@@ -3,7 +3,7 @@
 
 # Helio
 
-A feature-complete real-time rendering engine written in Rust using Blade graphics, with all the advanced capabilities of Unreal Engine's renderer.
+A real-time rendering engine written in Rust using Blade graphics, with all the advanced capabilities of Unreal Engine's renderer.
 
 ## Features
 
