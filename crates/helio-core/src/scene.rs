@@ -31,8 +31,7 @@ impl Entity {
 }
 
 pub struct Scene {
-    entities: Arc<RwLock<HashMap<EntityId, Entity>>>,
-    next_entity_id: Arc<RwLock<EntityId>>,
+    pub entities: Vec<Entity>,
     pub camera: Camera,
     pub ambient_light: glam::Vec3,
     pub environment_intensity: f32,
@@ -46,8 +45,7 @@ pub struct Scene {
 impl Scene {
     pub fn new(camera: Camera) -> Self {
         Self {
-            entities: Arc::new(RwLock::new(HashMap::new())),
-            next_entity_id: Arc::new(RwLock::new(0)),
+            entities: Vec::new(),
             camera,
             ambient_light: glam::Vec3::splat(0.03),
             environment_intensity: 1.0,
@@ -59,52 +57,11 @@ impl Scene {
         }
     }
     
-    pub fn add_entity(&mut self, mut entity: Entity) -> EntityId {
-        let mut next_id = self.next_entity_id.write();
-        entity.id = *next_id;
-        *next_id += 1;
-        
-        let id = entity.id;
-        self.entities.write().insert(id, entity);
-        id
-    }
-    
-    pub fn remove_entity(&mut self, id: EntityId) -> Option<Entity> {
-        self.entities.write().remove(&id)
-    }
-    
-    pub fn get_entity(&self, id: EntityId) -> Option<Entity> {
-        self.entities.read().get(&id).cloned()
-    }
-    
-    pub fn get_entity_mut<F, R>(&self, id: EntityId, f: F) -> Option<R>
-    where
-        F: FnOnce(&mut Entity) -> R,
-    {
-        let mut entities = self.entities.write();
-        entities.get_mut(&id).map(f)
-    }
-    
-    pub fn for_each_entity<F>(&self, mut f: F)
-    where
-        F: FnMut(&Entity),
-    {
-        let entities = self.entities.read();
-        for entity in entities.values() {
-            f(entity);
-        }
-    }
-    
-    pub fn visible_entities(&self) -> Vec<Entity> {
-        self.entities
-            .read()
-            .values()
-            .filter(|e| e.visible)
-            .cloned()
-            .collect()
+    pub fn add_entity(&mut self, entity: Entity) {
+        self.entities.push(entity);
     }
     
     pub fn entity_count(&self) -> usize {
-        self.entities.read().len()
+        self.entities.len()
     }
 }

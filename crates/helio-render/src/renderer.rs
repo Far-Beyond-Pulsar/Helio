@@ -43,8 +43,11 @@ impl Default for RendererConfig {
 }
 
 pub struct Renderer {
+    #[allow(dead_code)]
     context: Arc<RenderContext>,
+    #[allow(dead_code)]
     config: RwLock<RendererConfig>,
+    #[allow(dead_code)]
     frame_graph: RwLock<FrameGraph>,
     
     // Frame data

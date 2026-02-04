@@ -14,6 +14,7 @@ pub use camera::*;
 pub use scene::*;
 pub use transform::*;
 pub use viewport::*;
+#[allow(hidden_glob_reexports)]
 pub use render_context::*;
 pub use frame_graph::*;
 pub use gpu_resources::*;

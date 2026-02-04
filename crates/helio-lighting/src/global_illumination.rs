@@ -1,4 +1,4 @@
-use glam::Vec3;
+use glam::{Vec3, UVec3};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GITechnique {
@@ -14,29 +14,48 @@ pub enum GITechnique {
     Voxel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GIProbeResolution {
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
 pub struct GlobalIllumination {
     pub technique: GITechnique,
     pub enabled: bool,
     pub intensity: f32,
     pub bounce_count: u32,
     pub quality: f32,
+    pub probe_count: UVec3,
+    pub probe_spacing: Vec3,
 }
 
 impl GlobalIllumination {
-    pub fn new(technique: GITechnique) -> Self {
+    pub fn new(resolution: GIProbeResolution) -> Self {
+        let probe_count = match resolution {
+            GIProbeResolution::Low => UVec3::new(8, 4, 8),
+            GIProbeResolution::Medium => UVec3::new(16, 8, 16),
+            GIProbeResolution::High => UVec3::new(32, 16, 32),
+            GIProbeResolution::Ultra => UVec3::new(64, 32, 64),
+        };
+        
         Self {
-            technique,
+            technique: GITechnique::DDGI,
             enabled: true,
             intensity: 1.0,
             bounce_count: 1,
             quality: 1.0,
+            probe_count,
+            probe_spacing: Vec3::splat(2.0),
         }
     }
 }
 
 impl Default for GlobalIllumination {
     fn default() -> Self {
-        Self::new(GITechnique::DDGI)
+        Self::new(GIProbeResolution::Medium)
     }
 }
 

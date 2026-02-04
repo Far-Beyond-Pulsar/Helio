@@ -7,6 +7,7 @@ pub mod volumetric;
 pub mod lightmaps;
 pub mod clustered;
 pub mod ibl;
+pub mod lighting_system;
 
 pub use lights::*;
 pub use shadows::*;
@@ -17,3 +18,4 @@ pub use volumetric::*;
 pub use lightmaps::*;
 pub use clustered::*;
 pub use ibl::*;
+pub use lighting_system::*;

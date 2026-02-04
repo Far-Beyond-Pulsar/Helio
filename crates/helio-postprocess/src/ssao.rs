@@ -3,6 +3,7 @@ pub struct SSAO {
     pub radius: f32,
     pub intensity: f32,
     pub bias: f32,
+    pub samples: u32,
     pub sample_count: u32,
     pub blur_passes: u32,
 }
@@ -14,6 +15,7 @@ impl Default for SSAO {
             radius: 0.5,
             intensity: 1.0,
             bias: 0.025,
+            samples: 16,
             sample_count: 16,
             blur_passes: 2,
         }

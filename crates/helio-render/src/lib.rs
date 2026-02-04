@@ -1,3 +1,5 @@
+#[allow(ambiguous_glob_reexports)]
+
 pub mod renderer;
 pub mod pipeline;
 pub mod gbuffer;
