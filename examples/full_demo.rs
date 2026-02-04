@@ -210,8 +210,8 @@ impl HelioApp {
                 eprintln!("Render error: {:?}", e);
             }
 
-            // Present frame
-            drop(frame);
+            // Frame is automatically presented
+            let _ = frame;
 
             self.frame_count += 1;
 
@@ -283,9 +283,6 @@ impl ApplicationHandler for HelioApp {
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
-                if let Some(window) = &self.window {
-                    window.request_redraw();
-                }
             }
             _ => {}
         }
@@ -305,7 +302,7 @@ fn main() {
     env_logger::init();
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = HelioApp::new();
     event_loop.run_app(&mut app).expect("Failed to run event loop");
