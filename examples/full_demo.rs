@@ -66,9 +66,7 @@ impl HelioApp {
         println!("   ✓ Vulkan/DX12/Metal backend initialized");
 
         // Create surface
-        let surface = unsafe {
-            gpu_context.create_surface(&*window).expect("Failed to create surface")
-        };
+        let surface = gpu_context.create_surface(&*window).expect("Failed to create surface");
         println!("   ✓ Surface created for window\n");
 
         // Configure surface
@@ -194,11 +192,6 @@ impl HelioApp {
     }
 
     fn render_frame(&mut self) {
-        if self.frame_count == 0 {
-            self.frame_count += 1;
-            return;
-        }
-
         if let (Some(surface), Some(renderer), Some(scene), Some(viewport), Some(particle_system)) = (
             &mut self.surface,
             &mut self.renderer,
@@ -217,7 +210,7 @@ impl HelioApp {
                 eprintln!("Render error: {:?}", e);
             }
 
-            // Frame is automatically presented when dropped
+            // Present frame
             drop(frame);
 
             self.frame_count += 1;
@@ -299,8 +292,11 @@ impl ApplicationHandler for HelioApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        // Request redraw only when we're ready
         if let Some(window) = &self.window {
-            window.request_redraw();
+            if self.surface.is_some() {
+                window.request_redraw();
+            }
         }
     }
 }
