@@ -79,7 +79,7 @@ impl HelioApp {
                 depth: 1,
             },
             usage: gpu::TextureUsage::TARGET,
-            display_sync: gpu::DisplaySync::Block,
+            display_sync: gpu::DisplaySync::Recent,
             color_space: gpu::ColorSpace::Linear,
             allow_exclusive_full_screen: false,
             transparent: false,
@@ -87,6 +87,7 @@ impl HelioApp {
 
         let mut surface_mut = surface;
         gpu_context.reconfigure_surface(&mut surface_mut, surface_config);
+        println!("   ✓ Swapchain configured\n");
 
         let gpu_context = Arc::new(gpu_context);
         let render_context = Arc::new(RenderContext::new(Arc::clone(&gpu_context)));
@@ -193,26 +194,36 @@ impl HelioApp {
     }
 
     fn render_frame(&mut self) {
-        if let (Some(surface), Some(renderer), Some(scene), Some(viewport), Some(particle_system)) = (
+        if let (Some(surface), Some(renderer), Some(scene), Some(viewport), Some(particle_system), Some(render_context)) = (
             &mut self.surface,
             &mut self.renderer,
             &self.scene,
             &self.viewport,
             &mut self.particle_system,
+            &self.render_context,
         ) {
             // Update particle system
             particle_system.update(1.0 / 60.0);
 
-            // Acquire frame from surface
-            let frame = surface.acquire_frame();
+            // Create command encoder for GPU work
+            let mut encoder = render_context.begin_frame();
 
-            // Render
+            // Acquire frame AFTER beginning command encoder
+            let frame = surface.acquire_frame();
+            
+            // Initialize the frame texture
+            encoder.init_texture(frame.texture());
+
+            // Render to the frame
             if let Err(e) = renderer.render(scene, viewport) {
                 eprintln!("Render error: {:?}", e);
             }
+            
+            // Present the frame through the command encoder
+            encoder.present(frame);
 
-            // Frame is automatically presented
-            let _ = frame;
+            // Submit all GPU commands
+            render_context.submit(encoder);
 
             self.frame_count += 1;
 
@@ -250,11 +261,6 @@ impl ApplicationHandler for HelioApp {
             println!("   ✓ Window created (1920x1080)\n");
 
             self.initialize_graphics(window);
-
-            // Wait for GPU to fully initialize
-            println!("⏳ Waiting for GPU initialization...");
-            std::thread::sleep(Duration::from_secs(3));
-            println!("   ✓ GPU ready\n");
         }
     }
 
@@ -289,19 +295,18 @@ impl ApplicationHandler for HelioApp {
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
-
-                // Request next frame at 60 FPS (16.67ms per frame)
-                let next_frame_time = Instant::now() + Duration::from_millis(16);
-                event_loop.set_control_flow(ControlFlow::WaitUntil(next_frame_time));
             }
             _ => {}
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        // Request redraw only when we're ready
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Request redraw with controlled frame rate
         if let Some(window) = &self.window {
             if self.surface.is_some() {
+                // Small delay to avoid overwhelming the GPU with frame requests
+                let next_frame_time = Instant::now() + Duration::from_millis(16);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next_frame_time));
                 window.request_redraw();
             }
         }
