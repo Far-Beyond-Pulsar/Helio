@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cargo doc:*)",
       "WebFetch(domain:docs.rs)",
-      "Bash(cargo run:*)"
+      "Bash(cargo run:*)",
+      "Bash(cargo add:*)"
     ]
   }
 }
