@@ -15,7 +15,9 @@ helio-lighting = { path = "../helio-lighting" }
 helio-material = { path = "../helio-material" }
 helio-postprocess = { path = "../helio-postprocess" }
 blade-graphics = { workspace = true }
+blade-macros = { workspace = true }
 glam = { workspace = true }
+bytemuck = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }

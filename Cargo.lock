@@ -856,6 +856,8 @@ name = "helio-example"
 version = "0.1.0"
 dependencies = [
  "blade-graphics",
+ "blade-macros",
+ "bytemuck",
  "env_logger",
  "glam",
  "helio-core",
