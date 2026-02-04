@@ -1,5 +1,6 @@
 use helio::prelude::*;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -249,6 +250,11 @@ impl ApplicationHandler for HelioApp {
             println!("   ✓ Window created (1920x1080)\n");
 
             self.initialize_graphics(window);
+
+            // Wait for GPU to fully initialize
+            println!("⏳ Waiting for GPU initialization...");
+            std::thread::sleep(Duration::from_secs(3));
+            println!("   ✓ GPU ready\n");
         }
     }
 
@@ -283,6 +289,10 @@ impl ApplicationHandler for HelioApp {
             }
             WindowEvent::RedrawRequested => {
                 self.render_frame();
+
+                // Request next frame at 60 FPS (16.67ms per frame)
+                let next_frame_time = Instant::now() + Duration::from_millis(16);
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next_frame_time));
             }
             _ => {}
         }
@@ -302,7 +312,6 @@ fn main() {
     env_logger::init();
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = HelioApp::new();
     event_loop.run_app(&mut app).expect("Failed to run event loop");
