@@ -194,6 +194,11 @@ impl Application {
         self.frame_times.push(delta_time);
         self.frame_count += 1;
 
+        // Print every 100 frames initially for testing
+        if self.frame_count % 100 == 0 {
+            println!("Frame {} - running...", self.frame_count);
+        }
+
         if self.frame_count % 10000 == 0 {
             let elapsed = self.fps_timer.elapsed().as_secs_f32();
             let avg_fps = 10000.0 / elapsed;
@@ -332,13 +337,13 @@ fn main() {
                     elwt.exit();
                 }
                 WindowEvent::RedrawRequested => {
-                    app.update();
-                    app.render();
-                    app.window.request_redraw();
+                    // Handled in AboutToWait now
                 }
                 _ => {}
             },
             Event::AboutToWait => {
+                app.update();
+                app.render();
                 app.window.request_redraw();
             }
             _ => {}
