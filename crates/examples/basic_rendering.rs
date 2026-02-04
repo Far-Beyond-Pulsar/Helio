@@ -65,6 +65,8 @@ struct Application {
     
     // Simple rendering pipeline
     render_pipeline: gpu::RenderPipeline,
+    depth_texture: gpu::Texture,
+    depth_view: gpu::TextureView,
     meshes: HashMap<MeshHandle, SimpleMesh>,
     mesh_list: Vec<Mesh>,
     
@@ -268,6 +270,32 @@ impl Application {
 
         log::info!("Render pipeline created");
 
+        // Create depth buffer
+        let depth_texture = context.create_texture(gpu::TextureDesc {
+            name: "depth_buffer",
+            size: gpu::Extent {
+                width: size.width,
+                height: size.height,
+                depth: 1,
+            },
+            dimension: gpu::TextureDimension::D2,
+            format: gpu::TextureFormat::Depth32Float,
+            mip_level_count: 1,
+            array_layer_count: 1,
+            sample_count: 1,
+            usage: gpu::TextureUsage::TARGET,
+            external: None,
+        });
+        let depth_view = context.create_texture_view(
+            depth_texture,
+            gpu::TextureViewDesc {
+                name: "depth_view",
+                format: gpu::TextureFormat::Depth32Float,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
+
         // Upload meshes to GPU
         let mut meshes = HashMap::new();
         let mut mesh_list = vec![cube_mesh, sphere_mesh, plane_mesh];
@@ -339,6 +367,8 @@ impl Application {
             command_encoder,
             prev_sync_point: None,
             render_pipeline,
+            depth_texture,
+            depth_view,
             meshes,
             mesh_list,
             last_frame_time: std::time::Instant::now(),
@@ -410,6 +440,10 @@ impl Application {
         self.command_encoder.start();
         
         let frame = self.surface.acquire_frame();
+        
+        // CRITICAL: Initialize the texture before rendering to it
+        self.command_encoder.init_texture(frame.texture());
+        
         let target_view = frame.texture_view();
         
         // Create camera uniform
@@ -427,7 +461,11 @@ impl Application {
                     init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
                     finish_op: gpu::FinishOp::Store,
                 }],
-                depth_stencil: None,
+                depth_stencil: Some(gpu::RenderTarget {
+                    view: self.depth_view,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                    finish_op: gpu::FinishOp::Store,
+                }),
             },
         ) {
             let mut rc = pass.with(&self.render_pipeline);
@@ -439,6 +477,7 @@ impl Application {
             rc.bind(0, &camera_data);
             
             // Draw each entity
+            let mut draw_count = 0;
             for entity in self.scene.entities.values() {
                 if !entity.visible {
                     continue;
@@ -450,7 +489,7 @@ impl Application {
                         let transform = entity.transform.to_matrix();
                         let model_uniform = ModelUniform {
                             transform: transform.to_cols_array_2d(),
-                            color: [0.7, 0.7, 0.8, 1.0],
+                            color: [1.0, 0.2, 0.2, 1.0], // Bright red
                         };
                         
                         // Bind model data (group 1)
@@ -464,8 +503,13 @@ impl Application {
                         
                         // Draw indexed
                         rc.draw_indexed(simple_mesh.index_buffer, gpu::IndexType::U32, 0, simple_mesh.index_count as i32, 0, 1);
+                        draw_count += 1;
                     }
                 }
+            }
+            
+            if self.frame_count == 0 {
+                log::info!("First frame: drew {} entities", draw_count);
             }
         }
         
@@ -496,6 +540,36 @@ impl Application {
         };
 
         self.context.reconfigure_surface(&mut self.surface, config);
+        
+        // Recreate depth buffer
+        self.context.destroy_texture_view(self.depth_view);
+        self.context.destroy_texture(self.depth_texture);
+        
+        self.depth_texture = self.context.create_texture(gpu::TextureDesc {
+            name: "depth_buffer",
+            size: gpu::Extent {
+                width,
+                height,
+                depth: 1,
+            },
+            dimension: gpu::TextureDimension::D2,
+            format: gpu::TextureFormat::Depth32Float,
+            mip_level_count: 1,
+            array_layer_count: 1,
+            sample_count: 1,
+            usage: gpu::TextureUsage::TARGET,
+            external: None,
+        });
+        self.depth_view = self.context.create_texture_view(
+            self.depth_texture,
+            gpu::TextureViewDesc {
+                name: "depth_view",
+                format: gpu::TextureFormat::Depth32Float,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
+        
         self.renderer.resize(width, height);
         self.scene.camera.set_aspect_ratio(width as f32 / height as f32);
     }
@@ -505,6 +579,8 @@ impl Application {
         if let Some(sp) = self.prev_sync_point.take() {
             self.context.wait_for(&sp, !0);
         }
+        self.context.destroy_texture_view(self.depth_view);
+        self.context.destroy_texture(self.depth_texture);
         self.renderer.cleanup();
         self.lighting.cleanup(&self.context);
         self.context.destroy_command_encoder(&mut self.command_encoder);
