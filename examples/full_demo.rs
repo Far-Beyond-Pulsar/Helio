@@ -10,7 +10,7 @@ use blade_graphics as gpu;
 
 struct HelioApp {
     window: Option<Arc<Window>>,
-    gpu_context: Option<gpu::Context>,
+    gpu_context: Option<Arc<gpu::Context>>,
     surface: Option<gpu::Surface>,
     render_context: Option<Arc<RenderContext>>,
     renderer: Option<Renderer>,
@@ -82,12 +82,15 @@ impl HelioApp {
             usage: gpu::TextureUsage::TARGET,
             display_sync: gpu::DisplaySync::Block,
             color_space: gpu::ColorSpace::Linear,
+            allow_exclusive_full_screen: false,
+            transparent: false,
         };
 
         let mut surface_mut = surface;
         gpu_context.reconfigure_surface(&mut surface_mut, surface_config);
 
-        let render_context = Arc::new(RenderContext::new(Arc::new(gpu_context.clone())));
+        let gpu_context = Arc::new(gpu_context);
+        let render_context = Arc::new(RenderContext::new(Arc::clone(&gpu_context)));
         println!("   ✓ Render context created\n");
 
         // Create renderer
