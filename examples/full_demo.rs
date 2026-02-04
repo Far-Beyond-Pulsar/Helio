@@ -368,11 +368,18 @@ fn create_demo_materials() -> Vec<helio::material::Material> {
     ]
 }
 
-// Mock GPU context for demonstration
+// Create GPU context for demonstration
 fn create_mock_gpu_context() -> gpu::Context {
-    // In a real application, this would create an actual GPU context
-    // For this demo, we'll create a minimal context
+    use blade_graphics as gpu;
+
+    // Create a minimal GPU context
+    let desc = gpu::ContextDesc {
+        validation: false,    // Disable validation for demo
+        capture: false,       // No capture support needed
+        overlay: false,       // No overlay needed
+    };
+
     unsafe {
-        std::mem::zeroed()
+        gpu::Context::init(desc).expect("Failed to initialize GPU context")
     }
 }
