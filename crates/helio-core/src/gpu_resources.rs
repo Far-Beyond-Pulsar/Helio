@@ -44,12 +44,13 @@ impl GpuTexture {
             size,
             array_layer_count: 1,
             mip_level_count: mip_levels,
+            sample_count: 1,
             dimension: gpu::TextureDimension::D2,
             usage,
+            external: None,
         });
-        
-        let view = context.create_texture_view(gpu::TextureViewDesc {
-            texture,
+
+        let view = context.create_texture_view(texture, gpu::TextureViewDesc {
             name,
             format,
             dimension: gpu::ViewDimension::D2,
