@@ -65,6 +65,11 @@ helio-ui = { path = "crates/helio-ui" }
 blade-graphics = { workspace = true }
 glam = { workspace = true }
 
+[dev-dependencies]
+winit = { workspace = true }
+env_logger = { workspace = true }
+raw-window-handle = "0.6"
+
 [profile.release]
 opt-level = 3
 lto = "thin"
