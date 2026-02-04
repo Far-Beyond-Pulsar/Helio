@@ -1,0 +1,32 @@
+[package]
+name = "examples"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[example]]
+name = "basic_rendering"
+path = "basic_rendering.rs"
+
+[[example]]
+name = "deferred_rendering"
+path = "deferred_rendering.rs"
+
+[[example]]
+name = "pbr_materials"
+path = "pbr_materials.rs"
+
+[[example]]
+name = "shadows"
+path = "shadows.rs"
+
+[[example]]
+name = "particles"
+path = "particles.rs"
+
+[dependencies]
+helio = { path = ".." }
+blade-graphics = { workspace = true }
+glam = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

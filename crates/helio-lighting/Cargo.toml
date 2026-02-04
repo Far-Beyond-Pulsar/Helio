@@ -1,0 +1,13 @@
+[package]
+name = "helio-lighting"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helio-core = { path = "../helio-core" }
+blade-graphics = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+bitflags = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }

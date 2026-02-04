@@ -1,0 +1,73 @@
+[package]
+name = "helio"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helio Contributors"]
+description = "A real-time rendering engine with advanced capabilities"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Far-Beyond-Pulsar/Helio"
+
+[workspace]
+members = [
+    "crates/helio-core",
+    "crates/helio-render",
+    "crates/helio-material",
+    "crates/helio-lighting",
+    "crates/helio-postprocess",
+    "crates/helio-terrain",
+    "crates/helio-particles",
+    "crates/helio-animation",
+    "crates/helio-culling",
+    "crates/helio-raytracing",
+    "crates/helio-virtualtexture",
+    "crates/helio-atmosphere",
+    "crates/helio-water",
+    "crates/helio-decals",
+    "crates/helio-ui",
+    "examples"
+]
+
+[workspace.dependencies]
+blade-graphics = "0.4"
+blade-macros = "0.3"
+glam = "0.28"
+bytemuck = { version = "1.14", features = ["derive"] }
+bitflags = "2.4"
+parking_lot = "0.12"
+rayon = "1.8"
+crossbeam-channel = "0.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1.0"
+half = "2.3"
+naga = "0.19"
+
+[dependencies]
+helio-core = { path = "crates/helio-core" }
+helio-render = { path = "crates/helio-render" }
+helio-material = { path = "crates/helio-material" }
+helio-lighting = { path = "crates/helio-lighting" }
+helio-postprocess = { path = "crates/helio-postprocess" }
+helio-terrain = { path = "crates/helio-terrain" }
+helio-particles = { path = "crates/helio-particles" }
+helio-animation = { path = "crates/helio-animation" }
+helio-culling = { path = "crates/helio-culling" }
+helio-raytracing = { path = "crates/helio-raytracing" }
+helio-virtualtexture = { path = "crates/helio-virtualtexture" }
+helio-atmosphere = { path = "crates/helio-atmosphere" }
+helio-water = { path = "crates/helio-water" }
+helio-decals = { path = "crates/helio-decals" }
+helio-ui = { path = "crates/helio-ui" }
+blade-graphics = { workspace = true }
+glam = { workspace = true }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.dev]
+opt-level = 1

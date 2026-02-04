@@ -1,0 +1,11 @@
+[package]
+name = "helio-animation"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blade-graphics = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+bitflags = { workspace = true }
+parking_lot = { workspace = true }
