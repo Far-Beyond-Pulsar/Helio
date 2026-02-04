@@ -1,7 +1,16 @@
-pub mod canvas;
-pub mod text;
-pub mod widgets;
+// ui system implementation
+pub struct uiSystem {
+    enabled: bool,
+}
 
-pub use canvas::*;
-pub use text::*;
-pub use widgets::*;
+impl uiSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for uiSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

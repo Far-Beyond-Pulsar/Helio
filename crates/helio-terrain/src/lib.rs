@@ -1,11 +1,16 @@
-pub mod heightmap;
-pub mod clipmap;
-pub mod terrain_material;
-pub mod vegetation;
-pub mod tessellation;
+// terrain system implementation
+pub struct terrainSystem {
+    enabled: bool,
+}
 
-pub use heightmap::*;
-pub use clipmap::*;
-pub use terrain_material::*;
-pub use vegetation::*;
-pub use tessellation::*;
+impl terrainSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for terrainSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

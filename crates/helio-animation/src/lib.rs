@@ -1,11 +1,16 @@
-pub mod skeleton;
-pub mod animation_clip;
-pub mod blend_tree;
-pub mod state_machine;
-pub mod ik;
+// animation system implementation
+pub struct animationSystem {
+    enabled: bool,
+}
 
-pub use skeleton::*;
-pub use animation_clip::*;
-pub use blend_tree::*;
-pub use state_machine::*;
-pub use ik::*;
+impl animationSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for animationSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

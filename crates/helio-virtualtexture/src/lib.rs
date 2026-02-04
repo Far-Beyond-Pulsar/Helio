@@ -1,7 +1,16 @@
-pub mod streaming;
-pub mod feedback;
-pub mod cache;
+// virtualtexture system implementation
+pub struct virtualtextureSystem {
+    enabled: bool,
+}
 
-pub use streaming::*;
-pub use feedback::*;
-pub use cache::*;
+impl virtualtextureSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for virtualtextureSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

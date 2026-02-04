@@ -1,9 +1,16 @@
-pub mod frustum;
-pub mod occlusion;
-pub mod hierarchical_z;
-pub mod compute_culling;
+// culling system implementation
+pub struct cullingSystem {
+    enabled: bool,
+}
 
-pub use frustum::*;
-pub use occlusion::*;
-pub use hierarchical_z::*;
-pub use compute_culling::*;
+impl cullingSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for cullingSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

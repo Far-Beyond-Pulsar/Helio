@@ -1,9 +1,16 @@
-pub mod raytracing;
-pub mod acceleration_structure;
-pub mod path_tracing;
-pub mod hybrid_rendering;
+// raytracing system implementation
+pub struct raytracingSystem {
+    enabled: bool,
+}
 
-pub use raytracing::*;
-pub use acceleration_structure::*;
-pub use path_tracing::*;
-pub use hybrid_rendering::*;
+impl raytracingSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for raytracingSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

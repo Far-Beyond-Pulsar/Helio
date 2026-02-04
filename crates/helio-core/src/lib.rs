@@ -1,24 +1,20 @@
 pub mod camera;
 pub mod scene;
 pub mod transform;
-pub mod viewport;
-pub mod render_context;
-pub mod frame_graph;
 pub mod gpu_resources;
-pub mod buffer;
-pub mod texture;
+pub mod bounds;
 pub mod mesh;
-pub mod error;
+pub mod vertex;
+pub mod material_types;
 
 pub use camera::*;
 pub use scene::*;
 pub use transform::*;
-pub use viewport::*;
-#[allow(hidden_glob_reexports)]
-pub use render_context::*;
-pub use frame_graph::*;
 pub use gpu_resources::*;
-pub use buffer::*;
-pub use texture::*;
+pub use bounds::*;
 pub use mesh::*;
-pub use error::*;
+pub use vertex::*;
+pub use material_types::*;
+
+pub use blade_graphics as gpu;
+pub use glam;

@@ -1,68 +1,138 @@
-use blade_graphics as gpu;
+use crate::gpu;
+use std::collections::HashMap;
+use parking_lot::RwLock;
 use std::sync::Arc;
 
-pub struct GpuBuffer {
-    pub buffer: gpu::Buffer,
-    pub size: u64,
+pub type ResourceHandle = u64;
+
+pub struct GpuBufferPool {
+    buffers: HashMap<ResourceHandle, gpu::Buffer>,
+    next_handle: ResourceHandle,
 }
 
-impl GpuBuffer {
-    pub fn new(context: &gpu::Context, size: u64, name: &str) -> Self {
-        let buffer = context.create_buffer(gpu::BufferDesc {
-            name,
-            size,
-            memory: gpu::Memory::Device,
-        });
-        
+impl GpuBufferPool {
+    pub fn new() -> Self {
         Self {
-            buffer,
-            size,
+            buffers: HashMap::new(),
+            next_handle: 1,
+        }
+    }
+
+    pub fn allocate(&mut self, context: &gpu::Context, desc: gpu::BufferDesc) -> ResourceHandle {
+        let handle = self.next_handle;
+        self.next_handle += 1;
+        let buffer = context.create_buffer(desc);
+        self.buffers.insert(handle, buffer);
+        handle
+    }
+
+    pub fn get(&self, handle: ResourceHandle) -> Option<gpu::Buffer> {
+        self.buffers.get(&handle).copied()
+    }
+
+    pub fn free(&mut self, handle: ResourceHandle, context: &gpu::Context) {
+        if let Some(buffer) = self.buffers.remove(&handle) {
+            context.destroy_buffer(buffer);
+        }
+    }
+
+    pub fn clear(&mut self, context: &gpu::Context) {
+        for (_, buffer) in self.buffers.drain() {
+            context.destroy_buffer(buffer);
         }
     }
 }
 
-pub struct GpuTexture {
-    pub texture: gpu::Texture,
-    pub view: gpu::TextureView,
-    pub size: gpu::Extent,
-    pub format: gpu::TextureFormat,
-    pub mip_levels: u32,
+impl Default for GpuBufferPool {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
-impl GpuTexture {
-    pub fn new(
-        context: &gpu::Context,
-        size: gpu::Extent,
-        format: gpu::TextureFormat,
-        usage: gpu::TextureUsage,
-        mip_levels: u32,
-        name: &str,
-    ) -> Self {
-        let texture = context.create_texture(gpu::TextureDesc {
-            name,
-            format,
-            size,
-            array_layer_count: 1,
-            mip_level_count: mip_levels,
-            sample_count: 1,
-            dimension: gpu::TextureDimension::D2,
-            usage,
-            external: None,
-        });
+pub struct GpuTexturePool {
+    textures: HashMap<ResourceHandle, gpu::Texture>,
+    views: HashMap<ResourceHandle, gpu::TextureView>,
+    next_handle: ResourceHandle,
+}
 
-        let view = context.create_texture_view(texture, gpu::TextureViewDesc {
-            name,
-            format,
-            dimension: gpu::ViewDimension::D2,
-            subresources: &gpu::TextureSubresources::default(),
-        });
-        
+impl GpuTexturePool {
+    pub fn new() -> Self {
         Self {
-            texture,
-            view,
-            size,
-            format,
-            mip_levels,
+            textures: HashMap::new(),
+            views: HashMap::new(),
+            next_handle: 1,
         }
+    }
+
+    pub fn allocate(
+        &mut self,
+        context: &gpu::Context,
+        desc: gpu::TextureDesc,
+        view_desc: gpu::TextureViewDesc,
+    ) -> ResourceHandle {
+        let handle = self.next_handle;
+        self.next_handle += 1;
+        let texture = context.create_texture(desc);
+        let view = context.create_texture_view(texture, view_desc);
+        self.textures.insert(handle, texture);
+        self.views.insert(handle, view);
+        handle
+    }
+
+    pub fn get_texture(&self, handle: ResourceHandle) -> Option<gpu::Texture> {
+        self.textures.get(&handle).copied()
+    }
+
+    pub fn get_view(&self, handle: ResourceHandle) -> Option<gpu::TextureView> {
+        self.views.get(&handle).copied()
+    }
+
+    pub fn free(&mut self, handle: ResourceHandle, context: &gpu::Context) {
+        if let Some(view) = self.views.remove(&handle) {
+            context.destroy_texture_view(view);
+        }
+        if let Some(texture) = self.textures.remove(&handle) {
+            context.destroy_texture(texture);
+        }
+    }
+
+    pub fn clear(&mut self, context: &gpu::Context) {
+        for (_, view) in self.views.drain() {
+            context.destroy_texture_view(view);
+        }
+        for (_, texture) in self.textures.drain() {
+            context.destroy_texture(texture);
+        }
+    }
+}
+
+impl Default for GpuTexturePool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct GpuResourceManager {
+    pub buffers: Arc<RwLock<GpuBufferPool>>,
+    pub textures: Arc<RwLock<GpuTexturePool>>,
+}
+
+impl GpuResourceManager {
+    pub fn new() -> Self {
+        Self {
+            buffers: Arc::new(RwLock::new(GpuBufferPool::new())),
+            textures: Arc::new(RwLock::new(GpuTexturePool::new())),
+        }
+    }
+
+    pub fn clear(&self, context: &gpu::Context) {
+        self.buffers.write().clear(context);
+        self.textures.write().clear(context);
+    }
+}
+
+impl Default for GpuResourceManager {
+    fn default() -> Self {
+        Self::new()
     }
 }

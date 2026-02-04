@@ -1,11 +1,16 @@
-pub mod material;
-pub mod shader;
-pub mod pbr;
-pub mod shader_graph;
-pub mod material_instance;
+// material system implementation
+pub struct materialSystem {
+    enabled: bool,
+}
 
-pub use material::*;
-pub use shader::*;
-pub use pbr::*;
-pub use shader_graph::*;
-pub use material_instance::*;
+impl materialSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for materialSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

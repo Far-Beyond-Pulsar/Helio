@@ -1,7 +1,16 @@
-pub mod ocean;
-pub mod simulation;
-pub mod rendering;
+// water system implementation
+pub struct waterSystem {
+    enabled: bool,
+}
 
-pub use ocean::*;
-pub use simulation::*;
-pub use rendering::*;
+impl waterSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for waterSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

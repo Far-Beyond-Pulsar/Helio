@@ -1,240 +1,249 @@
-use glam::{Vec2, Vec3, Vec4};
-use bytemuck::{Pod, Zeroable};
+use crate::gpu;
+use crate::bounds::Aabb;
+use crate::vertex::{Vertex, PackedVertex};
 
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-pub struct Vertex {
-    pub position: Vec3,
-    pub normal: Vec3,
-    pub tangent: Vec4,
-    pub uv0: Vec2,
-    pub uv1: Vec2,
-    pub color: Vec4,
-}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MeshHandle(pub u32);
 
-unsafe impl Pod for Vertex {}
-unsafe impl Zeroable for Vertex {}
-
-impl Default for Vertex {
-    fn default() -> Self {
-        Self {
-            position: Vec3::ZERO,
-            normal: Vec3::Y,
-            tangent: Vec4::new(1.0, 0.0, 0.0, 1.0),
-            uv0: Vec2::ZERO,
-            uv1: Vec2::ZERO,
-            color: Vec4::ONE,
-        }
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrimitiveTopology {
+    TriangleList,
+    TriangleStrip,
+    LineList,
+    LineStrip,
+    PointList,
 }
 
 pub struct Mesh {
     pub vertices: Vec<Vertex>,
     pub indices: Vec<u32>,
-    pub bounds: BoundingBox,
+    pub bounds: Aabb,
+    pub topology: PrimitiveTopology,
+    pub vertex_buffer: Option<gpu::Buffer>,
+    pub index_buffer: Option<gpu::Buffer>,
 }
 
 impl Mesh {
-    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>) -> Self {
-        let bounds = BoundingBox::from_vertices(&vertices);
+    pub fn new(vertices: Vec<Vertex>, indices: Vec<u32>, topology: PrimitiveTopology) -> Self {
+        let positions: Vec<_> = vertices.iter().map(|v| glam::Vec3::from_array(v.position)).collect();
+        let bounds = if !positions.is_empty() {
+            Aabb::from_points(&positions)
+        } else {
+            Aabb::default()
+        };
+
         Self {
             vertices,
             indices,
             bounds,
+            topology,
+            vertex_buffer: None,
+            index_buffer: None,
         }
     }
-    
-    pub fn calculate_tangents(&mut self) {
-        for i in (0..self.indices.len()).step_by(3) {
-            let i0 = self.indices[i] as usize;
-            let i1 = self.indices[i + 1] as usize;
-            let i2 = self.indices[i + 2] as usize;
-            
-            let v0 = &self.vertices[i0];
-            let v1 = &self.vertices[i1];
-            let v2 = &self.vertices[i2];
-            
-            let edge1 = v1.position - v0.position;
-            let edge2 = v2.position - v0.position;
-            
-            let delta_uv1 = v1.uv0 - v0.uv0;
-            let delta_uv2 = v2.uv0 - v0.uv0;
-            
-            let f = 1.0 / (delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y);
-            
-            let tangent = Vec3::new(
-                f * (delta_uv2.y * edge1.x - delta_uv1.y * edge2.x),
-                f * (delta_uv2.y * edge1.y - delta_uv1.y * edge2.y),
-                f * (delta_uv2.y * edge1.z - delta_uv1.y * edge2.z),
-            ).normalize();
-            
-            let tangent4 = Vec4::new(tangent.x, tangent.y, tangent.z, 1.0);
-            
-            self.vertices[i0].tangent = tangent4;
-            self.vertices[i1].tangent = tangent4;
-            self.vertices[i2].tangent = tangent4;
+
+    pub fn upload_to_gpu(&mut self, context: &gpu::Context) {
+        // GPU upload will be handled by the renderer
+        // This is a placeholder for now
+    }
+
+    pub fn cleanup_gpu_resources(&mut self, context: &gpu::Context) {
+        if let Some(buffer) = self.vertex_buffer.take() {
+            context.destroy_buffer(buffer);
+        }
+        if let Some(buffer) = self.index_buffer.take() {
+            context.destroy_buffer(buffer);
         }
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct BoundingBox {
-    pub min: Vec3,
-    pub max: Vec3,
+pub struct MeshBuilder {
+    vertices: Vec<Vertex>,
+    indices: Vec<u32>,
+    topology: PrimitiveTopology,
 }
 
-impl BoundingBox {
-    pub fn new(min: Vec3, max: Vec3) -> Self {
-        Self { min, max }
-    }
-    
-    pub fn from_vertices(vertices: &[Vertex]) -> Self {
-        if vertices.is_empty() {
-            return Self {
-                min: Vec3::ZERO,
-                max: Vec3::ZERO,
-            };
+impl MeshBuilder {
+    pub fn new() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            topology: PrimitiveTopology::TriangleList,
         }
-        
-        let mut min = vertices[0].position;
-        let mut max = vertices[0].position;
-        
-        for vertex in vertices.iter().skip(1) {
-            min = min.min(vertex.position);
-            max = max.max(vertex.position);
-        }
-        
-        Self { min, max }
     }
-    
-    pub fn center(&self) -> Vec3 {
-        (self.min + self.max) * 0.5
+
+    pub fn with_topology(mut self, topology: PrimitiveTopology) -> Self {
+        self.topology = topology;
+        self
     }
-    
-    pub fn extents(&self) -> Vec3 {
-        (self.max - self.min) * 0.5
+
+    pub fn add_vertex(&mut self, vertex: Vertex) -> u32 {
+        let index = self.vertices.len() as u32;
+        self.vertices.push(vertex);
+        index
     }
-    
-    pub fn radius(&self) -> f32 {
-        self.extents().length()
+
+    pub fn add_triangle(&mut self, i0: u32, i1: u32, i2: u32) {
+        self.indices.push(i0);
+        self.indices.push(i1);
+        self.indices.push(i2);
+    }
+
+    pub fn build(self) -> Mesh {
+        Mesh::new(self.vertices, self.indices, self.topology)
     }
 }
 
-pub mod primitives {
-    use super::*;
-    
-    pub fn create_cube() -> Mesh {
-        let vertices = vec![
-            // Front
-            Vertex { position: Vec3::new(-0.5, -0.5,  0.5), normal: Vec3::NEG_Z, uv0: Vec2::new(0.0, 0.0), ..Default::default() },
-            Vertex { position: Vec3::new( 0.5, -0.5,  0.5), normal: Vec3::NEG_Z, uv0: Vec2::new(1.0, 0.0), ..Default::default() },
-            Vertex { position: Vec3::new( 0.5,  0.5,  0.5), normal: Vec3::NEG_Z, uv0: Vec2::new(1.0, 1.0), ..Default::default() },
-            Vertex { position: Vec3::new(-0.5,  0.5,  0.5), normal: Vec3::NEG_Z, uv0: Vec2::new(0.0, 1.0), ..Default::default() },
-            
-            // Back
-            Vertex { position: Vec3::new( 0.5, -0.5, -0.5), normal: Vec3::Z, uv0: Vec2::new(0.0, 0.0), ..Default::default() },
-            Vertex { position: Vec3::new(-0.5, -0.5, -0.5), normal: Vec3::Z, uv0: Vec2::new(1.0, 0.0), ..Default::default() },
-            Vertex { position: Vec3::new(-0.5,  0.5, -0.5), normal: Vec3::Z, uv0: Vec2::new(1.0, 1.0), ..Default::default() },
-            Vertex { position: Vec3::new( 0.5,  0.5, -0.5), normal: Vec3::Z, uv0: Vec2::new(0.0, 1.0), ..Default::default() },
+impl Default for MeshBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub fn create_cube_mesh(size: f32) -> Mesh {
+    let half = size * 0.5;
+    let mut builder = MeshBuilder::new();
+
+    let positions = [
+        glam::Vec3::new(-half, -half, -half),
+        glam::Vec3::new(half, -half, -half),
+        glam::Vec3::new(half, half, -half),
+        glam::Vec3::new(-half, half, -half),
+        glam::Vec3::new(-half, -half, half),
+        glam::Vec3::new(half, -half, half),
+        glam::Vec3::new(half, half, half),
+        glam::Vec3::new(-half, half, half),
+    ];
+
+    let normals = [
+        glam::Vec3::NEG_Z,
+        glam::Vec3::Z,
+        glam::Vec3::NEG_X,
+        glam::Vec3::X,
+        glam::Vec3::NEG_Y,
+        glam::Vec3::Y,
+    ];
+
+    let tangent = glam::Vec4::new(1.0, 0.0, 0.0, 1.0);
+
+    let faces = [
+        ([0, 1, 2, 3], normals[0]),
+        ([5, 4, 7, 6], normals[1]),
+        ([4, 0, 3, 7], normals[2]),
+        ([1, 5, 6, 2], normals[3]),
+        ([4, 5, 1, 0], normals[4]),
+        ([3, 2, 6, 7], normals[5]),
+    ];
+
+    for (face_indices, normal) in &faces {
+        let base_idx = builder.vertices.len() as u32;
+        
+        let uvs = [
+            glam::Vec2::new(0.0, 0.0),
+            glam::Vec2::new(1.0, 0.0),
+            glam::Vec2::new(1.0, 1.0),
+            glam::Vec2::new(0.0, 1.0),
         ];
-        
-        let indices = vec![
-            0, 1, 2, 2, 3, 0, // Front
-            4, 5, 6, 6, 7, 4, // Back
-        ];
-        
-        Mesh::new(vertices, indices)
+
+        for (i, &pos_idx) in face_indices.iter().enumerate() {
+            builder.add_vertex(Vertex::new(
+                positions[pos_idx],
+                *normal,
+                tangent,
+                uvs[i],
+            ));
+        }
+
+        builder.add_triangle(base_idx, base_idx + 1, base_idx + 2);
+        builder.add_triangle(base_idx, base_idx + 2, base_idx + 3);
     }
-    
-    pub fn create_sphere(subdivisions: u32) -> Mesh {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        
-        let rings = subdivisions;
-        let sectors = subdivisions * 2;
-        
-        for ring in 0..=rings {
-            let theta = ring as f32 * std::f32::consts::PI / rings as f32;
-            let sin_theta = theta.sin();
-            let cos_theta = theta.cos();
-            
-            for sector in 0..=sectors {
-                let phi = sector as f32 * 2.0 * std::f32::consts::PI / sectors as f32;
-                let sin_phi = phi.sin();
-                let cos_phi = phi.cos();
-                
-                let x = sin_theta * cos_phi;
-                let y = cos_theta;
-                let z = sin_theta * sin_phi;
-                
-                let u = sector as f32 / sectors as f32;
-                let v = ring as f32 / rings as f32;
-                
-                vertices.push(Vertex {
-                    position: Vec3::new(x * 0.5, y * 0.5, z * 0.5),
-                    normal: Vec3::new(x, y, z),
-                    uv0: Vec2::new(u, v),
-                    ..Default::default()
-                });
-            }
+
+    builder.build()
+}
+
+pub fn create_sphere_mesh(radius: f32, segments: u32, rings: u32) -> Mesh {
+    let mut builder = MeshBuilder::new();
+
+    for ring in 0..=rings {
+        let theta = ring as f32 * std::f32::consts::PI / rings as f32;
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        for segment in 0..=segments {
+            let phi = segment as f32 * 2.0 * std::f32::consts::PI / segments as f32;
+            let sin_phi = phi.sin();
+            let cos_phi = phi.cos();
+
+            let position = glam::Vec3::new(
+                sin_theta * cos_phi * radius,
+                cos_theta * radius,
+                sin_theta * sin_phi * radius,
+            );
+            let normal = position.normalize();
+            let tangent = glam::Vec4::new(-sin_phi, 0.0, cos_phi, 1.0);
+            let tex_coords = glam::Vec2::new(
+                segment as f32 / segments as f32,
+                ring as f32 / rings as f32,
+            );
+
+            builder.add_vertex(Vertex::new(position, normal, tangent, tex_coords));
         }
-        
-        for ring in 0..rings {
-            for sector in 0..sectors {
-                let current = ring * (sectors + 1) + sector;
-                let next = current + sectors + 1;
-                
-                indices.push(current);
-                indices.push(next);
-                indices.push(current + 1);
-                
-                indices.push(current + 1);
-                indices.push(next);
-                indices.push(next + 1);
-            }
-        }
-        
-        Mesh::new(vertices, indices)
     }
-    
-    pub fn create_plane(width: f32, height: f32, subdivisions: u32) -> Mesh {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        
-        for y in 0..=subdivisions {
-            for x in 0..=subdivisions {
-                let u = x as f32 / subdivisions as f32;
-                let v = y as f32 / subdivisions as f32;
-                
-                let px = (u - 0.5) * width;
-                let pz = (v - 0.5) * height;
-                
-                vertices.push(Vertex {
-                    position: Vec3::new(px, 0.0, pz),
-                    normal: Vec3::Y,
-                    uv0: Vec2::new(u, v),
-                    ..Default::default()
-                });
-            }
+
+    for ring in 0..rings {
+        for segment in 0..segments {
+            let i0 = ring * (segments + 1) + segment;
+            let i1 = i0 + 1;
+            let i2 = i0 + (segments + 1);
+            let i3 = i2 + 1;
+
+            builder.add_triangle(i0, i1, i2);
+            builder.add_triangle(i2, i1, i3);
         }
-        
-        for y in 0..subdivisions {
-            for x in 0..subdivisions {
-                let i0 = y * (subdivisions + 1) + x;
-                let i1 = i0 + 1;
-                let i2 = (y + 1) * (subdivisions + 1) + x;
-                let i3 = i2 + 1;
-                
-                indices.push(i0);
-                indices.push(i2);
-                indices.push(i1);
-                
-                indices.push(i1);
-                indices.push(i2);
-                indices.push(i3);
-            }
-        }
-        
-        Mesh::new(vertices, indices)
     }
+
+    builder.build()
+}
+
+pub fn create_plane_mesh(width: f32, height: f32) -> Mesh {
+    let mut builder = MeshBuilder::new();
+
+    let half_w = width * 0.5;
+    let half_h = height * 0.5;
+
+    let vertices = [
+        Vertex::new(
+            glam::Vec3::new(-half_w, 0.0, -half_h),
+            glam::Vec3::Y,
+            glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+            glam::Vec2::new(0.0, 0.0),
+        ),
+        Vertex::new(
+            glam::Vec3::new(half_w, 0.0, -half_h),
+            glam::Vec3::Y,
+            glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+            glam::Vec2::new(1.0, 0.0),
+        ),
+        Vertex::new(
+            glam::Vec3::new(half_w, 0.0, half_h),
+            glam::Vec3::Y,
+            glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+            glam::Vec2::new(1.0, 1.0),
+        ),
+        Vertex::new(
+            glam::Vec3::new(-half_w, 0.0, half_h),
+            glam::Vec3::Y,
+            glam::Vec4::new(1.0, 0.0, 0.0, 1.0),
+            glam::Vec2::new(0.0, 1.0),
+        ),
+    ];
+
+    for vertex in vertices {
+        builder.add_vertex(vertex);
+    }
+
+    builder.add_triangle(0, 1, 2);
+    builder.add_triangle(0, 2, 3);
+
+    builder.build()
 }

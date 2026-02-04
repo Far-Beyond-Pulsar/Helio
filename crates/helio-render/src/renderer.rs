@@ -1,83 +1,145 @@
-use blade_graphics as gpu;
-use helio_core::*;
-use parking_lot::RwLock;
+use helio_core::{gpu, Scene, Camera, CameraGpuData};
+use helio_lighting::LightingSystem;
+use crate::{RendererConfig, RenderPath, FrameGraph, GBuffer, DeferredRenderer, ForwardRenderer};
+use glam::Mat4;
 use std::sync::Arc;
 
-pub type Result<T> = std::result::Result<T, HelioError>;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenderPath {
-    Forward,
-    Deferred,
-    ForwardPlus,
-    VisibilityBuffer,
-}
-
-#[derive(Debug, Clone)]
-pub struct RendererConfig {
-    pub render_path: RenderPath,
-    pub enable_msaa: bool,
-    pub msaa_samples: u32,
-    pub enable_taa: bool,
-    pub enable_hdr: bool,
-    pub enable_depth_prepass: bool,
-    pub enable_async_compute: bool,
-    pub shadow_resolution: u32,
-    pub max_lights: u32,
-}
-
-impl Default for RendererConfig {
-    fn default() -> Self {
-        Self {
-            render_path: RenderPath::Deferred,
-            enable_msaa: true,
-            msaa_samples: 4,
-            enable_taa: true,
-            enable_hdr: true,
-            enable_depth_prepass: true,
-            enable_async_compute: true,
-            shadow_resolution: 2048,
-            max_lights: 1024,
-        }
-    }
-}
-
 pub struct Renderer {
-    #[allow(dead_code)]
-    context: Arc<RenderContext>,
-    #[allow(dead_code)]
-    config: RwLock<RendererConfig>,
-    #[allow(dead_code)]
-    frame_graph: RwLock<FrameGraph>,
-    
-    // Frame data
-    frame_count: u64,
+    pub config: RendererConfig,
+    pub context: Arc<gpu::Context>,
+    pub frame_graph: FrameGraph,
+    pub gbuffer: Option<GBuffer>,
+    pub deferred_renderer: Option<DeferredRenderer>,
+    pub forward_renderer: Option<ForwardRenderer>,
+    pub camera_buffer: Option<gpu::Buffer>,
+    pub frame_index: u32,
+    prev_view_proj: Mat4,
 }
 
 impl Renderer {
-    pub fn new(context: Arc<RenderContext>, config: RendererConfig) -> Self {
-        Self {
-            context,
-            config: RwLock::new(config),
-            frame_graph: RwLock::new(FrameGraph::new()),
-            frame_count: 0,
+    pub fn new(context: Arc<gpu::Context>, config: RendererConfig) -> Self {
+        let mut renderer = Self {
+            config: config.clone(),
+            context: context.clone(),
+            frame_graph: FrameGraph::new(),
+            gbuffer: None,
+            deferred_renderer: None,
+            forward_renderer: None,
+            camera_buffer: None,
+            frame_index: 0,
+            prev_view_proj: Mat4::IDENTITY,
+        };
+
+        renderer.camera_buffer = Some(context.create_buffer(gpu::BufferDesc {
+            name: "camera_data",
+            size: std::mem::size_of::<CameraGpuData>() as u64,
+            memory: gpu::Memory::Shared,
+        }));
+
+        match config.render_path {
+            RenderPath::Deferred => {
+                renderer.gbuffer = Some(GBuffer::new(&context, config.width, config.height));
+                renderer.deferred_renderer = Some(DeferredRenderer::new(&context));
+            }
+            RenderPath::Forward | RenderPath::ForwardPlus => {
+                renderer.forward_renderer = Some(ForwardRenderer::new(&context, &config));
+            }
+            RenderPath::VisibilityBuffer => {
+                
+            }
+        }
+
+        renderer
+    }
+
+    pub fn render(
+        &mut self,
+        scene: &Scene,
+        lighting: &mut LightingSystem,
+        target_view: gpu::TextureView,
+    ) {
+        self.update_camera_buffer(&scene.camera);
+        lighting.update_gpu_data(&self.context);
+
+        let mut encoder = self.context.create_command_encoder(gpu::CommandEncoderDesc {
+            name: "frame",
+            buffer_count: 1,
+        });
+        encoder.start();
+
+        match self.config.render_path {
+            RenderPath::Deferred => {
+                if let (Some(gbuffer), Some(deferred)) = (&mut self.gbuffer, &mut self.deferred_renderer) {
+                    gbuffer.clear(&mut encoder);
+                    deferred.render(
+                        &mut encoder,
+                        scene,
+                        lighting,
+                        gbuffer,
+                        target_view,
+                        self.camera_buffer.unwrap(),
+                    );
+                }
+            }
+            RenderPath::Forward | RenderPath::ForwardPlus => {
+                if let Some(forward) = &mut self.forward_renderer {
+                    forward.render(
+                        &mut encoder,
+                        scene,
+                        lighting,
+                        target_view,
+                        self.camera_buffer.unwrap(),
+                    );
+                }
+            }
+            RenderPath::VisibilityBuffer => {
+                
+            }
+        }
+
+        let sync_point = self.context.submit(&mut encoder);
+        self.context.wait_for(&sync_point, !0);
+        self.context.destroy_command_encoder(&mut encoder);
+
+        self.frame_index += 1;
+    }
+
+    fn update_camera_buffer(&mut self, camera: &Camera) {
+        if let Some(buffer) = self.camera_buffer {
+            let view_proj = camera.view_projection_matrix();
+            let _gpu_data = CameraGpuData::from_camera(
+                camera,
+                self.prev_view_proj,
+                self.frame_index,
+            );
+            self.prev_view_proj = view_proj;
+
+            // Buffer mapping will be handled by renderer implementation
         }
     }
-    
-    pub fn initialize(&mut self, _width: u32, _height: u32) -> Result<()> {
-        Ok(())
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.config.width = width;
+        self.config.height = height;
+
+        if let Some(mut gbuffer) = self.gbuffer.take() {
+            gbuffer.cleanup(&self.context);
+            self.gbuffer = Some(GBuffer::new(&self.context, width, height));
+        }
     }
-    
-    pub fn render(&mut self, _scene: &Scene, _viewport: &Viewport) -> Result<()> {
-        self.frame_count += 1;
-        Ok(())
+
+    pub fn cleanup(&mut self) {
+        if let Some(buffer) = self.camera_buffer.take() {
+            self.context.destroy_buffer(buffer);
+        }
+        if let Some(mut gbuffer) = self.gbuffer.take() {
+            gbuffer.cleanup(&self.context);
+        }
     }
-    
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
-        self.initialize(width, height)
-    }
-    
-    pub fn frame_count(&self) -> u64 {
-        self.frame_count
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }

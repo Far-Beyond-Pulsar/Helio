@@ -1,31 +1,16 @@
-pub mod bloom;
-pub mod tone_mapping;
-pub mod color_grading;
-pub mod ssao;
-pub mod ssr;
-pub mod taa;
-pub mod fxaa;
-pub mod smaa;
-pub mod dof;
-pub mod motion_blur;
-pub mod lens_flare;
-pub mod vignette;
-pub mod chromatic_aberration;
-pub mod film_grain;
-pub mod auto_exposure;
+// postprocess system implementation
+pub struct postprocessSystem {
+    enabled: bool,
+}
 
-pub use bloom::*;
-pub use tone_mapping::*;
-pub use color_grading::*;
-pub use ssao::*;
-pub use ssr::*;
-pub use taa::*;
-pub use fxaa::*;
-pub use smaa::*;
-pub use dof::*;
-pub use motion_blur::*;
-pub use lens_flare::*;
-pub use vignette::*;
-pub use chromatic_aberration::*;
-pub use film_grain::*;
-pub use auto_exposure::*;
+impl postprocessSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for postprocessSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

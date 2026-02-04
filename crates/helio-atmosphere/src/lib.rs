@@ -1,7 +1,16 @@
-pub mod sky;
-pub mod volumetric_clouds;
-pub mod fog;
+// atmosphere system implementation
+pub struct atmosphereSystem {
+    enabled: bool,
+}
 
-pub use sky::*;
-pub use volumetric_clouds::*;
-pub use fog::*;
+impl atmosphereSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for atmosphereSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -24,7 +24,7 @@ members = [
     "crates/helio-water",
     "crates/helio-decals",
     "crates/helio-ui",
-    "examples"
+    "crates/examples"
 ]
 
 [workspace.dependencies]

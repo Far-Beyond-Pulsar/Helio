@@ -1,14 +1,79 @@
-use glam::{Mat4, Vec3, Quat};
+use glam::{Mat4, Quat, Vec3};
+use crate::gpu;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
     pub position: Vec3,
     pub rotation: Quat,
     pub scale: Vec3,
-    
-    local_matrix: Mat4,
-    world_matrix: Mat4,
-    dirty: bool,
+}
+
+impl Transform {
+    pub fn new(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
+        Self {
+            position,
+            rotation,
+            scale,
+        }
+    }
+
+    pub fn from_position(position: Vec3) -> Self {
+        Self {
+            position,
+            rotation: Quat::IDENTITY,
+            scale: Vec3::ONE,
+        }
+    }
+
+    pub fn to_matrix(&self) -> Mat4 {
+        Mat4::from_scale_rotation_translation(self.scale, self.rotation, self.position)
+    }
+
+    pub fn to_blade_transform(&self) -> gpu::Transform {
+        let m = self.to_matrix().transpose();
+        gpu::Transform {
+            x: m.x_axis.to_array().into(),
+            y: m.y_axis.to_array().into(),
+            z: m.z_axis.to_array().into(),
+        }
+    }
+
+    pub fn from_blade_transform(t: gpu::Transform) -> Self {
+        let mat = Mat4 {
+            x_axis: glam::Vec4::from_array(t.x.into()),
+            y_axis: glam::Vec4::from_array(t.y.into()),
+            z_axis: glam::Vec4::from_array(t.z.into()),
+            w_axis: glam::Vec4::W,
+        }
+        .transpose();
+        
+        let (scale, rotation, position) = mat.to_scale_rotation_translation();
+        Self {
+            position,
+            rotation,
+            scale,
+        }
+    }
+
+    pub fn transform_point(&self, point: Vec3) -> Vec3 {
+        self.rotation * (self.scale * point) + self.position
+    }
+
+    pub fn transform_vector(&self, vector: Vec3) -> Vec3 {
+        self.rotation * (self.scale * vector)
+    }
+
+    pub fn inverse(&self) -> Self {
+        let inv_rotation = self.rotation.inverse();
+        let inv_scale = Vec3::ONE / self.scale;
+        let inv_position = inv_rotation * (-self.position * inv_scale);
+        
+        Self {
+            position: inv_position,
+            rotation: inv_rotation,
+            scale: inv_scale,
+        }
+    }
 }
 
 impl Default for Transform {
@@ -17,117 +82,17 @@ impl Default for Transform {
             position: Vec3::ZERO,
             rotation: Quat::IDENTITY,
             scale: Vec3::ONE,
-            local_matrix: Mat4::IDENTITY,
-            world_matrix: Mat4::IDENTITY,
-            dirty: true,
         }
     }
 }
 
-impl Transform {
-    pub fn new(position: Vec3, rotation: Quat, scale: Vec3) -> Self {
-        let mut transform = Self {
+impl From<Mat4> for Transform {
+    fn from(mat: Mat4) -> Self {
+        let (scale, rotation, position) = mat.to_scale_rotation_translation();
+        Self {
             position,
             rotation,
             scale,
-            local_matrix: Mat4::IDENTITY,
-            world_matrix: Mat4::IDENTITY,
-            dirty: true,
-        };
-        transform.update_matrices();
-        transform
-    }
-    
-    pub fn from_position(position: Vec3) -> Self {
-        Self::new(position, Quat::IDENTITY, Vec3::ONE)
-    }
-    
-    pub fn from_rotation(rotation: Quat) -> Self {
-        Self::new(Vec3::ZERO, rotation, Vec3::ONE)
-    }
-    
-    pub fn from_scale(scale: Vec3) -> Self {
-        Self::new(Vec3::ZERO, Quat::IDENTITY, scale)
-    }
-    
-    pub fn set_position(&mut self, position: Vec3) {
-        self.position = position;
-        self.dirty = true;
-    }
-    
-    pub fn set_rotation(&mut self, rotation: Quat) {
-        self.rotation = rotation;
-        self.dirty = true;
-    }
-    
-    pub fn set_scale(&mut self, scale: Vec3) {
-        self.scale = scale;
-        self.dirty = true;
-    }
-    
-    pub fn translate(&mut self, translation: Vec3) {
-        self.position += translation;
-        self.dirty = true;
-    }
-    
-    pub fn rotate(&mut self, rotation: Quat) {
-        self.rotation = rotation * self.rotation;
-        self.dirty = true;
-    }
-    
-    pub fn look_at(&mut self, target: Vec3, up: Vec3) {
-        let forward = (target - self.position).normalize();
-        let right = forward.cross(up).normalize();
-        let new_up = right.cross(forward);
-        
-        self.rotation = Quat::from_mat3(&glam::Mat3::from_cols(
-            right,
-            new_up,
-            -forward,
-        ));
-        self.dirty = true;
-    }
-    
-    pub fn forward(&self) -> Vec3 {
-        self.rotation * Vec3::NEG_Z
-    }
-    
-    pub fn right(&self) -> Vec3 {
-        self.rotation * Vec3::X
-    }
-    
-    pub fn up(&self) -> Vec3 {
-        self.rotation * Vec3::Y
-    }
-    
-    pub fn local_matrix(&mut self) -> Mat4 {
-        if self.dirty {
-            self.update_matrices();
         }
-        self.local_matrix
-    }
-    
-    pub fn world_matrix(&mut self) -> Mat4 {
-        if self.dirty {
-            self.update_matrices();
-        }
-        self.world_matrix
-    }
-    
-    fn update_matrices(&mut self) {
-        self.local_matrix = Mat4::from_scale_rotation_translation(
-            self.scale,
-            self.rotation,
-            self.position,
-        );
-        self.world_matrix = self.local_matrix;
-        self.dirty = false;
-    }
-    
-    pub fn set_parent_transform(&mut self, parent: &Transform) {
-        if self.dirty {
-            self.update_matrices();
-        }
-        self.world_matrix = parent.world_matrix * self.local_matrix;
     }
 }

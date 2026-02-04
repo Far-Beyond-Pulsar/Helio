@@ -1,5 +1,16 @@
-pub mod decal_system;
-pub mod projection;
+// decals system implementation
+pub struct decalsSystem {
+    enabled: bool,
+}
 
-pub use decal_system::*;
-pub use projection::*;
+impl decalsSystem {
+    pub fn new() -> Self {
+        Self { enabled: true }
+    }
+}
+
+impl Default for decalsSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}

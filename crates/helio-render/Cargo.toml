@@ -2,14 +2,20 @@
 name = "helio-render"
 version = "0.1.0"
 edition = "2021"
+authors = ["Helio Contributors"]
+description = "Core rendering pipeline for Helio"
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-core = { path = "../helio-core" }
+helio-lighting = { path = "../helio-lighting" }
 blade-graphics = { workspace = true }
+blade-macros = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 bitflags = { workspace = true }
 parking_lot = { workspace = true }
 rayon = { workspace = true }
-log = { workspace = true }
+serde = { workspace = true }
 thiserror = { workspace = true }
+naga = { workspace = true }
