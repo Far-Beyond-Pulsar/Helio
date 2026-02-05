@@ -2,18 +2,9 @@
 name = "helio-core"
 version = "0.1.0"
 edition = "2021"
-authors = ["Helio Contributors"]
-description = "Core types and structures for Helio rendering engine"
-license = "MIT OR Apache-2.0"
 
 [dependencies]
 blade-graphics = { workspace = true }
 blade-macros = { workspace = true }
-glam = { workspace = true }
 bytemuck = { workspace = true }
-bitflags = { workspace = true }
-parking_lot = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
-half = { workspace = true }
-naga = { workspace = true }
+glam = { workspace = true }

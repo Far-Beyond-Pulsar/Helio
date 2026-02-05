@@ -1,123 +1,225 @@
-pub mod lights;
-pub mod shadows;
-pub mod gi;
-pub mod probes;
-pub mod volumetric;
-
-pub use lights::*;
-pub use shadows::*;
-pub use gi::*;
-pub use probes::*;
-pub use volumetric::*;
-
-use helio_core::gpu;
-use glam::Vec3;
+use blade_graphics as gpu;
 use bytemuck::{Pod, Zeroable};
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GIMode {
+    None,
+    Realtime,
+    Baked,
+}
 
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct LightingGpuData {
-    pub ambient_color: [f32; 3],
-    pub num_directional_lights: u32,
-    pub num_point_lights: u32,
-    pub num_spot_lights: u32,
-    pub num_area_lights: u32,
-    pub gi_intensity: f32,
-    pub shadow_bias: f32,
-    pub shadow_normal_bias: f32,
-    pub pcf_radius: f32,
-    pub cascade_split_lambda: f32,
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct GIParams {
+    pub num_rays: u32,
+    pub max_bounces: u32,
+    pub intensity: f32,
+    pub _pad: u32,
 }
 
-impl Default for LightingGpuData {
+impl Default for GIParams {
     fn default() -> Self {
         Self {
-            ambient_color: [0.03, 0.03, 0.03],
-            num_directional_lights: 0,
-            num_point_lights: 0,
-            num_spot_lights: 0,
-            num_area_lights: 0,
-            gi_intensity: 1.0,
-            shadow_bias: 0.005,
-            shadow_normal_bias: 0.01,
-            pcf_radius: 1.0,
-            cascade_split_lambda: 0.95,
+            num_rays: 1,
+            max_bounces: 2,
+            intensity: 1.0,
+            _pad: 0,
         }
     }
 }
 
-pub struct LightingSystem {
-    pub directional_lights: Vec<DirectionalLight>,
-    pub point_lights: Vec<PointLight>,
-    pub spot_lights: Vec<SpotLight>,
-    pub area_lights: Vec<AreaLight>,
-    pub shadow_system: ShadowSystem,
-    pub gi_system: Option<GISystem>,
-    pub probe_system: Option<ProbeSystem>,
-    pub volumetric_system: Option<VolumetricSystem>,
-    pub lighting_buffer: Option<gpu::Buffer>,
-    pub light_data_buffer: Option<gpu::Buffer>,
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct LightData {
+    pub position: [f32; 3],
+    pub light_type: u32,
+    pub direction: [f32; 3],
+    pub intensity: f32,
+    pub color: [f32; 3],
+    pub range: f32,
 }
 
-impl LightingSystem {
-    pub fn new(context: &gpu::Context) -> Self {
-        Self {
-            directional_lights: Vec::new(),
-            point_lights: Vec::new(),
-            spot_lights: Vec::new(),
-            area_lights: Vec::new(),
-            shadow_system: ShadowSystem::new(context),
-            gi_system: None,
-            probe_system: None,
-            volumetric_system: None,
-            lighting_buffer: None,
-            light_data_buffer: None,
-        }
-    }
+pub struct GlobalIllumination {
+    mode: GIMode,
+    gi_pipeline: Option<gpu::ComputePipeline>,
+    gi_buffer: Option<gpu::Texture>,
+    gi_view: Option<gpu::TextureView>,
+    params: GIParams,
+    context: Arc<gpu::Context>,
+}
 
-    pub fn add_directional_light(&mut self, light: DirectionalLight) {
-        self.directional_lights.push(light);
-    }
-
-    pub fn add_point_light(&mut self, light: PointLight) {
-        self.point_lights.push(light);
-    }
-
-    pub fn add_spot_light(&mut self, light: SpotLight) {
-        self.spot_lights.push(light);
-    }
-
-    pub fn add_area_light(&mut self, light: AreaLight) {
-        self.area_lights.push(light);
-    }
-
-    pub fn update_gpu_data(&mut self, context: &gpu::Context) {
-        let _gpu_data = LightingGpuData {
-            num_directional_lights: self.directional_lights.len() as u32,
-            num_point_lights: self.point_lights.len() as u32,
-            num_spot_lights: self.spot_lights.len() as u32,
-            num_area_lights: self.area_lights.len() as u32,
-            ..Default::default()
+impl GlobalIllumination {
+    pub fn new(
+        context: Arc<gpu::Context>,
+        mode: GIMode,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let (gi_pipeline, gi_buffer, gi_view) = if mode == GIMode::Realtime {
+            Self::create_rt_gi(context.clone(), width, height)
+        } else {
+            (None, None, None)
         };
-
-        if self.lighting_buffer.is_none() {
-            self.lighting_buffer = Some(context.create_buffer(gpu::BufferDesc {
-                name: "lighting_data",
-                size: std::mem::size_of::<LightingGpuData>() as u64,
-                memory: gpu::Memory::Shared,
-            }));
+        
+        Self {
+            mode,
+            gi_pipeline,
+            gi_buffer,
+            gi_view,
+            params: GIParams::default(),
+            context,
         }
-
-        // Buffer mapping will be handled by implementation
     }
+    
+    fn create_rt_gi(
+        context: Arc<gpu::Context>,
+        width: u32,
+        height: u32,
+    ) -> (Option<gpu::ComputePipeline>, Option<gpu::Texture>, Option<gpu::TextureView>) {
+        let capabilities = context.capabilities();
+        if !capabilities.ray_query.contains(gpu::ShaderVisibility::COMPUTE) {
+            log::warn!("Ray tracing not supported, falling back to no GI");
+            return (None, None, None);
+        }
+        
+        let shader_source = match std::fs::read_to_string("shaders/gi_raytracing.wgsl") {
+            Ok(src) => src,
+            Err(_) => {
+                log::warn!("GI shader not found, skipping GI setup");
+                return (None, None, None);
+            }
+        };
+        
+        let shader = context.create_shader(gpu::ShaderDesc {
+            source: &shader_source,
+        });
+        
+        #[derive(blade_macros::ShaderData)]
+        struct GIData {
+            params: GIParams,
+            acc_struct: gpu::AccelerationStructure,
+            output: gpu::TextureView,
+        }
+        
+        let layout = <GIData as gpu::ShaderData>::layout();
+        let pipeline = context.create_compute_pipeline(gpu::ComputePipelineDesc {
+            name: "gi_rt",
+            data_layouts: &[&layout],
+            compute: shader.at("compute_gi"),
+        });
+        
+        let gi_buffer = context.create_texture(gpu::TextureDesc {
+            name: "gi_buffer",
+            format: gpu::TextureFormat::Rgba16Float,
+            size: gpu::Extent { width, height, depth: 1 },
+            dimension: gpu::TextureDimension::D2,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            usage: gpu::TextureUsage::RESOURCE | gpu::TextureUsage::STORAGE,
+            sample_count: 1,
+            external: None,
+        });
+        
+        let gi_view = context.create_texture_view(
+            gi_buffer,
+            gpu::TextureViewDesc {
+                name: "gi_view",
+                format: gpu::TextureFormat::Rgba16Float,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
+        
+        (Some(pipeline), Some(gi_buffer), Some(gi_view))
+    }
+    
+    pub fn mode(&self) -> GIMode {
+        self.mode
+    }
+    
+    pub fn set_mode(&mut self, mode: GIMode, width: u32, height: u32) {
+        if self.mode == mode {
+            return;
+        }
+        
+        self.cleanup();
+        
+        self.mode = mode;
+        if mode == GIMode::Realtime {
+            let (pipeline, buffer, view) = Self::create_rt_gi(
+                self.context.clone(),
+                width,
+                height,
+            );
+            self.gi_pipeline = pipeline;
+            self.gi_buffer = buffer;
+            self.gi_view = view;
+        }
+    }
+    
+    pub fn set_params(&mut self, params: GIParams) {
+        self.params = params;
+    }
+    
+    pub fn params(&self) -> GIParams {
+        self.params
+    }
+    
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if self.mode != GIMode::Realtime {
+            return;
+        }
+        
+        if let Some(view) = self.gi_view {
+            self.context.destroy_texture_view(view);
+        }
+        if let Some(buffer) = self.gi_buffer {
+            self.context.destroy_texture(buffer);
+        }
+        
+        let gi_buffer = self.context.create_texture(gpu::TextureDesc {
+            name: "gi_buffer",
+            format: gpu::TextureFormat::Rgba16Float,
+            size: gpu::Extent { width, height, depth: 1 },
+            dimension: gpu::TextureDimension::D2,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            usage: gpu::TextureUsage::RESOURCE | gpu::TextureUsage::STORAGE,
+            sample_count: 1,
+            external: None,
+        });
+        
+        let gi_view = self.context.create_texture_view(
+            gi_buffer,
+            gpu::TextureViewDesc {
+                name: "gi_view",
+                format: gpu::TextureFormat::Rgba16Float,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
+        
+        self.gi_buffer = Some(gi_buffer);
+        self.gi_view = Some(gi_view);
+    }
+    
+    pub fn gi_view(&self) -> Option<gpu::TextureView> {
+        self.gi_view
+    }
+    
+    fn cleanup(&mut self) {
+        if let Some(view) = self.gi_view.take() {
+            self.context.destroy_texture_view(view);
+        }
+        if let Some(buffer) = self.gi_buffer.take() {
+            self.context.destroy_texture(buffer);
+        }
+    }
+}
 
-    pub fn cleanup(&mut self, context: &gpu::Context) {
-        if let Some(buffer) = self.lighting_buffer.take() {
-            context.destroy_buffer(buffer);
-        }
-        if let Some(buffer) = self.light_data_buffer.take() {
-            context.destroy_buffer(buffer);
-        }
-        self.shadow_system.cleanup(context);
+impl Drop for GlobalIllumination {
+    fn drop(&mut self) {
+        self.cleanup();
     }
 }

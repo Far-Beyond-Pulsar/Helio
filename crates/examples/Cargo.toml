@@ -1,8 +1,7 @@
 [package]
-name = "helio-example"
+name = "examples"
 version = "0.1.0"
 edition = "2021"
-publish = false
 
 [[bin]]
 name = "basic_rendering"
@@ -11,13 +10,9 @@ path = "basic_rendering.rs"
 [dependencies]
 helio-core = { path = "../helio-core" }
 helio-render = { path = "../helio-render" }
-helio-lighting = { path = "../helio-lighting" }
-helio-material = { path = "../helio-material" }
-helio-postprocess = { path = "../helio-postprocess" }
 blade-graphics = { workspace = true }
-blade-macros = { workspace = true }
-glam = { workspace = true }
 bytemuck = { workspace = true }
+glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }

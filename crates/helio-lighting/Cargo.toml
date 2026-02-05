@@ -2,17 +2,11 @@
 name = "helio-lighting"
 version = "0.1.0"
 edition = "2021"
-authors = ["Helio Contributors"]
-description = "Lighting and shadow systems for Helio rendering engine"
-license = "MIT OR Apache-2.0"
 
 [dependencies]
 helio-core = { path = "../helio-core" }
 blade-graphics = { workspace = true }
 blade-macros = { workspace = true }
-glam = { workspace = true }
 bytemuck = { workspace = true }
-bitflags = { workspace = true }
-parking_lot = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }

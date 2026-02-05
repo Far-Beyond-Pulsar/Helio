@@ -1,60 +1,173 @@
-pub mod renderer;
-pub mod frame_graph;
-pub mod render_pass;
-pub mod gbuffer;
-pub mod deferred;
-pub mod forward;
-pub mod visibility_buffer;
-pub mod shader_compiler;
+use blade_graphics as gpu;
+use bytemuck::{Pod, Zeroable};
+use std::sync::Arc;
 
-pub use renderer::*;
-pub use frame_graph::*;
-pub use render_pass::*;
-pub use gbuffer::*;
-pub use deferred::*;
-pub use forward::*;
-pub use visibility_buffer::*;
-pub use shader_compiler::*;
-
-use helio_core::gpu;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RenderPath {
-    Deferred,
-    Forward,
-    ForwardPlus,
-    VisibilityBuffer,
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct CameraUniforms {
+    pub view_proj: [[f32; 4]; 4],
+    pub position: [f32; 3],
+    pub _pad: f32,
 }
 
-impl Default for RenderPath {
-    fn default() -> Self {
-        Self::Deferred
-    }
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct TransformUniforms {
+    pub model: [[f32; 4]; 4],
 }
 
-#[derive(Clone, Debug)]
-pub struct RendererConfig {
-    pub render_path: RenderPath,
-    pub width: u32,
-    pub height: u32,
-    pub hdr_enabled: bool,
-    pub msaa_samples: u32,
-    pub vsync_enabled: bool,
-    pub max_lights_per_tile: u32,
-    pub tile_size: u32,
+#[derive(blade_macros::ShaderData)]
+struct SceneData {
+    camera: CameraUniforms,
 }
 
-impl Default for RendererConfig {
-    fn default() -> Self {
+#[derive(blade_macros::ShaderData)]
+struct ObjectData {
+    transform: TransformUniforms,
+}
+
+pub struct Renderer {
+    pipeline: gpu::RenderPipeline,
+    depth_texture: gpu::Texture,
+    depth_view: gpu::TextureView,
+    context: Arc<gpu::Context>,
+}
+
+impl Renderer {
+    pub fn new(
+        context: Arc<gpu::Context>,
+        surface_format: gpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let scene_layout = <SceneData as gpu::ShaderData>::layout();
+        let object_layout = <ObjectData as gpu::ShaderData>::layout();
+        
+        let shader_source = std::fs::read_to_string("shaders/main.wgsl")
+            .expect("Failed to read shader");
+        let shader = context.create_shader(gpu::ShaderDesc {
+            source: &shader_source,
+        });
+        
+        let depth_texture = context.create_texture(gpu::TextureDesc {
+            name: "depth",
+            format: gpu::TextureFormat::Depth32Float,
+            size: gpu::Extent { width, height, depth: 1 },
+            dimension: gpu::TextureDimension::D2,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            usage: gpu::TextureUsage::TARGET,
+            sample_count: 1,
+            external: None,
+        });
+        
+        let depth_view = context.create_texture_view(
+            depth_texture,
+            gpu::TextureViewDesc {
+                name: "depth_view",
+                format: gpu::TextureFormat::Depth32Float,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
+        
+        let pipeline = context.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "main",
+            data_layouts: &[&scene_layout, &object_layout],
+            vertex: shader.at("vs_main"),
+            vertex_fetches: &[gpu::VertexFetchState {
+                layout: &<helio_core::PackedVertex as gpu::Vertex>::layout(),
+                instanced: false,
+            }],
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleList,
+                front_face: gpu::FrontFace::Ccw,
+                cull_mode: Some(gpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu::DepthStencilState {
+                format: gpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: gpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            fragment: Some(shader.at("fs_main")),
+            color_targets: &[gpu::ColorTargetState {
+                format: surface_format,
+                blend: None,
+                write_mask: gpu::ColorWrites::default(),
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+        
         Self {
-            render_path: RenderPath::Deferred,
-            width: 1920,
-            height: 1080,
-            hdr_enabled: true,
-            msaa_samples: 1,
-            vsync_enabled: true,
-            max_lights_per_tile: 256,
-            tile_size: 16,
+            pipeline,
+            depth_texture,
+            depth_view,
+            context,
         }
+    }
+    
+    pub fn render(
+        &self,
+        command_encoder: &mut gpu::CommandEncoder,
+        target_view: gpu::TextureView,
+        camera: CameraUniforms,
+        meshes: &[(TransformUniforms, gpu::BufferPiece, gpu::BufferPiece, u32)],
+    ) {
+        if let mut pass = command_encoder.render(
+            "main",
+            gpu::RenderTargetSet {
+                colors: &[gpu::RenderTarget {
+                    view: target_view,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                    finish_op: gpu::FinishOp::Store,
+                }],
+                depth_stencil: Some(gpu::RenderTarget {
+                    view: self.depth_view,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                    finish_op: gpu::FinishOp::Store,
+                }),
+            },
+        ) {
+            let scene_data = SceneData { camera };
+            let mut rc = pass.with(&self.pipeline);
+            
+            for (transform, vertex_buf, index_buf, index_count) in meshes {
+                let object_data = ObjectData { transform: *transform };
+                rc.bind(0, &scene_data);
+                rc.bind(1, &object_data);
+                rc.bind_vertex(0, *vertex_buf);
+                rc.draw_indexed(*index_buf, gpu::IndexType::U32, *index_count, 0, 0, 1);
+            }
+        }
+    }
+    
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.context.destroy_texture_view(self.depth_view);
+        self.context.destroy_texture(self.depth_texture);
+        
+        self.depth_texture = self.context.create_texture(gpu::TextureDesc {
+            name: "depth",
+            format: gpu::TextureFormat::Depth32Float,
+            size: gpu::Extent { width, height, depth: 1 },
+            dimension: gpu::TextureDimension::D2,
+            array_layer_count: 1,
+            mip_level_count: 1,
+            usage: gpu::TextureUsage::TARGET,
+            sample_count: 1,
+            external: None,
+        });
+        
+        self.depth_view = self.context.create_texture_view(
+            self.depth_texture,
+            gpu::TextureViewDesc {
+                name: "depth_view",
+                format: gpu::TextureFormat::Depth32Float,
+                dimension: gpu::ViewDimension::D2,
+                subresources: &Default::default(),
+            },
+        );
     }
 }
