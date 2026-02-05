@@ -1,7 +1,7 @@
 struct Camera {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
-    gi_flag: f32,  // Used to toggle GI visualization
+    _pad: f32,
 };
 var<uniform> camera: Camera;
 
@@ -40,19 +40,15 @@ fn vs_main(vertex: Vertex) -> VertexOutput {
     return output;
 }
 
+// FEATURE_FUNCTIONS
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let ambient = vec3<f32>(0.2);
-    let diffuse = max(dot(input.world_normal, light_dir), 0.0);
+    // Base color (normal visualization)
+    let base_color = input.world_normal * 0.5 + 0.5;
     
-    // Base color with lighting
-    let lit_color = ambient + diffuse * vec3<f32>(0.8);
+    // Apply lighting (injected function)
+    let final_color = calculate_lighting(input.world_normal, base_color);
     
-    // GI is toggled by passing camera.position.w as a flag (hack for demo)
-    // When > 0.5, add orange GI tint to show it's enabled
-    let gi_contribution = select(vec3<f32>(0.0), vec3<f32>(0.3, 0.15, 0.0), camera.gi_flag > 0.5);
-    
-    let final_color = lit_color + gi_contribution;
     return vec4<f32>(final_color, 1.0);
 }

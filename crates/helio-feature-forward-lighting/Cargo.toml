@@ -1,0 +1,8 @@
+[package]
+name = "helio-feature-forward-lighting"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helio-features = { path = "../helio-features" }
+blade-graphics = { workspace = true }
