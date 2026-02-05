@@ -2,25 +2,6 @@ use blade_graphics as gpu;
 use bytemuck::{Pod, Zeroable};
 use std::sync::Arc;
 
-/// Compose shader with feature injections
-pub fn compose_shader(base_shader_path: &str, injected_code: &str, defines: &[&str]) -> String {
-    let base = std::fs::read_to_string(base_shader_path)
-        .unwrap_or_else(|_| panic!("Failed to read shader: {}", base_shader_path));
-    
-    // Inject feature functions
-    let with_features = base.replace("// FEATURE_FUNCTIONS", injected_code);
-    
-    // Add defines at the top
-    let mut final_code = String::new();
-    for define in defines {
-        final_code.push_str(&format!("#define {}\n", define));
-    }
-    final_code.push('\n');
-    final_code.push_str(&with_features);
-    
-    final_code
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct CameraUniforms {
@@ -59,33 +40,13 @@ impl Renderer {
         width: u32,
         height: u32,
     ) -> Self {
-        Self::with_shader(context, surface_format, width, height, "shaders/main.wgsl")
-    }
-    
-    pub fn with_shader(
-        context: Arc<gpu::Context>,
-        surface_format: gpu::TextureFormat,
-        width: u32,
-        height: u32,
-        shader_path: &str,
-    ) -> Self {
-        let shader_source = std::fs::read_to_string(shader_path)
-            .unwrap_or_else(|_| panic!("Failed to read shader: {}", shader_path));
-        Self::with_shader_source(context, surface_format, width, height, &shader_source)
-    }
-    
-    pub fn with_shader_source(
-        context: Arc<gpu::Context>,
-        surface_format: gpu::TextureFormat,
-        width: u32,
-        height: u32,
-        shader_source: &str,
-    ) -> Self {
         let scene_layout = <SceneData as gpu::ShaderData>::layout();
         let object_layout = <ObjectData as gpu::ShaderData>::layout();
         
+        let shader_source = std::fs::read_to_string("shaders/main.wgsl")
+            .expect("Failed to read shader");
         let shader = context.create_shader(gpu::ShaderDesc {
-            source: shader_source,
+            source: &shader_source,
         });
         
         let depth_texture = context.create_texture(gpu::TextureDesc {
