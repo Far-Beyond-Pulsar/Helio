@@ -50,7 +50,7 @@ impl Feature for BasicLighting {
             // Inject lighting calculation in fragment shader
             ShaderInjection {
                 point: ShaderInjectionPoint::FragmentColorCalculation,
-                code: "    final_color = apply_basic_lighting(normalize(in.world_normal), final_color);".to_string(),
+                code: "    final_color = apply_basic_lighting(normalize(input.world_normal), final_color);".to_string(),
                 priority: 0,
             },
         ]

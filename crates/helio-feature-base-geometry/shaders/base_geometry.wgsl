@@ -53,10 +53,10 @@ fn vs_main(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // INJECT_FRAGMENTMAIN
-
     // Default gray color
     var final_color = vec3<f32>(0.8);
+
+    // INJECT_FRAGMENTMAIN
 
     // INJECT_FRAGMENTCOLORCALCULATION
 
