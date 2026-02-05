@@ -1,13 +1,11 @@
 [package]
-name = "helio-render"
+name = "helio-feature-materials"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-helio-core = { path = "../helio-core" }
 helio-features = { path = "../helio-features" }
 blade-graphics = { workspace = true }
 blade-macros = { workspace = true }
-bytemuck = { workspace = true }
 glam = { workspace = true }
-log = { workspace = true }
+bytemuck = { workspace = true }

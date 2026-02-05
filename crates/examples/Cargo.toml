@@ -7,9 +7,25 @@ edition = "2021"
 name = "basic_rendering"
 path = "basic_rendering.rs"
 
+[[bin]]
+name = "feature_geometry"
+path = "feature_geometry.rs"
+
+[[bin]]
+name = "feature_with_lighting"
+path = "feature_with_lighting.rs"
+
+[[bin]]
+name = "feature_complete"
+path = "feature_complete.rs"
+
 [dependencies]
 helio-core = { path = "../helio-core" }
 helio-render = { path = "../helio-render" }
+helio-features = { path = "../helio-features" }
+helio-feature-base-geometry = { path = "../helio-feature-base-geometry" }
+helio-feature-lighting = { path = "../helio-feature-lighting" }
+helio-feature-materials = { path = "../helio-feature-materials" }
 blade-graphics = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }

@@ -559,6 +559,10 @@ dependencies = [
  "env_logger",
  "glam",
  "helio-core",
+ "helio-feature-base-geometry",
+ "helio-feature-lighting",
+ "helio-feature-materials",
+ "helio-features",
  "helio-render",
  "log",
  "winit",
@@ -733,6 +737,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-feature-base-geometry"
+version = "0.1.0"
+dependencies = [
+ "blade-graphics",
+ "glam",
+ "helio-features",
+]
+
+[[package]]
+name = "helio-feature-lighting"
+version = "0.1.0"
+dependencies = [
+ "blade-graphics",
+ "glam",
+ "helio-features",
+]
+
+[[package]]
+name = "helio-feature-materials"
+version = "0.1.0"
+dependencies = [
+ "blade-graphics",
+ "blade-macros",
+ "bytemuck",
+ "glam",
+ "helio-features",
+]
+
+[[package]]
+name = "helio-features"
+version = "0.1.0"
+dependencies = [
+ "blade-graphics",
+ "glam",
+ "log",
+]
+
+[[package]]
 name = "helio-lighting"
 version = "0.1.0"
 dependencies = [
@@ -753,6 +795,8 @@ dependencies = [
  "bytemuck",
  "glam",
  "helio-core",
+ "helio-features",
+ "log",
 ]
 
 [[package]]

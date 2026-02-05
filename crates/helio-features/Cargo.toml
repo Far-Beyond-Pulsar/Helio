@@ -1,0 +1,9 @@
+[package]
+name = "helio-features"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+blade-graphics = { workspace = true }
+glam = { workspace = true }
+log = { workspace = true }

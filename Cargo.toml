@@ -3,6 +3,10 @@ members = [
     "crates/helio-core",
     "crates/helio-render",
     "crates/helio-lighting",
+    "crates/helio-features",
+    "crates/helio-feature-base-geometry",
+    "crates/helio-feature-lighting",
+    "crates/helio-feature-materials",
     "crates/examples",
 ]
 resolver = "2"

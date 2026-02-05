@@ -5,7 +5,9 @@
       "WebFetch(domain:docs.rs)",
       "Bash(cargo run:*)",
       "Bash(cargo add:*)",
-      "Bash(cargo build:*)"
+      "Bash(cargo build:*)",
+      "Bash($env:RUST_LOG=\"debug\")",
+      "Bash(Select-String -Pattern \"Composed shader\" -Context 0,100)"
     ]
   }
 }
