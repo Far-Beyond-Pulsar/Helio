@@ -15,9 +15,9 @@ Helio is a modular, feature-based rendering engine built on top of blade-graphic
 
 Each feature is a separate crate that implements the `Feature` trait:
 
-- **helio-feature-base-geometry**: Base geometry rendering (no lighting)
+- **helio-feature-base-geometry**: Base geometry rendering with UV coordinate pass-through
 - **helio-feature-lighting**: Basic diffuse + ambient lighting
-- **helio-feature-materials**: Material system with color/metallic/roughness properties
+- **helio-feature-materials**: Procedural texture materials with checkerboard pattern
 
 ## Feature System
 
@@ -134,7 +134,7 @@ Adds basic diffuse + ambient lighting to the geometry. Objects now have shading 
 ```bash
 cargo run --bin feature_complete --release
 ```
-Combines all three features: geometry, lighting, and materials. This demonstrates how features compose to create a complete rendering pipeline.
+Combines all three features: geometry, lighting, and materials with procedural textures. Objects display a checkerboard pattern that's properly lit. This demonstrates how features compose to create a complete rendering pipeline.
 
 ### 4. Basic Rendering (`basic_rendering`)
 ```bash

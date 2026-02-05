@@ -76,10 +76,10 @@ impl Feature for BasicMaterials {
                 code: self.material_functions.clone(),
                 priority: -5,
             },
-            // Apply material color early in the pipeline
+            // Apply material color with texture coordinates
             ShaderInjection {
                 point: ShaderInjectionPoint::FragmentMain,
-                code: "    final_color = apply_material_color(final_color);".to_string(),
+                code: "    final_color = apply_material_color(final_color, input.tex_coords);".to_string(),
                 priority: -10,
             },
         ]

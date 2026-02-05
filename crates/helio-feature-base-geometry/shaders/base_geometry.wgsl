@@ -24,6 +24,7 @@ struct VertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal: vec3<f32>,
+    @location(2) tex_coords: vec2<f32>,
 };
 
 // INJECT_VERTEXPREAMBLE
@@ -43,6 +44,7 @@ fn vs_main(vertex: Vertex) -> VertexOutput {
     output.position = camera.view_proj * world_pos;
     output.world_position = world_pos.xyz;
     output.world_normal = world_normal;
+    output.tex_coords = vertex.tex_coords;
 
     // INJECT_VERTEXPOSTPROCESS
 
