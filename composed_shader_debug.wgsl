@@ -49,22 +49,16 @@ fn vs_main(vertex: Vertex) -> VertexOutput {
     return output;
 }
 
-// Material data structures and bindings
-
-struct MaterialData {
-    base_color: vec4<f32>,
-    metallic: f32,
-    roughness: f32,
-    _padding: vec2<f32>,
-}
-
-@group(2) @binding(0)
-var<uniform> material: MaterialData;
+// Material data structures
+// Note: For this basic demo, we're not using a material buffer
+// Materials just provide color modification functions
 
 // Material processing functions
 
 fn apply_material_color(base_color: vec3<f32>) -> vec3<f32> {
-    return base_color * material.base_color.rgb;
+    // For this demo, materials just enhance the base color slightly
+    // In a full implementation, this would use material properties from a uniform buffer
+    return base_color * vec3<f32>(1.0, 0.9, 0.85); // Slightly warm tint
 }
 
 // Basic lighting functions

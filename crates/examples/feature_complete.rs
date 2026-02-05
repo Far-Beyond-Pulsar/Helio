@@ -283,7 +283,7 @@ fn main() {
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
-        .with_title("Helio - All Features (Geometry + Lighting + Materials)")
+        .with_title("Helio - Complete Pipeline (Geometry + Lighting + Materials)")
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
     #[allow(deprecated)]

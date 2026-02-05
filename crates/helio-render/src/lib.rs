@@ -206,9 +206,6 @@ impl FeatureRenderer {
 
         log::debug!("Composed shader:\n{}", composed_shader);
 
-        // Temporary: write shader to file for debugging
-        std::fs::write("composed_shader_debug.wgsl", &composed_shader).ok();
-
         let shader = context.create_shader(gpu::ShaderDesc {
             source: &composed_shader,
         });
