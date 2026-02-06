@@ -177,17 +177,18 @@ impl Example {
     fn render(&mut self) {
         let frame = self.surface.acquire_frame();
         let elapsed = self.start_time.elapsed().as_secs_f32();
-        
+        let elapsed_wrapped = elapsed % (2.0 * std::f32::consts::PI);
+
         self.command_encoder.start();
         self.command_encoder.init_texture(frame.texture());
-        
+
         let width = self.window_size.width as f32;
         let height = self.window_size.height as f32;
-        
+
         let camera_pos = Vec3::new(
-            (elapsed * 0.5).cos() * 5.0,
+            (elapsed_wrapped * 0.5).cos() * 5.0,
             3.0,
-            (elapsed * 0.5).sin() * 5.0,
+            (elapsed_wrapped * 0.5).sin() * 5.0,
         );
         let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
         let projection = Mat4::perspective_rh(
@@ -197,16 +198,16 @@ impl Example {
             100.0,
         );
         let view_proj = projection * view;
-        
+
         let camera = CameraUniforms {
             view_proj: view_proj.to_cols_array_2d(),
             position: camera_pos.to_array(),
             _pad: 0.0,
         };
-        
+
         let mut meshes = Vec::new();
-        
-        let cube_transform = Mat4::from_rotation_y(elapsed) * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
+
+        let cube_transform = Mat4::from_rotation_y(elapsed_wrapped) * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
         meshes.push((
             TransformUniforms { model: cube_transform.to_cols_array_2d() },
             self.cube_vertices.into(),
