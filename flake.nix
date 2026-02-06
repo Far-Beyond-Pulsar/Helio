@@ -12,7 +12,15 @@
         pkgs = import nixpkgs { inherit system; };
       in {
         devShells.default = pkgs.mkShell {
+          nativeBuildInputs = [
+            pkgs.wayland
+            pkgs.wayland-protocols
+            pkgs.libxkbcommon
+          ];
           buildInputs = [
+            pkgs.wayland
+            pkgs.wayland-protocols
+            pkgs.xkeyboard_config
             pkgs.rustc
             pkgs.cargo
             pkgs.pkg-config
@@ -55,7 +63,11 @@
             pkgs.xorg.xcbutilcursor
           ];
           shellHook = ''
-            export RUST_BACKTRACE=1
+            export RUST_BACKTRACE=1; \
+            export LD_LIBRARY_PATH="${pkgs.wayland}/lib:${pkgs.xorg.libX11}/lib:${pkgs.xorg.libxcb}/lib:${pkgs.xorg.libXcursor}/lib:${pkgs.xorg.libXi}/lib:${pkgs.xorg.libXrandr}/lib:${pkgs.xorg.libXinerama}/lib:${pkgs.xorg.libXext}/lib:${pkgs.libxkbcommon}/lib:${pkgs.vulkan-loader}/lib:$LD_LIBRARY_PATH"; \
+            export XKB_CONFIG_ROOT="${pkgs.xkeyboard_config}/share/X11/xkb"; \
+            echo "[nix develop] LD_LIBRARY_PATH set to: $LD_LIBRARY_PATH"; \
+            echo "[nix develop] XKB_CONFIG_ROOT set to: $XKB_CONFIG_ROOT";
           '';
         };
       }
