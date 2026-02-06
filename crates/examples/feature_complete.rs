@@ -287,7 +287,7 @@ fn main() {
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
-        .with_title("Helio - Complete Pipeline (Geometry + Lighting + Materials)")
+        .with_title("Helio - Complete Pipeline (Press 1: Geometry, 2: Lighting, 3: Materials)")
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
     #[allow(deprecated)]
@@ -302,12 +302,46 @@ fn main() {
                 winit::event::WindowEvent::KeyboardInput {
                     event:
                         winit::event::KeyEvent {
-                            physical_key:
-                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape),
+                            physical_key,
+                            state: winit::event::ElementState::Pressed,
                             ..
                         },
                     ..
-                } => elwt.exit(),
+                } => {
+                    match physical_key {
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
+                            elwt.exit();
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
+                            let registry = app.renderer.registry_mut();
+                            if registry.toggle_feature("base_geometry") {
+                                let enabled = registry.get_feature("base_geometry").unwrap().is_enabled();
+                                let status = if enabled { "ON" } else { "OFF" };
+                                println!("[1] Base Geometry: {}", status);
+                                log::info!("[1] Base Geometry: {}", status);
+                            }
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
+                            let registry = app.renderer.registry_mut();
+                            if registry.toggle_feature("basic_lighting") {
+                                let enabled = registry.get_feature("basic_lighting").unwrap().is_enabled();
+                                let status = if enabled { "ON" } else { "OFF" };
+                                println!("[2] Basic Lighting: {}", status);
+                                log::info!("[2] Basic Lighting: {}", status);
+                            }
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit3) => {
+                            let registry = app.renderer.registry_mut();
+                            if registry.toggle_feature("basic_materials") {
+                                let enabled = registry.get_feature("basic_materials").unwrap().is_enabled();
+                                let status = if enabled { "ON" } else { "OFF" };
+                                println!("[3] Basic Materials: {}", status);
+                                log::info!("[3] Basic Materials: {}", status);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 winit::event::WindowEvent::Resized(new_size) => {
                     app.resize(new_size);
                 }

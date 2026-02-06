@@ -283,7 +283,7 @@ fn main() {
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
-        .with_title("Helio - Base Geometry Feature")
+        .with_title("Helio - Base Geometry Feature (Press 1 to toggle geometry)")
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
     #[allow(deprecated)]
@@ -298,12 +298,28 @@ fn main() {
                 winit::event::WindowEvent::KeyboardInput {
                     event:
                         winit::event::KeyEvent {
-                            physical_key:
-                                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape),
+                            physical_key,
+                            state: winit::event::ElementState::Pressed,
                             ..
                         },
                     ..
-                } => elwt.exit(),
+                } => {
+                    match physical_key {
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
+                            elwt.exit();
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
+                            let registry = app.renderer.registry_mut();
+                            if registry.toggle_feature("base_geometry") {
+                                let enabled = registry.get_feature("base_geometry").unwrap().is_enabled();
+                                let status = if enabled { "ON" } else { "OFF" };
+                                println!("[1] Base Geometry: {}", status);
+                                log::info!("[1] Base Geometry: {}", status);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
                 winit::event::WindowEvent::Resized(new_size) => {
                     app.resize(new_size);
                 }
