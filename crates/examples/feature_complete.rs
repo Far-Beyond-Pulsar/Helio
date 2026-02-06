@@ -4,6 +4,7 @@ use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh};
 use helio_feature_base_geometry::BaseGeometry;
 use helio_feature_lighting::BasicLighting;
 use helio_feature_materials::BasicMaterials;
+use helio_feature_shadow_mapping::ShadowMapping;
 use helio_features::FeatureRegistry;
 use helio_render::{CameraUniforms, FeatureRenderer, TransformUniforms};
 use std::{ptr, sync::Arc, time::Instant};
@@ -161,6 +162,7 @@ impl Example {
         registry.register(base_geometry);
         registry.register(BasicLighting::new());
         registry.register(BasicMaterials::new());
+        registry.register(ShadowMapping::new());
 
         let renderer = FeatureRenderer::new(
             context.clone(),
@@ -287,7 +289,7 @@ fn main() {
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
-        .with_title("Helio - Complete Pipeline (Press 1: Geometry, 2: Lighting, 3: Materials)")
+        .with_title("Helio - Complete Pipeline (Press 1: Geometry, 2: Lighting, 3: Materials, 4: Shadows)")
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
     #[allow(deprecated)]
@@ -336,6 +338,15 @@ fn main() {
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[3] Basic Materials: {}", status);
                                 log::info!("[3] Basic Materials: {}", status);
+                                app.renderer.rebuild_pipeline();
+                            }
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit4) => {
+                            if app.renderer.registry_mut().toggle_feature("shadow_mapping") {
+                                let enabled = app.renderer.registry().get_feature("shadow_mapping").unwrap().is_enabled();
+                                let status = if enabled { "ON" } else { "OFF" };
+                                println!("[4] Shadow Mapping: {}", status);
+                                log::info!("[4] Shadow Mapping: {}", status);
                                 app.renderer.rebuild_pipeline();
                             }
                         }

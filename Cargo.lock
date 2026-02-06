@@ -562,6 +562,7 @@ dependencies = [
  "helio-feature-base-geometry",
  "helio-feature-lighting",
  "helio-feature-materials",
+ "helio-feature-shadow-mapping",
  "helio-features",
  "helio-render",
  "log",
@@ -763,6 +764,17 @@ dependencies = [
  "bytemuck",
  "glam",
  "helio-features",
+]
+
+[[package]]
+name = "helio-feature-shadow-mapping"
+version = "0.1.0"
+dependencies = [
+ "blade-graphics",
+ "bytemuck",
+ "glam",
+ "helio-features",
+ "log",
 ]
 
 [[package]]

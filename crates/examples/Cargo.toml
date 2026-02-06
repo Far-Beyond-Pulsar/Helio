@@ -26,6 +26,7 @@ helio-features = { path = "../helio-features" }
 helio-feature-base-geometry = { path = "../helio-feature-base-geometry" }
 helio-feature-lighting = { path = "../helio-feature-lighting" }
 helio-feature-materials = { path = "../helio-feature-materials" }
+helio-feature-shadow-mapping = { path = "../helio-feature-shadow-mapping" }
 blade-graphics = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }

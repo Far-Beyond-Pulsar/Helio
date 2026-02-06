@@ -1,0 +1,11 @@
+[package]
+name = "helio-feature-shadow-mapping"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helio-features = { path = "../helio-features" }
+blade-graphics = { workspace = true }
+glam = { workspace = true }
+bytemuck = { workspace = true }
+log = { workspace = true }
