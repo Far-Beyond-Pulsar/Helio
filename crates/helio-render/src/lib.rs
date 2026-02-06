@@ -143,10 +143,10 @@ impl Renderer {
         ) {
             let scene_data = SceneData { camera };
             let mut rc = pass.with(&self.pipeline);
-            
+            rc.bind(0, &scene_data);
+
             for (transform, vertex_buf, index_buf, index_count) in meshes {
                 let object_data = ObjectData { transform: *transform };
-                rc.bind(0, &scene_data);
                 rc.bind(1, &object_data);
                 rc.bind_vertex(0, *vertex_buf);
                 rc.draw_indexed(*index_buf, gpu::IndexType::U32, *index_count, 0, 0, 1);
@@ -314,10 +314,10 @@ impl FeatureRenderer {
         ) {
             let scene_data = SceneData { camera };
             let mut rc = pass.with(&self.pipeline);
+            rc.bind(0, &scene_data);
 
             for (transform, vertex_buf, index_buf, index_count) in meshes {
                 let object_data = ObjectData { transform: *transform };
-                rc.bind(0, &scene_data);
                 rc.bind(1, &object_data);
                 rc.bind_vertex(0, *vertex_buf);
                 rc.draw_indexed(*index_buf, gpu::IndexType::U32, *index_count, 0, 0, 1);
