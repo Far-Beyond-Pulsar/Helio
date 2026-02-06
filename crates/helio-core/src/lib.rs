@@ -21,6 +21,17 @@ impl PackedVertex {
             tangent: pack_snorm(1.0, 0.0, 0.0, 0.0),
         }
     }
+
+    pub fn new_with_uv(position: [f32; 3], normal: [f32; 3], tex_coords: [f32; 2]) -> Self {
+        let normal_packed = pack_snorm(normal[0], normal[1], normal[2], 0.0);
+        Self {
+            position,
+            bitangent_sign: 1.0,
+            tex_coords,
+            normal: normal_packed,
+            tangent: pack_snorm(1.0, 0.0, 0.0, 0.0),
+        }
+    }
 }
 
 fn pack_snorm(x: f32, y: f32, z: f32, w: f32) -> u32 {
@@ -126,15 +137,17 @@ pub fn create_sphere_mesh(radius: f32, sectors: u32, stacks: u32) -> Mesh {
 pub fn create_plane_mesh(width: f32, height: f32) -> Mesh {
     let w = width / 2.0;
     let h = height / 2.0;
-    
+
+    let uv_scale = 2.0;
     let vertices = vec![
-        PackedVertex::new([-w, 0.0, -h], [0.0, 1.0, 0.0]),
-        PackedVertex::new([w, 0.0, -h], [0.0, 1.0, 0.0]),
-        PackedVertex::new([w, 0.0, h], [0.0, 1.0, 0.0]),
-        PackedVertex::new([-w, 0.0, h], [0.0, 1.0, 0.0]),
+        PackedVertex::new_with_uv([-w, 0.0, -h], [0.0, 1.0, 0.0], [0.0, 0.0]),
+        PackedVertex::new_with_uv([w, 0.0, -h], [0.0, 1.0, 0.0], [uv_scale, 0.0]),
+        PackedVertex::new_with_uv([w, 0.0, h], [0.0, 1.0, 0.0], [uv_scale, uv_scale]),
+        PackedVertex::new_with_uv([-w, 0.0, h], [0.0, 1.0, 0.0], [0.0, uv_scale]),
     ];
-    
-    let indices = vec![0, 1, 2, 0, 2, 3];
-    
+
+    // Counter-clockwise winding when viewed from above (for backface culling)
+    let indices = vec![0, 2, 1, 0, 3, 2];
+
     Mesh { vertices, indices }
 }

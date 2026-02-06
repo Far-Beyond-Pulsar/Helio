@@ -133,7 +133,7 @@ impl Renderer {
             gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
                     view: target_view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
                     finish_op: gpu::FinishOp::Store,
                 }],
                 depth_stencil: Some(gpu::RenderTarget {
@@ -351,7 +351,7 @@ impl FeatureRenderer {
             gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
                     view: target_view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::TransparentBlack),
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
                     finish_op: gpu::FinishOp::Store,
                 }],
                 depth_stencil: Some(gpu::RenderTarget {

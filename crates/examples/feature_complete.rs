@@ -65,7 +65,7 @@ impl Example {
 
         let cube_mesh = create_cube_mesh(1.0);
         let sphere_mesh = create_sphere_mesh(0.5, 32, 32);
-        let plane_mesh = create_plane_mesh(10.0, 10.0);
+        let plane_mesh = create_plane_mesh(20.0, 20.0);
 
         let cube_vertices = context.create_buffer(gpu::BufferDesc {
             name: "cube_vertices",
@@ -214,8 +214,8 @@ impl Example {
         let aspect_ratio = self.window_size.width as f32 / self.window_size.height as f32;
         let projection = Mat4::perspective_rh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
 
-        let camera_pos = Vec3::new(5.0 * elapsed_wrapped.sin(), 3.0, 5.0 * elapsed_wrapped.cos());
-        let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
+        let camera_pos = Vec3::new(5.0 * elapsed_wrapped.sin(), 4.0, 5.0 * elapsed_wrapped.cos());
+        let view = Mat4::look_at_rh(camera_pos, Vec3::new(0.0, 0.5, 0.0), Vec3::Y);
         let view_proj = projection * view;
 
         let camera = CameraUniforms {
