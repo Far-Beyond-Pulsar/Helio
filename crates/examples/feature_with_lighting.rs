@@ -206,6 +206,9 @@ impl Example {
         let elapsed = (now - self.start_time).as_secs_f32();
         let elapsed_wrapped = elapsed % (2.0 * std::f32::consts::PI);
 
+        self.command_encoder.start();
+        self.command_encoder.init_texture(frame.texture());
+
         let aspect_ratio = self.window_size.width as f32 / self.window_size.height as f32;
         let projection = Mat4::perspective_rh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
 
