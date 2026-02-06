@@ -202,11 +202,12 @@ impl Example {
         self.last_frame_time = now;
 
         let elapsed = (now - self.start_time).as_secs_f32();
+        let elapsed_wrapped = elapsed % (2.0 * std::f32::consts::PI);
 
         let aspect_ratio = self.window_size.width as f32 / self.window_size.height as f32;
         let projection = Mat4::perspective_rh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
 
-        let camera_pos = Vec3::new(5.0 * elapsed.sin(), 3.0, 5.0 * elapsed.cos());
+        let camera_pos = Vec3::new(5.0 * elapsed_wrapped.sin(), 3.0, 5.0 * elapsed_wrapped.cos());
         let view = Mat4::look_at_rh(camera_pos, Vec3::ZERO, Vec3::Y);
         let view_proj = projection * view;
 
@@ -219,7 +220,7 @@ impl Example {
         let mut meshes = Vec::new();
 
         let cube_transform =
-            Mat4::from_rotation_y(elapsed) * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
+            Mat4::from_rotation_y(elapsed_wrapped) * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
         meshes.push((
             TransformUniforms {
                 model: cube_transform.to_cols_array_2d(),
