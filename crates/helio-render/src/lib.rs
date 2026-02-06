@@ -41,6 +41,8 @@ pub struct FeatureRenderer {
     context: Arc<gpu::Context>,
     registry: FeatureRegistry,
     frame_index: u64,
+    base_shader: String,
+    surface_format: gpu::TextureFormat,
 }
 
 impl Renderer {
@@ -274,7 +276,54 @@ impl FeatureRenderer {
             context,
             registry,
             frame_index: 0,
+            base_shader: base_shader.to_string(),
+            surface_format,
         }
+    }
+
+    pub fn rebuild_pipeline(&mut self) {
+        log::debug!("Rebuilding pipeline with updated features");
+
+        let composed_shader = self.registry.compose_shader(&self.base_shader);
+        log::debug!("Recomposed shader:\n{}", composed_shader);
+
+        let shader = self.context.create_shader(gpu::ShaderDesc {
+            source: &composed_shader,
+        });
+
+        let scene_layout = <SceneData as gpu::ShaderData>::layout();
+        let object_layout = <ObjectData as gpu::ShaderData>::layout();
+        let data_layouts = vec![&scene_layout, &object_layout];
+
+        self.pipeline = self.context.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "feature_main",
+            data_layouts: &data_layouts,
+            vertex: shader.at("vs_main"),
+            vertex_fetches: &[gpu::VertexFetchState {
+                layout: &<helio_core::PackedVertex as gpu::Vertex>::layout(),
+                instanced: false,
+            }],
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleList,
+                front_face: gpu::FrontFace::Ccw,
+                cull_mode: Some(gpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu::DepthStencilState {
+                format: gpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: gpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            fragment: Some(shader.at("fs_main")),
+            color_targets: &[gpu::ColorTargetState {
+                format: self.surface_format,
+                blend: None,
+                write_mask: gpu::ColorWrites::default(),
+            }],
+            multisample_state: gpu::MultisampleState::default(),
+        });
     }
 
     pub fn render(

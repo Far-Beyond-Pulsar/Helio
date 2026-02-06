@@ -313,30 +313,30 @@ fn main() {
                             elwt.exit();
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
-                            let registry = app.renderer.registry_mut();
-                            if registry.toggle_feature("base_geometry") {
-                                let enabled = registry.get_feature("base_geometry").unwrap().is_enabled();
+                            if app.renderer.registry_mut().toggle_feature("base_geometry") {
+                                let enabled = app.renderer.registry().get_feature("base_geometry").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[1] Base Geometry: {}", status);
                                 log::info!("[1] Base Geometry: {}", status);
+                                app.renderer.rebuild_pipeline();
                             }
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
-                            let registry = app.renderer.registry_mut();
-                            if registry.toggle_feature("basic_lighting") {
-                                let enabled = registry.get_feature("basic_lighting").unwrap().is_enabled();
+                            if app.renderer.registry_mut().toggle_feature("basic_lighting") {
+                                let enabled = app.renderer.registry().get_feature("basic_lighting").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[2] Basic Lighting: {}", status);
                                 log::info!("[2] Basic Lighting: {}", status);
+                                app.renderer.rebuild_pipeline();
                             }
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit3) => {
-                            let registry = app.renderer.registry_mut();
-                            if registry.toggle_feature("basic_materials") {
-                                let enabled = registry.get_feature("basic_materials").unwrap().is_enabled();
+                            if app.renderer.registry_mut().toggle_feature("basic_materials") {
+                                let enabled = app.renderer.registry().get_feature("basic_materials").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[3] Basic Materials: {}", status);
                                 log::info!("[3] Basic Materials: {}", status);
+                                app.renderer.rebuild_pipeline();
                             }
                         }
                         _ => {}
