@@ -7,7 +7,13 @@ struct ShadowData {
     shadow_bias: f32,
 }
 
-// TODO: This needs to be bound as a uniform - for now using constants
+// TODO: Shadow map texture binding
+// @group(2) @binding(0)
+// var shadow_map: texture_depth_2d;
+// @group(2) @binding(1)
+// var shadow_sampler: sampler_comparison;
+
+// Hardcoded shadow data matching the renderer's light setup
 fn get_shadow_data() -> ShadowData {
     var data: ShadowData;
     // Light from top-right matching the lighting direction
@@ -17,8 +23,8 @@ fn get_shadow_data() -> ShadowData {
     // Create light view matrix
     let view = look_at_rh(light_pos, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0));
 
-    // Orthographic projection for directional light
-    let projection = orthographic_rh(-15.0, 15.0, -15.0, 15.0, 0.1, 50.0);
+    // Orthographic projection for directional light (tighter bounds)
+    let projection = orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0);
 
     data.light_view_proj = projection * view;
     data.light_direction = light_dir;
@@ -55,12 +61,24 @@ fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, far:
     );
 }
 
-// Sample shadow map with PCF (Percentage Closer Filtering)
-fn sample_shadow_map(shadow_coord: vec3<f32>) -> f32 {
-    // TODO: Actual shadow map texture sampling will be implemented
-    // For now, return a simple falloff based on distance
-    let center_dist = length(shadow_coord.xy - vec2<f32>(0.5));
-    return smoothstep(0.7, 0.3, center_dist);
+// Sample shadow visibility (1.0 = fully lit, 0.0 = fully shadowed)
+fn sample_shadow_visibility(shadow_coord: vec3<f32>) -> f32 {
+    // TODO: Actual shadow map texture sampling
+    // The geometry is being rendered to the shadow map texture,
+    // but we need to bind and sample it here. This requires:
+    // 1. Binding shadow_map texture in the main pipeline
+    // 2. Using textureSampleCompare() to sample depth
+    //
+    // Proper implementation would be:
+    // let depth = textureSampleCompare(shadow_map, shadow_sampler, shadow_coord.xy, shadow_coord.z);
+    // return depth;
+
+    // Temporary: Show a procedural pattern until texture binding is implemented
+    let center = vec2<f32>(0.5, 0.5);
+    let dist = length(shadow_coord.xy - center);
+    let shadow_radius = 0.15;
+    let shadow_softness = 0.1;
+    return smoothstep(shadow_radius - shadow_softness, shadow_radius + shadow_softness, dist);
 }
 
 // Transform world position to shadow map space
@@ -93,10 +111,10 @@ fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<
     let ndotl = dot(world_normal, -shadow_data.light_direction);
     let bias = max(shadow_data.shadow_bias * (1.0 - ndotl), shadow_data.shadow_bias * 0.1);
 
-    // Sample shadow map
-    let shadow = sample_shadow_map(shadow_coord - vec3<f32>(0.0, 0.0, bias));
+    // Sample shadow visibility
+    let visibility = sample_shadow_visibility(shadow_coord - vec3<f32>(0.0, 0.0, bias));
 
-    // Apply shadow (0.3 = minimum brightness in shadow)
-    let shadow_factor = mix(0.3, 1.0, shadow);
+    // Apply shadow (0.2 = minimum brightness in shadow)
+    let shadow_factor = mix(0.2, 1.0, visibility);
     return base_color * shadow_factor;
 }

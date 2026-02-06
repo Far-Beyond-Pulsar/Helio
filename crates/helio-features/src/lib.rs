@@ -78,6 +78,26 @@ pub trait Feature: Send + Sync {
         // Features can override this to bind resources
         // Binding will be done through the pass parameter in bind_all_resources
     }
+
+    /// Optional: Render geometry for shadow map generation
+    /// This is called during the shadow pass and receives actual scene geometry
+    fn render_shadow_pass(
+        &mut self,
+        encoder: &mut gpu::CommandEncoder,
+        context: &FeatureContext,
+        meshes: &[crate::MeshData],
+        light_view_proj: [[f32; 4]; 4],
+    ) {
+        let _ = (encoder, context, meshes, light_view_proj);
+    }
+}
+
+/// Mesh data passed to shadow rendering
+pub struct MeshData {
+    pub transform: [[f32; 4]; 4],
+    pub vertex_buffer: gpu::BufferPiece,
+    pub index_buffer: gpu::BufferPiece,
+    pub index_count: u32,
 }
 
 /// Registry that manages all rendering features and composing them into shaders
@@ -167,6 +187,21 @@ impl FeatureRegistry {
         for feature in &mut self.features {
             if feature.is_enabled() {
                 feature.post_render_pass(encoder, context);
+            }
+        }
+    }
+
+    /// Execute shadow passes for all enabled features that support shadow rendering
+    pub fn execute_shadow_passes(
+        &mut self,
+        encoder: &mut gpu::CommandEncoder,
+        context: &FeatureContext,
+        meshes: &[MeshData],
+        light_view_proj: [[f32; 4]; 4],
+    ) {
+        for feature in &mut self.features {
+            if feature.is_enabled() {
+                feature.render_shadow_pass(encoder, context, meshes, light_view_proj);
             }
         }
     }

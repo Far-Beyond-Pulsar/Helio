@@ -43,6 +43,7 @@ pub struct FeatureRenderer {
     frame_index: u64,
     base_shader: String,
     surface_format: gpu::TextureFormat,
+    shadow_pipeline: Option<gpu::RenderPipeline>,
 }
 
 impl Renderer {
@@ -278,6 +279,7 @@ impl FeatureRenderer {
             frame_index: 0,
             base_shader: base_shader.to_string(),
             surface_format,
+            shadow_pipeline: None,
         }
     }
 
@@ -334,7 +336,7 @@ impl FeatureRenderer {
         meshes: &[(TransformUniforms, gpu::BufferPiece, gpu::BufferPiece, u32)],
         delta_time: f32,
     ) {
-        use helio_features::FeatureContext;
+        use helio_features::{FeatureContext, MeshData};
 
         let context = FeatureContext {
             gpu: self.context.clone(),
@@ -344,6 +346,29 @@ impl FeatureRenderer {
         };
 
         self.registry.prepare_frame(&context);
+
+        // Convert meshes to MeshData for shadow pass
+        let mesh_data: Vec<MeshData> = meshes
+            .iter()
+            .map(|(transform, vertex_buf, index_buf, index_count)| MeshData {
+                transform: transform.model,
+                vertex_buffer: *vertex_buf,
+                index_buffer: *index_buf,
+                index_count: *index_count,
+            })
+            .collect();
+
+        // Calculate light view projection for shadow mapping
+        // Using same direction as BasicLighting feature
+        let light_direction = glam::Vec3::new(0.5, -1.0, 0.3).normalize();
+        let light_pos = -light_direction * 20.0;
+        let light_view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, glam::Vec3::Y);
+        let light_projection = glam::Mat4::orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0);
+        let light_view_proj = (light_projection * light_view).to_cols_array_2d();
+
+        // Execute shadow passes before main render
+        self.registry.execute_shadow_passes(command_encoder, &context, &mesh_data, light_view_proj);
+
         self.registry.execute_pre_passes(command_encoder, &context);
 
         if let mut pass = command_encoder.render(

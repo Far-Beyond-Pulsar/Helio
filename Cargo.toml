@@ -7,7 +7,7 @@ members = [
     "crates/helio-feature-base-geometry",
     "crates/helio-feature-lighting",
     "crates/helio-feature-materials",
-    "crates/helio-feature-shadow-mapping",
+    "crates/helio-feature-procedural-shadows",
     "crates/examples",
 ]
 resolver = "2"
