@@ -129,7 +129,7 @@ impl Renderer {
         camera: CameraUniforms,
         meshes: &[(TransformUniforms, gpu::BufferPiece, gpu::BufferPiece, u32)],
     ) {
-        if let mut pass = command_encoder.render(
+        let mut pass = command_encoder.render(
             "main",
             gpu::RenderTargetSet {
                 colors: &[gpu::RenderTarget {
@@ -143,7 +143,8 @@ impl Renderer {
                     finish_op: gpu::FinishOp::Store,
                 }),
             },
-        ) {
+        );
+        {
             let scene_data = SceneData { camera };
             let mut rc = pass.with(&self.pipeline);
             rc.bind(0, &scene_data);
@@ -371,21 +372,22 @@ impl FeatureRenderer {
 
         self.registry.execute_pre_passes(command_encoder, &context);
 
-        if let mut pass = command_encoder.render(
-            "feature_main",
-            gpu::RenderTargetSet {
-                colors: &[gpu::RenderTarget {
-                    view: target_view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
-                    finish_op: gpu::FinishOp::Store,
-                }],
-                depth_stencil: Some(gpu::RenderTarget {
-                    view: self.depth_view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
-                    finish_op: gpu::FinishOp::Store,
-                }),
-            },
-        ) {
+        {
+            let mut pass = command_encoder.render(
+                "feature_main",
+                gpu::RenderTargetSet {
+                    colors: &[gpu::RenderTarget {
+                        view: target_view,
+                        init_op: gpu::InitOp::Clear(gpu::TextureColor::OpaqueBlack),
+                        finish_op: gpu::FinishOp::Store,
+                    }],
+                    depth_stencil: Some(gpu::RenderTarget {
+                        view: self.depth_view,
+                        init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                        finish_op: gpu::FinishOp::Store,
+                    }),
+                },
+            );
             let scene_data = SceneData { camera };
             let mut rc = pass.with(&self.pipeline);
             rc.bind(0, &scene_data);

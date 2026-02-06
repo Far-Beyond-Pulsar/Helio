@@ -199,7 +199,7 @@ impl Feature for ProceduralShadows {
             None => return,
         };
 
-        if let mut pass = encoder.render(
+        let mut pass = encoder.render(
             "shadow_depth_pass",
             gpu::RenderTargetSet {
                 colors: &[],
@@ -209,24 +209,24 @@ impl Feature for ProceduralShadows {
                     finish_op: gpu::FinishOp::Store,
                 }),
             },
-        ) {
-            let shadow_data = ShadowData {
-                shadow_uniforms: ShadowUniforms { light_view_proj },
+        );
+
+        let shadow_data = ShadowData {
+            shadow_uniforms: ShadowUniforms { light_view_proj },
+        };
+
+        let mut rc = pass.with(shadow_pipeline);
+        rc.bind(0, &shadow_data);
+
+        for mesh in meshes {
+            let object_data = ObjectData {
+                object_uniforms: ObjectUniforms {
+                    model: mesh.transform,
+                },
             };
-
-            let mut rc = pass.with(shadow_pipeline);
-            rc.bind(0, &shadow_data);
-
-            for mesh in meshes {
-                let object_data = ObjectData {
-                    object_uniforms: ObjectUniforms {
-                        model: mesh.transform,
-                    },
-                };
-                rc.bind(1, &object_data);
-                rc.bind_vertex(0, mesh.vertex_buffer);
-                rc.draw_indexed(mesh.index_buffer, gpu::IndexType::U32, mesh.index_count, 0, 0, 1);
-            }
+            rc.bind(1, &object_data);
+            rc.bind_vertex(0, mesh.vertex_buffer);
+            rc.draw_indexed(mesh.index_buffer, gpu::IndexType::U32, mesh.index_count, 0, 0, 1);
         }
     }
 }
