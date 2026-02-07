@@ -42,6 +42,30 @@ struct RadianceProbe {
     sh_coefficients: [[f32; 4]; 9], // Spherical harmonics coefficients (RGB + padding)
 }
 
+/// Shadow pass uniforms
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ShadowUniforms {
+    pub light_view_proj: [[f32; 4]; 4],
+}
+
+/// Object transform for shadow pass
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct ObjectUniforms {
+    pub model: [[f32; 4]; 4],
+}
+
+#[derive(blade_macros::ShaderData)]
+struct ShadowData {
+    shadow_uniforms: ShadowUniforms,
+}
+
+#[derive(blade_macros::ShaderData)]
+struct ObjectData {
+    object_uniforms: ObjectUniforms,
+}
+
 #[derive(blade_macros::ShaderData)]
 struct GIData {
     gi_uniforms: GIUniforms,
@@ -275,6 +299,43 @@ impl Feature for GlobalIllumination {
         // Create radiance probe grid
         self.create_radiance_probes(&context.gpu);
 
+        // Create shadow pipeline
+        let shadow_shader_source = include_str!("../shaders/shadow_pass.wgsl");
+        let shadow_shader = context.gpu.create_shader(gpu::ShaderDesc {
+            source: shadow_shader_source,
+        });
+
+        let shadow_layout = <ShadowData as gpu::ShaderData>::layout();
+        let object_layout = <ObjectData as gpu::ShaderData>::layout();
+
+        let shadow_pipeline = context.gpu.create_render_pipeline(gpu::RenderPipelineDesc {
+            name: "gi_shadow_pass",
+            data_layouts: &[&shadow_layout, &object_layout],
+            vertex: shadow_shader.at("vs_main"),
+            vertex_fetches: &[gpu::VertexFetchState {
+                layout: &<helio_core::PackedVertex as gpu::Vertex>::layout(),
+                instanced: false,
+            }],
+            primitive: gpu::PrimitiveState {
+                topology: gpu::PrimitiveTopology::TriangleList,
+                front_face: gpu::FrontFace::Ccw,
+                cull_mode: Some(gpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(gpu::DepthStencilState {
+                format: gpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: gpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            fragment: None,
+            color_targets: &[],
+            multisample_state: gpu::MultisampleState::default(),
+        });
+
+        self.shadow_pipeline = Some(shadow_pipeline);
+
         // Update light view-proj matrix
         self.gi_uniforms.light_view_proj = self.get_light_view_proj().to_cols_array_2d();
 
@@ -302,37 +363,18 @@ impl Feature for GlobalIllumination {
 
     fn shader_injections(&self) -> Vec<ShaderInjection> {
         let gi_functions = include_str!("../shaders/gi_functions.wgsl").to_string();
-        let pbr_functions = include_str!("../shaders/pbr_functions.wgsl").to_string();
-        let shadow_functions = include_str!("../shaders/shadow_sampling.wgsl").to_string();
 
         vec![
-            // Inject GI uniforms and bindings
+            // Inject simplified GI functions (includes PBR, shadows, materials)
             ShaderInjection {
                 point: ShaderInjectionPoint::FragmentPreamble,
                 code: gi_functions,
-                priority: -20,
+                priority: 10,
             },
-            // Inject PBR lighting model
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentPreamble,
-                code: pbr_functions,
-                priority: -15,
-            },
-            // Inject shadow sampling
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentPreamble,
-                code: shadow_functions,
-                priority: -10,
-            },
-            // Apply complete GI lighting in main fragment shader
+            // Apply GI lighting
             ShaderInjection {
                 point: ShaderInjectionPoint::FragmentColorCalculation,
-                code: "    final_color = apply_global_illumination(\
-                        input.world_position, \
-                        input.world_normal, \
-                        input.tex_coords, \
-                        final_color\
-                    );".to_string(),
+                code: "    final_color = apply_global_illumination(input.world_position, input.world_normal, input.tex_coords, final_color);".to_string(),
                 priority: 100,
             },
         ]
@@ -343,11 +385,9 @@ impl Feature for GlobalIllumination {
         self.gi_uniforms.light_view_proj = self.get_light_view_proj().to_cols_array_2d();
     }
 
-    fn pre_render_pass(&mut self, encoder: &mut gpu::CommandEncoder, _context: &FeatureContext) {
-        // TODO: Render shadow pass here
-        // TODO: Update surface cache
-        // TODO: Update radiance probes
-        let _ = encoder;
+    fn pre_render_pass(&mut self, _encoder: &mut gpu::CommandEncoder, _context: &FeatureContext) {
+        // Shadow pass will be called via render_shadow_pass
+        // Surface cache and probe updates would go here in the future
     }
 
     fn render_shadow_pass(
@@ -357,8 +397,54 @@ impl Feature for GlobalIllumination {
         meshes: &[helio_features::MeshData],
         light_view_proj: [[f32; 4]; 4],
     ) {
-        // This will be called by the renderer to populate the shadow map
-        let _ = (encoder, meshes, light_view_proj);
-        // Implementation will be similar to procedural shadows
+        let shadow_pipeline = match &self.shadow_pipeline {
+            Some(pipeline) => pipeline,
+            None => {
+                log::warn!("Shadow pipeline not initialized");
+                return;
+            }
+        };
+
+        let shadow_view = match self.shadow_map_view {
+            Some(view) => view,
+            None => {
+                log::warn!("Shadow map view not initialized");
+                return;
+            }
+        };
+
+        // Begin shadow depth pass
+        let mut pass = encoder.render(
+            "gi_shadow_depth_pass",
+            gpu::RenderTargetSet {
+                colors: &[],
+                depth_stencil: Some(gpu::RenderTarget {
+                    view: shadow_view,
+                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                    finish_op: gpu::FinishOp::Store,
+                }),
+            },
+        );
+
+        let shadow_data = ShadowData {
+            shadow_uniforms: ShadowUniforms { light_view_proj },
+        };
+
+        let mut rc = pass.with(shadow_pipeline);
+        rc.bind(0, &shadow_data);
+
+        // Render all meshes from light's perspective
+        for mesh in meshes {
+            let object_data = ObjectData {
+                object_uniforms: ObjectUniforms {
+                    model: mesh.transform,
+                },
+            };
+            rc.bind(1, &object_data);
+            rc.bind_vertex(0, mesh.vertex_buffer);
+            rc.draw_indexed(mesh.index_buffer, gpu::IndexType::U32, mesh.index_count, 0, 0, 1);
+        }
+
+        log::debug!("Rendered {} meshes to shadow map", meshes.len());
     }
 }

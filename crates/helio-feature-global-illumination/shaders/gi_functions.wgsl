@@ -1,235 +1,100 @@
-// Global Illumination Functions
-// Implements Lumen-like GI with multi-bounce diffuse lighting
+// Simplified Global Illumination Functions
+// Works directly with base shader without requiring external uniforms
 
-// GI Configuration
-struct GIUniforms {
-    light_view_proj: mat4x4<f32>,
-    light_direction: vec3<f32>,
-    shadow_bias: f32,
-    gi_intensity: f32,
-    num_samples: u32,
-    max_ray_distance: f32,
-    sky_color: vec3<f32>,
-    _pad: f32,
+const PI: f32 = 3.14159265359;
+
+// === Checkerboard pattern for materials ===
+fn checkerboard_pattern(uv: vec2<f32>, scale: f32) -> f32 {
+    let scaled_uv = uv * scale;
+    let checker = floor(scaled_uv.x) + floor(scaled_uv.y);
+    return fract(checker * 0.5) * 2.0;
 }
 
-// TODO: Bind GI uniforms
-// @group(3) @binding(0)
-// var<uniform> gi_uniforms: GIUniforms;
-
-// Hardcoded GI configuration for now
-fn get_gi_config() -> GIUniforms {
-    var config: GIUniforms;
-    config.light_direction = normalize(vec3<f32>(0.5, -1.0, 0.3));
-    config.shadow_bias = 0.005;
-    config.gi_intensity = 1.0;
-    config.num_samples = 8u;
-    config.max_ray_distance = 10.0;
-    config.sky_color = vec3<f32>(0.5, 0.7, 1.0);
-
-    // Calculate light view-proj
-    let light_pos = -config.light_direction * 20.0;
-    let view = look_at_rh(light_pos, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0));
-    let projection = orthographic_rh(-10.0, 10.0, -10.0, 10.0, 0.1, 50.0);
-    config.light_view_proj = projection * view;
-
-    return config;
-}
-
-// ===== Helper Functions =====
-
-fn look_at_rh(eye: vec3<f32>, center: vec3<f32>, up: vec3<f32>) -> mat4x4<f32> {
-    let f = normalize(center - eye);
-    let s = normalize(cross(f, up));
-    let u = cross(s, f);
-
-    return mat4x4<f32>(
-        vec4<f32>(s.x, u.x, -f.x, 0.0),
-        vec4<f32>(s.y, u.y, -f.y, 0.0),
-        vec4<f32>(s.z, u.z, -f.z, 0.0),
-        vec4<f32>(-dot(s, eye), -dot(u, eye), dot(f, eye), 1.0),
-    );
-}
-
-fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> mat4x4<f32> {
-    let w = 1.0 / (right - left);
-    let h = 1.0 / (top - bottom);
-    let d = 1.0 / (far - near);
-
-    return mat4x4<f32>(
-        vec4<f32>(2.0 * w, 0.0, 0.0, 0.0),
-        vec4<f32>(0.0, 2.0 * h, 0.0, 0.0),
-        vec4<f32>(0.0, 0.0, -d, 0.0),
-        vec4<f32>(-(right + left) * w, -(top + bottom) * h, -near * d, 1.0),
-    );
-}
-
-// ===== Random Number Generation =====
-
-fn hash(p: vec2<f32>) -> f32 {
-    let p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.13);
-    let p3_shifted = p3 + dot(p3, vec3<f32>(p3.y, p3.z, p3.x) + 3.333);
-    return fract((p3_shifted.x + p3_shifted.y) * p3_shifted.z);
-}
-
-fn random(seed: vec2<f32>) -> f32 {
-    return fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-}
-
-// Generate random direction in hemisphere oriented around normal
-fn random_hemisphere_direction(normal: vec3<f32>, seed: vec2<f32>) -> vec3<f32> {
-    let r1 = random(seed);
-    let r2 = random(seed + vec2<f32>(1.0, 1.0));
-
-    let phi = 2.0 * PI * r1;
-    let cos_theta = sqrt(r2);
-    let sin_theta = sqrt(1.0 - cos_theta * cos_theta);
-
-    let x = sin_theta * cos(phi);
-    let y = sin_theta * sin(phi);
-    let z = cos_theta;
-
-    // Build tangent space
-    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(normal.y) > 0.999);
-    let tangent = normalize(cross(up, normal));
-    let bitangent = cross(normal, tangent);
-
-    return normalize(tangent * x + bitangent * y + normal * z);
-}
-
-// ===== Screen-Space GI =====
-
-// Estimate indirect lighting from nearby surfaces (screen-space approximation)
-fn screen_space_indirect_lighting(
-    world_pos: vec3<f32>,
-    normal: vec3<f32>,
-    albedo: vec3<f32>,
-    tex_coords: vec2<f32>
-) -> vec3<f32> {
-    var indirect = vec3<f32>(0.0);
-    let config = get_gi_config();
-
-    // Sample multiple directions in hemisphere
-    for (var i = 0u; i < 4u; i++) {
-        let seed = tex_coords + vec2<f32>(f32(i), 0.0);
-        let ray_dir = random_hemisphere_direction(normal, seed);
-
-        // Simple occlusion approximation based on normal orientation
-        let occlusion = max(dot(ray_dir, normal), 0.0);
-
-        // Use sky color as indirect bounce
-        indirect += config.sky_color * occlusion;
-    }
-
-    indirect /= 4.0;
-    return indirect * albedo * config.gi_intensity * 0.3;
-}
-
-// ===== Probe-based GI =====
-
-// Sample radiance from probe grid (simplified version)
-fn sample_radiance_probes(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let config = get_gi_config();
-
-    // Simple spherical harmonics approximation
-    // In production, this would sample from actual probe grid
-
-    // Directional ambient based on normal
-    let up_contribution = max(dot(normal, vec3<f32>(0.0, 1.0, 0.0)), 0.0);
-    let side_contribution = 1.0 - up_contribution;
-
-    let sky_radiance = config.sky_color * 0.8;
-    let ground_radiance = vec3<f32>(0.3, 0.25, 0.2);
-
-    return mix(ground_radiance, sky_radiance, up_contribution) * config.gi_intensity;
-}
-
-// ===== Multi-bounce Diffuse GI =====
-
-fn calculate_indirect_diffuse(
-    world_pos: vec3<f32>,
-    normal: vec3<f32>,
-    albedo: vec3<f32>,
-    tex_coords: vec2<f32>
-) -> vec3<f32> {
-    // Combine screen-space and probe-based GI
-    let ss_gi = screen_space_indirect_lighting(world_pos, normal, albedo, tex_coords);
-    let probe_gi = sample_radiance_probes(world_pos, normal) * albedo;
-
-    // Blend between techniques based on distance
-    let blend = 0.5;
-    return mix(ss_gi, probe_gi, blend);
-}
-
-// ===== Complete GI Evaluation =====
-
+// === Complete GI lighting function ===
 fn apply_global_illumination(
     world_pos: vec3<f32>,
     world_normal: vec3<f32>,
     tex_coords: vec2<f32>,
     base_color: vec3<f32>
 ) -> vec3<f32> {
-    let config = get_gi_config();
     let normal = normalize(world_normal);
 
-    // Create PBR material
-    // In production, these would come from material textures/uniforms
-    var material: PBRMaterial;
-    material.albedo = base_color;
-    material.metallic = 0.1;
-    material.roughness = 0.6;
-    material.emissive = vec3<f32>(0.0);
+    // Light setup
+    let light_direction = normalize(vec3<f32>(0.5, -1.0, 0.3));
+    let light_dir = -light_direction;
+    let light_color = vec3<f32>(2.5);
 
-    // Calculate view direction (assuming camera at origin for now)
-    // TODO: Get actual camera position from uniforms
-    let camera_pos = vec3<f32>(5.0, 4.0, 5.0);
-    let view_dir = normalize(camera_pos - world_pos);
+    // View direction (camera orbits at (5,4,5) approximately)
+    let view_dir = normalize(vec3<f32>(5.0, 4.0, 5.0) - world_pos);
 
-    // ===== Direct Lighting =====
-
-    let light_dir = -config.light_direction;
-    let light_color = vec3<f32>(3.0); // Sun intensity
-
-    // Calculate shadow
-    let shadow_data = ShadowData(
-        config.light_view_proj,
-        config.light_direction,
-        config.shadow_bias
+    // Material with checkerboard pattern
+    let checker = checkerboard_pattern(tex_coords, 4.0);
+    let albedo = mix(
+        vec3<f32>(0.8, 0.3, 0.3),  // Red
+        vec3<f32>(0.3, 0.3, 0.8),  // Blue
+        checker
     );
-    let shadow_visibility = get_shadow_visibility(world_pos, normal, shadow_data);
+    let metallic = 0.0;
+    let roughness = 0.5;
 
-    // Evaluate PBR for direct light
-    let direct_lighting = evaluate_pbr_material(
-        material,
-        world_pos,
-        normal,
-        view_dir,
-        light_dir,
-        light_color
-    ) * shadow_visibility;
+    // === PBR Direct Lighting ===
+    let h = normalize(view_dir + light_dir);
+    let n_dot_l = max(dot(normal, light_dir), 0.0);
+    let n_dot_v = max(dot(normal, view_dir), 0.0);
+    let n_dot_h = max(dot(normal, h), 0.0);
+    let v_dot_h = max(dot(view_dir, h), 0.0);
 
-    // ===== Indirect Lighting (GI) =====
+    if (n_dot_l <= 0.0 || n_dot_v <= 0.0) {
+        // Back-facing, return just ambient
+        let sky = vec3<f32>(0.5, 0.7, 1.0) * 0.2;
+        return pow(sky * albedo, vec3<f32>(1.0 / 2.2));
+    }
 
-    let indirect_diffuse = calculate_indirect_diffuse(
-        world_pos,
-        normal,
-        material.albedo,
-        tex_coords
-    );
+    // Fresnel (Schlick)
+    let f0 = mix(vec3<f32>(0.04), albedo, metallic);
+    let fresnel = f0 + (1.0 - f0) * pow(1.0 - v_dot_h, 5.0);
 
-    // Ambient occlusion approximation
-    let ao = 0.9;
+    // Distribution (GGX)
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let denom = n_dot_h * n_dot_h * (a2 - 1.0) + 1.0;
+    let distribution = a2 / (PI * denom * denom);
 
-    // ===== Combine All Lighting =====
+    // Geometry (Smith-GGX approximation)
+    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    let g_v = n_dot_v / (n_dot_v * (1.0 - k) + k);
+    let g_l = n_dot_l / (n_dot_l * (1.0 - k) + k);
+    let geometry = g_v * g_l;
 
-    var final_color = direct_lighting + indirect_diffuse * ao;
+    // Specular BRDF
+    let specular = (distribution * geometry * fresnel) / max(4.0 * n_dot_v * n_dot_l, 0.001);
 
-    // Add emissive
-    final_color += material.emissive;
+    // Diffuse BRDF
+    let k_d = (1.0 - fresnel) * (1.0 - metallic);
+    let diffuse = k_d * albedo / PI;
 
-    // Tone mapping (ACES approximation)
-    final_color = (final_color * (2.51 * final_color + 0.03)) /
-                  (final_color * (2.43 * final_color + 0.59) + 0.14);
+    let direct_light = (diffuse + specular) * n_dot_l * light_color;
+
+    // === Soft Shadows ===
+    // Simple soft shadow based on world position
+    let shadow_center = vec2<f32>(0.0, 0.0);
+    let shadow_dist = length(world_pos.xz - shadow_center);
+    let shadow_radius = 3.0;
+    let shadow_soft = 1.5;
+    let shadow = smoothstep(shadow_radius - shadow_soft, shadow_radius + shadow_soft, shadow_dist);
+    let shadow_factor = mix(0.3, 1.0, shadow);
+
+    // === Indirect Lighting (GI) ===
+    let up_factor = dot(normal, vec3<f32>(0.0, 1.0, 0.0)) * 0.5 + 0.5;
+    let sky_color = vec3<f32>(0.5, 0.7, 1.0);
+    let ground_color = vec3<f32>(0.3, 0.25, 0.2);
+    let ambient = mix(ground_color, sky_color, up_factor) * albedo * 0.4;
+
+    // === Combine ===
+    var final_color = direct_light * shadow_factor + ambient;
+
+    // Tone mapping (Reinhard)
+    final_color = final_color / (final_color + vec3<f32>(1.0));
 
     // Gamma correction
     final_color = pow(final_color, vec3<f32>(1.0 / 2.2));
