@@ -2,7 +2,9 @@ use blade_graphics as gpu;
 use glam::{Mat4, Vec3};
 use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh};
 use helio_feature_base_geometry::BaseGeometry;
-use helio_feature_global_illumination::GlobalIllumination;
+use helio_feature_lighting::BasicLighting;
+use helio_feature_materials::BasicMaterials;
+use helio_feature_procedural_shadows::ProceduralShadows;
 use helio_features::FeatureRegistry;
 use helio_render::{CameraUniforms, FeatureRenderer, TransformUniforms};
 use std::{ptr, sync::Arc, time::Instant};
@@ -158,14 +160,9 @@ impl Example {
 
         let mut registry = FeatureRegistry::new();
         registry.register(base_geometry);
-
-        // Register Global Illumination (replaces lighting, materials, and shadows)
-        let gi = GlobalIllumination::new()
-            .with_shadow_map_size(2048)
-            .with_probe_grid((8, 4, 8), 4.0)
-            .with_gi_intensity(1.2);
-
-        registry.register(gi);
+        registry.register(BasicLighting::new());
+        registry.register(BasicMaterials::new());
+        registry.register(ProceduralShadows::new());
 
         let renderer = FeatureRenderer::new(
             context.clone(),
@@ -182,12 +179,6 @@ impl Example {
         });
 
         let now = Instant::now();
-
-        log::info!("Feature Complete example with Global Illumination!");
-        log::info!("Controls:");
-        log::info!("  [1] - Toggle base geometry");
-        log::info!("  [2] - Toggle global illumination (PBR + GI + Shadows)");
-        log::info!("  [ESC] - Exit");
 
         Self {
             context,
@@ -298,7 +289,7 @@ fn main() {
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
-        .with_title("Helio - Complete Pipeline with Global Illumination [1: Geometry | 2: GI (PBR+Shadows)]")
+        .with_title("Helio - Complete Pipeline (1: Geometry, 2: Lighting, 3: Materials, 4: Fake Shadows)")
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
     #[allow(deprecated)]
@@ -333,11 +324,29 @@ fn main() {
                             }
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
-                            if app.renderer.registry_mut().toggle_feature("global_illumination") {
-                                let enabled = app.renderer.registry().get_feature("global_illumination").unwrap().is_enabled();
+                            if app.renderer.registry_mut().toggle_feature("basic_lighting") {
+                                let enabled = app.renderer.registry().get_feature("basic_lighting").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
-                                println!("[2] Global Illumination (PBR + Shadows + GI): {}", status);
-                                log::info!("[2] Global Illumination: {}", status);
+                                println!("[2] Basic Lighting: {}", status);
+                                log::info!("[2] Basic Lighting: {}", status);
+                                app.renderer.rebuild_pipeline();
+                            }
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit3) => {
+                            if app.renderer.registry_mut().toggle_feature("basic_materials") {
+                                let enabled = app.renderer.registry().get_feature("basic_materials").unwrap().is_enabled();
+                                let status = if enabled { "ON" } else { "OFF" };
+                                println!("[3] Basic Materials: {}", status);
+                                log::info!("[3] Basic Materials: {}", status);
+                                app.renderer.rebuild_pipeline();
+                            }
+                        }
+                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit4) => {
+                            if app.renderer.registry_mut().toggle_feature("procedural_shadows") {
+                                let enabled = app.renderer.registry().get_feature("procedural_shadows").unwrap().is_enabled();
+                                let status = if enabled { "ON" } else { "OFF" };
+                                println!("[4] Procedural Shadows (Fake): {}", status);
+                                log::info!("[4] Procedural Shadows: {}", status);
                                 app.renderer.rebuild_pipeline();
                             }
                         }

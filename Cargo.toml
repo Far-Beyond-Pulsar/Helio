@@ -8,7 +8,6 @@ members = [
     "crates/helio-feature-lighting",
     "crates/helio-feature-materials",
     "crates/helio-feature-procedural-shadows",
-    "crates/helio-feature-global-illumination",
     "crates/examples",
 ]
 resolver = "2"

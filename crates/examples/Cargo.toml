@@ -19,10 +19,6 @@ path = "feature_with_lighting.rs"
 name = "feature_complete"
 path = "feature_complete.rs"
 
-[[bin]]
-name = "feature_global_illumination"
-path = "feature_global_illumination.rs"
-
 [dependencies]
 helio-core = { path = "../helio-core" }
 helio-render = { path = "../helio-render" }
@@ -31,7 +27,6 @@ helio-feature-base-geometry = { path = "../helio-feature-base-geometry" }
 helio-feature-lighting = { path = "../helio-feature-lighting" }
 helio-feature-materials = { path = "../helio-feature-materials" }
 helio-feature-procedural-shadows = { path = "../helio-feature-procedural-shadows" }
-helio-feature-global-illumination = { path = "../helio-feature-global-illumination" }
 blade-graphics = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
