@@ -560,6 +560,7 @@ dependencies = [
  "glam",
  "helio-core",
  "helio-feature-base-geometry",
+ "helio-feature-global-illumination",
  "helio-feature-lighting",
  "helio-feature-materials",
  "helio-feature-procedural-shadows",
@@ -744,6 +745,19 @@ dependencies = [
  "blade-graphics",
  "glam",
  "helio-features",
+]
+
+[[package]]
+name = "helio-feature-global-illumination"
+version = "0.1.0"
+dependencies = [
+ "blade-graphics",
+ "blade-macros",
+ "bytemuck",
+ "glam",
+ "helio-core",
+ "helio-features",
+ "log",
 ]
 
 [[package]]
