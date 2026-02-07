@@ -156,10 +156,11 @@ impl Example {
         let base_geometry = BaseGeometry::new();
         let base_shader = base_geometry.shader_template().to_string();
 
+        // Create feature registry with GI
         let mut registry = FeatureRegistry::new();
         registry.register(base_geometry);
 
-        // Register Global Illumination (replaces lighting, materials, and shadows)
+        // Add Global Illumination feature
         let gi = GlobalIllumination::new()
             .with_shadow_map_size(2048)
             .with_probe_grid((8, 4, 8), 4.0)
@@ -183,10 +184,10 @@ impl Example {
 
         let now = Instant::now();
 
-        log::info!("Feature Complete example with Global Illumination!");
+        log::info!("Global Illumination example initialized!");
         log::info!("Controls:");
         log::info!("  [1] - Toggle base geometry");
-        log::info!("  [2] - Toggle global illumination (PBR + GI + Shadows)");
+        log::info!("  [2] - Toggle global illumination");
         log::info!("  [ESC] - Exit");
 
         Self {
@@ -225,7 +226,11 @@ impl Example {
         let aspect_ratio = self.window_size.width as f32 / self.window_size.height as f32;
         let projection = Mat4::perspective_rh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
 
-        let camera_pos = Vec3::new(5.0 * elapsed_wrapped.sin(), 4.0, 5.0 * elapsed_wrapped.cos());
+        let camera_pos = Vec3::new(
+            5.0 * elapsed_wrapped.sin(),
+            4.0,
+            5.0 * elapsed_wrapped.cos(),
+        );
         let view = Mat4::look_at_rh(camera_pos, Vec3::new(0.0, 0.5, 0.0), Vec3::Y);
         let view_proj = projection * view;
 
@@ -237,8 +242,9 @@ impl Example {
 
         let mut meshes = Vec::new();
 
-        let cube_transform =
-            Mat4::from_rotation_y(elapsed_wrapped) * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
+        // Rotating cube
+        let cube_transform = Mat4::from_rotation_y(elapsed_wrapped)
+            * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
         meshes.push((
             TransformUniforms {
                 model: cube_transform.to_cols_array_2d(),
@@ -248,6 +254,7 @@ impl Example {
             self.cube_index_count,
         ));
 
+        // Static sphere
         let sphere_transform = Mat4::from_translation(Vec3::new(2.0, 1.0, 0.0));
         meshes.push((
             TransformUniforms {
@@ -258,6 +265,18 @@ impl Example {
             self.sphere_index_count,
         ));
 
+        // Additional objects for more interesting GI
+        let sphere2_transform = Mat4::from_translation(Vec3::new(0.0, 0.5, -2.0));
+        meshes.push((
+            TransformUniforms {
+                model: sphere2_transform.to_cols_array_2d(),
+            },
+            self.sphere_vertices.into(),
+            self.sphere_indices.into(),
+            self.sphere_index_count,
+        ));
+
+        // Ground plane
         let plane_transform = Mat4::from_translation(Vec3::ZERO);
         meshes.push((
             TransformUniforms {
@@ -298,7 +317,7 @@ fn main() {
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
-        .with_title("Helio - Complete Pipeline with Global Illumination [1: Geometry | 2: GI (PBR+Shadows)]")
+        .with_title("Helio - Global Illumination (Lumen-like) [1: Toggle Geometry | 2: Toggle GI]")
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
     #[allow(deprecated)]
@@ -325,7 +344,12 @@ fn main() {
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
                             if app.renderer.registry_mut().toggle_feature("base_geometry") {
-                                let enabled = app.renderer.registry().get_feature("base_geometry").unwrap().is_enabled();
+                                let enabled = app
+                                    .renderer
+                                    .registry()
+                                    .get_feature("base_geometry")
+                                    .unwrap()
+                                    .is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[1] Base Geometry: {}", status);
                                 log::info!("[1] Base Geometry: {}", status);
@@ -333,10 +357,19 @@ fn main() {
                             }
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
-                            if app.renderer.registry_mut().toggle_feature("global_illumination") {
-                                let enabled = app.renderer.registry().get_feature("global_illumination").unwrap().is_enabled();
+                            if app
+                                .renderer
+                                .registry_mut()
+                                .toggle_feature("global_illumination")
+                            {
+                                let enabled = app
+                                    .renderer
+                                    .registry()
+                                    .get_feature("global_illumination")
+                                    .unwrap()
+                                    .is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
-                                println!("[2] Global Illumination (PBR + Shadows + GI): {}", status);
+                                println!("[2] Global Illumination: {}", status);
                                 log::info!("[2] Global Illumination: {}", status);
                                 app.renderer.rebuild_pipeline();
                             }

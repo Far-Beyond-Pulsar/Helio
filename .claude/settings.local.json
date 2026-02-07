@@ -8,7 +8,8 @@
       "Bash(cargo build:*)",
       "Bash($env:RUST_LOG=\"debug\")",
       "Bash(Select-String -Pattern \"Composed shader\" -Context 0,100)",
-      "Bash(RUST_LOG=debug cargo run:*)"
+      "Bash(RUST_LOG=debug cargo run:*)",
+      "Bash(mkdir:*)"
     ]
   }
 }
