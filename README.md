@@ -2,6 +2,14 @@
 
 Helio is a modular, feature-based rendering engine built on top of blade-graphics. It allows you to compose rendering pipelines from individual feature crates, each providing their own shaders and GPU functionality.
 
+# ⭐ Support the Project
+
+If Pulsar Engine aligns with how you think game engines should be built, consider supporting the project on GitHub:
+- ⭐ Star the repo to help others discover Pulsar
+- 👀 Watch for updates to follow major architectural changes and milestones
+- 🍴 Fork if you want to experiment or contribute
+Stars and watches directly influence visibility and help justify continued deep-systems work on the engine.
+
 <img width="1922" height="1109" alt="image" src="https://github.com/user-attachments/assets/032640eb-0c1a-4ed2-b00c-2e204c4c614c" />
 
 ## Key Features
