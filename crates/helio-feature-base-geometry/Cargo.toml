@@ -7,3 +7,4 @@ edition = "2021"
 helio-features = { path = "../helio-features" }
 blade-graphics = { workspace = true }
 glam = { workspace = true }
+log = "0.4"

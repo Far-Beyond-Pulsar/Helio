@@ -9,3 +9,4 @@ blade-graphics = { workspace = true }
 blade-macros = { workspace = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
+log = "0.4"

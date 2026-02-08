@@ -311,7 +311,7 @@ fn main() {
                             elwt.exit();
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
-                            if app.renderer.registry_mut().toggle_feature("base_geometry") {
+                            if let Ok(_) = app.renderer.registry_mut().toggle_feature("base_geometry") {
                                 let enabled = app.renderer.registry().get_feature("base_geometry").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[1] Base Geometry: {}", status);
@@ -320,7 +320,7 @@ fn main() {
                             }
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
-                            if app.renderer.registry_mut().toggle_feature("basic_lighting") {
+                            if let Ok(_) = app.renderer.registry_mut().toggle_feature("basic_lighting") {
                                 let enabled = app.renderer.registry().get_feature("basic_lighting").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[2] Basic Lighting: {}", status);

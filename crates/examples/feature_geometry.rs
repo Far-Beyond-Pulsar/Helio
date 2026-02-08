@@ -309,7 +309,7 @@ fn main() {
                             elwt.exit();
                         }
                         winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
-                            if app.renderer.registry_mut().toggle_feature("base_geometry") {
+                            if let Ok(_) = app.renderer.registry_mut().toggle_feature("base_geometry") {
                                 let enabled = app.renderer.registry().get_feature("base_geometry").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
                                 println!("[1] Base Geometry: {}", status);

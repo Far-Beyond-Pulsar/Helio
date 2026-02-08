@@ -1,22 +1,30 @@
 use helio_features::{Feature, FeatureContext, ShaderInjection};
 
+/// Base geometry feature providing fundamental geometry rendering.
+///
+/// This feature provides the base shader template that other features
+/// inject into. It handles vertex transformation, normal calculation,
+/// and basic output setup.
 pub struct BaseGeometry {
     enabled: bool,
-    shader_template: String,
+    shader_template: &'static str,
 }
 
 impl BaseGeometry {
+    /// Create a new base geometry feature.
     pub fn new() -> Self {
-        let shader_template = include_str!("../shaders/base_geometry.wgsl").to_string();
-
         Self {
             enabled: true,
-            shader_template,
+            shader_template: include_str!("../shaders/base_geometry.wgsl"),
         }
     }
 
+    /// Get the shader template for use with the feature renderer.
+    ///
+    /// This template contains injection markers where other features
+    /// can insert their shader code.
     pub fn shader_template(&self) -> &str {
-        &self.shader_template
+        self.shader_template
     }
 }
 
@@ -32,7 +40,7 @@ impl Feature for BaseGeometry {
     }
 
     fn init(&mut self, _context: &FeatureContext) {
-        // Base geometry doesn't need initialization
+        log::debug!("Base geometry feature initialized");
     }
 
     fn is_enabled(&self) -> bool {
@@ -45,7 +53,10 @@ impl Feature for BaseGeometry {
 
     fn shader_injections(&self) -> Vec<ShaderInjection> {
         // Base geometry provides the template, not injections
-        // Other features will inject into this template
         Vec::new()
+    }
+    
+    fn cleanup(&mut self, _context: &FeatureContext) {
+        // No GPU resources to clean up
     }
 }

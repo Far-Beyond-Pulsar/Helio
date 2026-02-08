@@ -1,17 +1,18 @@
 use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
 
+/// Basic lighting feature with diffuse and ambient lighting.
+///
+/// Provides simple directional lighting calculations in the fragment shader.
+/// The light direction is hardcoded for simplicity.
 pub struct BasicLighting {
     enabled: bool,
-    lighting_functions: String,
 }
 
 impl BasicLighting {
+    /// Create a new basic lighting feature.
     pub fn new() -> Self {
-        let lighting_functions = include_str!("../shaders/lighting_functions.wgsl").to_string();
-
         Self {
             enabled: true,
-            lighting_functions,
         }
     }
 }
@@ -28,7 +29,7 @@ impl Feature for BasicLighting {
     }
 
     fn init(&mut self, _context: &FeatureContext) {
-        // Basic lighting doesn't need GPU resources
+        log::debug!("Basic lighting feature initialized");
     }
 
     fn is_enabled(&self) -> bool {
@@ -41,18 +42,20 @@ impl Feature for BasicLighting {
 
     fn shader_injections(&self) -> Vec<ShaderInjection> {
         vec![
-            // Inject lighting functions before fragment shader
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentPreamble,
-                code: self.lighting_functions.clone(),
-                priority: 0,
-            },
-            // Inject lighting calculation in fragment shader
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentColorCalculation,
-                code: "    final_color = apply_basic_lighting(normalize(input.world_normal), final_color);".to_string(),
-                priority: 0,
-            },
+            // Inject lighting functions
+            ShaderInjection::new(
+                ShaderInjectionPoint::FragmentPreamble,
+                include_str!("../shaders/lighting_functions.wgsl"),
+            ),
+            // Apply lighting in color calculation
+            ShaderInjection::new(
+                ShaderInjectionPoint::FragmentColorCalculation,
+                "    final_color = apply_basic_lighting(normalize(input.world_normal), final_color);",
+            ),
         ]
+    }
+    
+    fn cleanup(&mut self, _context: &FeatureContext) {
+        // No GPU resources to clean up
     }
 }

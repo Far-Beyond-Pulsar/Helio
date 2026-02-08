@@ -24,6 +24,15 @@ struct ObjectData {
     object_uniforms: ObjectUniforms,
 }
 
+/// Procedural shadow mapping feature.
+///
+/// Renders scene geometry into a shadow map from the light's perspective,
+/// then samples it during main rendering to produce shadows.
+///
+/// # Performance
+/// Shadow map size significantly impacts performance. Use 1024 or 2048
+/// for most applications. Higher resolutions provide sharper shadows at
+/// the cost of memory and rendering time.
 pub struct ProceduralShadows {
     enabled: bool,
     shadow_map: Option<gpu::Texture>,
@@ -35,6 +44,7 @@ pub struct ProceduralShadows {
 }
 
 impl ProceduralShadows {
+    /// Create a new procedural shadows feature with default 2048x2048 shadow map.
     pub fn new() -> Self {
         Self {
             enabled: true,
@@ -47,13 +57,19 @@ impl ProceduralShadows {
         }
     }
 
+    /// Set the shadow map resolution (must be called before init).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let shadows = ProceduralShadows::new().with_size(1024);
+    /// ```
     pub fn with_size(mut self, size: u32) -> Self {
         self.shadow_map_size = size;
         self
     }
 
+    /// Get the light's view-projection matrix for shadow rendering.
     pub fn get_light_view_proj(&self) -> glam::Mat4 {
-        // Orthographic projection for directional light
         let light_pos = -self.light_direction * 20.0;
         let view = glam::Mat4::look_at_rh(
             light_pos,
@@ -61,7 +77,6 @@ impl ProceduralShadows {
             glam::Vec3::Y,
         );
 
-        // Orthographic bounds to cover the scene (tighter for better shadow resolution)
         let projection = glam::Mat4::orthographic_rh(
             -8.0, 8.0,  // left, right
             -8.0, 8.0,  // bottom, top
@@ -84,6 +99,12 @@ impl Feature for ProceduralShadows {
     }
 
     fn init(&mut self, context: &FeatureContext) {
+        log::info!(
+            "Initializing procedural shadows with {}x{} shadow map",
+            self.shadow_map_size,
+            self.shadow_map_size
+        );
+        
         self.context = Some(context.gpu.clone());
 
         // Create shadow map texture
@@ -116,7 +137,7 @@ impl Feature for ProceduralShadows {
         self.shadow_map = Some(shadow_map);
         self.shadow_map_view = Some(shadow_map_view);
 
-        // Create shadow pipeline
+        // Create shadow rendering pipeline (depth-only pass)
         let shadow_shader_source = include_str!("../shaders/shadow_pass.wgsl");
         let shadow_shader = context.gpu.create_shader(gpu::ShaderDesc {
             source: shadow_shader_source,
@@ -152,9 +173,6 @@ impl Feature for ProceduralShadows {
         });
 
         self.shadow_pipeline = Some(shadow_pipeline);
-
-        log::info!("Procedural shadows initialized with {}x{} shadow map",
-                   self.shadow_map_size, self.shadow_map_size);
     }
 
     fn is_enabled(&self) -> bool {
@@ -166,19 +184,19 @@ impl Feature for ProceduralShadows {
     }
 
     fn shader_injections(&self) -> Vec<ShaderInjection> {
-        let shadow_functions = include_str!("../shaders/shadow_functions.wgsl").to_string();
-
         vec![
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentPreamble,
-                code: shadow_functions,
-                priority: 5,
-            },
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentColorCalculation,
-                code: "    final_color = apply_shadow(final_color, input.world_position, input.world_normal);".to_string(),
-                priority: 10,
-            },
+            // Shadow sampling functions
+            ShaderInjection::with_priority(
+                ShaderInjectionPoint::FragmentPreamble,
+                include_str!("../shaders/shadow_functions.wgsl"),
+                5,
+            ),
+            // Apply shadows after lighting (higher priority runs later)
+            ShaderInjection::with_priority(
+                ShaderInjectionPoint::FragmentColorCalculation,
+                "    final_color = apply_shadow(final_color, input.world_position, input.world_normal);",
+                10,
+            ),
         ]
     }
 
@@ -191,12 +209,18 @@ impl Feature for ProceduralShadows {
     ) {
         let shadow_pipeline = match &self.shadow_pipeline {
             Some(pipeline) => pipeline,
-            None => return,
+            None => {
+                log::warn!("Shadow pipeline not initialized");
+                return;
+            }
         };
 
         let shadow_view = match self.shadow_map_view {
             Some(view) => view,
-            None => return,
+            None => {
+                log::warn!("Shadow map view not initialized");
+                return;
+            }
         };
 
         let mut pass = encoder.render(
@@ -228,5 +252,20 @@ impl Feature for ProceduralShadows {
             rc.bind_vertex(0, mesh.vertex_buffer);
             rc.draw_indexed(mesh.index_buffer, gpu::IndexType::U32, mesh.index_count, 0, 0, 1);
         }
+    }
+    
+    fn cleanup(&mut self, context: &FeatureContext) {
+        log::debug!("Cleaning up procedural shadows");
+        
+        if let Some(view) = self.shadow_map_view.take() {
+            context.gpu.destroy_texture_view(view);
+        }
+        
+        if let Some(texture) = self.shadow_map.take() {
+            context.gpu.destroy_texture(texture);
+        }
+        
+        // Pipelines are automatically cleaned up by blade
+        self.shadow_pipeline = None;
     }
 }

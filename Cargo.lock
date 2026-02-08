@@ -744,6 +744,7 @@ dependencies = [
  "blade-graphics",
  "glam",
  "helio-features",
+ "log",
 ]
 
 [[package]]
@@ -753,6 +754,7 @@ dependencies = [
  "blade-graphics",
  "glam",
  "helio-features",
+ "log",
 ]
 
 [[package]]
@@ -764,6 +766,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "helio-features",
+ "log",
 ]
 
 [[package]]

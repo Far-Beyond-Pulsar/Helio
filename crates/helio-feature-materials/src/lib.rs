@@ -1,5 +1,6 @@
 use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
 
+/// Material data structure for PBR-like materials.
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct MaterialData {
@@ -20,21 +21,20 @@ impl Default for MaterialData {
     }
 }
 
+/// Basic materials feature with procedural texture generation.
+///
+/// Provides checkerboard pattern materials for visual interest.
+/// In a real application, this would handle texture sampling and
+/// material property management.
 pub struct BasicMaterials {
     enabled: bool,
-    material_bindings: String,
-    material_functions: String,
 }
 
 impl BasicMaterials {
+    /// Create a new basic materials feature.
     pub fn new() -> Self {
-        let material_bindings = include_str!("../shaders/material_bindings.wgsl").to_string();
-        let material_functions = include_str!("../shaders/material_functions.wgsl").to_string();
-
         Self {
             enabled: true,
-            material_bindings,
-            material_functions,
         }
     }
 }
@@ -51,7 +51,7 @@ impl Feature for BasicMaterials {
     }
 
     fn init(&mut self, _context: &FeatureContext) {
-        // Materials will be bound per-object by the application
+        log::debug!("Basic materials feature initialized");
     }
 
     fn is_enabled(&self) -> bool {
@@ -64,24 +64,28 @@ impl Feature for BasicMaterials {
 
     fn shader_injections(&self) -> Vec<ShaderInjection> {
         vec![
-            // Inject material bindings
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentPreamble,
-                code: self.material_bindings.clone(),
-                priority: -10, // Lower priority so it goes before other fragment code
-            },
-            // Inject material functions
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentPreamble,
-                code: self.material_functions.clone(),
-                priority: -5,
-            },
-            // Apply material color with texture coordinates
-            ShaderInjection {
-                point: ShaderInjectionPoint::FragmentMain,
-                code: "    final_color = apply_material_color(final_color, input.tex_coords);".to_string(),
-                priority: -10,
-            },
+            // Material bindings (low priority - injected early)
+            ShaderInjection::with_priority(
+                ShaderInjectionPoint::FragmentPreamble,
+                include_str!("../shaders/material_bindings.wgsl"),
+                -10,
+            ),
+            // Material functions
+            ShaderInjection::with_priority(
+                ShaderInjectionPoint::FragmentPreamble,
+                include_str!("../shaders/material_functions.wgsl"),
+                -5,
+            ),
+            // Apply material early in fragment processing
+            ShaderInjection::with_priority(
+                ShaderInjectionPoint::FragmentMain,
+                "    final_color = apply_material_color(final_color, input.tex_coords);",
+                -10,
+            ),
         ]
+    }
+    
+    fn cleanup(&mut self, _context: &FeatureContext) {
+        // No GPU resources to clean up
     }
 }
