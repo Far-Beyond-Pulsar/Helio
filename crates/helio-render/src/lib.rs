@@ -2,6 +2,7 @@ use blade_graphics as gpu;
 use bytemuck::{Pod, Zeroable};
 use helio_features::FeatureRegistry;
 use std::sync::Arc;
+use std::time::Instant;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -44,6 +45,7 @@ pub struct FeatureRenderer {
     base_shader: String,
     surface_format: gpu::TextureFormat,
     shadow_pipeline: Option<gpu::RenderPipeline>,
+    fps_last_time: Instant,
 }
 
 impl Renderer {
@@ -281,6 +283,7 @@ impl FeatureRenderer {
             base_shader: base_shader.to_string(),
             surface_format,
             shadow_pipeline: None,
+            fps_last_time: Instant::now(),
         }
     }
 
@@ -402,6 +405,14 @@ impl FeatureRenderer {
 
         self.registry.execute_post_passes(command_encoder, &context);
         self.frame_index += 1;
+        
+        if self.frame_index % 1000 == 0 {
+            let now = Instant::now();
+            let elapsed = now.duration_since(self.fps_last_time);
+            let fps = 1000.0 / elapsed.as_secs_f64();
+            println!("FPS: {:.2}", fps);
+            self.fps_last_time = now;
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
