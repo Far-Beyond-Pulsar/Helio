@@ -10,7 +10,9 @@ If Pulsar Engine aligns with how you think game engines should be built, conside
 - 🍴 Fork if you want to experiment or contribute
 Stars and watches directly influence visibility and help justify continued deep-systems work on the engine.
 
-<img width="1922" height="1109" alt="image" src="https://github.com/user-attachments/assets/032640eb-0c1a-4ed2-b00c-2e204c4c614c" />
+<img width="3439" height="1439" alt="image" src="https://github.com/user-attachments/assets/96a2ccd1-a77e-4200-9776-da08a944cd81" />
+<img width="3439" height="1435" alt="Screenshot 2026-02-09 142658" src="https://github.com/user-attachments/assets/9b2ebe05-eb97-4571-bb56-59ccddd11de1" />
+
 
 ## Key Features
 
