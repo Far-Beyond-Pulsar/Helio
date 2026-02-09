@@ -1,17 +1,15 @@
-// Shadow mapping functions
+// High-quality realtime shadow mapping with PCF
 
-// Shadow uniforms (will be bound by the feature)
+// Shadow map texture and comparison sampler (bound automatically by ShaderData)
+var shadow_map: texture_depth_2d;
+var shadow_sampler: sampler_comparison;
+
+// Shadow uniforms
 struct ShadowData {
     light_view_proj: mat4x4<f32>,
     light_direction: vec3<f32>,
     shadow_bias: f32,
 }
-
-// TODO: Shadow map texture binding
-// @group(2) @binding(0)
-// var shadow_map: texture_depth_2d;
-// @group(2) @binding(1)
-// var shadow_sampler: sampler_comparison;
 
 // Hardcoded shadow data matching the renderer's light setup
 fn get_shadow_data() -> ShadowData {
@@ -23,7 +21,7 @@ fn get_shadow_data() -> ShadowData {
     // Create light view matrix
     let view = look_at_rh(light_pos, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0));
 
-    // Orthographic projection for directional light (tighter bounds)
+    // Orthographic projection for directional light
     let projection = orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0);
 
     data.light_view_proj = projection * view;
@@ -61,24 +59,65 @@ fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, far:
     );
 }
 
-// Sample shadow visibility (1.0 = fully lit, 0.0 = fully shadowed)
-fn sample_shadow_visibility(shadow_coord: vec3<f32>) -> f32 {
-    // TODO: Actual shadow map texture sampling
-    // The geometry is being rendered to the shadow map texture,
-    // but we need to bind and sample it here. This requires:
-    // 1. Binding shadow_map texture in the main pipeline
-    // 2. Using textureSampleCompare() to sample depth
-    //
-    // Proper implementation would be:
-    // let depth = textureSampleCompare(shadow_map, shadow_sampler, shadow_coord.xy, shadow_coord.z);
-    // return depth;
+// High-quality PCF shadow sampling with 5x5 kernel
+// This provides smooth, realistic shadow edges
+fn sample_shadow_pcf(shadow_coord: vec3<f32>, texel_size: vec2<f32>) -> f32 {
+    var shadow = 0.0;
+    let samples = 5;
+    let half_samples = f32(samples) / 2.0;
 
-    // Temporary: Show a procedural pattern until texture binding is implemented
-    let center = vec2<f32>(0.5, 0.5);
-    let dist = length(shadow_coord.xy - center);
-    let shadow_radius = 0.15;
-    let shadow_softness = 0.1;
-    return smoothstep(shadow_radius - shadow_softness, shadow_radius + shadow_softness, dist);
+    // 5x5 PCF kernel for smooth shadows
+    for (var y = -2; y <= 2; y++) {
+        for (var x = -2; x <= 2; x++) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
+            let sample_coord = shadow_coord.xy + offset;
+
+            // Use hardware comparison sampling for efficiency
+            shadow += textureSampleCompareLevel(
+                shadow_map,
+                shadow_sampler,
+                sample_coord,
+                shadow_coord.z
+            );
+        }
+    }
+
+    // Average the samples (25 samples for 5x5 kernel)
+    return shadow / 25.0;
+}
+
+// Optimized PCF shadow sampling with 3x3 kernel
+// Good balance between quality and performance
+fn sample_shadow_pcf_3x3(shadow_coord: vec3<f32>, texel_size: vec2<f32>) -> f32 {
+    var shadow = 0.0;
+
+    // 3x3 PCF kernel
+    for (var y = -1; y <= 1; y++) {
+        for (var x = -1; x <= 1; x++) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
+            let sample_coord = shadow_coord.xy + offset;
+
+            shadow += textureSampleCompareLevel(
+                shadow_map,
+                shadow_sampler,
+                sample_coord,
+                shadow_coord.z
+            );
+        }
+    }
+
+    return shadow / 9.0;
+}
+
+// Sample shadow visibility using PCF (1.0 = fully lit, 0.0 = fully shadowed)
+fn sample_shadow_visibility(shadow_coord: vec3<f32>) -> f32 {
+    // Get shadow map dimensions for texel size calculation
+    let shadow_map_size = vec2<f32>(textureDimensions(shadow_map));
+    let texel_size = 1.0 / shadow_map_size;
+
+    // Use 3x3 PCF for good quality and performance
+    // For even higher quality, use sample_shadow_pcf() instead
+    return sample_shadow_pcf_3x3(shadow_coord, texel_size);
 }
 
 // Transform world position to shadow map space
@@ -86,35 +125,39 @@ fn world_to_shadow_coord(world_pos: vec3<f32>, light_view_proj: mat4x4<f32>) -> 
     let light_space = light_view_proj * vec4<f32>(world_pos, 1.0);
     var shadow_coord = light_space.xyz / light_space.w;
 
-    // Transform to [0, 1] range
+    // Transform to [0, 1] range for texture coordinates
     shadow_coord.x = shadow_coord.x * 0.5 + 0.5;
     shadow_coord.y = shadow_coord.y * -0.5 + 0.5;  // Flip Y for texture coords
 
     return shadow_coord;
 }
 
-// Apply shadow to color
+// Apply shadow to color with proper bias to prevent shadow acne
 fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
     let shadow_data = get_shadow_data();
 
     // Transform to shadow space
-    let shadow_coord = world_to_shadow_coord(world_pos, shadow_data.light_view_proj);
+    var shadow_coord = world_to_shadow_coord(world_pos, shadow_data.light_view_proj);
 
-    // Check if in shadow map bounds
+    // Check if position is within shadow map bounds
     if (shadow_coord.x < 0.0 || shadow_coord.x > 1.0 ||
         shadow_coord.y < 0.0 || shadow_coord.y > 1.0 ||
         shadow_coord.z < 0.0 || shadow_coord.z > 1.0) {
         return base_color;  // Outside shadow map, fully lit
     }
 
-    // Bias based on surface angle to light
-    let ndotl = dot(world_normal, -shadow_data.light_direction);
+    // Apply slope-scaled depth bias to prevent shadow acne
+    // This adjusts bias based on surface angle relative to light
+    let ndotl = max(dot(normalize(world_normal), -shadow_data.light_direction), 0.0);
     let bias = max(shadow_data.shadow_bias * (1.0 - ndotl), shadow_data.shadow_bias * 0.1);
 
-    // Sample shadow visibility
-    let visibility = sample_shadow_visibility(shadow_coord - vec3<f32>(0.0, 0.0, bias));
+    // Apply bias to depth coordinate
+    shadow_coord.z -= bias;
 
-    // Apply shadow (0.2 = minimum brightness in shadow)
-    let shadow_factor = mix(0.2, 1.0, visibility);
+    // Sample shadow with PCF for smooth edges
+    let visibility = sample_shadow_visibility(shadow_coord);
+
+    // Apply shadow with minimum ambient lighting (0.15 = 15% ambient in shadow)
+    let shadow_factor = mix(0.15, 1.0, visibility);
     return base_color * shadow_factor;
 }

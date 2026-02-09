@@ -264,7 +264,33 @@ impl FeatureRenderer {
 
         let scene_layout = <SceneData as gpu::ShaderData>::layout();
         let object_layout = <ObjectData as gpu::ShaderData>::layout();
-        let data_layouts = vec![&scene_layout, &object_layout];
+
+        // Check if any feature provides a shadow map and add its layout
+        #[cfg(feature = "shadows")]
+        let shadow_layout_storage;
+        let mut data_layouts = vec![&scene_layout, &object_layout];
+
+        // Check if the procedural shadows feature is enabled
+        #[cfg(feature = "shadows")]
+        {
+            let has_shadows = registry.features().iter().any(|f| {
+                f.is_enabled() && f.name() == "procedural_shadows"
+            });
+
+            log::info!("Checking for shadow feature: has_shadows={}", has_shadows);
+
+            if has_shadows {
+                use helio_feature_procedural_shadows::ShadowMapData;
+                shadow_layout_storage = <ShadowMapData as gpu::ShaderData>::layout();
+                data_layouts.push(&shadow_layout_storage);
+                log::info!("Added shadow map layout to pipeline. Total layouts: {}", data_layouts.len());
+            } else {
+                log::warn!("Shadows feature is compiled but no shadow feature is enabled");
+            }
+        }
+
+        log::info!("Creating pipeline with {} data layouts", data_layouts.len());
+        let data_layouts = &data_layouts[..];
 
         let depth_texture = context.create_texture(gpu::TextureDesc {
             name: "depth",
@@ -352,7 +378,28 @@ impl FeatureRenderer {
 
         let scene_layout = <SceneData as gpu::ShaderData>::layout();
         let object_layout = <ObjectData as gpu::ShaderData>::layout();
-        let data_layouts = vec![&scene_layout, &object_layout];
+
+        // Check if any feature provides a shadow map and add its layout
+        #[cfg(feature = "shadows")]
+        let shadow_layout_storage;
+        let mut data_layouts = vec![&scene_layout, &object_layout];
+
+        // Check if the procedural shadows feature is enabled
+        #[cfg(feature = "shadows")]
+        {
+            let has_shadows = self.registry.features().iter().any(|f| {
+                f.is_enabled() && f.name() == "procedural_shadows"
+            });
+
+            if has_shadows {
+                use helio_feature_procedural_shadows::ShadowMapData;
+                shadow_layout_storage = <ShadowMapData as gpu::ShaderData>::layout();
+                data_layouts.push(&shadow_layout_storage);
+                log::info!("Added shadow map layout to rebuilt pipeline");
+            }
+        }
+
+        let data_layouts = &data_layouts[..];
 
         self.pipeline = self.context.create_render_pipeline(gpu::RenderPipelineDesc {
             name: "feature_main",
@@ -474,10 +521,33 @@ impl FeatureRenderer {
                     }),
                 },
             );
-            
+
             let scene_data = SceneData { camera };
             let mut rc = pass.with(&self.pipeline);
             rc.bind(0, &scene_data);
+
+            // Bind shadow map if available
+            #[cfg(feature = "shadows")]
+            {
+                use helio_feature_procedural_shadows::ProceduralShadows;
+                // Find the shadow feature and bind its data
+                for feature in self.registry.features() {
+                    if feature.is_enabled() {
+                        // Try to downcast to ProceduralShadows
+                        if let Some(_) = feature.get_shadow_map_view() {
+                            // Get the feature as ProceduralShadows to access get_shadow_map_data
+                            let feature_ptr = feature.as_ref() as *const dyn helio_features::Feature;
+                            let shadows_ptr = feature_ptr as *const ProceduralShadows;
+                            let shadows = unsafe { &*shadows_ptr };
+
+                            if let Some(shadow_data) = shadows.get_shadow_map_data() {
+                                rc.bind(2, &shadow_data);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
 
             for (transform, vertex_buf, index_buf, index_count) in meshes {
                 let object_data = ObjectData { transform: *transform };

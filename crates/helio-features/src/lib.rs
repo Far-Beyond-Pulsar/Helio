@@ -336,6 +336,17 @@ pub trait Feature: Send + Sync {
     ) {
         let _ = (encoder, context, meshes, light_view_proj);
     }
+
+    /// Get the shadow map texture view for binding in shaders.
+    ///
+    /// Features that implement shadow mapping should return their shadow map texture view.
+    /// The renderer will bind this at group 2 for use in the main render pass.
+    ///
+    /// # Returns
+    /// `Some(texture_view)` if this feature provides a shadow map, `None` otherwise.
+    fn get_shadow_map_view(&self) -> Option<gpu::TextureView> {
+        None
+    }
 }
 
 /// Mesh data passed to shadow rendering.

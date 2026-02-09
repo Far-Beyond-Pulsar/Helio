@@ -832,6 +832,7 @@ dependencies = [
  "bytemuck",
  "glam",
  "helio-core",
+ "helio-feature-procedural-shadows",
  "helio-features",
  "log",
 ]

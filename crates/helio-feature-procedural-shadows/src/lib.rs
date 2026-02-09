@@ -24,6 +24,13 @@ struct ObjectData {
     object_uniforms: ObjectUniforms,
 }
 
+/// Shadow map texture and sampler for binding in shaders
+#[derive(blade_macros::ShaderData)]
+pub struct ShadowMapData {
+    pub shadow_map: gpu::TextureView,
+    pub shadow_sampler: gpu::Sampler,
+}
+
 /// Procedural shadow mapping feature.
 ///
 /// Renders scene geometry into a shadow map from the light's perspective,
@@ -37,6 +44,7 @@ pub struct ProceduralShadows {
     enabled: bool,
     shadow_map: Option<gpu::Texture>,
     shadow_map_view: Option<gpu::TextureView>,
+    shadow_sampler: Option<gpu::Sampler>,
     shadow_map_size: u32,
     light_direction: glam::Vec3,
     context: Option<Arc<gpu::Context>>,
@@ -50,6 +58,7 @@ impl ProceduralShadows {
             enabled: true,
             shadow_map: None,
             shadow_map_view: None,
+            shadow_sampler: None,
             shadow_map_size: 2048,
             light_direction: glam::Vec3::new(0.5, -1.0, 0.3).normalize(),
             context: None,
@@ -84,6 +93,20 @@ impl ProceduralShadows {
         );
 
         projection * view
+    }
+
+    /// Get the shadow map data for binding in the main render pass.
+    ///
+    /// Returns shader data containing the shadow map texture view and comparison sampler.
+    /// This should be bound at group 2 during the main render pass.
+    pub fn get_shadow_map_data(&self) -> Option<ShadowMapData> {
+        match (self.shadow_map_view, self.shadow_sampler) {
+            (Some(view), Some(sampler)) => Some(ShadowMapData {
+                shadow_map: view,
+                shadow_sampler: sampler,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -136,6 +159,22 @@ impl Feature for ProceduralShadows {
 
         self.shadow_map = Some(shadow_map);
         self.shadow_map_view = Some(shadow_map_view);
+
+        // Create comparison sampler for shadow map sampling
+        let shadow_sampler = context.gpu.create_sampler(gpu::SamplerDesc {
+            name: "shadow_sampler",
+            address_modes: [gpu::AddressMode::ClampToEdge; 3],
+            mag_filter: gpu::FilterMode::Linear,
+            min_filter: gpu::FilterMode::Linear,
+            mipmap_filter: gpu::FilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: Some(100.0),
+            compare: Some(gpu::CompareFunction::LessEqual),
+            border_color: None,
+            anisotropy_clamp: 1,
+        });
+
+        self.shadow_sampler = Some(shadow_sampler);
 
         // Create shadow rendering pipeline (depth-only pass)
         let shadow_shader_source = include_str!("../shaders/shadow_pass.wgsl");
@@ -256,16 +295,24 @@ impl Feature for ProceduralShadows {
     
     fn cleanup(&mut self, context: &FeatureContext) {
         log::debug!("Cleaning up procedural shadows");
-        
+
+        if let Some(sampler) = self.shadow_sampler.take() {
+            context.gpu.destroy_sampler(sampler);
+        }
+
         if let Some(view) = self.shadow_map_view.take() {
             context.gpu.destroy_texture_view(view);
         }
-        
+
         if let Some(texture) = self.shadow_map.take() {
             context.gpu.destroy_texture(texture);
         }
-        
+
         // Pipelines are automatically cleaned up by blade
         self.shadow_pipeline = None;
+    }
+
+    fn get_shadow_map_view(&self) -> Option<gpu::TextureView> {
+        self.shadow_map_view
     }
 }
