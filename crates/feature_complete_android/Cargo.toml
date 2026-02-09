@@ -20,4 +20,4 @@ glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
-android-activity = { version = "0.5.3", features = ["native-activity"] }
+android-activity = { version = "0.6", features = ["native-activity"] }

@@ -1,12 +1,12 @@
-use helio_core::*;
 use helio_render::*;
 use helio_features::*;
 use helio_feature_base_geometry::*;
 use helio_feature_lighting::*;
 use helio_feature_materials::*;
 use helio_feature_procedural_shadows::*;
-use winit::event_loop::EventLoop;
+use winit::event_loop::{EventLoop, EventLoopBuilder};
 use winit::platform::android::activity::AndroidApp;
+use winit::platform::android::EventLoopBuilderExtAndroid;
 use blade_graphics as gpu;
 use glam::{Mat4, Vec3};
 use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh};
@@ -267,32 +267,49 @@ fn android_main(app: AndroidApp) {
 #[no_mangle]
 pub fn run(app: AndroidApp) {
     env_logger::init();
-    let event_loop = EventLoop::new().unwrap();
-    let window = Arc::new(
-        winit::window::WindowBuilder::new()
-            .with_title("Helio - Complete Pipeline (Android)")
-            .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080))
-            .build(&event_loop)
-            .unwrap()
-    );
-    let mut example = Example::new(&window);
-    let _ = event_loop.run(move |event, _target| {
+    let event_loop = EventLoopBuilder::new()
+        .with_android_app(app)
+        .build()
+        .unwrap();
+    
+    let mut example: Option<Example> = None;
+    let mut window: Option<Arc<winit::window::Window>> = None;
+    
+    let _ = event_loop.run(move |event, event_loop| {
         match event {
-            winit::event::Event::WindowEvent { event, .. } => match event {
+            winit::event::Event::WindowEvent { event, window_id } => match event {
                 winit::event::WindowEvent::CloseRequested => {
                     // On Android, we can't really exit the event loop
                     // Just let the system handle it
                 }
                 winit::event::WindowEvent::Resized(new_size) => {
-                    example.resize(new_size);
+                    if let Some(ref mut ex) = example {
+                        ex.resize(new_size);
+                    }
                 }
                 winit::event::WindowEvent::RedrawRequested => {
-                    example.render();
+                    if let Some(ref mut ex) = example {
+                        ex.render();
+                    }
+                    if let Some(ref w) = window {
+                        w.request_redraw();
+                    }
                 }
                 _ => {}
             },
             winit::event::Event::Resumed => {
-                window.request_redraw();
+                // Create window on Android when app is resumed
+                if window.is_none() {
+                    let win = Arc::new(event_loop.create_window(
+                        winit::window::WindowAttributes::default()
+                            .with_title("Helio - Complete Pipeline (Android)")
+                    ).unwrap());
+                    example = Some(Example::new(&win));
+                    window = Some(win);
+                }
+                if let Some(ref w) = window {
+                    w.request_redraw();
+                }
             }
             _ => {}
         }

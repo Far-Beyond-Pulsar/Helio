@@ -18,9 +18,6 @@ blade-graphics = { git = "https://github.com/kvark/blade" }
 blade-macros = { git = "https://github.com/kvark/blade" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
-winit = "0.29"
+winit = "0.30.12"
 env_logger = "0.11"
 log = "0.4"
-
-[patch.crates-io]
-android-activity = { git = "https://github.com/rust-mobile/android-activity", rev = "e686e801" }
