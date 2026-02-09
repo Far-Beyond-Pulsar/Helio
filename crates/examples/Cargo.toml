@@ -19,6 +19,10 @@ path = "feature_with_lighting.rs"
 name = "feature_complete"
 path = "feature_complete.rs"
 
+[[bin]]
+name = "lighting_showcase"
+path = "lighting_showcase.rs"
+
 [dependencies]
 helio-core = { path = "../helio-core" }
 helio-render = { path = "../helio-render" }

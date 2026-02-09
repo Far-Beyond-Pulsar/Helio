@@ -2,6 +2,41 @@ use blade_graphics as gpu;
 use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
 use std::sync::Arc;
 
+/// Light type for shadow mapping
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LightType {
+    /// Directional light (sun) - parallel rays, orthographic projection
+    Directional,
+    /// Point light - omnidirectional, perspective projection (6 faces for cubemap)
+    Point,
+    /// Spot light - cone of light, perspective projection
+    Spot { inner_angle: f32, outer_angle: f32 },
+    /// Rectangular area light - soft shadows, orthographic projection
+    Rect { width: f32, height: f32 },
+}
+
+/// Configuration for a light source
+#[derive(Debug, Clone, Copy)]
+pub struct LightConfig {
+    pub light_type: LightType,
+    pub position: glam::Vec3,
+    pub direction: glam::Vec3,
+    pub intensity: f32,
+    pub color: glam::Vec3,
+}
+
+impl Default for LightConfig {
+    fn default() -> Self {
+        Self {
+            light_type: LightType::Directional,
+            position: glam::Vec3::new(10.0, 15.0, 10.0),
+            direction: glam::Vec3::new(0.5, -1.0, 0.3).normalize(),
+            intensity: 1.0,
+            color: glam::Vec3::ONE,
+        }
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShadowUniforms {
@@ -46,7 +81,7 @@ pub struct ProceduralShadows {
     shadow_map_view: Option<gpu::TextureView>,
     shadow_sampler: Option<gpu::Sampler>,
     shadow_map_size: u32,
-    light_direction: glam::Vec3,
+    light_config: LightConfig,
     context: Option<Arc<gpu::Context>>,
     shadow_pipeline: Option<gpu::RenderPipeline>,
 }
@@ -60,7 +95,7 @@ impl ProceduralShadows {
             shadow_map_view: None,
             shadow_sampler: None,
             shadow_map_size: 2048,
-            light_direction: glam::Vec3::new(0.5, -1.0, 0.3).normalize(),
+            light_config: LightConfig::default(),
             context: None,
             shadow_pipeline: None,
         }
@@ -77,22 +112,132 @@ impl ProceduralShadows {
         self
     }
 
+    /// Configure the light source.
+    pub fn with_light(mut self, config: LightConfig) -> Self {
+        self.light_config = config;
+        self
+    }
+
+    /// Create a directional light (sun).
+    pub fn with_directional_light(mut self, direction: glam::Vec3) -> Self {
+        self.light_config.light_type = LightType::Directional;
+        self.light_config.direction = direction.normalize();
+        self
+    }
+
+    /// Create a point light.
+    pub fn with_point_light(mut self, position: glam::Vec3) -> Self {
+        self.light_config.light_type = LightType::Point;
+        self.light_config.position = position;
+        self
+    }
+
+    /// Create a spotlight.
+    pub fn with_spot_light(mut self, position: glam::Vec3, direction: glam::Vec3, inner_angle: f32, outer_angle: f32) -> Self {
+        self.light_config.light_type = LightType::Spot { inner_angle, outer_angle };
+        self.light_config.position = position;
+        self.light_config.direction = direction.normalize();
+        self
+    }
+
+    /// Create a rectangular area light.
+    pub fn with_rect_light(mut self, position: glam::Vec3, direction: glam::Vec3, width: f32, height: f32) -> Self {
+        self.light_config.light_type = LightType::Rect { width, height };
+        self.light_config.position = position;
+        self.light_config.direction = direction.normalize();
+        self
+    }
+
+    /// Update the light configuration at runtime.
+    pub fn set_light_config(&mut self, config: LightConfig) {
+        self.light_config = config;
+    }
+
+    /// Get the current light configuration.
+    pub fn light_config(&self) -> &LightConfig {
+        &self.light_config
+    }
+
     /// Get the light's view-projection matrix for shadow rendering.
     pub fn get_light_view_proj(&self) -> glam::Mat4 {
-        let light_pos = -self.light_direction * 20.0;
-        let view = glam::Mat4::look_at_rh(
-            light_pos,
-            glam::Vec3::ZERO,
-            glam::Vec3::Y,
-        );
+        match self.light_config.light_type {
+            LightType::Directional => {
+                // Directional light: position light far away along direction
+                let light_pos = -self.light_config.direction * 20.0;
+                let view = glam::Mat4::look_at_rh(
+                    light_pos,
+                    glam::Vec3::ZERO,
+                    glam::Vec3::Y,
+                );
 
-        let projection = glam::Mat4::orthographic_rh(
-            -8.0, 8.0,  // left, right
-            -8.0, 8.0,  // bottom, top
-            0.1, 40.0,  // near, far
-        );
+                // Orthographic projection for parallel light rays
+                let projection = glam::Mat4::orthographic_rh(
+                    -8.0, 8.0,  // left, right
+                    -8.0, 8.0,  // bottom, top
+                    0.1, 40.0,  // near, far
+                );
 
-        projection * view
+                projection * view
+            }
+            LightType::Point => {
+                // Point light: use perspective projection
+                // For full point light shadows, we'd need a cubemap (6 faces)
+                // For now, use single face pointing down
+                let view = glam::Mat4::look_at_rh(
+                    self.light_config.position,
+                    self.light_config.position + self.light_config.direction,
+                    glam::Vec3::Y,
+                );
+
+                // Perspective projection with 90 degree FOV for point light
+                let projection = glam::Mat4::perspective_rh(
+                    90.0_f32.to_radians(),
+                    1.0,  // square aspect ratio
+                    0.1,
+                    50.0,
+                );
+
+                projection * view
+            }
+            LightType::Spot { inner_angle: _, outer_angle } => {
+                // Spotlight: perspective projection with cone angle
+                let view = glam::Mat4::look_at_rh(
+                    self.light_config.position,
+                    self.light_config.position + self.light_config.direction,
+                    glam::Vec3::Y,
+                );
+
+                // Perspective projection matching spotlight cone
+                let fov = outer_angle * 2.0;  // outer_angle is half-angle
+                let projection = glam::Mat4::perspective_rh(
+                    fov,
+                    1.0,  // square aspect ratio
+                    0.1,
+                    50.0,
+                );
+
+                projection * view
+            }
+            LightType::Rect { width, height } => {
+                // Rectangular area light: orthographic projection
+                let view = glam::Mat4::look_at_rh(
+                    self.light_config.position,
+                    self.light_config.position + self.light_config.direction,
+                    glam::Vec3::Y,
+                );
+
+                // Orthographic projection matching rect dimensions
+                let half_width = width / 2.0;
+                let half_height = height / 2.0;
+                let projection = glam::Mat4::orthographic_rh(
+                    -half_width, half_width,
+                    -half_height, half_height,
+                    0.1, 40.0,
+                );
+
+                projection * view
+            }
+        }
     }
 
     /// Get the shadow map data for binding in the main render pass.
