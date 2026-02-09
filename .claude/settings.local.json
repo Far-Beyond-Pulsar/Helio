@@ -13,7 +13,8 @@
       "Bash(find:*)",
       "Bash(RUST_LOG=info ./feature_complete.exe:*)",
       "Bash(timeout:*)",
-      "Bash(echo:*)"
+      "Bash(echo:*)",
+      "Bash(taskkill:*)"
     ]
   }
 }

@@ -132,12 +132,26 @@ fn world_to_shadow_coord(world_pos: vec3<f32>, light_view_proj: mat4x4<f32>) -> 
     return shadow_coord;
 }
 
-// Apply shadow to color with proper bias to prevent shadow acne
+// Apply shadow to color with production-quality bias to prevent shadow acne
 fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
     let shadow_data = get_shadow_data();
 
-    // Transform to shadow space
-    var shadow_coord = world_to_shadow_coord(world_pos, shadow_data.light_view_proj);
+    let normal = normalize(world_normal);
+    let light_dir = -shadow_data.light_direction;
+    let ndotl = max(dot(normal, light_dir), 0.0);
+
+    // Early out for surfaces facing away from light (can't receive shadows)
+    if (ndotl < 0.01) {
+        return base_color * 0.2;  // Fully in shadow
+    }
+
+    // Normal offset bias - offset sample point along normal to prevent acne
+    // This is more effective than depth bias alone
+    let normal_offset = 0.02;  // Adjust based on scene scale
+    let offset_pos = world_pos + normal * normal_offset * (1.0 - ndotl);
+
+    // Transform offset position to shadow space
+    var shadow_coord = world_to_shadow_coord(offset_pos, shadow_data.light_view_proj);
 
     // Check if position is within shadow map bounds
     if (shadow_coord.x < 0.0 || shadow_coord.x > 1.0 ||
@@ -146,18 +160,15 @@ fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<
         return base_color;  // Outside shadow map, fully lit
     }
 
-    // Apply slope-scaled depth bias to prevent shadow acne
-    // This adjusts bias based on surface angle relative to light
-    let ndotl = max(dot(normalize(world_normal), -shadow_data.light_direction), 0.0);
-    let bias = max(shadow_data.shadow_bias * (1.0 - ndotl), shadow_data.shadow_bias * 0.1);
-
-    // Apply bias to depth coordinate
-    shadow_coord.z -= bias;
+    // Additional slope-scaled depth bias for extra protection
+    // Use aggressive bias for steep angles
+    let slope_bias = max(shadow_data.shadow_bias * (1.0 - ndotl), shadow_data.shadow_bias);
+    shadow_coord.z -= slope_bias;
 
     // Sample shadow with PCF for smooth edges
     let visibility = sample_shadow_visibility(shadow_coord);
 
-    // Apply shadow with minimum ambient lighting (0.15 = 15% ambient in shadow)
-    let shadow_factor = mix(0.15, 1.0, visibility);
+    // Apply shadow with smooth falloff (0.2 = 20% ambient in shadow)
+    let shadow_factor = mix(0.2, 1.0, visibility);
     return base_color * shadow_factor;
 }

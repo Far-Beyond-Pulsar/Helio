@@ -196,7 +196,8 @@ impl Feature for ProceduralShadows {
             primitive: gpu::PrimitiveState {
                 topology: gpu::PrimitiveTopology::TriangleList,
                 front_face: gpu::FrontFace::Ccw,
-                cull_mode: Some(gpu::Face::Back),
+                // Use front-face culling for shadow pass to reduce self-shadowing
+                cull_mode: Some(gpu::Face::Front),
                 ..Default::default()
             },
             depth_stencil: Some(gpu::DepthStencilState {
@@ -204,7 +205,12 @@ impl Feature for ProceduralShadows {
                 depth_write_enabled: true,
                 depth_compare: gpu::CompareFunction::Less,
                 stencil: Default::default(),
-                bias: Default::default(),
+                // Hardware depth bias to prevent shadow acne
+                bias: gpu::DepthBiasState {
+                    constant: 2,      // Constant bias
+                    slope_scale: 2.0, // Slope-scaled bias
+                    clamp: 0.0,
+                },
             }),
             fragment: None, // Depth-only pass
             color_targets: &[],
