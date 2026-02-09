@@ -140,8 +140,12 @@ fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<
     let light_dir = -shadow_data.light_direction;
     let ndotl = max(dot(normal, light_dir), 0.0);
 
-    // Early out for surfaces facing away from light (can't receive shadows)
-    if (ndotl < 0.01) {
+    // Smooth fade for surfaces facing away from light
+    // Use smoothstep for gradual transition from shadow to light
+    let face_fade = smoothstep(0.0, 0.15, ndotl);
+
+    // If completely facing away, apply ambient only
+    if (face_fade < 0.001) {
         return base_color * 0.2;  // Fully in shadow
     }
 
@@ -170,5 +174,8 @@ fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<
 
     // Apply shadow with smooth falloff (0.2 = 20% ambient in shadow)
     let shadow_factor = mix(0.2, 1.0, visibility);
-    return base_color * shadow_factor;
+
+    // Blend shadow with face fade for smooth transitions on angled surfaces
+    let final_factor = mix(0.2, shadow_factor, face_fade);
+    return base_color * final_factor;
 }

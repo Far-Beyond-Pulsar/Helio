@@ -228,8 +228,20 @@ impl Example {
 
         let mut meshes = Vec::new();
 
+        // Ground plane
+        let plane_transform = Mat4::from_translation(Vec3::ZERO);
+        meshes.push((
+            TransformUniforms {
+                model: plane_transform.to_cols_array_2d(),
+            },
+            self.plane_vertices.into(),
+            self.plane_indices.into(),
+            self.plane_index_count,
+        ));
+
+        // Central rotating cube
         let cube_transform =
-            Mat4::from_rotation_y(elapsed_wrapped) * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
+            Mat4::from_rotation_y(elapsed_wrapped) * Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0));
         meshes.push((
             TransformUniforms {
                 model: cube_transform.to_cols_array_2d(),
@@ -239,24 +251,128 @@ impl Example {
             self.cube_index_count,
         ));
 
-        let sphere_transform = Mat4::from_translation(Vec3::new(2.0, 1.0, 0.0));
+        // Sphere orbiting around center - circular path
+        let orbit_radius = 3.0;
+        let sphere1_x = orbit_radius * elapsed_wrapped.cos();
+        let sphere1_z = orbit_radius * elapsed_wrapped.sin();
+        let sphere1_transform = Mat4::from_translation(Vec3::new(sphere1_x, 1.5, sphere1_z));
         meshes.push((
             TransformUniforms {
-                model: sphere_transform.to_cols_array_2d(),
+                model: sphere1_transform.to_cols_array_2d(),
             },
             self.sphere_vertices.into(),
             self.sphere_indices.into(),
             self.sphere_index_count,
         ));
 
-        let plane_transform = Mat4::from_translation(Vec3::ZERO);
+        // Second sphere orbiting opposite direction
+        let sphere2_x = orbit_radius * (-elapsed_wrapped).cos();
+        let sphere2_z = orbit_radius * (-elapsed_wrapped).sin();
+        let sphere2_transform = Mat4::from_translation(Vec3::new(sphere2_x, 1.0, sphere2_z));
         meshes.push((
             TransformUniforms {
-                model: plane_transform.to_cols_array_2d(),
+                model: sphere2_transform.to_cols_array_2d(),
             },
-            self.plane_vertices.into(),
-            self.plane_indices.into(),
-            self.plane_index_count,
+            self.sphere_vertices.into(),
+            self.sphere_indices.into(),
+            self.sphere_index_count,
+        ));
+
+        // Vertically bobbing cube that passes through the rotating cube
+        let bob_height = 2.0 + (elapsed * 2.0).sin() * 1.5;
+        let bobbing_cube_transform =
+            Mat4::from_rotation_x(elapsed_wrapped * 0.5) *
+            Mat4::from_translation(Vec3::new(0.0, bob_height, 0.0));
+        meshes.push((
+            TransformUniforms {
+                model: bobbing_cube_transform.to_cols_array_2d(),
+            },
+            self.cube_vertices.into(),
+            self.cube_indices.into(),
+            self.cube_index_count,
+        ));
+
+        // Small cube moving in figure-8 pattern
+        let figure8_x = 2.5 * (elapsed * 0.7).sin();
+        let figure8_z = 1.5 * (elapsed * 1.4).sin();
+        let figure8_cube_transform =
+            Mat4::from_rotation_z(elapsed_wrapped * 1.5) *
+            Mat4::from_translation(Vec3::new(figure8_x, 0.75, figure8_z)) *
+            Mat4::from_scale(Vec3::splat(0.6));
+        meshes.push((
+            TransformUniforms {
+                model: figure8_cube_transform.to_cols_array_2d(),
+            },
+            self.cube_vertices.into(),
+            self.cube_indices.into(),
+            self.cube_index_count,
+        ));
+
+        // Sphere moving up and down through other objects
+        let vertical_sphere_y = 0.5 + (elapsed * 1.5).sin() * 2.5;
+        let vertical_sphere_transform = Mat4::from_translation(Vec3::new(-1.5, vertical_sphere_y, 1.5));
+        meshes.push((
+            TransformUniforms {
+                model: vertical_sphere_transform.to_cols_array_2d(),
+            },
+            self.sphere_vertices.into(),
+            self.sphere_indices.into(),
+            self.sphere_index_count,
+        ));
+
+        // Spinning cube on the side
+        let side_cube_transform =
+            Mat4::from_translation(Vec3::new(-3.0, 1.5, -2.0)) *
+            Mat4::from_rotation_y(elapsed_wrapped * 2.0) *
+            Mat4::from_rotation_x(elapsed_wrapped);
+        meshes.push((
+            TransformUniforms {
+                model: side_cube_transform.to_cols_array_2d(),
+            },
+            self.cube_vertices.into(),
+            self.cube_indices.into(),
+            self.cube_index_count,
+        ));
+
+        // Floating sphere moving in a slow arc
+        let arc_angle = elapsed * 0.5;
+        let arc_x = 2.0 * arc_angle.cos();
+        let arc_z = 2.0 * arc_angle.sin();
+        let arc_sphere_transform = Mat4::from_translation(Vec3::new(arc_x, 2.5, arc_z));
+        meshes.push((
+            TransformUniforms {
+                model: arc_sphere_transform.to_cols_array_2d(),
+            },
+            self.sphere_vertices.into(),
+            self.sphere_indices.into(),
+            self.sphere_index_count,
+        ));
+
+        // Stack of cubes that periodically intersect
+        let stack1_y = 0.5 + (elapsed * 1.2).sin() * 0.3;
+        let stack1_transform =
+            Mat4::from_translation(Vec3::new(2.5, stack1_y, -2.0)) *
+            Mat4::from_scale(Vec3::splat(0.8));
+        meshes.push((
+            TransformUniforms {
+                model: stack1_transform.to_cols_array_2d(),
+            },
+            self.cube_vertices.into(),
+            self.cube_indices.into(),
+            self.cube_index_count,
+        ));
+
+        let stack2_y = 1.0 + (elapsed * 1.2 + 1.0).sin() * 0.3;
+        let stack2_transform =
+            Mat4::from_translation(Vec3::new(2.5, stack2_y, -2.0)) *
+            Mat4::from_scale(Vec3::splat(0.8));
+        meshes.push((
+            TransformUniforms {
+                model: stack2_transform.to_cols_array_2d(),
+            },
+            self.cube_vertices.into(),
+            self.cube_indices.into(),
+            self.cube_index_count,
         ));
 
         self.renderer.render(
@@ -289,7 +405,7 @@ fn main() {
 
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
-        .with_title("Helio - Complete Pipeline (1: Geometry, 2: Lighting, 3: Materials, 4: Fake Shadows)")
+        .with_title("Helio - Shadow Stress Test (1: Geometry, 2: Lighting, 3: Materials, 4: Procedural Shadows)")
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
     #[allow(deprecated)]
@@ -345,7 +461,7 @@ fn main() {
                             if let Ok(_) = app.renderer.registry_mut().toggle_feature("procedural_shadows") {
                                 let enabled = app.renderer.registry().get_feature("procedural_shadows").unwrap().is_enabled();
                                 let status = if enabled { "ON" } else { "OFF" };
-                                println!("[4] Procedural Shadows (Fake): {}", status);
+                                println!("[4] Procedural Shadows: {}", status);
                                 log::info!("[4] Procedural Shadows: {}", status);
                                 app.renderer.rebuild_pipeline();
                             }
