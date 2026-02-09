@@ -1,63 +1,44 @@
-// High-quality realtime shadow mapping with PCF
+// High-quality realtime multi-light shadow mapping with PCF
 
-// Shadow map texture and comparison sampler (bound automatically by ShaderData)
+// Shadow map texture and comparison sampler (bound via ShaderData)
 var shadow_map: texture_depth_2d;
 var shadow_sampler: sampler_comparison;
 
-// Shadow uniforms
-struct ShadowData {
+// Light types
+const LIGHT_TYPE_DIRECTIONAL: u32 = 0u;
+const LIGHT_TYPE_POINT: u32 = 1u;
+const LIGHT_TYPE_SPOT: u32 = 2u;
+const LIGHT_TYPE_RECT: u32 = 3u;
+
+// GPU representation of a light
+struct GpuLight {
+    light_type: u32,
+    intensity: f32,
+    radius: f32,
+    _padding1: f32,
+    
+    position: vec3<f32>,
+    inner_angle: f32,
+    
+    direction: vec3<f32>,
+    outer_angle: f32,
+    
+    color: vec3<f32>,
+    width: f32,
+    
     light_view_proj: mat4x4<f32>,
-    light_direction: vec3<f32>,
-    shadow_bias: f32,
+    
+    height: f32,
+    _padding2: vec3<f32>,
 }
 
-// Hardcoded shadow data matching the renderer's light setup
-fn get_shadow_data() -> ShadowData {
-    var data: ShadowData;
-    // Light from top-right matching the lighting direction
-    let light_dir = normalize(vec3<f32>(0.5, -1.0, 0.3));
-    let light_pos = -light_dir * 20.0;
-
-    // Create light view matrix
-    let view = look_at_rh(light_pos, vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0));
-
-    // Orthographic projection for directional light
-    let projection = orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0);
-
-    data.light_view_proj = projection * view;
-    data.light_direction = light_dir;
-    data.shadow_bias = 0.005;
-
-    return data;
+// Shadow uniforms from CPU (bound via ShaderData)
+struct ShadowUniforms {
+    light_count: u32,
+    _padding: vec3<u32>,
+    lights: array<GpuLight, 8>,
 }
-
-// Helper: Look-at matrix
-fn look_at_rh(eye: vec3<f32>, center: vec3<f32>, up: vec3<f32>) -> mat4x4<f32> {
-    let f = normalize(center - eye);
-    let s = normalize(cross(f, up));
-    let u = cross(s, f);
-
-    return mat4x4<f32>(
-        vec4<f32>(s.x, u.x, -f.x, 0.0),
-        vec4<f32>(s.y, u.y, -f.y, 0.0),
-        vec4<f32>(s.z, u.z, -f.z, 0.0),
-        vec4<f32>(-dot(s, eye), -dot(u, eye), dot(f, eye), 1.0),
-    );
-}
-
-// Helper: Orthographic projection
-fn orthographic_rh(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> mat4x4<f32> {
-    let w = 1.0 / (right - left);
-    let h = 1.0 / (top - bottom);
-    let d = 1.0 / (far - near);
-
-    return mat4x4<f32>(
-        vec4<f32>(2.0 * w, 0.0, 0.0, 0.0),
-        vec4<f32>(0.0, 2.0 * h, 0.0, 0.0),
-        vec4<f32>(0.0, 0.0, -d, 0.0),
-        vec4<f32>(-(right + left) * w, -(top + bottom) * h, -near * d, 1.0),
-    );
-}
+var<uniform> shadow_uniforms: ShadowUniforms;
 
 // High-quality PCF shadow sampling with 5x5 kernel
 // This provides smooth, realistic shadow edges
@@ -120,9 +101,9 @@ fn sample_shadow_visibility(shadow_coord: vec3<f32>) -> f32 {
     return sample_shadow_pcf_3x3(shadow_coord, texel_size);
 }
 
-// Transform world position to shadow map space
-fn world_to_shadow_coord(world_pos: vec3<f32>, light_view_proj: mat4x4<f32>) -> vec3<f32> {
-    let light_space = light_view_proj * vec4<f32>(world_pos, 1.0);
+// Transform world position to shadow map space for a specific light
+fn world_to_shadow_coord(world_pos: vec3<f32>, light: GpuLight) -> vec3<f32> {
+    let light_space = light.light_view_proj * vec4<f32>(world_pos, 1.0);
     var shadow_coord = light_space.xyz / light_space.w;
 
     // Transform to [0, 1] range for texture coordinates
@@ -132,50 +113,161 @@ fn world_to_shadow_coord(world_pos: vec3<f32>, light_view_proj: mat4x4<f32>) -> 
     return shadow_coord;
 }
 
-// Apply shadow to color with production-quality bias to prevent shadow acne
-fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let shadow_data = get_shadow_data();
-
-    let normal = normalize(world_normal);
-    let light_dir = -shadow_data.light_direction;
-    let ndotl = max(dot(normal, light_dir), 0.0);
-
-    // Smooth fade for surfaces facing away from light
-    // Use smoothstep for gradual transition from shadow to light
-    let face_fade = smoothstep(0.0, 0.15, ndotl);
-
-    // If completely facing away, apply ambient only
-    if (face_fade < 0.001) {
-        return base_color * 0.2;  // Fully in shadow
+// Check if fragment is in shadow for a specific light
+fn compute_light_shadow(light: GpuLight, light_index: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32 {
+    // Only first light has shadow map for now (TODO: support multiple shadow maps via texture array)
+    if (light_index > 0u) {
+        return 1.0; // No shadows for lights beyond first
     }
-
+    
+    let normal = normalize(world_normal);
+    
+    // Calculate light direction based on type
+    var light_dir: vec3<f32>;
+    var distance_to_light: f32;
+    
+    if (light.light_type == LIGHT_TYPE_DIRECTIONAL) {
+        light_dir = -light.direction;
+        distance_to_light = 0.0; // Infinite distance
+    } else {
+        let to_light = light.position - world_pos;
+        distance_to_light = length(to_light);
+        light_dir = normalize(to_light);
+        
+        // Check if beyond attenuation radius
+        if (light.radius > 0.0 && distance_to_light > light.radius) {
+            return 1.0; // Fully lit (no shadow contribution)
+        }
+    }
+    
+    let ndotl = max(dot(normal, light_dir), 0.0);
+    
+    // Spotlight cone attenuation
+    if (light.light_type == LIGHT_TYPE_SPOT) {
+        let spot_dir = -light.direction;
+        let theta = dot(normalize(world_pos - light.position), spot_dir);
+        let inner_cutoff = cos(light.inner_angle);
+        let outer_cutoff = cos(light.outer_angle);
+        
+        // Outside spotlight cone
+        if (theta < outer_cutoff) {
+            return 1.0; // Fully lit (no shadow contribution)
+        }
+        
+        // Smooth falloff at cone edges
+        let epsilon = inner_cutoff - outer_cutoff;
+        let spot_intensity = clamp((theta - outer_cutoff) / epsilon, 0.0, 1.0);
+        if (spot_intensity < 0.01) {
+            return 1.0;
+        }
+    }
+    
+    // Smooth fade for surfaces facing away from light
+    let face_fade = smoothstep(0.0, 0.15, ndotl);
+    if (face_fade < 0.001) {
+        return 0.2; // Fully in shadow
+    }
+    
     // Normal offset bias - offset sample point along normal to prevent acne
-    // This is more effective than depth bias alone
-    let normal_offset = 0.02;  // Adjust based on scene scale
+    let normal_offset = 0.02;
     let offset_pos = world_pos + normal * normal_offset * (1.0 - ndotl);
-
+    
     // Transform offset position to shadow space
-    var shadow_coord = world_to_shadow_coord(offset_pos, shadow_data.light_view_proj);
-
+    var shadow_coord = world_to_shadow_coord(offset_pos, light);
+    
     // Check if position is within shadow map bounds
     if (shadow_coord.x < 0.0 || shadow_coord.x > 1.0 ||
         shadow_coord.y < 0.0 || shadow_coord.y > 1.0 ||
         shadow_coord.z < 0.0 || shadow_coord.z > 1.0) {
-        return base_color;  // Outside shadow map, fully lit
+        return 1.0; // Outside shadow map, fully lit
     }
-
-    // Additional slope-scaled depth bias for extra protection
-    // Use aggressive bias for steep angles
-    let slope_bias = max(shadow_data.shadow_bias * (1.0 - ndotl), shadow_data.shadow_bias);
+    
+    // Additional slope-scaled depth bias
+    let shadow_bias = 0.005;
+    let slope_bias = max(shadow_bias * (1.0 - ndotl), shadow_bias);
     shadow_coord.z -= slope_bias;
-
+    
     // Sample shadow with PCF for smooth edges
     let visibility = sample_shadow_visibility(shadow_coord);
-
-    // Apply shadow with smooth falloff (0.2 = 20% ambient in shadow)
+    
+    // Apply shadow with smooth falloff
     let shadow_factor = mix(0.2, 1.0, visibility);
+    return mix(0.2, shadow_factor, face_fade);
+}
 
-    // Blend shadow with face fade for smooth transitions on angled surfaces
-    let final_factor = mix(0.2, shadow_factor, face_fade);
-    return base_color * final_factor;
+// Apply shadows from all lights
+fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    // If no lights, return base color with minimal ambient
+    if (shadow_uniforms.light_count == 0u) {
+        return base_color * 0.1;
+    }
+    
+    var accumulated_light = vec3<f32>(0.0);
+    let normal = normalize(world_normal);
+    
+    // For each light, accumulate lighting with shadows
+    for (var i = 0u; i < shadow_uniforms.light_count && i < 8u; i++) {
+        let light = shadow_uniforms.lights[i];
+        
+        // Calculate light direction
+        var light_dir: vec3<f32>;
+        var distance_to_light: f32;
+        
+        if (light.light_type == LIGHT_TYPE_DIRECTIONAL) {
+            light_dir = -light.direction;
+            distance_to_light = 0.0;
+        } else {
+            let to_light = light.position - world_pos;
+            distance_to_light = length(to_light);
+            light_dir = normalize(to_light);
+        }
+        
+        // Basic diffuse lighting
+        let ndotl = max(dot(normal, light_dir), 0.0);
+        
+        // Distance attenuation (inverse square with smoothing)
+        var attenuation = 1.0;
+        if (light.light_type != LIGHT_TYPE_DIRECTIONAL && light.radius > 0.0) {
+            if (distance_to_light > light.radius) {
+                continue; // Skip lights that are too far
+            }
+            // Smooth quadratic falloff
+            let normalized_dist = distance_to_light / light.radius;
+            attenuation = 1.0 - (normalized_dist * normalized_dist);
+            attenuation = attenuation * attenuation; // Smoother falloff
+        }
+        
+        // Spotlight cone attenuation
+        if (light.light_type == LIGHT_TYPE_SPOT) {
+            let spot_dir = -light.direction;
+            let theta = dot(-light_dir, spot_dir);
+            let inner_cutoff = cos(light.inner_angle);
+            let outer_cutoff = cos(light.outer_angle);
+            
+            if (theta < outer_cutoff) {
+                continue; // Outside spotlight cone
+            }
+            
+            // Smooth transition between inner and outer cone
+            let epsilon = inner_cutoff - outer_cutoff;
+            let spot_intensity = clamp((theta - outer_cutoff) / epsilon, 0.0, 1.0);
+            attenuation *= spot_intensity;
+        }
+        
+        // Calculate shadow factor for this light (only first light has shadows for now)
+        var shadow_factor = 1.0;
+        if (i == 0u) {
+            shadow_factor = compute_light_shadow(light, i, world_pos, world_normal);
+        }
+        
+        // Accumulate light contribution
+        let light_contribution = light.color * light.intensity * ndotl * attenuation * shadow_factor;
+        accumulated_light += light_contribution;
+    }
+    
+    // Add small ambient
+    let ambient = vec3<f32>(0.05);
+    
+    // Apply accumulated lighting to base color
+    return base_color * (accumulated_light + ambient);
 }
