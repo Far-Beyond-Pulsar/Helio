@@ -342,6 +342,33 @@ Potential future features:
 
 ## Contributing
 
+## Android Build (Experimental)
+
+Helio can be built for Android using [cargo-apk](https://github.com/rust-windowing/cargo-apk) and the `helio-android`/`helio-android-apk` crates:
+
+### Prerequisites
+- Install [Android NDK](https://developer.android.com/ndk/downloads) and set `ANDROID_NDK_HOME` environment variable
+- Install Rust Android targets:
+    ```sh
+    rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+    ```
+- Install cargo-apk:
+    ```sh
+    cargo install cargo-apk
+    ```
+
+### Build and Run
+From the workspace root:
+```sh
+cargo apk run -p helio-android-apk --target aarch64-linux-android
+```
+This will build and deploy the APK to a connected Android device or emulator.
+
+**Note:**
+- The Android integration is a stub. See `crates/helio-android/src/lib.rs` and winit's android example for a full event loop and renderer integration.
+- You may need to adjust the Android manifest and icons for your app.
+
+
 To add a new feature:
 
 1. Create `crates/helio-feature-yourfeature/`

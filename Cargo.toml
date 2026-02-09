@@ -9,6 +9,7 @@ members = [
     "crates/helio-feature-materials",
     "crates/helio-feature-procedural-shadows",
     "crates/examples",
+    "crates/feature_complete_android",
 ]
 resolver = "2"
 
@@ -17,6 +18,9 @@ blade-graphics = { git = "https://github.com/kvark/blade" }
 blade-macros = { git = "https://github.com/kvark/blade" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
-winit = "0.30"
+winit = "0.29"
 env_logger = "0.11"
 log = "0.4"
+
+[patch.crates-io]
+android-activity = { git = "https://github.com/rust-mobile/android-activity", rev = "e686e801" }
