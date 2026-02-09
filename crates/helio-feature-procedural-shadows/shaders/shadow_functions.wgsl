@@ -114,7 +114,12 @@ fn world_to_shadow_coord(world_pos: vec3<f32>, light: GpuLight) -> vec3<f32> {
 }
 
 // Check if fragment is in shadow for a specific light
-fn compute_light_shadow(light: GpuLight, world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32 {
+fn compute_light_shadow(light: GpuLight, light_index: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32 {
+    // Only first light has shadow map for now (TODO: support multiple shadow maps via texture array)
+    if (light_index > 0u) {
+        return 1.0; // No shadows for lights beyond first
+    }
+    
     let normal = normalize(world_normal);
     
     // Calculate light direction based on type
@@ -204,7 +209,7 @@ fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<
         let light = shadow_uniforms.lights[i];
         
         // Calculate shadow factor for this light (0.2 = shadowed, 1.0 = lit)
-        let shadow_factor = compute_light_shadow(light, world_pos, world_normal);
+        let shadow_factor = compute_light_shadow(light, i, world_pos, world_normal);
         
         // Calculate light direction
         var light_dir: vec3<f32>;
