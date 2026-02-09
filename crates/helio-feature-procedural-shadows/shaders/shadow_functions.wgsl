@@ -197,44 +197,77 @@ fn compute_light_shadow(light: GpuLight, light_index: u32, world_pos: vec3<f32>,
 
 // Apply shadows from all lights
 fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    // If no lights, return base color
+    // If no lights, return base color with minimal ambient
     if (shadow_uniforms.light_count == 0u) {
-        return base_color;
+        return base_color * 0.1;
     }
     
-    var final_color = vec3<f32>(0.0);
+    var accumulated_light = vec3<f32>(0.0);
+    let normal = normalize(world_normal);
     
     // For each light, accumulate lighting with shadows
     for (var i = 0u; i < shadow_uniforms.light_count && i < 8u; i++) {
         let light = shadow_uniforms.lights[i];
         
-        // Calculate shadow factor for this light (0.2 = shadowed, 1.0 = lit)
-        let shadow_factor = compute_light_shadow(light, i, world_pos, world_normal);
-        
         // Calculate light direction
         var light_dir: vec3<f32>;
+        var distance_to_light: f32;
+        
         if (light.light_type == LIGHT_TYPE_DIRECTIONAL) {
             light_dir = -light.direction;
+            distance_to_light = 0.0;
         } else {
-            light_dir = normalize(light.position - world_pos);
+            let to_light = light.position - world_pos;
+            distance_to_light = length(to_light);
+            light_dir = normalize(to_light);
         }
         
         // Basic diffuse lighting
-        let ndotl = max(dot(normalize(world_normal), light_dir), 0.0);
+        let ndotl = max(dot(normal, light_dir), 0.0);
         
-        // Distance attenuation for non-directional lights
+        // Distance attenuation (inverse square with smoothing)
         var attenuation = 1.0;
         if (light.light_type != LIGHT_TYPE_DIRECTIONAL && light.radius > 0.0) {
-            let distance = length(light.position - world_pos);
-            attenuation = 1.0 - smoothstep(0.0, light.radius, distance);
+            if (distance_to_light > light.radius) {
+                continue; // Skip lights that are too far
+            }
+            // Smooth quadratic falloff
+            let normalized_dist = distance_to_light / light.radius;
+            attenuation = 1.0 - (normalized_dist * normalized_dist);
+            attenuation = attenuation * attenuation; // Smoother falloff
         }
         
-        // Accumulate light contribution with shadows
-        final_color += base_color * light.color * light.intensity * ndotl * shadow_factor * attenuation;
+        // Spotlight cone attenuation
+        if (light.light_type == LIGHT_TYPE_SPOT) {
+            let spot_dir = -light.direction;
+            let theta = dot(-light_dir, spot_dir);
+            let inner_cutoff = cos(light.inner_angle);
+            let outer_cutoff = cos(light.outer_angle);
+            
+            if (theta < outer_cutoff) {
+                continue; // Outside spotlight cone
+            }
+            
+            // Smooth transition between inner and outer cone
+            let epsilon = inner_cutoff - outer_cutoff;
+            let spot_intensity = clamp((theta - outer_cutoff) / epsilon, 0.0, 1.0);
+            attenuation *= spot_intensity;
+        }
+        
+        // Calculate shadow factor for this light (only first light has shadows for now)
+        var shadow_factor = 1.0;
+        if (i == 0u) {
+            shadow_factor = compute_light_shadow(light, i, world_pos, world_normal);
+        }
+        
+        // Accumulate light contribution
+        let light_contribution = light.color * light.intensity * ndotl * attenuation * shadow_factor;
+        accumulated_light += light_contribution;
     }
     
-    // Add ambient lighting
-    let ambient = base_color * 0.1;
+    // Add small ambient
+    let ambient = vec3<f32>(0.05);
     
-    return final_color + ambient;
+    // Apply accumulated lighting to base color
+    return base_color * (accumulated_light + ambient);
 }
