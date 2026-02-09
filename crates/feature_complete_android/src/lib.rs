@@ -1,10 +1,4 @@
-use helio_render::*;
-use helio_features::*;
-use helio_feature_base_geometry::*;
-use helio_feature_lighting::*;
-use helio_feature_materials::*;
-use helio_feature_procedural_shadows::*;
-use winit::event_loop::{EventLoop, EventLoopBuilder};
+use winit::event_loop::EventLoop;
 use winit::platform::android::activity::AndroidApp;
 use winit::platform::android::EventLoopBuilderExtAndroid;
 use blade_graphics as gpu;
@@ -267,7 +261,7 @@ fn android_main(app: AndroidApp) {
 #[no_mangle]
 pub fn run(app: AndroidApp) {
     env_logger::init();
-    let event_loop = EventLoopBuilder::new()
+    let event_loop = EventLoop::builder()
         .with_android_app(app)
         .build()
         .unwrap();
@@ -277,7 +271,7 @@ pub fn run(app: AndroidApp) {
     
     let _ = event_loop.run(move |event, event_loop| {
         match event {
-            winit::event::Event::WindowEvent { event, window_id } => match event {
+            winit::event::Event::WindowEvent { event, window_id: _ } => match event {
                 winit::event::WindowEvent::CloseRequested => {
                     // On Android, we can't really exit the event loop
                     // Just let the system handle it
