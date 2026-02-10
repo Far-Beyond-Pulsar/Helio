@@ -589,16 +589,24 @@ impl Feature for ProceduralShadows {
 
     fn shader_injections(&self) -> Vec<ShaderInjection> {
         vec![
-            // Shadow sampling functions
+            // Shadow sampling + ACES/gamma helpers
             ShaderInjection::with_priority(
                 ShaderInjectionPoint::FragmentPreamble,
                 include_str!("../shaders/shadow_functions.wgsl"),
                 5,
             ),
-            // Apply shadows after lighting (higher priority runs later)
+            // Snapshot raw material albedo BEFORE BasicLighting (priority 0) runs.
+            // apply_shadow must receive unlit albedo — passing the pre-lit value
+            // causes double-multiplication and a washed-out result.
+            ShaderInjection::with_priority(
+                ShaderInjectionPoint::FragmentMain,
+                "    let shadow_albedo = final_color;",
+                -5,
+            ),
+            // Recompute full lighting from albedo, overwriting BasicLighting's output.
             ShaderInjection::with_priority(
                 ShaderInjectionPoint::FragmentColorCalculation,
-                "    final_color = apply_shadow(final_color, input.world_position, input.world_normal);",
+                "    final_color = apply_shadow(shadow_albedo, input.world_position, input.world_normal);",
                 10,
             ),
         ]
