@@ -104,7 +104,7 @@ struct Example {
     last_frame_time: Instant,
     camera: CameraController,
     cursor_grabbed: bool,
-    current_light_type: usize,  // 0: spotlight, 1: point, 2: rect, 3: sun
+    demo_mode: usize,  // 0: single light cycle, 1: multi-light dance, 2: spotlight array, 3: color party
 }
 
 impl Example {
@@ -238,95 +238,41 @@ impl Example {
         registry.register(BasicLighting::new());
         registry.register(BasicMaterials::new());
 
-        // Start with multiple colored lights
+        // Start with an impressive multi-light setup
         let mut shadows = ProceduralShadows::new();
         
-        // Directional sun light (commented out for now)
-        // let _ = shadows.add_light(LightConfig {
-        //     light_type: LightType::Directional,
-        //     position: Vec3::new(10.0, 15.0, 10.0),
-        //     direction: Vec3::new(0.5, -1.0, 0.3).normalize(),
-        //     intensity: 0.8,
-        //     color: Vec3::new(1.0, 0.95, 0.8),
-        // });
-        
-        // Red spotlight from center ceiling
-        let _ = shadows.add_light(LightConfig {
+        // Add multiple overlapping colored lights for a dramatic showcase
+        shadows.add_light(LightConfig {
             light_type: LightType::Spot {
                 inner_angle: 25.0_f32.to_radians(),
                 outer_angle: 40.0_f32.to_radians(),
-                radius: 15.0,
             },
-            position: Vec3::new(0.0, 6.0, 0.0),
+            position: Vec3::new(0.0, 8.0, 0.0),
             direction: Vec3::new(0.0, -1.0, 0.0),
-            intensity: 2.0,
-            color: Vec3::new(1.0, 0.2, 0.2),
-        });
-        
-        // Green point light - left side
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Point { radius: 10.0 },
-            position: Vec3::new(-4.0, 3.0, 0.0),
-            direction: Vec3::new(0.0, 0.0, 0.0),
-            intensity: 2.5,
-            color: Vec3::new(0.2, 1.0, 0.2),
-        });
-        
-        // Blue point light - right side
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Point { radius: 10.0 },
-            position: Vec3::new(4.0, 3.0, 0.0),
-            direction: Vec3::new(0.0, 0.0, 0.0),
-            intensity: 2.5,
-            color: Vec3::new(0.2, 0.3, 1.0),
-        });
-        
-        // Cyan rect light - back wall
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Rect {
-                width: 2.0,
-                height: 2.0,
-                radius: 12.0,
-            },
-            position: Vec3::new(0.0, 3.0, -5.0),
-            direction: Vec3::new(0.0, 0.0, 1.0),
             intensity: 1.5,
-            color: Vec3::new(0.2, 1.0, 1.0),
+            color: Vec3::new(1.0, 0.2, 0.2), // Red
+            attenuation_radius: 12.0,
+            attenuation_falloff: 2.0,
         });
         
-        // Yellow spotlight - front
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Spot {
-                inner_angle: 30.0_f32.to_radians(),
-                outer_angle: 50.0_f32.to_radians(),
-                radius: 12.0,
-            },
-            position: Vec3::new(0.0, 5.0, 5.0),
-            direction: Vec3::new(0.0, -0.5, -1.0).normalize(),
-            intensity: 1.8,
-            color: Vec3::new(1.0, 1.0, 0.2),
+        shadows.add_light(LightConfig {
+            light_type: LightType::Point,
+            position: Vec3::new(-4.0, 3.0, -4.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            intensity: 1.2,
+            color: Vec3::new(0.2, 1.0, 0.2), // Green
+            attenuation_radius: 10.0,
+            attenuation_falloff: 2.5,
         });
         
-        // Magenta point light - corner
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Point { radius: 8.0 },
-            position: Vec3::new(-3.0, 2.0, -3.0),
-            direction: Vec3::new(0.0, 0.0, 0.0),
-            intensity: 2.0,
-            color: Vec3::new(1.0, 0.2, 1.0),
-        });
-        
-        // Orange rect light - side wall
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Rect {
-                width: 1.5,
-                height: 3.0,
-                radius: 10.0,
-            },
-            position: Vec3::new(5.0, 3.0, -2.0),
-            direction: Vec3::new(-1.0, 0.0, 0.0),
-            intensity: 1.6,
-            color: Vec3::new(1.0, 0.5, 0.1),
+        shadows.add_light(LightConfig {
+            light_type: LightType::Point,
+            position: Vec3::new(4.0, 3.0, -4.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            intensity: 1.2,
+            color: Vec3::new(0.2, 0.2, 1.0), // Blue
+            attenuation_radius: 10.0,
+            attenuation_falloff: 2.5,
         });
         
         registry.register(shadows);
@@ -364,75 +310,197 @@ impl Example {
             plane_index_count: plane_mesh.indices.len() as u32,
             start_time: now,
             last_frame_time: now,
-            camera: CameraController::new(Vec3::new(0.0, 3.0, 10.0)),
+            camera: CameraController::new(Vec3::new(0.0, 5.0, 15.0)),
             cursor_grabbed: false,
-            current_light_type: 0,
+            demo_mode: 1, // Start with multi-light dance
         }
     }
 
-    fn update_light_type(&mut self) {
-        // Create the light configuration based on current type
-        let config = match self.current_light_type {
+    fn update_demo_lights(&mut self, time: f32) {
+        // Get the shadow feature
+        let shadows = if let Some(feature) = self.renderer.registry_mut().get_feature_mut("procedural_shadows") {
+            unsafe {
+                &mut *(feature.as_mut() as *mut dyn helio_features::Feature as *mut ProceduralShadows)
+            }
+        } else {
+            return;
+        };
+
+        shadows.clear_lights();
+
+        match self.demo_mode {
             0 => {
-                println!("[5] Red Spotlight (indoor center)");
-                LightConfig {
+                // Single rotating spotlight with pulsing intensity
+                let angle = time * 0.5;
+                let pulse = (time * 2.0).sin() * 0.3 + 1.2;
+                
+                shadows.add_light(LightConfig {
                     light_type: LightType::Spot {
                         inner_angle: 30.0_f32.to_radians(),
-                        outer_angle: 45.0_f32.to_radians(),
-                        radius: 15.0,
+                        outer_angle: 50.0_f32.to_radians(),
                     },
-                    position: Vec3::new(0.0, 7.0, -2.0),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.0,
-                    color: Vec3::new(1.0, 0.3, 0.3), // Red tint
-                }
+                    position: Vec3::new(angle.cos() * 5.0, 8.0, angle.sin() * 5.0),
+                    direction: Vec3::new(-angle.cos(), -1.0, -angle.sin()).normalize(),
+                    intensity: pulse,
+                    color: Vec3::new(1.0, 0.9, 0.7),
+                    attenuation_radius: 18.0,
+                    attenuation_falloff: 2.0,
+                });
             }
             1 => {
-                println!("[6] Green Point Light (indoor corner)");
-                LightConfig {
-                    light_type: LightType::Point { radius: 12.0 },
-                    position: Vec3::new(-3.0, 4.0, -3.0),
+                // Multi-light dance - RGB lights circling with different speeds
+                let r_angle = time * 0.8;
+                let g_angle = time * 1.2 + 2.0;
+                let b_angle = time * 1.0 + 4.0;
+                
+                // Red spotlight from above
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Spot {
+                        inner_angle: 25.0_f32.to_radians(),
+                        outer_angle: 40.0_f32.to_radians(),
+                    },
+                    position: Vec3::new(r_angle.cos() * 3.0, 7.0, r_angle.sin() * 3.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.0,
-                    color: Vec3::new(0.3, 1.0, 0.3), // Green tint
-                }
+                    intensity: 1.5,
+                    color: Vec3::new(1.0, 0.1, 0.1),
+                    attenuation_radius: 12.0,
+                    attenuation_falloff: 2.0,
+                });
+                
+                // Green point light
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Point,
+                    position: Vec3::new(g_angle.cos() * 5.0, 3.0, g_angle.sin() * 5.0),
+                    direction: Vec3::new(0.0, -1.0, 0.0),
+                    intensity: 1.3,
+                    color: Vec3::new(0.1, 1.0, 0.1),
+                    attenuation_radius: 10.0,
+                    attenuation_falloff: 2.5,
+                });
+                
+                // Blue point light
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Point,
+                    position: Vec3::new(b_angle.cos() * 4.0, 4.0, b_angle.sin() * 4.0),
+                    direction: Vec3::new(0.0, -1.0, 0.0),
+                    intensity: 1.3,
+                    color: Vec3::new(0.1, 0.1, 1.0),
+                    attenuation_radius: 10.0,
+                    attenuation_falloff: 2.5,
+                });
+                
+                // Cyan accent light
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Point,
+                    position: Vec3::new((time * 1.5).cos() * 2.0, 2.0, (time * 1.5).sin() * 2.0),
+                    direction: Vec3::new(0.0, -1.0, 0.0),
+                    intensity: 0.8,
+                    color: Vec3::new(0.3, 1.0, 1.0),
+                    attenuation_radius: 6.0,
+                    attenuation_falloff: 3.0,
+                });
             }
             2 => {
-                println!("[7] Blue Rectangular Light (indoor ceiling)");
-                LightConfig {
-                    light_type: LightType::Rect {
-                        width: 3.0,
-                        height: 3.0,
-                        radius: 10.0,
-                    },
-                    position: Vec3::new(1.0, 4.8, -1.0),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.0,
-                    color: Vec3::new(0.3, 0.3, 1.0), // Blue tint
+                // Spotlight array - 6 spotlights in a grid pattern
+                let colors = [
+                    Vec3::new(1.0, 0.3, 0.3),  // Red
+                    Vec3::new(1.0, 0.8, 0.2),  // Orange
+                    Vec3::new(0.3, 1.0, 0.3),  // Green
+                    Vec3::new(0.3, 0.8, 1.0),  // Cyan
+                    Vec3::new(0.4, 0.3, 1.0),  // Blue
+                    Vec3::new(1.0, 0.3, 0.8),  // Magenta
+                ];
+                
+                let wave = (time * 2.0).sin() * 0.3 + 1.0;
+                
+                for i in 0..6 {
+                    let angle = (i as f32 / 6.0) * std::f32::consts::TAU;
+                    let phase_offset = i as f32 * 0.5;
+                    let height_wave = ((time * 1.5 + phase_offset).sin() * 2.0 + 7.0).max(5.0);
+                    
+                    shadows.add_light(LightConfig {
+                        light_type: LightType::Spot {
+                            inner_angle: 20.0_f32.to_radians(),
+                            outer_angle: 35.0_f32.to_radians(),
+                        },
+                        position: Vec3::new(
+                            angle.cos() * 6.0,
+                            height_wave,
+                            angle.sin() * 6.0
+                        ),
+                        direction: Vec3::new(-angle.cos() * 0.3, -1.0, -angle.sin() * 0.3).normalize(),
+                        intensity: wave + (i as f32 * 0.1),
+                        color: colors[i],
+                        attenuation_radius: 15.0,
+                        attenuation_falloff: 2.0,
+                    });
                 }
             }
             3 => {
-                println!("[8] Directional Sun (outdoor)");
-                LightConfig {
-                    light_type: LightType::Directional,
-                    position: Vec3::new(10.0, 15.0, 10.0),
-                    direction: Vec3::new(0.5, -1.0, 0.3).normalize(),
-                    intensity: 1.0,
-                    color: Vec3::new(1.0, 0.95, 0.8), // Warm sunlight
+                // Color party - 8 overlapping lights with pulsing colors
+                for i in 0..8 {
+                    let angle = (i as f32 / 8.0) * std::f32::consts::TAU + time * 0.3;
+                    let height = ((time * 2.0 + i as f32).sin() * 1.5 + 4.0).max(2.0);
+                    let radius = 3.0 + i as f32 * 0.3;
+                    
+                    // Create rainbow colors with time variation
+                    let hue = (i as f32 / 8.0 + time * 0.2) % 1.0;
+                    let color = Self::hue_to_rgb(hue);
+                    
+                    let light_type = if i % 3 == 0 {
+                        LightType::Spot {
+                            inner_angle: 30.0_f32.to_radians(),
+                            outer_angle: 45.0_f32.to_radians(),
+                        }
+                    } else {
+                        LightType::Point
+                    };
+                    
+                    shadows.add_light(LightConfig {
+                        light_type,
+                        position: Vec3::new(angle.cos() * radius, height, angle.sin() * radius),
+                        direction: Vec3::new(0.0, -1.0, 0.0),
+                        intensity: 1.0 + (time * 3.0 + i as f32).sin() * 0.5,
+                        color,
+                        attenuation_radius: 8.0 + (i as f32 * 0.5),
+                        attenuation_falloff: 2.0 + (time * 0.5).sin().abs(),
+                    });
                 }
             }
-            _ => LightConfig::default(),
+            _ => {}
+        }
+    }
+    
+    // Convert HSV to RGB for rainbow colors
+    fn hue_to_rgb(hue: f32) -> Vec3 {
+        let h = hue * 6.0;
+        let x = 1.0 - (h % 2.0 - 1.0).abs();
+        
+        let (r, g, b) = if h < 1.0 {
+            (1.0, x, 0.0)
+        } else if h < 2.0 {
+            (x, 1.0, 0.0)
+        } else if h < 3.0 {
+            (0.0, 1.0, x)
+        } else if h < 4.0 {
+            (0.0, x, 1.0)
+        } else if h < 5.0 {
+            (x, 0.0, 1.0)
+        } else {
+            (1.0, 0.0, x)
         };
+        
+        Vec3::new(r, g, b)
+    }
 
-        // Update the shadow feature's light configuration
-        if let Some(feature) = self.renderer.registry_mut().get_feature_mut("procedural_shadows") {
-            // Downcast to ProceduralShadows to access add_light
-            let shadows: &mut ProceduralShadows = unsafe {
-                &mut *(feature.as_mut() as *mut dyn helio_features::Feature as *mut ProceduralShadows)
-            };
-            // Clear existing lights and add the new one
-            shadows.clear_lights();
-            let _ = shadows.add_light(config);
+    fn update_light_type(&mut self) {
+        println!("\n=== Demo Mode {} ===", self.demo_mode);
+        match self.demo_mode {
+            0 => println!("Single Rotating Spotlight - Watch it circle and pulse!"),
+            1 => println!("RGB Multi-Light Dance - Multiple colored lights with overlapping shadows!"),
+            2 => println!("Spotlight Array - 6 spotlights in formation with wave motion!"),
+            3 => println!("Color Party - 8 lights with rainbow colors and dynamic intensity!"),
+            _ => {}
         }
     }
 
@@ -461,9 +529,11 @@ impl Example {
         };
 
         let mut meshes = Vec::new();
+        let elapsed = (now - self.start_time).as_secs_f32();
 
-        // Ground plane
-        let ground_transform = Mat4::from_translation(Vec3::ZERO);
+        // Ground plane - larger and more interesting
+        let ground_transform = Mat4::from_translation(Vec3::new(0.0, -0.1, 0.0)) *
+            Mat4::from_scale(Vec3::new(1.5, 1.0, 1.5));
         meshes.push((
             TransformUniforms {
                 model: ground_transform.to_cols_array_2d(),
@@ -473,92 +543,160 @@ impl Example {
             self.plane_index_count,
         ));
 
-        // Build a shelter/room structure
-        // Back wall
-        let back_wall = Mat4::from_translation(Vec3::new(0.0, 2.5, -5.0)) *
-            Mat4::from_scale(Vec3::new(10.0, 5.0, 0.2));
-        meshes.push((
-            TransformUniforms {
-                model: back_wall.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Central rotating pillar with spheres
+        for i in 0..5 {
+            let height = i as f32 * 1.5;
+            let angle = elapsed * 0.5 + i as f32 * 0.6;
+            let radius = 2.0 + (elapsed * 0.3 + i as f32).sin() * 0.5;
+            
+            let sphere_pos = Mat4::from_translation(Vec3::new(
+                angle.cos() * radius,
+                height + 1.0,
+                angle.sin() * radius
+            )) * Mat4::from_scale(Vec3::splat(0.8 + (elapsed * 2.0 + i as f32).sin().abs() * 0.3));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: sphere_pos.to_cols_array_2d(),
+                },
+                self.sphere_vertices.into(),
+                self.sphere_indices.into(),
+                self.sphere_index_count,
+            ));
+        }
 
-        // Left wall
-        let left_wall = Mat4::from_translation(Vec3::new(-5.0, 2.5, 0.0)) *
-            Mat4::from_scale(Vec3::new(0.2, 5.0, 10.0));
-        meshes.push((
-            TransformUniforms {
-                model: left_wall.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Orbiting cubes at different heights
+        for i in 0..8 {
+            let orbit_angle = elapsed * 0.8 + (i as f32 / 8.0) * std::f32::consts::TAU;
+            let orbit_radius = 6.0;
+            let height = 2.0 + (elapsed * 1.5 + i as f32).sin() * 2.0;
+            let rotation_speed = 1.0 + i as f32 * 0.2;
+            
+            let cube_transform = Mat4::from_translation(Vec3::new(
+                orbit_angle.cos() * orbit_radius,
+                height,
+                orbit_angle.sin() * orbit_radius
+            )) * Mat4::from_rotation_y(elapsed * rotation_speed) * 
+            Mat4::from_rotation_x(elapsed * rotation_speed * 0.7) *
+            Mat4::from_scale(Vec3::splat(0.6));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: cube_transform.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+        }
 
-        // Right wall (partial, with opening)
-        let right_wall_back = Mat4::from_translation(Vec3::new(5.0, 2.5, -3.0)) *
-            Mat4::from_scale(Vec3::new(0.2, 5.0, 4.0));
-        meshes.push((
-            TransformUniforms {
-                model: right_wall_back.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Dancing spheres on the ground
+        for i in 0..12 {
+            let dance_angle = (i as f32 / 12.0) * std::f32::consts::TAU;
+            let dance_radius = 4.0 + (elapsed * 0.5).sin() * 1.0;
+            let bounce_height = ((elapsed * 3.0 + i as f32).sin().abs() * 2.0 + 0.5).max(0.5);
+            
+            let sphere_transform = Mat4::from_translation(Vec3::new(
+                dance_angle.cos() * dance_radius,
+                bounce_height,
+                dance_angle.sin() * dance_radius
+            )) * Mat4::from_scale(Vec3::splat(0.4 + (elapsed + i as f32).cos().abs() * 0.2));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: sphere_transform.to_cols_array_2d(),
+                },
+                self.sphere_vertices.into(),
+                self.sphere_indices.into(),
+                self.sphere_index_count,
+            ));
+        }
 
-        // Roof
-        let roof = Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)) *
-            Mat4::from_scale(Vec3::new(10.0, 0.2, 10.0));
-        meshes.push((
-            TransformUniforms {
-                model: roof.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Spinning double helix of cubes
+        for i in 0..16 {
+            let helix_height = i as f32 * 0.6;
+            let helix_angle1 = elapsed * 2.0 + i as f32 * 0.4;
+            let helix_angle2 = helix_angle1 + std::f32::consts::PI;
+            let helix_radius = 2.5;
+            
+            // First helix strand
+            let helix1 = Mat4::from_translation(Vec3::new(
+                helix_angle1.cos() * helix_radius,
+                helix_height + 0.5,
+                helix_angle1.sin() * helix_radius
+            )) * Mat4::from_rotation_y(elapsed * 3.0) * Mat4::from_scale(Vec3::splat(0.3));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: helix1.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+            
+            // Second helix strand
+            let helix2 = Mat4::from_translation(Vec3::new(
+                helix_angle2.cos() * helix_radius,
+                helix_height + 0.5,
+                helix_angle2.sin() * helix_radius
+            )) * Mat4::from_rotation_y(elapsed * 3.0) * Mat4::from_scale(Vec3::splat(0.3));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: helix2.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+        }
 
-        // Indoor objects
-        let elapsed = (now - self.start_time).as_secs_f32();
+        // Pulsing towers at corners
+        let tower_positions = [
+            Vec3::new(-8.0, 0.0, -8.0),
+            Vec3::new(8.0, 0.0, -8.0),
+            Vec3::new(-8.0, 0.0, 8.0),
+            Vec3::new(8.0, 0.0, 8.0),
+        ];
+        
+        for (idx, pos) in tower_positions.iter().enumerate() {
+            let pulse = (elapsed * 2.0 + idx as f32 * 1.5).sin() * 2.0 + 3.0;
+            let tower = Mat4::from_translation(*pos + Vec3::new(0.0, pulse / 2.0, 0.0)) *
+                Mat4::from_scale(Vec3::new(0.8, pulse, 0.8));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: tower.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+        }
 
-        // Rotating cube indoors
-        let indoor_cube = Mat4::from_translation(Vec3::new(-2.0, 1.0, -2.0)) *
-            Mat4::from_rotation_y(elapsed);
-        meshes.push((
-            TransformUniforms {
-                model: indoor_cube.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Rotating ring of spheres
+        for i in 0..20 {
+            let ring_angle = (i as f32 / 20.0) * std::f32::consts::TAU + elapsed * 1.5;
+            let ring_radius = 10.0;
+            let ring_height = 3.0 + (ring_angle * 2.0).sin() * 1.0;
+            
+            let sphere = Mat4::from_translation(Vec3::new(
+                ring_angle.cos() * ring_radius,
+                ring_height,
+                ring_angle.sin() * ring_radius
+            )) * Mat4::from_scale(Vec3::splat(0.5));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: sphere.to_cols_array_2d(),
+                },
+                self.sphere_vertices.into(),
+                self.sphere_indices.into(),
+                self.sphere_index_count,
+            ));
+        }
 
-        // Sphere indoors
-        let indoor_sphere = Mat4::from_translation(Vec3::new(2.0, 1.5, -2.0));
-        meshes.push((
-            TransformUniforms {
-                model: indoor_sphere.to_cols_array_2d(),
-            },
-            self.sphere_vertices.into(),
-            self.sphere_indices.into(),
-            self.sphere_index_count,
-        ));
-
-        // Outdoor objects
-        // Cube stack outside
-        let outdoor_cube1 = Mat4::from_translation(Vec3::new(7.0, 0.5, 2.0));
-        meshes.push((
-            TransformUniforms {
-                model: outdoor_cube1.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
 
         let outdoor_cube2 = Mat4::from_translation(Vec3::new(7.0, 1.5, 2.0)) *
             Mat4::from_rotation_y(elapsed * 0.5);
@@ -718,22 +856,6 @@ fn main() {
                                             println!("[4] Procedural Shadows: {}", if enabled { "ON" } else { "OFF" });
                                             app.renderer.rebuild_pipeline();
                                         }
-                                    }
-                                    winit::keyboard::KeyCode::Digit5 => {
-                                        app.current_light_type = 0;
-                                        app.update_light_type();
-                                    }
-                                    winit::keyboard::KeyCode::Digit6 => {
-                                        app.current_light_type = 1;
-                                        app.update_light_type();
-                                    }
-                                    winit::keyboard::KeyCode::Digit7 => {
-                                        app.current_light_type = 2;
-                                        app.update_light_type();
-                                    }
-                                    winit::keyboard::KeyCode::Digit8 => {
-                                        app.current_light_type = 3;
-                                        app.update_light_type();
                                     }
                                     _ => {}
                                 }
