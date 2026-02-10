@@ -12,8 +12,7 @@ Stars and watches directly influence visibility and help justify continued deep-
 
 <img width="3439" height="1439" alt="image" src="https://github.com/user-attachments/assets/96a2ccd1-a77e-4200-9776-da08a944cd81" />
 <img width="3439" height="1435" alt="Screenshot 2026-02-09 142658" src="https://github.com/user-attachments/assets/9b2ebe05-eb97-4571-bb56-59ccddd11de1" />
-<img width="1922" height="1109" alt="image" src="https://github.com/user-attachments/assets/f4707030-0413-4bb5-b064-5547052583db" />
-<img width="1922" height="1109" alt="image" src="https://github.com/user-attachments/assets/a36b0acd-d6c8-498e-a6c5-78cd86e51980" />
+<img width="1646" height="1057" alt="image" src="https://github.com/user-attachments/assets/4f030329-daff-4cb6-a8a9-acc255dcc54b" />
 
 ## Key Features
 
