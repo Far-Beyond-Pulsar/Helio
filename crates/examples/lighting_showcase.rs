@@ -122,6 +122,24 @@ impl Example {
         }
     }
 
+    fn adjust_light_brightness(&mut self, factor: f32) {
+        // Get the shadow feature
+        let shadows = if let Some(feature) = self.renderer.registry_mut().get_feature_mut("procedural_shadows") {
+            unsafe {
+                &mut *(feature.as_mut() as *mut dyn helio_features::Feature as *mut ProceduralShadows)
+            }
+        } else {
+            return;
+        };
+
+        // Adjust intensity of all lights
+        for light in shadows.lights_mut() {
+            light.intensity *= factor;
+        }
+        
+        println!("Light brightness adjusted by {}x", factor);
+    }
+
     fn new(window: &winit::window::Window) -> Self {
         let context = Arc::new(unsafe {
             gpu::Context::init(gpu::ContextDesc {
@@ -858,6 +876,14 @@ fn main() {
                                             println!("[4] Procedural Shadows: {}", if enabled { "ON" } else { "OFF" });
                                             app.renderer.rebuild_pipeline();
                                         }
+                                    }
+                                    winit::keyboard::KeyCode::Equal | winit::keyboard::KeyCode::NumpadAdd => {
+                                        // Brighten lights by 20%
+                                        app.adjust_light_brightness(1.2);
+                                    }
+                                    winit::keyboard::KeyCode::Minus | winit::keyboard::KeyCode::NumpadSubtract => {
+                                        // Darken lights by 20%
+                                        app.adjust_light_brightness(0.8);
                                     }
                                     _ => {}
                                 }
