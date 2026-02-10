@@ -560,6 +560,7 @@ dependencies = [
  "glam",
  "helio-core",
  "helio-feature-base-geometry",
+ "helio-feature-bloom",
  "helio-feature-lighting",
  "helio-feature-materials",
  "helio-feature-procedural-shadows",
@@ -765,6 +766,13 @@ dependencies = [
  "glam",
  "helio-features",
  "log",
+]
+
+[[package]]
+name = "helio-feature-bloom"
+version = "0.1.0"
+dependencies = [
+ "helio-features",
 ]
 
 [[package]]

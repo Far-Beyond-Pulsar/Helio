@@ -4,6 +4,7 @@ use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh};
 use helio_feature_base_geometry::BaseGeometry;
 use helio_feature_lighting::BasicLighting;
 use helio_feature_materials::BasicMaterials;
+use helio_feature_bloom::Bloom;
 use helio_feature_procedural_shadows::{ProceduralShadows, LightType, LightConfig};
 use helio_features::FeatureRegistry;
 use helio_render::{CameraUniforms, FeatureRenderer, TransformUniforms};
@@ -276,6 +277,7 @@ impl Example {
         });
         
         registry.register(shadows);
+        registry.register(Bloom::new());
 
         let renderer = FeatureRenderer::new(
             context.clone(),
