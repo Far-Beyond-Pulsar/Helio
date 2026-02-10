@@ -31,6 +31,30 @@ struct LightingUniforms {
 }
 var<uniform> lighting: LightingUniforms;
 
+// ---------------------------------------------------------------------------
+// Post-processing helpers
+// ---------------------------------------------------------------------------
+
+// ACES filmic tone mapping (Narkowicz 2015 approximation).
+// Maps HDR linear radiance to a perceptually pleasing [0, 1] range with an
+// S-curve: shadows lifted slightly, highlights rolled off gracefully.
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+// Encode a linear-light value into sRGB gamma (display-referred).
+// Matches the IEC 61966-2-1 piecewise curve used by the GPU's sRGB texture
+// format. Using the simple power-law approximation (pow 1/2.2) is close
+// enough for real-time and avoids branching.
+fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
+    return pow(max(linear, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.2));
+}
+
 // Calculate attenuation for a light based on distance and light parameters
 fn calculate_attenuation(light: GpuLight, world_pos: vec3<f32>) -> f32 {
     let light_type = light.position_and_type.w;
@@ -305,9 +329,8 @@ fn calculate_light_contribution(
         return vec3<f32>(0.0);
     }
 
-    // Smooth fade for surfaces facing away from light
-    let face_fade = smoothstep(0.0, 0.15, ndotl);
-    if (face_fade < 0.001) {
+    // Back-face cull: no contribution from surfaces facing away from the light.
+    if (ndotl < 0.001) {
         return vec3<f32>(0.0);
     }
 
@@ -335,8 +358,11 @@ fn calculate_light_contribution(
         }
     }
 
-    // Combine all factors: lighting, attenuation, cone, shadow
-    let combined_attenuation = distance_attenuation * cone_attenuation * face_fade * visibility;
+    // Lambertian diffuse: radiance scales with cosine of incidence angle (ndotl).
+    // This is the physically correct model — surfaces angled away from the light
+    // receive proportionally less energy. Previously face_fade was a binary
+    // smoothstep that kept all lit surfaces at uniform brightness; this fixes that.
+    let combined_attenuation = distance_attenuation * cone_attenuation * ndotl * visibility;
     return light_color * light_intensity * combined_attenuation;
 }
 
@@ -366,12 +392,17 @@ fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<
         total_lighting += light_contribution;
     }
 
-    // Add ambient lighting (20% base)
+    // Flat ambient — keeps unlit areas from going fully black.
     let ambient = 0.2;
     let final_lighting = ambient + total_lighting;
 
-    // Clamp to reasonable range to avoid over-brightening
-    let clamped_lighting = min(final_lighting, vec3<f32>(2.0));
+    // Accumulate linear radiance. No artificial clamp here; ACES handles HDR.
+    let linear_radiance = base_color * final_lighting;
 
-    return base_color * clamped_lighting;
+    // ACES filmic tone mapping: compresses HDR -> [0, 1] with an S-curve.
+    // Bright light overlaps get gracefully rolled off instead of hard-clipping.
+    let tonemapped = aces_tonemap(linear_radiance);
+
+    // Gamma encode for display (linear -> sRGB).
+    return linear_to_srgb(tonemapped);
 }
