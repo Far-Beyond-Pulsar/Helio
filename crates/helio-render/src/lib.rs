@@ -490,16 +490,9 @@ impl FeatureRenderer {
             })
             .collect();
 
-        // Calculate light view projection for shadow mapping
-        // TODO: This should come from a lighting feature, not be hardcoded
-        let light_direction = glam::Vec3::new(0.5, -1.0, 0.3).normalize();
-        let light_pos = -light_direction * 20.0;
-        let light_view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, glam::Vec3::Y);
-        let light_projection = glam::Mat4::orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0);
-        let light_view_proj = (light_projection * light_view).to_cols_array_2d();
-
-        // Execute shadow passes before main render
-        self.registry.execute_shadow_passes(command_encoder, &context, &mesh_data, light_view_proj);
+        // Execute shadow passes before main render.
+        // Each shadow feature computes its own light matrices internally.
+        self.registry.execute_shadow_passes(command_encoder, &context, &mesh_data);
 
         // Execute pre-render passes
         self.registry.execute_pre_passes(command_encoder, &context);
@@ -530,16 +523,13 @@ impl FeatureRenderer {
             #[cfg(feature = "shadows")]
             {
                 use helio_feature_procedural_shadows::ProceduralShadows;
-                // Find the shadow feature and bind its data
+                use helio_features::Feature;
                 for feature in self.registry.features() {
                     if feature.is_enabled() {
-                        // Try to downcast to ProceduralShadows
-                        if let Some(_) = feature.get_shadow_map_view() {
-                            // Get the feature as ProceduralShadows to access get_shadow_map_data
-                            let feature_ptr = feature.as_ref() as *const dyn helio_features::Feature;
-                            let shadows_ptr = feature_ptr as *const ProceduralShadows;
-                            let shadows = unsafe { &*shadows_ptr };
-
+                        // Deref through Box to dyn Feature so as_any() dispatches
+                        // through the Feature vtable (not Box<dyn Feature>'s blanket impl).
+                        let feature_obj: &dyn Feature = &**feature;
+                        if let Some(shadows) = feature_obj.as_any().downcast_ref::<ProceduralShadows>() {
                             if let Some(shadow_data) = shadows.get_shadow_map_data() {
                                 rc.bind(2, &shadow_data);
                                 break;

@@ -2,6 +2,27 @@ use blade_graphics as gpu;
 use std::borrow::Cow;
 use std::sync::Arc;
 
+/// Helper trait enabling safe downcasting of `dyn Feature` to a concrete type.
+///
+/// Implemented automatically for all `'static` types, so any `Feature` implementor
+/// that owns its data (no lifetime parameters) gets this for free.
+///
+/// # Example
+/// ```ignore
+/// if let Some(shadows) = feature.as_any().downcast_ref::<ProceduralShadows>() {
+///     let data = shadows.get_shadow_map_data();
+/// }
+/// ```
+pub trait AsAny: 'static {
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+impl<T: 'static> AsAny for T {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// Defines where shader code should be injected in the rendering pipeline.
 ///
 /// Injection points are processed in order during shader composition. Each feature
@@ -202,7 +223,7 @@ impl FeatureContext {
 ///     }
 /// }
 /// ```
-pub trait Feature: Send + Sync {
+pub trait Feature: Send + Sync + AsAny {
     /// Returns a unique identifier for this feature.
     ///
     /// Used for feature lookup and debugging. Should be lowercase snake_case.
@@ -326,15 +347,13 @@ pub trait Feature: Send + Sync {
     /// - `encoder`: Command encoder for recording render commands
     /// - `context`: Current frame context
     /// - `meshes`: Scene geometry to render
-    /// - `light_view_proj`: Light's view-projection matrix
     fn render_shadow_pass(
         &mut self,
         encoder: &mut gpu::CommandEncoder,
         context: &FeatureContext,
         meshes: &[crate::MeshData],
-        light_view_proj: [[f32; 4]; 4],
     ) {
-        let _ = (encoder, context, meshes, light_view_proj);
+        let _ = (encoder, context, meshes);
     }
 
     /// Get the shadow map texture view for binding in shaders.
@@ -615,17 +634,15 @@ impl FeatureRegistry {
     /// - `encoder`: Command encoder for recording commands
     /// - `context`: Current frame context
     /// - `meshes`: Scene geometry to render into shadow maps
-    /// - `light_view_proj`: Light's view-projection matrix
     pub fn execute_shadow_passes(
         &mut self,
         encoder: &mut gpu::CommandEncoder,
         context: &FeatureContext,
         meshes: &[MeshData],
-        light_view_proj: [[f32; 4]; 4],
     ) {
         for feature in &mut self.features {
             if feature.is_enabled() {
-                feature.render_shadow_pass(encoder, context, meshes, light_view_proj);
+                feature.render_shadow_pass(encoder, context, meshes);
             }
         }
     }

@@ -176,14 +176,17 @@ pub struct ProceduralShadows {
 }
 
 impl ProceduralShadows {
-    /// Create a new procedural shadows feature with default 2048x2048 shadow map.
+    /// Create a new procedural shadows feature with default 1024x1024 shadow map.
+    ///
+    /// Each light slot uses 6 texture array layers (one per cube face), so total memory
+    /// is `size² × MAX_SHADOW_LIGHTS × 6 × 4 bytes`. At 1024×1024 with 8 lights: ~200 MB.
     pub fn new() -> Self {
         Self {
             enabled: true,
             shadow_map: None,
             shadow_map_view: None,
             shadow_sampler: None,
-            shadow_map_size: 2048,
+            shadow_map_size: 1024,
             lights: Vec::new(),
             context: None,
             shadow_pipeline: None,
@@ -296,86 +299,120 @@ impl ProceduralShadows {
         self.lights.first()
     }
 
-    /// Get the light's view-projection matrix for shadow rendering.
+    /// Cube face directions for point light shadow rendering: (forward, up).
+    ///
+    /// Matches the face ordering used by the WGSL `select_cube_face` / `get_cube_face_view_proj`
+    /// functions. Face indices: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z.
+    const CUBE_FACE_DIRS: [(glam::Vec3, glam::Vec3); 6] = [
+        (glam::Vec3::X,     glam::Vec3::NEG_Y),  // +X
+        (glam::Vec3::NEG_X, glam::Vec3::NEG_Y),  // -X
+        (glam::Vec3::Y,     glam::Vec3::Z),       // +Y
+        (glam::Vec3::NEG_Y, glam::Vec3::NEG_Z),  // -Y
+        (glam::Vec3::Z,     glam::Vec3::NEG_Y),  // +Z
+        (glam::Vec3::NEG_Z, glam::Vec3::NEG_Y),  // -Z
+    ];
+
+    /// Returns view-projection matrices for rendering into the shadow map.
+    ///
+    /// For point lights this yields 6 matrices (one per cube face). All other
+    /// light types yield exactly 1. The returned matrices must be rendered into
+    /// consecutive shadow map layers starting at `light_index * 6`.
+    fn get_shadow_render_matrices(config: &LightConfig) -> Vec<glam::Mat4> {
+        match config.light_type {
+            LightType::Directional => {
+                let light_pos = -config.direction * 20.0;
+                let view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, glam::Vec3::Y);
+                let projection = glam::Mat4::orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0);
+                vec![projection * view]
+            }
+            LightType::Point => {
+                // Proper cubemap: 6 faces with 90° FOV each for full omnidirectional coverage.
+                let projection = glam::Mat4::perspective_rh(
+                    90.0_f32.to_radians(),
+                    1.0,
+                    0.1,
+                    config.attenuation_radius,
+                );
+                Self::CUBE_FACE_DIRS.iter().map(|(forward, up)| {
+                    let view = glam::Mat4::look_at_rh(
+                        config.position,
+                        config.position + *forward,
+                        *up,
+                    );
+                    projection * view
+                }).collect()
+            }
+            LightType::Spot { inner_angle: _, outer_angle } => {
+                let view = glam::Mat4::look_at_rh(
+                    config.position,
+                    config.position + config.direction,
+                    glam::Vec3::Y,
+                );
+                let fov = outer_angle * 2.0;
+                let projection = glam::Mat4::perspective_rh(fov, 1.0, 0.1, config.attenuation_radius);
+                vec![projection * view]
+            }
+            LightType::Rect { width, height } => {
+                let view = glam::Mat4::look_at_rh(
+                    config.position,
+                    config.position + config.direction,
+                    glam::Vec3::Y,
+                );
+                let (hw, hh) = (width / 2.0, height / 2.0);
+                let projection = glam::Mat4::orthographic_rh(-hw, hw, -hh, hh, 0.1, config.attenuation_radius);
+                vec![projection * view]
+            }
+        }
+    }
+
+    /// Returns the view-projection matrix stored in GpuLight for shader use.
+    ///
+    /// For point lights the shader reconstructs per-face matrices dynamically, so this
+    /// stores the +X face matrix as a representative value. For all other light types
+    /// this is the single shadow map matrix used during sampling.
     fn get_light_view_proj(config: &LightConfig) -> glam::Mat4 {
         match config.light_type {
             LightType::Directional => {
-                // Directional light: position light far away along direction
                 let light_pos = -config.direction * 20.0;
-                let view = glam::Mat4::look_at_rh(
-                    light_pos,
-                    glam::Vec3::ZERO,
-                    glam::Vec3::Y,
-                );
-
-                // Orthographic projection for parallel light rays
-                let projection = glam::Mat4::orthographic_rh(
-                    -8.0, 8.0,  // left, right
-                    -8.0, 8.0,  // bottom, top
-                    0.1, 40.0,  // near, far
-                );
-
+                let view = glam::Mat4::look_at_rh(light_pos, glam::Vec3::ZERO, glam::Vec3::Y);
+                let projection = glam::Mat4::orthographic_rh(-8.0, 8.0, -8.0, 8.0, 0.1, 40.0);
                 projection * view
             }
             LightType::Point => {
-                // Point light: use perspective projection
-                // Ideally we'd use a cubemap (6 faces) for omnidirectional shadows
-                // As a workaround, use a very wide FOV looking downward to approximate omnidirectional coverage
-                // This captures most inter-object occlusions for objects below/around the light
+                // Shader reconstructs all 6 face matrices dynamically from the light position.
+                // Store face 0 (+X) here so the field is not left as zeros.
+                let (forward, up) = Self::CUBE_FACE_DIRS[0];
                 let view = glam::Mat4::look_at_rh(
                     config.position,
-                    config.position + glam::Vec3::new(0.0, -1.0, 0.0),  // Always look down
-                    glam::Vec3::Z,  // Use Z as up to avoid gimbal lock
+                    config.position + forward,
+                    up,
                 );
-
-                // Very wide FOV (160 degrees) to approximate omnidirectional coverage
-                // This captures objects in most directions from the light
                 let projection = glam::Mat4::perspective_rh(
-                    160.0_f32.to_radians(),  // Wide FOV for better coverage
-                    1.0,  // square aspect ratio
+                    90.0_f32.to_radians(),
+                    1.0,
                     0.1,
                     config.attenuation_radius,
                 );
-
                 projection * view
             }
             LightType::Spot { inner_angle: _, outer_angle } => {
-                // Spotlight: perspective projection with cone angle
                 let view = glam::Mat4::look_at_rh(
                     config.position,
                     config.position + config.direction,
                     glam::Vec3::Y,
                 );
-
-                // Perspective projection matching spotlight cone
-                let fov = outer_angle * 2.0;  // outer_angle is half-angle
-                let projection = glam::Mat4::perspective_rh(
-                    fov,
-                    1.0,  // square aspect ratio
-                    0.1,
-                    config.attenuation_radius,
-                );
-
+                let fov = outer_angle * 2.0;
+                let projection = glam::Mat4::perspective_rh(fov, 1.0, 0.1, config.attenuation_radius);
                 projection * view
             }
             LightType::Rect { width, height } => {
-                // Rectangular area light: orthographic projection
                 let view = glam::Mat4::look_at_rh(
                     config.position,
                     config.position + config.direction,
                     glam::Vec3::Y,
                 );
-
-                // Orthographic projection matching rect dimensions
-                let half_width = width / 2.0;
-                let half_height = height / 2.0;
-                let projection = glam::Mat4::orthographic_rh(
-                    -half_width, half_width,
-                    -half_height, half_height,
-                    0.1,
-                    config.attenuation_radius,
-                );
-
+                let (hw, hh) = (width / 2.0, height / 2.0);
+                let projection = glam::Mat4::orthographic_rh(-hw, hw, -hh, hh, 0.1, config.attenuation_radius);
                 projection * view
             }
         }
@@ -403,8 +440,11 @@ impl ProceduralShadows {
                         break;
                     }
 
+                    // Each light slot occupies 6 consecutive layers (one per cube face).
+                    // Non-point lights only use the first of those 6 layers.
+                    let base_layer = (i * 6) as u32;
                     let view_proj = Self::get_light_view_proj(config);
-                    let mut gpu_light = GpuLight::from_config(config, i as u32);
+                    let mut gpu_light = GpuLight::from_config(config, base_layer);
                     gpu_light.view_proj = view_proj.to_cols_array_2d();
                     gpu_lights[i] = gpu_light;
                     light_count += 1;
@@ -439,15 +479,17 @@ impl Feature for ProceduralShadows {
 
     fn init(&mut self, context: &FeatureContext) {
         log::info!(
-            "Initializing procedural shadows with {}x{} shadow map array ({} layers)",
+            "Initializing procedural shadows with {}x{} shadow map array ({} layers, 6 per light)",
             self.shadow_map_size,
             self.shadow_map_size,
-            MAX_SHADOW_LIGHTS
+            MAX_SHADOW_LIGHTS * 6
         );
         
         self.context = Some(context.gpu.clone());
 
-        // Create shadow map texture array with MAX_SHADOW_LIGHTS layers
+        // Create shadow map texture array: 6 layers per light (one per cube face).
+        // This supports both point lights (all 6 faces used) and other light types
+        // (only face 0 used, but all 6 layers are allocated for consistent indexing).
         let shadow_map = context.gpu.create_texture(gpu::TextureDesc {
             name: "shadow_map_array",
             format: gpu::TextureFormat::Depth32Float,
@@ -457,7 +499,7 @@ impl Feature for ProceduralShadows {
                 depth: 1,
             },
             dimension: gpu::TextureDimension::D2,
-            array_layer_count: MAX_SHADOW_LIGHTS as u32,
+            array_layer_count: (MAX_SHADOW_LIGHTS * 6) as u32,
             mip_level_count: 1,
             usage: gpu::TextureUsage::TARGET | gpu::TextureUsage::RESOURCE,
             sample_count: 1,
@@ -567,7 +609,6 @@ impl Feature for ProceduralShadows {
         encoder: &mut gpu::CommandEncoder,
         context: &FeatureContext,
         meshes: &[helio_features::MeshData],
-        _light_view_proj: [[f32; 4]; 4],
     ) {
         let shadow_pipeline = match &self.shadow_pipeline {
             Some(pipeline) => pipeline,
@@ -585,73 +626,76 @@ impl Feature for ProceduralShadows {
             }
         };
 
-        // Render each light's shadow map into a separate texture array layer
+        // Render each light's shadow map. Each light slot occupies 6 consecutive layers.
+        // Point lights fill all 6 faces; other light types only render into face 0.
         for (light_index, light_config) in self.lights.iter().enumerate() {
             if light_index >= MAX_SHADOW_LIGHTS {
                 break;
             }
 
-            // Create a view for this specific array layer
-            let layer_view = context.gpu.create_texture_view(
-                shadow_texture,
-                gpu::TextureViewDesc {
-                    name: &format!("shadow_map_layer_{}", light_index),
-                    format: gpu::TextureFormat::Depth32Float,
-                    dimension: gpu::ViewDimension::D2,
-                    subresources: &gpu::TextureSubresources {
-                        base_mip_level: 0,
-                        mip_level_count: std::num::NonZero::new(1),
-                        base_array_layer: light_index as u32,
-                        array_layer_count: std::num::NonZero::new(1),
+            let base_layer = light_index * 6;
+            let face_matrices = Self::get_shadow_render_matrices(light_config);
+
+            for (face_idx, face_view_proj) in face_matrices.iter().enumerate() {
+                let layer = base_layer + face_idx;
+
+                let layer_view = context.gpu.create_texture_view(
+                    shadow_texture,
+                    gpu::TextureViewDesc {
+                        name: &format!("shadow_map_light{}_face{}", light_index, face_idx),
+                        format: gpu::TextureFormat::Depth32Float,
+                        dimension: gpu::ViewDimension::D2,
+                        subresources: &gpu::TextureSubresources {
+                            base_mip_level: 0,
+                            mip_level_count: std::num::NonZero::new(1),
+                            base_array_layer: layer as u32,
+                            array_layer_count: std::num::NonZero::new(1),
+                        },
                     },
-                },
-            );
+                );
 
-            // Render shadow pass for this light
-            let light_view_proj = Self::get_light_view_proj(light_config);
+                let mut pass = encoder.render(
+                    &format!("shadow_pass_light{}_face{}", light_index, face_idx),
+                    gpu::RenderTargetSet {
+                        colors: &[],
+                        depth_stencil: Some(gpu::RenderTarget {
+                            view: layer_view,
+                            init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                            finish_op: gpu::FinishOp::Store,
+                        }),
+                    },
+                );
 
-            let mut pass = encoder.render(
-                &format!("shadow_depth_pass_light_{}", light_index),
-                gpu::RenderTargetSet {
-                    colors: &[],
-                    depth_stencil: Some(gpu::RenderTarget {
-                        view: layer_view,
-                        init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
-                        finish_op: gpu::FinishOp::Store,
-                    }),
-                },
-            );
-
-            let shadow_data = ShadowData {
-                shadow_uniforms: ShadowUniforms {
-                    light_view_proj: light_view_proj.to_cols_array_2d(),
-                },
-            };
-
-            let mut rc = pass.with(shadow_pipeline);
-            rc.bind(0, &shadow_data);
-
-            for mesh in meshes {
-                let object_data = ObjectData {
-                    object_uniforms: ObjectUniforms {
-                        model: mesh.transform,
+                let shadow_data = ShadowData {
+                    shadow_uniforms: ShadowUniforms {
+                        light_view_proj: face_view_proj.to_cols_array_2d(),
                     },
                 };
-                rc.bind(1, &object_data);
-                rc.bind_vertex(0, mesh.vertex_buffer);
-                rc.draw_indexed(
-                    mesh.index_buffer,
-                    gpu::IndexType::U32,
-                    mesh.index_count,
-                    0,
-                    0,
-                    1,
-                );
-            }
 
-            // Clean up the temporary layer view
-            drop(pass);
-            context.gpu.destroy_texture_view(layer_view);
+                let mut rc = pass.with(shadow_pipeline);
+                rc.bind(0, &shadow_data);
+
+                for mesh in meshes {
+                    let object_data = ObjectData {
+                        object_uniforms: ObjectUniforms {
+                            model: mesh.transform,
+                        },
+                    };
+                    rc.bind(1, &object_data);
+                    rc.bind_vertex(0, mesh.vertex_buffer);
+                    rc.draw_indexed(
+                        mesh.index_buffer,
+                        gpu::IndexType::U32,
+                        mesh.index_count,
+                        0,
+                        0,
+                        1,
+                    );
+                }
+
+                drop(pass);
+                context.gpu.destroy_texture_view(layer_view);
+            }
         }
     }
     
