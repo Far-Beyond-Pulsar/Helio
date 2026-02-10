@@ -2,43 +2,17 @@ use blade_graphics as gpu;
 use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
 use std::sync::Arc;
 
-/// Maximum number of overlapping lights that can affect a single fragment
-const MAX_OVERLAPPING_LIGHTS: usize = 8;
-
 /// Light type for shadow mapping
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum LightType {
     /// Directional light (sun) - parallel rays, orthographic projection
-    /// Only one directional light can exist at a time
     Directional,
     /// Point light - omnidirectional, perspective projection (6 faces for cubemap)
-    Point { radius: f32 },
+    Point,
     /// Spot light - cone of light, perspective projection
-    Spot { inner_angle: f32, outer_angle: f32, radius: f32 },
+    Spot { inner_angle: f32, outer_angle: f32 },
     /// Rectangular area light - soft shadows, orthographic projection
-    Rect { width: f32, height: f32, radius: f32 },
-}
-
-impl LightType {
-    /// Get the attenuation radius for this light type
-    pub fn attenuation_radius(&self) -> Option<f32> {
-        match self {
-            LightType::Directional => None,
-            LightType::Point { radius } => Some(*radius),
-            LightType::Spot { radius, .. } => Some(*radius),
-            LightType::Rect { radius, .. } => Some(*radius),
-        }
-    }
-
-    /// Get the light type as a u32 for shader use
-    fn as_u32(&self) -> u32 {
-        match self {
-            LightType::Directional => 0,
-            LightType::Point { .. } => 1,
-            LightType::Spot { .. } => 2,
-            LightType::Rect { .. } => 3,
-        }
-    }
+    Rect { width: f32, height: f32 },
 }
 
 /// Configuration for a light source
@@ -135,64 +109,10 @@ impl GpuLight {
     }
 }
 
-/// GPU representation of a light source
-/// Aligned for WGSL uniform buffer (std140 layout)
-#[repr(C, packed(2))]
-#[derive(Clone, Copy)]
-pub struct GpuLight {
-    pub light_type: u32,
-    pub intensity: f32,
-    pub radius: f32,
-    pub _padding1: f32,
-    
-    pub position: [f32; 3],
-    pub inner_angle: f32,
-    
-    pub direction: [f32; 3],
-    pub outer_angle: f32,
-    
-    pub color: [f32; 3],
-    pub width: f32,
-    
-    pub light_view_proj: [[f32; 4]; 4],
-    
-    pub height: f32,
-    pub _padding2: [f32; 3],
-    
-    // Array stride padding: 18 bytes to reach 162 total
-    pub _padding3: [u8; 18],
-}
-
-unsafe impl bytemuck::Pod for GpuLight {}
-unsafe impl bytemuck::Zeroable for GpuLight {}
-
-impl Default for GpuLight {
-    fn default() -> Self {
-        Self {
-            light_type: 0,
-            intensity: 0.0,
-            radius: 0.0,
-            _padding1: 0.0,
-            position: [0.0; 3],
-            inner_angle: 0.0,
-            direction: [0.0; 3],
-            outer_angle: 0.0,
-            color: [0.0; 3],
-            width: 0.0,
-            light_view_proj: [[0.0; 4]; 4],
-            height: 0.0,
-            _padding2: [0.0; 3],
-            _padding3: [0; 18],
-        }
-    }
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShadowUniforms {
-    pub light_count: u32,
-    pub _padding: [u32; 3],
-    pub lights: [GpuLight; MAX_OVERLAPPING_LIGHTS],
+    pub light_view_proj: [[f32; 4]; 4],
 }
 
 /// Uniforms containing all light data for the scene
@@ -246,8 +166,8 @@ pub struct ShadowMapData {
 /// for most applications. With 8 lights, memory usage = size² × 8 × 4 bytes.
 pub struct ProceduralShadows {
     enabled: bool,
-    shadow_maps: Vec<gpu::Texture>,
-    shadow_map_views: Vec<gpu::TextureView>,
+    shadow_map: Option<gpu::Texture>,
+    shadow_map_view: Option<gpu::TextureView>,
     shadow_sampler: Option<gpu::Sampler>,
     shadow_map_size: u32,
     lights: Vec<LightConfig>,
@@ -263,8 +183,8 @@ impl ProceduralShadows {
     pub fn new() -> Self {
         Self {
             enabled: true,
-            shadow_maps: Vec::new(),
-            shadow_map_views: Vec::new(),
+            shadow_map: None,
+            shadow_map_view: None,
             shadow_sampler: None,
             shadow_map_size: 1024,
             lights: Vec::new(),
@@ -498,40 +418,6 @@ impl ProceduralShadows {
         }
     }
 
-    /// Convert a light config to GPU representation
-    fn light_to_gpu(&self, light: &LightConfig) -> GpuLight {
-        let view_proj = self.get_light_view_proj(light);
-        
-        let (inner_angle, outer_angle) = match light.light_type {
-            LightType::Spot { inner_angle, outer_angle, .. } => (inner_angle, outer_angle),
-            _ => (0.0, 0.0),
-        };
-        
-        let (width, height) = match light.light_type {
-            LightType::Rect { width, height, .. } => (width, height),
-            _ => (0.0, 0.0),
-        };
-        
-        let radius = light.light_type.attenuation_radius().unwrap_or(0.0);
-        
-        GpuLight {
-            light_type: light.light_type.as_u32(),
-            intensity: light.intensity,
-            radius,
-            _padding1: 0.0,
-            position: light.position.to_array(),
-            inner_angle,
-            direction: light.direction.to_array(),
-            outer_angle,
-            color: light.color.to_array(),
-            width,
-            light_view_proj: view_proj.to_cols_array_2d(),
-            height,
-            _padding2: [0.0; 3],
-            _padding3: [0; 18],
-        }
-    }
-
     /// Get the shadow map data for binding in the main render pass.
     ///
     /// Returns shader data containing the shadow map texture array, comparison sampler,
@@ -630,9 +516,8 @@ impl Feature for ProceduralShadows {
             },
         );
 
-            self.shadow_maps.push(shadow_map);
-            self.shadow_map_views.push(shadow_map_view);
-        }
+        self.shadow_map = Some(shadow_map);
+        self.shadow_map_view = Some(shadow_map_view);
 
         // Create comparison sampler for shadow map sampling
         let shadow_sampler = context.gpu.create_sampler(gpu::SamplerDesc {
@@ -821,11 +706,11 @@ impl Feature for ProceduralShadows {
             context.gpu.destroy_sampler(sampler);
         }
 
-        for view in self.shadow_map_views.drain(..) {
+        if let Some(view) = self.shadow_map_view.take() {
             context.gpu.destroy_texture_view(view);
         }
 
-        for texture in self.shadow_maps.drain(..) {
+        if let Some(texture) = self.shadow_map.take() {
             context.gpu.destroy_texture(texture);
         }
 
@@ -834,6 +719,6 @@ impl Feature for ProceduralShadows {
     }
 
     fn get_shadow_map_view(&self) -> Option<gpu::TextureView> {
-        self.shadow_map_views.first().copied()
+        self.shadow_map_view
     }
 }
