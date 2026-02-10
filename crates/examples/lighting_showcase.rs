@@ -239,7 +239,7 @@ impl Example {
         registry.register(BasicMaterials::new());
 
         // Start with an impressive multi-light setup
-        let mut shadows = ProceduralShadows::new();
+        let mut shadows = ProceduralShadows::new().with_ambient(0.0);
         
         // Add multiple overlapping colored lights for a dramatic showcase
         shadows.add_light(LightConfig {

@@ -162,7 +162,7 @@ impl Example {
         registry.register(base_geometry);
         registry.register(BasicLighting::new());
         registry.register(BasicMaterials::new());
-        registry.register(ProceduralShadows::new());
+        registry.register(ProceduralShadows::new().with_ambient(0.0));
 
         let renderer = FeatureRenderer::new(
             context.clone(),

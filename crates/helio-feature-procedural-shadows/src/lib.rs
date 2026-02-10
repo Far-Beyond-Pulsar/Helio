@@ -119,7 +119,7 @@ pub struct ShadowUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct LightingUniforms {
-    /// Number of active lights (stored in .x, rest unused)
+    /// Number of active lights (x), ambient light intensity (y), zw unused
     pub light_count: [f32; 4],
     /// Array of all lights
     pub lights: [GpuLight; MAX_SHADOW_LIGHTS],
@@ -171,6 +171,7 @@ pub struct ProceduralShadows {
     shadow_sampler: Option<gpu::Sampler>,
     shadow_map_size: u32,
     lights: Vec<LightConfig>,
+    ambient: f32,
     context: Option<Arc<gpu::Context>>,
     shadow_pipeline: Option<gpu::RenderPipeline>,
 }
@@ -188,6 +189,7 @@ impl ProceduralShadows {
             shadow_sampler: None,
             shadow_map_size: 1024,
             lights: Vec::new(),
+            ambient: 0.0,
             context: None,
             shadow_pipeline: None,
         }
@@ -202,6 +204,27 @@ impl ProceduralShadows {
     pub fn with_size(mut self, size: u32) -> Self {
         self.shadow_map_size = size;
         self
+    }
+
+    /// Set the ambient light intensity (0.0 = black shadows, 1.0 = fully lit).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let shadows = ProceduralShadows::new().with_ambient(0.1);
+    /// ```
+    pub fn with_ambient(mut self, ambient: f32) -> Self {
+        self.ambient = ambient;
+        self
+    }
+
+    /// Set the ambient light intensity at runtime.
+    pub fn set_ambient(&mut self, ambient: f32) {
+        self.ambient = ambient;
+    }
+
+    /// Get the current ambient light intensity.
+    pub fn ambient(&self) -> f32 {
+        self.ambient
     }
 
     /// Add a light source to the scene.
@@ -451,7 +474,7 @@ impl ProceduralShadows {
                 }
 
                 let lighting = LightingUniforms {
-                    light_count: [light_count as f32, 0.0, 0.0, 0.0],
+                    light_count: [light_count as f32, self.ambient, 0.0, 0.0],
                     lights: gpu_lights,
                 };
 

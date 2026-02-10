@@ -26,7 +26,7 @@ struct GpuLight {
 
 // Lighting uniforms containing all lights
 struct LightingUniforms {
-    light_count: vec4<f32>,  // x = count, yzw unused
+    light_count: vec4<f32>,  // x = count, y = ambient, zw unused
     lights: array<GpuLight, MAX_SHADOW_LIGHTS>,
 }
 var<uniform> lighting: LightingUniforms;
@@ -360,10 +360,11 @@ fn calculate_light_contribution(
 // Apply multi-light shadows and lighting to color
 fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
     let light_count = i32(lighting.light_count.x);
+    let ambient = lighting.light_count.y;
 
     // No lights - return ambient only
     if (light_count == 0) {
-        return base_color * 0.2;
+        return base_color * ambient;
     }
 
     // Accumulate lighting from all lights
@@ -384,8 +385,8 @@ fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<
     }
 
     // Ambient keeps unlit surfaces from going fully black.
-    let ambient = 0.2;
-    let final_lighting = ambient + total_lighting;
+    // Use max() instead of adding to prevent double-lighting
+    let final_lighting = max(total_lighting, vec3<f32>(ambient));
 
     // Multiply albedo by accumulated radiance (no hard clamp; ACES handles HDR).
     let linear_radiance = base_color * final_lighting;
