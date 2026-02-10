@@ -23,6 +23,12 @@ pub struct LightConfig {
     pub direction: glam::Vec3,
     pub intensity: f32,
     pub color: glam::Vec3,
+    /// Attenuation radius - distance where light influence reaches zero
+    /// Only applies to Point, Spot, and Rect lights (not Directional)
+    pub attenuation_radius: f32,
+    /// Attenuation falloff exponent - controls how quickly light fades
+    /// Typical values: 1.0 (linear), 2.0 (quadratic/physically accurate), 4.0 (sharp falloff)
+    pub attenuation_falloff: f32,
 }
 
 impl Default for LightConfig {
@@ -33,6 +39,72 @@ impl Default for LightConfig {
             direction: glam::Vec3::new(0.5, -1.0, 0.3).normalize(),
             intensity: 1.0,
             color: glam::Vec3::ONE,
+            attenuation_radius: 10.0,
+            attenuation_falloff: 2.0,
+        }
+    }
+}
+
+/// Maximum number of shadow-casting lights that can overlap
+pub const MAX_SHADOW_LIGHTS: usize = 8;
+
+/// GPU representation of a single light for shaders
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuLight {
+    /// Light view-projection matrix for shadow mapping
+    pub view_proj: [[f32; 4]; 4],
+    /// Light position in world space (w component is light type)
+    /// type: 0.0 = Directional, 1.0 = Point, 2.0 = Spot, 3.0 = Rect
+    pub position_and_type: [f32; 4],
+    /// Light direction (normalized) and attenuation radius
+    pub direction_and_radius: [f32; 4],
+    /// Light color (RGB) and intensity
+    pub color_and_intensity: [f32; 4],
+    /// Spot light angles (inner, outer) and attenuation falloff, plus shadow map layer index
+    pub params: [f32; 4],
+}
+
+impl GpuLight {
+    fn from_config(config: &LightConfig, shadow_layer: u32) -> Self {
+        let light_type = match config.light_type {
+            LightType::Directional => 0.0,
+            LightType::Point => 1.0,
+            LightType::Spot { .. } => 2.0,
+            LightType::Rect { .. } => 3.0,
+        };
+
+        let (inner_angle, outer_angle) = match config.light_type {
+            LightType::Spot { inner_angle, outer_angle } => (inner_angle, outer_angle),
+            _ => (0.0, 0.0),
+        };
+
+        Self {
+            view_proj: [[0.0; 4]; 4], // Will be filled by caller
+            position_and_type: [
+                config.position.x,
+                config.position.y,
+                config.position.z,
+                light_type,
+            ],
+            direction_and_radius: [
+                config.direction.x,
+                config.direction.y,
+                config.direction.z,
+                config.attenuation_radius,
+            ],
+            color_and_intensity: [
+                config.color.x,
+                config.color.y,
+                config.color.z,
+                config.intensity,
+            ],
+            params: [
+                inner_angle,
+                outer_angle,
+                config.attenuation_falloff,
+                shadow_layer as f32,
+            ],
         }
     }
 }
@@ -41,6 +113,16 @@ impl Default for LightConfig {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct ShadowUniforms {
     pub light_view_proj: [[f32; 4]; 4],
+}
+
+/// Uniforms containing all light data for the scene
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LightingUniforms {
+    /// Number of active lights (stored in .x, rest unused)
+    pub light_count: [f32; 4],
+    /// Array of all lights
+    pub lights: [GpuLight; MAX_SHADOW_LIGHTS],
 }
 
 #[repr(C)]
@@ -62,26 +144,33 @@ struct ObjectData {
 /// Shadow map texture and sampler for binding in shaders
 #[derive(blade_macros::ShaderData)]
 pub struct ShadowMapData {
-    pub shadow_map: gpu::TextureView,
+    pub shadow_maps: gpu::TextureView,  // Texture array with MAX_SHADOW_LIGHTS layers
     pub shadow_sampler: gpu::Sampler,
+    pub lighting: LightingUniforms,
 }
 
 /// Procedural shadow mapping feature.
 ///
-/// Renders scene geometry into a shadow map from the light's perspective,
-/// then samples it during main rendering to produce shadows.
+/// Renders scene geometry into shadow maps from multiple light perspectives,
+/// then samples them during main rendering to produce shadows. Supports up to
+/// 8 overlapping shadow-casting lights plus one directional skylight.
+///
+/// # Light Types
+/// - **Directional**: Sun/skylight - parallel rays, no attenuation
+/// - **Point**: Omnidirectional light with radius-based attenuation
+/// - **Spot**: Cone of light with angle and radius-based attenuation
+/// - **Rect**: Rectangular area light with radius-based attenuation
 ///
 /// # Performance
 /// Shadow map size significantly impacts performance. Use 1024 or 2048
-/// for most applications. Higher resolutions provide sharper shadows at
-/// the cost of memory and rendering time.
+/// for most applications. With 8 lights, memory usage = size² × 8 × 4 bytes.
 pub struct ProceduralShadows {
     enabled: bool,
     shadow_map: Option<gpu::Texture>,
     shadow_map_view: Option<gpu::TextureView>,
     shadow_sampler: Option<gpu::Sampler>,
     shadow_map_size: u32,
-    light_config: LightConfig,
+    lights: Vec<LightConfig>,
     context: Option<Arc<gpu::Context>>,
     shadow_pipeline: Option<gpu::RenderPipeline>,
 }
@@ -95,7 +184,7 @@ impl ProceduralShadows {
             shadow_map_view: None,
             shadow_sampler: None,
             shadow_map_size: 2048,
-            light_config: LightConfig::default(),
+            lights: Vec::new(),
             context: None,
             shadow_pipeline: None,
         }
@@ -112,58 +201,107 @@ impl ProceduralShadows {
         self
     }
 
-    /// Configure the light source.
+    /// Add a light source to the scene.
+    ///
+    /// # Panics
+    /// Panics if more than MAX_SHADOW_LIGHTS (8) non-directional lights are added.
+    pub fn add_light(&mut self, config: LightConfig) {
+        if config.light_type != LightType::Directional {
+            let non_directional_count = self.lights.iter()
+                .filter(|l| l.light_type != LightType::Directional)
+                .count();
+            
+            if non_directional_count >= MAX_SHADOW_LIGHTS {
+                panic!("Maximum of {} shadow-casting lights exceeded", MAX_SHADOW_LIGHTS);
+            }
+        }
+        self.lights.push(config);
+    }
+
+    /// Clear all lights from the scene.
+    pub fn clear_lights(&mut self) {
+        self.lights.clear();
+    }
+
+    /// Get all current lights.
+    pub fn lights(&self) -> &[LightConfig] {
+        &self.lights
+    }
+
+    /// Get mutable access to all lights.
+    pub fn lights_mut(&mut self) -> &mut Vec<LightConfig> {
+        &mut self.lights
+    }
+
+    /// Configure the light source (legacy single-light API).
     pub fn with_light(mut self, config: LightConfig) -> Self {
-        self.light_config = config;
+        self.lights.clear();
+        self.lights.push(config);
         self
     }
 
     /// Create a directional light (sun).
     pub fn with_directional_light(mut self, direction: glam::Vec3) -> Self {
-        self.light_config.light_type = LightType::Directional;
-        self.light_config.direction = direction.normalize();
+        let mut config = LightConfig::default();
+        config.light_type = LightType::Directional;
+        config.direction = direction.normalize();
+        self.lights.clear();
+        self.lights.push(config);
         self
     }
 
     /// Create a point light.
-    pub fn with_point_light(mut self, position: glam::Vec3) -> Self {
-        self.light_config.light_type = LightType::Point;
-        self.light_config.position = position;
+    pub fn with_point_light(mut self, position: glam::Vec3, radius: f32) -> Self {
+        let mut config = LightConfig::default();
+        config.light_type = LightType::Point;
+        config.position = position;
+        config.attenuation_radius = radius;
+        self.lights.clear();
+        self.lights.push(config);
         self
     }
 
     /// Create a spotlight.
-    pub fn with_spot_light(mut self, position: glam::Vec3, direction: glam::Vec3, inner_angle: f32, outer_angle: f32) -> Self {
-        self.light_config.light_type = LightType::Spot { inner_angle, outer_angle };
-        self.light_config.position = position;
-        self.light_config.direction = direction.normalize();
+    pub fn with_spot_light(mut self, position: glam::Vec3, direction: glam::Vec3, inner_angle: f32, outer_angle: f32, radius: f32) -> Self {
+        let mut config = LightConfig::default();
+        config.light_type = LightType::Spot { inner_angle, outer_angle };
+        config.position = position;
+        config.direction = direction.normalize();
+        config.attenuation_radius = radius;
+        self.lights.clear();
+        self.lights.push(config);
         self
     }
 
     /// Create a rectangular area light.
-    pub fn with_rect_light(mut self, position: glam::Vec3, direction: glam::Vec3, width: f32, height: f32) -> Self {
-        self.light_config.light_type = LightType::Rect { width, height };
-        self.light_config.position = position;
-        self.light_config.direction = direction.normalize();
+    pub fn with_rect_light(mut self, position: glam::Vec3, direction: glam::Vec3, width: f32, height: f32, radius: f32) -> Self {
+        let mut config = LightConfig::default();
+        config.light_type = LightType::Rect { width, height };
+        config.position = position;
+        config.direction = direction.normalize();
+        config.attenuation_radius = radius;
+        self.lights.clear();
+        self.lights.push(config);
         self
     }
 
-    /// Update the light configuration at runtime.
+    /// Update the light configuration at runtime (legacy single-light API).
     pub fn set_light_config(&mut self, config: LightConfig) {
-        self.light_config = config;
+        self.lights.clear();
+        self.lights.push(config);
     }
 
-    /// Get the current light configuration.
-    pub fn light_config(&self) -> &LightConfig {
-        &self.light_config
+    /// Get the current light configuration (legacy single-light API).
+    pub fn light_config(&self) -> Option<&LightConfig> {
+        self.lights.first()
     }
 
     /// Get the light's view-projection matrix for shadow rendering.
-    pub fn get_light_view_proj(&self) -> glam::Mat4 {
-        match self.light_config.light_type {
+    fn get_light_view_proj(config: &LightConfig) -> glam::Mat4 {
+        match config.light_type {
             LightType::Directional => {
                 // Directional light: position light far away along direction
-                let light_pos = -self.light_config.direction * 20.0;
+                let light_pos = -config.direction * 20.0;
                 let view = glam::Mat4::look_at_rh(
                     light_pos,
                     glam::Vec3::ZERO,
@@ -184,8 +322,8 @@ impl ProceduralShadows {
                 // For full point light shadows, we'd need a cubemap (6 faces)
                 // For now, use single face pointing down
                 let view = glam::Mat4::look_at_rh(
-                    self.light_config.position,
-                    self.light_config.position + self.light_config.direction,
+                    config.position,
+                    config.position + config.direction,
                     glam::Vec3::Y,
                 );
 
@@ -194,7 +332,7 @@ impl ProceduralShadows {
                     90.0_f32.to_radians(),
                     1.0,  // square aspect ratio
                     0.1,
-                    50.0,
+                    config.attenuation_radius,
                 );
 
                 projection * view
@@ -202,8 +340,8 @@ impl ProceduralShadows {
             LightType::Spot { inner_angle: _, outer_angle } => {
                 // Spotlight: perspective projection with cone angle
                 let view = glam::Mat4::look_at_rh(
-                    self.light_config.position,
-                    self.light_config.position + self.light_config.direction,
+                    config.position,
+                    config.position + config.direction,
                     glam::Vec3::Y,
                 );
 
@@ -213,7 +351,7 @@ impl ProceduralShadows {
                     fov,
                     1.0,  // square aspect ratio
                     0.1,
-                    50.0,
+                    config.attenuation_radius,
                 );
 
                 projection * view
@@ -221,8 +359,8 @@ impl ProceduralShadows {
             LightType::Rect { width, height } => {
                 // Rectangular area light: orthographic projection
                 let view = glam::Mat4::look_at_rh(
-                    self.light_config.position,
-                    self.light_config.position + self.light_config.direction,
+                    config.position,
+                    config.position + config.direction,
                     glam::Vec3::Y,
                 );
 
@@ -232,7 +370,8 @@ impl ProceduralShadows {
                 let projection = glam::Mat4::orthographic_rh(
                     -half_width, half_width,
                     -half_height, half_height,
-                    0.1, 40.0,
+                    0.1,
+                    config.attenuation_radius,
                 );
 
                 projection * view
@@ -242,14 +381,44 @@ impl ProceduralShadows {
 
     /// Get the shadow map data for binding in the main render pass.
     ///
-    /// Returns shader data containing the shadow map texture view and comparison sampler.
-    /// This should be bound at group 2 during the main render pass.
+    /// Returns shader data containing the shadow map texture array, comparison sampler,
+    /// and all light data. This should be bound at group 2 during the main render pass.
     pub fn get_shadow_map_data(&self) -> Option<ShadowMapData> {
         match (self.shadow_map_view, self.shadow_sampler) {
-            (Some(view), Some(sampler)) => Some(ShadowMapData {
-                shadow_map: view,
-                shadow_sampler: sampler,
-            }),
+            (Some(view), Some(sampler)) => {
+                // Build lighting uniforms
+                let mut gpu_lights = [GpuLight {
+                    view_proj: [[0.0; 4]; 4],
+                    position_and_type: [0.0; 4],
+                    direction_and_radius: [0.0; 4],
+                    color_and_intensity: [0.0; 4],
+                    params: [0.0; 4],
+                }; MAX_SHADOW_LIGHTS];
+
+                let mut light_count = 0;
+                for (i, config) in self.lights.iter().enumerate() {
+                    if i >= MAX_SHADOW_LIGHTS {
+                        break;
+                    }
+
+                    let view_proj = Self::get_light_view_proj(config);
+                    let mut gpu_light = GpuLight::from_config(config, i as u32);
+                    gpu_light.view_proj = view_proj.to_cols_array_2d();
+                    gpu_lights[i] = gpu_light;
+                    light_count += 1;
+                }
+
+                let lighting = LightingUniforms {
+                    light_count: [light_count as f32, 0.0, 0.0, 0.0],
+                    lights: gpu_lights,
+                };
+
+                Some(ShadowMapData {
+                    shadow_maps: view,
+                    shadow_sampler: sampler,
+                    lighting,
+                })
+            }
             _ => None,
         }
     }
@@ -268,16 +437,17 @@ impl Feature for ProceduralShadows {
 
     fn init(&mut self, context: &FeatureContext) {
         log::info!(
-            "Initializing procedural shadows with {}x{} shadow map",
+            "Initializing procedural shadows with {}x{} shadow map array ({} layers)",
             self.shadow_map_size,
-            self.shadow_map_size
+            self.shadow_map_size,
+            MAX_SHADOW_LIGHTS
         );
         
         self.context = Some(context.gpu.clone());
 
-        // Create shadow map texture
+        // Create shadow map texture array with MAX_SHADOW_LIGHTS layers
         let shadow_map = context.gpu.create_texture(gpu::TextureDesc {
-            name: "shadow_map",
+            name: "shadow_map_array",
             format: gpu::TextureFormat::Depth32Float,
             size: gpu::Extent {
                 width: self.shadow_map_size,
@@ -285,7 +455,7 @@ impl Feature for ProceduralShadows {
                 depth: 1,
             },
             dimension: gpu::TextureDimension::D2,
-            array_layer_count: 1,
+            array_layer_count: MAX_SHADOW_LIGHTS as u32,
             mip_level_count: 1,
             usage: gpu::TextureUsage::TARGET | gpu::TextureUsage::RESOURCE,
             sample_count: 1,
@@ -295,9 +465,9 @@ impl Feature for ProceduralShadows {
         let shadow_map_view = context.gpu.create_texture_view(
             shadow_map,
             gpu::TextureViewDesc {
-                name: "shadow_map_view",
+                name: "shadow_map_array_view",
                 format: gpu::TextureFormat::Depth32Float,
-                dimension: gpu::ViewDimension::D2,
+                dimension: gpu::ViewDimension::D2Array,
                 subresources: &Default::default(),
             },
         );
@@ -393,9 +563,9 @@ impl Feature for ProceduralShadows {
     fn render_shadow_pass(
         &mut self,
         encoder: &mut gpu::CommandEncoder,
-        _context: &FeatureContext,
+        context: &FeatureContext,
         meshes: &[helio_features::MeshData],
-        light_view_proj: [[f32; 4]; 4],
+        _light_view_proj: [[f32; 4]; 4],
     ) {
         let shadow_pipeline = match &self.shadow_pipeline {
             Some(pipeline) => pipeline,
@@ -405,42 +575,81 @@ impl Feature for ProceduralShadows {
             }
         };
 
-        let shadow_view = match self.shadow_map_view {
-            Some(view) => view,
+        let shadow_texture = match self.shadow_map {
+            Some(texture) => texture,
             None => {
-                log::warn!("Shadow map view not initialized");
+                log::warn!("Shadow map not initialized");
                 return;
             }
         };
 
-        let mut pass = encoder.render(
-            "shadow_depth_pass",
-            gpu::RenderTargetSet {
-                colors: &[],
-                depth_stencil: Some(gpu::RenderTarget {
-                    view: shadow_view,
-                    init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
-                    finish_op: gpu::FinishOp::Store,
-                }),
-            },
-        );
+        // Render each light's shadow map into a separate texture array layer
+        for (light_index, light_config) in self.lights.iter().enumerate() {
+            if light_index >= MAX_SHADOW_LIGHTS {
+                break;
+            }
 
-        let shadow_data = ShadowData {
-            shadow_uniforms: ShadowUniforms { light_view_proj },
-        };
+            // Create a view for this specific array layer
+            let layer_view = context.gpu.create_texture_view(
+                shadow_texture,
+                gpu::TextureViewDesc {
+                    name: &format!("shadow_map_layer_{}", light_index),
+                    format: gpu::TextureFormat::Depth32Float,
+                    dimension: gpu::ViewDimension::D2,
+                    subresources: &gpu::TextureSubresources {
+                        base_mip_level: 0,
+                        mip_level_count: std::num::NonZero::new(1),
+                        base_array_layer: light_index as u32,
+                        array_layer_count: std::num::NonZero::new(1),
+                    },
+                },
+            );
 
-        let mut rc = pass.with(shadow_pipeline);
-        rc.bind(0, &shadow_data);
+            // Render shadow pass for this light
+            let light_view_proj = Self::get_light_view_proj(light_config);
 
-        for mesh in meshes {
-            let object_data = ObjectData {
-                object_uniforms: ObjectUniforms {
-                    model: mesh.transform,
+            let mut pass = encoder.render(
+                &format!("shadow_depth_pass_light_{}", light_index),
+                gpu::RenderTargetSet {
+                    colors: &[],
+                    depth_stencil: Some(gpu::RenderTarget {
+                        view: layer_view,
+                        init_op: gpu::InitOp::Clear(gpu::TextureColor::White),
+                        finish_op: gpu::FinishOp::Store,
+                    }),
+                },
+            );
+
+            let shadow_data = ShadowData {
+                shadow_uniforms: ShadowUniforms {
+                    light_view_proj: light_view_proj.to_cols_array_2d(),
                 },
             };
-            rc.bind(1, &object_data);
-            rc.bind_vertex(0, mesh.vertex_buffer);
-            rc.draw_indexed(mesh.index_buffer, gpu::IndexType::U32, mesh.index_count, 0, 0, 1);
+
+            let mut rc = pass.with(shadow_pipeline);
+            rc.bind(0, &shadow_data);
+
+            for mesh in meshes {
+                let object_data = ObjectData {
+                    object_uniforms: ObjectUniforms {
+                        model: mesh.transform,
+                    },
+                };
+                rc.bind(1, &object_data);
+                rc.bind_vertex(0, mesh.vertex_buffer);
+                rc.draw_indexed(
+                    mesh.index_buffer,
+                    gpu::IndexType::U32,
+                    mesh.index_count,
+                    0,
+                    0,
+                    1,
+                );
+            }
+
+            // Clean up the temporary layer view
+            drop(pass);
+            context.gpu.destroy_texture_view(layer_view);
         }
     }
     

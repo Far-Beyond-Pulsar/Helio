@@ -245,6 +245,7 @@ impl Example {
                 Vec3::new(0.0, -1.0, 0.0),
                 30.0_f32.to_radians(),
                 45.0_f32.to_radians(),
+                15.0, // attenuation radius
             );
         registry.register(spotlight);
 
@@ -301,6 +302,8 @@ impl Example {
                     direction: Vec3::new(0.0, -1.0, 0.0),
                     intensity: 1.0,
                     color: Vec3::new(1.0, 0.3, 0.3), // Red tint
+                    attenuation_radius: 15.0,
+                    attenuation_falloff: 2.0,
                 }
             }
             1 => {
@@ -311,6 +314,8 @@ impl Example {
                     direction: Vec3::new(0.0, -1.0, 0.0),
                     intensity: 1.0,
                     color: Vec3::new(0.3, 1.0, 0.3), // Green tint
+                    attenuation_radius: 12.0,
+                    attenuation_falloff: 2.0,
                 }
             }
             2 => {
@@ -324,6 +329,8 @@ impl Example {
                     direction: Vec3::new(0.0, -1.0, 0.0),
                     intensity: 1.0,
                     color: Vec3::new(0.3, 0.3, 1.0), // Blue tint
+                    attenuation_radius: 10.0,
+                    attenuation_falloff: 2.0,
                 }
             }
             3 => {
@@ -334,6 +341,8 @@ impl Example {
                     direction: Vec3::new(0.5, -1.0, 0.3).normalize(),
                     intensity: 1.0,
                     color: Vec3::new(1.0, 0.95, 0.8), // Warm sunlight
+                    attenuation_radius: 100.0, // Not used for directional
+                    attenuation_falloff: 1.0,  // Not used for directional
                 }
             }
             _ => LightConfig::default(),
