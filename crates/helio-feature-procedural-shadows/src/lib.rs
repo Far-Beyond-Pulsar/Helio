@@ -587,10 +587,10 @@ impl Feature for ProceduralShadows {
                 depth_write_enabled: true,
                 depth_compare: gpu::CompareFunction::Less,
                 stencil: Default::default(),
-                // Hardware depth bias to prevent shadow acne
+                // No hardware depth bias - PCF filtering handles artifacts
                 bias: gpu::DepthBiasState {
-                    constant: 2,      // Constant bias
-                    slope_scale: 2.0, // Slope-scaled bias
+                    constant: 0,
+                    slope_scale: 0.0,
                     clamp: 0.0,
                 },
             }),

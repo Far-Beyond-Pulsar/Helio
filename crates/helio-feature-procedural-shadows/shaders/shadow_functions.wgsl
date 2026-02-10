@@ -327,17 +327,16 @@ fn calculate_light_contribution(
         return vec3<f32>(0.0);
     }
 
-    // Apply a normal-scaled offset to reduce shadow acne
-    let normal_offset = 0.02;
-    let offset_pos = world_pos + normal * normal_offset * (1.0 - ndotl);
-    let shadow_bias = 0.005;
-    let slope_bias = max(shadow_bias * (1.0 - ndotl), shadow_bias);
+    // No bias - PCF filtering handles shadow acne
+    let normal_offset = 0.0;
+    let offset_pos = world_pos + normal * normal_offset;
+    let shadow_bias = 0.0;
 
     var visibility = 1.0;
 
     if (light_type == LIGHT_TYPE_POINT) {
         // Point lights use per-face cubemap lookup across 6 texture array layers
-        visibility = sample_point_light_shadow(light, base_layer, offset_pos, slope_bias);
+        visibility = sample_point_light_shadow(light, base_layer, offset_pos, shadow_bias);
     } else {
         var shadow_coord = world_to_shadow_coord(offset_pos, light.view_proj);
 
@@ -346,7 +345,7 @@ fn calculate_light_contribution(
             shadow_coord.y >= 0.0 && shadow_coord.y <= 1.0 &&
             shadow_coord.z >= 0.0 && shadow_coord.z <= 1.0) {
 
-            shadow_coord.z -= slope_bias;
+            shadow_coord.z -= shadow_bias;
             visibility = sample_shadow_visibility(shadow_coord, base_layer);
         }
     }
