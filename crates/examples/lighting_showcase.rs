@@ -529,9 +529,11 @@ impl Example {
         };
 
         let mut meshes = Vec::new();
+        let elapsed = (now - self.start_time).as_secs_f32();
 
-        // Ground plane
-        let ground_transform = Mat4::from_translation(Vec3::ZERO);
+        // Ground plane - larger and more interesting
+        let ground_transform = Mat4::from_translation(Vec3::new(0.0, -0.1, 0.0)) *
+            Mat4::from_scale(Vec3::new(1.5, 1.0, 1.5));
         meshes.push((
             TransformUniforms {
                 model: ground_transform.to_cols_array_2d(),
@@ -541,92 +543,160 @@ impl Example {
             self.plane_index_count,
         ));
 
-        // Build a shelter/room structure
-        // Back wall
-        let back_wall = Mat4::from_translation(Vec3::new(0.0, 2.5, -5.0)) *
-            Mat4::from_scale(Vec3::new(10.0, 5.0, 0.2));
-        meshes.push((
-            TransformUniforms {
-                model: back_wall.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Central rotating pillar with spheres
+        for i in 0..5 {
+            let height = i as f32 * 1.5;
+            let angle = elapsed * 0.5 + i as f32 * 0.6;
+            let radius = 2.0 + (elapsed * 0.3 + i as f32).sin() * 0.5;
+            
+            let sphere_pos = Mat4::from_translation(Vec3::new(
+                angle.cos() * radius,
+                height + 1.0,
+                angle.sin() * radius
+            )) * Mat4::from_scale(Vec3::splat(0.8 + (elapsed * 2.0 + i as f32).sin().abs() * 0.3));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: sphere_pos.to_cols_array_2d(),
+                },
+                self.sphere_vertices.into(),
+                self.sphere_indices.into(),
+                self.sphere_index_count,
+            ));
+        }
 
-        // Left wall
-        let left_wall = Mat4::from_translation(Vec3::new(-5.0, 2.5, 0.0)) *
-            Mat4::from_scale(Vec3::new(0.2, 5.0, 10.0));
-        meshes.push((
-            TransformUniforms {
-                model: left_wall.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Orbiting cubes at different heights
+        for i in 0..8 {
+            let orbit_angle = elapsed * 0.8 + (i as f32 / 8.0) * std::f32::consts::TAU;
+            let orbit_radius = 6.0;
+            let height = 2.0 + (elapsed * 1.5 + i as f32).sin() * 2.0;
+            let rotation_speed = 1.0 + i as f32 * 0.2;
+            
+            let cube_transform = Mat4::from_translation(Vec3::new(
+                orbit_angle.cos() * orbit_radius,
+                height,
+                orbit_angle.sin() * orbit_radius
+            )) * Mat4::from_rotation_y(elapsed * rotation_speed) * 
+            Mat4::from_rotation_x(elapsed * rotation_speed * 0.7) *
+            Mat4::from_scale(Vec3::splat(0.6));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: cube_transform.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+        }
 
-        // Right wall (partial, with opening)
-        let right_wall_back = Mat4::from_translation(Vec3::new(5.0, 2.5, -3.0)) *
-            Mat4::from_scale(Vec3::new(0.2, 5.0, 4.0));
-        meshes.push((
-            TransformUniforms {
-                model: right_wall_back.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Dancing spheres on the ground
+        for i in 0..12 {
+            let dance_angle = (i as f32 / 12.0) * std::f32::consts::TAU;
+            let dance_radius = 4.0 + (elapsed * 0.5).sin() * 1.0;
+            let bounce_height = ((elapsed * 3.0 + i as f32).sin().abs() * 2.0 + 0.5).max(0.5);
+            
+            let sphere_transform = Mat4::from_translation(Vec3::new(
+                dance_angle.cos() * dance_radius,
+                bounce_height,
+                dance_angle.sin() * dance_radius
+            )) * Mat4::from_scale(Vec3::splat(0.4 + (elapsed + i as f32).cos().abs() * 0.2));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: sphere_transform.to_cols_array_2d(),
+                },
+                self.sphere_vertices.into(),
+                self.sphere_indices.into(),
+                self.sphere_index_count,
+            ));
+        }
 
-        // Roof
-        let roof = Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)) *
-            Mat4::from_scale(Vec3::new(10.0, 0.2, 10.0));
-        meshes.push((
-            TransformUniforms {
-                model: roof.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Spinning double helix of cubes
+        for i in 0..16 {
+            let helix_height = i as f32 * 0.6;
+            let helix_angle1 = elapsed * 2.0 + i as f32 * 0.4;
+            let helix_angle2 = helix_angle1 + std::f32::consts::PI;
+            let helix_radius = 2.5;
+            
+            // First helix strand
+            let helix1 = Mat4::from_translation(Vec3::new(
+                helix_angle1.cos() * helix_radius,
+                helix_height + 0.5,
+                helix_angle1.sin() * helix_radius
+            )) * Mat4::from_rotation_y(elapsed * 3.0) * Mat4::from_scale(Vec3::splat(0.3));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: helix1.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+            
+            // Second helix strand
+            let helix2 = Mat4::from_translation(Vec3::new(
+                helix_angle2.cos() * helix_radius,
+                helix_height + 0.5,
+                helix_angle2.sin() * helix_radius
+            )) * Mat4::from_rotation_y(elapsed * 3.0) * Mat4::from_scale(Vec3::splat(0.3));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: helix2.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+        }
 
-        // Indoor objects
-        let elapsed = (now - self.start_time).as_secs_f32();
+        // Pulsing towers at corners
+        let tower_positions = [
+            Vec3::new(-8.0, 0.0, -8.0),
+            Vec3::new(8.0, 0.0, -8.0),
+            Vec3::new(-8.0, 0.0, 8.0),
+            Vec3::new(8.0, 0.0, 8.0),
+        ];
+        
+        for (idx, pos) in tower_positions.iter().enumerate() {
+            let pulse = (elapsed * 2.0 + idx as f32 * 1.5).sin() * 2.0 + 3.0;
+            let tower = Mat4::from_translation(*pos + Vec3::new(0.0, pulse / 2.0, 0.0)) *
+                Mat4::from_scale(Vec3::new(0.8, pulse, 0.8));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: tower.to_cols_array_2d(),
+                },
+                self.cube_vertices.into(),
+                self.cube_indices.into(),
+                self.cube_index_count,
+            ));
+        }
 
-        // Rotating cube indoors
-        let indoor_cube = Mat4::from_translation(Vec3::new(-2.0, 1.0, -2.0)) *
-            Mat4::from_rotation_y(elapsed);
-        meshes.push((
-            TransformUniforms {
-                model: indoor_cube.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
+        // Rotating ring of spheres
+        for i in 0..20 {
+            let ring_angle = (i as f32 / 20.0) * std::f32::consts::TAU + elapsed * 1.5;
+            let ring_radius = 10.0;
+            let ring_height = 3.0 + (ring_angle * 2.0).sin() * 1.0;
+            
+            let sphere = Mat4::from_translation(Vec3::new(
+                ring_angle.cos() * ring_radius,
+                ring_height,
+                ring_angle.sin() * ring_radius
+            )) * Mat4::from_scale(Vec3::splat(0.5));
+            
+            meshes.push((
+                TransformUniforms {
+                    model: sphere.to_cols_array_2d(),
+                },
+                self.sphere_vertices.into(),
+                self.sphere_indices.into(),
+                self.sphere_index_count,
+            ));
+        }
 
-        // Sphere indoors
-        let indoor_sphere = Mat4::from_translation(Vec3::new(2.0, 1.5, -2.0));
-        meshes.push((
-            TransformUniforms {
-                model: indoor_sphere.to_cols_array_2d(),
-            },
-            self.sphere_vertices.into(),
-            self.sphere_indices.into(),
-            self.sphere_index_count,
-        ));
-
-        // Outdoor objects
-        // Cube stack outside
-        let outdoor_cube1 = Mat4::from_translation(Vec3::new(7.0, 0.5, 2.0));
-        meshes.push((
-            TransformUniforms {
-                model: outdoor_cube1.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
 
         let outdoor_cube2 = Mat4::from_translation(Vec3::new(7.0, 1.5, 2.0)) *
             Mat4::from_rotation_y(elapsed * 0.5);
