@@ -319,17 +319,19 @@ impl ProceduralShadows {
             }
             LightType::Point => {
                 // Point light: use perspective projection
-                // For full point light shadows, we'd need a cubemap (6 faces)
-                // For now, use single face pointing down
+                // Ideally we'd use a cubemap (6 faces) for omnidirectional shadows
+                // As a workaround, use a very wide FOV looking downward to approximate omnidirectional coverage
+                // This captures most inter-object occlusions for objects below/around the light
                 let view = glam::Mat4::look_at_rh(
                     config.position,
-                    config.position + config.direction,
-                    glam::Vec3::Y,
+                    config.position + glam::Vec3::new(0.0, -1.0, 0.0),  // Always look down
+                    glam::Vec3::Z,  // Use Z as up to avoid gimbal lock
                 );
 
-                // Perspective projection with 90 degree FOV for point light
+                // Very wide FOV (160 degrees) to approximate omnidirectional coverage
+                // This captures objects in most directions from the light
                 let projection = glam::Mat4::perspective_rh(
-                    90.0_f32.to_radians(),
+                    160.0_f32.to_radians(),  // Wide FOV for better coverage
                     1.0,  // square aspect ratio
                     0.1,
                     config.attenuation_radius,
