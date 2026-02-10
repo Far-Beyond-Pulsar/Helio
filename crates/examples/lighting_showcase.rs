@@ -104,7 +104,7 @@ struct Example {
     last_frame_time: Instant,
     camera: CameraController,
     cursor_grabbed: bool,
-    current_light_type: usize,  // 0: spotlight, 1: point, 2: rect, 3: sun
+    demo_mode: usize,  // 0: single light cycle, 1: multi-light dance, 2: spotlight array, 3: color party
 }
 
 impl Example {
@@ -238,16 +238,44 @@ impl Example {
         registry.register(BasicLighting::new());
         registry.register(BasicMaterials::new());
 
-        // Start with spotlight shadows active
-        let spotlight = ProceduralShadows::new()
-            .with_spot_light(
-                Vec3::new(0.0, 7.0, -2.0),
-                Vec3::new(0.0, -1.0, 0.0),
-                30.0_f32.to_radians(),
-                45.0_f32.to_radians(),
-                15.0, // attenuation radius
-            );
-        registry.register(spotlight);
+        // Start with an impressive multi-light setup
+        let mut shadows = ProceduralShadows::new();
+        
+        // Add multiple overlapping colored lights for a dramatic showcase
+        shadows.add_light(LightConfig {
+            light_type: LightType::Spot {
+                inner_angle: 25.0_f32.to_radians(),
+                outer_angle: 40.0_f32.to_radians(),
+            },
+            position: Vec3::new(0.0, 8.0, 0.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            intensity: 1.5,
+            color: Vec3::new(1.0, 0.2, 0.2), // Red
+            attenuation_radius: 12.0,
+            attenuation_falloff: 2.0,
+        });
+        
+        shadows.add_light(LightConfig {
+            light_type: LightType::Point,
+            position: Vec3::new(-4.0, 3.0, -4.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            intensity: 1.2,
+            color: Vec3::new(0.2, 1.0, 0.2), // Green
+            attenuation_radius: 10.0,
+            attenuation_falloff: 2.5,
+        });
+        
+        shadows.add_light(LightConfig {
+            light_type: LightType::Point,
+            position: Vec3::new(4.0, 3.0, -4.0),
+            direction: Vec3::new(0.0, -1.0, 0.0),
+            intensity: 1.2,
+            color: Vec3::new(0.2, 0.2, 1.0), // Blue
+            attenuation_radius: 10.0,
+            attenuation_falloff: 2.5,
+        });
+        
+        registry.register(shadows);
 
         let renderer = FeatureRenderer::new(
             context.clone(),
@@ -282,79 +310,197 @@ impl Example {
             plane_index_count: plane_mesh.indices.len() as u32,
             start_time: now,
             last_frame_time: now,
-            camera: CameraController::new(Vec3::new(0.0, 3.0, 10.0)),
+            camera: CameraController::new(Vec3::new(0.0, 5.0, 15.0)),
             cursor_grabbed: false,
-            current_light_type: 0,
+            demo_mode: 1, // Start with multi-light dance
         }
     }
 
-    fn update_light_type(&mut self) {
-        // Create the light configuration based on current type
-        let config = match self.current_light_type {
+    fn update_demo_lights(&mut self, time: f32) {
+        // Get the shadow feature
+        let shadows = if let Some(feature) = self.renderer.registry_mut().get_feature_mut("procedural_shadows") {
+            unsafe {
+                &mut *(feature.as_mut() as *mut dyn helio_features::Feature as *mut ProceduralShadows)
+            }
+        } else {
+            return;
+        };
+
+        shadows.clear_lights();
+
+        match self.demo_mode {
             0 => {
-                println!("[5] Red Spotlight (indoor center)");
-                LightConfig {
+                // Single rotating spotlight with pulsing intensity
+                let angle = time * 0.5;
+                let pulse = (time * 2.0).sin() * 0.3 + 1.2;
+                
+                shadows.add_light(LightConfig {
                     light_type: LightType::Spot {
                         inner_angle: 30.0_f32.to_radians(),
-                        outer_angle: 45.0_f32.to_radians(),
+                        outer_angle: 50.0_f32.to_radians(),
                     },
-                    position: Vec3::new(0.0, 7.0, -2.0),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.0,
-                    color: Vec3::new(1.0, 0.3, 0.3), // Red tint
-                    attenuation_radius: 15.0,
+                    position: Vec3::new(angle.cos() * 5.0, 8.0, angle.sin() * 5.0),
+                    direction: Vec3::new(-angle.cos(), -1.0, -angle.sin()).normalize(),
+                    intensity: pulse,
+                    color: Vec3::new(1.0, 0.9, 0.7),
+                    attenuation_radius: 18.0,
                     attenuation_falloff: 2.0,
-                }
+                });
             }
             1 => {
-                println!("[6] Green Point Light (indoor corner)");
-                LightConfig {
-                    light_type: LightType::Point,
-                    position: Vec3::new(-3.0, 4.0, -3.0),
+                // Multi-light dance - RGB lights circling with different speeds
+                let r_angle = time * 0.8;
+                let g_angle = time * 1.2 + 2.0;
+                let b_angle = time * 1.0 + 4.0;
+                
+                // Red spotlight from above
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Spot {
+                        inner_angle: 25.0_f32.to_radians(),
+                        outer_angle: 40.0_f32.to_radians(),
+                    },
+                    position: Vec3::new(r_angle.cos() * 3.0, 7.0, r_angle.sin() * 3.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.0,
-                    color: Vec3::new(0.3, 1.0, 0.3), // Green tint
+                    intensity: 1.5,
+                    color: Vec3::new(1.0, 0.1, 0.1),
                     attenuation_radius: 12.0,
                     attenuation_falloff: 2.0,
-                }
+                });
+                
+                // Green point light
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Point,
+                    position: Vec3::new(g_angle.cos() * 5.0, 3.0, g_angle.sin() * 5.0),
+                    direction: Vec3::new(0.0, -1.0, 0.0),
+                    intensity: 1.3,
+                    color: Vec3::new(0.1, 1.0, 0.1),
+                    attenuation_radius: 10.0,
+                    attenuation_falloff: 2.5,
+                });
+                
+                // Blue point light
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Point,
+                    position: Vec3::new(b_angle.cos() * 4.0, 4.0, b_angle.sin() * 4.0),
+                    direction: Vec3::new(0.0, -1.0, 0.0),
+                    intensity: 1.3,
+                    color: Vec3::new(0.1, 0.1, 1.0),
+                    attenuation_radius: 10.0,
+                    attenuation_falloff: 2.5,
+                });
+                
+                // Cyan accent light
+                shadows.add_light(LightConfig {
+                    light_type: LightType::Point,
+                    position: Vec3::new((time * 1.5).cos() * 2.0, 2.0, (time * 1.5).sin() * 2.0),
+                    direction: Vec3::new(0.0, -1.0, 0.0),
+                    intensity: 0.8,
+                    color: Vec3::new(0.3, 1.0, 1.0),
+                    attenuation_radius: 6.0,
+                    attenuation_falloff: 3.0,
+                });
             }
             2 => {
-                println!("[7] Blue Rectangular Light (indoor ceiling)");
-                LightConfig {
-                    light_type: LightType::Rect {
-                        width: 3.0,
-                        height: 3.0,
-                    },
-                    position: Vec3::new(1.0, 4.8, -1.0),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.0,
-                    color: Vec3::new(0.3, 0.3, 1.0), // Blue tint
-                    attenuation_radius: 10.0,
-                    attenuation_falloff: 2.0,
+                // Spotlight array - 6 spotlights in a grid pattern
+                let colors = [
+                    Vec3::new(1.0, 0.3, 0.3),  // Red
+                    Vec3::new(1.0, 0.8, 0.2),  // Orange
+                    Vec3::new(0.3, 1.0, 0.3),  // Green
+                    Vec3::new(0.3, 0.8, 1.0),  // Cyan
+                    Vec3::new(0.4, 0.3, 1.0),  // Blue
+                    Vec3::new(1.0, 0.3, 0.8),  // Magenta
+                ];
+                
+                let wave = (time * 2.0).sin() * 0.3 + 1.0;
+                
+                for i in 0..6 {
+                    let angle = (i as f32 / 6.0) * std::f32::consts::TAU;
+                    let phase_offset = i as f32 * 0.5;
+                    let height_wave = ((time * 1.5 + phase_offset).sin() * 2.0 + 7.0).max(5.0);
+                    
+                    shadows.add_light(LightConfig {
+                        light_type: LightType::Spot {
+                            inner_angle: 20.0_f32.to_radians(),
+                            outer_angle: 35.0_f32.to_radians(),
+                        },
+                        position: Vec3::new(
+                            angle.cos() * 6.0,
+                            height_wave,
+                            angle.sin() * 6.0
+                        ),
+                        direction: Vec3::new(-angle.cos() * 0.3, -1.0, -angle.sin() * 0.3).normalize(),
+                        intensity: wave + (i as f32 * 0.1),
+                        color: colors[i],
+                        attenuation_radius: 15.0,
+                        attenuation_falloff: 2.0,
+                    });
                 }
             }
             3 => {
-                println!("[8] Directional Sun (outdoor)");
-                LightConfig {
-                    light_type: LightType::Directional,
-                    position: Vec3::new(10.0, 15.0, 10.0),
-                    direction: Vec3::new(0.5, -1.0, 0.3).normalize(),
-                    intensity: 1.0,
-                    color: Vec3::new(1.0, 0.95, 0.8), // Warm sunlight
-                    attenuation_radius: 100.0, // Not used for directional
-                    attenuation_falloff: 1.0,  // Not used for directional
+                // Color party - 8 overlapping lights with pulsing colors
+                for i in 0..8 {
+                    let angle = (i as f32 / 8.0) * std::f32::consts::TAU + time * 0.3;
+                    let height = ((time * 2.0 + i as f32).sin() * 1.5 + 4.0).max(2.0);
+                    let radius = 3.0 + i as f32 * 0.3;
+                    
+                    // Create rainbow colors with time variation
+                    let hue = (i as f32 / 8.0 + time * 0.2) % 1.0;
+                    let color = Self::hue_to_rgb(hue);
+                    
+                    let light_type = if i % 3 == 0 {
+                        LightType::Spot {
+                            inner_angle: 30.0_f32.to_radians(),
+                            outer_angle: 45.0_f32.to_radians(),
+                        }
+                    } else {
+                        LightType::Point
+                    };
+                    
+                    shadows.add_light(LightConfig {
+                        light_type,
+                        position: Vec3::new(angle.cos() * radius, height, angle.sin() * radius),
+                        direction: Vec3::new(0.0, -1.0, 0.0),
+                        intensity: 1.0 + (time * 3.0 + i as f32).sin() * 0.5,
+                        color,
+                        attenuation_radius: 8.0 + (i as f32 * 0.5),
+                        attenuation_falloff: 2.0 + (time * 0.5).sin().abs(),
+                    });
                 }
             }
-            _ => LightConfig::default(),
+            _ => {}
+        }
+    }
+    
+    // Convert HSV to RGB for rainbow colors
+    fn hue_to_rgb(hue: f32) -> Vec3 {
+        let h = hue * 6.0;
+        let x = 1.0 - (h % 2.0 - 1.0).abs();
+        
+        let (r, g, b) = if h < 1.0 {
+            (1.0, x, 0.0)
+        } else if h < 2.0 {
+            (x, 1.0, 0.0)
+        } else if h < 3.0 {
+            (0.0, 1.0, x)
+        } else if h < 4.0 {
+            (0.0, x, 1.0)
+        } else if h < 5.0 {
+            (x, 0.0, 1.0)
+        } else {
+            (1.0, 0.0, x)
         };
+        
+        Vec3::new(r, g, b)
+    }
 
-        // Update the shadow feature's light configuration
-        if let Some(feature) = self.renderer.registry_mut().get_feature_mut("procedural_shadows") {
-            // Downcast to ProceduralShadows to access set_light_config
-            let shadows: &mut ProceduralShadows = unsafe {
-                &mut *(feature.as_mut() as *mut dyn helio_features::Feature as *mut ProceduralShadows)
-            };
-            shadows.set_light_config(config);
+    fn update_light_type(&mut self) {
+        println!("\n=== Demo Mode {} ===", self.demo_mode);
+        match self.demo_mode {
+            0 => println!("Single Rotating Spotlight - Watch it circle and pulse!"),
+            1 => println!("RGB Multi-Light Dance - Multiple colored lights with overlapping shadows!"),
+            2 => println!("Spotlight Array - 6 spotlights in formation with wave motion!"),
+            3 => println!("Color Party - 8 lights with rainbow colors and dynamic intensity!"),
+            _ => {}
         }
     }
 
@@ -640,22 +786,6 @@ fn main() {
                                             println!("[4] Procedural Shadows: {}", if enabled { "ON" } else { "OFF" });
                                             app.renderer.rebuild_pipeline();
                                         }
-                                    }
-                                    winit::keyboard::KeyCode::Digit5 => {
-                                        app.current_light_type = 0;
-                                        app.update_light_type();
-                                    }
-                                    winit::keyboard::KeyCode::Digit6 => {
-                                        app.current_light_type = 1;
-                                        app.update_light_type();
-                                    }
-                                    winit::keyboard::KeyCode::Digit7 => {
-                                        app.current_light_type = 2;
-                                        app.update_light_type();
-                                    }
-                                    winit::keyboard::KeyCode::Digit8 => {
-                                        app.current_light_type = 3;
-                                        app.update_light_type();
                                     }
                                     _ => {}
                                 }
