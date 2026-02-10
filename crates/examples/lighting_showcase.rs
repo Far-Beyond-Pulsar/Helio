@@ -238,98 +238,15 @@ impl Example {
         registry.register(BasicLighting::new());
         registry.register(BasicMaterials::new());
 
-        // Start with multiple colored lights
-        let mut shadows = ProceduralShadows::new();
-        
-        // Directional sun light (commented out for now)
-        // let _ = shadows.add_light(LightConfig {
-        //     light_type: LightType::Directional,
-        //     position: Vec3::new(10.0, 15.0, 10.0),
-        //     direction: Vec3::new(0.5, -1.0, 0.3).normalize(),
-        //     intensity: 0.8,
-        //     color: Vec3::new(1.0, 0.95, 0.8),
-        // });
-        
-        // Red spotlight from center ceiling
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Spot {
-                inner_angle: 25.0_f32.to_radians(),
-                outer_angle: 40.0_f32.to_radians(),
-                radius: 15.0,
-            },
-            position: Vec3::new(0.0, 6.0, 0.0),
-            direction: Vec3::new(0.0, -1.0, 0.0),
-            intensity: 2.0,
-            color: Vec3::new(1.0, 0.2, 0.2),
-        });
-        
-        // Green point light - left side
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Point { radius: 10.0 },
-            position: Vec3::new(-4.0, 3.0, 0.0),
-            direction: Vec3::new(0.0, 0.0, 0.0),
-            intensity: 2.5,
-            color: Vec3::new(0.2, 1.0, 0.2),
-        });
-        
-        // Blue point light - right side
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Point { radius: 10.0 },
-            position: Vec3::new(4.0, 3.0, 0.0),
-            direction: Vec3::new(0.0, 0.0, 0.0),
-            intensity: 2.5,
-            color: Vec3::new(0.2, 0.3, 1.0),
-        });
-        
-        // Cyan rect light - back wall
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Rect {
-                width: 2.0,
-                height: 2.0,
-                radius: 12.0,
-            },
-            position: Vec3::new(0.0, 3.0, -5.0),
-            direction: Vec3::new(0.0, 0.0, 1.0),
-            intensity: 1.5,
-            color: Vec3::new(0.2, 1.0, 1.0),
-        });
-        
-        // Yellow spotlight - front
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Spot {
-                inner_angle: 30.0_f32.to_radians(),
-                outer_angle: 50.0_f32.to_radians(),
-                radius: 12.0,
-            },
-            position: Vec3::new(0.0, 5.0, 5.0),
-            direction: Vec3::new(0.0, -0.5, -1.0).normalize(),
-            intensity: 1.8,
-            color: Vec3::new(1.0, 1.0, 0.2),
-        });
-        
-        // Magenta point light - corner
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Point { radius: 8.0 },
-            position: Vec3::new(-3.0, 2.0, -3.0),
-            direction: Vec3::new(0.0, 0.0, 0.0),
-            intensity: 2.0,
-            color: Vec3::new(1.0, 0.2, 1.0),
-        });
-        
-        // Orange rect light - side wall
-        let _ = shadows.add_light(LightConfig {
-            light_type: LightType::Rect {
-                width: 1.5,
-                height: 3.0,
-                radius: 10.0,
-            },
-            position: Vec3::new(5.0, 3.0, -2.0),
-            direction: Vec3::new(-1.0, 0.0, 0.0),
-            intensity: 1.6,
-            color: Vec3::new(1.0, 0.5, 0.1),
-        });
-        
-        registry.register(shadows);
+        // Start with spotlight shadows active
+        let spotlight = ProceduralShadows::new()
+            .with_spot_light(
+                Vec3::new(0.0, 7.0, -2.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                30.0_f32.to_radians(),
+                45.0_f32.to_radians(),
+            );
+        registry.register(spotlight);
 
         let renderer = FeatureRenderer::new(
             context.clone(),
@@ -379,7 +296,6 @@ impl Example {
                     light_type: LightType::Spot {
                         inner_angle: 30.0_f32.to_radians(),
                         outer_angle: 45.0_f32.to_radians(),
-                        radius: 15.0,
                     },
                     position: Vec3::new(0.0, 7.0, -2.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
@@ -390,7 +306,7 @@ impl Example {
             1 => {
                 println!("[6] Green Point Light (indoor corner)");
                 LightConfig {
-                    light_type: LightType::Point { radius: 12.0 },
+                    light_type: LightType::Point,
                     position: Vec3::new(-3.0, 4.0, -3.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
                     intensity: 1.0,
@@ -403,7 +319,6 @@ impl Example {
                     light_type: LightType::Rect {
                         width: 3.0,
                         height: 3.0,
-                        radius: 10.0,
                     },
                     position: Vec3::new(1.0, 4.8, -1.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
@@ -426,13 +341,11 @@ impl Example {
 
         // Update the shadow feature's light configuration
         if let Some(feature) = self.renderer.registry_mut().get_feature_mut("procedural_shadows") {
-            // Downcast to ProceduralShadows to access add_light
+            // Downcast to ProceduralShadows to access set_light_config
             let shadows: &mut ProceduralShadows = unsafe {
                 &mut *(feature.as_mut() as *mut dyn helio_features::Feature as *mut ProceduralShadows)
             };
-            // Clear existing lights and add the new one
-            shadows.clear_lights();
-            let _ = shadows.add_light(config);
+            shadows.set_light_config(config);
         }
     }
 
