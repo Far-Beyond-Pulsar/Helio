@@ -141,7 +141,6 @@ fn perspective_rh(fov_y: f32, aspect: f32, near: f32, far: f32) -> mat4x4<f32> {
         vec4<f32>(0.0, 0.0, r * near, 0.0),
     );
 }
-var<uniform> shadow_uniforms: ShadowUniforms;
 
 // Select which of the 6 cube faces a direction vector maps to.
 // Face indices: 0=+X, 1=-X, 2=+Y, 3=-Y, 4=+Z, 5=-Z
@@ -248,9 +247,9 @@ fn sample_shadow_visibility(shadow_coord: vec3<f32>, layer: i32) -> f32 {
     return sample_shadow_pcf_3x3(shadow_coord, layer, texel_size);
 }
 
-// Transform world position to shadow map space for a specific light
-fn world_to_shadow_coord(world_pos: vec3<f32>, light: GpuLight) -> vec3<f32> {
-    let light_space = light.light_view_proj * vec4<f32>(world_pos, 1.0);
+// Transform world position to shadow map space
+fn world_to_shadow_coord(world_pos: vec3<f32>, light_view_proj: mat4x4<f32>) -> vec3<f32> {
+    let light_space = light_view_proj * vec4<f32>(world_pos, 1.0);
     var shadow_coord = light_space.xyz / light_space.w;
 
     // Transform to [0, 1] range for texture coordinates
