@@ -1,6 +1,6 @@
 use blade_graphics as gpu;
 use glam::{Mat4, Vec3};
-use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh};
+use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh, TextureManager};
 use helio_feature_base_geometry::BaseGeometry;
 use helio_feature_lighting::BasicLighting;
 use helio_feature_materials::BasicMaterials;
