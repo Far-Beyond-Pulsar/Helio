@@ -19,12 +19,18 @@ pub enum BlendMode {
 pub struct BillboardData {
     /// World space position
     pub position: [f32; 3],
-    /// Scale (width, height) in world units
+    /// Scale (width, height).
+    /// In world-scale mode: world-space units.
+    /// In screen-scale mode: angular units — multiplied by camera distance in
+    /// the shader so the billboard keeps a constant apparent size on screen.
     pub scale: [f32; 2],
     /// Texture to display
     pub texture: TextureId,
     /// Blending mode
     pub blend_mode: BlendMode,
+    /// When true the billboard is rendered at a constant screen size regardless
+    /// of distance from the camera.  Currently unused (disabled by default).
+    pub screen_scale: bool,
 }
 
 impl BillboardData {
@@ -34,11 +40,17 @@ impl BillboardData {
             scale,
             texture,
             blend_mode: BlendMode::Transparent,
+            screen_scale: false,
         }
     }
 
     pub fn with_blend_mode(mut self, mode: BlendMode) -> Self {
         self.blend_mode = mode;
+        self
+    }
+
+    pub fn with_screen_scale(mut self, screen_scale: bool) -> Self {
+        self.screen_scale = screen_scale;
         self
     }
 }
@@ -62,16 +74,19 @@ struct BillboardCameraData {
 }
 
 /// Billboard instance uniforms matching the WGSL BillboardInstance struct:
-///   world_position: vec3<f32>  (align 16, offset 0, size 12)
-///   scale:          vec2<f32>  (align  8, offset 16, size 8)
-///   struct size rounds up to 32 bytes
+///   world_position: vec3<f32>  (align 16, offset 0,  size 12)
+///   _pad1:          f32        (         offset 12, size  4) → total 16
+///   scale:          vec2<f32>  (align  8, offset 16, size  8)
+///   screen_scale:   u32        (align  4, offset 24, size  4)
+///   _pad2:          u32        (         offset 28, size  4) → total 32
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BillboardInstanceUniforms {
     world_position: [f32; 3],
     _pad1: f32,
     scale: [f32; 2],
-    _pad2: [f32; 2],
+    screen_scale: u32,
+    _pad2: u32,
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -210,7 +225,8 @@ impl BillboardFeature {
                     world_position: billboard.position,
                     _pad1: 0.0,
                     scale: billboard.scale,
-                    _pad2: [0.0, 0.0],
+                    screen_scale: billboard.screen_scale as u32,
+                    _pad2: 0,
                 },
             };
             rc.bind(1, &instance_data);

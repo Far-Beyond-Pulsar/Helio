@@ -10,6 +10,9 @@ struct CameraUniforms {
 struct BillboardInstance {
     world_position: vec3<f32>,
     scale: vec2<f32>,
+    // When non-zero, scale is multiplied by camera distance so the billboard
+    // keeps a constant apparent size on screen regardless of depth.
+    screen_scale: u32,
 }
 
 var<uniform> camera: CameraUniforms;
@@ -43,10 +46,18 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     let camera_right = normalize(view_inv[0]);
     let camera_up    = normalize(view_inv[1]);
 
+    // When screen_scale is set, multiply the world-space scale by the camera
+    // distance so the billboard subtends the same angle (pixel size) at any depth.
+    var effective_scale = billboard.scale;
+    if billboard.screen_scale != 0u {
+        let dist = length(camera.position - billboard.world_position);
+        effective_scale = effective_scale * dist;
+    }
+
     // Build a world-space position that faces the camera
     let world_pos = billboard.world_position
-        + camera_right * in.position.x * billboard.scale.x
-        + camera_up    * in.position.y * billboard.scale.y;
+        + camera_right * in.position.x * effective_scale.x
+        + camera_up    * in.position.y * effective_scale.y;
 
     out.position   = camera.view_proj * vec4<f32>(world_pos, 1.0);
     out.tex_coords = in.tex_coords;
