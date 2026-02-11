@@ -249,7 +249,22 @@ impl Example {
         }
         context.sync_buffer(plane_indices);
 
-        let base_geometry = BaseGeometry::new();
+        // Create texture manager and load spotlight icon
+        let mut texture_manager = helio_core::TextureManager::new(context.clone());
+        let spotlight_texture_id = match texture_manager.load_png("spotlight.png") {
+            Ok(id) => {
+                log::info!("Loaded spotlight.png for light billboards");
+                Some(id)
+            }
+            Err(e) => {
+                log::warn!("Failed to load spotlight.png: {} - light billboards will not be available", e);
+                None
+            }
+        };
+        let texture_manager = Arc::new(texture_manager);
+
+        let mut base_geometry = BaseGeometry::new();
+        base_geometry.set_texture_manager(texture_manager.clone());
         let base_shader = base_geometry.shader_template().to_string();
 
         let mut registry = FeatureRegistry::new();
@@ -296,6 +311,12 @@ impl Example {
             attenuation_falloff: 2.5,
         })
         .expect("Failed to add light");
+        
+        // Set up texture manager and spotlight icon for light billboards
+        shadows.set_texture_manager(texture_manager.clone());
+        if let Some(texture_id) = spotlight_texture_id {
+            shadows.set_spotlight_icon(texture_id);
+        }
         
         registry.register(shadows);
         registry.register(Bloom::new());

@@ -1,4 +1,5 @@
 use blade_graphics as gpu;
+use helio_core::{TextureId, TextureManager};
 use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
 use std::sync::Arc;
 
@@ -174,6 +175,8 @@ pub struct ProceduralShadows {
     ambient: f32,
     context: Option<Arc<gpu::Context>>,
     shadow_pipeline: Option<gpu::RenderPipeline>,
+    texture_manager: Option<Arc<TextureManager>>,
+    spotlight_icon_texture: Option<TextureId>,
 }
 
 impl ProceduralShadows {
@@ -192,6 +195,8 @@ impl ProceduralShadows {
             ambient: 0.0,
             context: None,
             shadow_pipeline: None,
+            texture_manager: None,
+            spotlight_icon_texture: None,
         }
     }
 
@@ -324,6 +329,37 @@ impl ProceduralShadows {
     /// Get the current light configuration (legacy single-light API).
     pub fn light_config(&self) -> Option<&LightConfig> {
         self.lights.first()
+    }
+
+    /// Set the texture manager for loading light icon textures
+    pub fn set_texture_manager(&mut self, manager: Arc<TextureManager>) {
+        self.texture_manager = Some(manager);
+    }
+    
+    /// Set the spotlight icon texture ID
+    pub fn set_spotlight_icon(&mut self, texture_id: TextureId) {
+        self.spotlight_icon_texture = Some(texture_id);
+    }
+    
+    /// Get the spotlight icon texture ID
+    pub fn spotlight_icon_texture(&self) -> Option<TextureId> {
+        self.spotlight_icon_texture
+    }
+    
+    /// Generate billboard data for all lights (for rendering light gizmos)
+    pub fn generate_light_billboards(&self) -> Vec<(glam::Vec3, f32)> {
+        self.lights.iter().map(|light| {
+            // Calculate billboard size based on light type
+            let size = match light.light_type {
+                LightType::Directional => 0.0, // Don't render billboards for directional lights
+                LightType::Point => 0.5,
+                LightType::Spot { .. } => 0.6,
+                LightType::Rect { width, height } => (width.max(height) * 0.5).max(0.5),
+            };
+            (light.position, size)
+        })
+        .filter(|(_, size)| *size > 0.0)
+        .collect()
     }
 
     /// Cube face directions for point light shadow rendering: (forward, up).
@@ -639,6 +675,16 @@ impl Feature for ProceduralShadows {
         });
 
         self.shadow_pipeline = Some(shadow_pipeline);
+        
+        // Load spotlight icon texture if texture manager is available
+        if let Some(ref _texture_manager) = self.texture_manager {
+            // Note: TextureManager::load_png requires &mut, but we have Arc<TextureManager>
+            // This needs to be handled differently - either use interior mutability (RefCell/Mutex)
+            // or load the texture before passing the manager to ProceduralShadows
+            log::debug!("Texture manager is set - spotlight icon should be pre-loaded");
+        } else {
+            log::debug!("No texture manager set for procedural shadows - light billboards will not be available");
+        }
     }
 
     fn is_enabled(&self) -> bool {
