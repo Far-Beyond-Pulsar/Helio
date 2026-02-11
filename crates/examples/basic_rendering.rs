@@ -60,7 +60,8 @@ impl Example {
             surface.info().format,
             window_size.width,
             window_size.height,
-        );
+        )
+        .expect("Failed to create renderer");
         
         let command_encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
             name: "main",

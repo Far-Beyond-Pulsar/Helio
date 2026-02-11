@@ -229,19 +229,23 @@ impl ProceduralShadows {
 
     /// Add a light source to the scene.
     ///
-    /// # Panics
-    /// Panics if more than MAX_SHADOW_LIGHTS (8) non-directional lights are added.
-    pub fn add_light(&mut self, config: LightConfig) {
+    /// Returns an error if more than MAX_SHADOW_LIGHTS (8) non-directional lights are added.
+    pub fn add_light(&mut self, config: LightConfig) -> Result<(), String> {
         if config.light_type != LightType::Directional {
             let non_directional_count = self.lights.iter()
                 .filter(|l| l.light_type != LightType::Directional)
                 .count();
             
             if non_directional_count >= MAX_SHADOW_LIGHTS {
-                panic!("Maximum of {} shadow-casting lights exceeded", MAX_SHADOW_LIGHTS);
+                return Err(format!(
+                    "Maximum of {} shadow-casting lights exceeded. Current count: {}",
+                    MAX_SHADOW_LIGHTS,
+                    non_directional_count
+                ));
             }
         }
         self.lights.push(config);
+        Ok(())
     }
 
     /// Clear all lights from the scene.
@@ -340,6 +344,9 @@ impl ProceduralShadows {
     /// For point lights this yields 6 matrices (one per cube face). All other
     /// light types yield exactly 1. The returned matrices must be rendered into
     /// consecutive shadow map layers starting at `light_index * 6`.
+    ///
+    /// # Validation
+    /// Returns empty vec if light configuration is invalid (e.g., zero FOV, inverted near/far).
     fn get_shadow_render_matrices(config: &LightConfig) -> Vec<glam::Mat4> {
         match config.light_type {
             LightType::Directional => {
@@ -349,6 +356,12 @@ impl ProceduralShadows {
                 vec![projection * view]
             }
             LightType::Point => {
+                // Validate near/far planes
+                if config.attenuation_radius <= 0.1 {
+                    log::warn!("Point light attenuation_radius ({}) too small, must be > 0.1", config.attenuation_radius);
+                    return Vec::new();
+                }
+                
                 // Proper cubemap: 6 faces with 90° FOV each for full omnidirectional coverage.
                 let projection = glam::Mat4::perspective_rh(
                     90.0_f32.to_radians(),
@@ -366,6 +379,16 @@ impl ProceduralShadows {
                 }).collect()
             }
             LightType::Spot { inner_angle: _, outer_angle } => {
+                // Validate FOV
+                if outer_angle <= 0.0 || outer_angle >= std::f32::consts::PI {
+                    log::warn!("Spot light outer_angle ({}) must be in range (0, π)", outer_angle);
+                    return Vec::new();
+                }
+                if config.attenuation_radius <= 0.1 {
+                    log::warn!("Spot light attenuation_radius ({}) too small, must be > 0.1", config.attenuation_radius);
+                    return Vec::new();
+                }
+                
                 let view = glam::Mat4::look_at_rh(
                     config.position,
                     config.position + config.direction,
@@ -376,6 +399,16 @@ impl ProceduralShadows {
                 vec![projection * view]
             }
             LightType::Rect { width, height } => {
+                // Validate dimensions
+                if width <= 0.0 || height <= 0.0 {
+                    log::warn!("Rect light dimensions ({}x{}) must be positive", width, height);
+                    return Vec::new();
+                }
+                if config.attenuation_radius <= 0.1 {
+                    log::warn!("Rect light attenuation_radius ({}) too small, must be > 0.1", config.attenuation_radius);
+                    return Vec::new();
+                }
+                
                 let view = glam::Mat4::look_at_rh(
                     config.position,
                     config.position + config.direction,
@@ -460,6 +493,12 @@ impl ProceduralShadows {
                 let mut light_count = 0;
                 for (i, config) in self.lights.iter().enumerate() {
                     if i >= MAX_SHADOW_LIGHTS {
+                        log::warn!(
+                            "Light limit exceeded: {} lights provided but only {} supported. Dropping {} lights.",
+                            self.lights.len(),
+                            MAX_SHADOW_LIGHTS,
+                            self.lights.len() - MAX_SHADOW_LIGHTS
+                        );
                         break;
                     }
 
@@ -666,10 +705,16 @@ impl Feature for ProceduralShadows {
 
             let base_layer = light_index * 6;
             let face_matrices = Self::get_shadow_render_matrices(light_config);
+            
+            // Skip if validation failed
+            if face_matrices.is_empty() {
+                log::warn!("Skipping light {} due to invalid configuration", light_index);
+                continue;
+            }
 
             for (face_idx, face_view_proj) in face_matrices.iter().enumerate() {
-                let layer = base_layer + face_idx;
-
+                let layer = (base_layer + face_idx) as u32;
+                
                 let layer_view = context.gpu.create_texture_view(
                     shadow_texture,
                     gpu::TextureViewDesc {
@@ -679,7 +724,7 @@ impl Feature for ProceduralShadows {
                         subresources: &gpu::TextureSubresources {
                             base_mip_level: 0,
                             mip_level_count: std::num::NonZero::new(1),
-                            base_array_layer: layer as u32,
+                            base_array_layer: layer,
                             array_layer_count: std::num::NonZero::new(1),
                         },
                     },

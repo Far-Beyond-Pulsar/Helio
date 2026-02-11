@@ -78,12 +78,12 @@ impl Renderer {
         surface_format: gpu::TextureFormat,
         width: u32,
         height: u32,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let scene_layout = <SceneData as gpu::ShaderData>::layout();
         let object_layout = <ObjectData as gpu::ShaderData>::layout();
         
         let shader_source = std::fs::read_to_string("shaders/main.wgsl")
-            .expect("Failed to read shader");
+            .map_err(|e| format!("Failed to read shader file 'shaders/main.wgsl': {}", e))?;
         let shader = context.create_shader(gpu::ShaderDesc {
             source: &shader_source,
         });
@@ -140,12 +140,12 @@ impl Renderer {
             multisample_state: gpu::MultisampleState::default(),
         });
         
-        Self {
+        Ok(Self {
             pipeline,
             depth_texture,
             depth_view,
             context,
-        }
+        })
     }
     
     pub fn render(
@@ -241,7 +241,7 @@ impl FeatureRenderer {
         height: u32,
         mut registry: FeatureRegistry,
         base_shader: &str,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let depth_format = gpu::TextureFormat::Depth32Float;
 
         let feature_context = FeatureContext::new(
@@ -344,7 +344,7 @@ impl FeatureRenderer {
             multisample_state: gpu::MultisampleState::default(),
         });
 
-        Self {
+        Ok(Self {
             pipeline,
             depth_texture,
             depth_view,
@@ -353,7 +353,7 @@ impl FeatureRenderer {
             frame_index: 0,
             base_shader: base_shader.to_string(),
             surface_format,
-        }
+        })
     }
 
     /// Rebuild the render pipeline with current feature state.

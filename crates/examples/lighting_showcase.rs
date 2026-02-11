@@ -272,7 +272,8 @@ impl Example {
             color: Vec3::new(1.0, 0.2, 0.2), // Red
             attenuation_radius: 12.0,
             attenuation_falloff: 2.0,
-        });
+        })
+        .expect("Failed to add light");
         
         shadows.add_light(LightConfig {
             light_type: LightType::Point,
@@ -282,7 +283,8 @@ impl Example {
             color: Vec3::new(0.2, 1.0, 0.2), // Green
             attenuation_radius: 10.0,
             attenuation_falloff: 2.5,
-        });
+        })
+        .expect("Failed to add light");
         
         shadows.add_light(LightConfig {
             light_type: LightType::Point,
@@ -292,7 +294,8 @@ impl Example {
             color: Vec3::new(0.2, 0.2, 1.0), // Blue
             attenuation_radius: 10.0,
             attenuation_falloff: 2.5,
-        });
+        })
+        .expect("Failed to add light");
         
         registry.register(shadows);
         registry.register(Bloom::new());
@@ -304,7 +307,8 @@ impl Example {
             window_size.height,
             registry,
             &base_shader,
-        );
+        )
+        .expect("Failed to create renderer");
 
         let command_encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
             name: "main",
@@ -354,7 +358,7 @@ impl Example {
                 let angle = time * 0.5;
                 let pulse = (time * 2.0).sin() * 0.3 + 1.2;
                 
-                shadows.add_light(LightConfig {
+                let _ = shadows.add_light(LightConfig {
                     light_type: LightType::Spot {
                         inner_angle: 30.0_f32.to_radians(),
                         outer_angle: 50.0_f32.to_radians(),
@@ -374,7 +378,7 @@ impl Example {
                 let b_angle = time * 1.0 + 4.0;
                 
                 // Red spotlight from above
-                shadows.add_light(LightConfig {
+                let _ = shadows.add_light(LightConfig {
                     light_type: LightType::Spot {
                         inner_angle: 25.0_f32.to_radians(),
                         outer_angle: 40.0_f32.to_radians(),
@@ -388,7 +392,7 @@ impl Example {
                 });
                 
                 // Green point light
-                shadows.add_light(LightConfig {
+                let _ = shadows.add_light(LightConfig {
                     light_type: LightType::Point,
                     position: Vec3::new(g_angle.cos() * 5.0, 3.0, g_angle.sin() * 5.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
@@ -399,7 +403,7 @@ impl Example {
                 });
                 
                 // Blue point light
-                shadows.add_light(LightConfig {
+                let _ = shadows.add_light(LightConfig {
                     light_type: LightType::Point,
                     position: Vec3::new(b_angle.cos() * 4.0, 4.0, b_angle.sin() * 4.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
@@ -410,7 +414,7 @@ impl Example {
                 });
                 
                 // Cyan accent light
-                shadows.add_light(LightConfig {
+                let _ = shadows.add_light(LightConfig {
                     light_type: LightType::Point,
                     position: Vec3::new((time * 1.5).cos() * 2.0, 2.0, (time * 1.5).sin() * 2.0),
                     direction: Vec3::new(0.0, -1.0, 0.0),
@@ -438,7 +442,7 @@ impl Example {
                     let phase_offset = i as f32 * 0.5;
                     let height_wave = ((time * 1.5 + phase_offset).sin() * 2.0 + 7.0).max(5.0);
                     
-                    shadows.add_light(LightConfig {
+                    let _ = shadows.add_light(LightConfig {
                         light_type: LightType::Spot {
                             inner_angle: 20.0_f32.to_radians(),
                             outer_angle: 35.0_f32.to_radians(),
@@ -476,7 +480,7 @@ impl Example {
                         LightType::Point
                     };
                     
-                    shadows.add_light(LightConfig {
+                    let _ = shadows.add_light(LightConfig {
                         light_type,
                         position: Vec3::new(angle.cos() * radius, height, angle.sin() * radius),
                         direction: Vec3::new(0.0, -1.0, 0.0),

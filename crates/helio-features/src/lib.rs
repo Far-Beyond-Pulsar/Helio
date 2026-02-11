@@ -438,6 +438,10 @@ pub struct FeatureRegistry {
     features: Vec<Box<dyn Feature>>,
     /// Enable debug output of composed shaders
     debug_output: bool,
+    /// Custom path for debug shader output (None = "composed_shader_debug.wgsl")
+    debug_output_path: Option<String>,
+    /// HashMap for O(1) feature name lookup
+    feature_indices: std::collections::HashMap<String, usize>,
 }
 
 impl FeatureRegistry {
@@ -446,6 +450,8 @@ impl FeatureRegistry {
         Self {
             features: Vec::new(),
             debug_output: false,
+            debug_output_path: None,
+            feature_indices: std::collections::HashMap::new(),
         }
     }
     
@@ -481,7 +487,10 @@ impl FeatureRegistry {
     /// registry.register(BasicLighting::new());
     /// ```
     pub fn register<F: Feature + 'static>(&mut self, feature: F) {
+        let name = feature.name().to_string();
+        let index = self.features.len();
         self.features.push(Box::new(feature));
+        self.feature_indices.insert(name, index);
     }
 
     /// Initialize all features with the given context.
@@ -522,13 +531,11 @@ impl FeatureRegistry {
 
         // Collect all injections from enabled features
         let mut injections: HashMap<ShaderInjectionPoint, Vec<ShaderInjection>> = HashMap::new();
-        let mut used_points = std::collections::HashSet::new();
 
         for feature in &self.features {
             if feature.is_enabled() {
                 log::debug!("Composing shader with feature: {}", feature.name());
                 for injection in feature.shader_injections() {
-                    used_points.insert(injection.point);
                     injections
                         .entry(injection.point)
                         .or_insert_with(Vec::new)
@@ -542,11 +549,8 @@ impl FeatureRegistry {
             injections_at_point.sort_by_key(|inj| inj.priority);
         }
 
-        // Replace injection points in base shader
-        let mut result = base_shader.to_string();
-        
-        // Check for unused injection markers
-        for point in [
+        // Pre-compute injection markers once
+        let markers: HashMap<ShaderInjectionPoint, String> = [
             ShaderInjectionPoint::VertexPreamble,
             ShaderInjectionPoint::VertexMain,
             ShaderInjectionPoint::VertexPostProcess,
@@ -554,39 +558,70 @@ impl FeatureRegistry {
             ShaderInjectionPoint::FragmentMain,
             ShaderInjectionPoint::FragmentColorCalculation,
             ShaderInjectionPoint::FragmentPostProcess,
-        ] {
+        ]
+        .iter()
+        .map(|&point| {
             let marker = format!("// INJECT_{:?}", point).to_uppercase();
-            if result.contains(&marker) && !used_points.contains(&point) {
-                log::debug!("Injection point {:?} present but unused", point);
+            (point, marker)
+        })
+        .collect();
+
+        // Single-pass shader composition using efficient string building
+        let mut result = String::with_capacity(base_shader.len() + injections.len() * 256);
+        let mut current_pos = 0;
+        
+        // Find all marker positions in base shader
+        let mut marker_positions: Vec<(usize, ShaderInjectionPoint, &str)> = Vec::new();
+        for (point, marker) in &markers {
+            if let Some(pos) = base_shader[current_pos..].find(marker.as_str()) {
+                marker_positions.push((pos + current_pos, *point, marker.as_str()));
             }
         }
-
-        for (point, injections_at_point) in injections {
-            let marker = format!("// INJECT_{:?}", point).to_uppercase();
+        
+        // Sort by position for sequential replacement
+        marker_positions.sort_by_key(|(pos, _, _)| *pos);
+        
+        // Build result string in single pass
+        for (pos, point, marker) in marker_positions {
+            // Add text up to marker
+            result.push_str(&base_shader[current_pos..pos]);
             
-            if !result.contains(&marker) {
-                log::warn!(
-                    "Injection point {:?} has code but marker '{}' not found in base shader",
-                    point, marker
-                );
-                continue;
+            // Add injected code if exists
+            if let Some(injections_at_point) = injections.get(&point) {
+                for inj in injections_at_point {
+                    result.push_str(inj.code.as_ref());
+                    result.push('\n');
+                }
+            } else {
+                // Keep marker if no injections for this point
+                result.push_str(marker);
             }
             
-            let code = injections_at_point
-                .iter()
-                .map(|inj| inj.code.as_ref())
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            result = result.replace(&marker, &code);
+            current_pos = pos + marker.len();
+        }
+        
+        // Add remaining shader text
+        result.push_str(&base_shader[current_pos..]);
+        
+        // Log warnings for injections without markers
+        for (point, _) in &injections {
+            if let Some(marker) = markers.get(point) {
+                if !base_shader.contains(marker.as_str()) {
+                    log::warn!(
+                        "Injection point {:?} has code but marker '{}' not found in base shader",
+                        point, marker
+                    );
+                }
+            }
         }
         
         // Write debug output if enabled
         if self.debug_output {
-            if let Err(e) = std::fs::write("composed_shader_debug.wgsl", &result) {
-                log::warn!("Failed to write debug shader output: {}", e);
+            let path = self.debug_output_path.as_deref().unwrap_or("composed_shader_debug.wgsl");
+            if let Err(e) = std::fs::write(path, &result) {
+                log::warn!("Failed to write debug shader output to '{}': {}", path, e);
             } else {
-                log::info!("Wrote composed shader to composed_shader_debug.wgsl");
+                log::info!("Wrote composed shader to '{}'", path);
             }
         }
 
@@ -666,17 +701,19 @@ impl FeatureRegistry {
     /// }
     /// ```
     pub fn get_feature(&self, name: &str) -> Option<&dyn Feature> {
-        self.features
-            .iter()
-            .find(|f| f.name() == name)
+        self.feature_indices
+            .get(name)
+            .and_then(|&index| self.features.get(index))
             .map(|f| f.as_ref())
     }
 
     /// Get a mutable reference to a feature by name.
     pub fn get_feature_mut(&mut self, name: &str) -> Option<&mut Box<dyn Feature>> {
-        self.features
-            .iter_mut()
-            .find(|f| f.name() == name)
+        if let Some(&index) = self.feature_indices.get(name) {
+            self.features.get_mut(index)
+        } else {
+            None
+        }
     }
 
     /// Toggle a feature's enabled state by name.
@@ -768,6 +805,7 @@ impl Default for FeatureRegistry {
 pub struct FeatureRegistryBuilder {
     features: Vec<Box<dyn Feature>>,
     debug_output: bool,
+    debug_output_path: Option<String>,
 }
 
 impl FeatureRegistryBuilder {
@@ -776,6 +814,7 @@ impl FeatureRegistryBuilder {
         Self {
             features: Vec::new(),
             debug_output: false,
+            debug_output_path: None,
         }
     }
     
@@ -791,11 +830,32 @@ impl FeatureRegistryBuilder {
         self
     }
     
+    /// Set custom path for debug shader output.
+    /// 
+    /// # Example
+    /// ```ignore
+    /// let registry = FeatureRegistry::builder()
+    ///     .debug_output(true)
+    ///     .debug_output_path("output/my_shader.wgsl")
+    ///     .build();
+    /// ```
+    pub fn debug_output_path(mut self, path: impl Into<String>) -> Self {
+        self.debug_output_path = Some(path.into());
+        self
+    }
+    
     /// Build the FeatureRegistry.
     pub fn build(self) -> FeatureRegistry {
+        let mut feature_indices = std::collections::HashMap::new();
+        for (i, feature) in self.features.iter().enumerate() {
+            feature_indices.insert(feature.name().to_string(), i);
+        }
+        
         FeatureRegistry {
             features: self.features,
             debug_output: self.debug_output,
+            debug_output_path: self.debug_output_path,
+            feature_indices,
         }
     }
 }

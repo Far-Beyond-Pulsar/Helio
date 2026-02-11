@@ -1,13 +1,15 @@
 use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
 
 /// Material data structure for PBR-like materials.
+/// Optimized memory layout: 32 bytes total (2 vec4 uniforms)
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct MaterialData {
-    pub base_color: [f32; 4],
-    pub metallic: f32,
-    pub roughness: f32,
-    pub _padding: [f32; 2],
+    pub base_color: [f32; 4],      // 16 bytes (vec4)
+    pub metallic: f32,              // 4 bytes
+    pub roughness: f32,             // 4 bytes
+    pub emissive_strength: f32,     // 4 bytes (repurposed from padding)
+    pub ao: f32,                    // 4 bytes (ambient occlusion, repurposed from padding)
 }
 
 impl Default for MaterialData {
@@ -16,7 +18,8 @@ impl Default for MaterialData {
             base_color: [1.0, 1.0, 1.0, 1.0],
             metallic: 0.0,
             roughness: 0.5,
-            _padding: [0.0; 2],
+            emissive_strength: 0.0,
+            ao: 1.0,
         }
     }
 }

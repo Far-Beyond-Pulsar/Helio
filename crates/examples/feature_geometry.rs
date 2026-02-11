@@ -165,7 +165,8 @@ impl Example {
             window_size.height,
             registry,
             &base_shader,
-        );
+        )
+        .expect("Failed to create renderer");
 
         let command_encoder = context.create_command_encoder(gpu::CommandEncoderDesc {
             name: "main",
