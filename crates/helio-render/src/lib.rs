@@ -549,7 +549,54 @@ impl FeatureRenderer {
 
         // Execute post-render passes
         self.registry.execute_post_passes(command_encoder, &context);
-        
+
+        // Billboard overlay pass: collect light billboard data from ProceduralShadows,
+        // then render via BillboardFeature using the same target and depth views.
+        #[cfg(feature = "billboards")]
+        {
+            use helio_feature_billboards::{BillboardData, BillboardFeature};
+
+            // Collect billboard positions/sizes/textures from any shadow feature
+            let mut billboard_data: Vec<BillboardData> = Vec::new();
+
+            #[cfg(feature = "shadows")]
+            {
+                use helio_feature_procedural_shadows::ProceduralShadows;
+                for feature in self.registry.features() {
+                    if feature.is_enabled() {
+                        let feature_obj: &dyn helio_features::Feature = &**feature;
+                        if let Some(shadows) = feature_obj.as_any().downcast_ref::<ProceduralShadows>() {
+                            if let Some(texture_id) = shadows.spotlight_icon_texture() {
+                                for (pos, size) in shadows.generate_light_billboards() {
+                                    billboard_data.push(BillboardData::new(
+                                        [pos.x, pos.y, pos.z],
+                                        [size, size],
+                                        texture_id,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if !billboard_data.is_empty() {
+                if let Some(bf_box) = self.registry.get_feature_mut("billboards") {
+                    let feature_obj: &mut dyn helio_features::Feature = &mut **bf_box;
+                    if let Some(bf) = feature_obj.as_any_mut().downcast_mut::<BillboardFeature>() {
+                        bf.render_billboard_overlay(
+                            command_encoder,
+                            target_view,
+                            self.depth_view,
+                            camera.view_proj,
+                            camera.position,
+                            &billboard_data,
+                        );
+                    }
+                }
+            }
+        }
+
         self.frame_index += 1;
     }
 

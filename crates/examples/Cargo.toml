@@ -32,6 +32,7 @@ helio-feature-lighting = { path = "../helio-feature-lighting" }
 helio-feature-materials = { path = "../helio-feature-materials" }
 helio-feature-procedural-shadows = { path = "../helio-feature-procedural-shadows" }
 helio-feature-bloom = { path = "../helio-feature-bloom" }
+helio-feature-billboards = { path = "../helio-feature-billboards" }
 blade-graphics = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }

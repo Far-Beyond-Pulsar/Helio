@@ -4,6 +4,7 @@ use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh, Textur
 use helio_feature_base_geometry::BaseGeometry;
 use helio_feature_lighting::BasicLighting;
 use helio_feature_materials::BasicMaterials;
+use helio_feature_billboards::BillboardFeature;
 use helio_feature_bloom::Bloom;
 use helio_feature_procedural_shadows::{ProceduralShadows, LightType, LightConfig};
 use helio_features::FeatureRegistry;
@@ -320,6 +321,10 @@ impl Example {
         
         registry.register(shadows);
         registry.register(Bloom::new());
+
+        let mut billboards = BillboardFeature::new();
+        billboards.set_texture_manager(texture_manager.clone());
+        registry.register(billboards);
 
         let renderer = FeatureRenderer::new(
             context.clone(),

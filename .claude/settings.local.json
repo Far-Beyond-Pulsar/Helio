@@ -14,7 +14,9 @@
       "Bash(RUST_LOG=info ./feature_complete.exe:*)",
       "Bash(timeout:*)",
       "Bash(echo:*)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(dir /s /b \"%USERPROFILE%\\.cargo\\git\\checkouts\")",
+      "Bash(findstr:*)"
     ]
   }
 }
