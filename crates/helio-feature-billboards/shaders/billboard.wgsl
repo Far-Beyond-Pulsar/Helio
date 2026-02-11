@@ -18,8 +18,8 @@ var tex: texture_2d<f32>;
 var tex_sampler: sampler;
 
 struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) tex_coords: vec2<f32>,
+    position: vec3<f32>,
+    tex_coords: vec2<f32>,
 }
 
 struct VertexOutput {
