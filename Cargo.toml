@@ -9,6 +9,7 @@ members = [
     "crates/helio-feature-materials",
     "crates/helio-feature-procedural-shadows",
     "crates/helio-feature-bloom",
+    "crates/helio-feature-billboards",
     "crates/examples",
     "crates/feature_complete_android",
 ]

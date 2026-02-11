@@ -1,12 +1,13 @@
 [package]
-name = "helio-core"
+name = "helio-feature-billboards"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+helio-core = { path = "../helio-core" }
+helio-features = { path = "../helio-features" }
 blade-graphics = { workspace = true }
 blade-macros = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png"] }

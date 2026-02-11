@@ -1,5 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 
+pub mod texture;
+pub use texture::{TextureId, TextureData, TextureManager, GpuTexture};
+
 #[derive(blade_macros::Vertex, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
 pub struct PackedVertex {
@@ -150,4 +153,40 @@ pub fn create_plane_mesh(width: f32, height: f32) -> Mesh {
     let indices = vec![0, 2, 1, 0, 3, 2];
 
     Mesh { vertices, indices }
+}
+
+/// Simple vertex format for billboards and UI elements
+#[derive(blade_macros::Vertex, Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+pub struct BillboardVertex {
+    pub position: [f32; 3],
+    pub tex_coords: [f32; 2],
+}
+
+impl BillboardVertex {
+    pub fn new(position: [f32; 3], tex_coords: [f32; 2]) -> Self {
+        Self { position, tex_coords }
+    }
+}
+
+pub struct BillboardMesh {
+    pub vertices: Vec<BillboardVertex>,
+    pub indices: Vec<u32>,
+}
+
+/// Create a quad mesh for billboard rendering (facing +Z)
+/// Center at origin, extends from -size/2 to +size/2 on X and Y axes
+pub fn create_billboard_quad(size: f32) -> BillboardMesh {
+    let s = size / 2.0;
+    
+    let vertices = vec![
+        BillboardVertex::new([-s, -s, 0.0], [0.0, 1.0]), // Bottom-left
+        BillboardVertex::new([s, -s, 0.0], [1.0, 1.0]),  // Bottom-right
+        BillboardVertex::new([s, s, 0.0], [1.0, 0.0]),   // Top-right
+        BillboardVertex::new([-s, s, 0.0], [0.0, 0.0]),  // Top-left
+    ];
+    
+    let indices = vec![0, 1, 2, 0, 2, 3];
+    
+    BillboardMesh { vertices, indices }
 }
