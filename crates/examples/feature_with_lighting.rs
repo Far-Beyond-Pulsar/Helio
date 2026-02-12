@@ -1,11 +1,11 @@
 use blade_graphics as gpu;
 use glam::{Mat4, Vec3};
-use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh};
+use helio_core::{create_cube_mesh, create_plane_mesh, create_sphere_mesh, MeshBuffer};
 use helio_feature_base_geometry::BaseGeometry;
 use helio_feature_lighting::BasicLighting;
 use helio_features::FeatureRegistry;
 use helio_render::{CameraUniforms, FeatureRenderer, TransformUniforms};
-use std::{ptr, sync::Arc, time::Instant};
+use std::{sync::Arc, time::Instant};
 
 struct Example {
     context: Arc<gpu::Context>,
@@ -14,17 +14,9 @@ struct Example {
     command_encoder: gpu::CommandEncoder,
     window_size: winit::dpi::PhysicalSize<u32>,
 
-    cube_vertices: gpu::Buffer,
-    cube_indices: gpu::Buffer,
-    cube_index_count: u32,
-
-    sphere_vertices: gpu::Buffer,
-    sphere_indices: gpu::Buffer,
-    sphere_index_count: u32,
-
-    plane_vertices: gpu::Buffer,
-    plane_indices: gpu::Buffer,
-    plane_index_count: u32,
+    cube_mesh: MeshBuffer,
+    sphere_mesh: MeshBuffer,
+    plane_mesh: MeshBuffer,
 
     start_time: Instant,
     last_frame_time: Instant,
@@ -62,103 +54,17 @@ impl Example {
             .create_surface_configured(window, Self::make_surface_config(window_size))
             .unwrap();
 
-        let cube_mesh = create_cube_mesh(1.0);
-        let sphere_mesh = create_sphere_mesh(0.5, 32, 32);
-        let plane_mesh = create_plane_mesh(20.0, 20.0);
-
-        let cube_vertices = context.create_buffer(gpu::BufferDesc {
-            name: "cube_vertices",
-            size: (cube_mesh.vertices.len() * std::mem::size_of::<helio_core::PackedVertex>())
-                as u64,
-            memory: gpu::Memory::Shared,
-        });
-        unsafe {
-            ptr::copy_nonoverlapping(
-                cube_mesh.vertices.as_ptr(),
-                cube_vertices.data() as *mut helio_core::PackedVertex,
-                cube_mesh.vertices.len(),
-            );
-        }
-        context.sync_buffer(cube_vertices);
-
-        let cube_indices = context.create_buffer(gpu::BufferDesc {
-            name: "cube_indices",
-            size: (cube_mesh.indices.len() * std::mem::size_of::<u32>()) as u64,
-            memory: gpu::Memory::Shared,
-        });
-        unsafe {
-            ptr::copy_nonoverlapping(
-                cube_mesh.indices.as_ptr(),
-                cube_indices.data() as *mut u32,
-                cube_mesh.indices.len(),
-            );
-        }
-        context.sync_buffer(cube_indices);
-
-        let sphere_vertices = context.create_buffer(gpu::BufferDesc {
-            name: "sphere_vertices",
-            size: (sphere_mesh.vertices.len() * std::mem::size_of::<helio_core::PackedVertex>())
-                as u64,
-            memory: gpu::Memory::Shared,
-        });
-        unsafe {
-            ptr::copy_nonoverlapping(
-                sphere_mesh.vertices.as_ptr(),
-                sphere_vertices.data() as *mut helio_core::PackedVertex,
-                sphere_mesh.vertices.len(),
-            );
-        }
-        context.sync_buffer(sphere_vertices);
-
-        let sphere_indices = context.create_buffer(gpu::BufferDesc {
-            name: "sphere_indices",
-            size: (sphere_mesh.indices.len() * std::mem::size_of::<u32>()) as u64,
-            memory: gpu::Memory::Shared,
-        });
-        unsafe {
-            ptr::copy_nonoverlapping(
-                sphere_mesh.indices.as_ptr(),
-                sphere_indices.data() as *mut u32,
-                sphere_mesh.indices.len(),
-            );
-        }
-        context.sync_buffer(sphere_indices);
-
-        let plane_vertices = context.create_buffer(gpu::BufferDesc {
-            name: "plane_vertices",
-            size: (plane_mesh.vertices.len() * std::mem::size_of::<helio_core::PackedVertex>())
-                as u64,
-            memory: gpu::Memory::Shared,
-        });
-        unsafe {
-            ptr::copy_nonoverlapping(
-                plane_mesh.vertices.as_ptr(),
-                plane_vertices.data() as *mut helio_core::PackedVertex,
-                plane_mesh.vertices.len(),
-            );
-        }
-        context.sync_buffer(plane_vertices);
-
-        let plane_indices = context.create_buffer(gpu::BufferDesc {
-            name: "plane_indices",
-            size: (plane_mesh.indices.len() * std::mem::size_of::<u32>()) as u64,
-            memory: gpu::Memory::Shared,
-        });
-        unsafe {
-            ptr::copy_nonoverlapping(
-                plane_mesh.indices.as_ptr(),
-                plane_indices.data() as *mut u32,
-                plane_mesh.indices.len(),
-            );
-        }
-        context.sync_buffer(plane_indices);
+        let cube_mesh = MeshBuffer::from_mesh(&context, "cube", &create_cube_mesh(1.0));
+        let sphere_mesh = MeshBuffer::from_mesh(&context, "sphere", &create_sphere_mesh(0.5, 32, 32));
+        let plane_mesh = MeshBuffer::from_mesh(&context, "plane", &create_plane_mesh(20.0, 20.0));
 
         let base_geometry = BaseGeometry::new();
         let base_shader = base_geometry.shader_template().to_string();
 
-        let mut registry = FeatureRegistry::new();
-        registry.register(base_geometry);
-        registry.register(BasicLighting::new());
+        let registry = FeatureRegistry::builder()
+            .with_feature(base_geometry)
+            .with_feature(BasicLighting::new())
+            .build();
 
         let renderer = FeatureRenderer::new(
             context.clone(),
@@ -176,22 +82,15 @@ impl Example {
         });
 
         let now = Instant::now();
-
         Self {
             context,
             surface,
             renderer,
             command_encoder,
             window_size,
-            cube_vertices,
-            cube_indices,
-            cube_index_count: cube_mesh.indices.len() as u32,
-            sphere_vertices,
-            sphere_indices,
-            sphere_index_count: sphere_mesh.indices.len() as u32,
-            plane_vertices,
-            plane_indices,
-            plane_index_count: plane_mesh.indices.len() as u32,
+            cube_mesh,
+            sphere_mesh,
+            plane_mesh,
             start_time: now,
             last_frame_time: now,
         }
@@ -210,51 +109,33 @@ impl Example {
         self.command_encoder.start();
         self.command_encoder.init_texture(frame.texture());
 
-        let aspect_ratio = self.window_size.width as f32 / self.window_size.height as f32;
-        let projection = Mat4::perspective_rh(45.0f32.to_radians(), aspect_ratio, 0.1, 100.0);
-
-        let camera_pos = Vec3::new(5.0 * elapsed_wrapped.sin(), 4.0, 5.0 * elapsed_wrapped.cos());
+        let aspect = self.window_size.width as f32 / self.window_size.height as f32;
+        let camera_pos = Vec3::new(
+            5.0 * elapsed_wrapped.sin(),
+            4.0,
+            5.0 * elapsed_wrapped.cos(),
+        );
         let view = Mat4::look_at_rh(camera_pos, Vec3::new(0.0, 0.5, 0.0), Vec3::Y);
-        let view_proj = projection * view;
+        let proj = Mat4::perspective_rh(45.0_f32.to_radians(), aspect, 0.1, 100.0);
+        let camera = CameraUniforms::new(proj * view, camera_pos);
 
-        let camera = CameraUniforms {
-            view_proj: view_proj.to_cols_array_2d(),
-            position: camera_pos.to_array(),
-            _pad: 0.0,
-        };
-
-        let mut meshes = Vec::new();
-
-        let cube_transform =
-            Mat4::from_rotation_y(elapsed_wrapped) * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0));
-        meshes.push((
-            TransformUniforms {
-                model: cube_transform.to_cols_array_2d(),
-            },
-            self.cube_vertices.into(),
-            self.cube_indices.into(),
-            self.cube_index_count,
-        ));
-
-        let sphere_transform = Mat4::from_translation(Vec3::new(2.0, 1.0, 0.0));
-        meshes.push((
-            TransformUniforms {
-                model: sphere_transform.to_cols_array_2d(),
-            },
-            self.sphere_vertices.into(),
-            self.sphere_indices.into(),
-            self.sphere_index_count,
-        ));
-
-        let plane_transform = Mat4::from_translation(Vec3::ZERO);
-        meshes.push((
-            TransformUniforms {
-                model: plane_transform.to_cols_array_2d(),
-            },
-            self.plane_vertices.into(),
-            self.plane_indices.into(),
-            self.plane_index_count,
-        ));
+        let meshes = [
+            (
+                TransformUniforms::from_matrix(
+                    Mat4::from_rotation_y(elapsed_wrapped)
+                        * Mat4::from_translation(Vec3::new(-2.0, 1.0, 0.0)),
+                ),
+                &self.cube_mesh,
+            ),
+            (
+                TransformUniforms::from_matrix(Mat4::from_translation(Vec3::new(2.0, 1.0, 0.0))),
+                &self.sphere_mesh,
+            ),
+            (
+                TransformUniforms::from_matrix(Mat4::IDENTITY),
+                &self.plane_mesh,
+            ),
+        ];
 
         self.renderer.render(
             &mut self.command_encoder,
@@ -273,7 +154,6 @@ impl Example {
         if new_size.width == 0 || new_size.height == 0 {
             return;
         }
-
         self.window_size = new_size;
         self.context
             .reconfigure_surface(&mut self.surface, Self::make_surface_config(new_size));
@@ -299,39 +179,28 @@ fn main() {
             winit::event::Event::WindowEvent { event, .. } => match event {
                 winit::event::WindowEvent::CloseRequested => elwt.exit(),
                 winit::event::WindowEvent::KeyboardInput {
-                    event:
-                        winit::event::KeyEvent {
-                            physical_key,
-                            state: winit::event::ElementState::Pressed,
-                            ..
-                        },
+                    event: winit::event::KeyEvent {
+                        physical_key,
+                        state: winit::event::ElementState::Pressed,
+                        ..
+                    },
                     ..
-                } => {
-                    match physical_key {
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
-                            elwt.exit();
-                        }
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
-                            if let Ok(_) = app.renderer.registry_mut().toggle_feature("base_geometry") {
-                                let enabled = app.renderer.registry().get_feature("base_geometry").unwrap().is_enabled();
-                                let status = if enabled { "ON" } else { "OFF" };
-                                println!("[1] Base Geometry: {}", status);
-                                log::info!("[1] Base Geometry: {}", status);
-                                app.renderer.rebuild_pipeline();
-                            }
-                        }
-                        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
-                            if let Ok(_) = app.renderer.registry_mut().toggle_feature("basic_lighting") {
-                                let enabled = app.renderer.registry().get_feature("basic_lighting").unwrap().is_enabled();
-                                let status = if enabled { "ON" } else { "OFF" };
-                                println!("[2] Basic Lighting: {}", status);
-                                log::info!("[2] Basic Lighting: {}", status);
-                                app.renderer.rebuild_pipeline();
-                            }
-                        }
-                        _ => {}
+                } => match physical_key {
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Escape) => {
+                        elwt.exit();
                     }
-                }
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit1) => {
+                        if let Ok(on) = app.renderer.toggle_and_rebuild("base_geometry") {
+                            println!("[1] Base Geometry: {}", if on { "ON" } else { "OFF" });
+                        }
+                    }
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Digit2) => {
+                        if let Ok(on) = app.renderer.toggle_and_rebuild("basic_lighting") {
+                            println!("[2] Basic Lighting: {}", if on { "ON" } else { "OFF" });
+                        }
+                    }
+                    _ => {}
+                },
                 winit::event::WindowEvent::Resized(new_size) => {
                     app.resize(new_size);
                 }
