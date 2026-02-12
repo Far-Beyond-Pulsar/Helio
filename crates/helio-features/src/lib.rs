@@ -720,6 +720,36 @@ impl FeatureRegistry {
         }
     }
 
+    /// Get a feature downcast to a concrete type.
+    ///
+    /// Returns `None` if the feature is not found or is not of type `T`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Some(shadows) = registry.get_feature_as::<ProceduralShadows>("procedural_shadows") {
+    ///     println!("Shadow map size: {}", shadows.shadow_map_size());
+    /// }
+    /// ```
+    pub fn get_feature_as<T: 'static>(&self, name: &str) -> Option<&T> {
+        self.get_feature(name)?.as_any().downcast_ref::<T>()
+    }
+
+    /// Get a mutable reference to a feature downcast to a concrete type.
+    ///
+    /// Returns `None` if the feature is not found or is not of type `T`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Some(shadows) = registry.get_feature_as_mut::<ProceduralShadows>("procedural_shadows") {
+    ///     shadows.clear_lights();
+    ///     shadows.add_light(my_light).unwrap();
+    /// }
+    /// ```
+    pub fn get_feature_as_mut<T: 'static>(&mut self, name: &str) -> Option<&mut T> {
+        let idx = *self.feature_indices.get(name)?;
+        self.features.get_mut(idx)?.as_any_mut().downcast_mut::<T>()
+    }
+
     /// Toggle a feature's enabled state by name.
     ///
     /// # Returns

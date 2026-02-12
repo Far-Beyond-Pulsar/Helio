@@ -1,5 +1,7 @@
 use blade_graphics as gpu;
 use bytemuck::{Pod, Zeroable};
+use glam::{Mat4, Vec3};
+use helio_core::MeshBuffer;
 use helio_features::{FeatureContext, FeatureRegistry};
 use std::sync::Arc;
 
@@ -12,11 +14,119 @@ pub struct CameraUniforms {
     pub _pad: f32,
 }
 
+impl CameraUniforms {
+    /// Build camera uniforms from a pre-composed view-projection matrix and world position.
+    pub fn new(view_proj: Mat4, position: Vec3) -> Self {
+        Self {
+            view_proj: view_proj.to_cols_array_2d(),
+            position: position.to_array(),
+            _pad: 0.0,
+        }
+    }
+}
+
 /// Uniforms for object transformation.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct TransformUniforms {
     pub model: [[f32; 4]; 4],
+}
+
+impl TransformUniforms {
+    /// Build transform uniforms from a model matrix.
+    pub fn from_matrix(mat: Mat4) -> Self {
+        Self { model: mat.to_cols_array_2d() }
+    }
+}
+
+/// Simple FPS-style camera controller.
+///
+/// Handles the view-matrix math without coupling to any windowing library.
+/// The calling code is responsible for tracking which keys are pressed and
+/// calling [`update_movement`] / [`handle_mouse_delta`] each frame.
+///
+/// # Example
+/// ```ignore
+/// let mut camera = FpsCamera::new(Vec3::new(0.0, 5.0, 15.0));
+///
+/// // Each frame (inside event/render loop):
+/// let fwd = keys.w as i8 - keys.s as i8;
+/// let rgt = keys.d as i8 - keys.a as i8;
+/// let up  = keys.space as i8 - keys.shift as i8;
+/// camera.update_movement(fwd as f32, rgt as f32, up as f32, delta_time);
+///
+/// let camera_uniforms = camera.build_camera_uniforms(60.0, aspect_ratio);
+/// ```
+pub struct FpsCamera {
+    pub position: Vec3,
+    /// Horizontal angle in radians (default points down -Z).
+    pub yaw: f32,
+    /// Vertical angle in radians, clamped to ±89°.
+    pub pitch: f32,
+    /// World-space units per second.
+    pub move_speed: f32,
+    /// Mouse sensitivity scalar (degrees per pixel scale).
+    pub look_speed: f32,
+}
+
+impl FpsCamera {
+    /// Create a camera at `position` looking down -Z.
+    pub fn new(position: Vec3) -> Self {
+        Self {
+            position,
+            yaw: -90.0_f32.to_radians(),
+            pitch: 0.0,
+            move_speed: 5.0,
+            look_speed: 0.1,
+        }
+    }
+
+    /// Unit forward vector in world space.
+    pub fn forward(&self) -> Vec3 {
+        Vec3::new(
+            self.yaw.cos() * self.pitch.cos(),
+            self.pitch.sin(),
+            self.yaw.sin() * self.pitch.cos(),
+        )
+        .normalize()
+    }
+
+    /// Unit right vector (perpendicular to forward, on the XZ plane).
+    pub fn right(&self) -> Vec3 {
+        self.forward().cross(Vec3::Y).normalize()
+    }
+
+    /// Move the camera. Positive `forward`/`right`/`up` = forward/right/up.
+    ///
+    /// Pass −1, 0, or 1 (from key state) scaled by any analogue magnitude.
+    pub fn update_movement(&mut self, forward: f32, right: f32, up: f32, dt: f32) {
+        let fwd = self.forward();
+        let rgt = self.right();
+        let speed = self.move_speed * dt;
+        self.position += fwd * forward * speed;
+        self.position += rgt * right * speed;
+        self.position.y += up * speed;
+    }
+
+    /// Apply a mouse delta (pixels). Positive dx = look right, positive dy = look down.
+    pub fn handle_mouse_delta(&mut self, dx: f32, dy: f32) {
+        self.yaw += dx * self.look_speed * 0.01;
+        self.pitch -= dy * self.look_speed * 0.01;
+        self.pitch = self.pitch.clamp(-89.0_f32.to_radians(), 89.0_f32.to_radians());
+    }
+
+    /// Right-handed view matrix.
+    pub fn view_matrix(&self) -> Mat4 {
+        Mat4::look_at_rh(self.position, self.position + self.forward(), Vec3::Y)
+    }
+
+    /// Build ready-to-use [`CameraUniforms`] for this camera.
+    ///
+    /// `fov_deg` is the vertical field of view in degrees.
+    pub fn build_camera_uniforms(&self, fov_deg: f32, aspect: f32) -> CameraUniforms {
+        let proj = Mat4::perspective_rh(fov_deg.to_radians(), aspect, 0.1, 100.0);
+        CameraUniforms::new(proj * self.view_matrix(), self.position)
+    }
 }
 
 #[derive(blade_macros::ShaderData)]
@@ -153,7 +263,7 @@ impl Renderer {
         command_encoder: &mut gpu::CommandEncoder,
         target_view: gpu::TextureView,
         camera: CameraUniforms,
-        meshes: &[(TransformUniforms, gpu::BufferPiece, gpu::BufferPiece, u32)],
+        meshes: &[(TransformUniforms, &MeshBuffer)],
     ) {
         let mut pass = command_encoder.render(
             "main",
@@ -175,11 +285,11 @@ impl Renderer {
             let mut rc = pass.with(&self.pipeline);
             rc.bind(0, &scene_data);
 
-            for (transform, vertex_buf, index_buf, index_count) in meshes {
+            for (transform, mesh) in meshes {
                 let object_data = ObjectData { transform: *transform };
                 rc.bind(1, &object_data);
-                rc.bind_vertex(0, *vertex_buf);
-                rc.draw_indexed(*index_buf, gpu::IndexType::U32, *index_count, 0, 0, 1);
+                rc.bind_vertex(0, mesh.vertex_piece());
+                rc.draw_indexed(mesh.index_piece(), gpu::IndexType::U32, mesh.index_count, 0, 0, 1);
             }
         }
     }
@@ -463,7 +573,7 @@ impl FeatureRenderer {
         command_encoder: &mut gpu::CommandEncoder,
         target_view: gpu::TextureView,
         camera: CameraUniforms,
-        meshes: &[(TransformUniforms, gpu::BufferPiece, gpu::BufferPiece, u32)],
+        meshes: &[(TransformUniforms, &MeshBuffer)],
         delta_time: f32,
     ) {
         use helio_features::MeshData;
@@ -482,11 +592,11 @@ impl FeatureRenderer {
         // Convert meshes to MeshData for shadow pass
         let mesh_data: Vec<MeshData> = meshes
             .iter()
-            .map(|(transform, vertex_buf, index_buf, index_count)| MeshData {
+            .map(|(transform, mesh)| MeshData {
                 transform: transform.model,
-                vertex_buffer: *vertex_buf,
-                index_buffer: *index_buf,
-                index_count: *index_count,
+                vertex_buffer: mesh.vertex_piece(),
+                index_buffer: mesh.index_piece(),
+                index_count: mesh.index_count,
             })
             .collect();
 
@@ -539,11 +649,11 @@ impl FeatureRenderer {
                 }
             }
 
-            for (transform, vertex_buf, index_buf, index_count) in meshes {
+            for (transform, mesh) in meshes {
                 let object_data = ObjectData { transform: *transform };
                 rc.bind(1, &object_data);
-                rc.bind_vertex(0, *vertex_buf);
-                rc.draw_indexed(*index_buf, gpu::IndexType::U32, *index_count, 0, 0, 1);
+                rc.bind_vertex(0, mesh.vertex_piece());
+                rc.draw_indexed(mesh.index_piece(), gpu::IndexType::U32, mesh.index_count, 0, 0, 1);
             }
         }
 
@@ -652,10 +762,27 @@ impl FeatureRenderer {
     pub fn frame_index(&self) -> u64 {
         self.frame_index
     }
-    
+
     /// Get the GPU context.
     pub fn context(&self) -> &Arc<gpu::Context> {
         &self.context
+    }
+
+    /// Toggle a feature and immediately rebuild the pipeline.
+    ///
+    /// Convenience wrapper around `registry_mut().toggle_feature()` + `rebuild_pipeline()`.
+    /// Returns `Ok(new_enabled_state)` or `Err` if the feature name is not found.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Ok(enabled) = renderer.toggle_and_rebuild("basic_lighting") {
+    ///     println!("Lighting: {}", if enabled { "ON" } else { "OFF" });
+    /// }
+    /// ```
+    pub fn toggle_and_rebuild(&mut self, name: &str) -> Result<bool, helio_features::FeatureError> {
+        let state = self.registry.toggle_feature(name)?;
+        self.rebuild_pipeline();
+        Ok(state)
     }
 }
 

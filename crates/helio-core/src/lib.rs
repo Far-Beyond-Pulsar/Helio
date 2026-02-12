@@ -1,7 +1,72 @@
+use blade_graphics as gpu;
 use bytemuck::{Pod, Zeroable};
 
 pub mod texture;
 pub use texture::{TextureId, TextureData, TextureManager, GpuTexture};
+
+/// GPU-resident mesh geometry. Wraps vertex and index buffer upload.
+///
+/// # Example
+/// ```ignore
+/// let cube = MeshBuffer::from_mesh(&context, "cube", &create_cube_mesh(1.0));
+/// ```
+pub struct MeshBuffer {
+    vertex_buffer: gpu::Buffer,
+    index_buffer: gpu::Buffer,
+    /// Number of indices (pass directly to draw calls).
+    pub index_count: u32,
+}
+
+impl MeshBuffer {
+    /// Upload a [`Mesh`] to GPU-accessible shared memory.
+    ///
+    /// The name is used as a debug label prefix for the created buffers.
+    pub fn from_mesh(context: &gpu::Context, name: &str, mesh: &Mesh) -> Self {
+        let vertex_buffer = context.create_buffer(gpu::BufferDesc {
+            name: &format!("{}_vertices", name),
+            size: (mesh.vertices.len() * std::mem::size_of::<PackedVertex>()) as u64,
+            memory: gpu::Memory::Shared,
+        });
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                mesh.vertices.as_ptr(),
+                vertex_buffer.data() as *mut PackedVertex,
+                mesh.vertices.len(),
+            );
+        }
+        context.sync_buffer(vertex_buffer);
+
+        let index_buffer = context.create_buffer(gpu::BufferDesc {
+            name: &format!("{}_indices", name),
+            size: (mesh.indices.len() * std::mem::size_of::<u32>()) as u64,
+            memory: gpu::Memory::Shared,
+        });
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                mesh.indices.as_ptr(),
+                index_buffer.data() as *mut u32,
+                mesh.indices.len(),
+            );
+        }
+        context.sync_buffer(index_buffer);
+
+        Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: mesh.indices.len() as u32,
+        }
+    }
+
+    /// Returns a [`gpu::BufferPiece`] pointing to the vertex data.
+    pub fn vertex_piece(&self) -> gpu::BufferPiece {
+        self.vertex_buffer.into()
+    }
+
+    /// Returns a [`gpu::BufferPiece`] pointing to the index data.
+    pub fn index_piece(&self) -> gpu::BufferPiece {
+        self.index_buffer.into()
+    }
+}
 
 #[derive(blade_macros::Vertex, Clone, Copy, Pod, Zeroable)]
 #[repr(C)]
