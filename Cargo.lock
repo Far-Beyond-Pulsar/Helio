@@ -203,7 +203,7 @@ checksum = "812e12b5285cc515a9c72a5c1d3b6d46a19dac5acfef5265968c166106e31dd3"
 [[package]]
 name = "blade-graphics"
 version = "0.7.0"
-source = "git+https://github.com/kvark/blade#d7e0bf8d4369033e51b85c400d3635c4c93a59bf"
+source = "git+https://github.com/tristanpoland/blade?rev=d85bd14a78ed7729abc298906e87332257674a02#d85bd14a78ed7729abc298906e87332257674a02"
 dependencies = [
  "ash",
  "ash-window",
@@ -237,7 +237,7 @@ dependencies = [
 [[package]]
 name = "blade-macros"
 version = "0.3.0"
-source = "git+https://github.com/kvark/blade#d7e0bf8d4369033e51b85c400d3635c4c93a59bf"
+source = "git+https://github.com/tristanpoland/blade?rev=d85bd14a78ed7729abc298906e87332257674a02#d85bd14a78ed7729abc298906e87332257674a02"
 dependencies = [
  "proc-macro2",
  "quote",
