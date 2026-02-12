@@ -241,6 +241,7 @@ impl BillboardFeature {
             rc.draw_indexed(quad_ibuf.into(), gpu::IndexType::U32, 6, 0, 0, 1);
         }
 
+        drop(rc);
         drop(pass);
     }
 }

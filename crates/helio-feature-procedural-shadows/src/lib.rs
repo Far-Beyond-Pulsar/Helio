@@ -815,6 +815,7 @@ impl Feature for ProceduralShadows {
                     );
                 }
 
+                drop(rc);
                 drop(pass);
                 context.gpu.destroy_texture_view(layer_view);
             }
