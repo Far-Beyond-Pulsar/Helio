@@ -18,11 +18,3 @@ fn apply_basic_lighting(world_normal: vec3<f32>, base_color: vec3<f32>) -> vec3<
 
     return diffuse + ambient;
 }
-
-// Enhanced lighting with emissive support
-// If material feature exports emissive data, it can be added here
-fn apply_lighting_with_emissive(world_normal: vec3<f32>, base_color: vec3<f32>, emissive: vec3<f32>) -> vec3<f32> {
-    let lit_color = apply_basic_lighting(world_normal, base_color);
-    // Emissive color is added directly (self-illumination)
-    return lit_color + emissive;
-}

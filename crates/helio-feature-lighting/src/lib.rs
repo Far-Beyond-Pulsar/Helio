@@ -52,11 +52,10 @@ impl Feature for BasicLighting {
                 ShaderInjectionPoint::FragmentPreamble,
                 include_str!("../shaders/lighting_functions.wgsl"),
             ),
-            // Apply lighting in color calculation with emissive support
-            // Note: material_emissive is provided by materials feature (defaults to black if materials disabled)
+            // Apply lighting in color calculation
             ShaderInjection::new(
                 ShaderInjectionPoint::FragmentColorCalculation,
-                "    final_color = apply_lighting_with_emissive(normalize(input.world_normal), final_color, material_emissive);",
+                "    final_color = apply_basic_lighting(normalize(input.world_normal), final_color);",
             ),
         ]
     }

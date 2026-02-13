@@ -155,7 +155,6 @@ impl Example {
             .with_feature(shadows)
             .with_feature(Bloom::new())
             .with_feature(billboards)
-            .debug_output(true) // Enable to see composed shader
             .build();
 
         let renderer = FeatureRenderer::new(

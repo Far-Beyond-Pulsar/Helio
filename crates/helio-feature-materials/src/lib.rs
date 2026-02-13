@@ -126,29 +126,11 @@ impl Feature for BasicMaterials {
                 include_str!("../shaders/material_functions.wgsl"),
                 -5,
             ),
-            // Declare emissive variable early (so lighting can access it)
-            ShaderInjection::with_priority(
-                ShaderInjectionPoint::FragmentMain,
-                "    var material_emissive = vec3<f32>(0.0, 0.0, 0.0);",
-                -15,
-            ),
             // Apply material early in fragment processing
             ShaderInjection::with_priority(
                 ShaderInjectionPoint::FragmentMain,
                 "    final_color = apply_material_color(final_color, input.tex_coords);",
                 -10,
-            ),
-            // Calculate emissive based on world position
-            ShaderInjection::with_priority(
-                ShaderInjectionPoint::FragmentMain,
-                "    material_emissive = get_emissive_color(input.world_position);",
-                -9,
-            ),
-            // Add emissive AFTER all lighting/shadows (high priority)
-            ShaderInjection::with_priority(
-                ShaderInjectionPoint::FragmentColorCalculation,
-                "    final_color = final_color + material_emissive; // Self-illumination",
-                15, // Very high priority - run after shadows
             ),
         ]
     }
