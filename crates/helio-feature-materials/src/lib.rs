@@ -1,4 +1,7 @@
 use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
+use helio_features::{ExportedData, FeatureData};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Material data structure for PBR-like materials.
 /// Optimized memory layout: 32 bytes total (2 vec4 uniforms)
@@ -24,6 +27,37 @@ impl Default for MaterialData {
     }
 }
 
+/// Exportable material properties for other features to consume.
+///
+/// This is the CPU-side representation of material data that can be
+/// shared with other features (especially lighting) for PBR calculations.
+#[derive(Debug, Clone)]
+pub struct MaterialProperties {
+    pub base_color: [f32; 4],
+    pub metallic: f32,
+    pub roughness: f32,
+    pub emissive_strength: f32,
+    pub ao: f32,
+}
+
+impl MaterialProperties {
+    pub fn from_material_data(data: &MaterialData) -> Self {
+        Self {
+            base_color: data.base_color,
+            metallic: data.metallic,
+            roughness: data.roughness,
+            emissive_strength: data.emissive_strength,
+            ao: data.ao,
+        }
+    }
+}
+
+impl FeatureData for MaterialProperties {
+    fn description(&self) -> &str {
+        "Material PBR properties"
+    }
+}
+
 /// Basic materials feature with procedural texture generation.
 ///
 /// Provides checkerboard pattern materials for visual interest.
@@ -31,6 +65,8 @@ impl Default for MaterialData {
 /// material property management.
 pub struct BasicMaterials {
     enabled: bool,
+    /// Current material properties (for export to other features)
+    properties: MaterialData,
 }
 
 impl BasicMaterials {
@@ -38,7 +74,18 @@ impl BasicMaterials {
     pub fn new() -> Self {
         Self {
             enabled: true,
+            properties: MaterialData::default(),
         }
+    }
+
+    /// Update material properties (for runtime adjustments).
+    pub fn set_properties(&mut self, properties: MaterialData) {
+        self.properties = properties;
+    }
+
+    /// Get current material properties.
+    pub fn get_properties(&self) -> &MaterialData {
+        &self.properties
     }
 }
 
@@ -90,5 +137,15 @@ impl Feature for BasicMaterials {
     
     fn cleanup(&mut self, _context: &FeatureContext) {
         // No GPU resources to clean up
+    }
+
+    fn export_data(&self) -> HashMap<String, ExportedData> {
+        let mut exports = HashMap::new();
+        
+        // Export material properties as CPU data (zero-copy via Arc)
+        let props = Arc::new(MaterialProperties::from_material_data(&self.properties));
+        exports.insert("properties".to_string(), ExportedData::CpuData(props));
+        
+        exports
     }
 }

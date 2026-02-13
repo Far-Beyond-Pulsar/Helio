@@ -4,6 +4,11 @@ use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPo
 ///
 /// Provides simple directional lighting calculations in the fragment shader.
 /// The light direction is hardcoded for simplicity.
+///
+/// # Material Data Integration
+/// This feature can query material properties from the materials feature
+/// for PBR calculations. See `prepare_frame()` for an example of accessing
+/// exported material data.
 pub struct BasicLighting {
     enabled: bool,
 }
@@ -53,6 +58,22 @@ impl Feature for BasicLighting {
                 "    final_color = apply_basic_lighting(normalize(input.world_normal), final_color);",
             ),
         ]
+    }
+
+    fn prepare_frame(&mut self, _context: &FeatureContext) {
+        // Example: In a full implementation, you would query material data here:
+        //
+        // if let Some(data) = registry.get_exported_data("basic_materials", "properties") {
+        //     if let Some(props) = data.downcast_arc::<MaterialProperties>() {
+        //         // Use props.metallic, props.roughness for PBR calculations
+        //         // Update uniforms or shader parameters based on material properties
+        //         log::debug!("Material roughness: {}", props.roughness);
+        //         log::debug!("Material metallic: {}", props.metallic);
+        //     }
+        // }
+        //
+        // Note: To access the registry, you would need to pass it to prepare_frame()
+        // or store a reference to it. This is left as an exercise for integration.
     }
     
     fn cleanup(&mut self, _context: &FeatureContext) {
