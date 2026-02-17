@@ -79,10 +79,10 @@ impl Feature for BasicMaterials {
                 include_str!("../shaders/material_functions.wgsl"),
                 -5,
             ),
-            // Apply material early in fragment processing (now with world_pos)
+            // Apply material early in fragment processing (now with camera position)
             ShaderInjection::with_priority(
                 ShaderInjectionPoint::FragmentMain,
-                "    final_color = apply_material_color(final_color, input.tex_coords, input.world_position);",
+                "    final_color = apply_material_color(final_color, input.tex_coords, input.world_position, camera.position);",
                 -10,
             ),
         ]

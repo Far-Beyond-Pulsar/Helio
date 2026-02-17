@@ -51,7 +51,7 @@ impl Feature for BasicLighting {
             ShaderInjection::new(
                 ShaderInjectionPoint::FragmentColorCalculation,
                 r#"    // Check if emissive material and skip lighting
-    let material = get_material_for_fragment(input.world_position);
+    let material = get_material_for_fragment(input.world_position, camera.position);
     if (material.emissive_strength > 0.0) {
         // Emissive - already applied in material, no lighting needed
     } else {

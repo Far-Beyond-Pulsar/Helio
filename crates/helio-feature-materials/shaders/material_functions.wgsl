@@ -17,9 +17,9 @@ fn get_texture_color(uv: vec2<f32>) -> vec3<f32> {
     return mix(color2, color1, checker);
 }
 
-fn apply_material_color(base_color: vec3<f32>, tex_coords: vec2<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+fn apply_material_color(base_color: vec3<f32>, tex_coords: vec2<f32>, world_pos: vec3<f32>, camera_pos: vec3<f32>) -> vec3<f32> {
     // Get material data for this fragment
-    let material = get_material_for_fragment(world_pos);
+    let material = get_material_for_fragment(world_pos, camera_pos);
     
     // If emissive, skip texture and return bright emissive color
     if (material.emissive_strength > 0.0) {
