@@ -47,10 +47,17 @@ impl Feature for BasicLighting {
                 ShaderInjectionPoint::FragmentPreamble,
                 include_str!("../shaders/lighting_functions.wgsl"),
             ),
-            // Apply lighting in color calculation
+            // Apply lighting in color calculation (check emissive first)
             ShaderInjection::new(
                 ShaderInjectionPoint::FragmentColorCalculation,
-                "    final_color = apply_basic_lighting(normalize(input.world_normal), final_color);",
+                r#"    // Check if emissive material and skip lighting
+    let material = get_material_for_fragment(input.world_position);
+    if (material.emissive_strength > 0.0) {
+        // Emissive - already applied in material, no lighting needed
+    } else {
+        // Apply lighting to non-emissive materials
+        final_color = apply_basic_lighting(normalize(input.world_normal), final_color);
+    }"#,
             ),
         ]
     }

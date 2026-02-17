@@ -124,7 +124,7 @@ impl FpsCamera {
     ///
     /// `fov_deg` is the vertical field of view in degrees.
     pub fn build_camera_uniforms(&self, fov_deg: f32, aspect: f32) -> CameraUniforms {
-        let proj = Mat4::perspective_rh(fov_deg.to_radians(), aspect, 0.1, 100.0);
+        let proj = Mat4::perspective_rh(fov_deg.to_radians(), aspect, 0.1, 10000.0); // Increased far plane for sky sphere
         CameraUniforms::new(proj * self.view_matrix(), self.position)
     }
 }
@@ -231,7 +231,7 @@ impl Renderer {
             primitive: gpu::PrimitiveState {
                 topology: gpu::PrimitiveTopology::TriangleList,
                 front_face: gpu::FrontFace::Ccw,
-                cull_mode: Some(gpu::Face::Back),
+                cull_mode: None, // Disable culling for sky sphere to work
                 ..Default::default()
             },
             depth_stencil: Some(gpu::DepthStencilState {
@@ -367,6 +367,13 @@ impl FeatureRenderer {
         // Compose shader from features
         let composed_shader = registry.compose_shader(base_shader);
         log::debug!("Composed shader from {} features", registry.enabled_count());
+        
+        // DEBUG: Write composed shader to file for inspection
+        if let Err(e) = std::fs::write("D:\\Documents\\GitHub\\genesis\\Pulsar-Native\\composed_shader_debug.wgsl", &composed_shader) {
+            log::warn!("Failed to write debug shader: {}", e);
+        } else {
+            log::info!("✅ Composed shader written to composed_shader_debug.wgsl");
+        }
 
         let shader = context.create_shader(gpu::ShaderDesc {
             source: &composed_shader,
@@ -481,6 +488,13 @@ impl FeatureRenderer {
                   self.registry.enabled_count());
 
         let composed_shader = self.registry.compose_shader(&self.base_shader);
+        
+        // DEBUG: Write composed shader to file for inspection
+        if let Err(e) = std::fs::write("D:\\Documents\\GitHub\\genesis\\Pulsar-Native\\composed_shader_debug.wgsl", &composed_shader) {
+            log::warn!("Failed to write debug shader: {}", e);
+        } else {
+            log::info!("✅ Composed shader written to composed_shader_debug.wgsl");
+        }
 
         let shader = self.context.create_shader(gpu::ShaderDesc {
             source: &composed_shader,

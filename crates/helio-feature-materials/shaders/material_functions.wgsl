@@ -17,10 +17,16 @@ fn get_texture_color(uv: vec2<f32>) -> vec3<f32> {
     return mix(color2, color1, checker);
 }
 
-fn apply_material_color(base_color: vec3<f32>, tex_coords: vec2<f32>) -> vec3<f32> {
-    // Sample the procedural texture
+fn apply_material_color(base_color: vec3<f32>, tex_coords: vec2<f32>, world_pos: vec3<f32>) -> vec3<f32> {
+    // Get material data for this fragment
+    let material = get_material_for_fragment(world_pos);
+    
+    // If emissive, skip texture and return bright emissive color
+    if (material.emissive_strength > 0.0) {
+        return material.base_color.rgb * material.emissive_strength;
+    }
+    
+    // Normal textured material
     let texture_color = get_texture_color(tex_coords);
-
-    // Blend texture with base color
-    return base_color * texture_color;
+    return base_color * texture_color * material.base_color.rgb;
 }

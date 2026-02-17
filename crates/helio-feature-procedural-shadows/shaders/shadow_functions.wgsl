@@ -358,6 +358,13 @@ fn calculate_light_contribution(
 
 // Apply multi-light shadows and lighting to color
 fn apply_shadow(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
+    // Check for emissive materials - bypass all lighting and shadows
+    let material = get_material_for_fragment(world_pos);
+    if (material.emissive_strength > 0.0) {
+        // Return BRIGHT emissive color - no lighting or tone mapping
+        return material.base_color.rgb * material.emissive_strength;
+    }
+    
     let light_count = i32(lighting.light_count.x);
     let ambient = lighting.light_count.y;
 
