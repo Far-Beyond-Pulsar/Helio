@@ -4,6 +4,7 @@
 struct Camera {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
+    time: f32,  // Elapsed time in seconds, packed in the vec3 padding slot
 };
 var<uniform> camera: Camera;
 

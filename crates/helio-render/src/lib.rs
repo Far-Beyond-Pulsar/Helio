@@ -11,16 +11,19 @@ use std::sync::Arc;
 pub struct CameraUniforms {
     pub view_proj: [[f32; 4]; 4],
     pub position: [f32; 3],
-    pub _pad: f32,
+    /// Elapsed time in seconds, packed into the vec3 padding slot.
+    /// Accessible in WGSL as `camera.time` for cloud animation and day/night cycles.
+    pub time: f32,
 }
 
 impl CameraUniforms {
-    /// Build camera uniforms from a pre-composed view-projection matrix and world position.
-    pub fn new(view_proj: Mat4, position: Vec3) -> Self {
+    /// Build camera uniforms from a pre-composed view-projection matrix, world position,
+    /// and elapsed time in seconds (used for cloud/sky animation).
+    pub fn new(view_proj: Mat4, position: Vec3, time: f32) -> Self {
         Self {
             view_proj: view_proj.to_cols_array_2d(),
             position: position.to_array(),
-            _pad: 0.0,
+            time,
         }
     }
 }
@@ -123,9 +126,10 @@ impl FpsCamera {
     /// Build ready-to-use [`CameraUniforms`] for this camera.
     ///
     /// `fov_deg` is the vertical field of view in degrees.
-    pub fn build_camera_uniforms(&self, fov_deg: f32, aspect: f32) -> CameraUniforms {
-        let proj = Mat4::perspective_rh(fov_deg.to_radians(), aspect, 0.1, 10000.0); // Increased far plane for sky sphere
-        CameraUniforms::new(proj * self.view_matrix(), self.position)
+    /// `time` is elapsed seconds since start, used for cloud and sky animation in shaders.
+    pub fn build_camera_uniforms(&self, fov_deg: f32, aspect: f32, time: f32) -> CameraUniforms {
+        let proj = Mat4::perspective_rh(fov_deg.to_radians(), aspect, 0.1, 10000.0);
+        CameraUniforms::new(proj * self.view_matrix(), self.position, time)
     }
 }
 

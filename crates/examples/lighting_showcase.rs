@@ -403,9 +403,8 @@ impl Example {
         self.command_encoder.init_texture(frame.texture());
 
         let aspect = self.window_size.width as f32 / self.window_size.height as f32;
-        let camera = self.camera.build_camera_uniforms(60.0, aspect);
-
         let elapsed = (now - self.start_time).as_secs_f32();
+        let camera = self.camera.build_camera_uniforms(60.0, aspect, elapsed);
         self.update_demo_lights(elapsed);
 
         let mut meshes = Vec::new();

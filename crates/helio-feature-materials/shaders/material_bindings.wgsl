@@ -8,18 +8,26 @@ struct MaterialData {
     ao: f32,
 };
 
-// ===== 3D Noise for Clouds =====
+// ===== Cloud and Sky Constants =====
+const CLOUD_HEIGHT_MIN: f32 = 200.0;   // World-space altitude of cloud base
+const CLOUD_HEIGHT_MAX: f32 = 400.0;   // World-space altitude of cloud top
+const CLOUD_COVERAGE: f32  = 0.58;     // Fraction of sky covered (0=clear, 1=overcast)
+
+// ===== 3D Noise =====
+
 fn hash(p: vec3<f32>) -> f32 {
     var p3 = fract(p * 0.1031);
     p3 += dot(p3, p3.yzx + 33.33);
     return fract((p3.x + p3.y) * p3.z);
 }
 
+// Smooth quintic-interpolated 3D value noise
 fn noise3d(p: vec3<f32>) -> f32 {
     let i = floor(p);
     let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    
+    // Quintic smoothstep for less grid-aliasing than cubic
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+
     return mix(
         mix(
             mix(hash(i + vec3<f32>(0.0, 0.0, 0.0)), hash(i + vec3<f32>(1.0, 0.0, 0.0)), u.x),
@@ -36,179 +44,270 @@ fn noise3d(p: vec3<f32>) -> f32 {
 }
 
 fn fbm(p: vec3<f32>, octaves: i32) -> f32 {
-    var value = 0.0;
+    var value     = 0.0;
     var amplitude = 0.5;
     var frequency = 1.0;
-    var pos = p;
-    
+    var pos       = p;
+
     for (var i = 0; i < octaves; i++) {
-        value += amplitude * noise3d(pos * frequency);
-        frequency *= 2.0;
+        value     += amplitude * noise3d(pos * frequency);
+        frequency *= 2.1;
         amplitude *= 0.5;
     }
-    
+
     return value;
 }
 
-// ===== Time of Day Sky Colors =====
-fn get_sky_colors_for_sun_angle(sun_height: f32) -> vec3<f32> {
-    // sun_height: -1 (below horizon) to 1 (zenith)
-    
-    // Night sky (sun well below horizon)
-    let night_color = vec3<f32>(0.01, 0.02, 0.05);
-    
-    // Dawn/Dusk colors (sun near horizon)
-    let sunrise_color = vec3<f32>(1.0, 0.6, 0.3);
-    let sunset_color = vec3<f32>(1.0, 0.5, 0.2);
-    
-    // Day sky colors
-    let day_horizon = vec3<f32>(0.6, 0.75, 0.95);
-    let day_zenith = vec3<f32>(0.1, 0.35, 0.8);
-    
-    // Blend based on sun height
-    if (sun_height < -0.2) {
-        // Night
-        return night_color;
-    } else if (sun_height < 0.1) {
-        // Dawn/Dusk transition
-        let t = smoothstep(-0.2, 0.1, sun_height);
-        return mix(night_color, sunrise_color, t);
-    } else {
-        // Day
-        return mix(day_horizon, day_zenith, smoothstep(0.1, 0.8, sun_height));
-    }
-}
+// ===== Volumetric Cloud Density =====
 
-fn get_sun_color_for_angle(sun_height: f32) -> vec3<f32> {
-    if (sun_height < 0.0) {
-        // Sun below horizon - orange/red
-        return vec3<f32>(1.0, 0.4, 0.1) * (1.0 + sun_height);
-    } else {
-        // Sun above horizon - white/yellow
-        let warmth = 1.0 - sun_height * 0.3;
-        return vec3<f32>(1.0, 0.98 * warmth, 0.95 * warmth);
-    }
-}
-
-// ===== Cloud Rendering with Thickness Variation =====
+// Returns cloud density [0,1] at a world-space position.
+// Only nonzero inside the cloud slab [CLOUD_HEIGHT_MIN, CLOUD_HEIGHT_MAX].
 fn get_cloud_density(world_pos: vec3<f32>, time: f32) -> f32 {
-    // Cloud layer parameters
-    let cloud_height_min = 200.0;
-    let cloud_height_max = 400.0;
-    let cloud_thickness = cloud_height_max - cloud_height_min;
-    
-    // Only clouds in certain height range
-    if (world_pos.y < cloud_height_min || world_pos.y > cloud_height_max) {
+    let cloud_thickness = CLOUD_HEIGHT_MAX - CLOUD_HEIGHT_MIN;
+
+    // Height normalised within the cloud slab
+    let height_frac = (world_pos.y - CLOUD_HEIGHT_MIN) / cloud_thickness;
+    if (height_frac < 0.0 || height_frac > 1.0) {
         return 0.0;
     }
-    
-    // Normalize height within cloud layer
-    let height_factor = (world_pos.y - cloud_height_min) / cloud_thickness;
-    
-    // Cloud coverage decreases at edges of layer
-    let coverage = smoothstep(0.0, 0.2, height_factor) * smoothstep(1.0, 0.8, height_factor);
-    
-    // Animate clouds by offsetting noise
-    let cloud_speed = vec3<f32>(0.5, 0.0, 0.3);
-    let animated_pos = world_pos * 0.003 + cloud_speed * time * 0.001;
-    
-    // Base cloud shape (low frequency)
-    let base_noise = fbm(animated_pos, 3);
-    
-    // Cloud thickness variation (medium frequency)
-    let thickness_noise = fbm(animated_pos * 2.0, 2) * 0.5;
-    
-    // Fine detail (high frequency)
-    let detail_noise = fbm(animated_pos * 5.0, 2) * 0.2;
-    
-    // Combine noise layers with thickness variation
-    let cloud_value = base_noise * (0.8 + thickness_noise) + detail_noise;
-    
-    // Apply coverage and threshold
-    let density = (cloud_value - 0.5) * coverage * 2.0;
-    return clamp(density, 0.0, 1.0);
+
+    // Height gradient: puffy in the lower two-thirds, wispy at the top
+    let height_fade = smoothstep(0.0, 0.12, height_frac)
+                    * smoothstep(1.0, 0.55, height_frac);
+
+    // Animate by translating the noise domain over time
+    let cloud_speed  = vec3<f32>(0.8, 0.0, 0.45);
+    let anim_pos     = world_pos * 0.0025 + cloud_speed * time * 0.00025;
+
+    // Large-scale base shape
+    let base = fbm(anim_pos, 4);
+
+    // Coverage threshold: erode below the threshold so we get distinct cloud masses
+    let threshold    = 1.0 - CLOUD_COVERAGE;
+    let coverage_raw = max(0.0, base - threshold) / CLOUD_COVERAGE;
+    if (coverage_raw < 0.001) {
+        return 0.0;
+    }
+
+    // Fine detail erosion for fluffy, billowing edges
+    let detail_pos = anim_pos * 2.7 + vec3<f32>(0.1, 0.2, 0.3);
+    let detail     = fbm(detail_pos, 3) * 0.35;
+    let shaped     = max(0.0, coverage_raw - detail * (1.0 - coverage_raw));
+
+    return clamp(shaped * height_fade, 0.0, 1.0);
 }
 
-// Calculate sky color based on view direction and sun position
+// Integrate cloud density along the view ray through the cloud slab.
+// Uses 3-sample ray marching through the cloud slab for correct coverage at
+// all viewing angles (near-horizon clouds are now visible, not just overhead).
+fn get_cloud_coverage_for_ray(view_dir: vec3<f32>, camera_pos: vec3<f32>, time: f32) -> f32 {
+    // Camera is always below the clouds; ray must be pointing upward
+    if (view_dir.y < 0.02) {
+        return 0.0;
+    }
+
+    // Ray-slab intersection
+    let t_min = (CLOUD_HEIGHT_MIN - camera_pos.y) / view_dir.y;
+    let t_max = (CLOUD_HEIGHT_MAX - camera_pos.y) / view_dir.y;
+    if (t_min < 0.0 && t_max < 0.0) {
+        return 0.0;
+    }
+
+    let t_enter   = max(0.0, t_min);
+    let step_size = (t_max - t_enter) / 3.0;
+
+    var total = 0.0;
+    for (var i = 0; i < 3; i++) {
+        let t          = t_enter + (f32(i) + 0.5) * step_size;
+        let sample_pos = camera_pos + view_dir * t;
+        total         += get_cloud_density(sample_pos, time);
+    }
+
+    return clamp(total / 3.0, 0.0, 1.0);
+}
+
+// ===== Time-of-Day Sky Gradient =====
+// sun_height: -1 = midnight below horizon, 0 = on the horizon, +1 = zenith noon
+
+fn get_sky_zenith_color(sun_height: f32) -> vec3<f32> {
+    let night    = vec3<f32>(0.003, 0.006, 0.022);   // Dark navy
+    let twilight = vec3<f32>(0.10,  0.14,  0.44);    // Dusky purple-blue
+    let day      = vec3<f32>(0.07,  0.26,  0.78);    // Rich azure
+
+    if (sun_height < -0.15) {
+        return night;
+    } else if (sun_height < 0.12) {
+        return mix(night, twilight, smoothstep(-0.15, 0.12, sun_height));
+    } else {
+        return mix(twilight, day, smoothstep(0.12, 0.6, sun_height));
+    }
+}
+
+fn get_sky_horizon_color(sun_height: f32) -> vec3<f32> {
+    let night    = vec3<f32>(0.005, 0.008, 0.026);  // Near-black blue
+    let twilight = vec3<f32>(1.00,  0.42,  0.08);   // Burning orange
+    let day      = vec3<f32>(0.52,  0.72,  0.96);   // Pale sky blue
+
+    if (sun_height < -0.15) {
+        return night;
+    } else if (sun_height < 0.12) {
+        return mix(night, twilight, smoothstep(-0.15, 0.12, sun_height));
+    } else {
+        return mix(twilight, day, smoothstep(0.12, 0.5, sun_height));
+    }
+}
+
+fn get_sun_disc_color(sun_height: f32) -> vec3<f32> {
+    // Deep orange-red at sunset, warm white at noon
+    let sunset = vec3<f32>(1.0, 0.45, 0.05);
+    let noon   = vec3<f32>(1.0, 0.96, 0.88);
+    return mix(sunset, noon, smoothstep(0.0, 0.4, sun_height));
+}
+
+// ===== Star Field =====
+fn get_stars(view_dir: vec3<f32>, sun_height: f32) -> vec3<f32> {
+    if (sun_height > 0.15) {
+        return vec3<f32>(0.0);
+    }
+    let visibility = smoothstep(0.15, -0.10, sun_height);
+
+    // Two layers of stars at different angular densities for depth
+    let v1    = floor(view_dir * 180.0);
+    let h1    = hash(v1);
+    let d1    = length(fract(view_dir * 180.0) - 0.5);
+    let star1 = smoothstep(0.07, 0.0, d1) * select(0.0, h1 * 1.5, h1 > 0.97);
+
+    let v2    = floor(view_dir * 320.0 + vec3<f32>(17.3, 31.7, 5.1));
+    let h2    = hash(v2);
+    let d2    = length(fract(view_dir * 320.0 + vec3<f32>(17.3, 31.7, 5.1)) - 0.5);
+    let star2 = smoothstep(0.04, 0.0, d2) * select(0.0, h2 * 0.9, h2 > 0.985);
+
+    // Slight blue-orange variation like real stars
+    let star_col = mix(vec3<f32>(0.80, 0.85, 1.00), vec3<f32>(1.00, 0.95, 0.80), h1);
+    return star_col * (star1 + star2) * visibility;
+}
+
+// ===== Main Sky Colour Calculation =====
+
 fn calculate_sky_color(world_pos: vec3<f32>, camera_pos: vec3<f32>) -> vec3<f32> {
-    // View direction
     let view_dir = normalize(world_pos - camera_pos);
-    
-    // Sun direction (adjust Y for different times of day)
-    // Y = 0.6 is midday, Y = 0.0 is sunrise/sunset, Y < 0 is night
-    let sun_dir = normalize(vec3<f32>(0.4, 0.6, -0.5));
-    let sun_height = sun_dir.y;
-    
-    // Get time-of-day appropriate sky color
-    let base_sky_color = get_sky_colors_for_sun_angle(sun_height);
-    
-    // Calculate angle from view direction to sun
-    let sun_dot = dot(view_dir, sun_dir);
-    
-    // Radial gradient centered on sun
-    let angle_to_sun = acos(clamp(sun_dot, -1.0, 1.0));
-    let sun_gradient_factor = 1.0 - smoothstep(0.0, 1.5, angle_to_sun);
-    
-    // Blend sky color based on proximity to sun
-    let sun_influence_color = get_sun_color_for_angle(sun_height) * 0.4;
-    var sky_color = mix(base_sky_color, base_sky_color + sun_influence_color, sun_gradient_factor);
-    
-    // Sun disc (VERY bright for bloom)
-    let sun_disc_size = 0.9998;
-    let sun_glow_size = 0.992;
-    
-    if (sun_dot > sun_disc_size) {
-        let sun_intensity = smoothstep(sun_disc_size, 1.0, sun_dot);
-        let sun_brightness = mix(30.0, 80.0, smoothstep(-0.1, 0.5, sun_height));
-        sky_color = mix(sky_color, get_sun_color_for_angle(sun_height) * sun_brightness, sun_intensity);
-    } else if (sun_dot > sun_glow_size) {
-        let glow_intensity = smoothstep(sun_glow_size, sun_disc_size, sun_dot);
-        sky_color = mix(sky_color, get_sun_color_for_angle(sun_height) * 5.0, glow_intensity * 0.6);
+    let time     = camera.time;  // Elapsed seconds from CameraUniforms
+
+    // --- Sun direction ---
+    // Static midday position; swap for animated rotation once a time-of-day
+    // system passes a cycle speed:
+    //   let angle = time * 0.0002;
+    //   let sun_dir = normalize(vec3(cos(angle), sin(angle) * 0.85, 0.3));
+    let sun_dir    = normalize(vec3<f32>(0.4, 0.6, -0.5));
+    let sun_height = sun_dir.y;                          // –1 … +1
+    let sun_dot    = dot(view_dir, sun_dir);
+
+    // === 1. Atmospheric sky gradient (Rayleigh-style) ===
+    let zenith_col  = get_sky_zenith_color(sun_height);
+    let horizon_col = get_sky_horizon_color(sun_height);
+
+    var sky_color: vec3<f32>;
+    if (view_dir.y < 0.0) {
+        // Below horizon: dark ground fog fading to black
+        let ground_t = saturate(-view_dir.y * 4.0);
+        sky_color = mix(horizon_col * 0.30, vec3<f32>(0.01, 0.01, 0.01), ground_t);
+    } else {
+        // Exponential altitude blend (thicker atmosphere near horizon)
+        let alt_t = 1.0 - exp(-view_dir.y * 3.5);
+        sky_color = mix(horizon_col, zenith_col, alt_t);
     }
-    
-    // Atmospheric haze (stronger near horizon)
-    let horizon_factor = 1.0 - abs(view_dir.y);
-    let haze_color = mix(base_sky_color, vec3<f32>(0.9, 0.85, 0.7), 0.3);
-    sky_color = mix(sky_color, haze_color, pow(horizon_factor, 3.0) * 0.4);
-    
-    // Add volumetric clouds
-    let time = 0.0; // TODO: pass time uniform for animation
-    let sample_pos = camera_pos + view_dir * 300.0;
-    let cloud_density = get_cloud_density(sample_pos, time);
-    
-    if (cloud_density > 0.01) {
-        // Cloud color varies with sun angle
-        let cloud_base_color = vec3<f32>(1.0, 1.0, 1.0);
-        let cloud_sun_tint = get_sun_color_for_angle(sun_height) * 0.3;
-        let cloud_color = cloud_base_color + cloud_sun_tint;
-        
-        // Cloud shading (more shadow for thicker clouds)
-        let cloud_shadow = 1.0 - cloud_density * 0.5;
-        sky_color = mix(sky_color * cloud_shadow, cloud_color, cloud_density * 0.9);
+
+    // Mie forward-scatter: warm glow in the direction of the sun
+    if (sun_height > -0.15) {
+        let mie      = pow(max(0.0, sun_dot), 6.0) * 0.40;
+        let mie_wide = pow(max(0.0, sun_dot), 2.0) * 0.12;
+        let mie_col  = mix(
+            vec3<f32>(1.0, 0.50, 0.15),  // Orange sunset scatter
+            vec3<f32>(1.0, 0.92, 0.78),  // Warm noon scatter
+            smoothstep(0.0, 0.4, sun_height)
+        );
+        let mie_str = max(0.0, sun_height + 0.15) * 0.5;
+        sky_color  += mie_col * (mie + mie_wide) * mie_str;
     }
-    
+
+    // === 2. Night stars ===
+    sky_color += get_stars(view_dir, sun_height);
+
+    // === 3. Volumetric clouds — sampled BEFORE the sun disc ===
+    //    Correct ray-slab intersection means clouds appear at all elevations,
+    //    not just directly overhead.
+    let cloud_density = get_cloud_coverage_for_ray(view_dir, camera_pos, time);
+
+    if (cloud_density > 0.005) {
+        // Lit colour varies with sun angle and whether we see the top/underside
+        let lit_frac = smoothstep(0.1, 0.8, view_dir.y);
+
+        let lit_col    = mix(
+            vec3<f32>(1.0,  0.62, 0.30),  // Warm golden at sunset
+            vec3<f32>(1.0,  0.98, 0.96),  // Cool bright white at noon
+            smoothstep(0.0, 0.35, sun_height)
+        );
+        let shadow_col = mix(
+            vec3<f32>(0.28, 0.20, 0.30),  // Deep violet-grey at sunset
+            vec3<f32>(0.55, 0.62, 0.76),  // Cool blue-grey at noon
+            smoothstep(0.0, 0.35, sun_height)
+        );
+        let night_col  = vec3<f32>(0.035, 0.035, 0.055); // Almost-black night cloud
+
+        let cloud_base  = mix(shadow_col, lit_col, lit_frac);
+        let cloud_color = mix(night_col, cloud_base, smoothstep(-0.1, 0.12, sun_height));
+
+        // Silver-lining: thin edges catch sunlight
+        let edge_bright = pow(1.0 - cloud_density, 3.0) * max(0.0, sun_height) * 0.45;
+        let silver      = lit_col * edge_bright;
+
+        // Sky darkens under the cloud mass (shadow on the air below)
+        let sky_shadow = 1.0 - cloud_density * 0.55;
+        sky_color = mix(sky_color * sky_shadow, cloud_color + silver, cloud_density * 0.92);
+    }
+
+    // === 4. Sun disc — applied last, attenuated by cloud cover ===
+    let sun_col  = get_sun_disc_color(sun_height);
+    let sun_occl = cloud_density; // how much cloud is blocking the sun
+
+    // Disc
+    if (sun_height > -0.08 && sun_dot > 0.9985) {
+        let disc_t     = smoothstep(0.9985, 1.0, sun_dot);
+        let brightness = mix(6.0, 45.0, smoothstep(0.0, 0.4, sun_height));
+        let atten      = 1.0 - sun_occl * 0.95;
+        sky_color      = mix(sky_color, sun_col * brightness, disc_t * atten);
+    }
+
+    // Corona / inner glow
+    if (sun_height > -0.10 && sun_dot > 0.975) {
+        let glow       = pow((sun_dot - 0.975) / 0.025, 2.0);
+        let glow_col   = sun_col * mix(2.0, 7.0, smoothstep(0.0, 0.4, sun_height));
+        sky_color     += glow_col * glow * 0.35 * (1.0 - sun_occl * 0.7);
+    }
+
     return sky_color;
 }
 
-// Global material ID that can be set per-object
+// ===== Material Dispatch =====
+
 fn get_material_for_fragment(world_pos: vec3<f32>, camera_pos: vec3<f32>) -> MaterialData {
     var mat: MaterialData;
-    mat.base_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
-    mat.metallic = 0.0;
-    mat.roughness = 0.5;
+    mat.base_color       = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    mat.metallic         = 0.0;
+    mat.roughness        = 0.5;
     mat.emissive_strength = 0.0;
-    mat.ao = 1.0;
-    
-    // Detect sky sphere by distance from camera
-    let dist_from_camera = length(world_pos - camera_pos);
-    if (dist_from_camera > 400.0) {
-        // Sky sphere with time-of-day system and volumetric clouds
-        let sky_color = calculate_sky_color(world_pos, camera_pos);
-        mat.base_color = vec4<f32>(sky_color, 1.0);
+    mat.ao               = 1.0;
+
+    // Sky sphere detection: fragments more than 400 units from the camera
+    // belong to the inverted sky sphere
+    let dist = length(world_pos - camera_pos);
+    if (dist > 400.0) {
+        let sky_color         = calculate_sky_color(world_pos, camera_pos);
+        mat.base_color        = vec4<f32>(sky_color, 1.0);
         mat.emissive_strength = 1.5;
-        mat.metallic = 0.0;
-        mat.roughness = 1.0;
+        mat.metallic          = 0.0;
+        mat.roughness         = 1.0;
     }
-    
+
     return mat;
 }
