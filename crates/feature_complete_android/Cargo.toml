@@ -7,7 +7,14 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-wgpu = { workspace = true }
+helio-core = { path = "../helio-core" }
+helio-render = { path = "../helio-render" }
+helio-features = { path = "../helio-features" }
+helio-feature-base-geometry = { path = "../helio-feature-base-geometry" }
+helio-feature-lighting = { path = "../helio-feature-lighting" }
+helio-feature-materials = { path = "../helio-feature-materials" }
+helio-feature-procedural-shadows = { path = "../helio-feature-procedural-shadows" }
+blade-graphics = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }
