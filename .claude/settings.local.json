@@ -17,7 +17,8 @@
       "Bash(taskkill:*)",
       "Bash(dir /s /b \"%USERPROFILE%\\.cargo\\git\\checkouts\")",
       "Bash(findstr:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(cargo check:*)"
     ]
   }
 }

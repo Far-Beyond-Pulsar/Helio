@@ -1,11 +1,12 @@
 [package]
-name = "helio-lighting"
+name = "helio-feature-radiance-cascades"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+helio-features = { path = "../helio-features" }
 helio-core = { path = "../helio-core" }
 wgpu = { workspace = true }
-bytemuck = { workspace = true }
 glam = { workspace = true }
+bytemuck = { workspace = true }
 log = { workspace = true }
