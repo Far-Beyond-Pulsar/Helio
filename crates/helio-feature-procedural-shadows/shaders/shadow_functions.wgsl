@@ -12,8 +12,8 @@ const LIGHT_TYPE_SPOT: f32 = 2.0;
 const LIGHT_TYPE_RECT: f32 = 3.0;
 
 // Shadow map texture array and comparison sampler (bound automatically by ShaderData)
-var shadow_maps: texture_depth_2d_array;
-var shadow_sampler: sampler_comparison;
+@group(2) @binding(1) var shadow_maps: texture_depth_2d_array;
+@group(2) @binding(2) var shadow_sampler: sampler_comparison;
 
 // GPU representation of a light
 struct GpuLight {
@@ -29,7 +29,7 @@ struct LightingUniforms {
     light_count: vec4<f32>,  // x = count, y = ambient, zw unused
     lights: array<GpuLight, MAX_SHADOW_LIGHTS>,
 }
-var<uniform> lighting: LightingUniforms;
+@group(2) @binding(0) var<uniform> lighting: LightingUniforms;
 
 // ACES filmic tone mapping (Narkowicz 2015).
 // Maps HDR linear radiance to [0,1] with an S-curve: lifted shadows,

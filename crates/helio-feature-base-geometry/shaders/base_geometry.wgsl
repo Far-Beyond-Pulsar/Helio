@@ -1,24 +1,23 @@
-// Base Geometry Shader - provides basic geometry rendering without lighting
-// Features can inject code at marked injection points
+// Base Geometry Shader
 
 struct Camera {
     view_proj: mat4x4<f32>,
     position: vec3<f32>,
-    time: f32,  // Elapsed time in seconds, packed in the vec3 padding slot
+    time: f32,
 };
-var<uniform> camera: Camera;
+@group(0) @binding(0) var<uniform> camera: Camera;
 
 struct Transform {
     model: mat4x4<f32>,
 };
-var<uniform> transform: Transform;
+@group(1) @binding(0) var<uniform> transform: Transform;
 
 struct Vertex {
-    position: vec3<f32>,
-    bitangent_sign: f32,
-    tex_coords: vec2<f32>,
-    normal: u32,
-    tangent: u32,
+    @location(0) position: vec3<f32>,
+    @location(1) bitangent_sign: f32,
+    @location(2) tex_coords: vec2<f32>,
+    @location(3) normal: u32,
+    @location(4) tangent: u32,
 };
 
 struct VertexOutput {
@@ -56,7 +55,6 @@ fn vs_main(vertex: Vertex) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Default gray color
     var final_color = vec3<f32>(0.8);
 
     // INJECT_FRAGMENTMAIN

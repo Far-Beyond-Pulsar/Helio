@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-blade-graphics = { workspace = true }
-blade-macros = { workspace = true }
+wgpu = { workspace = true }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 log = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { workspace = true }
