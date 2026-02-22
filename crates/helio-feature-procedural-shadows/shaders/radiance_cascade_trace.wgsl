@@ -253,9 +253,29 @@ fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     return world_pos.xyz / world_pos.w;
 }
 
+// Estimate surface normal from depth buffer using screen-space derivatives
+fn estimate_normal(screen_uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let depth_size = textureDimensions(scene_depth);
+    let texel_size = 1.0 / vec2<f32>(depth_size);
+
+    // Sample neighboring depths
+    let d_right = textureLoad(scene_depth, vec2<i32>((screen_uv + vec2<f32>(texel_size.x, 0.0)) * vec2<f32>(depth_size)), 0);
+    let d_up = textureLoad(scene_depth, vec2<i32>((screen_uv + vec2<f32>(0.0, texel_size.y)) * vec2<f32>(depth_size)), 0);
+
+    // Reconstruct world positions
+    let p_center = reconstruct_world_pos(screen_uv, depth);
+    let p_right = reconstruct_world_pos(screen_uv + vec2<f32>(texel_size.x, 0.0), d_right);
+    let p_up = reconstruct_world_pos(screen_uv + vec2<f32>(0.0, texel_size.y), d_up);
+
+    // Compute normal from cross product
+    let dx = p_right - p_center;
+    let dy = p_up - p_center;
+    return normalize(cross(dx, dy));
+}
+
 // Screen-space ray marching through depth buffer
 fn trace_scene_ray(origin: vec3<f32>, direction: vec3<f32>, max_dist: f32) -> vec3<f32> {
-    // First check if ray hits any lights
+    // First check if ray hits any lights directly
     let light_radiance = check_light_intersections(origin, direction);
     if (length(light_radiance) > 0.0) {
         return light_radiance;
@@ -289,9 +309,37 @@ fn trace_scene_ray(origin: vec3<f32>, direction: vec3<f32>, max_dist: f32) -> ve
 
         // Check if ray hit surface
         if (ndc.z > depth_sample) {
-            // Sample color at hit point
-            let scene_radiance = textureSampleLevel(scene_color, linear_sampler, screen_uv, 0.0).rgb;
-            return scene_radiance;
+            // Reconstruct hit position and normal
+            let hit_pos = reconstruct_world_pos(screen_uv, depth_sample);
+            let hit_normal = estimate_normal(screen_uv, depth_sample);
+
+            // Sample material albedo at hit point
+            let albedo = textureSampleLevel(scene_color, linear_sampler, screen_uv, 0.0).rgb;
+
+            // Sample indirect light from cascade 0 (finest level)
+            var total_radiance = sample_cascade_0(hit_pos);
+
+            // Add direct lighting from all lights with shadow testing
+            for (var light_idx = 0u; light_idx < num_lights; light_idx++) {
+                let light = lights[light_idx];
+                let to_light = light.position - hit_pos;
+                let light_dist = length(to_light);
+                let light_dir = to_light / light_dist;
+
+                // Only add light if surface faces the light
+                let n_dot_l = max(dot(hit_normal, light_dir), 0.0);
+                if (n_dot_l > 0.0) {
+                    // Test visibility (shadow)
+                    if (test_light_visibility(hit_pos, light.position)) {
+                        // Add direct light contribution with inverse square falloff
+                        let attenuation = 1.0 / (light_dist * light_dist + 1.0);
+                        total_radiance += light.color * light.intensity * attenuation * n_dot_l;
+                    }
+                }
+            }
+
+            // Multiply by albedo (material color)
+            return albedo * total_radiance;
         }
     }
 
