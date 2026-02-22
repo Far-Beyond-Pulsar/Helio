@@ -50,7 +50,7 @@ struct GpuLight {
     color: vec3<f32>,
     intensity: f32,
 }
-var<storage, read> lights: array<GpuLight, 16>;
+var<uniform> lights: array<GpuLight, 16>;
 var<uniform> num_lights: u32;
 
 // Probe grid configuration
@@ -175,16 +175,75 @@ fn check_light_intersections(origin: vec3<f32>, direction: vec3<f32>) -> vec3<f3
     return hit_radiance;
 }
 
-// Sample radiance from previous (finer) cascade
-fn sample_previous_cascade(world_pos: vec3<f32>, direction: vec3<f32>, prev_level: u32) -> vec3<f32> {
-    // Get probe index for world position in previous cascade
-    let probe_idx = world_pos_to_probe_index(world_pos, prev_level);
+// Sample radiance from cascade 0 (finest) at world position with bilinear interpolation
+fn sample_cascade_0(world_pos: vec3<f32>) -> vec3<f32> {
+    // Convert world position to probe UV coordinates
+    let world_size = WORLD_MAX - WORLD_MIN;
+    let local_pos = (world_pos - WORLD_MIN) / world_size;
+    let clamped = clamp(local_pos, vec3<f32>(0.0), vec3<f32>(1.0));
 
-    // Convert to UV coordinates
-    let uv = (vec2<f32>(probe_idx) + 0.5) / f32(PROBES_PER_AXIS);
+    // Map XZ to probe grid coordinates
+    let probe_coord = vec2<f32>(clamped.x, clamped.z) * f32(PROBES_PER_AXIS);
+    let probe_idx_base = vec2<i32>(probe_coord);
+    let blend = fract(probe_coord);
 
-    // Sample previous cascade
-    return textureSampleLevel(prev_cascade_texture, prev_cascade_sampler, uv, 0.0).rgb;
+    // Sample 4 neighboring probes for bilinear interpolation
+    let uv_00 = (vec2<f32>(probe_idx_base) + 0.5) / f32(PROBES_PER_AXIS);
+    let uv_10 = (vec2<f32>(probe_idx_base + vec2<i32>(1, 0)) + 0.5) / f32(PROBES_PER_AXIS);
+    let uv_01 = (vec2<f32>(probe_idx_base + vec2<i32>(0, 1)) + 0.5) / f32(PROBES_PER_AXIS);
+    let uv_11 = (vec2<f32>(probe_idx_base + vec2<i32>(1, 1)) + 0.5) / f32(PROBES_PER_AXIS);
+
+    // Sample cascade 0 texture at 4 corners
+    let r00 = textureSampleLevel(prev_cascade_texture, prev_cascade_sampler, uv_00, 0.0).rgb;
+    let r10 = textureSampleLevel(prev_cascade_texture, prev_cascade_sampler, uv_10, 0.0).rgb;
+    let r01 = textureSampleLevel(prev_cascade_texture, prev_cascade_sampler, uv_01, 0.0).rgb;
+    let r11 = textureSampleLevel(prev_cascade_texture, prev_cascade_sampler, uv_11, 0.0).rgb;
+
+    // Bilinear interpolation
+    let r0 = mix(r00, r10, blend.x);
+    let r1 = mix(r01, r11, blend.x);
+    return mix(r0, r1, blend.y);
+}
+
+// Test if there's a clear path to a light (shadow test)
+fn test_light_visibility(origin: vec3<f32>, light_pos: vec3<f32>) -> bool {
+    let to_light = light_pos - origin;
+    let light_dist = length(to_light);
+    let light_dir = to_light / light_dist;
+
+    // March through depth buffer to check occlusion
+    let depth_size = textureDimensions(scene_depth);
+    let max_steps = 32u;
+    let step_size = light_dist / f32(max_steps);
+
+    var current_pos = origin + light_dir * 0.1; // Offset to avoid self-intersection
+
+    for (var i = 0u; i < max_steps; i++) {
+        // Project to screen space
+        let clip_pos = camera.view_proj * vec4<f32>(current_pos, 1.0);
+        let ndc = clip_pos.xyz / clip_pos.w;
+        let screen_uv = ndc.xy * 0.5 + 0.5;
+
+        // Check if on screen
+        if (screen_uv.x >= 0.0 && screen_uv.x <= 1.0 && screen_uv.y >= 0.0 && screen_uv.y <= 1.0) {
+            let texel_coord = vec2<i32>(screen_uv * vec2<f32>(depth_size));
+            let depth_sample = textureLoad(scene_depth, texel_coord, 0);
+
+            // If ray is behind surface, light is occluded
+            if (ndc.z > depth_sample + 0.001) {
+                return false;
+            }
+        }
+
+        current_pos += light_dir * step_size;
+
+        // If we've reached the light, path is clear
+        if (length(current_pos - origin) >= light_dist * 0.95) {
+            break;
+        }
+    }
+
+    return true;
 }
 
 // Reconstruct world position from depth buffer
@@ -251,19 +310,8 @@ fn compute_probe_radiance(probe_pos: vec3<f32>, cascade_level: u32) -> vec3<f32>
 
         var radiance: vec3<f32>;
 
-        if (cascade_level == 0u) {
-            // Finest cascade - trace actual scene
-            radiance = trace_scene_ray(probe_pos, ray_dir, MAX_RAY_DISTANCE);
-        } else {
-            // Coarser cascades - sample from finer cascade
-            let sample_pos = probe_pos + ray_dir * get_probe_spacing(cascade_level - 1u);
-            radiance = sample_previous_cascade(sample_pos, ray_dir, cascade_level - 1u);
-
-            // Fallback to direct sampling if needed
-            if (length(radiance) < 0.001) {
-                radiance = trace_scene_ray(probe_pos, ray_dir, MAX_RAY_DISTANCE);
-            }
-        }
+        // Trace the scene
+        radiance = trace_scene_ray(probe_pos, ray_dir, MAX_RAY_DISTANCE);
 
         // Cosine weighting for diffuse surfaces
         let ndotl = max(dot(probe_normal, ray_dir), 0.0);

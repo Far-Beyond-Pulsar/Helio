@@ -31,16 +31,33 @@ fn world_pos_to_probe_uv(world_pos: vec3<f32>) -> vec2<f32> {
     return vec2<f32>(clamped.x, clamped.z);
 }
 
-// Sample radiance from the probe grid with bilinear interpolation
+// Sample radiance from the probe grid with trilinear interpolation
 fn sample_radiance_cascade(world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
     // Get UV for this world position
     let probe_uv = world_pos_to_probe_uv(world_pos);
 
-    // Scale UV to probe grid region in texture (first 128x128 of 1024x2048)
-    let texture_uv = probe_uv * (f32(PROBES_PER_AXIS) / 1024.0);
+    // Map to probe grid coordinates
+    let probe_coord = probe_uv * f32(PROBES_PER_AXIS);
+    let probe_idx_base = vec2<i32>(probe_coord);
+    let blend = fract(probe_coord);
 
-    // Sample with bilinear filtering for smooth interpolation between probes
-    let radiance = textureSampleLevel(shadow_maps, shadow_sampler, texture_uv, 0.0).rgb;
+    // Sample 4 neighboring probes for better interpolation
+    let uv_00 = (vec2<f32>(probe_idx_base) + 0.5) / f32(PROBES_PER_AXIS);
+    let uv_10 = (vec2<f32>(probe_idx_base + vec2<i32>(1, 0)) + 0.5) / f32(PROBES_PER_AXIS);
+    let uv_01 = (vec2<f32>(probe_idx_base + vec2<i32>(0, 1)) + 0.5) / f32(PROBES_PER_AXIS);
+    let uv_11 = (vec2<f32>(probe_idx_base + vec2<i32>(1, 1)) + 0.5) / f32(PROBES_PER_AXIS);
+
+    // Convert to texture space
+    let tex_scale = f32(PROBES_PER_AXIS) / 1024.0;
+    let r00 = textureSampleLevel(shadow_maps, shadow_sampler, uv_00 * tex_scale, 0.0).rgb;
+    let r10 = textureSampleLevel(shadow_maps, shadow_sampler, uv_10 * tex_scale, 0.0).rgb;
+    let r01 = textureSampleLevel(shadow_maps, shadow_sampler, uv_01 * tex_scale, 0.0).rgb;
+    let r11 = textureSampleLevel(shadow_maps, shadow_sampler, uv_11 * tex_scale, 0.0).rgb;
+
+    // Bilinear interpolation
+    let r0 = mix(r00, r10, blend.x);
+    let r1 = mix(r01, r11, blend.x);
+    let radiance = mix(r0, r1, blend.y);
 
     return radiance;
 }
