@@ -32,6 +32,26 @@ var<uniform> scene: SceneUniforms;
 var cascade_texture: texture_storage_2d<rgba16float, write>;
 var prev_cascade_texture: texture_2d<f32>;
 var prev_cascade_sampler: sampler;
+var scene_depth: texture_depth_2d;
+var scene_color: texture_2d<f32>;
+var linear_sampler: sampler;
+
+struct Camera {
+    view_proj: mat4x4<f32>,
+    inv_view_proj: mat4x4<f32>,
+    position: vec3<f32>,
+    _pad: f32,
+}
+var<uniform> camera: Camera;
+
+struct GpuLight {
+    position: vec3<f32>,
+    radius: f32,
+    color: vec3<f32>,
+    intensity: f32,
+}
+var<storage, read> lights: array<GpuLight, 16>;
+var<uniform> num_lights: u32;
 
 // Probe grid configuration
 // Total probes: 128x128 = 16,384 probes
@@ -114,29 +134,45 @@ fn hash22(p: vec2<f32>) -> vec2<f32> {
     return fract((p3.xx + p3.yz) * p3.zy);
 }
 
-// Evaluate procedural sky
-fn evaluate_sky(direction: vec3<f32>) -> vec3<f32> {
-    let sun_dir = normalize(-light_config.sun_direction);
-    let sun_dot = max(dot(direction, sun_dir), 0.0);
+// No hardcoded lighting - all light comes from the scene
+fn evaluate_environment(direction: vec3<f32>) -> vec3<f32> {
+    // Return black - no environment lighting
+    // All light must come from emissive objects in the scene
+    return vec3<f32>(0.0);
+}
 
-    // Sun disk
-    let sun_intensity = pow(sun_dot, 256.0) * 100.0;
-    let sun_contribution = light_config.sun_color * sun_intensity;
+// Check if ray intersects with a sphere light
+fn ray_sphere_intersection(origin: vec3<f32>, direction: vec3<f32>, center: vec3<f32>, radius: f32) -> f32 {
+    let oc = origin - center;
+    let a = dot(direction, direction);
+    let b = 2.0 * dot(oc, direction);
+    let c = dot(oc, oc) - radius * radius;
+    let discriminant = b * b - 4.0 * a * c;
 
-    // Atmospheric scattering approximation
-    let horizon_factor = pow(1.0 - abs(direction.y), 4.0);
-    let sky_gradient = mix(
-        light_config.sky_color,
-        light_config.sky_color * vec3<f32>(1.0, 0.8, 0.6),
-        horizon_factor
-    );
+    if (discriminant < 0.0) {
+        return -1.0; // No hit
+    }
 
-    // Sun glow
-    let sun_glow = pow(sun_dot, 8.0) * light_config.sun_color * 2.0;
+    let t = (-b - sqrt(discriminant)) / (2.0 * a);
+    return select(-1.0, t, t > 0.001); // Return t if positive, else -1
+}
 
-    let sky_radiance = (sky_gradient + sun_glow) * light_config.ambient_intensity * 2.0;
+// Check if ray hits any lights and return radiance
+fn check_light_intersections(origin: vec3<f32>, direction: vec3<f32>) -> vec3<f32> {
+    var closest_t = 999999.0;
+    var hit_radiance = vec3<f32>(0.0);
 
-    return sun_contribution + sky_radiance;
+    for (var i = 0u; i < num_lights; i++) {
+        let light = lights[i];
+        let t = ray_sphere_intersection(origin, direction, light.position, light.radius);
+
+        if (t > 0.0 && t < closest_t) {
+            closest_t = t;
+            hit_radiance = light.color * light.intensity;
+        }
+    }
+
+    return hit_radiance;
 }
 
 // Sample radiance from previous (finer) cascade
@@ -151,35 +187,57 @@ fn sample_previous_cascade(world_pos: vec3<f32>, direction: vec3<f32>, prev_leve
     return textureSampleLevel(prev_cascade_texture, prev_cascade_sampler, uv, 0.0).rgb;
 }
 
-// Trace ray through scene
-// TODO: Integrate with actual scene geometry via:
-//  - Depth buffer ray marching
-//  - BVH acceleration structure
-//  - Signed distance fields
-//  - Voxel grid
-// For now, returns environment lighting
+// Reconstruct world position from depth buffer
+fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(uv * 2.0 - 1.0, depth, 1.0);
+    let world_pos = camera.inv_view_proj * ndc;
+    return world_pos.xyz / world_pos.w;
+}
+
+// Screen-space ray marching through depth buffer
 fn trace_scene_ray(origin: vec3<f32>, direction: vec3<f32>, max_dist: f32) -> vec3<f32> {
-    // Simple ground plane intersection
-    if (direction.y < -0.01) {
-        let t = -origin.y / direction.y;
-        if (t > 0.0 && t < max_dist) {
-            let hit_pos = origin + direction * t;
+    // First check if ray hits any lights
+    let light_radiance = check_light_intersections(origin, direction);
+    if (length(light_radiance) > 0.0) {
+        return light_radiance;
+    }
 
-            // Checkerboard pattern
-            let checker = select(0.3, 0.7,
-                (i32(floor(hit_pos.x)) + i32(floor(hit_pos.z))) % 2 == 0
-            );
+    // Then check scene geometry via depth buffer
+    let depth_size = textureDimensions(scene_depth);
+    let max_steps = 64u;
+    let step_size = max_dist / f32(max_steps);
 
-            // Simple diffuse shading from sun
-            let sun_dir = normalize(-light_config.sun_direction);
-            let ndotl = max(dot(vec3<f32>(0.0, 1.0, 0.0), sun_dir), 0.0);
+    var current_pos = origin;
 
-            return vec3<f32>(checker) * light_config.sun_color * light_config.sun_intensity * ndotl;
+    for (var i = 0u; i < max_steps; i++) {
+        current_pos += direction * step_size;
+
+        // Project to screen space
+        let clip_pos = camera.view_proj * vec4<f32>(current_pos, 1.0);
+        let ndc = clip_pos.xyz / clip_pos.w;
+        let screen_uv = ndc.xy * 0.5 + 0.5;
+
+        // Check if on screen
+        if (screen_uv.x < 0.0 || screen_uv.x > 1.0 || screen_uv.y < 0.0 || screen_uv.y > 1.0) {
+            break;
+        }
+
+        // Convert UV to texel coordinates for depth load
+        let texel_coord = vec2<i32>(screen_uv * vec2<f32>(depth_size));
+
+        // Load depth directly
+        let depth_sample = textureLoad(scene_depth, texel_coord, 0);
+
+        // Check if ray hit surface
+        if (ndc.z > depth_sample) {
+            // Sample color at hit point
+            let scene_radiance = textureSampleLevel(scene_color, linear_sampler, screen_uv, 0.0).rgb;
+            return scene_radiance;
         }
     }
 
-    // No hit - return sky
-    return evaluate_sky(direction);
+    // No hit - return black (no environment lighting)
+    return evaluate_environment(direction);
 }
 
 // Compute radiance for a probe by tracing rays
@@ -212,9 +270,9 @@ fn compute_probe_radiance(probe_pos: vec3<f32>, cascade_level: u32) -> vec3<f32>
         accumulated_radiance += radiance * ndotl;
     }
 
-    // Monte Carlo integration: divide by N and multiply by 2π (hemisphere integral)
-    // The cosine weighting and hemisphere integral combine to give us 2π / N
-    accumulated_radiance *= (2.0 * PI) / f32(NUM_RAYS_PER_PROBE);
+    // Monte Carlo integration with cosine weighting
+    // Integral over hemisphere: π for diffuse, divided by number of samples
+    accumulated_radiance *= PI / f32(NUM_RAYS_PER_PROBE);
 
     return accumulated_radiance;
 }

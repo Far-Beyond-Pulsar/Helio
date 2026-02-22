@@ -6,7 +6,38 @@ use std::sync::Arc;
 /// Number of cascade levels for radiance cascades
 pub const NUM_CASCADES: usize = 5;
 
-/// Light configuration for radiance cascades
+/// Light source in the scene
+#[derive(Debug, Clone, Copy)]
+pub struct Light {
+    pub position: glam::Vec3,
+    pub color: glam::Vec3,
+    pub intensity: f32,
+    pub radius: f32,
+    pub light_type: LightType,
+}
+
+/// GPU representation of a light
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuLight {
+    pub position: [f32; 3],
+    pub radius: f32,
+    pub color: [f32; 3],
+    pub intensity: f32,
+}
+
+impl From<&Light> for GpuLight {
+    fn from(light: &Light) -> Self {
+        Self {
+            position: light.position.to_array(),
+            radius: light.radius,
+            color: light.color.to_array(),
+            intensity: light.intensity,
+        }
+    }
+}
+
+/// Legacy light configuration (kept for backward compatibility)
 #[derive(Debug, Clone, Copy)]
 pub struct LightConfig {
     pub sun_direction: glam::Vec3,
@@ -26,6 +57,15 @@ impl Default for LightConfig {
             ambient_intensity: 0.1,
         }
     }
+}
+
+/// Light type enum
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum LightType {
+    Point,
+    Directional,
+    Spot { inner_angle: f32, outer_angle: f32 },
+    Rect { width: f32, height: f32 },
 }
 
 /// GPU representation of light configuration
@@ -63,14 +103,33 @@ pub struct SceneUniforms {
     pub _pad1: f32,
 }
 
+/// Camera uniforms for ray tracing
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuCamera {
+    pub view_proj: [[f32; 4]; 4],
+    pub inv_view_proj: [[f32; 4]; 4],
+    pub position: [f32; 3],
+    pub _pad: f32,
+}
+
 /// Shader data for compute pass
 #[derive(blade_macros::ShaderData)]
 struct RadianceComputeData {
     light_config: GpuLightConfig,
     scene: SceneUniforms,
+    camera: GpuCamera,
+    lights: [GpuLight; 16],
+    num_lights: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
     cascade_texture: gpu::TextureView,
     prev_cascade_texture: gpu::TextureView,
     prev_cascade_sampler: gpu::Sampler,
+    scene_depth: gpu::TextureView,
+    scene_color: gpu::TextureView,
+    linear_sampler: gpu::Sampler,
 }
 
 /// Shader data for main render pass
@@ -107,7 +166,16 @@ pub struct RadianceCascades {
     cascade_views: Vec<Option<gpu::TextureView>>,
     cascade_sampler: Option<gpu::Sampler>,
 
-    // Configuration
+    // Scene data for ray tracing
+    prev_depth_view: Option<gpu::TextureView>,
+    prev_color_view: Option<gpu::TextureView>,
+    linear_sampler: Option<gpu::Sampler>,
+    camera_data: GpuCamera,
+
+    // Light sources
+    lights: Vec<Light>,
+
+    // Configuration (legacy)
     light_config: LightConfig,
     current_time: f32,
 
@@ -126,12 +194,54 @@ impl RadianceCascades {
             cascade_textures: vec![None; NUM_CASCADES],
             cascade_views: vec![None; NUM_CASCADES],
             cascade_sampler: None,
+            prev_depth_view: None,
+            prev_color_view: None,
+            linear_sampler: None,
+            camera_data: GpuCamera {
+                view_proj: [[0.0; 4]; 4],
+                inv_view_proj: [[0.0; 4]; 4],
+                position: [0.0; 3],
+                _pad: 0.0,
+            },
+            lights: Vec::new(),
             light_config: LightConfig::default(),
             current_time: 0.0,
             context: None,
             compute_pipeline: None,
             texture_manager: None,
         }
+    }
+
+    /// Add a light source to the scene
+    pub fn add_light(&mut self, light: Light) -> Result<(), String> {
+        if self.lights.len() >= 16 {
+            return Err("Maximum of 16 lights supported".to_string());
+        }
+        self.lights.push(light);
+        Ok(())
+    }
+
+    /// Clear all lights
+    pub fn clear_lights(&mut self) {
+        self.lights.clear();
+    }
+
+    /// Get all lights
+    pub fn get_lights(&self) -> &[Light] {
+        &self.lights
+    }
+
+    /// Set camera data for ray tracing
+    pub fn set_camera(&mut self, view_proj: glam::Mat4, position: glam::Vec3) {
+        self.camera_data.view_proj = view_proj.to_cols_array_2d();
+        self.camera_data.inv_view_proj = view_proj.inverse().to_cols_array_2d();
+        self.camera_data.position = position.to_array();
+    }
+
+    /// Set previous frame buffers for scene ray tracing
+    pub fn set_scene_buffers(&mut self, depth_view: gpu::TextureView, color_view: gpu::TextureView) {
+        self.prev_depth_view = Some(depth_view);
+        self.prev_color_view = Some(color_view);
     }
 
     /// Set the light configuration
@@ -188,13 +298,25 @@ impl RadianceCascades {
             }
         };
 
-        let sampler = match self.cascade_sampler {
+        let cascade_sampler = match self.cascade_sampler {
             Some(s) => s,
             None => {
                 log::warn!("Cascade sampler not initialized");
                 return;
             }
         };
+
+        let linear_sampler = match self.linear_sampler {
+            Some(s) => s,
+            None => {
+                log::warn!("Linear sampler not initialized");
+                return;
+            }
+        };
+
+        // Use previous frame buffers or first cascade as placeholder
+        let depth_view = self.prev_depth_view.unwrap_or_else(|| self.cascade_views[0].unwrap());
+        let color_view = self.prev_color_view.unwrap_or_else(|| self.cascade_views[0].unwrap());
 
         // Compute cascades from coarsest to finest
         for cascade_idx in (0..NUM_CASCADES).rev() {
@@ -221,12 +343,32 @@ impl RadianceCascades {
                 _pad1: 0.0,
             };
 
+            // Convert lights to GPU format
+            let mut gpu_lights = [GpuLight {
+                position: [0.0; 3],
+                radius: 0.0,
+                color: [0.0; 3],
+                intensity: 0.0,
+            }; 16];
+            for (i, light) in self.lights.iter().take(16).enumerate() {
+                gpu_lights[i] = GpuLight::from(light);
+            }
+
             let compute_data = RadianceComputeData {
                 light_config: GpuLightConfig::from(&self.light_config),
                 scene: scene_uniforms,
+                camera: self.camera_data,
+                lights: gpu_lights,
+                num_lights: self.lights.len().min(16) as u32,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
                 cascade_texture: cascade_view,
                 prev_cascade_texture: prev_view,
-                prev_cascade_sampler: sampler,
+                prev_cascade_sampler: cascade_sampler,
+                scene_depth: depth_view,
+                scene_color: color_view,
+                linear_sampler,
             };
 
             let mut compute_pass = encoder.compute(&format!("radiance_cascade_{}", cascade_idx));
@@ -312,6 +454,22 @@ impl Feature for RadianceCascades {
 
         self.cascade_sampler = Some(cascade_sampler);
 
+        // Create linear sampler for scene textures
+        let linear_sampler = context.gpu.create_sampler(gpu::SamplerDesc {
+            name: "linear_sampler",
+            address_modes: [gpu::AddressMode::ClampToEdge; 3],
+            mag_filter: gpu::FilterMode::Linear,
+            min_filter: gpu::FilterMode::Linear,
+            mipmap_filter: gpu::FilterMode::Nearest,
+            lod_min_clamp: 0.0,
+            lod_max_clamp: Some(100.0),
+            compare: None,
+            border_color: None,
+            anisotropy_clamp: 1,
+        });
+
+        self.linear_sampler = Some(linear_sampler);
+
         // Create compute pipeline for ray tracing
         let compute_shader_source = include_str!("../shaders/radiance_cascade_trace.wgsl");
         let compute_shader = context.gpu.create_shader(gpu::ShaderDesc {
@@ -391,6 +549,10 @@ impl Feature for RadianceCascades {
             context.gpu.destroy_sampler(sampler);
         }
 
+        if let Some(sampler) = self.linear_sampler.take() {
+            context.gpu.destroy_sampler(sampler);
+        }
+
         for view in &mut self.cascade_views {
             if let Some(v) = view.take() {
                 context.gpu.destroy_texture_view(v);
@@ -415,15 +577,6 @@ impl Feature for RadianceCascades {
 // Re-export for compatibility with existing code
 pub type ProceduralShadows = RadianceCascades;
 
-// Legacy compatibility - map LightType to simplified config
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum LightType {
-    Directional,
-    Point,
-    Spot { inner_angle: f32, outer_angle: f32 },
-    Rect { width: f32, height: f32 },
-}
-
 // For backward compatibility - configure sun from directional light
 impl RadianceCascades {
     pub fn with_directional_light(mut self, direction: glam::Vec3) -> Self {
@@ -442,21 +595,6 @@ impl RadianceCascades {
 
     pub fn ambient(&self) -> f32 {
         self.light_config.ambient_intensity
-    }
-
-    /// Legacy API - not used in radiance cascades but kept for compatibility
-    pub fn add_light(&mut self, _config: LightConfig) -> Result<(), String> {
-        Ok(())
-    }
-
-    pub fn clear_lights(&mut self) {}
-
-    pub fn lights(&self) -> &[LightConfig] {
-        std::slice::from_ref(&self.light_config)
-    }
-
-    pub fn lights_mut(&mut self) -> &mut LightConfig {
-        &mut self.light_config
     }
 
     pub fn with_light_legacy(self, _config: LightConfig) -> Self {

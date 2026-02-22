@@ -62,21 +62,12 @@ fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
 
 // Apply radiance cascades GI to fragment
 fn apply_radiance_cascade(base_color: vec3<f32>, world_pos: vec3<f32>, world_normal: vec3<f32>) -> vec3<f32> {
-    let normal = normalize(world_normal);
-
-    // Direct sun lighting
-    let sun_dir = normalize(-lighting.sun_direction);
-    let ndotl = max(dot(normal, sun_dir), 0.0);
-    let direct_light = lighting.sun_color * lighting.sun_intensity * ndotl;
-
-    // Sample indirect lighting from radiance cascades
-    let indirect_light = sample_radiance_cascade(world_pos, world_normal);
-
-    // Combine direct and indirect lighting
-    let total_light = direct_light + indirect_light;
+    // Sample lighting from radiance cascades
+    // All light comes from emissive objects in the scene - no hardcoded lighting
+    let radiance = sample_radiance_cascade(world_pos, world_normal);
 
     // Apply to albedo
-    let lit_color = base_color * total_light;
+    let lit_color = base_color * radiance;
 
     // Tone mapping and gamma correction
     return linear_to_srgb(aces_tonemap(lit_color));

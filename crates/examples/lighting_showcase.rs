@@ -5,7 +5,7 @@ use helio_feature_billboards::BillboardFeature;
 use helio_feature_bloom::Bloom;
 use helio_feature_lighting::BasicLighting;
 use helio_feature_materials::BasicMaterials;
-use helio_feature_procedural_shadows::{LightConfig, ProceduralShadows};
+use helio_feature_procedural_shadows::{Light, LightConfig, LightType, ProceduralShadows};
 use helio_features::FeatureRegistry;
 use helio_render::{FpsCamera, FeatureRenderer, TransformUniforms};
 use std::{collections::HashSet, sync::Arc, time::Instant};
@@ -44,16 +44,9 @@ impl Example {
     }
 
     fn adjust_light_brightness(&mut self, factor: f32) {
-        if let Some(shadows) = self
-            .renderer
-            .registry_mut()
-            .get_feature_as_mut::<ProceduralShadows>("procedural_shadows")
-        {
-            let mut light = *shadows.lights_mut();
-            light.sun_intensity *= factor;
-            shadows.set_light(light);
-            println!("Sun brightness adjusted to {:.2}", light.sun_intensity);
-        }
+        // Light brightness adjustment disabled - using fixed corner lights
+        // To adjust: clear_lights() and add new lights with different intensity
+        println!("Light brightness adjustment not available with multiple corner lights");
     }
 
     fn new(window: &winit::window::Window) -> Self {
@@ -87,15 +80,48 @@ impl Example {
         base_geometry.set_texture_manager(texture_manager.clone());
         let base_shader = base_geometry.shader_template().to_string();
 
-        // Start with default GI lighting
-        let shadows = ProceduralShadows::new()
-            .with_light(LightConfig {
-                sun_direction: Vec3::new(-0.5, -1.0, -0.3).normalize(),
-                sun_color: Vec3::new(1.0, 0.9, 0.65),
-                sun_intensity: 2.5,
-                sky_color: Vec3::new(0.7, 0.8, 1.0),
-                ambient_intensity: 0.1,
-            });
+        // Create GI system with 4 colored corner lights
+        let mut shadows = ProceduralShadows::new();
+
+        // Add 4 colored lights in corners
+        let light_height = 8.0;
+        let light_radius_pos = 10.0;
+
+        // Red light (corner 1)
+        shadows.add_light(Light {
+            position: Vec3::new(light_radius_pos, light_height, light_radius_pos),
+            color: Vec3::new(1.0, 0.0, 0.0),
+            intensity: 50.0,
+            radius: 0.5,
+            light_type: LightType::Point,
+        }).unwrap();
+
+        // Green light (corner 2)
+        shadows.add_light(Light {
+            position: Vec3::new(-light_radius_pos, light_height, light_radius_pos),
+            color: Vec3::new(0.0, 1.0, 0.0),
+            intensity: 50.0,
+            radius: 0.5,
+            light_type: LightType::Point,
+        }).unwrap();
+
+        // Blue light (corner 3)
+        shadows.add_light(Light {
+            position: Vec3::new(-light_radius_pos, light_height, -light_radius_pos),
+            color: Vec3::new(0.0, 0.0, 1.0),
+            intensity: 50.0,
+            radius: 0.5,
+            light_type: LightType::Point,
+        }).unwrap();
+
+        // Yellow light (corner 4)
+        shadows.add_light(Light {
+            position: Vec3::new(light_radius_pos, light_height, -light_radius_pos),
+            color: Vec3::new(1.0, 1.0, 0.0),
+            intensity: 50.0,
+            radius: 0.5,
+            light_type: LightType::Point,
+        }).unwrap();
 
         let billboards = BillboardFeature::new();
 
@@ -157,83 +183,8 @@ impl Example {
         // Update time for animated GI
         shadows.update_time(time);
 
-        let light_config = match self.demo_mode {
-            0 => {
-                // Rotating sun - watch GI update in real-time
-                let angle = time * 0.3;
-                LightConfig {
-                    sun_direction: Vec3::new(
-                        angle.cos(),
-                        -1.0,
-                        angle.sin()
-                    ).normalize(),
-                    sun_color: Vec3::new(1.0, 0.9, 0.65),
-                    sun_intensity: 2.5,
-                    sky_color: Vec3::new(0.7, 0.8, 1.0),
-                    ambient_intensity: 0.1,
-                }
-            }
-            1 => {
-                // Sunset mode - warm orange sun low on horizon
-                let angle = time * 0.2;
-                LightConfig {
-                    sun_direction: Vec3::new(
-                        angle.cos() * 0.8,
-                        -0.3,
-                        angle.sin() * 0.8
-                    ).normalize(),
-                    sun_color: Vec3::new(1.0, 0.5, 0.2),
-                    sun_intensity: 3.0,
-                    sky_color: Vec3::new(1.0, 0.6, 0.3),
-                    ambient_intensity: 0.2,
-                }
-            }
-            2 => {
-                // Day-night cycle - sun moves from horizon to overhead
-                let cycle = (time * 0.15).sin();
-                let sun_height = cycle;
-                let sun_angle = time * 0.1;
-                LightConfig {
-                    sun_direction: Vec3::new(
-                        sun_angle.cos() * (1.0 - sun_height.abs()),
-                        -sun_height,
-                        sun_angle.sin() * (1.0 - sun_height.abs())
-                    ).normalize(),
-                    sun_color: Vec3::new(
-                        1.0,
-                        0.8 + cycle * 0.2,
-                        0.6 + cycle * 0.4
-                    ),
-                    sun_intensity: 2.0 + cycle * 1.5,
-                    sky_color: Vec3::new(
-                        0.5 + cycle * 0.3,
-                        0.6 + cycle * 0.3,
-                        0.8 + cycle * 0.2
-                    ),
-                    ambient_intensity: 0.05 + (cycle * 0.5 + 0.5) * 0.15,
-                }
-            }
-            3 => {
-                // Disco mode - rapidly changing colored lighting
-                let hue = (time * 0.5) % 1.0;
-                let color = Self::hue_to_rgb(hue);
-                let angle = time * 0.8;
-                LightConfig {
-                    sun_direction: Vec3::new(
-                        angle.cos(),
-                        -0.5 - (time * 2.0).sin() * 0.3,
-                        angle.sin()
-                    ).normalize(),
-                    sun_color: color,
-                    sun_intensity: 2.0 + (time * 3.0).sin().abs() * 2.0,
-                    sky_color: Self::hue_to_rgb((hue + 0.5) % 1.0) * 0.5,
-                    ambient_intensity: 0.1 + (time * 1.5).sin().abs() * 0.2,
-                }
-            }
-            _ => LightConfig::default()
-        };
-
-        shadows.set_light(light_config);
+        // Demo modes disabled - using static corner lights
+        // To re-enable: clear_lights() and add_light() with animated positions/colors
     }
 
     fn hue_to_rgb(hue: f32) -> Vec3 {
