@@ -5,7 +5,7 @@ use helio_feature_billboards::BillboardFeature;
 use helio_feature_bloom::Bloom;
 use helio_feature_lighting::BasicLighting;
 use helio_feature_materials::BasicMaterials;
-use helio_feature_procedural_shadows::{LightConfig, LightType, ProceduralShadows};
+use helio_feature_procedural_shadows::{LightConfig, ProceduralShadows};
 use helio_features::FeatureRegistry;
 use helio_render::{FpsCamera, FeatureRenderer, TransformUniforms};
 use std::{collections::HashSet, sync::Arc, time::Instant};
@@ -49,10 +49,10 @@ impl Example {
             .registry_mut()
             .get_feature_as_mut::<ProceduralShadows>("procedural_shadows")
         {
-            for light in shadows.lights_mut() {
-                light.intensity *= factor;
-            }
-            println!("Light brightness adjusted by {}x", factor);
+            let mut light = *shadows.lights_mut();
+            light.sun_intensity *= factor;
+            shadows.set_light(light);
+            println!("Sun brightness adjusted to {:.2}", light.sun_intensity);
         }
     }
 
@@ -76,77 +76,28 @@ impl Example {
             .create_surface_configured(window, Self::make_surface_config(window_size))
             .unwrap();
 
-        // Upload meshes — one line each instead of ~15 lines of unsafe buffer code
+        // Upload meshes
         let cube_mesh = MeshBuffer::from_mesh(&context, "cube", &create_cube_mesh(1.0));
         let sphere_mesh = MeshBuffer::from_mesh(&context, "sphere", &create_sphere_mesh(0.5, 32, 32));
         let plane_mesh = MeshBuffer::from_mesh(&context, "plane", &create_plane_mesh(20.0, 20.0));
 
-        // Texture manager for billboard icons
-        let mut texture_manager = helio_core::TextureManager::new(context.clone());
-        let spotlight_texture_id = match texture_manager.load_png("spotlight.png") {
-            Ok(id) => {
-                log::info!("Loaded spotlight.png for light billboards");
-                Some(id)
-            }
-            Err(e) => {
-                log::warn!(
-                    "Failed to load spotlight.png: {} - light billboards will not be available",
-                    e
-                );
-                None
-            }
-        };
-        let texture_manager = Arc::new(texture_manager);
+        let texture_manager = Arc::new(helio_core::TextureManager::new(context.clone()));
 
         let mut base_geometry = BaseGeometry::new();
         base_geometry.set_texture_manager(texture_manager.clone());
         let base_shader = base_geometry.shader_template().to_string();
 
-        // Start with an impressive multi-light setup
-        let mut shadows = ProceduralShadows::new().with_ambient(0.0);
-        shadows
-            .add_light(LightConfig {
-                light_type: LightType::Spot {
-                    inner_angle: 25.0_f32.to_radians(),
-                    outer_angle: 40.0_f32.to_radians(),
-                },
-                position: Vec3::new(0.0, 8.0, 0.0),
-                direction: Vec3::new(0.0, -1.0, 0.0),
-                intensity: 1.5,
-                color: Vec3::new(1.0, 0.2, 0.2),
-                attenuation_radius: 12.0,
-                attenuation_falloff: 2.0,
-            })
-            .expect("Failed to add light");
-        shadows
-            .add_light(LightConfig {
-                light_type: LightType::Point,
-                position: Vec3::new(-4.0, 3.0, -4.0),
-                direction: Vec3::new(0.0, -1.0, 0.0),
-                intensity: 1.2,
-                color: Vec3::new(0.2, 1.0, 0.2),
-                attenuation_radius: 10.0,
-                attenuation_falloff: 2.5,
-            })
-            .expect("Failed to add light");
-        shadows
-            .add_light(LightConfig {
-                light_type: LightType::Point,
-                position: Vec3::new(4.0, 3.0, -4.0),
-                direction: Vec3::new(0.0, -1.0, 0.0),
-                intensity: 1.2,
-                color: Vec3::new(0.2, 0.2, 1.0),
-                attenuation_radius: 10.0,
-                attenuation_falloff: 2.5,
-            })
-            .expect("Failed to add light");
-        shadows.set_texture_manager(texture_manager.clone());
-        if let Some(texture_id) = spotlight_texture_id {
-            shadows.set_spotlight_icon(texture_id);
-        }
+        // Start with default GI lighting
+        let shadows = ProceduralShadows::new()
+            .with_light(LightConfig {
+                sun_direction: Vec3::new(-0.5, -1.0, -0.3).normalize(),
+                sun_color: Vec3::new(1.0, 0.9, 0.65),
+                sun_intensity: 2.5,
+                sky_color: Vec3::new(0.7, 0.8, 1.0),
+                ambient_intensity: 0.1,
+            });
 
-        let mut billboards = BillboardFeature::new();
-        billboards.set_texture_manager(texture_manager.clone());
+        let billboards = BillboardFeature::new();
 
         let registry = FeatureRegistry::builder()
             .with_feature(base_geometry)
@@ -190,7 +141,7 @@ impl Example {
             camera,
             keys_pressed: HashSet::new(),
             cursor_grabbed: false,
-            demo_mode: 1,
+            demo_mode: 0,
         }
     }
 
@@ -203,150 +154,86 @@ impl Example {
             return;
         };
 
-        shadows.clear_lights();
+        // Update time for animated GI
+        shadows.update_time(time);
 
-        match self.demo_mode {
+        let light_config = match self.demo_mode {
             0 => {
-                // Single rotating spotlight with pulsing intensity
-                let angle = time * 0.5;
-                let pulse = (time * 2.0).sin() * 0.3 + 1.2;
-                let _ = shadows.add_light(LightConfig {
-                    light_type: LightType::Spot {
-                        inner_angle: 30.0_f32.to_radians(),
-                        outer_angle: 50.0_f32.to_radians(),
-                    },
-                    position: Vec3::new(angle.cos() * 5.0, 8.0, angle.sin() * 5.0),
-                    direction: Vec3::new(-angle.cos(), -1.0, -angle.sin()).normalize(),
-                    intensity: pulse,
-                    color: Vec3::new(1.0, 0.9, 0.7),
-                    attenuation_radius: 18.0,
-                    attenuation_falloff: 2.0,
-                });
+                // Rotating sun - watch GI update in real-time
+                let angle = time * 0.3;
+                LightConfig {
+                    sun_direction: Vec3::new(
+                        angle.cos(),
+                        -1.0,
+                        angle.sin()
+                    ).normalize(),
+                    sun_color: Vec3::new(1.0, 0.9, 0.65),
+                    sun_intensity: 2.5,
+                    sky_color: Vec3::new(0.7, 0.8, 1.0),
+                    ambient_intensity: 0.1,
+                }
             }
             1 => {
-                // Multi-light dance - RGB lights circling with different speeds
-                let r_angle = time * 0.8;
-                let g_angle = time * 1.2 + 2.0;
-                let b_angle = time * 1.0 + 4.0;
-
-                let _ = shadows.add_light(LightConfig {
-                    light_type: LightType::Spot {
-                        inner_angle: 25.0_f32.to_radians(),
-                        outer_angle: 40.0_f32.to_radians(),
-                    },
-                    position: Vec3::new(r_angle.cos() * 3.0, 7.0, r_angle.sin() * 3.0),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.5,
-                    color: Vec3::new(1.0, 0.1, 0.1),
-                    attenuation_radius: 12.0,
-                    attenuation_falloff: 2.0,
-                });
-                let _ = shadows.add_light(LightConfig {
-                    light_type: LightType::Point,
-                    position: Vec3::new(g_angle.cos() * 5.0, 3.0, g_angle.sin() * 5.0),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.3,
-                    color: Vec3::new(0.1, 1.0, 0.1),
-                    attenuation_radius: 10.0,
-                    attenuation_falloff: 2.5,
-                });
-                let _ = shadows.add_light(LightConfig {
-                    light_type: LightType::Point,
-                    position: Vec3::new(b_angle.cos() * 4.0, 4.0, b_angle.sin() * 4.0),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 1.3,
-                    color: Vec3::new(0.1, 0.1, 1.0),
-                    attenuation_radius: 10.0,
-                    attenuation_falloff: 2.5,
-                });
-                let _ = shadows.add_light(LightConfig {
-                    light_type: LightType::Point,
-                    position: Vec3::new(
-                        (time * 1.5).cos() * 2.0,
-                        2.0,
-                        (time * 1.5).sin() * 2.0,
-                    ),
-                    direction: Vec3::new(0.0, -1.0, 0.0),
-                    intensity: 0.8,
-                    color: Vec3::new(0.3, 1.0, 1.0),
-                    attenuation_radius: 6.0,
-                    attenuation_falloff: 3.0,
-                });
+                // Sunset mode - warm orange sun low on horizon
+                let angle = time * 0.2;
+                LightConfig {
+                    sun_direction: Vec3::new(
+                        angle.cos() * 0.8,
+                        -0.3,
+                        angle.sin() * 0.8
+                    ).normalize(),
+                    sun_color: Vec3::new(1.0, 0.5, 0.2),
+                    sun_intensity: 3.0,
+                    sky_color: Vec3::new(1.0, 0.6, 0.3),
+                    ambient_intensity: 0.2,
+                }
             }
             2 => {
-                // Spotlight array - 6 spotlights in a grid pattern
-                let colors = [
-                    Vec3::new(1.0, 0.3, 0.3),
-                    Vec3::new(1.0, 0.8, 0.2),
-                    Vec3::new(0.3, 1.0, 0.3),
-                    Vec3::new(0.3, 0.8, 1.0),
-                    Vec3::new(0.4, 0.3, 1.0),
-                    Vec3::new(1.0, 0.3, 0.8),
-                ];
-                let wave = (time * 2.0).sin() * 0.3 + 1.0;
-                for i in 0..6 {
-                    let angle = (i as f32 / 6.0) * std::f32::consts::TAU;
-                    let phase_offset = i as f32 * 0.5;
-                    let height_wave =
-                        ((time * 1.5 + phase_offset).sin() * 2.0 + 7.0).max(5.0);
-                    let _ = shadows.add_light(LightConfig {
-                        light_type: LightType::Spot {
-                            inner_angle: 20.0_f32.to_radians(),
-                            outer_angle: 35.0_f32.to_radians(),
-                        },
-                        position: Vec3::new(
-                            angle.cos() * 6.0,
-                            height_wave,
-                            angle.sin() * 6.0,
-                        ),
-                        direction: Vec3::new(
-                            -angle.cos() * 0.3,
-                            -1.0,
-                            -angle.sin() * 0.3,
-                        )
-                        .normalize(),
-                        intensity: wave + (i as f32 * 0.1),
-                        color: colors[i],
-                        attenuation_radius: 15.0,
-                        attenuation_falloff: 2.0,
-                    });
+                // Day-night cycle - sun moves from horizon to overhead
+                let cycle = (time * 0.15).sin();
+                let sun_height = cycle;
+                let sun_angle = time * 0.1;
+                LightConfig {
+                    sun_direction: Vec3::new(
+                        sun_angle.cos() * (1.0 - sun_height.abs()),
+                        -sun_height,
+                        sun_angle.sin() * (1.0 - sun_height.abs())
+                    ).normalize(),
+                    sun_color: Vec3::new(
+                        1.0,
+                        0.8 + cycle * 0.2,
+                        0.6 + cycle * 0.4
+                    ),
+                    sun_intensity: 2.0 + cycle * 1.5,
+                    sky_color: Vec3::new(
+                        0.5 + cycle * 0.3,
+                        0.6 + cycle * 0.3,
+                        0.8 + cycle * 0.2
+                    ),
+                    ambient_intensity: 0.05 + (cycle * 0.5 + 0.5) * 0.15,
                 }
             }
             3 => {
-                // Color party - 8 overlapping lights with pulsing colors
-                for i in 0..8 {
-                    let angle =
-                        (i as f32 / 8.0) * std::f32::consts::TAU + time * 0.3;
-                    let height =
-                        ((time * 2.0 + i as f32).sin() * 1.5 + 4.0).max(2.0);
-                    let radius = 3.0 + i as f32 * 0.3;
-                    let hue = (i as f32 / 8.0 + time * 0.2) % 1.0;
-                    let color = Self::hue_to_rgb(hue);
-                    let light_type = if i % 3 == 0 {
-                        LightType::Spot {
-                            inner_angle: 30.0_f32.to_radians(),
-                            outer_angle: 45.0_f32.to_radians(),
-                        }
-                    } else {
-                        LightType::Point
-                    };
-                    let _ = shadows.add_light(LightConfig {
-                        light_type,
-                        position: Vec3::new(
-                            angle.cos() * radius,
-                            height,
-                            angle.sin() * radius,
-                        ),
-                        direction: Vec3::new(0.0, -1.0, 0.0),
-                        intensity: 1.0 + (time * 3.0 + i as f32).sin() * 0.5,
-                        color,
-                        attenuation_radius: 8.0 + (i as f32 * 0.5),
-                        attenuation_falloff: 2.0 + (time * 0.5).sin().abs(),
-                    });
+                // Disco mode - rapidly changing colored lighting
+                let hue = (time * 0.5) % 1.0;
+                let color = Self::hue_to_rgb(hue);
+                let angle = time * 0.8;
+                LightConfig {
+                    sun_direction: Vec3::new(
+                        angle.cos(),
+                        -0.5 - (time * 2.0).sin() * 0.3,
+                        angle.sin()
+                    ).normalize(),
+                    sun_color: color,
+                    sun_intensity: 2.0 + (time * 3.0).sin().abs() * 2.0,
+                    sky_color: Self::hue_to_rgb((hue + 0.5) % 1.0) * 0.5,
+                    ambient_intensity: 0.1 + (time * 1.5).sin().abs() * 0.2,
                 }
             }
-            _ => {}
-        }
+            _ => LightConfig::default()
+        };
+
+        shadows.set_light(light_config);
     }
 
     fn hue_to_rgb(hue: f32) -> Vec3 {
@@ -369,14 +256,12 @@ impl Example {
     }
 
     fn update_light_type(&mut self) {
-        println!("\n=== Demo Mode {} ===", self.demo_mode);
+        println!("\n=== GI Demo Mode {} ===", self.demo_mode);
         match self.demo_mode {
-            0 => println!("Single Rotating Spotlight - Watch it circle and pulse!"),
-            1 => println!(
-                "RGB Multi-Light Dance - Multiple colored lights with overlapping shadows!"
-            ),
-            2 => println!("Spotlight Array - 6 spotlights in formation with wave motion!"),
-            3 => println!("Color Party - 8 lights with rainbow colors and dynamic intensity!"),
+            0 => println!("Rotating Sun - Watch global illumination update in real-time!"),
+            1 => println!("Sunset Mode - Warm orange light with soft shadows!"),
+            2 => println!("Day-Night Cycle - Full lighting cycle from dawn to dusk!"),
+            3 => println!("Disco Mode - Rapidly changing colored GI!"),
             _ => {}
         }
     }
@@ -548,7 +433,7 @@ fn main() {
     let event_loop = winit::event_loop::EventLoop::new().unwrap();
     let window_attr = winit::window::Window::default_attributes()
         .with_title(
-            "Helio - Lighting Showcase | WASD: Move, Mouse: Look | 1-4: Toggle features | +/-: Brightness",
+            "Helio - GI Showcase (Radiance Cascades) | WASD: Move | 5: Cycle modes | +/-: Brightness",
         )
         .with_inner_size(winit::dpi::LogicalSize::new(1920, 1080));
 
@@ -615,7 +500,7 @@ fn main() {
                                         if let Ok(on) =
                                             app.renderer.toggle_and_rebuild("procedural_shadows")
                                         {
-                                            println!("[4] Shadows: {}", if on { "ON" } else { "OFF" });
+                                            println!("[4] GI (Radiance Cascades): {}", if on { "ON" } else { "OFF" });
                                         }
                                     }
                                     winit::keyboard::KeyCode::Digit5 => {
