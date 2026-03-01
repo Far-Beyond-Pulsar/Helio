@@ -2,6 +2,7 @@
 members = [
     "crates/helio-core",
     "crates/helio-render",
+    "crates/helio-render-v2",
     "crates/helio-lighting",
     "crates/helio-features",
     "crates/helio-feature-base-geometry",
@@ -11,7 +12,6 @@ members = [
     "crates/helio-feature-bloom",
     "crates/helio-feature-billboards",
     "crates/examples",
-    "crates/feature_complete_android",
 ]
 resolver = "2"
 

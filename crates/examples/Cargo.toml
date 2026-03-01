@@ -23,9 +23,14 @@ path = "feature_complete.rs"
 name = "lighting_showcase"
 path = "lighting_showcase.rs"
 
+[[bin]]
+name = "render_v2_basic"
+path = "render_v2_basic.rs"
+
 [dependencies]
 helio-core = { path = "../helio-core" }
 helio-render = { path = "../helio-render" }
+helio-render-v2 = { path = "../helio-render-v2" }
 helio-features = { path = "../helio-features" }
 helio-feature-base-geometry = { path = "../helio-feature-base-geometry" }
 helio-feature-lighting = { path = "../helio-feature-lighting" }
@@ -39,3 +44,5 @@ glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+wgpu = "22"
+pollster = "0.3"

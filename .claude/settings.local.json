@@ -17,7 +17,8 @@
       "Bash(taskkill:*)",
       "Bash(dir /s /b \"%USERPROFILE%\\.cargo\\git\\checkouts\")",
       "Bash(findstr:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(Select-String -Pattern \"(error|warning:.*crates.helio-render-v2)\" -Context 0,2)"
     ]
   }
 }
