@@ -1,27 +1,7 @@
 [package]
 name = "examples"
 version = "0.1.0"
-edition = "2024"
-
-[[bin]]
-name = "basic_rendering"
-path = "basic_rendering.rs"
-
-[[bin]]
-name = "feature_geometry"
-path = "feature_geometry.rs"
-
-[[bin]]
-name = "feature_with_lighting"
-path = "feature_with_lighting.rs"
-
-[[bin]]
-name = "feature_complete"
-path = "feature_complete.rs"
-
-[[bin]]
-name = "lighting_showcase"
-path = "lighting_showcase.rs"
+edition = "2021"
 
 [[bin]]
 name = "render_v2_basic"
@@ -29,8 +9,7 @@ path = "render_v2_basic.rs"
 
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }
-helio-core = { path = "../helio-core" }
-blade-graphics = { workspace = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }

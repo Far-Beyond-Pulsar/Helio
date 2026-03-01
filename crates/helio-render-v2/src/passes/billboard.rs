@@ -5,16 +5,15 @@ use crate::{Result, Error};
 use std::sync::{Arc, atomic::Ordering};
 
 /// Renders camera-facing billboard quads using instanced drawing
-///
-/// All instances are drawn in a single call (one quad mesh, `N` instances).
-/// The billboard shader reads per-instance position/scale/color from the
-/// instance vertex buffer and computes the camera-facing rotation on the GPU.
 pub struct BillboardPass {
     vertex_buffer: Arc<wgpu::Buffer>,
     index_buffer: Arc<wgpu::Buffer>,
     instance_buffer: Arc<wgpu::Buffer>,
     instance_count: Arc<std::sync::atomic::AtomicU32>,
     surface_format: wgpu::TextureFormat,
+    /// Bind group 1: sprite texture + sampler (may be a white fallback)
+    sprite_bind_group: Arc<wgpu::BindGroup>,
+    sprite_bind_group_layout: Arc<wgpu::BindGroupLayout>,
     pipeline: Option<Arc<wgpu::RenderPipeline>>,
 }
 
@@ -25,6 +24,8 @@ impl BillboardPass {
         instance_buffer: Arc<wgpu::Buffer>,
         instance_count: Arc<std::sync::atomic::AtomicU32>,
         surface_format: wgpu::TextureFormat,
+        sprite_bind_group: Arc<wgpu::BindGroup>,
+        sprite_bind_group_layout: Arc<wgpu::BindGroupLayout>,
     ) -> Self {
         Self {
             vertex_buffer,
@@ -32,11 +33,12 @@ impl BillboardPass {
             instance_buffer,
             instance_count,
             surface_format,
+            sprite_bind_group,
+            sprite_bind_group_layout,
             pipeline: None,
         }
     }
 
-    /// Build the render pipeline (called lazily on first execute)
     fn build_pipeline(
         &mut self,
         device: &wgpu::Device,
@@ -52,7 +54,7 @@ impl BillboardPass {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Billboard Pipeline Layout"),
-            bind_group_layouts: &[global_layout],
+            bind_group_layouts: &[global_layout, &self.sprite_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -180,6 +182,7 @@ impl RenderPass for BillboardPass {
 
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, global_bg, &[]);
+        pass.set_bind_group(1, &self.sprite_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

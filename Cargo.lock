@@ -666,12 +666,11 @@ dependencies = [
 name = "examples"
 version = "0.1.0"
 dependencies = [
- "blade-graphics",
  "bytemuck",
  "env_logger",
  "glam",
- "helio-core",
  "helio-render-v2",
+ "image",
  "log",
  "pollster",
  "wgpu",

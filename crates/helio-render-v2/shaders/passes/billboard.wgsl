@@ -19,6 +19,10 @@ struct Globals {
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> globals: Globals;
 
+// Group 1: sprite texture
+@group(1) @binding(0) var sprite_tex:     texture_2d<f32>;
+@group(1) @binding(1) var sprite_sampler: sampler;
+
 // ── Vertex inputs ──────────────────────────────────────────────────────────
 
 struct QuadVertex {
@@ -83,14 +87,10 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // Circular mask: discard fragments outside the unit circle
-    let uv_centered = in.uv * 2.0 - vec2<f32>(1.0, 1.0);
-    let dist = dot(uv_centered, uv_centered);
-    if dist > 1.0 {
-        discard;
-    }
-
-    // Soft edge falloff
-    let alpha = in.color.a * (1.0 - smoothstep(0.7, 1.0, dist));
-    return vec4<f32>(in.color.rgb, alpha);
+    let tex_color = textureSample(sprite_tex, sprite_sampler, in.uv);
+    // Tint the sprite by the per-instance color; use texture alpha for transparency
+    let rgb   = tex_color.rgb * in.color.rgb;
+    let alpha = tex_color.a   * in.color.a;
+    if alpha < 0.01 { discard; }
+    return vec4<f32>(rgb, alpha);
 }

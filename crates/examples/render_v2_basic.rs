@@ -26,6 +26,17 @@ use winit::{
 use std::collections::HashSet;
 use std::sync::Arc;
 
+fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
+    let img = image::open(path)
+        .unwrap_or_else(|_| {
+            log::warn!("Could not load sprite '{}', using white fallback", path);
+            image::DynamicImage::new_rgba8(1, 1)
+        })
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
+
 fn main() {
     env_logger::init();
     log::info!("Starting Helio Render V2 Basic Example");
@@ -134,11 +145,12 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         // Features — data-free: all content comes from the Scene
+        let (sprite_rgba, sprite_w, sprite_h) = load_sprite("spotlight.png");
         let feature_registry = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
             .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.2))
             .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
-            .with_feature(BillboardsFeature::new())
+            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h))
             .build();
 
         let renderer = Renderer::new(

@@ -62,17 +62,12 @@ pub(crate) struct BillboardVertex {
 }
 
 /// Billboard rendering feature
-///
-/// Renders camera-facing quads at arbitrary world positions.  Useful for
-/// particles, editor gizmos, sprites, lens flares, etc.
-///
-/// The feature creates a shared quad mesh and a per-instance VERTEX buffer that
-/// it re-uploads every frame via `prepare()`.  A `BillboardPass` (registered
-/// during `register()`) reads those buffers and issues one instanced draw call.
 pub struct BillboardsFeature {
     enabled: bool,
     instances: Vec<BillboardInstance>,
     max_instances: u32,
+    /// Optional sprite image: raw RGBA8 bytes + dimensions
+    sprite_rgba: Option<(Vec<u8>, u32, u32)>,
     // Shared with BillboardPass via Arc
     vertex_buffer: Option<Arc<wgpu::Buffer>>,
     index_buffer: Option<Arc<wgpu::Buffer>>,
@@ -86,6 +81,7 @@ impl BillboardsFeature {
             enabled: true,
             instances: Vec::new(),
             max_instances: 1024,
+            sprite_rgba: None,
             vertex_buffer: None,
             index_buffer: None,
             instance_buffer: None,
@@ -93,8 +89,9 @@ impl BillboardsFeature {
         }
     }
 
-    pub fn with_max_instances(mut self, max: u32) -> Self {
-        self.max_instances = max;
+    /// Set a sprite texture from raw RGBA8 pixel data
+    pub fn with_sprite(mut self, rgba: Vec<u8>, width: u32, height: u32) -> Self {
+        self.sprite_rgba = Some((rgba, width, height));
         self
     }
 
@@ -161,23 +158,99 @@ impl Feature for BillboardsFeature {
             mapped_at_creation: false,
         }));
 
-        // Register the billboard pass with shared buffer refs and the atomic counter
+        // ── Sprite bind group layout (group 1) ─────────────────────────────────
+        let sprite_layout = Arc::new(ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Billboard Sprite Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        }));
+
+        // Build the sprite texture (or a 1×1 white fallback)
+        let (sprite_tex, tex_w, tex_h) = if let Some((ref rgba, w, h)) = self.sprite_rgba {
+            let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Billboard Sprite"),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            ctx.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                rgba,
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            (tex, w, h)
+        } else {
+            // 1×1 white fallback
+            let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Billboard Sprite (white fallback)"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1, sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            ctx.queue.write_texture(
+                wgpu::ImageCopyTexture { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                &[255u8, 255, 255, 255],
+                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+                wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            );
+            (tex, 1u32, 1u32)
+        };
+        let _ = (tex_w, tex_h);
+
+        let sprite_view = sprite_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let sprite_sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Billboard Sprite Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let sprite_bg = Arc::new(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Billboard Sprite Bind Group"),
+            layout: &sprite_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&sprite_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sprite_sampler) },
+            ],
+        }));
+
         ctx.graph.add_pass(BillboardPass::new(
             vertex_buffer.clone(),
             index_buffer.clone(),
             instance_buffer.clone(),
             self.instance_count.clone(),
             ctx.surface_format,
+            sprite_bg,
+            sprite_layout,
         ));
 
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
         self.instance_buffer = Some(instance_buffer);
 
-        log::info!(
-            "Billboards feature registered: max {} instances",
-            self.max_instances
-        );
+        log::info!("Billboards feature registered: max {} instances", self.max_instances);
         Ok(())
     }
 
