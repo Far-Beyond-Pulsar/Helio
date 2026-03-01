@@ -283,7 +283,7 @@ impl AppState {
 
         // Apply mouse look — yaw left/right, pitch up/down (non-inverted)
         self.cam_yaw   += self.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch  = (self.cam_pitch + self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
+        self.cam_pitch  = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
 
         // Standard FPS basis: yaw=0 looks down -Z
