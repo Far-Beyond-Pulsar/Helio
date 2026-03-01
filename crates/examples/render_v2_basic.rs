@@ -2,6 +2,12 @@
 //!
 //! All scene content is driven by a `Scene` struct — no hardcoded lights
 //! or geometry in the renderer.
+//!
+//! Controls:
+//!   WASD        — move forward/left/back/right
+//!   Space/Shift — move up/down
+//!   Mouse drag  — look around (click to grab cursor)
+//!   Escape      — release cursor / exit
 
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
 use helio_render_v2::features::{
@@ -15,8 +21,9 @@ use winit::{
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
+    window::{Window, WindowId, CursorGrabMode},
 };
+use std::collections::HashSet;
 use std::sync::Arc;
 
 fn main() {
@@ -44,6 +51,14 @@ struct AppState {
     cube2: GpuMesh,
     cube3: GpuMesh,
     ground: GpuMesh,
+
+    // Free-camera state
+    cam_pos:   glam::Vec3,
+    cam_yaw:   f32,   // radians, horizontal rotation
+    cam_pitch: f32,   // radians, vertical rotation (clamped)
+    keys:      HashSet<KeyCode>,
+    cursor_grabbed: bool,
+    mouse_delta: (f32, f32),
 }
 
 impl App {
@@ -151,6 +166,12 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: std::time::Instant::now(),
             cube1, cube2, cube3, ground,
+            cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
+            cam_yaw:   std::f32::consts::PI,  // face -Z
+            cam_pitch: -0.2,
+            keys:      HashSet::new(),
+            cursor_grabbed: false,
+            mouse_delta: (0.0, 0.0),
         });
     }
 
@@ -158,8 +179,12 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
 
         match event {
-            WindowEvent::CloseRequested
-            | WindowEvent::KeyboardInput {
+            // ── Exit ──────────────────────────────────────────────────────────
+            WindowEvent::CloseRequested => {
+                log::info!("Shutting down");
+                event_loop.exit();
+            }
+            WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
                     physical_key: PhysicalKey::Code(KeyCode::Escape),
@@ -167,9 +192,46 @@ impl ApplicationHandler for App {
                 },
                 ..
             } => {
-                log::info!("Shutting down");
-                event_loop.exit();
+                if state.cursor_grabbed {
+                    // First Escape releases the cursor
+                    state.cursor_grabbed = false;
+                    let _ = state.window.set_cursor_grab(CursorGrabMode::None);
+                    state.window.set_cursor_visible(true);
+                } else {
+                    event_loop.exit();
+                }
             }
+
+            // ── Keyboard held state ───────────────────────────────────────────
+            WindowEvent::KeyboardInput {
+                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. },
+                ..
+            } => {
+                match ks {
+                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Released => { state.keys.remove(&key); }
+                }
+            }
+
+            // ── Mouse button — grab cursor on click ───────────────────────────
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                if !state.cursor_grabbed {
+                    // Try confined first, fall back to locked
+                    let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
+                        .is_ok();
+                    if grabbed {
+                        state.window.set_cursor_visible(false);
+                        state.cursor_grabbed = true;
+                    }
+                }
+            }
+
+            // ── Window resize ─────────────────────────────────────────────────
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 let config = wgpu::SurfaceConfiguration {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -184,6 +246,7 @@ impl ApplicationHandler for App {
                 state.surface.configure(&state.device, &config);
                 state.renderer.resize(size.width, size.height);
             }
+
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
                 let dt = (now - state.last_frame).as_secs_f32();
@@ -195,6 +258,16 @@ impl ApplicationHandler for App {
         }
     }
 
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: winit::event::DeviceId, event: DeviceEvent) {
+        let Some(state) = &mut self.state else { return };
+        if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
+            if state.cursor_grabbed {
+                state.mouse_delta.0 += dx as f32;
+                state.mouse_delta.1 += dy as f32;
+            }
+        }
+    }
+
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
         if let Some(state) = &self.state {
             state.window.request_redraw();
@@ -203,49 +276,72 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
-    fn render(&mut self, delta_time: f32) {
+    fn render(&mut self, dt: f32) {
+        // ── Camera movement ────────────────────────────────────────────────────
+        const SPEED: f32 = 5.0;
+        const LOOK_SENS: f32 = 0.002;
+
+        // Apply mouse look
+        self.cam_yaw   -= self.mouse_delta.0 * LOOK_SENS;
+        self.cam_pitch -= self.mouse_delta.1 * LOOK_SENS;
+        self.cam_pitch  = self.cam_pitch.clamp(-1.5, 1.5);
+        self.mouse_delta = (0.0, 0.0);
+
+        // Build forward/right/up vectors from yaw+pitch
+        let (sy, cy) = self.cam_yaw.sin_cos();
+        let (sp, cp) = self.cam_pitch.sin_cos();
+        let forward = glam::Vec3::new(cy * cp, sp, sy * cp);
+        let right   = glam::Vec3::new(-sy, 0.0, cy).normalize();
+        let up      = glam::Vec3::Y;
+
+        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right   * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right   * SPEED * dt; }
+        if self.keys.contains(&KeyCode::Space)      { self.cam_pos += up * SPEED * dt; }
+        if self.keys.contains(&KeyCode::ShiftLeft)  { self.cam_pos -= up * SPEED * dt; }
+
+        let size = self.window.inner_size();
+        let aspect = size.width as f32 / size.height.max(1) as f32;
+        let time = self.renderer.frame_count() as f32 * 0.016;
+
+        let camera = Camera::perspective(
+            self.cam_pos,
+            self.cam_pos + forward,
+            glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            aspect,
+            0.1,
+            200.0,
+            time,
+        );
+
+        // ── Acquire surface ────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => { log::warn!("Surface error: {:?}", e); return; }
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let time = self.renderer.frame_count() as f32 * 0.016;
-        let angle = time * 0.3;
-        let camera = Camera::perspective(
-            glam::Vec3::new(angle.sin() * 6.0, 3.0, angle.cos() * 6.0),
-            glam::Vec3::new(0.0, 0.5, 0.0),
-            glam::Vec3::Y,
-            std::f32::consts::FRAC_PI_4,
-            1280.0 / 720.0,
-            0.1,
-            100.0,
-            time,
-        );
-
-        // Build the scene – this is the ONLY place scene content is defined
+        // ── Build scene ────────────────────────────────────────────────────────
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
 
         let scene = Scene::new()
-            // Orange point light hovering above center, slowly bobbing
             .add_light(SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0))
-            // Cool blue light off to one side
-            .add_light(SceneLight::point(p1, [0.25, 0.5, 1.0], 5.0, 6.0))
-            // Warm pink light on the other side
-            .add_light(SceneLight::point(p2, [1.0, 0.3, 0.5], 5.0, 6.0))
-            // Objects
+            .add_light(SceneLight::point(p1, [0.25, 0.5,  1.0], 5.0, 6.0))
+            .add_light(SceneLight::point(p2, [1.0, 0.3,  0.5],  5.0, 6.0))
             .add_object(self.cube1.clone())
             .add_object(self.cube2.clone())
             .add_object(self.cube3.clone())
             .add_object(self.ground.clone())
-            // Billboards co-located with each light so you can see their source
+            // Billboards co-located with each light
             .add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]))
-            .add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0]))
-            .add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0]));
+            .add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5,  1.0, 1.0]))
+            .add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3,  0.5, 1.0]));
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, delta_time) {
+        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }
 

@@ -13,7 +13,7 @@ pub use builder::GraphBuilder;
 
 use crate::{Result, Error};
 use crate::resources::ResourceManager;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Render graph for automatic pass ordering and resource management
 pub struct RenderGraph {
@@ -109,20 +109,20 @@ impl RenderGraph {
             }
         }
 
-        // Topological sort (Kahn's algorithm)
-        let mut queue: Vec<usize> = (0..self.passes.len())
+        // Topological sort (Kahn's algorithm — FIFO to preserve insertion order)
+        let mut queue: VecDeque<usize> = (0..self.passes.len())
             .filter(|&i| in_degree[i] == 0)
             .collect();
 
         let mut order = Vec::new();
 
-        while let Some(node) = queue.pop() {
+        while let Some(node) = queue.pop_front() {
             order.push(node);
 
             for &neighbor in &adj_list[node] {
                 in_degree[neighbor] -= 1;
                 if in_degree[neighbor] == 0 {
-                    queue.push(neighbor);
+                    queue.push_back(neighbor);
                 }
             }
         }
