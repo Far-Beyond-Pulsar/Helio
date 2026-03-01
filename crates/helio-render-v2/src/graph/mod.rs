@@ -200,6 +200,7 @@ impl RenderGraph {
                 encoder: ctx.encoder,
                 resources: ctx.resources,
                 target: ctx.target,
+                depth_view: ctx.depth_view,
                 global_bind_group: ctx.global_bind_group,
                 lighting_bind_group: ctx.lighting_bind_group,
                 sky_color: ctx.sky_color,
@@ -254,6 +255,8 @@ pub struct GraphContext<'a> {
     pub encoder: &'a mut wgpu::CommandEncoder,
     pub resources: &'a ResourceManager,
     pub target: &'a wgpu::TextureView,
+    /// Depth buffer (Depth32Float)
+    pub depth_view: &'a wgpu::TextureView,
     pub frame: u64,
     /// Bind group 0 – camera + globals
     pub global_bind_group: &'a wgpu::BindGroup,

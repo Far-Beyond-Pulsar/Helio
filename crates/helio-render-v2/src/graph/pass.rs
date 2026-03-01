@@ -34,6 +34,9 @@ pub struct PassContext<'a> {
     /// Main render target
     pub target: &'a wgpu::TextureView,
 
+    /// Depth buffer (Depth32Float, cleared to 1.0 each frame by GeometryPass)
+    pub depth_view: &'a wgpu::TextureView,
+
     /// Bind group 0 – camera + globals (shared by all passes)
     pub global_bind_group: &'a wgpu::BindGroup,
 

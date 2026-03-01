@@ -45,6 +45,22 @@ struct MaterialUniform {
     ao: f32,
 }
 
+/// Create a Depth32Float texture + view at the given resolution
+fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Depth Texture"),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Depth32Float,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
 /// Main renderer
 pub struct Renderer {
     device: Arc<wgpu::Device>,
@@ -74,6 +90,10 @@ pub struct Renderer {
     scene_ambient_intensity: f32,
     scene_light_count: u32,
     scene_sky_color: [f32; 3],
+
+    // Depth buffer (Depth32Float, recreated on resize)
+    depth_texture: wgpu::Texture,
+    depth_view: wgpu::TextureView,
 
     // Frame state
     frame_count: u64,
@@ -298,6 +318,8 @@ impl Renderer {
         // Build the render graph
         graph.build()?;
 
+        let (depth_texture, depth_view) = create_depth_texture(&device, config.width, config.height);
+
         log::info!("Helio Render V2 initialized successfully");
 
         Ok(Self {
@@ -318,6 +340,8 @@ impl Renderer {
             scene_ambient_intensity: 0.0,
             scene_light_count: 0,
             scene_sky_color: [0.0, 0.0, 0.0],
+            depth_texture,
+            depth_view,
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -389,6 +413,7 @@ impl Renderer {
             encoder: &mut encoder,
             resources: &self.resources,
             target,
+            depth_view: &self.depth_view,
             frame: self.frame_count,
             global_bind_group: &self.global_bind_group,
             lighting_bind_group: &self.lighting_bind_group,
@@ -451,9 +476,13 @@ impl Renderer {
         self.render(camera, target, delta_time)
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {        log::info!("Resizing renderer to {}x{}", width, height);
+    pub fn resize(&mut self, width: u32, height: u32) {
+        log::info!("Resizing renderer to {}x{}", width, height);
         self.width = width;
         self.height = height;
+        let (tex, view) = create_depth_texture(&self.device, width, height);
+        self.depth_texture = tex;
+        self.depth_view = view;
     }
 
     pub fn frame_count(&self) -> u64 { self.frame_count }

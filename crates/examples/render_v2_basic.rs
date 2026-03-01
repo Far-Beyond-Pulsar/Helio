@@ -167,7 +167,7 @@ impl ApplicationHandler for App {
             last_frame: std::time::Instant::now(),
             cube1, cube2, cube3, ground,
             cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
-            cam_yaw:   std::f32::consts::PI,  // face -Z
+            cam_yaw:   0.0,         // yaw=0 looks down -Z toward the scene
             cam_pitch: -0.2,
             keys:      HashSet::new(),
             cursor_grabbed: false,
@@ -281,17 +281,16 @@ impl AppState {
         const SPEED: f32 = 5.0;
         const LOOK_SENS: f32 = 0.002;
 
-        // Apply mouse look
+        // Apply mouse look — yaw left/right, pitch up/down (non-inverted)
         self.cam_yaw   -= self.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch -= self.mouse_delta.1 * LOOK_SENS;
-        self.cam_pitch  = self.cam_pitch.clamp(-1.5, 1.5);
+        self.cam_pitch  = (self.cam_pitch + self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
 
-        // Build forward/right/up vectors from yaw+pitch
+        // Standard FPS basis: yaw=0 looks down -Z
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
-        let forward = glam::Vec3::new(cy * cp, sp, sy * cp);
-        let right   = glam::Vec3::new(-sy, 0.0, cy).normalize();
+        let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
+        let right   = glam::Vec3::new(cy, 0.0, sy);
         let up      = glam::Vec3::Y;
 
         if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }

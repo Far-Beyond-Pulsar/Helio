@@ -26,6 +26,7 @@ impl RenderPass for GeometryPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let target      = ctx.target;
+        let depth_view  = ctx.depth_view;
         let global_bg   = ctx.global_bind_group;
         let lighting_bg = ctx.lighting_bind_group;
 
@@ -42,12 +43,21 @@ impl RenderPass for GeometryPass {
             },
         });
 
+        let depth_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
+            view: depth_view,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Clear(1.0),
+                store: wgpu::StoreOp::Store,
+            }),
+            stencil_ops: None,
+        });
+
         // If no pipeline, just clear so features/billboards can still draw
         let Some(pipeline) = self.pipeline.as_ref() else {
             let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Geometry Pass (clear only)"),
                 color_attachments: &[color_attachment],
-                depth_stencil_attachment: None,
+                depth_stencil_attachment: depth_attachment,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
@@ -57,7 +67,7 @@ impl RenderPass for GeometryPass {
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Geometry Pass"),
             color_attachments: &[color_attachment],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: depth_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
         });
