@@ -671,14 +671,6 @@ dependencies = [
  "env_logger",
  "glam",
  "helio-core",
- "helio-feature-base-geometry",
- "helio-feature-billboards",
- "helio-feature-bloom",
- "helio-feature-lighting",
- "helio-feature-materials",
- "helio-feature-procedural-shadows",
- "helio-features",
- "helio-render",
  "helio-render-v2",
  "log",
  "pollster",
@@ -973,108 +965,6 @@ dependencies = [
  "bytemuck",
  "glam",
  "image",
- "log",
-]
-
-[[package]]
-name = "helio-feature-base-geometry"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "glam",
- "helio-core",
- "helio-features",
- "log",
-]
-
-[[package]]
-name = "helio-feature-billboards"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "blade-macros",
- "bytemuck",
- "glam",
- "helio-core",
- "helio-features",
- "log",
-]
-
-[[package]]
-name = "helio-feature-bloom"
-version = "0.1.0"
-dependencies = [
- "helio-features",
-]
-
-[[package]]
-name = "helio-feature-lighting"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "glam",
- "helio-features",
- "log",
-]
-
-[[package]]
-name = "helio-feature-materials"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "blade-macros",
- "bytemuck",
- "glam",
- "helio-features",
- "log",
-]
-
-[[package]]
-name = "helio-feature-procedural-shadows"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "blade-macros",
- "bytemuck",
- "glam",
- "helio-core",
- "helio-features",
- "log",
-]
-
-[[package]]
-name = "helio-features"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "glam",
- "log",
-]
-
-[[package]]
-name = "helio-lighting"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "blade-macros",
- "bytemuck",
- "glam",
- "helio-core",
- "log",
-]
-
-[[package]]
-name = "helio-render"
-version = "0.1.0"
-dependencies = [
- "blade-graphics",
- "blade-macros",
- "bytemuck",
- "glam",
- "helio-core",
- "helio-feature-billboards",
- "helio-feature-procedural-shadows",
- "helio-features",
  "log",
 ]
 
@@ -1889,9 +1779,9 @@ checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
 name = "png"
-version = "0.18.0"
+version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97baced388464909d42d89643fe4361939af9b7ce7a31ee32a168f832a70f2a0"
+checksum = "60769b8b31b2a9f263dae2776c37b1b28ae246943cf719eb6946a1db05128a61"
 dependencies = [
  "bitflags 2.10.0",
  "crc32fast",
@@ -1967,12 +1857,9 @@ checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
 
 [[package]]
 name = "pxfm"
-version = "0.1.27"
+version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7186d3822593aa4393561d186d1393b3923e9d6163d3fbfd6e825e3e6cf3e6a8"
-dependencies = [
- "num-traits",
-]
+checksum = "b5a041e753da8b807c9255f28de81879c78c876392ff2469cde94799b2896b9d"
 
 [[package]]
 name = "quick-xml"

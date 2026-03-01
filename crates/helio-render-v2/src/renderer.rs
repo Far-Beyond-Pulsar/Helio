@@ -142,7 +142,24 @@ impl Renderer {
             ],
         });
 
-        // ── Register features (shadow passes etc.) ────────────────────────────
+        // ── Geometry pass — must be added to graph BEFORE features so it ────────
+        // ── executes first (billboard/post passes render on top).           ────────
+        let draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
+
+        // Collect defines before feature registration (side-effect free)
+        let defines = features.collect_shader_defines();
+        let geometry_pipeline = pipelines.get_or_create(
+            include_str!("../shaders/passes/geometry.wgsl"),
+            "geometry".to_string(),
+            &defines,
+            PipelineVariant::Forward,
+        )?;
+
+        let mut geometry_pass = GeometryPass::with_draw_list(draw_list.clone());
+        geometry_pass.set_pipeline(geometry_pipeline);
+        graph.add_pass(geometry_pass);
+
+        // ── Register features (adds BillboardPass etc. after GeometryPass) ───────
         let (feat_light_buf, feat_shadow_view, feat_shadow_sampler) = {
             let mut ctx = FeatureContext::new(
                 &device, &queue, &mut graph, &mut resources, config.surface_format,
@@ -299,21 +316,6 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&cube_view) },
             ],
         }));
-
-        // ── Geometry pass with shared draw list ──────────────────────────────
-        let draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
-
-        let defines = features.collect_shader_defines();
-        let geometry_pipeline = pipelines.get_or_create(
-            include_str!("../shaders/passes/geometry.wgsl"),
-            "geometry".to_string(),
-            &defines,
-            PipelineVariant::Forward,
-        )?;
-
-        let mut geometry_pass = GeometryPass::with_draw_list(draw_list.clone());
-        geometry_pass.set_pipeline(geometry_pipeline);
-        graph.add_pass(geometry_pass);
 
         // Build the render graph
         graph.build()?;
