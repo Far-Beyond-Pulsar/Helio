@@ -83,29 +83,29 @@ impl RenderGraph {
         log::info!("Building render graph with {} passes", self.passes.len());
 
         // Build dependency graph using topological sort
-        let mut in_degree = vec![0; self.passes.len()];
-        let mut adj_list: Vec<Vec<usize>> = vec![Vec::new(); self.passes.len()];
 
-        // Track which passes write to each resource
+        // First pass: collect ALL resource writers before building edges.
+        // This makes ordering independent of pass registration order.
         let mut resource_writers: HashMap<ResourceHandle, usize> = HashMap::new();
-
-        // Build adjacency list based on resource dependencies
         for (i, pass) in self.passes.iter().enumerate() {
-            // For each resource this pass reads, add dependency on its writer
-            for &resource in &pass.reads {
-                if let Some(&writer_idx) = resource_writers.get(&resource) {
-                    // This pass depends on the writer
-                    adj_list[writer_idx].push(i);
-                    in_degree[i] += 1;
-                }
-            }
-
-            // Mark this pass as writer for its outputs
             for &resource in &pass.writes {
                 resource_writers.insert(resource, i);
             }
             for &resource in &pass.creates {
                 resource_writers.insert(resource, i);
+            }
+        }
+
+        // Second pass: build adjacency list based on reads
+        let mut in_degree = vec![0; self.passes.len()];
+        let mut adj_list: Vec<Vec<usize>> = vec![Vec::new(); self.passes.len()];
+
+        for (i, pass) in self.passes.iter().enumerate() {
+            for &resource in &pass.reads {
+                if let Some(&writer_idx) = resource_writers.get(&resource) {
+                    adj_list[writer_idx].push(i);
+                    in_degree[i] += 1;
+                }
             }
         }
 

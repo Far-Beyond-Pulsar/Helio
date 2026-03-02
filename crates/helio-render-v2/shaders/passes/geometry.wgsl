@@ -121,6 +121,60 @@ struct GpuLight {
 @group(2) @binding(1) var shadow_atlas:   texture_depth_2d_array;
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
 
+// Binding 3: env_cube (IBL, declared in layout but not used here)
+
+struct LightMatrix { mat: mat4x4<f32> }
+@group(2) @binding(4) var<storage, read> shadow_matrices: array<LightMatrix>;
+
+// ── Shadow helpers ───────────────────────────────────────────────────────────
+
+/// PCF shadow lookup for the given light.
+/// Returns 1.0 (fully lit) or 0.0 (fully shadowed), with soft edges.
+fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
+    if !ENABLE_SHADOWS {
+        return 1.0;
+    }
+
+    let light_clip = shadow_matrices[light_idx].mat * vec4<f32>(world_pos, 1.0);
+    // Reject geometry behind the light (w <= 0 means behind clip plane)
+    if light_clip.w <= 0.0 {
+        return 1.0;
+    }
+
+    // Perspective divide → NDC
+    let ndc = light_clip.xyz / light_clip.w;
+
+    // Convert NDC xy to texture UV: [-1,1] → [0,1]
+    let shadow_uv = ndc.xy * 0.5 + vec2<f32>(0.5, 0.5);
+
+    // Reject out-of-frustum fragments
+    if any(shadow_uv < vec2<f32>(0.0, 0.0)) || any(shadow_uv > vec2<f32>(1.0, 1.0))
+       || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+
+    let depth     = ndc.z;
+    let bias      = 0.005;
+    let texel     = 1.0 / 1024.0;
+
+    // 3×3 PCF kernel
+    // shadow_sampler uses LessEqual compare: stored_depth <= (depth - bias) → 1.0 (in shadow)
+    var shadow_sum = 0.0;
+    for (var xi = -1; xi <= 1; xi++) {
+        for (var yi = -1; yi <= 1; yi++) {
+            let off = vec2<f32>(f32(xi) * texel, f32(yi) * texel);
+            shadow_sum += textureSampleCompareLevel(
+                shadow_atlas, shadow_sampler,
+                shadow_uv + off,
+                i32(light_idx),
+                depth - bias,
+            );
+        }
+    }
+    // shadow_sum/9 = 1.0 when fully in shadow → invert to get attenuation factor
+    return 1.0 - shadow_sum / 9.0;
+}
+
 // Evaluate one light contribution (Lambertian diffuse)
 fn eval_light(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     var L: vec3<f32>;
@@ -159,7 +213,8 @@ fn calculate_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<
 
     var diffuse = vec3<f32>(0.0);
     for (var i: u32 = 0u; i < globals.light_count; i++) {
-        diffuse += eval_light(lights[i], world_pos, normal) * base_color;
+        let sf = shadow_factor(i, world_pos);
+        diffuse += eval_light(lights[i], world_pos, normal) * base_color * sf;
     }
     return ambient + diffuse;
 }

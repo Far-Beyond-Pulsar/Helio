@@ -11,9 +11,10 @@ use crate::scene::Scene;
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
 use crate::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use wgpu::util::DeviceExt;
 use bytemuck::Zeroable;
+use glam::{Mat4, Vec3};
 
 /// Main renderer configuration
 pub struct RendererConfig {
@@ -43,6 +44,37 @@ struct MaterialUniform {
     roughness: f32,
     emissive: f32,
     ao: f32,
+}
+
+/// GPU shadow light-space matrix (must match WGSL LightMatrix struct = 64 bytes)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct GpuShadowMatrix {
+    mat: [f32; 16],
+}
+
+/// Compute a light-space view-proj matrix for shadow rendering.
+fn compute_light_matrix(position: [f32; 3], direction: [f32; 3], range: f32, is_directional: bool) -> Mat4 {
+    if is_directional {
+        let dir = Vec3::from(direction).normalize();
+        let light_pos = -dir * 50.0;
+        let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+        let view = Mat4::look_at_rh(light_pos, Vec3::ZERO, up);
+        let proj = Mat4::orthographic_rh(-50.0, 50.0, -50.0, 50.0, 0.1, 200.0);
+        proj * view
+    } else {
+        let pos = Vec3::from(position);
+        let to_origin = Vec3::ZERO - pos;
+        let dir = if to_origin.length() > 0.001 {
+            to_origin.normalize()
+        } else {
+            Vec3::new(0.0, -1.0, 0.0) // fallback: aim down
+        };
+        let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+        let view = Mat4::look_at_rh(pos, pos + dir, up);
+        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1, range.max(0.1));
+        proj * view
+    }
 }
 
 /// Create a Depth32Float texture + view at the given resolution
@@ -85,6 +117,10 @@ pub struct Renderer {
 
     // Light buffer for scene writes
     light_buffer: Arc<wgpu::Buffer>,
+    // Shadow light-space matrix buffer (shared with ShadowPass)
+    shadow_matrix_buffer: Arc<wgpu::Buffer>,
+    // Shared light count for ShadowPass (updated each frame before graph exec)
+    light_count_arc: Arc<AtomicU32>,
     // Current scene ambient (updated by render_scene)
     scene_ambient_color: [f32; 3],
     scene_ambient_intensity: f32,
@@ -146,6 +182,17 @@ impl Renderer {
         // ── executes first (billboard/post passes render on top).           ────────
         let draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
 
+        // Shadow matrix buffer: 16 × mat4x4<f32> = 1024 bytes
+        let shadow_matrix_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Matrix Buffer"),
+            size: (MAX_LIGHTS as u64) * 64, // 16 × 64 bytes
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        // Shared light count — updated each frame; read by ShadowPass
+        let light_count_arc = Arc::new(AtomicU32::new(0));
+
         // Collect defines before feature registration (side-effect free)
         let defines = features.collect_shader_defines();
         let geometry_pipeline = pipelines.get_or_create(
@@ -163,6 +210,9 @@ impl Renderer {
         let (feat_light_buf, feat_shadow_view, feat_shadow_sampler) = {
             let mut ctx = FeatureContext::new(
                 &device, &queue, &mut graph, &mut resources, config.surface_format,
+                draw_list.clone(),
+                shadow_matrix_buffer.clone(),
+                light_count_arc.clone(),
             );
             features.register_all(&mut ctx)?;
             (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler)
@@ -314,6 +364,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&shadow_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_samp) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&cube_view) },
+                wgpu::BindGroupEntry { binding: 4, resource: shadow_matrix_buffer.as_entire_binding() },
             ],
         }));
 
@@ -338,6 +389,8 @@ impl Renderer {
             default_material_bind_group,
             draw_list,
             light_buffer,
+            shadow_matrix_buffer,
+            light_count_arc,
             scene_ambient_color: [0.0, 0.0, 0.0],
             scene_ambient_intensity: 0.0,
             scene_light_count: 0,
@@ -463,6 +516,18 @@ impl Renderer {
         }).collect();
         gpu_lights.resize(MAX_LIGHTS as usize, GpuLight::zeroed());
         self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&gpu_lights));
+
+        // Compute and upload light-space matrices for shadow rendering
+        let mut shadow_mats: Vec<GpuShadowMatrix> = scene.lights[..count].iter().map(|l| {
+            let is_dir = matches!(l.light_type, crate::features::LightType::Directional);
+            let mat = compute_light_matrix(l.position, l.direction, l.range, is_dir);
+            GpuShadowMatrix { mat: mat.to_cols_array() }
+        }).collect();
+        shadow_mats.resize(MAX_LIGHTS as usize, GpuShadowMatrix::zeroed());
+        self.queue.write_buffer(&self.shadow_matrix_buffer, 0, bytemuck::cast_slice(&shadow_mats));
+
+        // Update shared light count (ShadowPass reads this before drawing)
+        self.light_count_arc.store(count as u32, Ordering::Relaxed);
 
         // Update billboard instances from scene
         if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {

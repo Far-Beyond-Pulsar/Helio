@@ -124,7 +124,13 @@ impl Feature for ShadowsFeature {
         ctx.shadow_atlas_view = self.shadow_atlas_view.clone();
         ctx.shadow_sampler = self.shadow_sampler.clone();
 
-        ctx.graph.add_pass(ShadowPass::new(layer_views));
+        ctx.graph.add_pass(ShadowPass::new(
+            layer_views,
+            ctx.draw_list.clone(),
+            ctx.shadow_matrix_buffer.clone(),
+            ctx.light_count_arc.clone(),
+            ctx.device,
+        ));
 
         log::info!(
             "Shadows feature registered: {}×{} atlas, {} max lights",

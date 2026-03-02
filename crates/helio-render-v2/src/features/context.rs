@@ -3,7 +3,8 @@
 use crate::resources::ResourceManager;
 use crate::graph::RenderGraph;
 use crate::camera::Camera;
-use std::sync::Arc;
+use crate::mesh::DrawCall;
+use std::sync::{Arc, Mutex, atomic::AtomicU32};
 
 /// Context provided to features during registration
 pub struct FeatureContext<'a> {
@@ -14,7 +15,15 @@ pub struct FeatureContext<'a> {
     /// Surface / swapchain format (used for pipeline creation)
     pub surface_format: wgpu::TextureFormat,
 
-    // Output fields set by features during register()
+    // ── Inputs from Renderer (always set) ──────────────────────────────────
+    /// Shared draw list — ShadowsFeature passes this to ShadowPass
+    pub draw_list: Arc<Mutex<Vec<DrawCall>>>,
+    /// Shadow light-space matrix buffer — ShadowsFeature passes this to ShadowPass
+    pub shadow_matrix_buffer: Arc<wgpu::Buffer>,
+    /// Shared light count — updated by Renderer each frame; ShadowPass reads it
+    pub light_count_arc: Arc<AtomicU32>,
+
+    // ── Outputs set by features during register() ───────────────────────────
     /// Light storage buffer set by LightingFeature
     pub light_buffer: Option<Arc<wgpu::Buffer>>,
     /// Shadow atlas texture view set by ShadowsFeature
@@ -30,6 +39,9 @@ impl<'a> FeatureContext<'a> {
         graph: &'a mut RenderGraph,
         resources: &'a mut ResourceManager,
         surface_format: wgpu::TextureFormat,
+        draw_list: Arc<Mutex<Vec<DrawCall>>>,
+        shadow_matrix_buffer: Arc<wgpu::Buffer>,
+        light_count_arc: Arc<AtomicU32>,
     ) -> Self {
         Self {
             device,
@@ -37,6 +49,9 @@ impl<'a> FeatureContext<'a> {
             graph,
             resources,
             surface_format,
+            draw_list,
+            shadow_matrix_buffer,
+            light_count_arc,
             light_buffer: None,
             shadow_atlas_view: None,
             shadow_sampler: None,

@@ -1,6 +1,6 @@
 //! Main geometry pass – renders all queued draw calls
 
-use crate::graph::{RenderPass, PassContext};
+use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::mesh::DrawCall;
 use crate::Result;
 use std::sync::{Arc, Mutex};
@@ -23,6 +23,13 @@ impl GeometryPass {
 
 impl RenderPass for GeometryPass {
     fn name(&self) -> &str { "geometry" }
+
+    fn declare_resources(&self, builder: &mut PassResourceBuilder) {
+        // Reads shadow atlas written by ShadowPass → enforces shadow-before-geometry order
+        builder.read(ResourceHandle::named("shadow_atlas"));
+        // Writes color target read by BillboardPass → enforces geometry-before-billboard order
+        builder.write(ResourceHandle::named("color_target"));
+    }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let target      = ctx.target;

@@ -1,6 +1,6 @@
 //! Billboard render pass - instanced alpha-blended camera-facing quads
 
-use crate::graph::{RenderPass, PassContext};
+use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::{Result, Error};
 use std::sync::{Arc, atomic::Ordering};
 
@@ -139,6 +139,11 @@ impl BillboardPass {
 impl RenderPass for BillboardPass {
     fn name(&self) -> &str {
         "billboards"
+    }
+
+    fn declare_resources(&self, builder: &mut PassResourceBuilder) {
+        // Reads color target written by GeometryPass → enforces geometry-before-billboard order
+        builder.read(ResourceHandle::named("color_target"));
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
