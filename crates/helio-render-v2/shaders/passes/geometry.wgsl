@@ -130,7 +130,7 @@ struct LightMatrix { mat: mat4x4<f32> }
 
 const ATLAS_SIZE: f32 = 512.0;
 
-const POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+var<private> POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
     vec2<f32>(-0.94201624, -0.39906216),
     vec2<f32>( 0.94558609, -0.76890725),
     vec2<f32>(-0.09418410, -0.92938870),
