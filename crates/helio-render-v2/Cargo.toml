@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-wgpu = "22"
+wgpu = {git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8"}
 glam = { version = "0.29", features = ["bytemuck"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 bitflags = "2.4"

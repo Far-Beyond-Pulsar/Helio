@@ -193,9 +193,9 @@ impl Feature for BillboardsFeature {
                 view_formats: &[],
             });
             ctx.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 rgba,
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             );
             (tex, w, h)
@@ -211,9 +211,9 @@ impl Feature for BillboardsFeature {
                 view_formats: &[],
             });
             ctx.queue.write_texture(
-                wgpu::ImageCopyTexture { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
                 &[255u8, 255, 255, 255],
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
                 wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             );
             (tex, 1u32, 1u32)

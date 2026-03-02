@@ -115,8 +115,9 @@ impl ApplicationHandler for App {
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
+                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                trace: wgpu::Trace::Off,
             },
-            None,
         ))
         .expect("Failed to create device");
 

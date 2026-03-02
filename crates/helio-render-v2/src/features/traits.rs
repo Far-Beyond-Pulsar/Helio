@@ -132,6 +132,17 @@ pub trait Feature: Send + Sync + AsAny {
         let _ = device;
     }
 
+    /// wgpu device features required by this feature
+    ///
+    /// The renderer will attempt to request these features. If unavailable on the
+    /// adapter the feature must fall back gracefully.
+    fn required_device_features() -> wgpu::Features
+    where
+        Self: Sized,
+    {
+        wgpu::Features::empty()
+    }
+
     /// Check if feature is currently enabled
     fn is_enabled(&self) -> bool {
         true

@@ -243,12 +243,12 @@ impl Renderer {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &white_tex, mip_level: 0,
                 origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
             },
             &[255u8, 255, 255, 255],
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
         let white_view = white_tex.create_view(&Default::default());
@@ -264,12 +264,12 @@ impl Renderer {
             view_formats: &[],
         });
         queue.write_texture(
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture: &normal_tex, mip_level: 0,
                 origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
             },
             &[128u8, 128, 255, 255],
-            wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
         let normal_view = normal_tex.create_view(&Default::default());
@@ -346,13 +346,13 @@ impl Renderer {
         });
         for face in 0..6u32 {
             queue.write_texture(
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture: &cube_tex, mip_level: 0,
                     origin: wgpu::Origin3d { x: 0, y: 0, z: face },
                     aspect: wgpu::TextureAspect::All,
                 },
                 &[0u8, 0, 0, 255],
-                wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
                 wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             );
         }

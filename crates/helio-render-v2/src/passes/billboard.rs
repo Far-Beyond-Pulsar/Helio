@@ -54,8 +54,8 @@ impl BillboardPass {
 
         let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Billboard Pipeline Layout"),
-            bind_group_layouts: &[global_layout, &self.sprite_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(global_layout), Some(&self.sprite_bind_group_layout as &wgpu::BindGroupLayout)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -64,7 +64,7 @@ impl BillboardPass {
             cache: None,
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[
                     // Slot 0: quad vertex (position + uv, per-vertex)
                     wgpu::VertexBufferLayout {
@@ -113,7 +113,7 @@ impl BillboardPass {
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
@@ -129,7 +129,7 @@ impl BillboardPass {
             },
             depth_stencil: None,  // Billboards render without depth buffer
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: None,
         });
 
         self.pipeline = Some(Arc::new(pipeline));
@@ -175,6 +175,7 @@ impl RenderPass for BillboardPass {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -183,11 +184,12 @@ impl RenderPass for BillboardPass {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, global_bg, &[]);
-        pass.set_bind_group(1, &self.sprite_bind_group, &[]);
+        pass.set_bind_group(1, Some(self.sprite_bind_group.as_ref()), &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
         pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

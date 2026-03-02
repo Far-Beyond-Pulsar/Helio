@@ -75,11 +75,11 @@ impl PipelineCache {
         let pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some(&format!("{}_layout", shader_id)),
             bind_group_layouts: &[
-                &self.bind_group_layouts.global,
-                &self.bind_group_layouts.material,
-                &self.bind_group_layouts.lighting,
+                Some(&self.bind_group_layouts.global as &wgpu::BindGroupLayout),
+                Some(&self.bind_group_layouts.material as &wgpu::BindGroupLayout),
+                Some(&self.bind_group_layouts.lighting as &wgpu::BindGroupLayout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Create pipeline based on variant
@@ -112,7 +112,7 @@ impl PipelineCache {
             cache: None,
             vertex: wgpu::VertexState {
                 module: shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[
                     // Vertex buffer layout matching PackedVertex from helio-core
                     wgpu::VertexBufferLayout {
@@ -156,7 +156,7 @@ impl PipelineCache {
             },
             fragment: Some(wgpu::FragmentState {
                 module: shader,
-                entry_point: "fs_main",
+                entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: self.surface_format,
                     blend: Some(wgpu::BlendState::REPLACE),
@@ -175,8 +175,8 @@ impl PipelineCache {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -185,7 +185,7 @@ impl PipelineCache {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
         }))
     }
 
@@ -200,7 +200,7 @@ impl PipelineCache {
             cache: None,
             vertex: wgpu::VertexState {
                 module: shader,
-                entry_point: "vs_main",
+                entry_point: Some("vs_main"),
                 buffers: &[
                     wgpu::VertexBufferLayout {
                         array_stride: 32,
@@ -248,8 +248,8 @@ impl PipelineCache {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -258,7 +258,7 @@ impl PipelineCache {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
         }))
     }
 

@@ -39,6 +39,7 @@ pub struct GpuMesh {
     pub vertex_buffer: Arc<wgpu::Buffer>,
     pub index_buffer: Arc<wgpu::Buffer>,
     pub index_count: u32,
+    pub vertex_count: u32,
 }
 
 impl GpuMesh {
@@ -47,14 +48,20 @@ impl GpuMesh {
         let vertex_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Mesh Vertex Buffer"),
             contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            // BLAS_INPUT needed so RT can use this buffer as geometry source
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::BLAS_INPUT,
         }));
         let index_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Mesh Index Buffer"),
             contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT,
         }));
-        Self { vertex_buffer, index_buffer, index_count: indices.len() as u32 }
+        Self {
+            vertex_buffer,
+            index_buffer,
+            index_count: indices.len() as u32,
+            vertex_count: vertices.len() as u32,
+        }
     }
 
     /// Build a unit cube mesh centered at `center` with half-extent `half_size`
@@ -109,6 +116,7 @@ pub struct DrawCall {
     pub vertex_buffer: Arc<wgpu::Buffer>,
     pub index_buffer: Arc<wgpu::Buffer>,
     pub index_count: u32,
+    pub vertex_count: u32,
     pub material_bind_group: Arc<wgpu::BindGroup>,
 }
 
@@ -118,6 +126,7 @@ impl DrawCall {
             vertex_buffer: mesh.vertex_buffer.clone(),
             index_buffer: mesh.index_buffer.clone(),
             index_count: mesh.index_count,
+            vertex_count: mesh.vertex_count,
             material_bind_group: material,
         }
     }

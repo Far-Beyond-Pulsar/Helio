@@ -44,6 +44,7 @@ impl RenderPass for GeometryPass {
         let color_attachment = Some(wgpu::RenderPassColorAttachment {
             view: target,
             resolve_target: None,
+            depth_slice: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
                 store: wgpu::StoreOp::Store,
@@ -67,6 +68,7 @@ impl RenderPass for GeometryPass {
                 depth_stencil_attachment: depth_attachment,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             return Ok(());
         };
@@ -77,6 +79,7 @@ impl RenderPass for GeometryPass {
             depth_stencil_attachment: depth_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: None,
         });
 
         pass.set_pipeline(pipeline);
@@ -84,7 +87,7 @@ impl RenderPass for GeometryPass {
         pass.set_bind_group(2, lighting_bg, &[]);
 
         for dc in &draw_calls {
-            pass.set_bind_group(1, &dc.material_bind_group, &[]);
+            pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..dc.index_count, 0, 0..1);
