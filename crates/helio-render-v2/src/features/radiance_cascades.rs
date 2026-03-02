@@ -59,9 +59,12 @@ pub struct RadianceCascadesFeature {
     enabled: bool,
     world_min: [f32; 3],
     world_max: [f32; 3],
-    // Kept alive across frames (GPU objects held here)
-    _cascade_textures: Vec<wgpu::Texture>,
-    cascade_arc_views: Vec<Arc<wgpu::TextureView>>,
+    // output textures: what RC writes each frame; what geometry reads
+    output_textures:  Vec<Arc<wgpu::Texture>>,
+    output_views:     Vec<Arc<wgpu::TextureView>>,
+    // history textures: previous frame's output, blended into current
+    history_textures: Vec<Arc<wgpu::Texture>>,
+    history_views:    Vec<Arc<wgpu::TextureView>>,
     _dummy_tex: Option<wgpu::Texture>,
     _dummy_view: Option<wgpu::TextureView>,
     _static_bufs: Vec<wgpu::Buffer>,
@@ -75,8 +78,10 @@ impl RadianceCascadesFeature {
             enabled: true,
             world_min: [-10.0, -1.0, -10.0],
             world_max: [10.0, 10.0, 10.0],
-            _cascade_textures: Vec::new(),
-            cascade_arc_views: Vec::new(),
+            output_textures:  Vec::new(),
+            output_views:     Vec::new(),
+            history_textures: Vec::new(),
+            history_views:    Vec::new(),
             _dummy_tex: None,
             _dummy_view: None,
             _static_bufs: Vec::new(),
@@ -105,26 +110,37 @@ impl Feature for RadianceCascadesFeature {
         use wgpu::util::DeviceExt;
         let device = ctx.device;
 
-        // ── Cascade textures ────────────────────────────────────────────────
-        let mut cascade_textures: Vec<wgpu::Texture> = Vec::with_capacity(CASCADE_COUNT);
-        let mut cascade_arc_views: Vec<Arc<wgpu::TextureView>> = Vec::with_capacity(CASCADE_COUNT);
-        for c in 0..CASCADE_COUNT {
-            let tex = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(&format!("RC Cascade {c}")),
-                size: wgpu::Extent3d { width: ATLAS_W, height: ATLAS_HEIGHTS[c], depth_or_array_layers: 1 },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-                view_formats: &[],
-            });
-            let view = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor::default()));
-            cascade_textures.push(tex);
-            cascade_arc_views.push(view);
-        }
+        // ── Create one set of cascade textures, returning Arc<Texture> + Arc<TextureView> ─
+        let make_cascade_set = |label: &str, extra_usage: wgpu::TextureUsages|
+            -> (Vec<Arc<wgpu::Texture>>, Vec<Arc<wgpu::TextureView>>)
+        {
+            let mut textures = Vec::with_capacity(CASCADE_COUNT);
+            let mut views    = Vec::with_capacity(CASCADE_COUNT);
+            for c in 0..CASCADE_COUNT {
+                let tex = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(&format!("{label} {c}")),
+                    size: wgpu::Extent3d { width: ATLAS_W, height: ATLAS_HEIGHTS[c], depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING | extra_usage,
+                    view_formats: &[],
+                }));
+                let view = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor::default()));
+                textures.push(tex);
+                views.push(view);
+            }
+            (textures, views)
+        };
+        // output: what RC writes each frame; what geometry reads
+        let (output_textures, output_views) =
+            make_cascade_set("RC Output", wgpu::TextureUsages::COPY_SRC);
+        // history: previous frame's output, blended into current
+        let (history_textures, history_views) =
+            make_cascade_set("RC History", wgpu::TextureUsages::COPY_DST);
 
-        // Dummy parent texture for cascade 4 (no parent)
+        // Dummy parent texture for cascade 3 (no coarser parent)
         let dummy_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("RC Dummy Parent"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
@@ -179,7 +195,7 @@ impl Feature for RadianceCascadesFeature {
             max_instances: 256,
         });
 
-        // ── Light buffer (may be None if LightingFeature not registered) ─────
+        // ── Light buffer ─────────────────────────────────────────────────────
         use crate::features::lighting::MAX_LIGHTS;
         use crate::features::lighting::GpuLight;
         let light_buf: Arc<wgpu::Buffer> = ctx.light_buffer.clone().unwrap_or_else(|| {
@@ -191,7 +207,7 @@ impl Feature for RadianceCascadesFeature {
             }))
         });
 
-        // ── Compute pipeline (layout: None = auto from shader) ───────────────
+        // ── Compute pipeline ─────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("rc_trace"),
             source: wgpu::ShaderSource::Wgsl(
@@ -208,54 +224,41 @@ impl Feature for RadianceCascadesFeature {
         }));
         let bg_layout = pipeline.get_bind_group_layout(0);
 
-        // ── Bind groups (one per cascade: C writes cascade[C], reads cascade[C+1]) ─
-        let bind_groups: Vec<wgpu::BindGroup> = (0..CASCADE_COUNT)
-            .map(|c| {
-                let parent_view: &wgpu::TextureView = if c + 1 < CASCADE_COUNT {
-                    &cascade_arc_views[c + 1]
-                } else {
-                    &dummy_view
-                };
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some(&format!("RC BG {c}")),
-                    layout: &bg_layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&cascade_arc_views[c]),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(parent_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: rc_dyn_buf.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 3,
-                            resource: static_bufs[c].as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 4,
-                            resource: wgpu::BindingResource::AccelerationStructure(&tlas),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 5,
-                            resource: light_buf.as_entire_binding(),
-                        },
-                    ],
-                })
+        // ── Bind groups ───────────────────────────────────────────────────────
+        // 0: output[c]   – storage write (current frame result)
+        // 1: output[c+1] – parent cascade already written this frame
+        // 2: rc_dyn uniform  3: cascade_static uniform  4: TLAS  5: lights
+        // 6: history[c]  – read previous frame's result for temporal blend
+        let bind_groups: Vec<wgpu::BindGroup> = (0..CASCADE_COUNT).map(|c| {
+            let parent_view: &wgpu::TextureView = if c + 1 < CASCADE_COUNT {
+                &output_views[c + 1]
+            } else {
+                &dummy_view
+            };
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(&format!("RC BG {c}")),
+                layout: &bg_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&output_views[c]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(parent_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: rc_dyn_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: static_bufs[c].as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::AccelerationStructure(&tlas) },
+                    wgpu::BindGroupEntry { binding: 5, resource: light_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&history_views[c]) },
+                ],
             })
-            .collect();
+        }).collect();
 
         // ── Set context outputs ──────────────────────────────────────────────
-        ctx.rc_cascade0_view = Some(cascade_arc_views[0].clone());
+        ctx.rc_cascade0_view = Some(output_views[0].clone());
         ctx.rc_world_bounds = Some((self.world_min, self.world_max));
 
         // Keep GPU objects alive in the feature struct
-        self.cascade_arc_views = cascade_arc_views;
-        self._cascade_textures = cascade_textures;
+        self.output_views     = output_views;
+        self.output_textures  = output_textures.clone();
+        self.history_views    = history_views;
+        self.history_textures = history_textures.clone();
         self._dummy_view = Some(dummy_view);
         self._dummy_tex = Some(dummy_tex);
         self._static_bufs = static_bufs;
@@ -268,6 +271,8 @@ impl Feature for RadianceCascadesFeature {
             ctx.draw_list.clone(),
             pipeline,
             bind_groups,
+            output_textures,
+            history_textures,
             rc_dyn_buf,
             tlas,
             self.world_min,
@@ -305,8 +310,10 @@ impl Feature for RadianceCascadesFeature {
     fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }
 
     fn cleanup(&mut self, _device: &wgpu::Device) {
-        self._cascade_textures.clear();
-        self.cascade_arc_views.clear();
+        self.output_textures.clear();
+        self.output_views.clear();
+        self.history_textures.clear();
+        self.history_views.clear();
         self._dummy_tex = None;
         self._dummy_view = None;
         self._static_bufs.clear();

@@ -3,7 +3,7 @@
 //! Runs once per frame, cascades 4→0 (coarse to fine so each cascade can
 //! read from its already-computed parent).
 
-use crate::features::radiance_cascades::{CASCADE_COUNT, PROBE_DIMS, DIR_DIMS, ATLAS_HEIGHTS};
+use crate::features::radiance_cascades::{CASCADE_COUNT, PROBE_DIMS, DIR_DIMS, ATLAS_HEIGHTS, ATLAS_W};
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::mesh::DrawCall;
 use crate::Result;
@@ -31,6 +31,10 @@ pub struct RadianceCascadesPass {
     pipeline: Arc<wgpu::ComputePipeline>,
     /// One bind group per cascade (index == cascade level)
     bind_groups: Vec<wgpu::BindGroup>,
+    /// Output textures (what RC writes; geometry reads these)
+    output_textures: Vec<Arc<wgpu::Texture>>,
+    /// History textures (previous frame; copy output→history after each dispatch)
+    history_textures: Vec<Arc<wgpu::Texture>>,
     rc_dynamic_buf: Arc<wgpu::Buffer>,
     tlas: wgpu::Tlas,
     blas_cache: HashMap<usize, BlasEntry>,
@@ -45,6 +49,8 @@ impl RadianceCascadesPass {
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         pipeline: Arc<wgpu::ComputePipeline>,
         bind_groups: Vec<wgpu::BindGroup>,
+        output_textures: Vec<Arc<wgpu::Texture>>,
+        history_textures: Vec<Arc<wgpu::Texture>>,
         rc_dynamic_buf: Arc<wgpu::Buffer>,
         tlas: wgpu::Tlas,
         world_min: [f32; 3],
@@ -55,6 +61,8 @@ impl RadianceCascadesPass {
             draw_list,
             pipeline,
             bind_groups,
+            output_textures,
+            history_textures,
             rc_dynamic_buf,
             tlas,
             blas_cache: HashMap::new(),
@@ -161,6 +169,30 @@ impl RenderPass for RadianceCascadesPass {
             cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         }
         drop(cpass);
+
+        // ── 5. Copy output → history for temporal accumulation next frame ─────
+        for c in 0..CASCADE_COUNT {
+            let extent = wgpu::Extent3d {
+                width: ATLAS_W,
+                height: ATLAS_HEIGHTS[c],
+                depth_or_array_layers: 1,
+            };
+            ctx.encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.output_textures[c],
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.history_textures[c],
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                extent,
+            );
+        }
 
         Ok(())
     }

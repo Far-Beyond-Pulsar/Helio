@@ -52,6 +52,7 @@ struct CascadeStatic {
 @group(0) @binding(3) var<uniform>  rc_stat: CascadeStatic;
 @group(0) @binding(4) var acc_struct: acceleration_structure;
 @group(0) @binding(5) var<storage, read> lights: array<GpuLight, 16>;
+@group(0) @binding(6) var cascade_history: texture_2d<f32>;
 
 // Y-up octahedral decode (Y is the pole — uv center = +Y)
 fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
@@ -69,8 +70,24 @@ fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
     return normalize(n);
 }
 
-// Evaluate a single light at a surface point (returns lit radiance contribution).
-// Casts a shadow ray to determine visibility.
+// Read one parent probe: average its 2×2 direction sub-bins for direction (dx,dy).
+// Returns vec4(radiance, throughput).
+fn read_parent_probe(ppx: u32, ppy: u32, ppz: u32,
+                     dx: u32, dy: u32,
+                     pdim: u32, ppdim: u32) -> vec4<f32> {
+    var r = vec4<f32>(0.0);
+    for (var ddx: u32 = 0u; ddx < 2u; ddx++) {
+        for (var ddy: u32 = 0u; ddy < 2u; ddy++) {
+            let ax = i32(ppx * pdim + dx * 2u + ddx);
+            let ay = i32((ppy * ppdim + ppz) * pdim + dy * 2u + ddy);
+            r += textureLoad(cascade_parent, vec2<i32>(ax, ay), 0);
+        }
+    }
+    return r * 0.25;
+}
+
+// Evaluate a single light at a surface point with soft shadow (4 samples on a light disk).
+// Gradual visibility prevents the hard snap as lights move past shadow boundaries.
 fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     let light = lights[li];
     var to_light: vec3<f32>;
@@ -91,7 +108,6 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
         atten    = clamp(1.0 - (dist / light.range), 0.0, 1.0);
         atten    = atten * atten;
         if light.light_type > 1.5 {
-            // Spot cone
             let cos_angle  = dot(-to_light, light.direction);
             let cos_outer  = cos(light.outer_angle);
             let cos_inner  = cos(light.inner_angle);
@@ -103,17 +119,37 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     let ndotl = max(0.0, dot(hit_normal, to_light));
     if ndotl < 0.001 || atten < 0.001 { return vec3<f32>(0.0); }
 
-    // Shadow ray
-    var sq: ray_query;
-    rayQueryInitialize(&sq, acc_struct,
-        RayDesc(0x01u, 0xFFu, 0.003, dist - 0.003,
-            hit_pos + hit_normal * 0.004, to_light));
-    rayQueryProceed(&sq);
-    if rayQueryGetCommittedIntersection(&sq).kind != RAY_QUERY_INTERSECTION_NONE {
-        return vec3<f32>(0.0); // shadowed
+    // Soft shadow: 5 shadow rays — centre + 4 disk offsets around the light.
+    // Simulates a small area light so shadow boundaries fade gradually.
+    let light_radius = 0.35;
+    let perp  = normalize(cross(to_light, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(to_light.y) < 0.9)));
+    let perp2 = cross(to_light, perp);
+    let origin = hit_pos + hit_normal * 0.004;
+
+    // Disk offsets (centre + 4 ring samples at radius 1)
+    var offsets: array<vec2<f32>, 5>;
+    offsets[0] = vec2<f32>( 0.0,  0.0);
+    offsets[1] = vec2<f32>( 1.0,  0.0);
+    offsets[2] = vec2<f32>(-1.0,  0.0);
+    offsets[3] = vec2<f32>( 0.0,  1.0);
+    offsets[4] = vec2<f32>( 0.0, -1.0);
+
+    var vis = 0.0;
+    for (var si: u32 = 0u; si < 5u; si++) {
+        let off   = offsets[si] * light_radius;
+        let light_point = light.position + perp * off.x + perp2 * off.y;
+        let ray_dir   = normalize(light_point - hit_pos);
+        let ray_dist  = length(light_point - hit_pos);
+        var sq: ray_query;
+        rayQueryInitialize(&sq, acc_struct,
+            RayDesc(0x01u, 0xFFu, 0.005, ray_dist - 0.005, origin, ray_dir));
+        rayQueryProceed(&sq);
+        if rayQueryGetCommittedIntersection(&sq).kind == RAY_QUERY_INTERSECTION_NONE {
+            vis += 0.2; // 1/5
+        }
     }
 
-    return light.color * light.intensity * atten * ndotl;
+    return light.color * light.intensity * atten * ndotl * vis;
 }
 
 @compute @workgroup_size(8, 8)
@@ -168,33 +204,51 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         throughput = 1.0;
     }
 
-    // Merge with parent (dispatched coarse-first so parent is already written)
-    // merged_rad = local_rad + parent_rad * local_throughput
-    // merged_thr = local_throughput * parent_throughput
+    // Trilinear parent probe interpolation (eliminates snapping at probe cell boundaries).
+    // Map child probe center (px+0.5) into parent probe space: fp = (px - 0.5) * 0.5
+    // Then bilinearly blend between the 8 surrounding parent probes.
     if rc_stat.cascade_index < 3u && rc_stat.parent_dir_dim > 0u {
         let pdim  = rc_stat.parent_dir_dim;
         let ppdim = rc_stat.parent_probe_dim;
-        let ppx   = px / 2u;
-        let ppy   = py / 2u;
-        let ppz   = pz / 2u;
 
-        var p_rad = vec3<f32>(0.0);
-        var p_thr = 0.0;
-        for (var ddx: u32 = 0u; ddx < 2u; ddx++) {
-            for (var ddy: u32 = 0u; ddy < 2u; ddy++) {
-                let ax = i32(ppx * pdim + dx * 2u + ddx);
-                let ay = i32((ppy * ppdim + ppz) * pdim + dy * 2u + ddy);
-                let s = textureLoad(cascade_parent, vec2<i32>(ax, ay), 0);
-                p_rad += s.rgb;
-                p_thr += s.w;
-            }
-        }
-        p_rad *= 0.25;
-        p_thr *= 0.25;
+        // Fractional parent probe coordinate
+        let fp = (vec3<f32>(f32(px), f32(py), f32(pz)) - 0.5) * 0.5;
+        let fp_c = clamp(fp, vec3<f32>(0.0), vec3<f32>(f32(ppdim) - 1.001));
+        let pi0 = vec3<u32>(u32(fp_c.x), u32(fp_c.y), u32(fp_c.z));
+        let pi1 = vec3<u32>(
+            min(pi0.x + 1u, ppdim - 1u),
+            min(pi0.y + 1u, ppdim - 1u),
+            min(pi0.z + 1u, ppdim - 1u),
+        );
+        let w = fp_c - floor(fp_c); // trilinear weights
 
-        radiance   = radiance + p_rad * throughput;
-        throughput = throughput * p_thr;
+        let s000 = read_parent_probe(pi0.x, pi0.y, pi0.z, dx, dy, pdim, ppdim);
+        let s001 = read_parent_probe(pi0.x, pi0.y, pi1.z, dx, dy, pdim, ppdim);
+        let s010 = read_parent_probe(pi0.x, pi1.y, pi0.z, dx, dy, pdim, ppdim);
+        let s011 = read_parent_probe(pi0.x, pi1.y, pi1.z, dx, dy, pdim, ppdim);
+        let s100 = read_parent_probe(pi1.x, pi0.y, pi0.z, dx, dy, pdim, ppdim);
+        let s101 = read_parent_probe(pi1.x, pi0.y, pi1.z, dx, dy, pdim, ppdim);
+        let s110 = read_parent_probe(pi1.x, pi1.y, pi0.z, dx, dy, pdim, ppdim);
+        let s111 = read_parent_probe(pi1.x, pi1.y, pi1.z, dx, dy, pdim, ppdim);
+
+        let s00 = mix(s000, s001, w.z);
+        let s01 = mix(s010, s011, w.z);
+        let s10 = mix(s100, s101, w.z);
+        let s11 = mix(s110, s111, w.z);
+        let s0  = mix(s00,  s01,  w.y);
+        let s1  = mix(s10,  s11,  w.y);
+        let parent = mix(s0, s1, w.x);
+
+        radiance   = radiance + parent.rgb * throughput;
+        throughput = throughput * parent.w;
     }
+
+    // ── Temporal accumulation: EMA blend with previous frame ──────────────
+    // alpha=0.15 → ~6-frame convergence. First frame (history=0) blends cleanly.
+    let hist = textureLoad(cascade_history, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
+    let alpha = 0.15;
+    radiance   = mix(hist.rgb, radiance,   alpha);
+    throughput = mix(hist.w,   throughput, alpha);
 
     textureStore(cascade_out, vec2<i32>(i32(gid.x), i32(gid.y)),
         vec4<f32>(radiance, throughput));
