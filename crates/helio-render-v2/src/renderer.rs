@@ -53,28 +53,40 @@ struct GpuShadowMatrix {
     mat: [f32; 16],
 }
 
-/// Compute a light-space view-proj matrix for shadow rendering.
-fn compute_light_matrix(position: [f32; 3], direction: [f32; 3], range: f32, is_directional: bool) -> Mat4 {
-    if is_directional {
-        let dir = Vec3::from(direction).normalize();
-        let light_pos = -dir * 50.0;
-        let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-        let view = Mat4::look_at_rh(light_pos, Vec3::ZERO, up);
-        let proj = Mat4::orthographic_rh(-50.0, 50.0, -50.0, 50.0, 0.1, 200.0);
-        proj * view
-    } else {
-        let pos = Vec3::from(position);
-        let to_origin = Vec3::ZERO - pos;
-        let dir = if to_origin.length() > 0.001 {
-            to_origin.normalize()
-        } else {
-            Vec3::new(0.0, -1.0, 0.0) // fallback: aim down
-        };
-        let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-        let view = Mat4::look_at_rh(pos, pos + dir, up);
-        let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1, range.max(0.1));
-        proj * view
-    }
+/// Compute 6 cube-face view-proj matrices for a point light (±X, ±Y, ±Z).
+fn compute_point_light_matrices(position: [f32; 3], range: f32) -> [Mat4; 6] {
+    let pos = Vec3::from(position);
+    let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.05, range.max(0.1));
+    let views = [
+        Mat4::look_at_rh(pos, pos + Vec3::X,  -Vec3::Y), // +X
+        Mat4::look_at_rh(pos, pos - Vec3::X,  -Vec3::Y), // -X
+        Mat4::look_at_rh(pos, pos + Vec3::Y,   Vec3::Z), // +Y
+        Mat4::look_at_rh(pos, pos - Vec3::Y,  -Vec3::Z), // -Y
+        Mat4::look_at_rh(pos, pos + Vec3::Z,  -Vec3::Y), // +Z
+        Mat4::look_at_rh(pos, pos - Vec3::Z,  -Vec3::Y), // -Z
+    ];
+    views.map(|view| proj * view)
+}
+
+/// Compute the light-space matrix for a directional light (ortho projection).
+fn compute_directional_matrix(direction: [f32; 3]) -> Mat4 {
+    let dir = Vec3::from(direction).normalize();
+    let light_pos = -dir * 50.0;
+    let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    let view = Mat4::look_at_rh(light_pos, Vec3::ZERO, up);
+    let proj = Mat4::orthographic_rh(-50.0, 50.0, -50.0, 50.0, 0.1, 200.0);
+    proj * view
+}
+
+/// Compute the light-space matrix for a spot light (perspective projection).
+fn compute_spot_matrix(position: [f32; 3], direction: [f32; 3], range: f32, outer_angle: f32) -> Mat4 {
+    let pos = Vec3::from(position);
+    let dir = Vec3::from(direction).normalize();
+    let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+    let view = Mat4::look_at_rh(pos, pos + dir, up);
+    let fov = (outer_angle * 2.0).clamp(std::f32::consts::FRAC_PI_4, std::f32::consts::PI - 0.01);
+    let proj = Mat4::perspective_rh(fov, 1.0, 0.05, range.max(0.1));
+    proj * view
 }
 
 /// Create a Depth32Float texture + view at the given resolution
@@ -182,10 +194,10 @@ impl Renderer {
         // ── executes first (billboard/post passes render on top).           ────────
         let draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
 
-        // Shadow matrix buffer: 16 × mat4x4<f32> = 1024 bytes
+        // Shadow matrix buffer: 16 lights × 6 faces × mat4x4<f32> = 6144 bytes
         let shadow_matrix_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow Matrix Buffer"),
-            size: (MAX_LIGHTS as u64) * 64, // 16 × 64 bytes
+            size: (MAX_LIGHTS as u64) * 6 * 64, // 16 × 6 × 64 bytes
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -502,6 +514,10 @@ impl Renderer {
                 crate::features::LightType::Point => 1.0,
                 crate::features::LightType::Spot { .. } => 2.0,
             };
+            let (inner_angle, outer_angle) = match l.light_type {
+                crate::features::LightType::Spot { inner_angle, outer_angle } => (inner_angle, outer_angle),
+                _ => (0.0, 0.0),
+            };
             GpuLight {
                 position: l.position,
                 light_type,
@@ -509,21 +525,37 @@ impl Renderer {
                 range: l.range,
                 color: l.color,
                 intensity: l.intensity,
-                inner_angle: 0.0,
-                outer_angle: 0.0,
+                inner_angle,
+                outer_angle,
                 _pad: [0.0; 2],
             }
         }).collect();
         gpu_lights.resize(MAX_LIGHTS as usize, GpuLight::zeroed());
         self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&gpu_lights));
 
-        // Compute and upload light-space matrices for shadow rendering
-        let mut shadow_mats: Vec<GpuShadowMatrix> = scene.lights[..count].iter().map(|l| {
-            let is_dir = matches!(l.light_type, crate::features::LightType::Directional);
-            let mat = compute_light_matrix(l.position, l.direction, l.range, is_dir);
-            GpuShadowMatrix { mat: mat.to_cols_array() }
-        }).collect();
-        shadow_mats.resize(MAX_LIGHTS as usize, GpuShadowMatrix::zeroed());
+        // Compute and upload light-space matrices — 6 per light (cube faces).
+        // Point lights: 6 real face matrices. Directional/spot: face 0 + 5 identities.
+        let identity = Mat4::IDENTITY;
+        let mut shadow_mats: Vec<GpuShadowMatrix> = Vec::with_capacity(MAX_LIGHTS as usize * 6);
+        for l in &scene.lights[..count] {
+            let six: [Mat4; 6] = match l.light_type {
+                crate::features::LightType::Point => {
+                    compute_point_light_matrices(l.position, l.range)
+                }
+                crate::features::LightType::Directional => {
+                    let m0 = compute_directional_matrix(l.direction);
+                    [m0, identity, identity, identity, identity, identity]
+                }
+                crate::features::LightType::Spot { outer_angle, .. } => {
+                    let m0 = compute_spot_matrix(l.position, l.direction, l.range, outer_angle);
+                    [m0, identity, identity, identity, identity, identity]
+                }
+            };
+            for m in &six {
+                shadow_mats.push(GpuShadowMatrix { mat: m.to_cols_array() });
+            }
+        }
+        shadow_mats.resize(MAX_LIGHTS as usize * 6, GpuShadowMatrix::zeroed());
         self.queue.write_buffer(&self.shadow_matrix_buffer, 0, bytemuck::cast_slice(&shadow_mats));
 
         // Update shared light count (ShadowPass reads this before drawing)

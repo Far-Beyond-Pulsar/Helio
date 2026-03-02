@@ -128,55 +128,102 @@ struct LightMatrix { mat: mat4x4<f32> }
 
 // ── Shadow helpers ───────────────────────────────────────────────────────────
 
-/// PCF shadow lookup for the given light.
-/// Returns 1.0 (fully lit) or 0.0 (fully shadowed), with soft edges.
-fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
+const ATLAS_SIZE: f32 = 512.0;
+
+const POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2<f32>(-0.94201624, -0.39906216),
+    vec2<f32>( 0.94558609, -0.76890725),
+    vec2<f32>(-0.09418410, -0.92938870),
+    vec2<f32>( 0.34495938,  0.29387760),
+    vec2<f32>(-0.91588581,  0.45771432),
+    vec2<f32>(-0.81544232, -0.87912464),
+    vec2<f32>(-0.38277543,  0.27676845),
+    vec2<f32>( 0.97484398,  0.75648379),
+    vec2<f32>( 0.44323325, -0.97511554),
+    vec2<f32>( 0.53742981, -0.47373420),
+    vec2<f32>(-0.26496911, -0.41893023),
+    vec2<f32>( 0.79197514,  0.19090188),
+    vec2<f32>(-0.24188840,  0.99706507),
+    vec2<f32>(-0.81409955,  0.91437590),
+    vec2<f32>( 0.19984126,  0.78641367),
+    vec2<f32>( 0.14383161, -0.14100790),
+);
+
+/// Select a cube face index (0-5 = +X,-X,+Y,-Y,+Z,-Z) from a direction vector.
+fn point_light_face(dir: vec3<f32>) -> u32 {
+    let a = abs(dir);
+    if a.x >= a.y && a.x >= a.z {
+        return select(0u, 1u, dir.x < 0.0); // +X=0, -X=1
+    } else if a.y >= a.x && a.y >= a.z {
+        return select(2u, 3u, dir.y < 0.0); // +Y=2, -Y=3
+    } else {
+        return select(4u, 5u, dir.z < 0.0); // +Z=4, -Z=5
+    }
+}
+
+/// PCF shadow factor for the given light.
+/// Returns 1.0 (fully lit) … 0.0 (fully shadowed), with soft Poisson-disk filtering.
+fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32 {
     if !ENABLE_SHADOWS {
         return 1.0;
     }
 
-    let light_clip = shadow_matrices[light_idx].mat * vec4<f32>(world_pos, 1.0);
-    // Reject geometry behind the light (w <= 0 means behind clip plane)
+    let light = lights[light_idx];
+
+    // Select atlas layer: point lights use the face matching dominant axis;
+    // directional/spot always use face 0.
+    var layer: u32;
+    if light.light_type > 0.5 && light.light_type < 1.5 {
+        // Point light — pick face from world-space direction to fragment
+        let to_frag = world_pos - light.position;
+        layer = light_idx * 6u + point_light_face(to_frag);
+    } else {
+        layer = light_idx * 6u; // face 0
+    }
+
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
+    // Reject geometry behind the light clip plane
     if light_clip.w <= 0.0 {
         return 1.0;
     }
 
-    // Perspective divide → NDC
     let ndc = light_clip.xyz / light_clip.w;
-
-    // Convert NDC xy to texture UV: [-1,1] → [0,1]
     let shadow_uv = ndc.xy * 0.5 + vec2<f32>(0.5, 0.5);
 
     // Reject out-of-frustum fragments
-    if any(shadow_uv < vec2<f32>(0.0, 0.0)) || any(shadow_uv > vec2<f32>(1.0, 1.0))
+    if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))
        || ndc.z < 0.0 || ndc.z > 1.0 {
         return 1.0;
     }
 
-    let depth     = ndc.z;
-    let bias      = 0.005;
-    let texel     = 1.0 / 1024.0;
-
-    // 3×3 PCF kernel
-    // shadow_sampler uses LessEqual compare: stored_depth <= (depth - bias) → 1.0 (in shadow)
-    var shadow_sum = 0.0;
-    for (var xi = -1; xi <= 1; xi++) {
-        for (var yi = -1; yi <= 1; yi++) {
-            let off = vec2<f32>(f32(xi) * texel, f32(yi) * texel);
-            shadow_sum += textureSampleCompareLevel(
-                shadow_atlas, shadow_sampler,
-                shadow_uv + off,
-                i32(light_idx),
-                depth - bias,
-            );
-        }
+    // Normal-based slope bias: less bias when light hits head-on, more at grazing angles
+    var L_dir: vec3<f32>;
+    if light.light_type < 0.5 {
+        L_dir = normalize(-light.direction);
+    } else {
+        L_dir = normalize(light.position - world_pos);
     }
-    // shadow_sum/9 = 1.0 when fully in shadow → invert to get attenuation factor
-    return 1.0 - shadow_sum / 9.0;
+    let n_dot_l    = max(dot(world_normal, L_dir), 0.0);
+    let slope_bias = mix(0.005, 0.0005, n_dot_l);
+    let depth      = ndc.z;
+
+    // 16-tap Poisson disk PCF
+    let filter_radius = 2.0 / ATLAS_SIZE;
+    var shadow_sum = 0.0;
+    for (var i = 0; i < 16; i++) {
+        let offset = POISSON_DISK[i] * filter_radius;
+        shadow_sum += textureSampleCompareLevel(
+            shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            depth - slope_bias,
+        );
+    }
+    return 1.0 - shadow_sum / 16.0;
 }
 
-// Evaluate one light contribution (Lambertian diffuse)
-fn eval_light(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+// Evaluate one light's contribution (Lambertian diffuse + shadow).
+fn eval_light(light_idx: u32, light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     var L: vec3<f32>;
     var attenuation: f32 = 1.0;
 
@@ -200,7 +247,8 @@ fn eval_light(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<
     }
 
     let ndotl = max(dot(normal, L), 0.0);
-    return light.color * light.intensity * ndotl * attenuation;
+    let sf    = shadow_factor(light_idx, world_pos, normal);
+    return light.color * light.intensity * ndotl * attenuation * sf;
 }
 
 // Accumulate all active lights
@@ -213,8 +261,7 @@ fn calculate_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<
 
     var diffuse = vec3<f32>(0.0);
     for (var i: u32 = 0u; i < globals.light_count; i++) {
-        let sf = shadow_factor(i, world_pos);
-        diffuse += eval_light(lights[i], world_pos, normal) * base_color * sf;
+        diffuse += eval_light(i, lights[i], world_pos, normal) * base_color;
     }
     return ambient + diffuse;
 }

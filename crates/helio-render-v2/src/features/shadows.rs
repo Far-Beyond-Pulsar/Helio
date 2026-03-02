@@ -7,8 +7,8 @@ use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Default shadow atlas resolution per shadow map tile
-pub const DEFAULT_SHADOW_ATLAS_SIZE: u32 = 2048;
+/// Default shadow atlas resolution per shadow map face
+pub const DEFAULT_SHADOW_ATLAS_SIZE: u32 = 512;
 /// Default maximum number of shadow-casting lights
 pub const DEFAULT_MAX_SHADOW_LIGHTS: u32 = 8;
 
@@ -72,13 +72,14 @@ impl Feature for ShadowsFeature {
     }
 
     fn register(&mut self, ctx: &mut FeatureContext) -> Result<()> {
-        // Shadow atlas: one layer per shadow-casting light
+        // Shadow atlas: 6 layers per light (cube faces), one layer per face per light
+        let total_layers = self.max_shadow_lights * 6;
         let atlas = ctx.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Shadow Atlas"),
             size: wgpu::Extent3d {
                 width: self.atlas_size,
                 height: self.atlas_size,
-                depth_or_array_layers: self.max_shadow_lights,
+                depth_or_array_layers: total_layers,
             },
             mip_level_count: 1,
             sample_count: 1,
@@ -104,8 +105,8 @@ impl Feature for ShadowsFeature {
             ..Default::default()
         });
 
-        // Per-layer views so the shadow pass can render into individual layers
-        let layer_views: Vec<Arc<wgpu::TextureView>> = (0..self.max_shadow_lights)
+        // Per-layer views: one per face per light (total_layers views)
+        let layer_views: Vec<Arc<wgpu::TextureView>> = (0..total_layers)
             .map(|layer| {
                 Arc::new(atlas.create_view(&wgpu::TextureViewDescriptor {
                     label: Some(&format!("Shadow Atlas Layer {layer}")),
@@ -133,10 +134,11 @@ impl Feature for ShadowsFeature {
         ));
 
         log::info!(
-            "Shadows feature registered: {}×{} atlas, {} max lights",
+            "Shadows feature registered: {}×{} atlas, {} max lights ({} total layers)",
             self.atlas_size,
             self.atlas_size,
-            self.max_shadow_lights
+            self.max_shadow_lights,
+            total_layers,
         );
         Ok(())
     }

@@ -89,7 +89,8 @@ impl ShadowPass {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                // Peter-Pan trick: cull front faces to eliminate self-shadowing acne
+                cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -97,7 +98,11 @@ impl ShadowPass {
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,      // constant units bias
+                    slope_scale: 2.0, // slope-scale bias (eliminates acne at grazing angles)
+                    clamp: 0.0,
+                },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
@@ -127,9 +132,9 @@ impl RenderPass for ShadowPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let light_count = self.light_count.load(Ordering::Relaxed) as usize;
-        let actual_count = light_count.min(self.layer_views.len());
+        // Each light occupies 6 consecutive layers
+        let actual_count = light_count.min(self.layer_views.len() / 6);
 
-        // Always clear every active layer, even when there are no draw calls
         if actual_count == 0 {
             return Ok(());
         }
@@ -137,33 +142,35 @@ impl RenderPass for ShadowPass {
         let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
 
         for i in 0..actual_count {
-            let light_idx = i as u32;
+            for face in 0u32..6u32 {
+                let layer_idx = i as u32 * 6 + face;
 
-            let mut pass = ctx.begin_render_pass(
-                &format!("Shadow Pass Layer {i}"),
-                &[],
-                Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.layer_views[i],
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
+                let mut pass = ctx.begin_render_pass(
+                    &format!("Shadow Light {i} Face {face}"),
+                    &[],
+                    Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &self.layer_views[layer_idx as usize],
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
                     }),
-                    stencil_ops: None,
-                }),
-            );
+                );
 
-            if draw_calls.is_empty() {
-                continue;
-            }
+                if draw_calls.is_empty() {
+                    continue;
+                }
 
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, &self.bind_group, &[]);
 
-            for dc in &draw_calls {
-                pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                // instance_index == light_idx selects the light matrix in the vertex shader
-                pass.draw_indexed(0..dc.index_count, 0, light_idx..(light_idx + 1));
+                for dc in &draw_calls {
+                    pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+                    pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    // instance_index = layer_idx selects the correct face matrix in the vertex shader
+                    pass.draw_indexed(0..dc.index_count, 0, layer_idx..(layer_idx + 1));
+                }
             }
         }
 
