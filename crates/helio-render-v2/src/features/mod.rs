@@ -23,4 +23,3 @@ pub use bloom::BloomFeature;
 pub use shadows::ShadowsFeature;
 pub use billboards::{BillboardsFeature, BillboardInstance};
 
-use crate::Result;

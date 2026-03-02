@@ -188,7 +188,8 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
     }
 
     let ndc = light_clip.xyz / light_clip.w;
-    let shadow_uv = ndc.xy * 0.5 + vec2<f32>(0.5, 0.5);
+    // wgpu/Vulkan NDC: Y=-1 is top of screen, texture V=0 is top → flip Y
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
 
     // Reject out-of-frustum fragments
     if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))
@@ -196,7 +197,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
         return 1.0;
     }
 
-    // Normal-based slope bias: less bias when light hits head-on, more at grazing angles
+    // Normal-based slope bias: less bias when light hits head-on, more at grazing
     var L_dir: vec3<f32>;
     if light.light_type < 0.5 {
         L_dir = normalize(-light.direction);
@@ -204,26 +205,29 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
         L_dir = normalize(light.position - world_pos);
     }
     let n_dot_l    = max(dot(world_normal, L_dir), 0.0);
-    let slope_bias = mix(0.005, 0.0005, n_dot_l);
-    let depth      = ndc.z;
+    let slope_bias = mix(0.001, 0.0001, n_dot_l);
+    let depth      = ndc.z - slope_bias;
 
     // 16-tap Poisson disk PCF
+    // textureSampleCompareLevel with LessEqual returns 1.0 when fragment is lit
+    // (stored_depth >= frag_depth → not occluded), 0.0 when in shadow
     let filter_radius = 2.0 / ATLAS_SIZE;
-    var shadow_sum = 0.0;
+    var lit_sum = 0.0;
     for (var i = 0; i < 16; i++) {
         let offset = POISSON_DISK[i] * filter_radius;
-        shadow_sum += textureSampleCompareLevel(
+        lit_sum += textureSampleCompareLevel(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
-            depth - slope_bias,
+            depth,
         );
     }
-    return 1.0 - shadow_sum / 16.0;
+    // lit_sum/16 = fraction of samples that pass (1.0=fully lit, 0.0=fully shadowed)
+    return lit_sum / 16.0;
 }
 
-// Evaluate one light's contribution (Lambertian diffuse + shadow).
-fn eval_light(light_idx: u32, light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+// Evaluate one light's contribution (Blinn-Phong: diffuse + specular + shadow).
+fn eval_light(light_idx: u32, light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
     var L: vec3<f32>;
     var attenuation: f32 = 1.0;
 
@@ -231,12 +235,14 @@ fn eval_light(light_idx: u32, light: GpuLight, world_pos: vec3<f32>, normal: vec
         // Directional
         L = normalize(-light.direction);
     } else {
-        // Point or spot
+        // Point or spot — smooth quadratic falloff that reaches 0 at range
         let to_light = light.position - world_pos;
         let dist     = length(to_light);
+        if dist > light.range { return vec3<f32>(0.0); }
         L            = to_light / dist;
-        let falloff  = saturate_f(1.0 - (dist / light.range));
-        attenuation  = falloff * falloff;
+        let ratio    = dist / light.range;
+        let falloff  = max(0.0, 1.0 - ratio * ratio);
+        attenuation  = falloff * falloff;  // smooth, no rescaling — intensity controls brightness
 
         if light.light_type > 1.5 {
             // Spot cone
@@ -246,13 +252,19 @@ fn eval_light(light_idx: u32, light: GpuLight, world_pos: vec3<f32>, normal: vec
         }
     }
 
-    let ndotl = max(dot(normal, L), 0.0);
-    let sf    = shadow_factor(light_idx, world_pos, normal);
-    return light.color * light.intensity * ndotl * attenuation * sf;
+    let ndotl   = max(dot(normal, L), 0.0);
+    let sf      = shadow_factor(light_idx, world_pos, normal);
+
+    // Blinn-Phong specular
+    let half_v  = normalize(L + view_dir);
+    let spec    = pow(max(dot(normal, half_v), 0.0), 32.0) * 0.3;
+
+    let lit     = light.color * light.intensity * attenuation * sf;
+    return lit * (ndotl + spec);
 }
 
 // Accumulate all active lights
-fn calculate_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>) -> vec3<f32> {
+fn calculate_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
     let ambient = globals.ambient_intensity * globals.ambient_color.rgb * base_color;
 
     if !ENABLE_LIGHTING {
@@ -261,7 +273,7 @@ fn calculate_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<
 
     var diffuse = vec3<f32>(0.0);
     for (var i: u32 = 0u; i < globals.light_count; i++) {
-        diffuse += eval_light(i, lights[i], world_pos, normal) * base_color;
+        diffuse += eval_light(i, lights[i], world_pos, normal, view_dir) * base_color;
     }
     return ambient + diffuse;
 }
@@ -295,7 +307,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let proc_color = mix(dark, light_col, checker);
     let base_color = material.base_color.rgb * proc_color;
 
-    var color = calculate_lighting(input.world_position, input.world_normal, base_color);
+    let view_dir = normalize(camera.position - input.world_position);
+    var color = calculate_lighting(input.world_position, input.world_normal, base_color, view_dir);
 
     // Emissive
     color += base_color * material.emissive;

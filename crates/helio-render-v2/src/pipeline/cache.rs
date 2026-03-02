@@ -1,6 +1,6 @@
 /// Pipeline cache with variant system for hot-swapping features
 
-use super::{PipelineVariant, PipelineDescriptor};
+use super::PipelineVariant;
 use crate::features::{FeatureFlags, ShaderDefine};
 use crate::resources::BindGroupLayouts;
 use crate::{Result, Error};

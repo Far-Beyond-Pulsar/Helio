@@ -13,7 +13,7 @@ pub use builder::GraphBuilder;
 
 use crate::{Result, Error};
 use crate::resources::ResourceManager;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 /// Render graph for automatic pass ordering and resource management
 pub struct RenderGraph {

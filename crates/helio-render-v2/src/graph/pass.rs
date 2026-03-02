@@ -54,7 +54,7 @@ impl<'a> PassContext<'a> {
         label: &str,
         color_attachments: &[Option<wgpu::RenderPassColorAttachment>],
         depth_stencil_attachment: Option<wgpu::RenderPassDepthStencilAttachment>,
-    ) -> wgpu::RenderPass {
+    ) -> wgpu::RenderPass<'_> {
         self.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
             color_attachments,
@@ -65,7 +65,7 @@ impl<'a> PassContext<'a> {
     }
 
     /// Begin a compute pass
-    pub fn begin_compute_pass(&mut self, label: &str) -> wgpu::ComputePass {
+    pub fn begin_compute_pass(&mut self, label: &str) -> wgpu::ComputePass<'_> {
         self.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(label),
             timestamp_writes: None,

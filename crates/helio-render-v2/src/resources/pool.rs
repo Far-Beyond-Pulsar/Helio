@@ -94,7 +94,7 @@ impl TexturePool {
     pub fn cleanup_old(&mut self, current_frame: u64) {
         const MAX_AGE: u64 = 60; // Keep textures for 60 frames (1 second at 60fps)
 
-        self.available.retain(|key, textures| {
+        self.available.retain(|_key, textures| {
             textures.retain(|_| {
                 // For now, keep all textures (can't easily track individual texture age)
                 // In production, would track texture creation frame
@@ -180,7 +180,7 @@ impl BufferPool {
     pub fn cleanup_old(&mut self, current_frame: u64) {
         const MAX_AGE: u64 = 60; // Keep buffers for 60 frames
 
-        self.available.retain(|key, buffers| {
+        self.available.retain(|_key, buffers| {
             buffers.retain(|_| true); // Keep all for now
             !buffers.is_empty()
         });

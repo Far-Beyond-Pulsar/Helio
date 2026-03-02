@@ -95,14 +95,14 @@ impl ResourceManager {
     /// Acquire a transient texture from the pool
     pub fn acquire_transient_texture(&mut self, desc: &wgpu::TextureDescriptor) -> ResourceId {
         let key = TextureKey::from_descriptor(desc);
-        let texture = self.texture_pool.acquire(key);
+        let _texture = self.texture_pool.acquire(key);
         let id = ResourceId::new();
         // TODO: Track transient resources
         id
     }
 
     /// Release a transient texture back to the pool
-    pub fn release_transient_texture(&mut self, id: ResourceId) {
+    pub fn release_transient_texture(&mut self, _id: ResourceId) {
         // TODO: Return to pool
     }
 
