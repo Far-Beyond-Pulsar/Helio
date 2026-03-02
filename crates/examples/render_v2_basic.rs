@@ -15,6 +15,7 @@ use helio_render_v2::features::{
     LightingFeature,
     BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance,
+    RadianceCascadesFeature,
 };
 use winit::{
     application::ApplicationHandler,
@@ -112,14 +113,16 @@ impl ApplicationHandler for App {
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("Main Device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
+                required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+                required_limits: wgpu::Limits::default()
+                    .using_minimum_supported_acceleration_structure_values(),
                 memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                // SAFETY: We acknowledge EXPERIMENTAL_RAY_QUERY may have implementation bugs.
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 trace: wgpu::Trace::Off,
             },
         ))
-        .expect("Failed to create device");
+        .expect("Failed to create device (ray tracing required)");
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -152,6 +155,10 @@ impl ApplicationHandler for App {
             .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.2))
             .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
             .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h))
+            .with_feature(
+                RadianceCascadesFeature::new()
+                    .with_world_bounds([-3.5, -0.3, -3.5], [3.5, 5.0, 3.5]),
+            )
             .build();
 
         let renderer = Renderer::new(
@@ -341,13 +348,17 @@ impl AppState {
         let p2 = [3.5f32, 1.5, 1.5];
 
         let scene = Scene::new()
+            // Lighting objects
             .add_light(SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0))
             .add_light(SceneLight::point(p1, [0.25, 0.5,  1.0], 5.0, 6.0))
             .add_light(SceneLight::point(p2, [1.0, 0.3,  0.5],  5.0, 6.0))
+
+            // Geometry objects
             .add_object(self.cube1.clone())
             .add_object(self.cube2.clone())
             .add_object(self.cube3.clone())
             .add_object(self.ground.clone())
+
             // Billboards co-located with each light
             .add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]))
             .add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5,  1.0, 1.0]))

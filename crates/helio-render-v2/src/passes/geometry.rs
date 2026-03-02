@@ -27,6 +27,8 @@ impl RenderPass for GeometryPass {
     fn declare_resources(&self, builder: &mut PassResourceBuilder) {
         // Reads shadow atlas written by ShadowPass → enforces shadow-before-geometry order
         builder.read(ResourceHandle::named("shadow_atlas"));
+        // Reads RC cascade 0 written by RadianceCascadesPass → enforces RC-before-geometry order
+        builder.read(ResourceHandle::named("rc_cascade0"));
         // Writes color target read by BillboardPass → enforces geometry-before-billboard order
         builder.write(ResourceHandle::named("color_target"));
     }

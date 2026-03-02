@@ -33,6 +33,8 @@ struct GlobalsUniform {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: [f32; 4],  // w unused, ensures alignment
+    rc_world_min: [f32; 4],   // xyz = RC probe grid world AABB min, w unused
+    rc_world_max: [f32; 4],   // xyz = RC probe grid world AABB max, w unused
 }
 
 /// Material uniform data – must match WGSL Material struct (32 bytes)
@@ -138,6 +140,9 @@ pub struct Renderer {
     scene_ambient_intensity: f32,
     scene_light_count: u32,
     scene_sky_color: [f32; 3],
+    // RC world bounds (set from RadianceCascadesFeature, zeroed if disabled)
+    rc_world_min: [f32; 3],
+    rc_world_max: [f32; 3],
 
     // Depth buffer (Depth32Float, recreated on resize)
     depth_texture: wgpu::Texture,
@@ -219,15 +224,17 @@ impl Renderer {
         graph.add_pass(geometry_pass);
 
         // ── Register features (adds BillboardPass etc. after GeometryPass) ───────
-        let (feat_light_buf, feat_shadow_view, feat_shadow_sampler) = {
+        let (feat_light_buf, feat_shadow_view, feat_shadow_sampler, feat_rc_view, feat_rc_bounds) = {
             let mut ctx = FeatureContext::new(
                 &device, &queue, &mut graph, &mut resources, config.surface_format,
+                device.clone(),
                 draw_list.clone(),
                 shadow_matrix_buffer.clone(),
                 light_count_arc.clone(),
             );
             features.register_all(&mut ctx)?;
-            (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler)
+            (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler,
+             ctx.rc_cascade0_view, ctx.rc_world_bounds)
         };
 
         // ── Default 1×1 textures ──────────────────────────────────────────────
@@ -368,6 +375,21 @@ impl Renderer {
         let shadow_view   = feat_shadow_view.unwrap_or_else(|| Arc::new(default_shadow_atlas_view));
         let shadow_samp   = feat_shadow_sampler.unwrap_or_else(|| Arc::new(default_comparison_sampler));
 
+        // Fallback 1×1 black Rgba16Float texture for RC when feature not registered
+        let default_rc_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Default RC Cascade 0"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let default_rc_view = default_rc_tex.create_view(&Default::default());
+        let rc_view = feat_rc_view.unwrap_or_else(|| Arc::new(default_rc_view));
+        let rc_world_min = feat_rc_bounds.map(|(mn, _)| mn).unwrap_or([0.0; 3]);
+        let rc_world_max = feat_rc_bounds.map(|(_, mx)| mx).unwrap_or([0.0; 3]);
+
         let lighting_bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Lighting Bind Group"),
             layout: &resources.bind_group_layouts.lighting,
@@ -377,6 +399,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&shadow_samp) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&cube_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: shadow_matrix_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&rc_view) },
             ],
         }));
 
@@ -407,6 +430,8 @@ impl Renderer {
             scene_ambient_intensity: 0.0,
             scene_light_count: 0,
             scene_sky_color: [0.0, 0.0, 0.0],
+            rc_world_min,
+            rc_world_max,
             depth_texture,
             depth_view,
             frame_count: 0,
@@ -461,6 +486,8 @@ impl Renderer {
             light_count: self.scene_light_count,
             ambient_intensity: self.scene_ambient_intensity,
             ambient_color: [self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2], 0.0],
+            rc_world_min: [self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2], 0.0],
+            rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
         };
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 

@@ -14,6 +14,7 @@ pub mod lighting;
 pub mod bloom;
 pub mod shadows;
 pub mod billboards;
+pub mod radiance_cascades;
 
 pub use traits::{Feature, ShaderDefine, ShaderModulePath};
 pub use context::{FeatureContext, PrepareContext};
@@ -22,4 +23,6 @@ pub use lighting::{LightingFeature, LightConfig, LightType};
 pub use bloom::BloomFeature;
 pub use shadows::ShadowsFeature;
 pub use billboards::{BillboardsFeature, BillboardInstance};
+pub use radiance_cascades::RadianceCascadesFeature;
+
 

@@ -14,6 +14,8 @@ pub struct FeatureContext<'a> {
     pub resources: &'a mut ResourceManager,
     /// Surface / swapchain format (used for pipeline creation)
     pub surface_format: wgpu::TextureFormat,
+    /// Arc clone of the device (needed by passes that create GPU resources at execution time)
+    pub device_arc: Arc<wgpu::Device>,
 
     // ── Inputs from Renderer (always set) ──────────────────────────────────
     /// Shared draw list — ShadowsFeature passes this to ShadowPass
@@ -30,6 +32,10 @@ pub struct FeatureContext<'a> {
     pub shadow_atlas_view: Option<Arc<wgpu::TextureView>>,
     /// Shadow comparison sampler set by ShadowsFeature
     pub shadow_sampler: Option<Arc<wgpu::Sampler>>,
+    /// Radiance Cascades cascade-0 texture view set by RadianceCascadesFeature
+    pub rc_cascade0_view: Option<Arc<wgpu::TextureView>>,
+    /// Radiance Cascades world AABB set by RadianceCascadesFeature
+    pub rc_world_bounds: Option<([f32; 3], [f32; 3])>,
 }
 
 impl<'a> FeatureContext<'a> {
@@ -39,6 +45,7 @@ impl<'a> FeatureContext<'a> {
         graph: &'a mut RenderGraph,
         resources: &'a mut ResourceManager,
         surface_format: wgpu::TextureFormat,
+        device_arc: Arc<wgpu::Device>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
         light_count_arc: Arc<AtomicU32>,
@@ -49,12 +56,15 @@ impl<'a> FeatureContext<'a> {
             graph,
             resources,
             surface_format,
+            device_arc,
             draw_list,
             shadow_matrix_buffer,
             light_count_arc,
             light_buffer: None,
             shadow_atlas_view: None,
             shadow_sampler: None,
+            rc_cascade0_view: None,
+            rc_world_bounds: None,
         }
     }
 }
@@ -88,3 +98,4 @@ impl<'a> PrepareContext<'a> {
         }
     }
 }
+

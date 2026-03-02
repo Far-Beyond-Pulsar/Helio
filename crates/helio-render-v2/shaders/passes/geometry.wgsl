@@ -26,6 +26,8 @@ struct Globals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: vec4<f32>,
+    rc_world_min: vec4<f32>,  // xyz = RC probe grid world AABB min
+    rc_world_max: vec4<f32>,  // xyz = RC probe grid world AABB max
 }
 
 struct Material {
@@ -125,6 +127,7 @@ struct GpuLight {
 
 struct LightMatrix { mat: mat4x4<f32> }
 @group(2) @binding(4) var<storage, read> shadow_matrices: array<LightMatrix>;
+@group(2) @binding(5) var rc_cascade0: texture_2d<f32>;
 
 // ── Shadow helpers ───────────────────────────────────────────────────────────
 
@@ -263,19 +266,90 @@ fn eval_light(light_idx: u32, light: GpuLight, world_pos: vec3<f32>, normal: vec
     return lit * (ndotl + spec);
 }
 
+// ── Radiance Cascades GI ─────────────────────────────────────────────────────
+
+const RC_PROBE_DIM: u32 = 16u;  // cascade 0 probe grid dimension (matches radiance_cascades.rs)
+const RC_DIR_DIM:   u32 = 4u;   // cascade 0 direction bins per axis (4x4 = 16 bins)
+
+// Y-up octahedral decode (Y is the pole — matches rc_trace.wgsl)
+fn rc_oct_decode(uv: vec2<f32>) -> vec3<f32> {
+    let f  = uv * 2.0 - 1.0;
+    let af = abs(f);
+    let l  = af.x + af.y;
+    var n: vec3<f32>;
+    if l > 1.0 {
+        let sx = select(-1.0, 1.0, f.x >= 0.0);
+        let sz = select(-1.0, 1.0, f.y >= 0.0);
+        n = vec3<f32>((1.0 - af.y) * sx, 1.0 - l, (1.0 - af.x) * sz);
+    } else {
+        n = vec3<f32>(f.x, 1.0 - l, f.y);
+    }
+    return normalize(n);
+}
+
+// Cosine-weighted irradiance integral over all RC_DIR_DIM² bins for one probe corner.
+fn rc_corner_irradiance(px: u32, py: u32, pz: u32, normal: vec3<f32>) -> vec3<f32> {
+    let dim = RC_PROBE_DIM - 1u;
+    let cpx = min(px, dim); let cpy = min(py, dim); let cpz = min(pz, dim);
+    var irr  = vec3<f32>(0.0);
+    var wsum = 0.0;
+    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
+        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
+            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
+            let dir    = rc_oct_decode(dir_uv);
+            let cos_w  = max(0.0, dot(normal, dir));
+            if cos_w > 0.001 {
+                let atlas_x = i32(cpx * RC_DIR_DIM + ddx);
+                let atlas_y = i32((cpy * RC_PROBE_DIM + cpz) * RC_DIR_DIM + ddy);
+                let rad = textureLoad(rc_cascade0, vec2<i32>(atlas_x, atlas_y), 0).rgb;
+                irr  += rad * cos_w;
+                wsum += cos_w;
+            }
+        }
+    }
+    return irr / max(wsum, 0.001);
+}
+
+fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let world_min  = globals.rc_world_min.xyz;
+    let world_max  = globals.rc_world_max.xyz;
+    let world_size = world_max - world_min;
+    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    // Floating-point probe coordinate (probe center = 0.5 offset)
+    let cell_size   = world_size / f32(RC_PROBE_DIM);
+    let probe_f     = (world_pos - world_min) / cell_size - 0.5;
+    let probe_dim_f = f32(RC_PROBE_DIM) - 1.0;
+    let pf  = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(probe_dim_f));
+    let pi  = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
+    let frc = fract(pf);
+
+    // Trilinear interpolation of cosine-weighted irradiance at 8 surrounding probes
+    let c000 = rc_corner_irradiance(pi.x,      pi.y,      pi.z     , normal);
+    let c001 = rc_corner_irradiance(pi.x,      pi.y,      pi.z + 1u, normal);
+    let c010 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z     , normal);
+    let c011 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z + 1u, normal);
+    let c100 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z     , normal);
+    let c101 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z + 1u, normal);
+    let c110 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z     , normal);
+    let c111 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z + 1u, normal);
+
+    let c00 = mix(c000, c001, frc.z);
+    let c01 = mix(c010, c011, frc.z);
+    let c10 = mix(c100, c101, frc.z);
+    let c11 = mix(c110, c111, frc.z);
+    let c0  = mix(c00, c01, frc.y);
+    let c1  = mix(c10, c11, frc.y);
+    return mix(c0, c1, frc.x);
+}
+
 // Accumulate all active lights
 fn calculate_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
-    let ambient = globals.ambient_intensity * globals.ambient_color.rgb * base_color;
-
-    if !ENABLE_LIGHTING {
-        return ambient;
-    }
-
-    var diffuse = vec3<f32>(0.0);
-    for (var i: u32 = 0u; i < globals.light_count; i++) {
-        diffuse += eval_light(i, lights[i], world_pos, normal, view_dir) * base_color;
-    }
-    return ambient + diffuse;
+    // Radiance Cascades handles ALL lighting (direct + indirect via ray tracing)
+    let rc_irradiance = sample_rc_irradiance(world_pos, normal);
+    return rc_irradiance * base_color;
 }
 
 // ── Bloom helper ─────────────────────────────────────────────────────────────
