@@ -120,7 +120,7 @@ fn compute_directional_cascades(
     /// casters are guaranteed to be pulled in from.
     const SCENE_DEPTH: f32 = 2000.0;
     /// Shadow-atlas resolution per cascade (must match ShadowsFeature atlas_size).
-    const ATLAS_TEXELS: f32 = 1024.0;
+    const ATLAS_TEXELS: f32 = 2048.0;
 
     let dir = Vec3::from(direction).normalize();
     let up  = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };

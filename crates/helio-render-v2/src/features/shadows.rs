@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Default shadow atlas resolution per shadow map face
-pub const DEFAULT_SHADOW_ATLAS_SIZE: u32 = 512;
+pub const DEFAULT_SHADOW_ATLAS_SIZE: u32 = 2048;
 /// Default maximum number of shadow-casting lights
 pub const DEFAULT_MAX_SHADOW_LIGHTS: u32 = 8;
 

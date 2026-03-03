@@ -127,7 +127,7 @@ struct LightMatrix { mat: mat4x4<f32> }
 // Shadow helpers (unchanged from original)
 // ============================================================================
 
-const ATLAS_SIZE: f32 = 512.0;
+const ATLAS_SIZE: f32 = 2048.0;
 
 var<private> POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
     vec2<f32>(-0.94201624, -0.39906216),
