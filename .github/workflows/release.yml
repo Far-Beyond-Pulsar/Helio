@@ -45,11 +45,17 @@ jobs:
           FIRST_CRATE=$(echo "${{ env.CRATES_TO_BUILD }}" | head -n1 | xargs)
           echo "first_crate=$FIRST_CRATE" >> $GITHUB_OUTPUT
 
+      - name: Display crate path for debugging
+        run: |
+          echo "First crate: ${{ steps.get-crate.outputs.first_crate }}"
+          echo "Cargo.toml content:"
+          head -5 "${{ steps.get-crate.outputs.first_crate }}/Cargo.toml"
+
       - name: Get package name from Cargo.toml
         id: get-name
         run: |
           CRATE_PATH="${{ steps.get-crate.outputs.first_crate }}"
-          PACKAGE_NAME=$(grep -m1 '^name' "$CRATE_PATH/Cargo.toml" | sed 's/name\s*=\s*"\(.*\)"/\1/')
+          PACKAGE_NAME=$(grep -m1 '^name' "$CRATE_PATH/Cargo.toml" | sed 's/name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/')
           PACKAGE_NAME=$(echo "$PACKAGE_NAME" | tr -d '[:space:]')
           echo "package_name=$PACKAGE_NAME" >> $GITHUB_OUTPUT
           echo "Package name: [$PACKAGE_NAME]"
@@ -254,7 +260,7 @@ jobs:
           while IFS= read -r crate_path; do
             crate_path=$(echo "$crate_path" | xargs)
             if [ -n "$crate_path" ]; then
-              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name\s*=\s*"\(.*\)"/\1/' | tr -d '[:space:]')
+              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/' | tr -d '[:space:]')
               ARGS="$ARGS -p $crate_name"
               echo "Added crate: $crate_name from $crate_path"
             fi
@@ -339,7 +345,7 @@ jobs:
           while IFS= read -r crate_path; do
             crate_path=$(echo "$crate_path" | xargs)
             if [ -n "$crate_path" ]; then
-              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name\s*=\s*"\(.*\)"/\1/' | tr -d '[:space:]')
+              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/' | tr -d '[:space:]')
               ARGS="$ARGS -p $crate_name"
               echo "Added crate for examples: $crate_name from $crate_path"
             fi
@@ -461,7 +467,7 @@ jobs:
           while IFS= read -r crate_path; do
             crate_path=$(echo "$crate_path" | xargs)
             if [ -n "$crate_path" ]; then
-              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name\s*=\s*"\(.*\)"/\1/' | tr -d '[:space:]')
+              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/' | tr -d '[:space:]')
               ARGS="$ARGS -p $crate_name"
               echo "Added crate: $crate_name from $crate_path"
             fi
@@ -475,11 +481,11 @@ jobs:
           while IFS= read -r crate_path; do
             crate_path=$(echo "$crate_path" | xargs)
             if [ -n "$crate_path" ]; then
-              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name\s*=\s*"\(.*\)"/\1/' | tr -d '[:space:]')
+              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/' | tr -d '[:space:]')
               ARGS="$ARGS -p $crate_name"
               echo "Added crate: $crate_name from $crate_path"
             fi
-          done <<< "${{ env.CRATES_TO_BUILD }}"
+          done <<< "${{ env.CRATES_WITH_EXAMPLES }}"
           cross build $ARGS
 
       - name: Generate SHA256
@@ -521,7 +527,7 @@ jobs:
           while IFS= read -r crate_path; do
             crate_path=$(echo "$crate_path" | xargs)
             if [ -n "$crate_path" ]; then
-              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name\s*=\s*"\(.*\)"/\1/' | tr -d '[:space:]')
+              crate_name=$(grep -m1 '^name' "$crate_path/Cargo.toml" | sed 's/name[[:space:]]*=[[:space:]]*"\(.*\)"/\1/' | tr -d '[:space:]')
               ARGS="$ARGS -p $crate_name"
               echo "Added crate for examples: $crate_name from $crate_path"
             fi
