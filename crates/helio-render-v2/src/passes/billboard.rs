@@ -127,7 +127,15 @@ impl BillboardPass {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: None,  // Billboards render without depth buffer
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                // Read depth to be occluded by geometry, but don't write —
+                // alpha-blended quads must not clobber the depth buffer.
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
         });
@@ -181,7 +189,12 @@ impl RenderPass for BillboardPass {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: ctx.depth_view,
+                // None = read-only depth: test against geometry depth, never write to it.
+                depth_ops: None,
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
