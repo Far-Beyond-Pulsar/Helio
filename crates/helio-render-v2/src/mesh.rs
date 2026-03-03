@@ -132,7 +132,38 @@ impl GpuMesh {
         Self::new(device, &vertices, &indices)
     }
 
-    /// Build a flat XZ plane centered at `center` with half-extent `half_extent`
+    /// Build an axis-aligned box with independent half-extents on each axis.
+    /// Useful for thin slabs, beams, or any non-uniform rectangular volume.
+    pub fn rect3d(device: &wgpu::Device, center: [f32; 3], half_extents: [f32; 3]) -> Self {
+        let [cx, cy, cz] = center;
+        let [hx, hy, hz] = half_extents;
+
+        let faces: &[([f32; 3], [[f32; 3]; 4])] = &[
+            ([0.0, 0.0, 1.0], [[cx-hx,cy-hy,cz+hz],[cx+hx,cy-hy,cz+hz],[cx+hx,cy+hy,cz+hz],[cx-hx,cy+hy,cz+hz]]),
+            ([0.0, 0.0,-1.0], [[cx+hx,cy-hy,cz-hz],[cx-hx,cy-hy,cz-hz],[cx-hx,cy+hy,cz-hz],[cx+hx,cy+hy,cz-hz]]),
+            ([1.0, 0.0, 0.0], [[cx+hx,cy-hy,cz+hz],[cx+hx,cy-hy,cz-hz],[cx+hx,cy+hy,cz-hz],[cx+hx,cy+hy,cz+hz]]),
+            ([-1.0,0.0, 0.0], [[cx-hx,cy-hy,cz-hz],[cx-hx,cy-hy,cz+hz],[cx-hx,cy+hy,cz+hz],[cx-hx,cy+hy,cz-hz]]),
+            ([0.0, 1.0, 0.0], [[cx-hx,cy+hy,cz+hz],[cx+hx,cy+hy,cz+hz],[cx+hx,cy+hy,cz-hz],[cx-hx,cy+hy,cz-hz]]),
+            ([0.0,-1.0, 0.0], [[cx-hx,cy-hy,cz-hz],[cx+hx,cy-hy,cz-hz],[cx+hx,cy-hy,cz+hz],[cx-hx,cy-hy,cz+hz]]),
+        ];
+
+        let uvs: [[f32; 2]; 4] = [[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]];
+        let mut vertices = Vec::with_capacity(24);
+        let mut indices  = Vec::with_capacity(36);
+
+        for (face_idx, (normal, corners)) in faces.iter().enumerate() {
+            let base = (face_idx * 4) as u32;
+            let tangent = face_tangent(corners[0], corners[1]);
+            for (i, &pos) in corners.iter().enumerate() {
+                vertices.push(PackedVertex::new_with_tangent(pos, *normal, uvs[i], tangent));
+            }
+            indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
+        }
+
+        Self::new(device, &vertices, &indices)
+    }
+
+
     pub fn plane(device: &wgpu::Device, center: [f32; 3], half_extent: f32) -> Self {
         let [cx, cy, cz] = center;
         let h = half_extent;

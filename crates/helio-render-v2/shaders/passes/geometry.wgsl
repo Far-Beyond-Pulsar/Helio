@@ -28,6 +28,8 @@ struct Globals {
     ambient_color: vec4<f32>,
     rc_world_min: vec4<f32>,
     rc_world_max: vec4<f32>,
+    /// World-space distance at each CSM cascade boundary (x=c0, y=c1, z=c2, w=c3).
+    csm_splits: vec4<f32>,
 }
 
 // Material uniform – must match material::MaterialUniform (48 bytes).
@@ -163,9 +165,20 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
     let light = lights[light_idx];
     var layer: u32;
     if light.light_type > 0.5 && light.light_type < 1.5 {
+        // Point light: select cube-map face from world-to-light vector
         let to_frag = world_pos - light.position;
         layer = light_idx * 6u + point_light_face(to_frag);
+    } else if light.light_type < 0.5 {
+        // Directional light: choose CSM cascade by world-space distance from camera.
+        // Slots 0-3 hold the four cascade matrices (see compute_directional_cascades).
+        let dist = length(world_pos - camera.position);
+        var cascade = 3u;
+        if      dist < globals.csm_splits.x { cascade = 0u; }
+        else if dist < globals.csm_splits.y { cascade = 1u; }
+        else if dist < globals.csm_splits.z { cascade = 2u; }
+        layer = light_idx * 6u + cascade;
     } else {
+        // Spot light: single projection at slot 0
         layer = light_idx * 6u;
     }
 
@@ -369,6 +382,20 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
 }
 
 // ============================================================================
+// ACES filmic tonemapping (matches sky.wgsl)
+// ============================================================================
+
+fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
+    // Narkowicz 2015 ACES approximation
+    let a = 2.51;
+    let b = 0.03;
+    let c = 2.43;
+    let d = 0.59;
+    let e = 0.14;
+    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+}
+
+// ============================================================================
 // Bloom helper (unchanged)
 // ============================================================================
 
@@ -462,6 +489,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── Bloom ─────────────────────────────────────────────────────────────────
     color = apply_bloom(color);
+
+    // ── ACES tonemapping (HDR → LDR, matches sky shader) ─────────────────────
+    color = aces_tonemap(color);
 
     return vec4<f32>(color, alpha);
 }

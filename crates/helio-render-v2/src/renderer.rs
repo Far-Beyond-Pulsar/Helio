@@ -15,7 +15,7 @@ use crate::Result;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use wgpu::util::DeviceExt;
 use bytemuck::Zeroable;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4Swizzles};
 
 /// Main renderer configuration
 pub struct RendererConfig {
@@ -36,6 +36,8 @@ struct GlobalsUniform {
     ambient_color: [f32; 4],  // w unused, ensures alignment
     rc_world_min: [f32; 4],   // xyz = RC probe grid world AABB min, w unused
     rc_world_max: [f32; 4],   // xyz = RC probe grid world AABB max, w unused
+    /// View-space distance at each CSM cascade boundary (4 cascades → 3 splits + sentinel).
+    csm_splits: [f32; 4],
 }
 
 /// Sky uniform data – 112 bytes, must exactly match SkyUniforms in sky.wgsl
@@ -90,14 +92,90 @@ fn compute_point_light_matrices(position: [f32; 3], range: f32) -> [Mat4; 6] {
     views.map(|view| proj * view)
 }
 
-/// Compute the light-space matrix for a directional light (ortho projection).
-fn compute_directional_matrix(direction: [f32; 3]) -> Mat4 {
+/// World-space distance thresholds for the 4 CSM cascade boundaries.
+/// Cascade i covers [CSM_SPLITS[i-1], CSM_SPLITS[i]] (cascade 0 starts at 0).
+const CSM_SPLITS: [f32; 4] = [8.0, 30.0, 100.0, 500.0];
+
+/// Compute 4 cascaded ortho light-space matrices for a directional light.
+///
+/// Each matrix is fitted tightly to a slice of the camera frustum so that
+/// shadow resolution is highest near the camera and coverage extends as far
+/// as `CSM_SPLITS[3]` (500 m by default), independent of scene size.
+///
+/// Slots 0-3 in the per-light shadow-matrix block are used for cascades;
+/// slots 4-5 (normally point-light cube faces) are left as identity.
+fn compute_directional_cascades(
+    cam_pos: Vec3,
+    view_proj_inv: Mat4,
+    direction: [f32; 3],
+) -> [Mat4; 4] {
     let dir = Vec3::from(direction).normalize();
-    let light_pos = -dir * 50.0;
-    let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
-    let view = Mat4::look_at_rh(light_pos, Vec3::ZERO, up);
-    let proj = Mat4::orthographic_rh(-50.0, 50.0, -50.0, 50.0, 0.1, 200.0);
-    proj * view
+    let up  = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
+
+    // Un-project 8 NDC corners to world space (wgpu: z in [0=near, 1=far])
+    let ndc: [[f32; 4]; 8] = [
+        [-1.0,-1.0, 0.0, 1.0], [1.0,-1.0, 0.0, 1.0],
+        [-1.0, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0],
+        [-1.0,-1.0, 1.0, 1.0], [1.0,-1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0],
+    ];
+    let world: Vec<Vec3> = ndc.iter().map(|c| {
+        let v = view_proj_inv * glam::Vec4::from(*c);
+        v.xyz() / v.w
+    }).collect();
+    // world[0..4] = near corners, world[4..8] = far corners
+
+    // Parametrize frustum depth as t ∈ [0, 1] by averaging corner distances
+    let near_dist: f32 = world[..4].iter().map(|c| (*c - cam_pos).length()).sum::<f32>() / 4.0;
+    let far_dist:  f32 = world[4..].iter().map(|c| (*c - cam_pos).length()).sum::<f32>() / 4.0;
+    let depth = (far_dist - near_dist).max(1.0);
+
+    let prev_d = [0.0_f32, CSM_SPLITS[0], CSM_SPLITS[1], CSM_SPLITS[2]];
+    let mut matrices = [Mat4::IDENTITY; 4];
+
+    for i in 0..4 {
+        let t0 = ((prev_d[i]     - near_dist) / depth).clamp(0.0, 1.0);
+        let t1 = ((CSM_SPLITS[i] - near_dist) / depth).clamp(0.0, 1.0);
+
+        // 8 corners of this frustum slice
+        let mut cc = [Vec3::ZERO; 8];
+        for j in 0..4 {
+            cc[j * 2]     = world[j].lerp(world[j + 4], t0);
+            cc[j * 2 + 1] = world[j].lerp(world[j + 4], t1);
+        }
+
+        // Centre of the slice → stable light-view pivot
+        let centroid = cc.iter().copied().fold(Vec3::ZERO, |a, b| a + b) / 8.0;
+        let light_view = Mat4::look_at_rh(centroid - dir * 100.0, centroid, up);
+
+        // Tight AABB of all 8 corners in light view space
+        let mut min_ls = Vec3::splat(f32::MAX);
+        let mut max_ls = Vec3::splat(f32::MIN);
+        for c in &cc {
+            let ls = light_view.transform_point3(*c);
+            min_ls = min_ls.min(ls);
+            max_ls = max_ls.max(ls);
+        }
+
+        // 10 % XY padding avoids hard cascade-edge artefacts
+        let pad = (max_ls.truncate() - min_ls.truncate()) * 0.1;
+        min_ls.x -= pad.x; max_ls.x += pad.x;
+        min_ls.y -= pad.y; max_ls.y += pad.y;
+
+        // RH ortho: objects are at negative Z in view space
+        // orthographic_rh(near, far) where near < far and both positive
+        let near = (-max_ls.z).max(0.01);
+        let far  = -min_ls.z + 200.0; // generous margin for off-frustum casters
+
+        let proj = Mat4::orthographic_rh(
+            min_ls.x, max_ls.x,
+            min_ls.y, max_ls.y,
+            near, far,
+        );
+        matrices[i] = proj * light_view;
+    }
+
+    matrices
 }
 
 /// Compute the light-space matrix for a spot light (perspective projection).
@@ -184,6 +262,8 @@ pub struct Renderer {
     scene_light_count: u32,
     scene_sky_color: [f32; 3],
     scene_has_sky: bool,
+    /// CSM cascade split distances uploaded each frame to GlobalsUniform.
+    scene_csm_splits: [f32; 4],
     // RC world bounds (set from RadianceCascadesFeature, zeroed if disabled)
     rc_world_min: [f32; 3],
     rc_world_max: [f32; 3],
@@ -492,6 +572,7 @@ impl Renderer {
             scene_light_count: 0,
             scene_sky_color: [0.0, 0.0, 0.0],
             scene_has_sky: false,
+            scene_csm_splits: CSM_SPLITS,
             rc_world_min,
             rc_world_max,
             sky_uniform_buffer,
@@ -567,6 +648,7 @@ impl Renderer {
             ambient_color: [self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2], 0.0],
             rc_world_min: [self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2], 0.0],
             rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
+            csm_splits: self.scene_csm_splits,
         };
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
@@ -645,7 +727,8 @@ impl Renderer {
         self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&gpu_lights));
 
         // Compute and upload light-space matrices — 6 per light (cube faces).
-        // Point lights: 6 real face matrices. Directional/spot: face 0 + 5 identities.
+        // Directional lights: slots 0-3 = 4 CSM cascades, slots 4-5 = identity.
+        // Point lights: 6 real cube-face matrices.
         let identity = Mat4::IDENTITY;
         let mut shadow_mats: Vec<GpuShadowMatrix> = Vec::with_capacity(MAX_LIGHTS as usize * 6);
         for l in &scene.lights[..count] {
@@ -654,8 +737,12 @@ impl Renderer {
                     compute_point_light_matrices(l.position, l.range)
                 }
                 crate::features::LightType::Directional => {
-                    let m0 = compute_directional_matrix(l.direction);
-                    [m0, identity, identity, identity, identity, identity]
+                    let [c0, c1, c2, c3] = compute_directional_cascades(
+                        camera.position,
+                        camera.view_proj_inv,
+                        l.direction,
+                    );
+                    [c0, c1, c2, c3, identity, identity]
                 }
                 crate::features::LightType::Spot { outer_angle, .. } => {
                     let m0 = compute_spot_matrix(l.position, l.direction, l.range, outer_angle);
@@ -684,6 +771,8 @@ impl Renderer {
         self.scene_light_count = count as u32;
         self.scene_sky_color = scene.sky_color;
         self.scene_has_sky = scene.sky_atmosphere.is_some();
+        // CSM splits are static constants; stored so render() can pass them to globals
+        self.scene_csm_splits = CSM_SPLITS;
 
         // Build and upload sky uniforms (even when sky is disabled the buffer exists)
         if let Some(atm) = &scene.sky_atmosphere {
@@ -732,8 +821,8 @@ impl Renderer {
                 let sun_elev = sun_dir[1].clamp(-1.0, 1.0);
                 let sky_amb  = estimate_sky_ambient(sun_elev, &atm.rayleigh_scatter);
                 let tint     = skylight.color_tint;
-                // 0.06 = empirical scale: visible tint without washing out lights/GI
-                let si = skylight.intensity * 0.06;
+                // ~0.004 = very subtle sky tint, will not overpower direct lights or GI
+                let si = skylight.intensity * 0.004;
                 let base_i = scene.ambient_intensity;
                 self.scene_ambient_color = [
                     scene.ambient_color[0] * base_i + sky_amb[0] * tint[0] * si,

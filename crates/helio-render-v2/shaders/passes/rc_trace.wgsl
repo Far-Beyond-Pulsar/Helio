@@ -119,33 +119,47 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     let ndotl = max(0.0, dot(hit_normal, to_light));
     if ndotl < 0.001 || atten < 0.001 { return vec3<f32>(0.0); }
 
-    // Soft shadow: 5 shadow rays — centre + 4 disk offsets around the light.
-    // Simulates a small area light so shadow boundaries fade gradually.
-    let light_radius = 0.35;
-    let perp  = normalize(cross(to_light, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(to_light.y) < 0.9)));
-    let perp2 = cross(to_light, perp);
+    // Shadow visibility — behaviour differs by light type:
+    //   Directional: cast rays in exactly to_light direction (no disk spread needed,
+    //                just a single hard-shadow ray since the sun is infinitely far away)
+    //   Point/Spot:  soft shadow disk around the light position
     let origin = hit_pos + hit_normal * 0.004;
-
-    // Disk offsets (centre + 4 ring samples at radius 1)
-    var offsets: array<vec2<f32>, 5>;
-    offsets[0] = vec2<f32>( 0.0,  0.0);
-    offsets[1] = vec2<f32>( 1.0,  0.0);
-    offsets[2] = vec2<f32>(-1.0,  0.0);
-    offsets[3] = vec2<f32>( 0.0,  1.0);
-    offsets[4] = vec2<f32>( 0.0, -1.0);
-
     var vis = 0.0;
-    for (var si: u32 = 0u; si < 5u; si++) {
-        let off   = offsets[si] * light_radius;
-        let light_point = light.position + perp * off.x + perp2 * off.y;
-        let ray_dir   = normalize(light_point - hit_pos);
-        let ray_dist  = length(light_point - hit_pos);
+
+    if light.light_type < 0.5 {
+        // Directional — single ray toward the sun, t_max = effectively infinite
         var sq: ray_query;
         rayQueryInitialize(&sq, acc_struct,
-            RayDesc(0x01u, 0xFFu, 0.005, ray_dist - 0.005, origin, ray_dir));
+            RayDesc(0x01u, 0xFFu, 0.005, 9999.0, origin, to_light));
         rayQueryProceed(&sq);
         if rayQueryGetCommittedIntersection(&sq).kind == RAY_QUERY_INTERSECTION_NONE {
-            vis += 0.2; // 1/5
+            vis = 1.0;
+        }
+    } else {
+        // Point / Spot — soft shadow: 5 rays on a disk around the light position
+        let light_radius = 0.35;
+        let perp  = normalize(cross(to_light, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(to_light.y) < 0.9)));
+        let perp2 = cross(to_light, perp);
+
+        var offsets: array<vec2<f32>, 5>;
+        offsets[0] = vec2<f32>( 0.0,  0.0);
+        offsets[1] = vec2<f32>( 1.0,  0.0);
+        offsets[2] = vec2<f32>(-1.0,  0.0);
+        offsets[3] = vec2<f32>( 0.0,  1.0);
+        offsets[4] = vec2<f32>( 0.0, -1.0);
+
+        for (var si: u32 = 0u; si < 5u; si++) {
+            let off         = offsets[si] * light_radius;
+            let light_point = light.position + perp * off.x + perp2 * off.y;
+            let ray_dir     = normalize(light_point - hit_pos);
+            let ray_dist    = length(light_point - hit_pos);
+            var sq: ray_query;
+            rayQueryInitialize(&sq, acc_struct,
+                RayDesc(0x01u, 0xFFu, 0.005, ray_dist - 0.005, origin, ray_dir));
+            rayQueryProceed(&sq);
+            if rayQueryGetCommittedIntersection(&sq).kind == RAY_QUERY_INTERSECTION_NONE {
+                vis += 0.2; // 1/5
+            }
         }
     }
 

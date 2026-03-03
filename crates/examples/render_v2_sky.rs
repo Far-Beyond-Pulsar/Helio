@@ -1,8 +1,11 @@
 //! Sky atmosphere example using helio-render-v2
 //!
-//! Demonstrates the volumetric sky system with Nishita atmospheric scattering,
-//! a sun driven by a directional light, a sky-based ambient light (Skylight),
-//! and optional volumetric clouds.
+//! Demonstrates the volumetric sky system working together with colored scene
+//! lights: a sun directional light drives the sky's sun direction and casts
+//! shadows; a sky-based ambient (Skylight) fills shadowed areas with the sky
+//! colour; and three point lights with distinct hues (warm amber, cool blue,
+//! deep red) show how colored scene lights interact with the sky-lit scene.
+//! Optional volumetric clouds drift overhead.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -19,7 +22,7 @@ use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
     BloomFeature, ShadowsFeature,
-    BillboardsFeature,
+    BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
 };
 use winit::{
@@ -65,6 +68,7 @@ struct AppState {
     cube2: GpuMesh,
     cube3: GpuMesh,
     ground: GpuMesh,
+    roof: GpuMesh,
 
     // Free-camera state
     cam_pos:   glam::Vec3,
@@ -170,11 +174,14 @@ impl ApplicationHandler for App {
         let cube2  = GpuMesh::cube(&device, [-2.0, 0.4, -1.0], 0.4);
         let cube3  = GpuMesh::cube(&device, [ 2.0, 0.3,  0.5], 0.3);
         let ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 20.0);
+        // Thin slab roof sitting just above the colored lights (y=2.7..3.0).
+        // rect3d gives independent extents: wide/deep but only 0.15 thick.
+        let roof   = GpuMesh::rect3d(&device, [0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
 
         self.state = Some(AppState {
             window, surface, device, surface_format, renderer,
             last_frame: std::time::Instant::now(),
-            cube1, cube2, cube3, ground,
+            cube1, cube2, cube3, ground, roof,
             cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
             cam_yaw:   0.0,
             cam_pitch: -0.2,
@@ -338,31 +345,54 @@ impl AppState {
             .with_sky_atmosphere(
                 SkyAtmosphere::new()
                     .with_sun_intensity(22.0)
-                    // exposure=4: calibrated for sRGB surface without manual gamma
                     .with_exposure(4.0)
                     .with_mie_g(0.76)
                     .with_clouds(
                         VolumetricClouds::new()
-                            .with_coverage(0.30)   // ~30% sky coverage
+                            .with_coverage(0.30)
                             .with_density(0.7)
                             .with_layer(800.0, 1800.0)
-                            .with_wind([1.0, 0.0], 0.08), // noise-space units/sec
+                            .with_wind([1.0, 0.0], 0.08),
                     ),
             )
+            // Sky-derived ambient fills shadowed areas with correct sky colour.
+            // Kept low so the colored point lights read clearly.
             .with_skylight(
                 Skylight::new()
-                    .with_intensity(1.0)
+                    .with_intensity(0.08)
                     .with_tint([1.0, 1.0, 1.0]),
             )
-            // ── Sun directional light (drives shadow + skylight colour) ──────
+            // ── Sun directional light ─────────────────────────────────────────
+            // Drives the sky's sun disc position; casts shadows + RC GI.
+            // Intensity scaled back so colored lights aren't drowned in white.
             .add_light(
-                SceneLight::directional(light_dir, sun_color, sun_lux * 3.0),
+                SceneLight::directional(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
+            )
+            // ── Colored point lights ──────────────────────────────────────────
+            // Three lights with distinct hues show how colored scene lights
+            // interact with the sky-lit scene: warm amber, cool blue, deep red.
+            .add_light(SceneLight::point([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0))
+            .add_light(SceneLight::point([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0))
+            .add_light(SceneLight::point([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0))
+            // ── Billboard markers (visible light sources) ─────────────────────
+            .add_billboard(
+                BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35])
+                    .with_color([1.0, 0.85, 0.6, 1.0]),
+            )
+            .add_billboard(
+                BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35])
+                    .with_color([0.4, 0.6, 1.0, 1.0]),
+            )
+            .add_billboard(
+                BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35])
+                    .with_color([1.0, 0.3, 0.3, 1.0]),
             )
             // ── Geometry ─────────────────────────────────────────────────────
             .add_object(self.cube1.clone())
             .add_object(self.cube2.clone())
             .add_object(self.cube3.clone())
-            .add_object(self.ground.clone());
+            .add_object(self.ground.clone())
+            .add_object(self.roof.clone());
 
         if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
             log::error!("Render error: {:?}", e);
