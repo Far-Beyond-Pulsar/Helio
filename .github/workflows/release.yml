@@ -524,19 +524,27 @@ jobs:
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
         shell: bash
         run: |
-          PACKAGE_NAME="${{ needs.check-version.outputs.package_name }}"
-          EXAMPLES_DIR="target/${{ matrix.target }}/release/examples"
-          ARCHIVE_NAME="${PACKAGE_NAME}-examples${{ matrix.asset_suffix }}.tar.gz"
+          BIN_DIR="target/${{ matrix.target }}/release"
+          ARCHIVE_NAME="examples${{ matrix.asset_suffix }}.tar.gz"
           
-          if [ -d "$EXAMPLES_DIR" ]; then
-            echo "Found examples directory: $EXAMPLES_DIR"
-            ls -l "$EXAMPLES_DIR"
-            tar -czf "$ARCHIVE_NAME" -C "$EXAMPLES_DIR" .
-            echo "Created archive: $ARCHIVE_NAME"
-            ls -lh "$ARCHIVE_NAME"
-            echo "EXAMPLES_ARCHIVE=$ARCHIVE_NAME" >> $GITHUB_ENV
+          if [ -d "$BIN_DIR" ]; then
+            echo "Found release directory: $BIN_DIR"
+            ls -lR "$BIN_DIR" | head -50
+            # Archive example binaries from crates/examples
+            cd "$BIN_DIR"
+            tar -czf "../../$ARCHIVE_NAME" render_v2_basic render_v2_sky 2>/dev/null || tar -czf "../../$ARCHIVE_NAME" render_v2_basic render_v2_sky.exe 2>/dev/null || true
+            cd - > /dev/null
+            if [ -f "$ARCHIVE_NAME" ] && [ -s "$ARCHIVE_NAME" ]; then
+              echo "Created archive: $ARCHIVE_NAME"
+              ls -lh "$ARCHIVE_NAME"
+              echo "EXAMPLES_ARCHIVE=$ARCHIVE_NAME" >> $GITHUB_ENV
+            else
+              echo "⚠️ Archive creation failed or is empty"
+              echo "Looking for binaries:"
+              find "$BIN_DIR" -type f \( -name 'render_v2_*' ! -name '*.d' \) | head -20
+            fi
           else
-            echo "⚠️ No examples directory found at: $EXAMPLES_DIR"
+            echo "⚠️ No release directory found at: $BIN_DIR"
           fi
 
       - name: Upload examples archive
