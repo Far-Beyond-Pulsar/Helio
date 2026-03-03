@@ -10,6 +10,10 @@ env:
   CRATES_TO_BUILD: |
     crates/helio-render-v2
   
+  # Crates to build examples for (newline-separated list)
+  CRATES_WITH_EXAMPLES: |
+    crates/examples
+  
   # Enable/disable crate building (set to 'false' to skip crate builds)
   BUILD_CRATES: 'false'
   
@@ -331,7 +335,7 @@ jobs:
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
         shell: bash
         run: |
-          ARGS="--release --target ${{ matrix.target }} --examples"
+          ARGS="--release --target ${{ matrix.target }}"
           while IFS= read -r crate_path; do
             crate_path=$(echo "$crate_path" | xargs)
             if [ -n "$crate_path" ]; then
@@ -339,7 +343,7 @@ jobs:
               ARGS="$ARGS -p $crate_name"
               echo "Added crate for examples: $crate_name from $crate_path"
             fi
-          done <<< "${{ env.CRATES_TO_BUILD }}"
+          done <<< "${{ env.CRATES_WITH_EXAMPLES }}"
           
           echo "Building examples with args: $ARGS"
           cargo build $ARGS
@@ -505,7 +509,7 @@ jobs:
       - name: Build examples
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
         run: |
-          ARGS="--release --target ${{ matrix.target }} --examples"
+          ARGS="--release --target ${{ matrix.target }}"
           while IFS= read -r crate_path; do
             crate_path=$(echo "$crate_path" | xargs)
             if [ -n "$crate_path" ]; then
@@ -513,7 +517,7 @@ jobs:
               ARGS="$ARGS -p $crate_name"
               echo "Added crate for examples: $crate_name from $crate_path"
             fi
-          done <<< "${{ env.CRATES_TO_BUILD }}"
+          done <<< "${{ env.CRATES_WITH_EXAMPLES }}"
           cross build $ARGS
 
       - name: Create examples archive
