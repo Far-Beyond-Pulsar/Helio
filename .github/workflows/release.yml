@@ -351,8 +351,8 @@ jobs:
         shell: bash
         run: |
           PACKAGE_NAME="${{ needs.check-version.outputs.package_name }}"
-          EXAMPLES_DIR="target/x86_64-unknown-linux-gnu/release/examples"
-          ARCHIVE_NAME="${PACKAGE_NAME}-examples-linux-x86_64.tar.gz"
+          EXAMPLES_DIR="target/${{ matrix.target }}/release/examples"
+          ARCHIVE_NAME="${PACKAGE_NAME}-examples${{ matrix.asset_name }}.tar.gz"
           
           if [ -d "$EXAMPLES_DIR" ]; then
             echo "Found examples directory: $EXAMPLES_DIR"
@@ -521,8 +521,8 @@ jobs:
         shell: bash
         run: |
           PACKAGE_NAME="${{ needs.check-version.outputs.package_name }}"
-          EXAMPLES_DIR="target/x86_64-unknown-linux-gnu/release/examples"
-          ARCHIVE_NAME="${PACKAGE_NAME}-examples-linux-x86_64.tar.gz"
+          EXAMPLES_DIR="target/${{ matrix.target }}/release/examples"
+          ARCHIVE_NAME="${PACKAGE_NAME}-examples${{ matrix.asset_suffix }}.tar.gz"
           
           if [ -d "$EXAMPLES_DIR" ]; then
             echo "Found examples directory: $EXAMPLES_DIR"
