@@ -8,7 +8,7 @@ env:
   # Examples: "crates/engine", "crates/plugin_manager", etc.
   # First crate is used for version checking
   CRATES_TO_BUILD: |
-    crates/engine
+    crates\helio-render-v2
   
   # Enable/disable crate building (set to 'false' to skip crate builds)
   BUILD_CRATES: 'false'
