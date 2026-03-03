@@ -193,10 +193,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
         return 1.0;
     }
 
-    // The shadow pass already applies hardware slope-scale bias (slope_scale: 1.0)
-    // during depth writes, which handles angle-dependent acne. A small constant
-    // bias here only covers floating-point precision at the comparison step.
-    let depth = ndc.z - 0.0002;
+    let depth = ndc.z;
 
     let filter_radius = 2.0 / ATLAS_SIZE;
     var lit_sum = 0.0;
