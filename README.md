@@ -8,6 +8,12 @@
 [![wgpu](https://img.shields.io/badge/wgpu-28-blue)](https://wgpu.rs/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey)](#)
+[![glam](https://img.shields.io/badge/glam-math-blue)](https://docs.rs/glam/)
+[![bytemuck](https://img.shields.io/badge/bytemuck-serialization-blue)](https://docs.rs/bytemuck/)
+[![PBR](https://img.shields.io/badge/feature-PBR-brightgreen)]()
+[![GI](https://img.shields.io/badge/feature-Global%20Illumination-brightgreen)]()
+[![CSM](https://img.shields.io/badge/feature-Cascaded%20Shadows-brightgreen)]()
+[![Sky](https://img.shields.io/badge/feature-Volumetric%20Sky-brightgreen)]()
 
 > Cross-platform, data-driven, physically-based rendering — with a render graph, radiance cascades GI, cascaded shadow maps, volumetric sky, and bloom — all in pure Rust.
 
