@@ -350,22 +350,14 @@ jobs:
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
         shell: bash
         run: |
-          EXAMPLES_DIR="${{ matrix.bin_path }}/examples"
-          ARCHIVE_NAME="${{ env.PACKAGE_NAME }}-examples${{ matrix.asset_name }}.tar.gz"
+          PACKAGE_NAME="${{ needs.check-version.outputs.package_name }}"
+          EXAMPLES_DIR="target/x86_64-unknown-linux-gnu/release/examples"
+          ARCHIVE_NAME="${PACKAGE_NAME}-examples-linux-x86_64.tar.gz"
           
           if [ -d "$EXAMPLES_DIR" ]; then
             echo "Found examples directory: $EXAMPLES_DIR"
             ls -l "$EXAMPLES_DIR"
-            
-            # Create tar.gz archive
-            if [[ "${{ runner.os }}" == "Windows" ]]; then
-              cd "$EXAMPLES_DIR"
-              tar -czf "../../$ARCHIVE_NAME" *
-              cd - > /dev/null
-            else
-              tar -czf "$ARCHIVE_NAME" -C "$EXAMPLES_DIR" .
-            fi
-            
+            tar -czf "$ARCHIVE_NAME" -C "$EXAMPLES_DIR" .
             echo "Created archive: $ARCHIVE_NAME"
             ls -lh "$ARCHIVE_NAME"
             echo "EXAMPLES_ARCHIVE=$ARCHIVE_NAME" >> $GITHUB_ENV
@@ -528,22 +520,14 @@ jobs:
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
         shell: bash
         run: |
-          EXAMPLES_DIR="target/${{ matrix.target }}/release/examples"
-          ARCHIVE_NAME="${{ env.PACKAGE_NAME }}-examples${{ matrix.asset_suffix }}.tar.gz"
+          PACKAGE_NAME="${{ needs.check-version.outputs.package_name }}"
+          EXAMPLES_DIR="target/x86_64-unknown-linux-gnu/release/examples"
+          ARCHIVE_NAME="${PACKAGE_NAME}-examples-linux-x86_64.tar.gz"
           
           if [ -d "$EXAMPLES_DIR" ]; then
             echo "Found examples directory: $EXAMPLES_DIR"
             ls -l "$EXAMPLES_DIR"
-            
-            # Create tar.gz archive
-            if [[ "${{ runner.os }}" == "Windows" ]]; then
-              cd "$EXAMPLES_DIR"
-              tar -czf "../../$ARCHIVE_NAME" *
-              cd - > /dev/null
-            else
-              tar -czf "$ARCHIVE_NAME" -C "$EXAMPLES_DIR" .
-            fi
-            
+            tar -czf "$ARCHIVE_NAME" -C "$EXAMPLES_DIR" .
             echo "Created archive: $ARCHIVE_NAME"
             ls -lh "$ARCHIVE_NAME"
             echo "EXAMPLES_ARCHIVE=$ARCHIVE_NAME" >> $GITHUB_ENV
