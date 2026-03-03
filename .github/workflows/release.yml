@@ -355,7 +355,7 @@ jobs:
           
           if [ -d "$EXAMPLES_DIR" ]; then
             echo "Found examples directory: $EXAMPLES_DIR"
-            ls -la "$EXAMPLES_DIR"
+            ls -l "$EXAMPLES_DIR"
             
             # Create tar.gz archive
             if [[ "${{ runner.os }}" == "Windows" ]]; then
@@ -526,16 +526,23 @@ jobs:
 
       - name: Create examples archive
         if: ${{ env.BUILD_EXAMPLES == 'true' }}
+        shell: bash
         run: |
           EXAMPLES_DIR="target/${{ matrix.target }}/release/examples"
           ARCHIVE_NAME="${{ env.PACKAGE_NAME }}-examples${{ matrix.asset_suffix }}.tar.gz"
           
           if [ -d "$EXAMPLES_DIR" ]; then
             echo "Found examples directory: $EXAMPLES_DIR"
-            ls -la "$EXAMPLES_DIR"
+            ls -l "$EXAMPLES_DIR"
             
             # Create tar.gz archive
-            tar -czf "$ARCHIVE_NAME" -C "$EXAMPLES_DIR" .
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              cd "$EXAMPLES_DIR"
+              tar -czf "../../$ARCHIVE_NAME" *
+              cd - > /dev/null
+            else
+              tar -czf "$ARCHIVE_NAME" -C "$EXAMPLES_DIR" .
+            fi
             
             echo "Created archive: $ARCHIVE_NAME"
             ls -lh "$ARCHIVE_NAME"
