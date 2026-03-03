@@ -195,7 +195,14 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
 
     let depth = ndc.z;
 
-    let filter_radius = 2.0 / ATLAS_SIZE;
+    // Scale the PCF kernel by cascade index: near cascades stay sharp,
+    // far cascades (low texel density over large floors) get wider filtering.
+    var cascade_scale = 1.0;
+    if light.light_type < 0.5 {
+        let cascade_idx = layer - light_idx * 6u;
+        cascade_scale = 1.0 + f32(cascade_idx) * 1.5; // 1×, 2.5×, 4×, 5.5×
+    }
+    let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
     var lit_sum = 0.0;
     for (var i = 0; i < 16; i++) {
         let offset = POISSON_DISK[i] * filter_radius;
@@ -348,6 +355,18 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
         return vec3<f32>(0.0);
     }
+
+    // Normalised [0,1] position within the probe volume
+    let t = (world_pos - world_min) / world_size;
+
+    // Fade to zero near the edges of the volume so surfaces outside (or at the
+    // boundary of) the RC grid blend smoothly into the ambient fallback instead
+    // of showing the clamped edge-probe value as a hard band.
+    let fade_margin = 0.05; // 5% of volume extent
+    let fade = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t) * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
+    let volume_weight = fade.x * fade.y * fade.z;
+    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
+
     let cell_size   = world_size / f32(RC_PROBE_DIM);
     let probe_f     = (world_pos - world_min) / cell_size - 0.5;
     let probe_dim_f = f32(RC_PROBE_DIM) - 1.0;
@@ -370,7 +389,7 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let c11 = mix(c110, c111, frc.z);
     let c0  = mix(c00, c01, frc.y);
     let c1  = mix(c10, c11, frc.y);
-    return mix(c0, c1, frc.x);
+    return mix(c0, c1, frc.x) * volume_weight;
 }
 
 // ============================================================================
@@ -474,21 +493,28 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let diffuse_indirect = kD_ibl * rc_irr * albedo;
 
     // ── Indirect specular: environment cubemap ─────────────────────────────────
-    // Reuse material_sampler (group 1 binding 3) to sample the env cube.
-    // A roughness-based lod would require a pre-filtered env map; we approximate
-    // by attenuating specular by roughness².
     let R           = reflect(-V, N);
     let env_sample  = textureSample(env_cube, material_sampler, R).rgb;
     let spec_scale  = (1.0 - roughness * roughness);
     let specular_indirect = F_ibl * env_sample * spec_scale;
 
-    // ── Ambient fallback (active when neither lights nor RC are providing) ─────
-    // Modulated by sky_occlusion: surfaces under roofs/geometry don't receive
-    // the full sky ambient, matching the directional light's shadow coverage.
-    let ambient_fallback = globals.ambient_color.rgb * globals.ambient_intensity * albedo * sky_occlusion;
+    // ── Hemisphere ambient (Valve HL2 / Ogre technique) ───────────────────────
+    // Blend between sky colour (surface faces up) and a dim ground-bounce
+    // colour (surface faces down) using the normal's Y component.
+    // This is analytically smooth across any surface size, zero cost, and
+    // removes the blocky appearance on large floors outside the RC volume.
+    let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
+    let ground_color = sky_color * 0.15; // ground bounce is dimmer and warmer
+    let hemi_t       = N.y * 0.5 + 0.5; // 0 = fully down, 1 = fully up
+    let hemi_ambient = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
+
+    // RC irradiance replaces the hemisphere ambient where probe coverage exists
+    // (rc_irr fades to 0 outside the volume, so hemi_ambient fills in cleanly).
+    let rc_weight    = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+    let ambient_fallback = mix(hemi_ambient, diffuse_indirect * sky_occlusion, rc_weight);
 
     // ── Combine: direct + indirect (AO applied to indirect only) ─────────────
-    let indirect = (diffuse_indirect * sky_occlusion + specular_indirect + ambient_fallback) * ao;
+    let indirect = (ambient_fallback + specular_indirect) * ao;
     var color    = Lo + indirect;
 
     // ── Emissive ──────────────────────────────────────────────────────────────

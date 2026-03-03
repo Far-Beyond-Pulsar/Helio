@@ -86,8 +86,7 @@ const PI: f32 = 3.14159265358979323846;
 const ATMO_STEPS:  u32 = 16u;
 const DEPTH_STEPS: u32 = 4u;
 
-// Cloud ray-march steps
-const CLOUD_STEPS: u32 = 32u;
+// (cloud steps removed – clouds now use single-plane intersection)
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Math helpers
@@ -235,100 +234,58 @@ fn fbm(p: vec3<f32>) -> f32 {
     return v;
 }
 
-fn cloud_density(world_p: vec3<f32>) -> f32 {
-    if world_p.y < sky.cloud_base || world_p.y > sky.cloud_top { return 0.0; }
-    let height_frac = (world_p.y - sky.cloud_base) / (sky.cloud_top - sky.cloud_base);
-    let vshape = smoothstep(0.0, 0.1, height_frac) * smoothstep(1.0, 0.6, height_frac);
-
-    // Convert world position to noise space first, then add wind offset directly
-    // in noise space so animation is visible (not diluted by the 0.0006 scale).
-    let sp_base = world_p * 0.0006;
-    let wind_offset = vec3<f32>(sky.cloud_wind_x, 0.0, sky.cloud_wind_z)
-                      * sky.cloud_speed * sky.time_sky;
-    let sp = sp_base + wind_offset;
-
-    let base_noise = fbm(sp);
-    let detail     = fbm(sp * 3.7 + vec3<f32>(5.2, 1.3, 2.7)) * 0.35;
-    let combined   = base_noise + detail;
-
-    // threshold = 1 - coverage; lower coverage → fewer clouds
-    let d = max(0.0, combined - (1.0 - sky.cloud_coverage)) * sky.cloud_density;
-    return d * vshape;
-}
+// ──────────────────────────────────────────────────────────────────────────────
+// Cheap planar cloud layer
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Volumetric cloud ray-march
-// Returns (inscattered colour, transmittance)
+// Cheap planar cloud layer
+//
+// Instead of a per-pixel volumetric ray-march (32 steps × FBM each), we:
+//   1. Intersect the view ray with the cloud base plane once.
+//   2. Sample 2 FBM calls at that world position (base shape + detail).
+//   3. Light analytically from the sun direction.
+//
+// Cost: ~2 FBM calls (10 noise evals) per pixel vs ~640+ for the old march.
+// Looks volumetric because clouds scroll, have soft edges, and are properly lit.
 // ──────────────────────────────────────────────────────────────────────────────
 
 fn trace_clouds(ro: vec3<f32>, rd: vec3<f32>, bg_col: vec3<f32>) -> vec3<f32> {
     if sky.clouds_enabled == 0u { return bg_col; }
+    // Only visible above horizon and when looking upward enough to hit the slab
+    if rd.y < 0.001 { return bg_col; }
 
-    // Find entry/exit heights in cloud slab (approximate for near-horizontal rays)
-    let base_h = sky.cloud_base;
-    let top_h  = sky.cloud_top;
+    // Ray–plane intersection with the cloud base
+    let t = (sky.cloud_base - ro.y) / rd.y;
+    if t < 0.0 { return bg_col; }
 
-    // Entry: the t at which the ray reaches base_h from below (rd.y > 0) or top (rd.y < 0)
-    var t0 = 0.0;
-    var t1 = 0.0;
-    if abs(rd.y) < 1e-4 {
-        // Ray is nearly horizontal – check if camera is in the cloud band
-        if ro.y >= base_h && ro.y <= top_h {
-            t0 = 0.0;
-            t1 = 10000.0;
-        } else {
-            return bg_col;
-        }
-    } else {
-        let ta = (base_h - ro.y) / rd.y;
-        let tb = (top_h  - ro.y) / rd.y;
-        t0 = max(min(ta, tb), 0.0);
-        t1 = max(ta, tb);
-        if t1 < 0.0 { return bg_col; }
-    }
+    let hit = ro + rd * t;
 
-    let seg   = min(t1 - t0, 20000.0);  // cap march length
-    let ds    = seg / f32(CLOUD_STEPS);
-    var t     = t0 + ds * 0.5;
-    var transmit = 1.0;
-    var accum    = vec3<f32>(0.0);
+    // Animated 2D noise position
+    let wind = vec2<f32>(sky.cloud_wind_x, sky.cloud_wind_z) * sky.cloud_speed * sky.time_sky;
+    let sp   = vec3<f32>((hit.xz + wind) * 0.0006, 0.0);
 
-    // Simple cloud colour: sunlit white mixed with sky horizon
-    let cloud_col = vec3<f32>(0.95, 0.96, 1.0);
+    // Two FBM samples: macro shape + fine detail
+    let base_noise = fbm(sp);
+    let detail     = fbm(sp * 3.7 + vec3<f32>(5.2, 0.0, 2.7)) * 0.35;
+    let raw        = base_noise + detail - (1.0 - sky.cloud_coverage);
+    if raw <= 0.0 { return bg_col; }
 
-    for (var i = 0u; i < CLOUD_STEPS; i++) {
-        if transmit < 0.01 { break; }
-        let p  = ro + rd * t;
-        let dn = cloud_density(p);
-        if dn > 0.0 {
-            // Lower extinction so clouds don't go fully black
-            let sigma = dn * 0.02;
-            let dT    = exp(-sigma * ds);
+    // Fade distant clouds and very flat-angle rays to avoid sharp slab edge
+    let dist_fade  = 1.0 - smoothstep(30000.0, 80000.0, t);
+    let angle_fade = smoothstep(0.001, 0.06, rd.y);
+    let coverage   = clamp(raw * sky.cloud_density * dist_fade * angle_fade, 0.0, 1.0);
 
-            // Light march toward sun — clamp OD so self-shadowing never kills
-            // the cloud entirely (real multiple-scattering approximation)
-            var sun_od = 0.0;
-            let sun_ds = 300.0 / 4.0;
-            for (var j = 0u; j < 4u; j++) {
-                let sp = p + sky.sun_direction * (sun_ds * (f32(j) + 0.5));
-                sun_od += cloud_density(sp) * 0.02 * sun_ds;
-            }
-            // Clamp to 2.5 so shadowed areas keep a floor (~8% transmittance)
-            let sun_transmit = exp(-min(sun_od, 2.5));
+    // Analytical lighting: top face lit by sun, underside is sky-ambient
+    let sun_up    = clamp(sky.sun_direction.y, 0.0, 1.0);
+    // Sunset tint when sun is near horizon
+    let sun_tint  = mix(vec3<f32>(1.0, 0.55, 0.25), vec3<f32>(1.0, 0.97, 0.92), smoothstep(0.0, 0.2, sun_up));
+    let lit_top   = sun_tint * sky.sun_intensity * 0.12 * sun_up;
+    let lit_amb   = bg_col * 0.30;  // underside picks up sky colour
+    let cloud_col = lit_top + lit_amb;
 
-            let phase = phase_mie(dot(rd, sky.sun_direction), 0.6);
-            let direct  = cloud_col * sky.sun_intensity * sun_transmit * phase * 0.3;
-            // Sky ambient scatter — keeps cloud undersides bright
-            let ambient = bg_col * 0.25;
-            let lit = direct + ambient;
-
-            accum    += transmit * (1.0 - dT) * lit;
-            transmit *= dT;
-        }
-        t += ds;
-    }
-
-    return bg_col * transmit + accum;
+    // Soft blend with a small view-angle-based normal approximation for depth
+    let alpha = coverage * smoothstep(0.0, 0.15, coverage);
+    return mix(bg_col, cloud_col, alpha);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
