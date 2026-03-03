@@ -1,388 +1,166 @@
-# Helio - Modular GPU Rendering Engine
-
-Helio is a modular, feature-based rendering engine built on top of blade-graphics. It allows you to compose rendering pipelines from individual feature crates, each providing their own shaders and GPU functionality.
-
-# ⭐ Support the Project
-
-If Pulsar Engine aligns with how you think game engines should be built, consider supporting the project on GitHub:
-- ⭐ Star the repo to help others discover Pulsar
-- 👀 Watch for updates to follow major architectural changes and milestones
-- 🍴 Fork if you want to experiment or contribute
-Stars and watches directly influence visibility and help justify continued deep-systems work on the engine.
-
-<img width="3439" height="1439" alt="image" src="https://github.com/user-attachments/assets/96a2ccd1-a77e-4200-9776-da08a944cd81" />
-<img width="3439" height="1435" alt="Screenshot 2026-02-09 142658" src="https://github.com/user-attachments/assets/9b2ebe05-eb97-4571-bb56-59ccddd11de1" />
-<img width="1646" height="1057" alt="image" src="https://github.com/user-attachments/assets/4f030329-daff-4cb6-a8a9-acc255dcc54b" />
-
-## Key Features
-
-✨ **Modular Architecture**: Each rendering feature is a separate crate  
-🔧 **Composable Shaders**: Features combine through shader injection, not inheritance  
-📝 **Well-Documented**: Comprehensive API docs and examples  
-⚡ **High Performance**: Zero-cost abstractions with compile-time optimization  
-🎯 **Type-Safe**: Strong typing with Result-based error handling  
-🔍 **Developer-Friendly**: Builder patterns, debug output, clear error messages  
-
-## Architecture
-
-### Core Crates
-
-- **helio-core**: Fundamental data structures (vertices, meshes, primitives)
-- **helio-render**: Core rendering infrastructure with `FeatureRenderer`
-- **helio-features**: Feature system trait definitions and registry
-- **helio-lighting**: Ray-traced global illumination (standalone)
-
-### Feature Crates
-
-Each feature is a separate crate that implements the `Feature` trait:
-
-- **helio-feature-base-geometry**: Base geometry rendering with UV coordinate pass-through
-- **helio-feature-lighting**: Basic diffuse + ambient lighting
-- **helio-feature-materials**: Procedural texture materials with checkerboard pattern
-- **helio-feature-procedural-shadows**: Shadow mapping with configurable resolution
-
-## Quick Start
-
-### Using the Feature System
-
-```rust
-use helio_feature_base_geometry::BaseGeometry;
-use helio_feature_lighting::BasicLighting;
-use helio_features::FeatureRegistry;
-use helio_render::FeatureRenderer;
-
-// Create base geometry feature and get its shader template
-let base_geometry = BaseGeometry::new();
-let base_shader = base_geometry.shader_template();
-
-// Register features using builder pattern
-let registry = FeatureRegistry::builder()
-    .with_feature(base_geometry)
-    .with_feature(BasicLighting::new())
-    .with_feature(BasicMaterials::new())
-    .debug_output(true) // Optional: write composed shader to file
-    .build();
-
-// Create renderer with composed pipeline
-let renderer = FeatureRenderer::new(
-    gpu_context,
-    surface_format,
-    width,
-    height,
-    registry,
-    base_shader,
-);
-
-// Render each frame
-renderer.render(&mut encoder, target_view, camera, &meshes, delta_time);
-
-// Toggle features at runtime (requires pipeline rebuild)
-renderer.registry_mut().toggle_feature("basic_lighting")?;
-renderer.rebuild_pipeline();
-```
-
-## Feature System
-
-### How It Works
-
-1. **Features provide shader code**: Each feature returns `ShaderInjection` objects specifying where their WGSL code should be inserted
-2. **Shader composition**: The `FeatureRegistry` composes features into a final shader by replacing injection point markers
-3. **Modular pipelines**: Features can add render passes before/after the main pass
-4. **Runtime toggling**: Features can be enabled/disabled with pipeline rebuild
-5. **Proper cleanup**: Resources are automatically cleaned up via Drop trait
-
-### Injection Points
-
-Features inject code at these points in the rendering pipeline:
-
-| Injection Point | Usage | Example |
-|----------------|-------|---------|
-| `VertexPreamble` | Global declarations, helper functions | Struct definitions, vertex utilities |
-| `VertexMain` | Start of vertex main | Early vertex processing |
-| `VertexPostProcess` | After position calculation | Passing data to fragment shader |
-| `FragmentPreamble` | Global declarations, bindings | Texture samplers, utility functions |
-| `FragmentMain` | Start of fragment main | Material setup, early discard |
-| `FragmentColorCalculation` | Color computation | Lighting, materials, textures |
-| `FragmentPostProcess` | Final post-processing | Tone mapping, color grading |
-
-### Creating a Custom Feature
-
-```rust
-use helio_features::{Feature, FeatureContext, ShaderInjection, ShaderInjectionPoint};
-
-pub struct MyFeature {
-    enabled: bool,
-    my_texture: Option<gpu::Texture>,
-}
-
-impl Feature for MyFeature {
-    fn name(&self) -> &str {
-        "my_feature"
-    }
-
-    fn init(&mut self, context: &FeatureContext) {
-        // Create GPU resources once during initialization
-        self.my_texture = Some(context.gpu.create_texture(...));
-    }
-
-    fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
-    fn set_enabled(&mut self, enabled: bool) {
-        self.enabled = enabled;
-    }
-
-    fn shader_injections(&self) -> Vec<ShaderInjection> {
-        vec![
-            // Use static strings for zero-copy
-            ShaderInjection::new(
-                ShaderInjectionPoint::FragmentPreamble,
-                include_str!("../shaders/my_functions.wgsl"),
-            ),
-            // Or use String for dynamic code with custom priority
-            ShaderInjection::with_priority(
-                ShaderInjectionPoint::FragmentColorCalculation,
-                "    final_color = my_function(final_color);",
-                10,  // Higher priority = runs later
-            ),
-        ]
-    }
-    
-    fn prepare_frame(&mut self, context: &FeatureContext) {
-        // Update per-frame data (uniforms, animation state, etc.)
-    }
-    
-    fn cleanup(&mut self, context: &FeatureContext) {
-        // Release GPU resources
-        if let Some(texture) = self.my_texture.take() {
-            context.gpu.destroy_texture(texture);
-        }
-    }
-}
-```
-
-## Examples
-
-The `crates/examples` directory contains demonstrations of the feature system:
-
-### 1. Base Geometry (`feature_geometry`)
-```bash
-cargo run --bin feature_geometry --release
-```
-Demonstrates the base geometry feature without any lighting. Objects appear flat with a uniform gray color.
-
-**Controls:**
-- `1` - Toggle base geometry
-- `ESC` - Exit
-
-### 2. Geometry + Lighting (`feature_with_lighting`)
-```bash
-cargo run --bin feature_with_lighting --release
-```
-Adds basic diffuse + ambient lighting to the geometry. Objects now have shading that responds to a directional light.
-
-**Controls:**
-- `1` - Toggle base geometry
-- `2` - Toggle lighting
-- `ESC` - Exit
-
-### 3. Complete Pipeline (`feature_complete`)
-```bash
-cargo run --bin feature_complete --release
-```
-Combines all features: geometry, lighting, materials, and shadows. Objects display a checkerboard pattern with proper lighting and shadow mapping. This demonstrates how features compose to create a complete rendering pipeline.
-
-**Controls:**
-- `1` - Toggle base geometry
-- `2` - Toggle lighting
-- `3` - Toggle materials
-- `4` - Toggle shadows
-- `ESC` - Exit
-
-### 4. Basic Rendering (`basic_rendering`)
-```bash
-cargo run --bin basic_rendering --release
-```
-The original non-feature-based example using the legacy `Renderer` class. Useful for comparison with the feature-based approach.
-
-## Building Custom Pipelines
-
-Mix and match any combination of features:
-
-```rust
-// Minimal: Just geometry
-let registry = FeatureRegistry::builder()
-    .with_feature(BaseGeometry::new())
-    .build();
-
-// Lighting pipeline
-let registry = FeatureRegistry::builder()
-    .with_feature(BaseGeometry::new())
-    .with_feature(BasicLighting::new())
-    .build();
-
-// Full featured with custom shadow resolution
-let registry = FeatureRegistry::builder()
-    .with_feature(BaseGeometry::new())
-    .with_feature(BasicLighting::new())
-    .with_feature(BasicMaterials::new())
-    .with_feature(ProceduralShadows::new().with_size(1024))
-    .build();
-```
-
-## Shader Composition Example
-
-Base geometry shader template (`base_geometry.wgsl`):
-```wgsl
-// INJECT_FRAGMENTPREAMBLE
-
-@fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // INJECT_FRAGMENTMAIN
-
-    var final_color = in.color;
-
-    // INJECT_FRAGMENTCOLORCALCULATION
-
-    return vec4<f32>(final_color, 1.0);
-}
-```
-
-Lighting feature injects:
-```wgsl
-// At INJECT_FRAGMENTPREAMBLE:
-fn apply_basic_lighting(normal: vec3<f32>, color: vec3<f32>) -> vec3<f32> {
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let ndotl = max(dot(normal, light_dir), 0.0);
-    return color * (ndotl + 0.2); // diffuse + ambient
-}
-
-// At INJECT_FRAGMENTCOLORCALCULATION:
-final_color = apply_basic_lighting(normalize(in.world_normal), final_color);
-```
-
-## Feature Priority
-
-When multiple features inject at the same point, `priority` controls the order:
-- **Lower priority** (e.g., -10) = injected first → for base setup like material bindings
-- **Higher priority** (e.g., 10) = injected later → for post-processing like shadows
-- **Default priority** (0) = for most features
-
-## API Design Philosophy
-
-Helio is designed to be:
-
-1. **Modular**: Each rendering feature is a separate crate with clear boundaries
-2. **Composable**: Features combine through shader injection, not inheritance  
-3. **Explicit**: No hidden magic - you see exactly what features are active
-4. **Extensible**: Create your own features without modifying the engine
-5. **Lightweight**: Examples are minimal - Helio and features do all heavy lifting
-6. **Well-Documented**: Every public API has comprehensive documentation
-7. **Error-Aware**: Result types for operations that can fail
-8. **Resource-Safe**: Automatic cleanup via Drop trait
-
-## Advanced Features
-
-### Debug Output
-
-Enable debug shader output to inspect composed shaders:
-
-```rust
-let mut registry = FeatureRegistry::new();
-registry.set_debug_output(true);
-// Composed shader will be written to composed_shader_debug.wgsl
-```
-
-### Error Handling
-
-The feature system uses Result types for better error handling:
-
-```rust
-match renderer.registry_mut().toggle_feature("my_feature") {
-    Ok(new_state) => {
-        println!("Feature is now: {}", if new_state { "ON" } else { "OFF" });
-        renderer.rebuild_pipeline();
-    }
-    Err(e) => eprintln!("Failed to toggle feature: {}", e),
-}
-```
-
-### Feature Lifecycle
-
-Features follow a clear lifecycle:
-
-1. **Creation**: Feature created with `new()` or builder
-2. **Registration**: Added to registry via `register()` or builder
-3. **Initialization**: `init()` called once - create GPU resources here
-4. **Per-Frame**:
-   - `prepare_frame()` - Update uniforms, animation
-   - `pre_render_pass()` - Shadow maps, etc.
-   - Main render pass (shader injections active)
-   - `post_render_pass()` - Post-processing
-5. **Cleanup**: `cleanup()` called when renderer drops
-
-## Performance Tips
-
-- Use static strings (`include_str!`) for shader code - zero runtime cost
-- Shadow map size significantly impacts performance (1024-2048 recommended)
-- Disable unused features to reduce shader complexity
-- Features are checked for enabled state each frame - keep the check lightweight
-- Use `debug_output` only during development
-
-## Roadmap
-
-Potential future features:
-- ✅ Shadow mapping (DONE!)
-- Cascaded shadow maps for better quality
-- PBR materials with texture support
-- Screen-space ambient occlusion (SSAO)
-- Bloom and HDR tonemapping
-- Deferred rendering pipeline
-- Compute-based particle systems
-- Volumetric lighting/fog
-
-## Contributing
-
-## Android Build (Experimental)
-
-Helio can be built for Android using [cargo-apk](https://github.com/rust-windowing/cargo-apk) and the `helio-android`/`helio-android-apk` crates:
+<div align="center">
+
+<img src="./branding/Helio.svg" alt="Helio Renderer" width="400"/>
+
+**A production-grade real-time renderer built on [wgpu](https://wgpu.rs/)**
+
+[![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
+[![wgpu](https://img.shields.io/badge/wgpu-28-blue)](https://wgpu.rs/)
+[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey)](#)
+
+> Cross-platform, data-driven, physically-based rendering — with a render graph, radiance cascades GI, cascaded shadow maps, volumetric sky, and bloom — all in pure Rust.
+
+</div>
+
+
+<div align="center">
+    <table style="border-collapse: collapse; border: none;">
+        <tr>
+            <td style="border: none;"><img src="media/image1.png" alt="Screenshot 1" width="100%"/></td>
+            <td style="border: none;"><img src="media/image2.png" alt="Screenshot 2" width="100%"/></td>
+        </tr>
+        <tr>
+            <td style="border: none;"><img src="media/image3.png" alt="Screenshot 3" width="100%"/></td>
+            <td style="border: none;"><img src="media/image4.png" alt="Screenshot 4" width="100%"/></td>
+        </tr>
+        <tr>
+            <td style="border: none;"><img src="media/image5.png" alt="Screenshot 5" width="100%"/></td>
+            <td style="border: none;"><img src="media/image6.png" alt="Screenshot 6" width="100%"/></td>
+        </tr>
+    </table>
+</div>
+
+
+## 🚀 Features
+
+### Rendering
+- **Physically-Based Shading** — metallic/roughness PBR with Cook-Torrance BRDF
+- **Cascaded Shadow Maps** — 4-cascade CSM with PCF filtering, zero Peter-Panning front-face culling
+- **Radiance Cascades GI** — screen-space global illumination with smooth probe volume blending
+- **Hemisphere Ambient** — HL2-style two-color analytical ambient fallback for areas outside GI coverage
+- **Bloom** — multi-pass physically-based bloom
+
+### Lighting
+- Directional lights (sun/moon with CSM)
+- Point lights with attenuation
+- Spot lights
+- Per-light shadow casting
+- Skylight ambient from atmosphere color
+
+### Sky & Atmosphere
+- **Rayleigh + Mie scattering** — physically accurate multi-layer atmosphere
+- **Dynamic time-of-day** — rotate the sun in real time; sky, shadows, and ambient all respond
+- **Cheap volumetric clouds** — planar-intersection FBM clouds with analytical sun lighting and sunset tint; near-zero GPU cost
+
+### Architecture
+- **Render graph** — automatic pass ordering and resource dependency resolution
+- **Pipeline cache** — compiled PSO variants with instant hot-swapping via specialization constants
+- **Resource pooling** — texture and buffer aliasing for minimal VRAM overhead
+- **Shared bind groups** — proper resource sharing across features; no redundant uploads
+- **Billboards** — GPU-instanced camera-facing sprites with correct depth occlusion
+
+---
+
+## 📦 Crates
+
+| Crate | Description |
+|---|---|
+| `helio-render-v2` | Core renderer library — scene, mesh, material, passes, features |
+| `helio-core` | Shared primitives and math utilities |
+| `examples` | Runnable demos |
+
+---
+
+## 🏁 Getting Started
 
 ### Prerequisites
-- Install [Android NDK](https://developer.android.com/ndk/downloads) and set `ANDROID_NDK_HOME` environment variable
-- Install Rust Android targets:
-    ```sh
-    rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
-    ```
-- Install cargo-apk:
-    ```sh
-    cargo install cargo-apk
-    ```
+- [Rust stable toolchain](https://rustup.rs/)
+- A GPU supporting Vulkan, Metal, DX12, or WebGPU
 
-### Build and Run
-From the workspace root:
-```sh
-cargo apk run -p helio-android-apk --target aarch64-linux-android
+### Run the examples
+
+```bash
+# Sky atmosphere demo — sun rotation, colored point lights, clouds
+cargo run --example render_v2_sky --release
+
+# Basic scene — geometry, point lights, shadows
+cargo run --example render_v2_basic --release
 ```
-This will build and deploy the APK to a connected Android device or emulator.
 
-**Note:**
-- The Android integration is a stub. See `crates/helio-android/src/lib.rs` and winit's android example for a full event loop and renderer integration.
-- You may need to adjust the Android manifest and icons for your app.
+### Controls (sky example)
+| Key | Action |
+|---|---|
+| `W A S D` | Move forward / left / back / right |
+| `Space` / `Shift` | Move up / down |
+| `Q` / `E` | Rotate sun (time of day) |
+| Mouse drag | Look around (click to grab cursor) |
+| `Escape` | Release cursor |
 
+---
 
-To add a new feature:
+## 🔧 Usage
 
-1. Create `crates/helio-feature-yourfeature/`
-2. Implement the `Feature` trait with proper docs
-3. Add shaders to `shaders/` subdirectory
-4. Implement `cleanup()` for GPU resource management
-5. Add the crate to workspace `Cargo.toml`
-6. Create an example demonstrating your feature
-7. Update this README
+```rust
+use helio_render_v2::{Renderer, RendererConfig, Camera, Scene, SceneLight};
+use helio_render_v2::features::{
+    FeatureRegistry, LightingFeature, ShadowsFeature,
+    BloomFeature, RadianceCascadesFeature,
+};
 
-See existing features for reference implementations.
+// Build the renderer
+let config = RendererConfig::default();
+let mut renderer = Renderer::new(&device, &queue, surface_format, config).await?;
 
-## License
+// Register features
+let mut registry = FeatureRegistry::new();
+registry.add(LightingFeature::new(&device));
+registry.add(ShadowsFeature::new(&device));
+registry.add(RadianceCascadesFeature::new(&device));
+registry.add(BloomFeature::new(&device));
 
-See LICENSE file for details.
+// Describe your scene
+let scene = Scene {
+    lights: vec![
+        SceneLight::directional([0.4, -0.8, 0.4], [1.0, 0.95, 0.8], 3.0),
+    ],
+    sky: Some(SkyAtmosphere::default()),
+    ..Default::default()
+};
+
+// Render loop
+renderer.render(&device, &queue, &surface, &camera, &scene, &registry)?;
+```
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] SSAO
+- [ ] Screen-space reflections
+- [ ] Skeletal animation
+- [ ] Point light shadows
+- [ ] Temporal anti-aliasing (TAA)
+- [ ] WASM / WebGPU target
+
+---
+
+## 📱 Android
+
+```powershell
+$env:ANDROID_HOME = "C:\Users\...\Android\Sdk"
+$env:ANDROID_NDK_ROOT = "$env:ANDROID_HOME\ndk\29.0.14206865"
+cargo apk build -p feature_complete_android --target aarch64-linux-android
+```
+
+---
+
+## 📄 License
+
+[MIT](LICENSE)
+
+---
+
+<div align="center">
+  <sub>Built with ❤️ in Rust · Powered by <a href="https://wgpu.rs/">wgpu</a></sub>
+</div>

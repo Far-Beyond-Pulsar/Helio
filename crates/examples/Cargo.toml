@@ -1,41 +1,23 @@
 [package]
 name = "examples"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [[bin]]
-name = "basic_rendering"
-path = "basic_rendering.rs"
+name = "render_v2_basic"
+path = "render_v2_basic.rs"
 
 [[bin]]
-name = "feature_geometry"
-path = "feature_geometry.rs"
-
-[[bin]]
-name = "feature_with_lighting"
-path = "feature_with_lighting.rs"
-
-[[bin]]
-name = "feature_complete"
-path = "feature_complete.rs"
-
-[[bin]]
-name = "lighting_showcase"
-path = "lighting_showcase.rs"
+name = "render_v2_sky"
+path = "render_v2_sky.rs"
 
 [dependencies]
-helio-core = { path = "../helio-core" }
-helio-render = { path = "../helio-render" }
-helio-features = { path = "../helio-features" }
-helio-feature-base-geometry = { path = "../helio-feature-base-geometry" }
-helio-feature-lighting = { path = "../helio-feature-lighting" }
-helio-feature-materials = { path = "../helio-feature-materials" }
-helio-feature-procedural-shadows = { path = "../helio-feature-procedural-shadows" }
-helio-feature-bloom = { path = "../helio-feature-bloom" }
-helio-feature-billboards = { path = "../helio-feature-billboards" }
-blade-graphics = { workspace = true }
+helio-render-v2 = { path = "../helio-render-v2" }
+image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
+wgpu = {git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8"}
+pollster = "0.3"

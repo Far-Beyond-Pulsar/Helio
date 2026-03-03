@@ -1,17 +1,9 @@
 [workspace]
 members = [
     "crates/helio-core",
-    "crates/helio-render",
-    "crates/helio-lighting",
-    "crates/helio-features",
-    "crates/helio-feature-base-geometry",
-    "crates/helio-feature-lighting",
-    "crates/helio-feature-materials",
-    "crates/helio-feature-procedural-shadows",
-    "crates/helio-feature-bloom",
-    "crates/helio-feature-billboards",
+    "crates/helio-render-v2",
+
     "crates/examples",
-    "crates/feature_complete_android",
 ]
 resolver = "2"
 
