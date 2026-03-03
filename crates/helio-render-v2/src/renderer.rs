@@ -98,21 +98,34 @@ const CSM_SPLITS: [f32; 4] = [8.0, 30.0, 100.0, 500.0];
 
 /// Compute 4 cascaded ortho light-space matrices for a directional light.
 ///
-/// Each matrix is fitted tightly to a slice of the camera frustum so that
-/// shadow resolution is highest near the camera and coverage extends as far
-/// as `CSM_SPLITS[3]` (500 m by default), independent of scene size.
+/// Uses **sphere-fit + texel snapping** — the standard "stable CSM" algorithm
+/// used by UE4, Unity HDRP, and id Tech 7:
 ///
-/// Slots 0-3 in the per-light shadow-matrix block are used for cascades;
-/// slots 4-5 (normally point-light cube faces) are left as identity.
+/// 1. Fit a bounding **sphere** (not AABB) to each camera-frustum slice.
+///    A sphere is rotation-invariant, so the ortho-box dimensions never change
+///    as the camera turns → zero shadow swimming.
+/// 2. **Snap** the light-view origin to shadow-map texel boundaries so the
+///    projected shadow never crawls as the camera translates.
+/// 3. Pull the light camera back by `SCENE_DEPTH` and extend the far plane by
+///    the same amount so off-screen casters (ceilings, terrain…) always cast.
+///
+/// Slots 0-3 hold the four cascade matrices; slots 4-5 are identity (reserved
+/// for point-light cube faces which are not used for directional lights).
 fn compute_directional_cascades(
     cam_pos: Vec3,
     view_proj_inv: Mat4,
     direction: [f32; 3],
 ) -> [Mat4; 4] {
+    /// Maximum world-space distance from any frustum centre that shadow
+    /// casters are guaranteed to be pulled in from.
+    const SCENE_DEPTH: f32 = 2000.0;
+    /// Shadow-atlas resolution per cascade (must match ShadowsFeature atlas_size).
+    const ATLAS_TEXELS: f32 = 1024.0;
+
     let dir = Vec3::from(direction).normalize();
     let up  = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };
 
-    // Un-project 8 NDC corners to world space (wgpu: z in [0=near, 1=far])
+    // Un-project 8 NDC corners to world space (wgpu depth: 0 = near, 1 = far)
     let ndc: [[f32; 4]; 8] = [
         [-1.0,-1.0, 0.0, 1.0], [1.0,-1.0, 0.0, 1.0],
         [-1.0, 1.0, 0.0, 1.0], [1.0, 1.0, 0.0, 1.0],
@@ -123,9 +136,8 @@ fn compute_directional_cascades(
         let v = view_proj_inv * glam::Vec4::from(*c);
         v.xyz() / v.w
     }).collect();
-    // world[0..4] = near corners, world[4..8] = far corners
+    // world[0..4] = near plane corners, world[4..8] = far plane corners
 
-    // Parametrize frustum depth as t ∈ [0, 1] by averaging corner distances
     let near_dist: f32 = world[..4].iter().map(|c| (*c - cam_pos).length()).sum::<f32>() / 4.0;
     let far_dist:  f32 = world[4..].iter().map(|c| (*c - cam_pos).length()).sum::<f32>() / 4.0;
     let depth = (far_dist - near_dist).max(1.0);
@@ -137,40 +149,53 @@ fn compute_directional_cascades(
         let t0 = ((prev_d[i]     - near_dist) / depth).clamp(0.0, 1.0);
         let t1 = ((CSM_SPLITS[i] - near_dist) / depth).clamp(0.0, 1.0);
 
-        // 8 corners of this frustum slice
+        // 8 world-space corners of this frustum slice
         let mut cc = [Vec3::ZERO; 8];
         for j in 0..4 {
             cc[j * 2]     = world[j].lerp(world[j + 4], t0);
             cc[j * 2 + 1] = world[j].lerp(world[j + 4], t1);
         }
 
-        // Centre of the slice → stable light-view pivot
+        // ── Step 1: bounding sphere of the 8 corners ──────────────────────────
+        // Centre = centroid; radius = max distance from centre to any corner.
+        // A sphere is rotation-invariant → ortho extents never change with yaw/pitch.
         let centroid = cc.iter().copied().fold(Vec3::ZERO, |a, b| a + b) / 8.0;
-        let light_view = Mat4::look_at_rh(centroid - dir * 100.0, centroid, up);
+        let radius   = cc.iter().map(|c| (*c - centroid).length()).fold(0.0_f32, f32::max);
+        // Round radius up to the nearest texel to eliminate sub-texel size jitter
+        let texel_size  = (2.0 * radius) / ATLAS_TEXELS;
+        let radius_snap = (radius / texel_size).ceil() * texel_size;
 
-        // Tight AABB of all 8 corners in light view space
-        let mut min_ls = Vec3::splat(f32::MAX);
-        let mut max_ls = Vec3::splat(f32::MIN);
-        for c in &cc {
-            let ls = light_view.transform_point3(*c);
-            min_ls = min_ls.min(ls);
-            max_ls = max_ls.max(ls);
-        }
+        // ── Step 2: texel-snapped light-view origin ────────────────────────────
+        // Project centroid onto the light's view plane (XY), then quantise to
+        // integer texel offsets so the shadow grid never sub-texel-crawls.
+        let light_view_raw = Mat4::look_at_rh(centroid - dir * SCENE_DEPTH, centroid, up);
+        let centroid_ls    = light_view_raw.transform_point3(centroid);
+        let snap           = texel_size;
+        let snapped_x      = (centroid_ls.x / snap).round() * snap;
+        let snapped_y      = (centroid_ls.y / snap).round() * snap;
 
-        // 10 % XY padding avoids hard cascade-edge artefacts
-        let pad = (max_ls.truncate() - min_ls.truncate()) * 0.1;
-        min_ls.x -= pad.x; max_ls.x += pad.x;
-        min_ls.y -= pad.y; max_ls.y += pad.y;
+        // Reconstruct the right/up axes of the light view to apply the snap in world space
+        let right_ws = light_view_raw.row(0).truncate().normalize();
+        let up_ws    = light_view_raw.row(1).truncate().normalize();
+        let snap_offset = right_ws * (snapped_x - centroid_ls.x)
+                        + up_ws   * (snapped_y - centroid_ls.y);
+        let stable_centroid = centroid + snap_offset;
 
-        // RH ortho: objects are at negative Z in view space
-        // orthographic_rh(near, far) where near < far and both positive
-        let near = (-max_ls.z).max(0.01);
-        let far  = -min_ls.z + 200.0; // generous margin for off-frustum casters
+        // Final light view: look from far behind the stable centroid
+        let light_view = Mat4::look_at_rh(
+            stable_centroid - dir * SCENE_DEPTH,
+            stable_centroid,
+            up,
+        );
 
+        // ── Step 3: ortho projection from the sphere radius ────────────────────
+        // Z: near = 0.1 (camera is SCENE_DEPTH behind centroid),
+        //    far  = SCENE_DEPTH * 2 (covers SCENE_DEPTH in front of centroid).
+        // Any caster within SCENE_DEPTH of the scene is guaranteed to cast.
         let proj = Mat4::orthographic_rh(
-            min_ls.x, max_ls.x,
-            min_ls.y, max_ls.y,
-            near, far,
+            -radius_snap, radius_snap,
+            -radius_snap, radius_snap,
+            0.1, SCENE_DEPTH * 2.0,
         );
         matrices[i] = proj * light_view;
     }
