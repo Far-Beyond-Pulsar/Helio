@@ -365,22 +365,41 @@ jobs:
           
           if [ -d "$BIN_DIR" ]; then
             echo "Found release directory: $BIN_DIR"
-            ls -lR "$BIN_DIR" | head -50
-            # Archive example binaries from crates/examples
+            echo "Looking for example binaries..."
+            
+            # Find example binaries (handle both with and without .exe extension)
+            BINARIES=()
+            for pattern in "render_v2_basic" "render_v2_sky"; do
+              if [ -f "$BIN_DIR/$pattern.exe" ]; then
+                BINARIES+=("$pattern.exe")
+              elif [ -f "$BIN_DIR/$pattern" ]; then
+                BINARIES+=("$pattern")
+              fi
+            done
+            
+            if [ ${#BINARIES[@]} -eq 0 ]; then
+              echo "⚠️ No example binaries found!"
+              echo "Available files in $BIN_DIR:"
+              ls -lh "$BIN_DIR" | grep -E "render_v2"
+              exit 1
+            fi
+            
+            echo "Found binaries: ${BINARIES[@]}"
             cd "$BIN_DIR"
-            tar -czf "../../$ARCHIVE_NAME" render_v2_basic render_v2_sky 2>/dev/null || tar -czf "../../$ARCHIVE_NAME" render_v2_basic render_v2_sky.exe 2>/dev/null || true
+            tar -czf "../../../$ARCHIVE_NAME" "${BINARIES[@]}"
             cd - > /dev/null
+            
             if [ -f "$ARCHIVE_NAME" ] && [ -s "$ARCHIVE_NAME" ]; then
-              echo "Created archive: $ARCHIVE_NAME"
+              echo "✅ Created archive: $ARCHIVE_NAME"
               ls -lh "$ARCHIVE_NAME"
               echo "EXAMPLES_ARCHIVE=$ARCHIVE_NAME" >> $GITHUB_ENV
             else
               echo "⚠️ Archive creation failed or is empty"
-              echo "Looking for binaries:"
-              find "$BIN_DIR" -type f \( -name 'render_v2_*' ! -name '*.d' \) | head -20
+              exit 1
             fi
           else
             echo "⚠️ No release directory found at: $BIN_DIR"
+            exit 1
           fi
 
       - name: Upload examples archive
