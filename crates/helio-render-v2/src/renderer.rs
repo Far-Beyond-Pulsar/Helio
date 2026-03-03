@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{GeometryPass, SkyPass};
+use crate::passes::{GeometryPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -371,13 +371,58 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let sky_bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Sky Bind Group"),
-            layout: &resources.bind_group_layouts.sky,
+        // Sky-View LUT: small panoramic Rgba16Float texture the SkyLutPass writes
+        // into every frame. The main SkyPass samples it instead of running the
+        // full atmosphere ray-march per pixel (~46× cheaper at 1280×720).
+        let sky_lut_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label:           Some("Sky View LUT"),
+            size:            wgpu::Extent3d { width: SKY_LUT_W, height: SKY_LUT_H, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count:    1,
+            dimension:       wgpu::TextureDimension::D2,
+            format:          SKY_LUT_FORMAT,
+            usage:           wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats:    &[],
+        });
+        let sky_lut_view = Arc::new(sky_lut_tex.create_view(&wgpu::TextureViewDescriptor::default()));
+        let sky_lut_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label:     Some("Sky LUT Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::Repeat, // wrap azimuth
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        // Uniform-only bind group for the LUT pass (no LUT texture – it produces it)
+        let sky_uniform_bg = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("Sky Uniform Bind Group"),
+            layout:  &resources.bind_group_layouts.sky_uniform,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: sky_uniform_buffer.as_entire_binding() },
             ],
         }));
+
+        // Full sky bind group (uniform + LUT texture + sampler) for the SkyPass
+        let sky_bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:   Some("Sky Bind Group"),
+            layout:  &resources.bind_group_layouts.sky,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: sky_uniform_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&sky_lut_view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&sky_lut_sampler) },
+            ],
+        }));
+
+        // SkyLutPass: renders atmosphere into the small LUT each frame
+        let sky_lut_pass = SkyLutPass::new(
+            &device,
+            &resources.bind_group_layouts.sky_uniform,
+            &resources.bind_group_layouts.global,
+            sky_uniform_bg,
+            sky_lut_view,
+        );
+        graph.add_pass(sky_lut_pass);
 
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Sky Pipeline Layout"),

@@ -18,25 +18,28 @@ use wgpu;
 /// - Group 4: Pass-specific storage (compute) - per-pass
 #[derive(Clone)]
 pub struct BindGroupLayouts {
-    pub global:   Arc<wgpu::BindGroupLayout>,
-    pub material: Arc<wgpu::BindGroupLayout>,
-    pub lighting: Arc<wgpu::BindGroupLayout>,
-    pub textures: Arc<wgpu::BindGroupLayout>,
-    pub storage:  Arc<wgpu::BindGroupLayout>,
-    /// Group 1 for SkyPass: binding 0 = SkyUniform buffer
-    pub sky:      Arc<wgpu::BindGroupLayout>,
+    pub global:      Arc<wgpu::BindGroupLayout>,
+    pub material:    Arc<wgpu::BindGroupLayout>,
+    pub lighting:    Arc<wgpu::BindGroupLayout>,
+    pub textures:    Arc<wgpu::BindGroupLayout>,
+    pub storage:     Arc<wgpu::BindGroupLayout>,
+    /// Group 1 for SkyLutPass: binding 0 = SkyUniform buffer only.
+    pub sky_uniform: Arc<wgpu::BindGroupLayout>,
+    /// Group 1 for SkyPass: binding 0 = SkyUniform, 1 = sky LUT texture, 2 = sampler.
+    pub sky:         Arc<wgpu::BindGroupLayout>,
 }
 
 impl BindGroupLayouts {
     /// Create the standard bind group layouts
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
-            global:   Arc::new(Self::create_global_layout(device)),
-            material: Arc::new(Self::create_material_layout(device)),
-            lighting: Arc::new(Self::create_lighting_layout(device)),
-            textures: Arc::new(Self::create_textures_layout(device)),
-            storage:  Arc::new(Self::create_storage_layout(device)),
-            sky:      Arc::new(Self::create_sky_layout(device)),
+            global:      Arc::new(Self::create_global_layout(device)),
+            material:    Arc::new(Self::create_material_layout(device)),
+            lighting:    Arc::new(Self::create_lighting_layout(device)),
+            textures:    Arc::new(Self::create_textures_layout(device)),
+            storage:     Arc::new(Self::create_storage_layout(device)),
+            sky_uniform: Arc::new(Self::create_sky_uniform_layout(device)),
+            sky:         Arc::new(Self::create_sky_layout(device)),
         }
     }
 
@@ -265,9 +268,10 @@ impl BindGroupLayouts {
     }
 
     /// Group 1 (SkyPass): SkyUniform buffer
-    fn create_sky_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    /// Group 1 for SkyLutPass – uniform only (no LUT texture, since it produces it).
+    fn create_sky_uniform_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Sky Bind Group Layout"),
+            label: Some("Sky Uniform Bind Group Layout"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -277,6 +281,43 @@ impl BindGroupLayouts {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    fn create_sky_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Sky Bind Group Layout"),
+            entries: &[
+                // binding 0: SkyUniforms buffer
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 1: sky-view LUT texture (atmosphere pre-baked into panoramic map)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // binding 2: bilinear sampler for the LUT
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
