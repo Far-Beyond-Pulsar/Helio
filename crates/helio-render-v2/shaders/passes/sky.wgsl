@@ -224,13 +224,18 @@ fn cloud_density(world_p: vec3<f32>) -> f32 {
     let height_frac = (world_p.y - sky.cloud_base) / (sky.cloud_top - sky.cloud_base);
     let vshape = smoothstep(0.0, 0.1, height_frac) * smoothstep(1.0, 0.6, height_frac);
 
-    let wind = vec3<f32>(sky.cloud_wind_x, 0.0, sky.cloud_wind_z) * sky.cloud_speed * sky.time_sky;
-    let sp   = (world_p + wind) * 0.0006;   // scale noise to world
+    // Convert world position to noise space first, then add wind offset directly
+    // in noise space so animation is visible (not diluted by the 0.0006 scale).
+    let sp_base = world_p * 0.0006;
+    let wind_offset = vec3<f32>(sky.cloud_wind_x, 0.0, sky.cloud_wind_z)
+                      * sky.cloud_speed * sky.time_sky;
+    let sp = sp_base + wind_offset;
 
     let base_noise = fbm(sp);
     let detail     = fbm(sp * 3.7 + vec3<f32>(5.2, 1.3, 2.7)) * 0.35;
     let combined   = base_noise + detail;
 
+    // threshold = 1 - coverage; lower coverage → fewer clouds
     let d = max(0.0, combined - (1.0 - sky.cloud_coverage)) * sky.cloud_density;
     return d * vshape;
 }
@@ -267,8 +272,8 @@ fn trace_clouds(ro: vec3<f32>, rd: vec3<f32>, bg_col: vec3<f32>) -> vec3<f32> {
     }
 
     let seg   = min(t1 - t0, 20000.0);  // cap march length
-    let step  = seg / f32(CLOUD_STEPS);
-    var t     = t0 + step * 0.5;
+    let ds    = seg / f32(CLOUD_STEPS);
+    var t     = t0 + ds * 0.5;
     var transmit = 1.0;
     var accum    = vec3<f32>(0.0);
 
@@ -280,26 +285,31 @@ fn trace_clouds(ro: vec3<f32>, rd: vec3<f32>, bg_col: vec3<f32>) -> vec3<f32> {
         let p  = ro + rd * t;
         let dn = cloud_density(p);
         if dn > 0.0 {
-            // Single-scattering approximation: Beer-Lambert + Henyey-Greenstein
-            let sigma = dn * 0.05;
-            let dT    = exp(-sigma * step);
+            // Lower extinction so clouds don't go fully black
+            let sigma = dn * 0.02;
+            let dT    = exp(-sigma * ds);
 
-            // Light march toward sun (cheap: 4 steps)
+            // Light march toward sun — clamp OD so self-shadowing never kills
+            // the cloud entirely (real multiple-scattering approximation)
             var sun_od = 0.0;
-            let sun_step = 500.0 / 4.0;
+            let sun_ds = 300.0 / 4.0;
             for (var j = 0u; j < 4u; j++) {
-                let sp = p + sky.sun_direction * (sun_step * (f32(j) + 0.5));
-                sun_od += cloud_density(sp) * 0.05 * sun_step;
+                let sp = p + sky.sun_direction * (sun_ds * (f32(j) + 0.5));
+                sun_od += cloud_density(sp) * 0.02 * sun_ds;
             }
-            let sun_transmit = exp(-sun_od);
+            // Clamp to 2.5 so shadowed areas keep a floor (~8% transmittance)
+            let sun_transmit = exp(-min(sun_od, 2.5));
 
             let phase = phase_mie(dot(rd, sky.sun_direction), 0.6);
-            let lit   = cloud_col * sky.sun_intensity * sun_transmit * phase * 0.15;
+            let direct  = cloud_col * sky.sun_intensity * sun_transmit * phase * 0.3;
+            // Sky ambient scatter — keeps cloud undersides bright
+            let ambient = bg_col * 0.25;
+            let lit = direct + ambient;
 
             accum    += transmit * (1.0 - dT) * lit;
             transmit *= dT;
         }
-        t += step;
+        t += ds;
     }
 
     return bg_col * transmit + accum;
@@ -336,25 +346,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let earth_hit = ray_sphere(cam_atm, ray_dir, sky.earth_radius);
     if earth_hit.x > 0.0 && ray_dir.y < 0.0 {
         let ground = vec3<f32>(0.12, 0.10, 0.09);
-        return vec4<f32>(aces_approx(ground * sky.exposure), 1.0);
+        // Ground colour is just the base colour dimmed by sun elevation
+        let sun_elev = sky.sun_direction.y;
+        let ground_lit = ground * max(sun_elev, 0.0) * sky.sun_intensity * 0.02;
+        return vec4<f32>(aces_approx(ground_lit * sky.exposure), 1.0);
     }
 
     // Atmosphere
     var sky_col = atmosphere(cam_atm, ray_dir);
 
-    // Sun disc
+    // Sun disc — add on top of scattered light
     let cos_a = dot(ray_dir, sky.sun_direction);
     if cos_a > sky.sun_disk_cos {
         let t = smoothstep(sky.sun_disk_cos, sky.sun_disk_cos + 0.0002, cos_a);
-        sky_col += t * vec3<f32>(1.5, 1.3, 0.9) * sky.sun_intensity * 0.1;
+        sky_col += t * vec3<f32>(1.5, 1.3, 0.9) * sky.sun_intensity * 0.08;
     }
 
     // Volumetric clouds (composited over atmosphere)
     sky_col = trace_clouds(camera.position, ray_dir, sky_col);
 
-    // Tone map and gamma-correct
-    var final_col = aces_approx(sky_col * sky.exposure);
-    final_col = pow(final_col, vec3<f32>(1.0 / 2.2));
+    // Tone map — sRGB surface handles gamma, do NOT apply manual pow(1/2.2) here
+    let final_col = aces_approx(sky_col * sky.exposure);
 
     return vec4<f32>(final_col, 1.0);
 }

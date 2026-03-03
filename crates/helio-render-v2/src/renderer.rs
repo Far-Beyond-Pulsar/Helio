@@ -678,7 +678,8 @@ impl Renderer {
         }
 
         // Store scene ambient + sky for globals upload in render()
-        self.scene_ambient_color = scene.ambient_color;
+        // Start from scene's own settings, then optionally blend in sky
+        self.scene_ambient_color    = scene.ambient_color;
         self.scene_ambient_intensity = scene.ambient_intensity;
         self.scene_light_count = count as u32;
         self.scene_sky_color = scene.sky_color;
@@ -723,15 +724,21 @@ impl Renderer {
             };
             self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&sky_uni));
 
-            // Inject sky-based ambient when a Skylight is present
+            // Inject sky-based ambient when a Skylight is present.
+            // RC cascades already handle most indirect diffuse; skylight should
+            // act as a subtle fill/tint (0.06 scale keeps it from overpowering
+            // direct lights and avoids double-counting with RC GI).
             if let Some(skylight) = &scene.skylight {
-                let sun_elev = sun_dir[1].clamp(-1.0, 1.0); // y component = elevation
-                let sky_ambient = estimate_sky_ambient(sun_elev, &atm.rayleigh_scatter);
-                let tint = skylight.color_tint;
+                let sun_elev = sun_dir[1].clamp(-1.0, 1.0);
+                let sky_amb  = estimate_sky_ambient(sun_elev, &atm.rayleigh_scatter);
+                let tint     = skylight.color_tint;
+                // 0.06 = empirical scale: visible tint without washing out lights/GI
+                let si = skylight.intensity * 0.06;
+                let base_i = scene.ambient_intensity;
                 self.scene_ambient_color = [
-                    sky_ambient[0] * tint[0] * skylight.intensity,
-                    sky_ambient[1] * tint[1] * skylight.intensity,
-                    sky_ambient[2] * tint[2] * skylight.intensity,
+                    scene.ambient_color[0] * base_i + sky_amb[0] * tint[0] * si,
+                    scene.ambient_color[1] * base_i + sky_amb[1] * tint[1] * si,
+                    scene.ambient_color[2] * base_i + sky_amb[2] * tint[2] * si,
                 ];
                 self.scene_ambient_intensity = 1.0;
             }

@@ -26,11 +26,11 @@ pub struct VolumetricClouds {
 impl Default for VolumetricClouds {
     fn default() -> Self {
         Self {
-            coverage: 0.45,
-            density: 0.8,
+            coverage: 0.30,
+            density: 0.7,
             base_height: 800.0,
             top_height: 1800.0,
-            wind_speed: 0.3,
+            wind_speed: 0.08,
             wind_direction: [1.0, 0.0],
         }
     }
@@ -98,7 +98,7 @@ impl Default for SkyAtmosphere {
             sun_disk_angle: 0.0045,
             earth_radius: 6360.0,
             atm_radius: 6420.0,
-            exposure: 10.0,
+            exposure: 4.0,
             clouds: None,
         }
     }

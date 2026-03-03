@@ -181,8 +181,8 @@ impl ApplicationHandler for App {
             keys:      HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            // Start at a nice afternoon angle (~45° elevation)
-            sun_angle: -0.8,
+            // Start at a nice afternoon angle (sun ~50° above horizon)
+            sun_angle: 1.0,
         });
     }
 
@@ -338,14 +338,15 @@ impl AppState {
             .with_sky_atmosphere(
                 SkyAtmosphere::new()
                     .with_sun_intensity(22.0)
-                    .with_exposure(10.0)
+                    // exposure=4: calibrated for sRGB surface without manual gamma
+                    .with_exposure(4.0)
                     .with_mie_g(0.76)
                     .with_clouds(
                         VolumetricClouds::new()
-                            .with_coverage(0.45)
-                            .with_density(0.8)
+                            .with_coverage(0.30)   // ~30% sky coverage
+                            .with_density(0.7)
                             .with_layer(800.0, 1800.0)
-                            .with_wind([1.0, 0.0], 0.3),
+                            .with_wind([1.0, 0.0], 0.08), // noise-space units/sec
                     ),
             )
             .with_skylight(
