@@ -7,6 +7,10 @@ edition = "2021"
 name = "render_v2_basic"
 path = "render_v2_basic.rs"
 
+[[bin]]
+name = "render_v2_sky"
+path = "render_v2_sky.rs"
+
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }
 image = { version = "0.25", default-features = false, features = ["png"] }
