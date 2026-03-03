@@ -461,6 +461,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+    // ── Sky occlusion: find first directional light, sample its cascade shadow ─
+    // Ambient (skylight) comes from the open sky. If a fragment is occluded from
+    // the sun's direction it is also occluded from the sky, so we modulate the
+    // ambient by the directional shadow factor. Soft PCF makes this a smooth fade.
+    var sky_occlusion = 1.0;
+    if ENABLE_SHADOWS && ENABLE_LIGHTING {
+        for (var i = 0u; i < globals.light_count; i++) {
+            if lights[i].light_type < 0.5 {
+                sky_occlusion = shadow_factor(i, input.world_position, N);
+                break;
+            }
+        }
+    }
+
     // ── Indirect diffuse: Radiance Cascades GI ────────────────────────────────
     let rc_irr    = sample_rc_irradiance(input.world_position, N);
     let F_ibl     = fresnel_schlick_roughness(NdV, F0, roughness);
@@ -477,10 +491,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let specular_indirect = F_ibl * env_sample * spec_scale;
 
     // ── Ambient fallback (active when neither lights nor RC are providing) ─────
-    let ambient_fallback = globals.ambient_color.rgb * globals.ambient_intensity * albedo;
+    // Modulated by sky_occlusion: surfaces under roofs/geometry don't receive
+    // the full sky ambient, matching the directional light's shadow coverage.
+    let ambient_fallback = globals.ambient_color.rgb * globals.ambient_intensity * albedo * sky_occlusion;
 
     // ── Combine: direct + indirect (AO applied to indirect only) ─────────────
-    let indirect = (diffuse_indirect + specular_indirect + ambient_fallback) * ao;
+    let indirect = (diffuse_indirect * sky_occlusion + specular_indirect + ambient_fallback) * ao;
     var color    = Lo + indirect;
 
     // ── Emissive ──────────────────────────────────────────────────────────────
