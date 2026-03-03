@@ -2,16 +2,24 @@
 
 use crate::features::{BillboardInstance, LightType};
 use crate::mesh::GpuMesh;
+use crate::material::GpuMaterial;
+use std::sync::Arc;
 
 /// A single renderable object in the scene
 #[derive(Clone)]
 pub struct SceneObject {
     pub mesh: GpuMesh,
+    /// Per-object material.  `None` → renderer uses its built-in default white material.
+    pub material: Option<Arc<wgpu::BindGroup>>,
 }
 
 impl SceneObject {
     pub fn new(mesh: GpuMesh) -> Self {
-        Self { mesh }
+        Self { mesh, material: None }
+    }
+
+    pub fn with_material(mesh: GpuMesh, material: GpuMaterial) -> Self {
+        Self { mesh, material: Some(material.bind_group) }
     }
 }
 
@@ -83,6 +91,12 @@ impl Scene {
 
     pub fn add_object(mut self, mesh: GpuMesh) -> Self {
         self.objects.push(SceneObject::new(mesh));
+        self
+    }
+
+    /// Add an object with a custom PBR material.
+    pub fn add_object_with_material(mut self, mesh: GpuMesh, material: GpuMaterial) -> Self {
+        self.objects.push(SceneObject::with_material(mesh, material));
         self
     }
 

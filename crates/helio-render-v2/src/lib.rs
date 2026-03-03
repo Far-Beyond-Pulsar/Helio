@@ -18,6 +18,7 @@ pub mod passes;
 pub mod shaders;
 pub mod mesh;
 pub mod scene;
+pub mod material;
 
 mod renderer;
 mod camera;
@@ -26,6 +27,7 @@ pub use renderer::{Renderer, RendererConfig};
 pub use camera::Camera;
 pub use mesh::{GpuMesh, PackedVertex, DrawCall};
 pub use scene::{Scene, SceneObject, SceneLight};
+pub use material::{Material, GpuMaterial, TextureData};
 
 /// Result type for renderer operations
 pub type Result<T> = std::result::Result<T, Error>;

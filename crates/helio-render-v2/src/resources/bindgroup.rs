@@ -18,22 +18,22 @@ use wgpu;
 /// - Group 4: Pass-specific storage (compute) - per-pass
 #[derive(Clone)]
 pub struct BindGroupLayouts {
-    pub global: Arc<wgpu::BindGroupLayout>,
+    pub global:   Arc<wgpu::BindGroupLayout>,
     pub material: Arc<wgpu::BindGroupLayout>,
     pub lighting: Arc<wgpu::BindGroupLayout>,
     pub textures: Arc<wgpu::BindGroupLayout>,
-    pub storage: Arc<wgpu::BindGroupLayout>,
+    pub storage:  Arc<wgpu::BindGroupLayout>,
 }
 
 impl BindGroupLayouts {
     /// Create the standard bind group layouts
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
-            global: Arc::new(Self::create_global_layout(device)),
+            global:   Arc::new(Self::create_global_layout(device)),
             material: Arc::new(Self::create_material_layout(device)),
             lighting: Arc::new(Self::create_lighting_layout(device)),
             textures: Arc::new(Self::create_textures_layout(device)),
-            storage: Arc::new(Self::create_storage_layout(device)),
+            storage:  Arc::new(Self::create_storage_layout(device)),
         }
     }
 
@@ -115,6 +115,28 @@ impl BindGroupLayouts {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Binding 4: ORM texture (R=occlusion, G=roughness, B=metallic)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Binding 5: Emissive texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],

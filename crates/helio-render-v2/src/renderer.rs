@@ -10,6 +10,7 @@ use crate::camera::Camera;
 use crate::scene::Scene;
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
+use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
 use crate::Result;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use wgpu::util::DeviceExt;
@@ -35,17 +36,6 @@ struct GlobalsUniform {
     ambient_color: [f32; 4],  // w unused, ensures alignment
     rc_world_min: [f32; 4],   // xyz = RC probe grid world AABB min, w unused
     rc_world_max: [f32; 4],   // xyz = RC probe grid world AABB max, w unused
-}
-
-/// Material uniform data – must match WGSL Material struct (32 bytes)
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct MaterialUniform {
-    base_color: [f32; 4],
-    metallic: f32,
-    roughness: f32,
-    emissive: f32,
-    ao: f32,
 }
 
 /// GPU shadow light-space matrix (must match WGSL LightMatrix struct = 64 bytes)
@@ -125,6 +115,9 @@ pub struct Renderer {
     global_bind_group: wgpu::BindGroup,
     lighting_bind_group: Arc<wgpu::BindGroup>,
     default_material_bind_group: Arc<wgpu::BindGroup>,
+
+    // Default 1×1 texture views + sampler shared by all materials
+    default_material_views: DefaultMaterialViews,
 
     // Draw list (shared with GeometryPass)
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
@@ -237,62 +230,13 @@ impl Renderer {
              ctx.rc_cascade0_view, ctx.rc_world_bounds)
         };
 
-        // ── Default 1×1 textures ──────────────────────────────────────────────
-
-        // White base-color texture
-        let white_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Default White Texture"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &white_tex, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
-            },
-            &[255u8, 255, 255, 255],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        );
-        let white_view = white_tex.create_view(&Default::default());
-
-        // Flat normal map (0.5, 0.5, 1.0)
-        let normal_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Default Flat Normal"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1, sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &normal_tex, mip_level: 0,
-                origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
-            },
-            &[128u8, 128, 255, 255],
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        );
-        let normal_view = normal_tex.create_view(&Default::default());
-
-        let default_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Default Sampler"),
-            address_mode_u: wgpu::AddressMode::Repeat,
-            address_mode_v: wgpu::AddressMode::Repeat,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
+        // ── Default material views (shared by create_material + default material) ──
+        let default_material_views = DefaultMaterialViews::new(&device, &queue);
 
         let mat_uniform = MaterialUniform {
             base_color: [1.0, 1.0, 1.0, 1.0],
-            metallic: 0.0, roughness: 0.6, emissive: 0.0, ao: 1.0,
+            metallic: 0.0, roughness: 0.5, emissive_factor: 0.0, ao: 1.0,
+            emissive_color: [0.0; 3], _pad: 0.0,
         };
         let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Default Material Uniform"),
@@ -305,9 +249,11 @@ impl Renderer {
             layout: &resources.bind_group_layouts.material,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: material_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&white_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&normal_view) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&default_sampler) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&default_material_views.white_srgb) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&default_material_views.flat_normal) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&default_material_views.sampler) },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&default_material_views.white_orm) },
+                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&default_material_views.black_emissive) },
             ],
         }));
 
@@ -434,10 +380,25 @@ impl Renderer {
             rc_world_max,
             depth_texture,
             depth_view,
+            default_material_views,
             frame_count: 0,
             width: config.width,
             height: config.height,
         })
+    }
+
+    // ── Material creation ─────────────────────────────────────────────────────
+
+    /// Upload a [`Material`] to the GPU and return a [`GpuMaterial`] ready for use in
+    /// [`Scene::add_object_with_material`] or [`Renderer::draw_mesh_with_material`].
+    pub fn create_material(&self, mat: &Material) -> GpuMaterial {
+        build_gpu_material(
+            &self.device,
+            &self.queue,
+            &self.resources.bind_group_layouts.material,
+            mat,
+            &self.default_material_views,
+        )
     }
 
     // ── Draw submission ───────────────────────────────────────────────────────
@@ -530,7 +491,10 @@ impl Renderer {
     pub fn render_scene(&mut self, scene: &Scene, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         // Queue draw calls for all objects
         for obj in &scene.objects {
-            self.draw_mesh(&obj.mesh);
+            match &obj.material {
+                Some(mat_bg) => self.draw_mesh_with_material(&obj.mesh, mat_bg.clone()),
+                None => self.draw_mesh(&obj.mesh),
+            }
         }
 
         // Upload scene lights to GPU buffer

@@ -1,4 +1,4 @@
-//! Main geometry pass shader
+//! Main geometry pass shader – Cook-Torrance GGX PBR
 //!
 //! Feature override constants (injected by PipelineCache before the source):
 //!
@@ -26,86 +26,79 @@ struct Globals {
     light_count: u32,
     ambient_intensity: f32,
     ambient_color: vec4<f32>,
-    rc_world_min: vec4<f32>,  // xyz = RC probe grid world AABB min
-    rc_world_max: vec4<f32>,  // xyz = RC probe grid world AABB max
+    rc_world_min: vec4<f32>,
+    rc_world_max: vec4<f32>,
 }
 
+// Material uniform – must match material::MaterialUniform (48 bytes).
 struct Material {
-    base_color: vec4<f32>,
-    metallic: f32,
-    roughness: f32,
-    emissive: f32,
-    ao: f32,
+    base_color:      vec4<f32>,   // offset  0
+    metallic:        f32,          // offset 16
+    roughness:       f32,          // offset 20
+    emissive_factor: f32,          // offset 24
+    ao:              f32,          // offset 28
+    emissive_color:  vec3<f32>,   // offset 32  (alignment 16 — ok)
+    _pad:            f32,          // offset 44
 }
 
-@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(0) var<uniform> camera:  Camera;
 @group(0) @binding(1) var<uniform> globals: Globals;
 
-@group(1) @binding(0) var<uniform> material: Material;
+@group(1) @binding(0) var<uniform> material:          Material;
 @group(1) @binding(1) var base_color_texture: texture_2d<f32>;
-@group(1) @binding(2) var normal_map: texture_2d<f32>;
-@group(1) @binding(3) var material_sampler: sampler;
+@group(1) @binding(2) var normal_map:         texture_2d<f32>;
+@group(1) @binding(3) var material_sampler:   sampler;
+@group(1) @binding(4) var orm_texture:        texture_2d<f32>; // R=AO, G=roughness, B=metallic
+@group(1) @binding(5) var emissive_texture:   texture_2d<f32>;
 
 // ============================================================================
 // Vertex Input/Output
 // ============================================================================
 
 struct Vertex {
-    @location(0) position: vec3<f32>,
+    @location(0) position:       vec3<f32>,
     @location(1) bitangent_sign: f32,
-    @location(2) tex_coords: vec2<f32>,
-    @location(3) normal: u32,      // Packed as SNORM8x4
-    @location(4) tangent: u32,     // Packed as SNORM8x4
+    @location(2) tex_coords:     vec2<f32>,
+    @location(3) normal:         u32,   // Packed SNORM8x4
+    @location(4) tangent:        u32,   // Packed SNORM8x4 (kept for buffer compat, TBN computed via derivatives)
 }
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_position: vec3<f32>,
-    @location(1) world_normal: vec3<f32>,
-    @location(2) tex_coords: vec2<f32>,
+    @location(1) world_normal:   vec3<f32>,
+    @location(2) tex_coords:     vec2<f32>,
 }
 
 // ============================================================================
 // Vertex Shader
 // ============================================================================
 
-fn decode_normal(packed: u32) -> vec3<f32> {
+fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
 @vertex
 fn vs_main(vertex: Vertex) -> VertexOutput {
-    var output: VertexOutput;
-
-    // Transform position to clip space
-    let world_pos = vec4<f32>(vertex.position, 1.0);
-    output.clip_position = camera.view_proj * world_pos;
-    output.world_position = vertex.position;
-
-    // Decode and transform normal
-    let normal = decode_normal(vertex.normal);
-    output.world_normal = normalize(normal);
-
-    output.tex_coords = vertex.tex_coords;
-
-    return output;
+    var out: VertexOutput;
+    out.clip_position  = camera.view_proj * vec4<f32>(vertex.position, 1.0);
+    out.world_position = vertex.position;
+    out.world_normal   = normalize(decode_snorm8x4(vertex.normal));
+    out.tex_coords     = vertex.tex_coords;
+    return out;
 }
 
 // ============================================================================
-// Fragment Shader
+// Lighting helpers
 // ============================================================================
 
 const PI: f32 = 3.14159265359;
 
-fn saturate_f(x: f32) -> f32 {
-    return clamp(x, 0.0, 1.0);
-}
+fn saturate_f(x: f32) -> f32 { return clamp(x, 0.0, 1.0); }
 
 fn luminance(color: vec3<f32>) -> f32 {
     return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
-
-// ── Lighting helpers ────────────────────────────────────────────────────────
 
 struct GpuLight {
     position:    vec3<f32>,
@@ -119,17 +112,18 @@ struct GpuLight {
     _pad:        vec2<f32>,
 }
 
-@group(2) @binding(0) var<storage, read> lights:        array<GpuLight>;
+@group(2) @binding(0) var<storage, read> lights:          array<GpuLight>;
 @group(2) @binding(1) var shadow_atlas:   texture_depth_2d_array;
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
-
-// Binding 3: env_cube (IBL, declared in layout but not used here)
+@group(2) @binding(3) var env_cube:       texture_cube<f32>;
 
 struct LightMatrix { mat: mat4x4<f32> }
 @group(2) @binding(4) var<storage, read> shadow_matrices: array<LightMatrix>;
 @group(2) @binding(5) var rc_cascade0: texture_2d<f32>;
 
-// ── Shadow helpers ───────────────────────────────────────────────────────────
+// ============================================================================
+// Shadow helpers (unchanged from original)
+// ============================================================================
 
 const ATLAS_SIZE: f32 = 512.0;
 
@@ -152,55 +146,40 @@ var<private> POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
     vec2<f32>( 0.14383161, -0.14100790),
 );
 
-/// Select a cube face index (0-5 = +X,-X,+Y,-Y,+Z,-Z) from a direction vector.
 fn point_light_face(dir: vec3<f32>) -> u32 {
     let a = abs(dir);
     if a.x >= a.y && a.x >= a.z {
-        return select(0u, 1u, dir.x < 0.0); // +X=0, -X=1
+        return select(0u, 1u, dir.x < 0.0);
     } else if a.y >= a.x && a.y >= a.z {
-        return select(2u, 3u, dir.y < 0.0); // +Y=2, -Y=3
+        return select(2u, 3u, dir.y < 0.0);
     } else {
-        return select(4u, 5u, dir.z < 0.0); // +Z=4, -Z=5
+        return select(4u, 5u, dir.z < 0.0);
     }
 }
 
-/// PCF shadow factor for the given light.
-/// Returns 1.0 (fully lit) … 0.0 (fully shadowed), with soft Poisson-disk filtering.
 fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32 {
-    if !ENABLE_SHADOWS {
-        return 1.0;
-    }
+    if !ENABLE_SHADOWS { return 1.0; }
 
     let light = lights[light_idx];
-
-    // Select atlas layer: point lights use the face matching dominant axis;
-    // directional/spot always use face 0.
     var layer: u32;
     if light.light_type > 0.5 && light.light_type < 1.5 {
-        // Point light — pick face from world-space direction to fragment
         let to_frag = world_pos - light.position;
         layer = light_idx * 6u + point_light_face(to_frag);
     } else {
-        layer = light_idx * 6u; // face 0
+        layer = light_idx * 6u;
     }
 
     let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
-    // Reject geometry behind the light clip plane
-    if light_clip.w <= 0.0 {
-        return 1.0;
-    }
+    if light_clip.w <= 0.0 { return 1.0; }
 
-    let ndc = light_clip.xyz / light_clip.w;
-    // wgpu/Vulkan NDC: Y=-1 is top of screen, texture V=0 is top → flip Y
+    let ndc       = light_clip.xyz / light_clip.w;
     let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
 
-    // Reject out-of-frustum fragments
     if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))
        || ndc.z < 0.0 || ndc.z > 1.0 {
         return 1.0;
     }
 
-    // Normal-based slope bias: less bias when light hits head-on, more at grazing
     var L_dir: vec3<f32>;
     if light.light_type < 0.5 {
         L_dir = normalize(-light.direction);
@@ -211,9 +190,6 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
     let slope_bias = mix(0.001, 0.0001, n_dot_l);
     let depth      = ndc.z - slope_bias;
 
-    // 16-tap Poisson disk PCF
-    // textureSampleCompareLevel with LessEqual returns 1.0 when fragment is lit
-    // (stored_depth >= frag_depth → not occluded), 0.0 when in shadow
     let filter_radius = 2.0 / ATLAS_SIZE;
     var lit_sum = 0.0;
     for (var i = 0; i < 16; i++) {
@@ -225,53 +201,104 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
             depth,
         );
     }
-    // lit_sum/16 = fraction of samples that pass (1.0=fully lit, 0.0=fully shadowed)
     return lit_sum / 16.0;
 }
 
-// Evaluate one light's contribution (Blinn-Phong: diffuse + specular + shadow).
-fn eval_light(light_idx: u32, light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
+// ============================================================================
+// Cook-Torrance GGX PBR BRDF
+// ============================================================================
+
+// GGX normal distribution function
+fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
+    let a    = roughness * roughness;
+    let a2   = a * a;
+    let NdH  = max(dot(N, H), 0.0);
+    let NdH2 = NdH * NdH;
+    let denom = NdH2 * (a2 - 1.0) + 1.0;
+    return a2 / (PI * denom * denom + 0.0001);
+}
+
+// Schlick-GGX geometry term (single direction)
+fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 {
+    let r = roughness + 1.0;
+    let k = (r * r) / 8.0;
+    return NdotV / (NdotV * (1.0 - k) + k + 0.0001);
+}
+
+// Smith combined geometry
+fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 {
+    let NdV = max(dot(N, V), 0.0);
+    let NdL = max(dot(N, L), 0.0);
+    return geometry_schlick_ggx(NdV, roughness) * geometry_schlick_ggx(NdL, roughness);
+}
+
+// Fresnel-Schlick
+fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
+    return F0 + (1.0 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+// Fresnel-Schlick with roughness (IBL)
+fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let one_minus_r = vec3<f32>(1.0 - roughness);
+    return F0 + (max(one_minus_r, F0) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+// Evaluate one light using the full Cook-Torrance BRDF + PCF shadows
+fn pbr_direct_light(
+    light_idx: u32,
+    light:     GpuLight,
+    world_pos: vec3<f32>,
+    N:         vec3<f32>,
+    V:         vec3<f32>,
+    F0:        vec3<f32>,
+    albedo:    vec3<f32>,
+    roughness: f32,
+    metallic:  f32,
+) -> vec3<f32> {
     var L: vec3<f32>;
-    var attenuation: f32 = 1.0;
+    var radiance: vec3<f32>;
 
     if light.light_type < 0.5 {
-        // Directional
-        L = normalize(-light.direction);
+        L        = normalize(-light.direction);
+        radiance = light.color * light.intensity;
     } else {
-        // Point or spot — smooth quadratic falloff that reaches 0 at range
         let to_light = light.position - world_pos;
         let dist     = length(to_light);
         if dist > light.range { return vec3<f32>(0.0); }
-        L            = to_light / dist;
+        L = to_light / dist;
         let ratio    = dist / light.range;
         let falloff  = max(0.0, 1.0 - ratio * ratio);
-        attenuation  = falloff * falloff;  // smooth, no rescaling — intensity controls brightness
-
+        var atten    = falloff * falloff;
         if light.light_type > 1.5 {
-            // Spot cone
-            let cos_angle = dot(-L, normalize(light.direction));
-            let spot      = smoothstep(cos(light.outer_angle), cos(light.inner_angle), cos_angle);
-            attenuation  *= spot;
+            let cos_a = dot(-L, normalize(light.direction));
+            atten    *= smoothstep(cos(light.outer_angle), cos(light.inner_angle), cos_a);
         }
+        radiance = light.color * light.intensity * atten;
     }
 
-    let ndotl   = max(dot(normal, L), 0.0);
-    let sf      = shadow_factor(light_idx, world_pos, normal);
+    let NdL = max(dot(N, L), 0.0);
+    if NdL == 0.0 { return vec3<f32>(0.0); }
 
-    // Blinn-Phong specular
-    let half_v  = normalize(L + view_dir);
-    let spec    = pow(max(dot(normal, half_v), 0.0), 32.0) * 0.3;
+    let H   = normalize(V + L);
+    let D   = distribution_ggx(N, H, roughness);
+    let G   = geometry_smith(N, V, L, roughness);
+    let F   = fresnel_schlick(max(dot(H, V), 0.0), F0);
 
-    let lit     = light.color * light.intensity * attenuation * sf;
-    return lit * (ndotl + spec);
+    let kS      = F;
+    let kD      = (1.0 - kS) * (1.0 - metallic);
+    let specular = D * G * F / (4.0 * max(dot(N, V), 0.0) * NdL + 0.0001);
+
+    let sf = shadow_factor(light_idx, world_pos, N);
+    return (kD * albedo / PI + specular) * radiance * NdL * sf;
 }
 
-// ── Radiance Cascades GI ─────────────────────────────────────────────────────
+// ============================================================================
+// Radiance Cascades GI (unchanged)
+// ============================================================================
 
-const RC_PROBE_DIM: u32 = 16u;  // cascade 0 probe grid dimension (matches radiance_cascades.rs)
-const RC_DIR_DIM:   u32 = 4u;   // cascade 0 direction bins per axis (4x4 = 16 bins)
+const RC_PROBE_DIM: u32 = 16u;
+const RC_DIR_DIM:   u32 = 4u;
 
-// Y-up octahedral decode (Y is the pole — matches rc_trace.wgsl)
 fn rc_oct_decode(uv: vec2<f32>) -> vec3<f32> {
     let f  = uv * 2.0 - 1.0;
     let af = abs(f);
@@ -287,7 +314,6 @@ fn rc_oct_decode(uv: vec2<f32>) -> vec3<f32> {
     return normalize(n);
 }
 
-// Cosine-weighted irradiance integral over all RC_DIR_DIM² bins for one probe corner.
 fn rc_corner_irradiance(px: u32, py: u32, pz: u32, normal: vec3<f32>) -> vec3<f32> {
     let dim = RC_PROBE_DIM - 1u;
     let cpx = min(px, dim); let cpy = min(py, dim); let cpz = min(pz, dim);
@@ -317,8 +343,6 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
         return vec3<f32>(0.0);
     }
-
-    // Floating-point probe coordinate (probe center = 0.5 offset)
     let cell_size   = world_size / f32(RC_PROBE_DIM);
     let probe_f     = (world_pos - world_min) / cell_size - 0.5;
     let probe_dim_f = f32(RC_PROBE_DIM) - 1.0;
@@ -326,14 +350,13 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let pi  = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
     let frc = fract(pf);
 
-    // Trilinear interpolation of cosine-weighted irradiance at 8 surrounding probes
-    let c000 = rc_corner_irradiance(pi.x,      pi.y,      pi.z     , normal);
+    let c000 = rc_corner_irradiance(pi.x,      pi.y,      pi.z,      normal);
     let c001 = rc_corner_irradiance(pi.x,      pi.y,      pi.z + 1u, normal);
-    let c010 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z     , normal);
+    let c010 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z,      normal);
     let c011 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z + 1u, normal);
-    let c100 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z     , normal);
+    let c100 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z,      normal);
     let c101 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z + 1u, normal);
-    let c110 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z     , normal);
+    let c110 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z,      normal);
     let c111 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z + 1u, normal);
 
     let c00 = mix(c000, c001, frc.z);
@@ -345,50 +368,101 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return mix(c0, c1, frc.x);
 }
 
-// Accumulate all active lights
-fn calculate_lighting(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>, view_dir: vec3<f32>) -> vec3<f32> {
-    // Radiance Cascades handles ALL lighting (direct + indirect via ray tracing)
-    let rc_irradiance = sample_rc_irradiance(world_pos, normal);
-    return rc_irradiance * base_color;
-}
-
-// ── Bloom helper ─────────────────────────────────────────────────────────────
+// ============================================================================
+// Bloom helper (unchanged)
+// ============================================================================
 
 fn apply_bloom(color: vec3<f32>) -> vec3<f32> {
-    if !ENABLE_BLOOM {
-        return color;
-    }
+    if !ENABLE_BLOOM { return color; }
     let lum    = luminance(color);
     let excess = max(lum - BLOOM_THRESHOLD, 0.0);
     return color + color * (excess * BLOOM_INTENSITY);
 }
 
-// ── Procedural helpers ────────────────────────────────────────────────────────
-
-fn checkerboard(uv: vec2<f32>, scale: f32) -> f32 {
-    let f = floor(uv * scale);
-    return fract((f.x + f.y) * 0.5) * 2.0;
-}
-
-// ── Fragment entry ────────────────────────────────────────────────────────────
+// ============================================================================
+// Fragment entry
+// ============================================================================
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    // Procedural checkerboard mixed with material base color
-    let checker    = checkerboard(input.tex_coords, 8.0);
-    let dark       = vec3<f32>(0.25, 0.25, 0.28);
-    let light_col  = vec3<f32>(0.85, 0.85, 0.82);
-    let proc_color = mix(dark, light_col, checker);
-    let base_color = material.base_color.rgb * proc_color;
+    let uv = input.tex_coords;
 
-    let view_dir = normalize(camera.position - input.world_position);
-    var color = calculate_lighting(input.world_position, input.world_normal, base_color, view_dir);
+    // ── Base color ────────────────────────────────────────────────────────────
+    let tex_sample = textureSample(base_color_texture, material_sampler, uv);
+    let albedo     = material.base_color.rgb * tex_sample.rgb;
+    let alpha      = material.base_color.a  * tex_sample.a;
 
-    // Emissive
-    color += base_color * material.emissive;
+    // ── Normal mapping – derivative-based TBN (Schuler/ShaderX5, used by Three.js) ──
+    // Reconstructs the tangent frame entirely from screen-space position + UV
+    // derivatives, so it is ALWAYS correct regardless of vertex tangent quality.
+    let N_geom = normalize(input.world_normal);
+    let q0     = dpdx(input.world_position);
+    let q1     = dpdy(input.world_position);
+    let st0    = dpdx(uv);
+    let st1    = dpdy(uv);
+    let q1perp = cross(q1, N_geom);
+    let q0perp = cross(N_geom, q0);
+    let T_deriv = q1perp * st0.x + q0perp * st1.x;
+    let B_deriv = q1perp * st0.y + q0perp * st1.y;
+    let det     = max(dot(T_deriv, T_deriv), dot(B_deriv, B_deriv));
+    let scale   = select(0.0, inverseSqrt(det), det > 1e-10);
+    let norm_ts = textureSample(normal_map, material_sampler, uv).rgb * 2.0 - 1.0;
+    let N       = normalize(
+        T_deriv * (norm_ts.x * scale) +
+        B_deriv * (norm_ts.y * scale) +
+        N_geom  *  norm_ts.z
+    );
 
-    // Bloom (branch eliminated at compile time when disabled)
+    // ── ORM texture (R=AO, G=roughness, B=metallic) ──────────────────────────
+    let orm      = textureSample(orm_texture, material_sampler, uv).rgb;
+    let ao       = material.ao       * orm.r;
+    let roughness = clamp(material.roughness * orm.g, 0.04, 1.0);
+    let metallic  = clamp(material.metallic  * orm.b, 0.0,  1.0);
+
+    // ── PBR setup ─────────────────────────────────────────────────────────────
+    // Dielectric F0 = 0.04; metallic surfaces use albedo as F0
+    let F0   = mix(vec3<f32>(0.04), albedo, metallic);
+    let V    = normalize(camera.position - input.world_position);
+    let NdV  = max(dot(N, V), 0.0);
+
+    // ── Direct lighting (Cook-Torrance) ───────────────────────────────────────
+    var Lo = vec3<f32>(0.0);
+    if ENABLE_LIGHTING {
+        for (var i = 0u; i < globals.light_count; i++) {
+            Lo += pbr_direct_light(i, lights[i], input.world_position, N, V,
+                                   F0, albedo, roughness, metallic);
+        }
+    }
+
+    // ── Indirect diffuse: Radiance Cascades GI ────────────────────────────────
+    let rc_irr    = sample_rc_irradiance(input.world_position, N);
+    let F_ibl     = fresnel_schlick_roughness(NdV, F0, roughness);
+    let kD_ibl    = (1.0 - F_ibl) * (1.0 - metallic);
+    let diffuse_indirect = kD_ibl * rc_irr * albedo;
+
+    // ── Indirect specular: environment cubemap ─────────────────────────────────
+    // Reuse material_sampler (group 1 binding 3) to sample the env cube.
+    // A roughness-based lod would require a pre-filtered env map; we approximate
+    // by attenuating specular by roughness².
+    let R           = reflect(-V, N);
+    let env_sample  = textureSample(env_cube, material_sampler, R).rgb;
+    let spec_scale  = (1.0 - roughness * roughness);
+    let specular_indirect = F_ibl * env_sample * spec_scale;
+
+    // ── Ambient fallback (active when neither lights nor RC are providing) ─────
+    let ambient_fallback = globals.ambient_color.rgb * globals.ambient_intensity * albedo;
+
+    // ── Combine: direct + indirect (AO applied to indirect only) ─────────────
+    let indirect = (diffuse_indirect + specular_indirect + ambient_fallback) * ao;
+    var color    = Lo + indirect;
+
+    // ── Emissive ──────────────────────────────────────────────────────────────
+    let emissive_tex = textureSample(emissive_texture, material_sampler, uv).rgb;
+    color += material.emissive_color * emissive_tex * material.emissive_factor;
+
+    // ── Bloom ─────────────────────────────────────────────────────────────────
     color = apply_bloom(color);
 
-    return vec4<f32>(color, material.base_color.a);
+    return vec4<f32>(color, alpha);
 }
+

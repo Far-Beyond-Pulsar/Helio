@@ -313,12 +313,12 @@ impl AppState {
         let right   = glam::Vec3::new(cy, 0.0, sy);
         let up      = glam::Vec3::Y;
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space)      { self.cam_pos += up * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft)  { self.cam_pos -= up * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW)      { self.cam_pos += forward * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyS)      { self.cam_pos -= forward * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyA)      { self.cam_pos -= right   * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyD)      { self.cam_pos += right   * SPEED * dt; }
+        if self.keys.contains(&KeyCode::Space)     { self.cam_pos += up * SPEED * dt; }
+        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= up * SPEED * dt; }
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
