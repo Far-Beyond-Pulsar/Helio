@@ -23,6 +23,8 @@ pub struct BindGroupLayouts {
     pub lighting: Arc<wgpu::BindGroupLayout>,
     pub textures: Arc<wgpu::BindGroupLayout>,
     pub storage:  Arc<wgpu::BindGroupLayout>,
+    /// Group 1 for SkyPass: binding 0 = SkyUniform buffer
+    pub sky:      Arc<wgpu::BindGroupLayout>,
 }
 
 impl BindGroupLayouts {
@@ -34,6 +36,7 @@ impl BindGroupLayouts {
             lighting: Arc::new(Self::create_lighting_layout(device)),
             textures: Arc::new(Self::create_textures_layout(device)),
             storage:  Arc::new(Self::create_storage_layout(device)),
+            sky:      Arc::new(Self::create_sky_layout(device)),
         }
     }
 
@@ -252,6 +255,25 @@ impl BindGroupLayouts {
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    /// Group 1 (SkyPass): SkyUniform buffer
+    fn create_sky_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Sky Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },

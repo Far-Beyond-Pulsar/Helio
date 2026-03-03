@@ -29,6 +29,8 @@ impl RenderPass for GeometryPass {
         builder.read(ResourceHandle::named("shadow_atlas"));
         // Reads RC cascade 0 written by RadianceCascadesPass → enforces RC-before-geometry order
         builder.read(ResourceHandle::named("rc_cascade0"));
+        // Reads sky layer written by SkyPass → enforces sky-before-geometry order
+        builder.read(ResourceHandle::named("sky_layer"));
         // Writes color target read by BillboardPass → enforces geometry-before-billboard order
         builder.write(ResourceHandle::named("color_target"));
     }
@@ -42,13 +44,19 @@ impl RenderPass for GeometryPass {
         // Snapshot the draw list (cheap Arc clone, cheap lock)
         let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
 
-        let [r, g, b] = ctx.sky_color.map(|c| c as f64);
+        // When SkyPass has already filled the color buffer, load it instead of clearing.
+        let color_load = if ctx.has_sky {
+            wgpu::LoadOp::Load
+        } else {
+            let [r, g, b] = ctx.sky_color.map(|c| c as f64);
+            wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 })
+        };
         let color_attachment = Some(wgpu::RenderPassColorAttachment {
             view: target,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
+                load: color_load,
                 store: wgpu::StoreOp::Store,
             },
         });

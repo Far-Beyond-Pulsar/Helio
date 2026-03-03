@@ -204,6 +204,8 @@ impl RenderGraph {
                 global_bind_group: ctx.global_bind_group,
                 lighting_bind_group: ctx.lighting_bind_group,
                 sky_color: ctx.sky_color,
+                has_sky: ctx.has_sky,
+                sky_bind_group: ctx.sky_bind_group,
             };
 
             self.passes[pass_idx].pass.execute(&mut pass_ctx)?;
@@ -262,8 +264,12 @@ pub struct GraphContext<'a> {
     pub global_bind_group: &'a wgpu::BindGroup,
     /// Bind group 2 – lights, shadows, env
     pub lighting_bind_group: &'a wgpu::BindGroup,
-    /// Sky / background clear color (linear RGB)
+    /// Sky / background clear color (linear RGB) – used when has_sky=false
     pub sky_color: [f32; 3],
+    /// True when a SkyAtmosphere is present – SkyPass renders; GeometryPass uses LoadOp::Load
+    pub has_sky: bool,
+    /// Sky bind group (group 1 in SkyPass pipeline), None when no sky
+    pub sky_bind_group: Option<&'a wgpu::BindGroup>,
 }
 
 /// Builder for declaring pass resource dependencies

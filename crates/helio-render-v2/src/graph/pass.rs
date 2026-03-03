@@ -25,26 +25,18 @@ pub trait RenderPass: Send + Sync {
 
 /// Context for pass execution
 pub struct PassContext<'a> {
-    /// Command encoder for recording GPU commands
     pub encoder: &'a mut wgpu::CommandEncoder,
-
-    /// Resource manager for accessing GPU resources
     pub resources: &'a ResourceManager,
-
-    /// Main render target
     pub target: &'a wgpu::TextureView,
-
-    /// Depth buffer (Depth32Float, cleared to 1.0 each frame by GeometryPass)
     pub depth_view: &'a wgpu::TextureView,
-
-    /// Bind group 0 – camera + globals (shared by all passes)
     pub global_bind_group: &'a wgpu::BindGroup,
-
-    /// Bind group 2 – lights, shadows, env (shared by all lit passes)
     pub lighting_bind_group: &'a wgpu::BindGroup,
-
-    /// Sky / background clear color (linear RGB)
+    /// Clear color used when `has_sky` is false
     pub sky_color: [f32; 3],
+    /// True when SkyPass will render the background this frame
+    pub has_sky: bool,
+    /// Sky uniforms bind group (group 1 in sky pipeline)
+    pub sky_bind_group: Option<&'a wgpu::BindGroup>,
 }
 
 impl<'a> PassContext<'a> {

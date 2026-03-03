@@ -26,7 +26,7 @@ mod camera;
 pub use renderer::{Renderer, RendererConfig};
 pub use camera::Camera;
 pub use mesh::{GpuMesh, PackedVertex, DrawCall};
-pub use scene::{Scene, SceneObject, SceneLight};
+pub use scene::{Scene, SceneObject, SceneLight, SkyAtmosphere, VolumetricClouds, Skylight};
 pub use material::{Material, GpuMaterial, TextureData};
 
 /// Result type for renderer operations

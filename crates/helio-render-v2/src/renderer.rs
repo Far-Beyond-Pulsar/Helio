@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::GeometryPass;
+use crate::passes::{GeometryPass, SkyPass};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -36,6 +36,36 @@ struct GlobalsUniform {
     ambient_color: [f32; 4],  // w unused, ensures alignment
     rc_world_min: [f32; 4],   // xyz = RC probe grid world AABB min, w unused
     rc_world_max: [f32; 4],   // xyz = RC probe grid world AABB max, w unused
+}
+
+/// Sky uniform data – 112 bytes, must exactly match SkyUniforms in sky.wgsl
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SkyUniform {
+    sun_direction:      [f32; 3],  // offset   0 (12 bytes)
+    sun_intensity:      f32,       // offset  12
+    rayleigh_scatter:   [f32; 3],  // offset  16
+    rayleigh_h_scale:   f32,       // offset  28
+    mie_scatter:        f32,       // offset  32
+    mie_h_scale:        f32,       // offset  36
+    mie_g:              f32,       // offset  40
+    sun_disk_cos:       f32,       // offset  44
+    earth_radius:       f32,       // offset  48
+    atm_radius:         f32,       // offset  52
+    exposure:           f32,       // offset  56
+    clouds_enabled:     u32,       // offset  60
+    cloud_coverage:     f32,       // offset  64
+    cloud_density:      f32,       // offset  68
+    cloud_base:         f32,       // offset  72
+    cloud_top:          f32,       // offset  76
+    cloud_wind_x:       f32,       // offset  80
+    cloud_wind_z:       f32,       // offset  84
+    cloud_speed:        f32,       // offset  88
+    time_sky:           f32,       // offset  92
+    skylight_intensity: f32,       // offset  96
+    _pad0:              f32,       // offset 100
+    _pad1:              f32,       // offset 104
+    _pad2:              f32,       // offset 108 → total 112 (multiple of 16)
 }
 
 /// GPU shadow light-space matrix (must match WGSL LightMatrix struct = 64 bytes)
@@ -97,6 +127,26 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu
     (tex, view)
 }
 
+/// Approximate sky zenith ambient colour from sun elevation (-1=night, 0=horizon, 1=zenith).
+fn estimate_sky_ambient(sun_elev: f32, rayleigh: &[f32; 3]) -> [f32; 3] {
+    if sun_elev < -0.05 {
+        let t = ((-sun_elev - 0.05) / 0.95).clamp(0.0, 1.0);
+        lerp3([0.04, 0.06, 0.15], [0.01, 0.01, 0.02], t)
+    } else if sun_elev < 0.15 {
+        let t = ((sun_elev + 0.05) / 0.2).clamp(0.0, 1.0);
+        lerp3([0.04, 0.06, 0.15], [0.55, 0.38, 0.20], t)
+    } else {
+        let t = ((sun_elev - 0.15) / 0.85).clamp(0.0, 1.0);
+        let day_blue = [rayleigh[0] * 8.0, rayleigh[1] * 5.5, rayleigh[2] * 3.5];
+        let noon = [day_blue[0].min(0.7), day_blue[1].min(0.85), day_blue[2].min(1.0)];
+        lerp3([0.55, 0.38, 0.20], noon, t)
+    }
+}
+
+fn lerp3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t, a[2]+(b[2]-a[2])*t]
+}
+
 /// Main renderer
 pub struct Renderer {
     device: Arc<wgpu::Device>,
@@ -133,9 +183,14 @@ pub struct Renderer {
     scene_ambient_intensity: f32,
     scene_light_count: u32,
     scene_sky_color: [f32; 3],
+    scene_has_sky: bool,
     // RC world bounds (set from RadianceCascadesFeature, zeroed if disabled)
     rc_world_min: [f32; 3],
     rc_world_max: [f32; 3],
+
+    // Sky pass resources
+    sky_uniform_buffer: wgpu::Buffer,
+    sky_bind_group: Arc<wgpu::BindGroup>,
 
     // Depth buffer (Depth32Float, recreated on resize)
     depth_texture: wgpu::Texture,
@@ -203,7 +258,67 @@ impl Renderer {
         // Shared light count — updated each frame; read by ShadowPass
         let light_count_arc = Arc::new(AtomicU32::new(0));
 
-        // Collect defines before feature registration (side-effect free)
+        // ── Sky pass (added FIRST so it runs before geometry) ─────────────────
+        let sky_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Sky Uniform Buffer"),
+            size: std::mem::size_of::<SkyUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let sky_bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Sky Bind Group"),
+            layout: &resources.bind_group_layouts.sky,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: sky_uniform_buffer.as_entire_binding() },
+            ],
+        }));
+
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Sky Pipeline Layout"),
+            bind_group_layouts: &[
+                Some(resources.bind_group_layouts.global.as_ref()),
+                Some(resources.bind_group_layouts.sky.as_ref()),
+            ],
+            immediate_size: 0,
+        });
+        let sky_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Sky Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/passes/sky.wgsl").into()),
+        });
+        let sky_pipeline = Arc::new(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Sky Pipeline"),
+            layout: Some(&sky_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &sky_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &sky_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        }));
+
+        let sky_pass = SkyPass::new(sky_pipeline, sky_bind_group.clone());
+        graph.add_pass(sky_pass);
+
+        // ── Geometry pass ─────────────────────────────────────────────────────
         let defines = features.collect_shader_defines();
         let geometry_pipeline = pipelines.get_or_create(
             include_str!("../shaders/passes/geometry.wgsl"),
@@ -376,8 +491,11 @@ impl Renderer {
             scene_ambient_intensity: 0.0,
             scene_light_count: 0,
             scene_sky_color: [0.0, 0.0, 0.0],
+            scene_has_sky: false,
             rc_world_min,
             rc_world_max,
+            sky_uniform_buffer,
+            sky_bind_group,
             depth_texture,
             depth_view,
             default_material_views,
@@ -473,6 +591,8 @@ impl Renderer {
             global_bind_group: &self.global_bind_group,
             lighting_bind_group: &self.lighting_bind_group,
             sky_color: self.scene_sky_color,
+            has_sky: self.scene_has_sky,
+            sky_bind_group: None,
         };
 
         self.graph.execute(&mut graph_ctx)?;
@@ -562,6 +682,60 @@ impl Renderer {
         self.scene_ambient_intensity = scene.ambient_intensity;
         self.scene_light_count = count as u32;
         self.scene_sky_color = scene.sky_color;
+        self.scene_has_sky = scene.sky_atmosphere.is_some();
+
+        // Build and upload sky uniforms (even when sky is disabled the buffer exists)
+        if let Some(atm) = &scene.sky_atmosphere {
+            // Use the first directional light as the sun; fall back to default noon sun
+            let sun_dir = scene.lights.iter()
+                .find(|l| matches!(l.light_type, crate::features::LightType::Directional))
+                .map(|l| {
+                    let d = Vec3::from(l.direction).normalize();
+                    // Convert from "direction of light ray" to "toward sun"
+                    [-d.x, -d.y, -d.z]
+                })
+                .unwrap_or([0.0, 1.0, 0.0]);
+
+            let clouds = atm.clouds.as_ref();
+            let sky_uni = SkyUniform {
+                sun_direction:    sun_dir,
+                sun_intensity:    atm.sun_intensity,
+                rayleigh_scatter: atm.rayleigh_scatter,
+                rayleigh_h_scale: atm.rayleigh_h_scale,
+                mie_scatter:      atm.mie_scatter,
+                mie_h_scale:      atm.mie_h_scale,
+                mie_g:            atm.mie_g,
+                sun_disk_cos:     atm.sun_disk_angle.cos(),
+                earth_radius:     atm.earth_radius,
+                atm_radius:       atm.atm_radius,
+                exposure:         atm.exposure,
+                clouds_enabled:   clouds.is_some() as u32,
+                cloud_coverage:   clouds.map(|c| c.coverage).unwrap_or(0.5),
+                cloud_density:    clouds.map(|c| c.density).unwrap_or(0.8),
+                cloud_base:       clouds.map(|c| c.base_height).unwrap_or(800.0),
+                cloud_top:        clouds.map(|c| c.top_height).unwrap_or(1800.0),
+                cloud_wind_x:     clouds.map(|c| c.wind_direction[0]).unwrap_or(1.0),
+                cloud_wind_z:     clouds.map(|c| c.wind_direction[1]).unwrap_or(0.0),
+                cloud_speed:      clouds.map(|c| c.wind_speed).unwrap_or(0.3),
+                time_sky:         self.frame_count as f32 / 60.0,
+                skylight_intensity: scene.skylight.as_ref().map(|sl| sl.intensity).unwrap_or(1.0),
+                _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
+            };
+            self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&sky_uni));
+
+            // Inject sky-based ambient when a Skylight is present
+            if let Some(skylight) = &scene.skylight {
+                let sun_elev = sun_dir[1].clamp(-1.0, 1.0); // y component = elevation
+                let sky_ambient = estimate_sky_ambient(sun_elev, &atm.rayleigh_scatter);
+                let tint = skylight.color_tint;
+                self.scene_ambient_color = [
+                    sky_ambient[0] * tint[0] * skylight.intensity,
+                    sky_ambient[1] * tint[1] * skylight.intensity,
+                    sky_ambient[2] * tint[2] * skylight.intensity,
+                ];
+                self.scene_ambient_intensity = 1.0;
+            }
+        }
 
         self.render(camera, target, delta_time)
     }

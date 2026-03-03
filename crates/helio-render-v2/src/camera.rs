@@ -12,15 +12,14 @@ pub struct Camera {
     pub position: Vec3,
     /// Elapsed time in seconds
     pub time: f32,
+    /// Inverse of view_proj (needed by sky shader to reconstruct world ray dirs)
+    pub view_proj_inv: Mat4,
 }
 
 impl Camera {
     pub fn new(view_proj: Mat4, position: Vec3, time: f32) -> Self {
-        Self {
-            view_proj,
-            position,
-            time,
-        }
+        let view_proj_inv = view_proj.inverse();
+        Self { view_proj, position, time, view_proj_inv }
     }
 
     /// Create a perspective camera
@@ -37,12 +36,7 @@ impl Camera {
         let view = Mat4::look_at_rh(position, target, up);
         let proj = Mat4::perspective_rh(fov_y, aspect, near, far);
         let view_proj = proj * view;
-
-        Self {
-            view_proj,
-            position,
-            time,
-        }
+        Self { view_proj, position, time, view_proj_inv: view_proj.inverse() }
     }
 
     /// Create an orthographic camera
@@ -61,11 +55,6 @@ impl Camera {
         let view = Mat4::look_at_rh(position, target, up);
         let proj = Mat4::orthographic_rh(left, right, bottom, top, near, far);
         let view_proj = proj * view;
-
-        Self {
-            view_proj,
-            position,
-            time,
-        }
+        Self { view_proj, position, time, view_proj_inv: view_proj.inverse() }
     }
 }
