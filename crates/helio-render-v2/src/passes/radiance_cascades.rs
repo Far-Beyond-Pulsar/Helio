@@ -16,6 +16,7 @@ struct BlasEntry {
     size_desc: wgpu::BlasTriangleGeometrySizeDescriptor,
     vertex_buffer: Arc<wgpu::Buffer>,
     index_buffer: Arc<wgpu::Buffer>,
+    built: bool,  // Track whether this BLAS has been built
 }
 
 /// Row-major identity transform for TlasInstance  ([f32; 12] = 3×4 matrix)
@@ -88,7 +89,6 @@ impl RenderPass for RadianceCascadesPass {
         }
 
         // ── 1. Create new BLASes for meshes not yet in the cache ──────────────
-        let mut new_keys: Vec<usize> = Vec::new();
         for dc in &draw_calls {
             let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
             if !self.blas_cache.contains_key(&key) {
@@ -114,8 +114,8 @@ impl RenderPass for RadianceCascadesPass {
                     size_desc,
                     vertex_buffer: dc.vertex_buffer.clone(),
                     index_buffer: dc.index_buffer.clone(),
+                    built: false,  // Mark as not yet built
                 });
-                new_keys.push(key);
             }
         }
 
@@ -131,33 +131,49 @@ impl RenderPass for RadianceCascadesPass {
             self.tlas[i] = None;
         }
 
-        // ── 3. Build all BLASes + TLAS ─────────────────────────────────────────
-        // Collect build entries (borrows self.blas_cache + draw_calls until the call).
-        // Build ALL cached BLASes each frame (simple; optimise to build-once later).
-        let mut blas_entries: Vec<wgpu::BlasBuildEntry> = Vec::with_capacity(draw_calls.len());
+        // ── 3. Build only unbuilt BLASes + TLAS ───────────────────────────────
+        // Collect build entries only for BLASes that haven't been built yet.
+        // Static geometry BLASes are built once and reused every frame.
+        let mut blas_entries: Vec<wgpu::BlasBuildEntry> = Vec::new();
+        let mut keys_to_mark_built: Vec<usize> = Vec::new();
+
         for dc in &draw_calls {
             let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
             let entry = &self.blas_cache[&key];
-            blas_entries.push(wgpu::BlasBuildEntry {
-                blas: &entry.blas,
-                geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
-                    wgpu::BlasTriangleGeometry {
-                        size: &entry.size_desc,
-                        vertex_buffer: &entry.vertex_buffer,
-                        first_vertex: 0,
-                        vertex_stride: 32, // PackedVertex is 32 bytes
-                        index_buffer: Some(&entry.index_buffer),
-                        first_index: Some(0),
-                        transform_buffer: None,
-                        transform_buffer_offset: None,
-                    },
-                ]),
-            });
+
+            // Only build if not already built
+            if !entry.built {
+                blas_entries.push(wgpu::BlasBuildEntry {
+                    blas: &entry.blas,
+                    geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
+                        wgpu::BlasTriangleGeometry {
+                            size: &entry.size_desc,
+                            vertex_buffer: &entry.vertex_buffer,
+                            first_vertex: 0,
+                            vertex_stride: 32, // PackedVertex is 32 bytes
+                            index_buffer: Some(&entry.index_buffer),
+                            first_index: Some(0),
+                            transform_buffer: None,
+                            transform_buffer_offset: None,
+                        },
+                    ]),
+                });
+                keys_to_mark_built.push(key);
+            }
         }
+
+        // Build new BLASes and always rebuild TLAS (TLAS rebuild is cheap)
         ctx.encoder.build_acceleration_structures(
             blas_entries.iter(),
             std::iter::once(&self.tlas),
         );
+
+        // Mark newly built BLASes as built
+        for key in keys_to_mark_built {
+            if let Some(entry) = self.blas_cache.get_mut(&key) {
+                entry.built = true;
+            }
+        }
 
         // ── 4. Dispatch cascades coarse → fine (4 → 0) ───────────────────────
         let mut cpass = ctx.begin_compute_pass("RC Trace");
