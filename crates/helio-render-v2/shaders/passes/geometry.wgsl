@@ -104,13 +104,13 @@ fn luminance(color: vec3<f32>) -> f32 {
 
 struct GpuLight {
     position:    vec3<f32>,
-    light_type:  f32,   // 0=directional  1=point  2=spot
-    direction:   vec3<f32>,
+    light_type:  f32,    // 0=directional  1=point  2=spot
+    direction:   vec3<f32>, // prenormalized on the CPU
     range:       f32,
     color:       vec3<f32>,
     intensity:   f32,
-    inner_angle: f32,
-    outer_angle: f32,
+    cos_inner:   f32,    // cos(inner_angle), precomputed on CPU
+    cos_outer:   f32,    // cos(outer_angle), precomputed on CPU
     _pad:        vec2<f32>,
 }
 
@@ -260,9 +260,10 @@ fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> v
     return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
-// Evaluate one light using the full Cook-Torrance BRDF + PCF shadows
+// Evaluate one light using the full Cook-Torrance BRDF.
+// `sf` is the shadow factor (0=fully shadowed, 1=lit), computed by the caller
+// so a single shadow_factor() call can be shared with sky_occlusion.
 fn pbr_direct_light(
-    light_idx: u32,
     light:     GpuLight,
     world_pos: vec3<f32>,
     N:         vec3<f32>,
@@ -271,6 +272,7 @@ fn pbr_direct_light(
     albedo:    vec3<f32>,
     roughness: f32,
     metallic:  f32,
+    sf:        f32,
 ) -> vec3<f32> {
     var L: vec3<f32>;
     var radiance: vec3<f32>;
@@ -287,8 +289,9 @@ fn pbr_direct_light(
         let falloff  = max(0.0, 1.0 - ratio * ratio);
         var atten    = falloff * falloff;
         if light.light_type > 1.5 {
-            let cos_a = dot(-L, normalize(light.direction));
-            atten    *= smoothstep(cos(light.outer_angle), cos(light.inner_angle), cos_a);
+            // direction is prenormalized; cos values precomputed — no trig per fragment.
+            let cos_a = dot(-L, light.direction);
+            atten    *= smoothstep(light.cos_outer, light.cos_inner, cos_a);
         }
         radiance = light.color * light.intensity * atten;
     }
@@ -308,7 +311,7 @@ fn pbr_direct_light(
     let kD      = (1.0 - kS) * (1.0 - metallic);
     let specular = D * G * F / (4.0 * max(dot(N, V), 0.0) * NdL + 0.0001);
 
-    let sf = shadow_factor(light_idx, world_pos, N);
+    // sf is passed in from the call site — already computed, no redundant atlas reads.
     return (kD * albedo / PI + specular) * radiance * NdL * sf;
 }
 
@@ -486,20 +489,22 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let NdV  = max(dot(N, V), 0.0);
 
     // ── Direct lighting (Cook-Torrance) ───────────────────────────────────────
+    // shadow_factor() is computed ONCE per light here at the call site, then
+    // passed into pbr_direct_light. The first directional light's shadow is
+    // also captured as sky_occlusion — previously this required a second full
+    // shadow_factor() call (4 PCF taps) in a separate loop.
+    var sky_occlusion = 1.0;
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         for (var i = 0u; i < globals.light_count; i++) {
-            Lo += pbr_direct_light(i, lights[i], input.world_position, N, V,
-                                   F0, albedo, roughness, metallic);
+            let sf = shadow_factor(i, input.world_position, N);
+            // Capture the first directional shadow as sky occlusion — free, no extra PCF.
+            if lights[i].light_type < 0.5 { sky_occlusion = sf; }
+            Lo += pbr_direct_light(lights[i], input.world_position, N, V,
+                                   F0, albedo, roughness, metallic, sf);
         }
-    }
-
-    // ── Sky occlusion: find first directional light, sample its cascade shadow ─
-    // Ambient (skylight) comes from the open sky. If a fragment is occluded from
-    // the sun's direction it is also occluded from the sky, so we modulate the
-    // ambient by the directional shadow factor. Soft PCF makes this a smooth fade.
-    var sky_occlusion = 1.0;
-    if ENABLE_SHADOWS && ENABLE_LIGHTING {
+    } else if ENABLE_SHADOWS {
+        // Lighting disabled but shadows still needed for sky occlusion.
         for (var i = 0u; i < globals.light_count; i++) {
             if lights[i].light_type < 0.5 {
                 sky_occlusion = shadow_factor(i, input.world_position, N);

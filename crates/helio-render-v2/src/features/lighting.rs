@@ -44,15 +44,18 @@ impl Default for LightConfig {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct GpuLight {
-    pub position: [f32; 3],
+    pub position:   [f32; 3],
     pub light_type: f32,
-    pub direction: [f32; 3],
-    pub range: f32,
-    pub color: [f32; 3],
-    pub intensity: f32,
-    pub inner_angle: f32,
-    pub outer_angle: f32,
-    pub _pad: [f32; 2],
+    /// Prenormalized on the CPU so the shader never calls normalize(direction).
+    pub direction:  [f32; 3],
+    pub range:      f32,
+    pub color:      [f32; 3],
+    pub intensity:  f32,
+    /// cos(inner_angle) — precomputed so the shader never calls cos().
+    pub cos_inner:  f32,
+    /// cos(outer_angle) — precomputed so the shader never calls cos().
+    pub cos_outer:  f32,
+    pub _pad:       [f32; 2],
 }
 
 /// Maximum number of lights supported per frame

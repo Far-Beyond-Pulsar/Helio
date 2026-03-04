@@ -18,28 +18,31 @@ use wgpu;
 /// - Group 4: Pass-specific storage (compute) - per-pass
 #[derive(Clone)]
 pub struct BindGroupLayouts {
-    pub global:      Arc<wgpu::BindGroupLayout>,
-    pub material:    Arc<wgpu::BindGroupLayout>,
-    pub lighting:    Arc<wgpu::BindGroupLayout>,
-    pub textures:    Arc<wgpu::BindGroupLayout>,
-    pub storage:     Arc<wgpu::BindGroupLayout>,
+    pub global:       Arc<wgpu::BindGroupLayout>,
+    pub material:     Arc<wgpu::BindGroupLayout>,
+    pub lighting:     Arc<wgpu::BindGroupLayout>,
+    pub textures:     Arc<wgpu::BindGroupLayout>,
+    pub storage:      Arc<wgpu::BindGroupLayout>,
     /// Group 1 for SkyLutPass: binding 0 = SkyUniform buffer only.
-    pub sky_uniform: Arc<wgpu::BindGroupLayout>,
+    pub sky_uniform:  Arc<wgpu::BindGroupLayout>,
     /// Group 1 for SkyPass: binding 0 = SkyUniform, 1 = sky LUT texture, 2 = sampler.
-    pub sky:         Arc<wgpu::BindGroupLayout>,
+    pub sky:          Arc<wgpu::BindGroupLayout>,
+    /// Group 1 for DeferredLightingPass: reads albedo, normal, orm, emissive, depth.
+    pub gbuffer_read: Arc<wgpu::BindGroupLayout>,
 }
 
 impl BindGroupLayouts {
     /// Create the standard bind group layouts
     pub fn new(device: &wgpu::Device) -> Self {
         Self {
-            global:      Arc::new(Self::create_global_layout(device)),
-            material:    Arc::new(Self::create_material_layout(device)),
-            lighting:    Arc::new(Self::create_lighting_layout(device)),
-            textures:    Arc::new(Self::create_textures_layout(device)),
-            storage:     Arc::new(Self::create_storage_layout(device)),
-            sky_uniform: Arc::new(Self::create_sky_uniform_layout(device)),
-            sky:         Arc::new(Self::create_sky_layout(device)),
+            global:       Arc::new(Self::create_global_layout(device)),
+            material:     Arc::new(Self::create_material_layout(device)),
+            lighting:     Arc::new(Self::create_lighting_layout(device)),
+            textures:     Arc::new(Self::create_textures_layout(device)),
+            storage:      Arc::new(Self::create_storage_layout(device)),
+            sky_uniform:  Arc::new(Self::create_sky_uniform_layout(device)),
+            sky:          Arc::new(Self::create_sky_layout(device)),
+            gbuffer_read: Arc::new(Self::create_gbuffer_read_layout(device)),
         }
     }
 
@@ -218,6 +221,14 @@ impl BindGroupLayouts {
                     },
                     count: None,
                 },
+                // Binding 6: Linear filtering sampler for environment IBL lookups.
+                // The deferred lighting pass uses this since it has no material group.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         })
     }
@@ -318,6 +329,71 @@ impl BindGroupLayouts {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    /// Group 1 for DeferredLightingPass – reads the four G-buffer textures plus the
+    /// depth texture.  All reads use `textureLoad` (no sampler required).
+    fn create_gbuffer_read_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("GBuffer Read Bind Group Layout"),
+            entries: &[
+                // 0: albedo    (Rgba8Unorm)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 1: normals   (Rgba16Float)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 2: ORM       (Rgba8Unorm)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 3: emissive  (Rgba16Float)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 4: depth     (Depth32Float via texture_depth_2d)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],

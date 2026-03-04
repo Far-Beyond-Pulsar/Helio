@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{GeometryPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight};
+use crate::passes::{GeometryPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -215,8 +215,9 @@ fn compute_spot_matrix(position: [f32; 3], direction: [f32; 3], range: f32, oute
     proj * view
 }
 
-/// Create a Depth32Float texture + view at the given resolution
-fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
+/// Create a Depth32Float texture + two views (write + depth-only-sample) at the given resolution.
+/// Both RENDER_ATTACHMENT and TEXTURE_BINDING are set so the deferred lighting pass can read depth.
+fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Depth Texture"),
         size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
@@ -224,11 +225,67 @@ fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
-    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    (tex, view)
+    // Full-aspect view for render pass attachment
+    let write_view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    // Depth-only view for texture binding in the deferred lighting bind group
+    let sample_view = tex.create_view(&wgpu::TextureViewDescriptor {
+        aspect: wgpu::TextureAspect::DepthOnly,
+        ..Default::default()
+    });
+    (tex, write_view, sample_view)
+}
+
+/// Create all four G-buffer textures and return their views packaged as `GBufferTargets`.
+fn create_gbuffer_textures(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Texture, GBufferTargets) {
+    let make = |label: &str, format: wgpu::TextureFormat| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    };
+    let albedo_tex  = make("GBuf Albedo",   wgpu::TextureFormat::Rgba8Unorm);
+    let normal_tex  = make("GBuf Normal",   wgpu::TextureFormat::Rgba16Float);
+    let orm_tex     = make("GBuf ORM",      wgpu::TextureFormat::Rgba8Unorm);
+    let emissive_tex = make("GBuf Emissive", wgpu::TextureFormat::Rgba16Float);
+    let albedo_view   = albedo_tex.create_view(&Default::default());
+    let normal_view   = normal_tex.create_view(&Default::default());
+    let orm_view      = orm_tex.create_view(&Default::default());
+    let emissive_view = emissive_tex.create_view(&Default::default());
+    let targets = GBufferTargets { albedo_view, normal_view, orm_view, emissive_view };
+    (albedo_tex, normal_tex, orm_tex, emissive_tex, targets)
+}
+
+/// Build the G-buffer read bind group used by the deferred lighting pass (group 1).
+fn create_gbuffer_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    targets: &GBufferTargets,
+    depth_sample_view: &wgpu::TextureView,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("GBuffer Read Bind Group"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&targets.albedo_view) },
+            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&targets.normal_view) },
+            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&targets.orm_view) },
+            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&targets.emissive_view) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth_sample_view) },
+        ],
+    })
 }
 
 /// Approximate sky zenith ambient colour from sun elevation (-1=night, 0=horizon, 1=zenith).
@@ -303,8 +360,20 @@ pub struct Renderer {
     sky_bind_group: Arc<wgpu::BindGroup>,
 
     // Depth buffer (Depth32Float, recreated on resize)
-    depth_texture: wgpu::Texture,
-    depth_view: wgpu::TextureView,
+    depth_texture:      wgpu::Texture,
+    depth_view:         wgpu::TextureView,
+    /// Depth-only view (DepthOnly aspect) bound into the G-buffer read bind group.
+    depth_sample_view:  wgpu::TextureView,
+
+    // ── Deferred G-buffer ──────────────────────────────────────────────────
+    gbuf_albedo_texture:   wgpu::Texture,
+    gbuf_normal_texture:   wgpu::Texture,
+    gbuf_orm_texture:      wgpu::Texture,
+    gbuf_emissive_texture: wgpu::Texture,
+    /// Shared with GBufferPass.  Swapped on resize.
+    gbuffer_targets: Arc<Mutex<GBufferTargets>>,
+    /// Shared with DeferredLightingPass.  Swapped on resize.
+    deferred_bg: Arc<Mutex<Arc<wgpu::BindGroup>>>,
 
     // Frame state
     frame_count: u64,
@@ -482,18 +551,31 @@ impl Renderer {
         let sky_pass = SkyPass::new(sky_pipeline, sky_bind_group.clone());
         graph.add_pass(sky_pass);
 
-        // ── Geometry pass ─────────────────────────────────────────────────────
+        // ── Deferred: depth + G-buffer textures (created before graph build) ────
         let defines = features.collect_shader_defines();
-        let geometry_pipeline = pipelines.get_or_create(
-            include_str!("../shaders/passes/geometry.wgsl"),
-            "geometry".to_string(),
-            &defines,
-            PipelineVariant::Forward,
-        )?;
 
-        let mut geometry_pass = GeometryPass::with_draw_list(draw_list.clone());
-        geometry_pass.set_pipeline(geometry_pipeline);
-        graph.add_pass(geometry_pass);
+        // Depth texture with TEXTURE_BINDING so the deferred lighting pass can sample it.
+        let (depth_texture, depth_view, depth_sample_view) =
+            create_depth_texture(&device, config.width, config.height);
+
+        // Four G-buffer render targets.
+        let (gbuf_albedo_texture, gbuf_normal_texture, gbuf_orm_texture, gbuf_emissive_texture, gbuf_targets) =
+            create_gbuffer_textures(&device, config.width, config.height);
+        let gbuffer_targets = Arc::new(Mutex::new(gbuf_targets));
+
+        // G-buffer write pass (replaces forward GeometryPass)
+        let gbuf_pipeline = pipelines.get_or_create(
+            include_str!("../shaders/passes/gbuffer.wgsl"),
+            "gbuffer".to_string(),
+            &defines,
+            PipelineVariant::GBufferWrite,
+        )?;
+        let gbuffer_pass = GBufferPass::new(
+            gbuffer_targets.clone(),
+            gbuf_pipeline,
+            draw_list.clone(),
+        );
+        graph.add_pass(gbuffer_pass);
 
         // ── Register features (adds BillboardPass etc. after GeometryPass) ───────
         let (feat_light_buf, feat_shadow_view, feat_shadow_sampler, feat_rc_view, feat_rc_bounds) = {
@@ -617,6 +699,15 @@ impl Renderer {
         let rc_world_min = feat_rc_bounds.map(|(mn, _)| mn).unwrap_or([0.0; 3]);
         let rc_world_max = feat_rc_bounds.map(|(_, mx)| mx).unwrap_or([0.0; 3]);
 
+        // Linear sampler for env-IBL reads in the deferred lighting shader (group 2 binding 6).
+        let env_linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Env Linear Sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         let lighting_bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Lighting Bind Group"),
             layout: &resources.bind_group_layouts.lighting,
@@ -627,13 +718,30 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&cube_view) },
                 wgpu::BindGroupEntry { binding: 4, resource: shadow_matrix_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&rc_view) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&env_linear_sampler) },
             ],
         }));
 
+        // ── Deferred lighting pass (fullscreen PBR over the G-buffer) ─────────
+        let gbuf_bg_inner = create_gbuffer_bind_group(
+            &device,
+            &resources.bind_group_layouts.gbuffer_read,
+            &*gbuffer_targets.lock().unwrap(),
+            &depth_sample_view,
+        );
+        let deferred_bg = Arc::new(Mutex::new(Arc::new(gbuf_bg_inner)));
+
+        let deferred_pipeline = pipelines.get_or_create(
+            include_str!("../shaders/passes/deferred_lighting.wgsl"),
+            "deferred_lighting".to_string(),
+            &defines,
+            PipelineVariant::DeferredLighting,
+        )?;
+        let deferred_pass = DeferredLightingPass::new(deferred_bg.clone(), deferred_pipeline);
+        graph.add_pass(deferred_pass);
+
         // Build the render graph
         graph.build()?;
-
-        let (depth_texture, depth_view) = create_depth_texture(&device, config.width, config.height);
 
         // Create profiler if TIMESTAMP_QUERY was requested on this device
         let profiler = GpuProfiler::new(&device, &queue);
@@ -670,6 +778,13 @@ impl Renderer {
             sky_bind_group,
             depth_texture,
             depth_view,
+            depth_sample_view,
+            gbuf_albedo_texture,
+            gbuf_normal_texture,
+            gbuf_orm_texture,
+            gbuf_emissive_texture,
+            gbuffer_targets,
+            deferred_bg,
             default_material_views,
             frame_count: 0,
             width: config.width,
@@ -815,19 +930,30 @@ impl Renderer {
                 crate::features::LightType::Point => 1.0,
                 crate::features::LightType::Spot { .. } => 2.0,
             };
-            let (inner_angle, outer_angle) = match l.light_type {
-                crate::features::LightType::Spot { inner_angle, outer_angle } => (inner_angle, outer_angle),
+            let (cos_inner, cos_outer) = match l.light_type {
+                crate::features::LightType::Spot { inner_angle, outer_angle } => {
+                    (inner_angle.cos(), outer_angle.cos())
+                }
                 _ => (0.0, 0.0),
+            };
+            // Prenormalize direction on the CPU so fragment shaders never call normalize().
+            let dir_len = (l.direction[0] * l.direction[0]
+                + l.direction[1] * l.direction[1]
+                + l.direction[2] * l.direction[2]).sqrt();
+            let direction = if dir_len > 1e-6 {
+                [l.direction[0] / dir_len, l.direction[1] / dir_len, l.direction[2] / dir_len]
+            } else {
+                [0.0, -1.0, 0.0]
             };
             GpuLight {
                 position: l.position,
                 light_type,
-                direction: l.direction,
+                direction,
                 range: l.range,
                 color: l.color,
                 intensity: l.intensity,
-                inner_angle,
-                outer_angle,
+                cos_inner,
+                cos_outer,
                 _pad: [0.0; 2],
             }
         }).collect();
@@ -972,9 +1098,32 @@ impl Renderer {
         log::info!("Resizing renderer to {}x{}", width, height);
         self.width = width;
         self.height = height;
-        let (tex, view) = create_depth_texture(&self.device, width, height);
+
+        // Recreate depth texture (new size; keeps TEXTURE_BINDING for deferred read)
+        let (tex, view, sample_view) = create_depth_texture(&self.device, width, height);
         self.depth_texture = tex;
         self.depth_view = view;
+        self.depth_sample_view = sample_view;
+
+        // Recreate G-buffer textures at new resolution
+        let (albedo_tex, normal_tex, orm_tex, emissive_tex, new_targets) =
+            create_gbuffer_textures(&self.device, width, height);
+        self.gbuf_albedo_texture  = albedo_tex;
+        self.gbuf_normal_texture  = normal_tex;
+        self.gbuf_orm_texture     = orm_tex;
+        self.gbuf_emissive_texture = emissive_tex;
+
+        // Hot-swap the targets shared with GBufferPass
+        *self.gbuffer_targets.lock().unwrap() = new_targets;
+
+        // Rebuild the G-buffer read bind group and hot-swap into DeferredLightingPass
+        let new_bg = Arc::new(create_gbuffer_bind_group(
+            &self.device,
+            &self.resources.bind_group_layouts.gbuffer_read,
+            &*self.gbuffer_targets.lock().unwrap(),
+            &self.depth_sample_view,
+        ));
+        *self.deferred_bg.lock().unwrap() = new_bg;
     }
 
     pub fn frame_count(&self) -> u64 { self.frame_count }
