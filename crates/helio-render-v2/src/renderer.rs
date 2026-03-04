@@ -97,13 +97,7 @@ fn compute_point_light_matrices(position: [f32; 3], range: f32) -> [Mat4; 6] {
 /// Cascade i covers [CSM_SPLITS[i-1], CSM_SPLITS[i]] (cascade 0 starts at 0).
 const CSM_SPLITS: [f32; 4] = [16.0, 80.0, 300.0, 1400.0];
 
-// Deferred clustered-lighting configuration.
-const CLUSTER_TILE_SIZE_PX: u32 = 16;
-const CLUSTER_Z_BINS: u32 = 16;
-const CLUSTER_NEAR: f32 = 0.1;
-const CLUSTER_FAR: f32 = 3000.0;
-const MAX_CLUSTERS: u32 = 262_144;
-const MAX_LIGHTS_PER_CLUSTER: u32 = 128;
+// GPU-driven architecture: no clustering needed
 
 /// Compute 4 cascaded ortho light-space matrices for a directional light.
 ///
@@ -345,9 +339,6 @@ pub struct Renderer {
     // Light buffer for scene writes
     light_buffer: Arc<wgpu::Buffer>,
     light_buffer_capacity_lights: u32,
-    // Deferred clustered-lighting indirection buffers
-    cluster_light_offsets_buffer: Arc<wgpu::Buffer>,
-    cluster_light_indices_buffer: Arc<wgpu::Buffer>,
     lighting_shadow_view: Arc<wgpu::TextureView>,
     lighting_shadow_sampler: Arc<wgpu::Sampler>,
     lighting_env_cube_view: Arc<wgpu::TextureView>,
@@ -734,23 +725,7 @@ impl Renderer {
             ..Default::default()
         });
 
-        // Deferred clustered-lighting indirection buffers:
-        // - offsets: cluster_count + 1 prefix-sum table
-        // - indices: flattened light index list referenced by offsets
-        let cluster_light_offsets_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cluster Light Offsets"),
-            size: ((MAX_CLUSTERS + 1) as u64) * std::mem::size_of::<u32>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        let cluster_light_indices_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Cluster Light Indices"),
-            size: (MAX_CLUSTERS as u64)
-                * (MAX_LIGHTS_PER_CLUSTER as u64)
-                * std::mem::size_of::<u32>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
+        // Cluster buffers removed - GPU-driven architecture
 
         let lighting_bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Lighting Bind Group"),
@@ -763,8 +738,6 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 4, resource: shadow_matrix_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&rc_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&env_linear_sampler) },
-                wgpu::BindGroupEntry { binding: 7, resource: cluster_light_offsets_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: cluster_light_indices_buffer.as_entire_binding() },
             ],
         }));
 
@@ -810,8 +783,6 @@ impl Renderer {
             draw_list,
             light_buffer,
             light_buffer_capacity_lights: MAX_LIGHTS,
-            cluster_light_offsets_buffer,
-            cluster_light_indices_buffer,
             lighting_shadow_view: shadow_view,
             lighting_shadow_sampler: shadow_samp,
             lighting_env_cube_view: Arc::new(cube_view),
@@ -889,8 +860,6 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 4, resource: self.shadow_matrix_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.lighting_rc_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.lighting_env_sampler) },
-                wgpu::BindGroupEntry { binding: 7, resource: self.cluster_light_offsets_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: self.cluster_light_indices_buffer.as_entire_binding() },
             ],
         }));
     }
@@ -1025,12 +994,14 @@ impl Renderer {
         if let Some(p) = &mut self.profiler { p.begin_readback(); }
 
         // Non-blocking readback of the previous frame's timing results
-        let poll_start = std::time::Instant::now();
-        if let Some(p) = &mut self.profiler { p.poll_results(&self.device); }
-        let poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
-        if poll_ms > 10.0 {
-            eprintln!("⚠️  poll_results() blocked for {:.2}ms", poll_ms);
-        }
+        // DISABLED: poll_results() was blocking for 10ms on GPU buffer readback
+        // GPU will asynchronously fill the buffer when ready
+        // let poll_start = std::time::Instant::now();
+        // if let Some(p) = &mut self.profiler { p.poll_results(&self.device); }
+        // let poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
+        // if poll_ms > 10.0 {
+        //     eprintln!("⚠️  poll_results() blocked for {:.2}ms", poll_ms);
+        // }
 
         // Measure frame-to-frame latency (time from start of previous frame to start of this frame)
         let frame_to_frame_ms = if let Some(last_start) = self.last_frame_start {
@@ -1048,8 +1019,8 @@ impl Renderer {
 
         if self.debug_printout && self.frame_count % 60 == 0 {
             let total_elapsed_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-            eprintln!("🎮 RENDERER: total elapsed from render() start: {:.2}ms (submit={:.2}ms, poll={:.2}ms)", 
-                total_elapsed_ms, submit_ms, poll_ms);
+            eprintln!("🎮 RENDERER: total elapsed from render() start: {:.2}ms (submit={:.2}ms)", 
+                total_elapsed_ms, submit_ms);
             
             if let Some(p) = &mut self.profiler {
                 p.set_frame_time_ms(frame_time_ms);
@@ -1075,6 +1046,8 @@ impl Renderer {
 
     /// Render the full scene. Everything in the scene is drawn; nothing else.
     pub fn render_scene(&mut self, scene: &Scene, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
+        let render_scene_start = std::time::Instant::now();
+        
         // Queue draw calls for all objects
         for obj in &scene.objects {
             match &obj.material {
@@ -1082,12 +1055,39 @@ impl Renderer {
                 None => self.draw_mesh(&obj.mesh),
             }
         }
+        let t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // Upload scene lights to GPU buffer.
         // Lights are sorted by relevance so the limited shadow budget is spent
         // on lights that actually contribute near the current camera view.
-        let count = scene.lights.len();
-        let mut sorted_lights: Vec<&crate::scene::SceneLight> = scene.lights[..count].iter().collect();
+        let total_lights = scene.lights.len();
+        
+        // CULLING PASS: Remove lights beyond influence range.
+        let mut visible_lights: Vec<&crate::scene::SceneLight> = Vec::with_capacity(total_lights);
+        for light in &scene.lights {
+            match light.light_type {
+                crate::features::LightType::Directional => {
+                    // Directional lights affect entire scene
+                    visible_lights.push(light);
+                }
+                crate::features::LightType::Point | crate::features::LightType::Spot { .. } => {
+                    let lp = glam::Vec3::from(light.position);
+                    let d = camera.position.distance(lp);
+                    let r = light.range.max(0.001);
+                    
+                    // Distance cull: keep lights within 2x their range
+                    // (attenuation will fade them out properly)
+                    if d > r * 2.0 {
+                        continue;
+                    }
+                    
+                    visible_lights.push(light);
+                }
+            }
+        }
+        
+        // Sort remaining visible lights by contribution
+        let mut sorted_lights = visible_lights;
         sorted_lights.sort_by(|a, b| {
             fn score(light: &crate::scene::SceneLight, camera_pos: glam::Vec3) -> f32 {
                 match light.light_type {
@@ -1115,6 +1115,14 @@ impl Renderer {
             let sa = score(a, camera.position);
             sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
         });
+        
+        // No hard cap anymore - distance culling controls light count
+        // (GPU can handle many lights per pixel with proper attenuation)
+        
+        let count = sorted_lights.len();
+        if self.frame_count % 120 == 0 && total_lights > count {
+            log::info!("Light culling: {} visible of {} total", count, total_lights);
+        }
 
         self.ensure_light_buffer_capacity(count as u32);
 
@@ -1139,6 +1147,7 @@ impl Renderer {
             } else {
                 [0.0, -1.0, 0.0]
             };
+            
             GpuLight {
                 position: l.position,
                 light_type,
@@ -1151,171 +1160,18 @@ impl Renderer {
                 _pad: [0.0; 2],
             }
         }).collect();
+        
+        // Write lights to GPU buffer
         if !gpu_lights.is_empty() {
             self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&gpu_lights));
         }
+        let t2_lights = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
-        // Build deferred clustered-lighting indirection tables (x/y tiles + z bins).
-        // Each cluster stores only relevant lights, reducing shading cost from
-        // O(total_lights) to O(cluster_lights).
-        let cluster_count_x = ((self.width + CLUSTER_TILE_SIZE_PX - 1) / CLUSTER_TILE_SIZE_PX).max(1);
-        let cluster_count_y = ((self.height + CLUSTER_TILE_SIZE_PX - 1) / CLUSTER_TILE_SIZE_PX).max(1);
-        let cluster_count = (cluster_count_x * cluster_count_y * CLUSTER_Z_BINS)
-            .min(MAX_CLUSTERS) as usize;
-        let per_cluster_capacity = MAX_LIGHTS_PER_CLUSTER as usize;
-        let mut cluster_counts = vec![0u32; cluster_count];
-        let mut cluster_slots = vec![0u32; cluster_count * per_cluster_capacity];
-
-        let project = |p: [f32; 3]| -> Option<(f32, f32)> {
-            let clip = camera.view_proj * glam::Vec4::new(p[0], p[1], p[2], 1.0);
-            if clip.w <= 0.0001 {
-                return None;
-            }
-            let ndc = clip.xyz() / clip.w;
-            let sx = (ndc.x * 0.5 + 0.5) * self.width as f32;
-            let sy = (1.0 - (ndc.y * 0.5 + 0.5)) * self.height as f32;
-            Some((sx, sy))
-        };
-
-        let cluster_z_from_distance = |distance: f32| -> u32 {
-            let d = distance.clamp(CLUSTER_NEAR, CLUSTER_FAR);
-            let t = (d / CLUSTER_NEAR).ln() / (CLUSTER_FAR / CLUSTER_NEAR).ln();
-            ((t * CLUSTER_Z_BINS as f32).floor() as u32).min(CLUSTER_Z_BINS - 1)
-        };
-
-        let mut cluster_overflow_count: u32 = 0;
-        for (light_idx, l) in sorted_lights.iter().enumerate() {
-            let (x0, x1, y0, y1, z0, z1) = match l.light_type {
-                crate::features::LightType::Directional => {
-                    (0u32, cluster_count_x - 1, 0u32, cluster_count_y - 1, 0u32, CLUSTER_Z_BINS - 1)
-                }
-                crate::features::LightType::Point | crate::features::LightType::Spot { .. } => {
-                    let r = l.range.max(0.001);
-                    let d_center = camera.position.distance(glam::Vec3::from(l.position));
-                    let min_d = (d_center - r).max(CLUSTER_NEAR);
-                    let max_d = (d_center + r).min(CLUSTER_FAR);
-
-                    // If the camera is inside (or very near) the light volume,
-                    // use full XY coverage to avoid frustum-edge popping.
-                    if d_center <= r * 1.2 {
-                        (
-                            0u32,
-                            cluster_count_x - 1,
-                            0u32,
-                            cluster_count_y - 1,
-                            cluster_z_from_distance(min_d),
-                            cluster_z_from_distance(max_d),
-                        )
-                    } else {
-                    let mut min_x = f32::INFINITY;
-                    let mut max_x = f32::NEG_INFINITY;
-                    let mut min_y = f32::INFINITY;
-                    let mut max_y = f32::NEG_INFINITY;
-                    let mut any = false;
-
-                    let samples = [
-                        [0.0, 0.0, 0.0],
-                        [ r, 0.0, 0.0],
-                        [-r, 0.0, 0.0],
-                        [0.0,  r, 0.0],
-                        [0.0, -r, 0.0],
-                        [0.0, 0.0,  r],
-                        [0.0, 0.0, -r],
-                    ];
-
-                    for s in samples {
-                        let p = [l.position[0] + s[0], l.position[1] + s[1], l.position[2] + s[2]];
-                        if let Some((sx, sy)) = project(p) {
-                            any = true;
-                            min_x = min_x.min(sx);
-                            max_x = max_x.max(sx);
-                            min_y = min_y.min(sy);
-                            max_y = max_y.max(sy);
-                        }
-                    }
-
-                    if !any {
-                        (
-                            0u32,
-                            cluster_count_x - 1,
-                            0u32,
-                            cluster_count_y - 1,
-                            cluster_z_from_distance(min_d),
-                            cluster_z_from_distance(max_d),
-                        )
-                    } else {
-                    if max_x < 0.0 || max_y < 0.0
-                        || min_x > self.width as f32 || min_y > self.height as f32 {
-                        continue;
-                    }
-
-                    // Conservative padding avoids tiny sub-pixel misses that create seams.
-                    let pad_px = (CLUSTER_TILE_SIZE_PX as f32) * 2.0;
-                    min_x -= pad_px;
-                    max_x += pad_px;
-                    min_y -= pad_px;
-                    max_y += pad_px;
-
-                    let clamped_min_x = min_x.clamp(0.0, (self.width.saturating_sub(1)) as f32);
-                    let clamped_max_x = max_x.clamp(0.0, (self.width.saturating_sub(1)) as f32);
-                    let clamped_min_y = min_y.clamp(0.0, (self.height.saturating_sub(1)) as f32);
-                    let clamped_max_y = max_y.clamp(0.0, (self.height.saturating_sub(1)) as f32);
-
-                    (
-                        (clamped_min_x as u32 / CLUSTER_TILE_SIZE_PX).min(cluster_count_x - 1),
-                        (clamped_max_x as u32 / CLUSTER_TILE_SIZE_PX).min(cluster_count_x - 1),
-                        (clamped_min_y as u32 / CLUSTER_TILE_SIZE_PX).min(cluster_count_y - 1),
-                        (clamped_max_y as u32 / CLUSTER_TILE_SIZE_PX).min(cluster_count_y - 1),
-                        cluster_z_from_distance(min_d),
-                        cluster_z_from_distance(max_d),
-                    )
-                    }
-                    }
-                }
-            };
-
-            for z in z0..=z1 {
-                for ty in y0..=y1 {
-                    for tx in x0..=x1 {
-                        let cluster = ((z * cluster_count_y + ty) * cluster_count_x + tx) as usize;
-                        if cluster >= cluster_count {
-                            continue;
-                        }
-                        let count_in_cluster = cluster_counts[cluster] as usize;
-                        if count_in_cluster >= per_cluster_capacity {
-                            cluster_overflow_count += 1;
-                            continue;
-                        }
-                        cluster_slots[cluster * per_cluster_capacity + count_in_cluster] = light_idx as u32;
-                        cluster_counts[cluster] += 1;
-                    }
-                }
-            }
-        }
-
-        let mut cluster_offsets = vec![0u32; cluster_count + 1];
-        for i in 0..cluster_count {
-            cluster_offsets[i + 1] = cluster_offsets[i] + cluster_counts[i];
-        }
-        let total_indices = cluster_offsets[cluster_count] as usize;
-        let mut cluster_indices = Vec::with_capacity(total_indices);
-        for i in 0..cluster_count {
-            let base = i * per_cluster_capacity;
-            let n = cluster_counts[i] as usize;
-            cluster_indices.extend_from_slice(&cluster_slots[base..base + n]);
-        }
-
-        self.queue.write_buffer(&self.cluster_light_offsets_buffer, 0, bytemuck::cast_slice(&cluster_offsets));
-        if !cluster_indices.is_empty() {
-            self.queue.write_buffer(&self.cluster_light_indices_buffer, 0, bytemuck::cast_slice(&cluster_indices));
-        }
-        if cluster_overflow_count > 0 && self.frame_count % 120 == 0 {
-            log::warn!(
-                "Clustered lighting overflow: {} assignments dropped (capacity {} per cluster)",
-                cluster_overflow_count,
-                MAX_LIGHTS_PER_CLUSTER,
-            );
-        }
+        // GPU-driven approach: NO CPU screen-space work whatsoever.
+        // CPU just uploads the visible light buffer.
+        // GPU shaders iterate lights and cull by world-space distance per-pixel.
+        
+        let t3_clustering = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // Compute and upload light-space matrices — 6 per light (cube faces).
         // Directional lights: slots 0-3 = 4 CSM cascades, slots 4-5 = identity.
@@ -1346,6 +1202,7 @@ impl Renderer {
         }
         shadow_mats.resize(MAX_LIGHTS as usize * 6, GpuShadowMatrix::zeroed());
         self.queue.write_buffer(&self.shadow_matrix_buffer, 0, bytemuck::cast_slice(&shadow_mats));
+        let t4_shadows = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // Update shared light count and per-light face counts (ShadowPass reads these)
         self.light_count_arc.store(count as u32, Ordering::Relaxed);
@@ -1378,6 +1235,7 @@ impl Renderer {
         if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
             bb.set_billboards(scene.billboards.clone());
         }
+        let t5_billboards = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // Store scene ambient + sky for globals upload in render()
         // Start from scene's own settings, then optionally blend in sky
@@ -1446,6 +1304,13 @@ impl Renderer {
                 ];
                 self.scene_ambient_intensity = 1.0;
             }
+        }
+        let t6_sky = render_scene_start.elapsed().as_secs_f32() * 1000.0;
+        
+        if self.debug_printout && self.frame_count % 60 == 0 {
+            eprintln!("🔧 render_scene CPU breakdown: queue={:.2}ms, lights={:.2}ms, cluster={:.2}ms, shadow={:.2}ms, bb={:.2}ms, sky={:.2}ms",
+                t1_queue_draws, t2_lights - t1_queue_draws, t3_clustering - t2_lights, 
+                t4_shadows - t3_clustering, t5_billboards - t4_shadows, t6_sky - t5_billboards);
         }
 
         self.render(camera, target, delta_time)

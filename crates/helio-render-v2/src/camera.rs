@@ -57,4 +57,12 @@ impl Camera {
         let view_proj = proj * view;
         Self { view_proj, position, time, view_proj_inv: view_proj.inverse() }
     }
+    
+    /// Get camera forward direction (normalized)
+    pub fn forward(&self) -> Vec3 {
+        // Extract forward from view_proj_inv matrix
+        // The forward vector is -Z axis of the view matrix
+        let inv = self.view_proj_inv;
+        Vec3::new(-inv.z_axis.x, -inv.z_axis.y, -inv.z_axis.z).normalize()
+    }
 }

@@ -509,6 +509,9 @@ impl AppState {
         }
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Time scene construction
+        let scene_build_start = std::time::Instant::now();
+        
         let mut lights = build_lights();
         // Apply intensity multiplier
         for light in &mut lights {
@@ -536,6 +539,11 @@ impl AppState {
                         .with_screen_scale(true),
                 );
             }
+        }
+        
+        let scene_build_ms = scene_build_start.elapsed().as_secs_f32() * 1000.0;
+        if scene_build_ms > 10.0 {
+            eprintln!("⚠️  Scene construction took {:.2}ms", scene_build_ms);
         }
 
         if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {

@@ -66,19 +66,9 @@ struct LightMatrix { mat: mat4x4<f32> }
 @group(2) @binding(4) var<storage, read> shadow_matrices: array<LightMatrix>;
 @group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
-@group(2) @binding(7) var<storage, read> cluster_light_offsets: array<u32>;
-@group(2) @binding(8) var<storage, read> cluster_light_indices: array<u32>;
+// cluster bindings removed - GPU-driven architecture
 
-const CLUSTER_TILE_SIZE_PX: u32 = 16u;
-const CLUSTER_Z_BINS: u32 = 16u;
-const CLUSTER_NEAR: f32 = 0.1;
-const CLUSTER_FAR:  f32 = 3000.0;
-
-fn cluster_z_from_distance(distance: f32) -> u32 {
-    let d = clamp(distance, CLUSTER_NEAR, CLUSTER_FAR);
-    let t = log(d / CLUSTER_NEAR) / log(CLUSTER_FAR / CLUSTER_NEAR);
-    return min(u32(floor(t * f32(CLUSTER_Z_BINS))), CLUSTER_Z_BINS - 1u);
-}
+// Cluster constants removed - GPU-driven architecture
 
 // ── Fullscreen-triangle vertex shader ────────────────────────────────────────
 
@@ -470,36 +460,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let NdV = max(dot(N, V), 0.0);
 
     // ── Direct lighting — shadow computed ONCE per light, reused for sky_occ ──
+    // GPU-driven: iterate all visible lights (already culled on CPU by distance)
     var Lo            = vec3<f32>(0.0);
     var sky_occlusion = 1.0;
     if ENABLE_LIGHTING {
-        let cluster_count_x = (u32(screen_size.x) + CLUSTER_TILE_SIZE_PX - 1u) / CLUSTER_TILE_SIZE_PX;
-        let cluster_count_y = (u32(screen_size.y) + CLUSTER_TILE_SIZE_PX - 1u) / CLUSTER_TILE_SIZE_PX;
-        let cx = min(u32(in.clip_pos.x) / CLUSTER_TILE_SIZE_PX, cluster_count_x - 1u);
-        let cy = min(u32(in.clip_pos.y) / CLUSTER_TILE_SIZE_PX, cluster_count_y - 1u);
-        let cz = cluster_z_from_distance(length(world_pos - camera.position));
-        let cluster_idx = (cz * cluster_count_y + cy) * cluster_count_x + cx;
-
-        let offsets_len = arrayLength(&cluster_light_offsets);
-        if cluster_idx + 1u < offsets_len {
-            let begin = cluster_light_offsets[cluster_idx];
-            let end   = cluster_light_offsets[cluster_idx + 1u];
-            for (var k = begin; k < end; k++) {
-                let i = cluster_light_indices[k];
-                if i >= globals.light_count { continue; }
-                let sf = shadow_factor(i, world_pos);
-                if lights[i].light_type < 0.5 { sky_occlusion = sf; }
-                Lo += pbr_direct_light(lights[i], world_pos, N, V,
-                                       F0, albedo, roughness, metallic, sf);
-            }
-        } else {
-            // Fallback for unexpectedly large resolutions beyond MAX_TILES.
-            for (var i = 0u; i < globals.light_count; i++) {
-                let sf = shadow_factor(i, world_pos);
-                if lights[i].light_type < 0.5 { sky_occlusion = sf; }
-                Lo += pbr_direct_light(lights[i], world_pos, N, V,
-                                       F0, albedo, roughness, metallic, sf);
-            }
+        for (var i = 0u; i < globals.light_count; i++) {
+            let sf = shadow_factor(i, world_pos);
+            if lights[i].light_type < 0.5 { sky_occlusion = sf; }
+            Lo += pbr_direct_light(lights[i], world_pos, N, V,
+                                   F0, albedo, roughness, metallic, sf);
         }
     }
 
