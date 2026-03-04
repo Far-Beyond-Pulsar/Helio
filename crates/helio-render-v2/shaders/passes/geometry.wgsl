@@ -186,7 +186,26 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
         layer = light_idx * 6u;
     }
 
-    let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
+    // Normal-offset shadow bias: push the sample point along the surface normal
+    // before projecting into shadow space. This eliminates self-shadowing acne at
+    // grazing angles (where slope-scale depth bias alone is insufficient).
+    // Offset is proportional to 1/NdL — surfaces parallel to the light get most.
+    var shadow_pos = world_pos;
+    if light.light_type < 0.5 {
+        let NdL = max(dot(world_normal, normalize(-light.direction)), 0.0);
+        shadow_pos += world_normal * (0.02 / max(NdL, 0.1));
+    } else if light.light_type > 0.5 && light.light_type < 1.5 {
+        let to_light = normalize(light.position - world_pos);
+        let NdL = max(dot(world_normal, to_light), 0.0);
+        shadow_pos += world_normal * (0.02 / max(NdL, 0.1));
+    } else {
+        // Spot: slightly larger offset — oblique angles are the common case.
+        let to_light = normalize(light.position - world_pos);
+        let NdL = max(dot(world_normal, to_light), 0.0);
+        shadow_pos += world_normal * (0.03 / max(NdL, 0.08));
+    }
+
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(shadow_pos, 1.0);
     if light_clip.w <= 0.0 { return 1.0; }
 
     let ndc       = light_clip.xyz / light_clip.w;
@@ -279,8 +298,13 @@ fn pbr_direct_light(
         radiance = light.color * light.intensity;
     } else {
         let to_light = light.position - world_pos;
-        let dist     = length(to_light);
-        if dist > light.range { return vec3<f32>(0.0); }
+        let raw_dist = length(to_light);
+        if raw_dist > light.range { return vec3<f32>(0.0); }
+        // Clamp to a minimum distance before computing the light direction.
+        // Without this, at point-blank range (dist → 0) dividing by dist
+        // amplifies floating-point error in world_pos into the L vector,
+        // causing NdL and the spot cone test to jitter per-fragment → noise.
+        let dist = max(raw_dist, 0.02);
         L = to_light / dist;
         let ratio    = dist / light.range;
         let falloff  = max(0.0, 1.0 - ratio * ratio);
