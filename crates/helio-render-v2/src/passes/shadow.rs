@@ -23,6 +23,11 @@ pub struct ShadowCullLight {
     pub is_directional: bool,
     /// Point lights get the per-face hemisphere cull in addition to the range cull.
     pub is_point:       bool,
+    /// Spot lights: normalised cone axis direction (world space).
+    pub spot_dir:       [f32; 3],
+    /// Spot lights: cos(outer_half_angle). Zero for non-spots.
+    /// A draw call is culled when its bounding sphere lies entirely outside the cone.
+    pub spot_outer_cos: f32,
 }
 
 /// Depth-only pass that fills shadow atlas layers
@@ -215,6 +220,26 @@ impl RenderPass for ShadowPass {
                     range_filtered.iter().copied().filter(|dc| {
                         let offset = (dc.bounds_center[axis] - cull.position[axis]) * sign;
                         offset + dc.bounds_radius >= 0.0
+                    }).collect()
+                } else if !cull.is_directional && cull.spot_outer_cos > 0.0 {
+                    // Spot light: cone-sphere intersection test.
+                    // Keep a sphere if it overlaps the infinite cone (then range already
+                    // handles the far cap). This is conservative — no false negatives.
+                    let [dx, dy, dz] = cull.spot_dir;
+                    let cos_o = cull.spot_outer_cos;
+                    range_filtered.iter().copied().filter(|dc| {
+                        let vx = dc.bounds_center[0] - cull.position[0];
+                        let vy = dc.bounds_center[1] - cull.position[1];
+                        let vz = dc.bounds_center[2] - cull.position[2];
+                        let v_len = (vx*vx + vy*vy + vz*vz).sqrt();
+                        if v_len < 1e-6 { return true; }
+                        // dot(V, dir): projection of V onto cone axis
+                        let dot = vx*dx + vy*dy + vz*dz;
+                        // Sphere entirely behind the apex
+                        if dot + dc.bounds_radius < 0.0 { return false; }
+                        // Angular test: dot/|V| >= cos_outer means center inside cone.
+                        // Expand by sphere radius (conservative): dot >= |V|*cos_outer - r
+                        dot >= v_len * cos_o - dc.bounds_radius
                     }).collect()
                 } else {
                     range_filtered.iter().copied().collect()

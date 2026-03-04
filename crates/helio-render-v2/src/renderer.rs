@@ -882,11 +882,21 @@ impl Renderer {
             let mut cull = self.shadow_cull_lights.lock().unwrap();
             cull.clear();
             for l in &scene.lights[..count] {
+                let (spot_dir, spot_outer_cos) =
+                    if let crate::features::LightType::Spot { outer_angle, .. } = l.light_type {
+                        let [x, y, z] = l.direction;
+                        let len = (x*x + y*y + z*z).sqrt().max(1e-6);
+                        ([x/len, y/len, z/len], outer_angle.cos())
+                    } else {
+                        ([0.0_f32; 3], 0.0_f32)
+                    };
                 cull.push(ShadowCullLight {
                     position:       l.position,
                     range:          l.range,
                     is_directional: matches!(l.light_type, crate::features::LightType::Directional),
                     is_point:       matches!(l.light_type, crate::features::LightType::Point),
+                    spot_dir,
+                    spot_outer_cos,
                 });
             }
         }
