@@ -408,14 +408,14 @@ impl AppState {
             .with_ambient([0.6, 0.72, 1.0], 0.06); // cool blue data-centre ambient
 
         // Overhead fluorescent panels — cool white, downward spot (1 shadow face vs 6)
-        // inner ≈ 70° half-angle, outer ≈ 85° for a wide soft-edge beam
+        // inner ≈ 40° half-angle, outer ≈ 50° — tight enough to cut shadow geometry significantly
         for &(px, pz) in CEILING_PANEL_XZ {
             let p = [px, 3.78, pz];
             scene = scene
                 .add_light(SceneLight::spot(
                     p, [0.0, -1.0, 0.0],
-                    [0.88, 0.93, 1.0], 4.5, 7.0,
-                    1.22, /* inner ~70° */ 1.48, /* outer ~85° */
+                    [0.88, 0.93, 1.0], 4.5, 5.0,
+                    0.70, /* inner ~40° */ 0.87, /* outer ~50° */
                 ));
         }
 

@@ -406,16 +406,16 @@ impl AppState {
             .add_light(SceneLight::directional(light_dir, sun_color, (sun_lux * 0.45).max(0.005)));
 
         // Streetlamps – sodium orange, activate as sun goes down.
-        // Real lamp heads have a reflector hood: wide downward spot, not omnidirectional.
-        // inner ~55° / outer ~70° half-angle gives a realistic cobra-head spread.
+        // Real lamp heads have a reflector hood: tight downward spot.
+        // inner ~40° / outer ~50° half-angle — cuts shadow geometry vs wider cone.
         let lamp_on = (1.0 - sun_lux).clamp(0.0, 1.0);
         for &(x, z) in LAMPS {
             let p = [x, 5.55, z];
             scene = scene
                 .add_light(SceneLight::spot(
                     p, [0.0, -1.0, 0.0],
-                    [1.0, 0.72, 0.30], 5.5 * lamp_on, 14.0,
-                    0.96, /* inner ~55° */ 1.22, /* outer ~70° */
+                    [1.0, 0.72, 0.30], 5.5 * lamp_on, 10.0,
+                    0.70, /* inner ~40° */ 0.87, /* outer ~50° */
                 ));
         }
 
