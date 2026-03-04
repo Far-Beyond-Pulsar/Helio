@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{GeometryPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT};
+use crate::passes::{GeometryPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -284,6 +284,8 @@ pub struct Renderer {
     light_count_arc: Arc<AtomicU32>,
     // Per-light active face counts: 6=point, 4=directional, 1=spot
     light_face_counts: Arc<std::sync::Mutex<Vec<u8>>>,
+    // Per-light position/range/type for ShadowPass draw-call culling
+    shadow_cull_lights: Arc<std::sync::Mutex<Vec<ShadowCullLight>>>,
     // Current scene ambient (updated by render_scene)
     scene_ambient_color: [f32; 3],
     scene_ambient_intensity: f32,
@@ -370,6 +372,9 @@ impl Renderer {
         let light_count_arc = Arc::new(AtomicU32::new(0));
         // Per-light face counts — updated each frame; read by ShadowPass
         let light_face_counts: Arc<std::sync::Mutex<Vec<u8>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Per-light cull data (position, range, type) — updated each frame; read by ShadowPass
+        let shadow_cull_lights: Arc<std::sync::Mutex<Vec<ShadowCullLight>>> =
             Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // ── Sky pass (added FIRST so it runs before geometry) ─────────────────
@@ -499,6 +504,7 @@ impl Renderer {
                 shadow_matrix_buffer.clone(),
                 light_count_arc.clone(),
                 light_face_counts.clone(),
+                shadow_cull_lights.clone(),
             );
             features.register_all(&mut ctx)?;
             (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler,
@@ -651,6 +657,7 @@ impl Renderer {
             shadow_matrix_buffer,
             light_count_arc,
             light_face_counts,
+            shadow_cull_lights,
             scene_ambient_color: [0.0, 0.0, 0.0],
             scene_ambient_intensity: 0.0,
             scene_light_count: 0,
@@ -869,6 +876,18 @@ impl Renderer {
                     crate::features::LightType::Spot { .. } => 1, // single projection
                 };
                 fc.push(faces);
+            }
+        }
+        {
+            let mut cull = self.shadow_cull_lights.lock().unwrap();
+            cull.clear();
+            for l in &scene.lights[..count] {
+                cull.push(ShadowCullLight {
+                    position:       l.position,
+                    range:          l.range,
+                    is_directional: matches!(l.light_type, crate::features::LightType::Directional),
+                    is_point:       matches!(l.light_type, crate::features::LightType::Point),
+                });
             }
         }
 

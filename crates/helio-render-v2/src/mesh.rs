@@ -76,6 +76,10 @@ pub struct GpuMesh {
     pub index_buffer: Arc<wgpu::Buffer>,
     pub index_count: u32,
     pub vertex_count: u32,
+    /// World-space centroid of all vertices (used for shadow culling).
+    pub bounds_center: [f32; 3],
+    /// Radius of the bounding sphere around `bounds_center`.
+    pub bounds_radius: f32,
 }
 
 impl GpuMesh {
@@ -92,11 +96,31 @@ impl GpuMesh {
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT,
         }));
+        // Bounding sphere: centroid + max-distance radius.
+        // Centroid approximation is conservative and fast; the tiny extra radius
+        // vs a min-bounding-sphere algorithm only means slightly fewer culled draws.
+        let (bounds_center, bounds_radius) = if vertices.is_empty() {
+            ([0.0f32; 3], 0.0f32)
+        } else {
+            let n = vertices.len() as f32;
+            let cx = vertices.iter().map(|v| v.position[0]).sum::<f32>() / n;
+            let cy = vertices.iter().map(|v| v.position[1]).sum::<f32>() / n;
+            let cz = vertices.iter().map(|v| v.position[2]).sum::<f32>() / n;
+            let r  = vertices.iter().map(|v| {
+                let dx = v.position[0] - cx;
+                let dy = v.position[1] - cy;
+                let dz = v.position[2] - cz;
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            }).fold(0.0f32, f32::max);
+            ([cx, cy, cz], r)
+        };
         Self {
             vertex_buffer,
             index_buffer,
             index_count: indices.len() as u32,
             vertex_count: vertices.len() as u32,
+            bounds_center,
+            bounds_radius,
         }
     }
 
@@ -188,6 +212,10 @@ pub struct DrawCall {
     pub index_count: u32,
     pub vertex_count: u32,
     pub material_bind_group: Arc<wgpu::BindGroup>,
+    /// World-space bounding sphere centre, copied from the source `GpuMesh`.
+    pub bounds_center: [f32; 3],
+    /// Bounding sphere radius, copied from the source `GpuMesh`.
+    pub bounds_radius: f32,
 }
 
 impl DrawCall {
@@ -198,6 +226,8 @@ impl DrawCall {
             index_count: mesh.index_count,
             vertex_count: mesh.vertex_count,
             material_bind_group: material,
+            bounds_center: mesh.bounds_center,
+            bounds_radius: mesh.bounds_radius,
         }
     }
 }

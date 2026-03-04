@@ -4,6 +4,7 @@ use crate::resources::ResourceManager;
 use crate::graph::RenderGraph;
 use crate::camera::Camera;
 use crate::mesh::DrawCall;
+use crate::passes::ShadowCullLight;
 use std::sync::{Arc, Mutex, atomic::AtomicU32};
 
 /// Context provided to features during registration
@@ -27,6 +28,8 @@ pub struct FeatureContext<'a> {
     /// Per-light face counts: 6 for point, 4 for directional (CSM), 1 for spot.
     /// Updated by Renderer each frame so ShadowPass can skip identity-matrix faces.
     pub light_face_counts: Arc<Mutex<Vec<u8>>>,
+    /// Per-light culling data (position, range, type) for `ShadowPass::execute`.
+    pub shadow_cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
 
     // ── Outputs set by features during register() ───────────────────────────
     /// Light storage buffer set by LightingFeature
@@ -53,6 +56,7 @@ impl<'a> FeatureContext<'a> {
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
         light_count_arc: Arc<AtomicU32>,
         light_face_counts: Arc<Mutex<Vec<u8>>>,
+        shadow_cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
     ) -> Self {
         Self {
             device,
@@ -65,6 +69,7 @@ impl<'a> FeatureContext<'a> {
             shadow_matrix_buffer,
             light_count_arc,
             light_face_counts,
+            shadow_cull_lights,
             light_buffer: None,
             shadow_atlas_view: None,
             shadow_sampler: None,

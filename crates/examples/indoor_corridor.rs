@@ -336,6 +336,7 @@ impl AppState {
 
         // Row of 5 cool-white fluorescent overhead lights spaced every 6 m
         // (ShadowsFeature caps shadow-casting lights at 4, extras still light via RC GI)
+        // Flush ceiling fixtures — spot with a wide downward cone (1 shadow face vs 6)
         let overhead_z: &[f32] = &[-14.0, -7.0, 0.0, 7.0, 14.0];
         let mut scene = Scene::new()
             .with_sky([0.0, 0.0, 0.0])
@@ -344,7 +345,11 @@ impl AppState {
         for &z in overhead_z {
             let p = [0.0f32, 2.88, z];
             scene = scene
-                .add_light(SceneLight::point(p, [0.9, 0.95, 1.0], 3.5, 9.0));
+                .add_light(SceneLight::spot(
+                    p, [0.0, -1.0, 0.0],
+                    [0.9, 0.95, 1.0], 3.5, 9.0,
+                    1.22, /* inner ~70° */ 1.48, /* outer ~85° */
+                ));
         }
 
         // Emergency-exit red lights at both ends

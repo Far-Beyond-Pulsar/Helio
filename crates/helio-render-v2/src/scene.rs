@@ -187,6 +187,31 @@ impl SceneLight {
             range,
         }
     }
+
+    /// Spot light — a cone emitter.
+    ///
+    /// `direction` is the axis the cone points along (should be normalised).
+    /// `inner_angle` / `outer_angle` are the half-angles of the soft-edge cone
+    /// in radians, e.g. `inner = 0.8`, `outer = 1.0` for a ~60°/115° spread.
+    /// Only one shadow-map face is rendered for spots (vs 6 for point lights).
+    pub fn spot(
+        position:    [f32; 3],
+        direction:   [f32; 3],
+        color:       [f32; 3],
+        intensity:   f32,
+        range:       f32,
+        inner_angle: f32,
+        outer_angle: f32,
+    ) -> Self {
+        Self {
+            light_type: LightType::Spot { inner_angle, outer_angle },
+            position,
+            direction,
+            color,
+            intensity,
+            range,
+        }
+    }
 }
 
 /// The scene database – defines all rendered content

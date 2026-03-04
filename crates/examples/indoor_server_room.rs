@@ -407,11 +407,16 @@ impl AppState {
             .with_sky([0.0, 0.0, 0.0])
             .with_ambient([0.6, 0.72, 1.0], 0.06); // cool blue data-centre ambient
 
-        // Overhead fluorescent panels — cool white
+        // Overhead fluorescent panels — cool white, downward spot (1 shadow face vs 6)
+        // inner ≈ 70° half-angle, outer ≈ 85° for a wide soft-edge beam
         for &(px, pz) in CEILING_PANEL_XZ {
             let p = [px, 3.78, pz];
             scene = scene
-                .add_light(SceneLight::point(p, [0.88, 0.93, 1.0], 4.5, 7.0));
+                .add_light(SceneLight::spot(
+                    p, [0.0, -1.0, 0.0],
+                    [0.88, 0.93, 1.0], 4.5, 7.0,
+                    1.22, /* inner ~70° */ 1.48, /* outer ~85° */
+                ));
         }
 
         // Per-row status LED strip at rack-top height

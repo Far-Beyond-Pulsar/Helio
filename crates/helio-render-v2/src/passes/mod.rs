@@ -8,7 +8,7 @@ pub mod sky;
 pub mod sky_lut;
 
 pub use geometry::GeometryPass;
-pub use shadow::ShadowPass;
+pub use shadow::{ShadowPass, ShadowCullLight};
 pub use billboard::BillboardPass;
 pub use radiance_cascades::RadianceCascadesPass;
 pub use sky::SkyPass;
