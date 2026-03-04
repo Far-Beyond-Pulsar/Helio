@@ -193,16 +193,15 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
     var shadow_pos = world_pos;
     if light.light_type < 0.5 {
         let NdL = max(dot(world_normal, normalize(-light.direction)), 0.0);
-        shadow_pos += world_normal * (0.02 / max(NdL, 0.1));
+        shadow_pos += world_normal * (0.003 / max(NdL, 0.3));
     } else if light.light_type > 0.5 && light.light_type < 1.5 {
         let to_light = normalize(light.position - world_pos);
         let NdL = max(dot(world_normal, to_light), 0.0);
-        shadow_pos += world_normal * (0.02 / max(NdL, 0.1));
+        shadow_pos += world_normal * (0.003 / max(NdL, 0.3));
     } else {
-        // Spot: slightly larger offset — oblique angles are the common case.
         let to_light = normalize(light.position - world_pos);
         let NdL = max(dot(world_normal, to_light), 0.0);
-        shadow_pos += world_normal * (0.03 / max(NdL, 0.08));
+        shadow_pos += world_normal * (0.005 / max(NdL, 0.2));
     }
 
     let light_clip = shadow_matrices[layer].mat * vec4<f32>(shadow_pos, 1.0);
