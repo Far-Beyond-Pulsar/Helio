@@ -129,23 +129,13 @@ struct LightMatrix { mat: mat4x4<f32> }
 
 const ATLAS_SIZE: f32 = 2048.0;
 
-var<private> POISSON_DISK: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+// 4-tap rotated Poisson disk — good coverage at 1/4 the bandwidth of 16 taps.
+// At high res the atlas texel density is high enough that 4 taps are sufficient.
+var<private> POISSON_DISK: array<vec2<f32>, 4> = array<vec2<f32>, 4>(
     vec2<f32>(-0.94201624, -0.39906216),
     vec2<f32>( 0.94558609, -0.76890725),
     vec2<f32>(-0.09418410, -0.92938870),
     vec2<f32>( 0.34495938,  0.29387760),
-    vec2<f32>(-0.91588581,  0.45771432),
-    vec2<f32>(-0.81544232, -0.87912464),
-    vec2<f32>(-0.38277543,  0.27676845),
-    vec2<f32>( 0.97484398,  0.75648379),
-    vec2<f32>( 0.44323325, -0.97511554),
-    vec2<f32>( 0.53742981, -0.47373420),
-    vec2<f32>(-0.26496911, -0.41893023),
-    vec2<f32>( 0.79197514,  0.19090188),
-    vec2<f32>(-0.24188840,  0.99706507),
-    vec2<f32>(-0.81409955,  0.91437590),
-    vec2<f32>( 0.19984126,  0.78641367),
-    vec2<f32>( 0.14383161, -0.14100790),
 );
 
 fn point_light_face(dir: vec3<f32>) -> u32 {
@@ -216,7 +206,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
     }
     let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
     var lit_sum = 0.0;
-    for (var i = 0; i < 16; i++) {
+    for (var i = 0; i < 4; i++) {
         let offset = POISSON_DISK[i] * filter_radius;
         lit_sum += textureSampleCompareLevel(
             shadow_atlas, shadow_sampler,
@@ -225,7 +215,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
             biased_depth,
         );
     }
-    return lit_sum / 16.0;
+    return lit_sum * 0.25;
 }
 
 // ============================================================================
@@ -256,15 +246,18 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
     return geometry_schlick_ggx(NdV, roughness) * geometry_schlick_ggx(NdL, roughness);
 }
 
+// Fast x^5 without general pow()
+fn pow5(x: f32) -> f32 { let x2 = x * x; return x2 * x2 * x; }
+
 // Fresnel-Schlick
 fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
-    return F0 + (1.0 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+    return F0 + (1.0 - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
 // Fresnel-Schlick with roughness (IBL)
 fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
     let one_minus_r = vec3<f32>(1.0 - roughness);
-    return F0 + (max(one_minus_r, F0) - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+    return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
 // Evaluate one light using the full Cook-Torrance BRDF + PCF shadows
@@ -303,6 +296,9 @@ fn pbr_direct_light(
     let NdL = max(dot(N, L), 0.0);
     if NdL == 0.0 { return vec3<f32>(0.0); }
 
+    // Skip BRDF + 4 PCF shadow reads when light is negligible.
+    if all(radiance < vec3<f32>(0.002)) { return vec3<f32>(0.0); }
+
     let H   = normalize(V + L);
     let D   = distribution_ggx(N, H, roughness);
     let G   = geometry_smith(N, V, L, roughness);
@@ -338,21 +334,21 @@ fn rc_oct_decode(uv: vec2<f32>) -> vec3<f32> {
     return normalize(n);
 }
 
-fn rc_corner_irradiance(px: u32, py: u32, pz: u32, normal: vec3<f32>) -> vec3<f32> {
+// Fetch one probe corner's irradiance given precomputed per-direction weights.
+// Directions and cos_weights are computed once per fragment in sample_rc_irradiance
+// and shared across all 8 trilinear corners, saving 7/8 of the rc_oct_decode+normalize calls.
+fn rc_corner_irradiance_precomp(
+    px: u32, py: u32, pz: u32,
+    cos_weights: array<f32, 16>,
+) -> vec3<f32> {
     let dim = RC_PROBE_DIM - 1u;
     let cpx = min(px, dim); let cpy = min(py, dim); let cpz = min(pz, dim);
     var irr  = vec3<f32>(0.0);
     var wsum = 0.0;
-
-    // OPTIMIZED: Cosine-weighted hemisphere sampling with early-out
-    // Skip directions that don't contribute (dot < 0) before texture load
+    var idx  = 0u;
     for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
         for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
-            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
-            let dir    = rc_oct_decode(dir_uv);
-            let cos_w  = max(0.0, dot(normal, dir));
-
-            // Early-out: skip texture load if direction doesn't contribute
+            let cos_w = cos_weights[idx];
             if cos_w > 0.001 {
                 let atlas_x = i32(cpx * RC_DIR_DIM + ddx);
                 let atlas_y = i32((cpy * RC_PROBE_DIM + cpz) * RC_DIR_DIM + ddy);
@@ -360,6 +356,7 @@ fn rc_corner_irradiance(px: u32, py: u32, pz: u32, normal: vec3<f32>) -> vec3<f3
                 irr  += rad * cos_w;
                 wsum += cos_w;
             }
+            idx++;
         }
     }
     return irr / max(wsum, 0.001);
@@ -373,20 +370,25 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         return vec3<f32>(0.0);
     }
 
-    // Normalised [0,1] position within the probe volume
     let t = (world_pos - world_min) / world_size;
-
-    // Fade to zero near the edges of the volume so surfaces outside (or at the
-    // boundary of) the RC grid blend smoothly into the ambient fallback instead
-    // of showing the clamped edge-probe value as a hard band.
-    let fade_margin = 0.05; // 5% of volume extent
-    let fade = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t) * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
+    let fade_margin = 0.05;
+    let fade = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
+             * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
     let volume_weight = fade.x * fade.y * fade.z;
     if volume_weight <= 0.0 { return vec3<f32>(0.0); }
 
-    // Trilinear interpolation across the 8 surrounding probes.
-    // 8 probes × ~8 contributing directions ≈ 64 cached texture loads — cheap
-    // because the 64×1024 atlas fits in L1 cache.
+    // Precompute direction cosine weights ONCE for all 8 trilinear corners.
+    // Previously rc_oct_decode+normalize ran 8×16=128 times; now it runs 16 times.
+    var cos_weights: array<f32, 16>;
+    var idx = 0u;
+    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
+        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
+            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
+            cos_weights[idx] = max(0.0, dot(normal, rc_oct_decode(dir_uv)));
+            idx++;
+        }
+    }
+
     let cell_size   = world_size / f32(RC_PROBE_DIM);
     let probe_f     = (world_pos - world_min) / cell_size - 0.5;
     let probe_dim_f = f32(RC_PROBE_DIM) - 1.0;
@@ -394,14 +396,14 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let pi  = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
     let frc = fract(pf);
 
-    let c000 = rc_corner_irradiance(pi.x,      pi.y,      pi.z,      normal);
-    let c001 = rc_corner_irradiance(pi.x,      pi.y,      pi.z + 1u, normal);
-    let c010 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z,      normal);
-    let c011 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z + 1u, normal);
-    let c100 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z,      normal);
-    let c101 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z + 1u, normal);
-    let c110 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z,      normal);
-    let c111 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z + 1u, normal);
+    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
+    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
+    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
+    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
+    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
+    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
+    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
+    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
 
     let c00 = mix(c000, c001, frc.z);
     let c01 = mix(c010, c011, frc.z);
