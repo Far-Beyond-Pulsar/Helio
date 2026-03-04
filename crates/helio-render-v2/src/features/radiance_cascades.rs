@@ -192,7 +192,7 @@ impl Feature for RadianceCascadesFeature {
             label: Some("RC TLAS"),
             flags: wgpu::AccelerationStructureFlags::PREFER_FAST_TRACE,
             update_mode: wgpu::AccelerationStructureUpdateMode::Build,
-            max_instances: 256,
+            max_instances: 2048,
         });
 
         // ── Light buffer ─────────────────────────────────────────────────────

@@ -43,6 +43,10 @@ path = "outdoor_city.rs"
 name = "outdoor_volcano"
 path = "outdoor_volcano.rs"
 
+[[bin]]
+name = "space_station"
+path = "space_station.rs"
+
 
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }

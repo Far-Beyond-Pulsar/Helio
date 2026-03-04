@@ -119,13 +119,15 @@ impl RenderPass for RadianceCascadesPass {
             }
         }
 
-        // ── 2. Set TLAS instances (all active draw calls) ─────────────────────
-        for (i, dc) in draw_calls.iter().enumerate() {
+        // ── 2. Set TLAS instances (all active draw calls, capped at TLAS capacity) ──
+        const TLAS_MAX: usize = 2048;
+        let active = draw_calls.len().min(TLAS_MAX);
+        for (i, dc) in draw_calls[..active].iter().enumerate() {
             let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
             let blas_ref = &self.blas_cache[&key].blas;
             self.tlas[i] = Some(wgpu::TlasInstance::new(blas_ref, IDENTITY_TRANSFORM, 0, 0xFF));
         }
-        for i in draw_calls.len()..256 {
+        for i in active..TLAS_MAX {
             self.tlas[i] = None;
         }
 

@@ -79,6 +79,7 @@ fn load_sprite() -> (Vec<u8>, u32, u32) {
     (img.into_raw(), w, h)
 }
 
+#[allow(dead_code)]
 fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
     let img = image::load_from_memory(include_bytes!("../../probe.png"))
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
@@ -98,11 +99,12 @@ fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_rende
         [1.0, 1.0, 0.0, 0.75],
         [1.0, 0.35, 0.0, 0.70],
     ];
+    // screen_scale=true: sizes are angular (multiplied by distance), giving constant apparent size
     const SIZES: [[f32; 2]; 4] = [
-        [0.04, 0.04],
-        [0.10, 0.10],
-        [0.22, 0.22],
-        [0.45, 0.45],
+        [0.035, 0.035],  // cascade 0 — finest (4096 probes) — tiny dots
+        [0.075, 0.075],  // cascade 1
+        [0.140, 0.140],  // cascade 2
+        [0.260, 0.260],  // cascade 3 — coarsest (8 probes) — large markers
     ];
     let mut out = Vec::new();
     for (c, &dim) in PROBE_DIMS.iter().enumerate() {
@@ -113,7 +115,8 @@ fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_rende
                     let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
                     let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
                     out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c]));
+                        .with_color(COLORS[c])
+                        .with_screen_scale(true));
                 }
             }
         }
@@ -440,9 +443,7 @@ impl AppState {
         for &z in CHANDELIER_Z {
             let p = [0.0_f32, 15.0, z];
             scene = scene
-                .add_light(SceneLight::point(p, [1.0, 0.92, 0.78], 8.0 * flicker, 22.0))
-                .add_billboard(BillboardInstance::new(p, [0.4, 0.4])
-                    .with_color([1.0, 0.92, 0.78, 1.0]));
+                .add_light(SceneLight::point(p, [1.0, 0.92, 0.78], 8.0 * flicker, 22.0));
         }
 
         // Stained glass shafts – coloured point lights from windows
@@ -455,9 +456,7 @@ impl AppState {
         for &(x, y, z) in CANDLES {
             let p = [x, y, z];
             scene = scene
-                .add_light(SceneLight::point(p, [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0))
-                .add_billboard(BillboardInstance::new(p, [0.15, 0.15])
-                    .with_color([1.0, 0.6, 0.15, 1.0]));
+                .add_light(SceneLight::point(p, [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0));
         }
 
         // Geometry
@@ -482,6 +481,25 @@ impl AppState {
         for m in &self.pews_right      { scene = scene.add_object(m.clone()); }
         for m in &self.chandelier_chains { scene = scene.add_object(m.clone()); }
         for m in &self.chandelier_rings  { scene = scene.add_object(m.clone()); }
+
+        if self.probe_vis {
+            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                scene = scene.add_billboard(b);
+            }
+        } else {
+            for &z in CHANDELIER_Z {
+                let p = [0.0_f32, 15.0, z];
+                scene = scene
+                    .add_billboard(BillboardInstance::new(p, [0.4, 0.4])
+                        .with_color([1.0, 0.92, 0.78, 1.0]));
+            }
+            for &(x, y, z) in CANDLES {
+                let p = [x, y, z];
+                scene = scene
+                    .add_billboard(BillboardInstance::new(p, [0.15, 0.15])
+                        .with_color([1.0, 0.6, 0.15, 1.0]));
+            }
+        }
 
         if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
             log::error!("Render: {:?}", e);

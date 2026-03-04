@@ -88,11 +88,12 @@ fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_rende
         [1.0, 1.0, 0.0, 0.75],
         [1.0, 0.35, 0.0, 0.70],
     ];
+    // screen_scale=true: sizes are angular (multiplied by distance), giving constant apparent size
     const SIZES: [[f32; 2]; 4] = [
-        [0.04, 0.04],
-        [0.10, 0.10],
-        [0.22, 0.22],
-        [0.45, 0.45],
+        [0.035, 0.035],  // cascade 0 — finest (4096 probes) — tiny dots
+        [0.075, 0.075],  // cascade 1
+        [0.140, 0.140],  // cascade 2
+        [0.260, 0.260],  // cascade 3 — coarsest (8 probes) — large markers
     ];
     let mut out = Vec::new();
     for (c, &dim) in PROBE_DIMS.iter().enumerate() {
@@ -103,7 +104,8 @@ fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_rende
                     let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
                     let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
                     out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c]));
+                        .with_color(COLORS[c])
+                        .with_screen_scale(true));
                 }
             }
         }
@@ -409,9 +411,7 @@ impl AppState {
         for &(px, pz) in CEILING_PANEL_XZ {
             let p = [px, 3.78, pz];
             scene = scene
-                .add_light(SceneLight::point(p, [0.88, 0.93, 1.0], 4.5, 7.0))
-                .add_billboard(BillboardInstance::new(p, [0.35, 0.12])
-                    .with_color([0.88, 0.93, 1.0, 1.0]));
+                .add_light(SceneLight::point(p, [0.88, 0.93, 1.0], 4.5, 7.0));
         }
 
         // Per-row status LED strip at rack-top height
@@ -420,16 +420,12 @@ impl AppState {
             // LED strip runs the full row length just above the racks
             let p = [rx, 2.1, 0.0];
             scene = scene
-                .add_light(SceneLight::point(p, col, 2.5, 6.0))
-                .add_billboard(BillboardInstance::new(p, [0.12, 0.08])
-                    .with_color([col[0], col[1], col[2], 1.0]));
+                .add_light(SceneLight::point(p, col, 2.5, 6.0));
             // Additional LED at each end of the row
             for &end_z in &[-4.5_f32, 4.5] {
                 let pe = [rx, 2.1, end_z];
                 scene = scene
-                    .add_light(SceneLight::point(pe, col, 1.0, 3.5))
-                    .add_billboard(BillboardInstance::new(pe, [0.1, 0.08])
-                        .with_color([col[0], col[1], col[2], 0.9]));
+                    .add_light(SceneLight::point(pe, col, 1.0, 3.5));
             }
         }
 
@@ -438,9 +434,7 @@ impl AppState {
             let p = [*cx, 2.8, -5.6];
             let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
             scene = scene
-                .add_light(SceneLight::point(p, col, 0.8, 3.0))
-                .add_billboard(BillboardInstance::new(p, [0.12, 0.08])
-                    .with_color([col[0], col[1], col[2], 0.85]));
+                .add_light(SceneLight::point(p, col, 0.8, 3.0));
         }
 
         // Geometry
@@ -460,6 +454,39 @@ impl AppState {
         for m in &self.cable_trays      { scene = scene.add_object(m.clone()); }
         for m in &self.ceiling_panels   { scene = scene.add_object(m.clone()); }
         for m in &self.cooling_units    { scene = scene.add_object(m.clone()); }
+
+        if self.probe_vis {
+            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                scene = scene.add_billboard(b);
+            }
+        } else {
+            for &(px, pz) in CEILING_PANEL_XZ {
+                let p = [px, 3.78, pz];
+                scene = scene
+                    .add_billboard(BillboardInstance::new(p, [0.35, 0.12])
+                        .with_color([0.88, 0.93, 1.0, 1.0]));
+            }
+            for &(rx, tag) in RACK_ROWS {
+                let col = row_color(tag);
+                let p = [rx, 2.1, 0.0];
+                scene = scene
+                    .add_billboard(BillboardInstance::new(p, [0.12, 0.08])
+                        .with_color([col[0], col[1], col[2], 1.0]));
+                for &end_z in &[-4.5_f32, 4.5] {
+                    let pe = [rx, 2.1, end_z];
+                    scene = scene
+                        .add_billboard(BillboardInstance::new(pe, [0.1, 0.08])
+                            .with_color([col[0], col[1], col[2], 0.9]));
+                }
+            }
+            for (i, cx) in [-9.0_f32, -3.0, 3.0, 9.0].iter().enumerate() {
+                let p = [*cx, 2.8, -5.6];
+                let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
+                scene = scene
+                    .add_billboard(BillboardInstance::new(p, [0.12, 0.08])
+                        .with_color([col[0], col[1], col[2], 0.85]));
+            }
+        }
 
         if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
             log::error!("Render: {:?}", e);
