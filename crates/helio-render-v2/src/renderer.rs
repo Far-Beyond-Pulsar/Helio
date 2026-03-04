@@ -11,6 +11,7 @@ use crate::scene::Scene;
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
+use crate::profiler::{GpuProfiler, PassTiming};
 use crate::Result;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use wgpu::util::DeviceExt;
@@ -305,6 +306,9 @@ pub struct Renderer {
     frame_count: u64,
     width: u32,
     height: u32,
+
+    /// GPU + CPU pass-level profiler.  `None` when TIMESTAMP_QUERY is unavailable.
+    profiler: Option<GpuProfiler>,
 }
 
 impl Renderer {
@@ -619,6 +623,9 @@ impl Renderer {
 
         let (depth_texture, depth_view) = create_depth_texture(&device, config.width, config.height);
 
+        // Create profiler if TIMESTAMP_QUERY was requested on this device
+        let profiler = GpuProfiler::new(&device, &queue);
+
         log::info!("Helio Render V2 initialized successfully");
 
         Ok(Self {
@@ -653,6 +660,7 @@ impl Renderer {
             frame_count: 0,
             width: config.width,
             height: config.height,
+            profiler,
         })
     }
 
@@ -752,11 +760,22 @@ impl Renderer {
             sky_bind_group: None,
         };
 
-        self.graph.execute(&mut graph_ctx)?;
+        if let Some(p) = &mut self.profiler { p.begin_frame(); }
+
+        self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
+
+        // Resolve GPU timestamp queries into staging buffers (before finish)
+        if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
 
         // Submit and clear the draw list for next frame
         self.queue.submit(Some(encoder.finish()));
         self.draw_list.lock().unwrap().clear();
+
+        // Schedule map_async AFTER submit so the buffer is no longer used by the encoder
+        if let Some(p) = &mut self.profiler { p.begin_readback(); }
+
+        // Non-blocking readback of the previous frame's timing results
+        if let Some(p) = &mut self.profiler { p.poll_results(&self.device); }
 
         self.frame_count += 1;
         Ok(())
@@ -921,6 +940,34 @@ impl Renderer {
     }
 
     pub fn frame_count(&self) -> u64 { self.frame_count }
+
+    // ── Profiling ─────────────────────────────────────────────────────────────
+
+    /// Returns the per-pass timing results collected during the last completed frame.
+    /// Each entry has `name`, `gpu_ms` (GPU execution time), and `cpu_ms` (driver overhead).
+    /// Returns an empty slice before the 2nd frame or when TIMESTAMP_QUERY is unavailable.
+    pub fn last_frame_timings(&self) -> &[PassTiming] {
+        self.profiler.as_ref()
+            .map(|p| p.last_timings.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// Print a compact timing summary to stderr.  Pass the current frame number;
+    /// output is emitted only when `frame % interval == 0` so you can call this
+    /// every frame without flooding the console.
+    ///
+    /// Example (interval = 60):
+    /// ```text
+    /// [GPU TIMING]  sky_lut: 0.11ms(gpu) | sky: 0.43ms(gpu) | radiance_cascades: 8.71ms(gpu) | ...
+    /// ```
+    pub fn print_timings_every(&self, interval: u64) {
+        if self.frame_count % interval != 0 { return; }
+        if let Some(p) = &self.profiler {
+            p.print_timings();
+        } else if self.frame_count % interval == 0 {
+            log::info!("[TIMING] TIMESTAMP_QUERY unavailable — add wgpu::Features::TIMESTAMP_QUERY to device descriptor");
+        }
+    }
     pub fn device(&self) -> &wgpu::Device { &self.device }
     pub fn queue(&self) -> &wgpu::Queue { &self.queue }
 }

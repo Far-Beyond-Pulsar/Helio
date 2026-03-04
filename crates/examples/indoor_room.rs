@@ -151,7 +151,7 @@ impl ApplicationHandler for App {
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Device"),
-            required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+            required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
             required_limits: wgpu::Limits::default()
                 .using_minimum_supported_acceleration_structure_values(),
             memory_hints: wgpu::MemoryHints::default(),

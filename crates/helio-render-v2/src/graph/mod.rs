@@ -13,6 +13,7 @@ pub use builder::GraphBuilder;
 
 use crate::{Result, Error};
 use crate::resources::ResourceManager;
+use crate::profiler::GpuProfiler;
 use std::collections::{HashMap, VecDeque};
 
 /// Render graph for automatic pass ordering and resource management
@@ -181,16 +182,36 @@ impl RenderGraph {
     }
 
     /// Execute the render graph
-    pub fn execute(&mut self, ctx: &mut GraphContext) -> Result<()> {
+    pub fn execute(&mut self, ctx: &mut GraphContext, profiler: Option<&mut GpuProfiler>) -> Result<()> {
         log::trace!("Executing render graph (frame {})", ctx.frame);
 
         // Clone execution order to avoid borrow checker issues
         let execution_order = self.execution_order.clone();
 
+        // Convert profiler to raw pointer so we can freely split borrows with
+        // ctx.encoder inside the loop.  This is sound: profiler outlives the loop,
+        // and it is only ever accessed from this (single) thread.
+        let profiler_raw: *mut GpuProfiler =
+            profiler.map(|p| p as *mut GpuProfiler).unwrap_or(std::ptr::null_mut());
+
         // Execute passes in order
         for (exec_idx, &pass_idx) in execution_order.iter().enumerate() {
             let pass_name = self.passes[pass_idx].pass.name().to_string();
             log::trace!("  Executing pass: {}", pass_name);
+
+            // Allocate query slots and record begin timestamp
+            let slot_pair: Option<(u32, u32)> = if !profiler_raw.is_null() {
+                // SAFETY: profiler_raw is valid, non-null, and exclusively accessed here.
+                let p = unsafe { &mut *profiler_raw };
+                p.allocate_scope(&pass_name).map(|(b, e)| {
+                    ctx.encoder.write_timestamp(p.query_set(), b);
+                    (b, e)
+                })
+            } else {
+                None
+            };
+
+            let cpu_start = std::time::Instant::now();
 
             // Allocate transient resources for this pass
             self.allocate_transient_resources(exec_idx, ctx)?;
@@ -209,6 +230,18 @@ impl RenderGraph {
             };
 
             self.passes[pass_idx].pass.execute(&mut pass_ctx)?;
+
+            let cpu_ms = cpu_start.elapsed().as_secs_f32() * 1000.0;
+
+            // Record end timestamp and store CPU time
+            if !profiler_raw.is_null() {
+                // SAFETY: same as above.
+                let p = unsafe { &mut *profiler_raw };
+                if let Some((_, end)) = slot_pair {
+                    ctx.encoder.write_timestamp(p.query_set(), end);
+                }
+                p.set_last_scope_cpu_ms(cpu_ms);
+            }
 
             // Release transient resources no longer needed
             self.release_transient_resources(exec_idx, ctx)?;

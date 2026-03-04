@@ -4,6 +4,8 @@
 
 **A production-grade real-time renderer built on [wgpu](https://wgpu.rs/)**
 
+**WIP**
+
 [![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
 [![wgpu](https://img.shields.io/badge/wgpu-28-blue)](https://wgpu.rs/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)

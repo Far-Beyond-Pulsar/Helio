@@ -19,12 +19,14 @@ pub mod shaders;
 pub mod mesh;
 pub mod scene;
 pub mod material;
+pub mod profiler;
 
 mod renderer;
 mod camera;
 
 pub use renderer::{Renderer, RendererConfig};
 pub use camera::Camera;
+pub use profiler::{GpuProfiler, PassTiming};
 pub use mesh::{GpuMesh, PackedVertex, DrawCall};
 pub use scene::{Scene, SceneObject, SceneLight, SkyAtmosphere, VolumetricClouds, Skylight};
 pub use material::{Material, GpuMaterial, TextureData};
