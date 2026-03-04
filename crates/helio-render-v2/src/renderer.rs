@@ -1071,16 +1071,7 @@ impl Renderer {
                     visible_lights.push(light);
                 }
                 crate::features::LightType::Point | crate::features::LightType::Spot { .. } => {
-                    let lp = glam::Vec3::from(light.position);
-                    let d = camera.position.distance(lp);
-                    let r = light.range.max(0.001);
-                    
-                    // Distance cull: keep lights within 2x their range
-                    // (attenuation will fade them out properly)
-                    if d > r * 2.0 {
-                        continue;
-                    }
-                    
+                    // Include all lights - GPU handles distance fade with smoothstep
                     visible_lights.push(light);
                 }
             }

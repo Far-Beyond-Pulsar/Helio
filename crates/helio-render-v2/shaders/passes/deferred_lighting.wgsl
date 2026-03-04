@@ -467,8 +467,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         for (var i = 0u; i < globals.light_count; i++) {
             let sf = shadow_factor(i, world_pos);
             if lights[i].light_type < 0.5 { sky_occlusion = sf; }
-            Lo += pbr_direct_light(lights[i], world_pos, N, V,
+            
+            // Distance-based fade: smooth fade-out as light goes beyond render distance
+            let cam_to_light = lights[i].position - camera.position;
+            let dist_to_light = length(cam_to_light);
+            let light_range = max(lights[i].range, 0.001);
+            
+            // Fade zone: fully visible at 2.0x range, fade out toward 2.2x range
+            let fade_in_dist = light_range * 2.0;
+            let fade_out_dist = light_range * 2.2;
+            let distance_fade = 1.0 - smoothstep(fade_in_dist, fade_out_dist, dist_to_light);
+            
+            let light_contrib = pbr_direct_light(lights[i], world_pos, N, V,
                                    F0, albedo, roughness, metallic, sf);
+            Lo += light_contrib * distance_fade;
         }
     }
 

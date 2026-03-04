@@ -513,9 +513,21 @@ impl AppState {
         let scene_build_start = std::time::Instant::now();
         
         let mut lights = build_lights();
-        // Apply intensity multiplier
+        
+        // Smooth fade-in over first 2 seconds (~120 frames at 60fps)
+        let fade_in_frames = 120.0;
+        let frame_age = (self.renderer.frame_count() as f32).min(fade_in_frames);
+        let time_fade = if frame_age < fade_in_frames {
+            // Smoothstep: smooth curve from 0 to 1
+            let t = frame_age / fade_in_frames;
+            t * t * (3.0 - 2.0 * t)  // Hermite smoothstep
+        } else {
+            1.0
+        };
+        
+        // Apply time-based fade-in only (GPU will handle distance fade)
         for light in &mut lights {
-            light.intensity *= self.light_intensity_multiplier;
+            light.intensity *= self.light_intensity_multiplier * time_fade;
         }
 
         let mut scene = Scene::new();
