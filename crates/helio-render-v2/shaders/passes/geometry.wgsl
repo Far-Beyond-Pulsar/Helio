@@ -376,17 +376,32 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let volume_weight = fade.x * fade.y * fade.z;
     if volume_weight <= 0.0 { return vec3<f32>(0.0); }
 
-    // OPTIMIZED: Use nearest-neighbor probe lookup instead of trilinear
-    // Reduces from 8 probe reads (128 texture loads) to 1 probe read (16 texture loads)
-    // Temporal accumulation and soft shadows make this imperceptible
+    // Trilinear interpolation across the 8 surrounding probes.
+    // 8 probes × ~8 contributing directions ≈ 64 cached texture loads — cheap
+    // because the 64×1024 atlas fits in L1 cache.
     let cell_size   = world_size / f32(RC_PROBE_DIM);
     let probe_f     = (world_pos - world_min) / cell_size - 0.5;
     let probe_dim_f = f32(RC_PROBE_DIM) - 1.0;
     let pf  = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(probe_dim_f));
-    let pi  = vec3<u32>(u32(pf.x + 0.5), u32(pf.y + 0.5), u32(pf.z + 0.5));
-    let pi_clamped = min(pi, vec3<u32>(RC_PROBE_DIM - 1u));
+    let pi  = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
+    let frc = fract(pf);
 
-    return rc_corner_irradiance(pi_clamped.x, pi_clamped.y, pi_clamped.z, normal) * volume_weight;
+    let c000 = rc_corner_irradiance(pi.x,      pi.y,      pi.z,      normal);
+    let c001 = rc_corner_irradiance(pi.x,      pi.y,      pi.z + 1u, normal);
+    let c010 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z,      normal);
+    let c011 = rc_corner_irradiance(pi.x,      pi.y + 1u, pi.z + 1u, normal);
+    let c100 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z,      normal);
+    let c101 = rc_corner_irradiance(pi.x + 1u, pi.y,      pi.z + 1u, normal);
+    let c110 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z,      normal);
+    let c111 = rc_corner_irradiance(pi.x + 1u, pi.y + 1u, pi.z + 1u, normal);
+
+    let c00 = mix(c000, c001, frc.z);
+    let c01 = mix(c010, c011, frc.z);
+    let c10 = mix(c100, c101, frc.z);
+    let c11 = mix(c110, c111, frc.z);
+    let c0  = mix(c00, c01, frc.y);
+    let c1  = mix(c10, c11, frc.y);
+    return mix(c0, c1, frc.x) * volume_weight;
 }
 
 // ============================================================================
