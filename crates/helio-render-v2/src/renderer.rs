@@ -397,6 +397,10 @@ pub struct Renderer {
     frame_count: u64,
     width: u32,
     height: u32,
+    /// Tracks the start time of the previous frame for frame-to-frame latency measurement.
+    last_frame_start: Option<std::time::Instant>,
+    /// Tracks the end time of the previous frame for frame-to-frame latency measurement.
+    last_frame_end: Option<std::time::Instant>,
 
     /// GPU + CPU pass-level profiler.  `None` when TIMESTAMP_QUERY is unavailable.
     profiler: Option<GpuProfiler>,
@@ -840,6 +844,8 @@ impl Renderer {
             frame_count: 0,
             width: config.width,
             height: config.height,
+            last_frame_start: None,
+            last_frame_end: None,
             profiler,
             debug_printout: false,
         })
@@ -1015,13 +1021,24 @@ impl Renderer {
         // Non-blocking readback of the previous frame's timing results
         if let Some(p) = &mut self.profiler { p.poll_results(&self.device); }
 
-        // When the 4-key debug toggle is on, print a timing snapshot roughly
-        // once per second (~every 60 frames).  The work is handed off to a
-        // detached thread so the render loop is never stalled by stderr I/O.
+        // Measure frame-to-frame latency (time from start of previous frame to start of this frame)
+        let frame_to_frame_ms = if let Some(last_start) = self.last_frame_start {
+            last_start.elapsed().as_secs_f32() * 1000.0
+        } else {
+            0.0 // First frame; no previous frame to measure from
+        };
+
+        // Measure render duration (time from start of this frame to end)
+        let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+        
+        // Track when this frame's render started for next frame's calculation
+        self.last_frame_start = Some(frame_start);
+        self.last_frame_end = Some(std::time::Instant::now());
+
         if self.debug_printout && self.frame_count % 60 == 0 {
-            let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
             if let Some(p) = &mut self.profiler {
                 p.set_frame_time_ms(frame_time_ms);
+                p.set_frame_to_frame_ms(frame_to_frame_ms);
             }
             if let Some(p) = &self.profiler {
                 if !p.last_timings.is_empty() {
@@ -1029,7 +1046,7 @@ impl Renderer {
                     let total_gpu   = p.last_total_gpu_ms;
                     let total_cpu   = p.last_total_cpu_ms;
                     std::thread::spawn(move || {
-                        crate::profiler::GpuProfiler::print_snapshot(timings, total_gpu, total_cpu, frame_time_ms);
+                        crate::profiler::GpuProfiler::print_snapshot(timings, total_gpu, total_cpu, frame_time_ms, frame_to_frame_ms);
                     });
                 }
             }
@@ -1481,8 +1498,9 @@ impl Renderer {
             let total_gpu   = p.last_total_gpu_ms;
             let total_cpu   = p.last_total_cpu_ms;
             let frame_time  = p.last_frame_time_ms;
+            let frame_to_frame = p.last_frame_to_frame_ms;
             std::thread::spawn(move || {
-                crate::profiler::GpuProfiler::print_snapshot(timings, total_gpu, total_cpu, frame_time);
+                crate::profiler::GpuProfiler::print_snapshot(timings, total_gpu, total_cpu, frame_time, frame_to_frame);
             });
         } else {
             log::info!("[TIMING] TIMESTAMP_QUERY unavailable — add wgpu::Features::TIMESTAMP_QUERY to device descriptor");
