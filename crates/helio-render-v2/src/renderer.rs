@@ -782,8 +782,10 @@ impl Renderer {
                 crate::features::LightType::Point => 1.0,
                 crate::features::LightType::Spot { .. } => 2.0,
             };
-            let (inner_angle, outer_angle) = match l.light_type {
-                crate::features::LightType::Spot { inner_angle, outer_angle } => (inner_angle, outer_angle),
+            // Precompute cosines for spot lights so shaders don't call cos() per ray
+            let (cos_inner_angle, cos_outer_angle) = match l.light_type {
+                crate::features::LightType::Spot { inner_angle, outer_angle } =>
+                    (inner_angle.cos(), outer_angle.cos()),
                 _ => (0.0, 0.0),
             };
             GpuLight {
@@ -793,8 +795,8 @@ impl Renderer {
                 range: l.range,
                 color: l.color,
                 intensity: l.intensity,
-                inner_angle,
-                outer_angle,
+                cos_inner_angle,
+                cos_outer_angle,
                 _pad: [0.0; 2],
             }
         }).collect();

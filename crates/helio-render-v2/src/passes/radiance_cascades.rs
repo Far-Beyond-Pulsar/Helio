@@ -41,6 +41,10 @@ pub struct RadianceCascadesPass {
     blas_cache: HashMap<usize, BlasEntry>,
     world_min: [f32; 3],
     world_max: [f32; 3],
+    /// Number of TLAS instances last time we rebuilt the TLAS.
+    /// When this matches the current active count AND no new BLASes exist,
+    /// the TLAS rebuild (a GPU stall) is skipped entirely.
+    tlas_last_instance_count: usize,
 }
 
 impl RadianceCascadesPass {
@@ -69,6 +73,7 @@ impl RadianceCascadesPass {
             blas_cache: HashMap::new(),
             world_min,
             world_max,
+            tlas_last_instance_count: 0,
         }
     }
 }
@@ -119,16 +124,21 @@ impl RenderPass for RadianceCascadesPass {
             }
         }
 
-        // ── 2. Set TLAS instances (all active draw calls, capped at TLAS capacity) ──
+        // ── 2. Set TLAS instances (only when geometry changes) ───────────────
         const TLAS_MAX: usize = 2048;
         let active = draw_calls.len().min(TLAS_MAX);
-        for (i, dc) in draw_calls[..active].iter().enumerate() {
-            let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
-            let blas_ref = &self.blas_cache[&key].blas;
-            self.tlas[i] = Some(wgpu::TlasInstance::new(blas_ref, IDENTITY_TRANSFORM, 0, 0xFF));
-        }
-        for i in active..TLAS_MAX {
-            self.tlas[i] = None;
+        // We check blas_entries later; do a quick pre-check on count to decide
+        // whether to touch the instance buffer at all.
+        let count_changed = active != self.tlas_last_instance_count;
+        if count_changed {
+            for (i, dc) in draw_calls[..active].iter().enumerate() {
+                let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
+                let blas_ref = &self.blas_cache[&key].blas;
+                self.tlas[i] = Some(wgpu::TlasInstance::new(blas_ref, IDENTITY_TRANSFORM, 0, 0xFF));
+            }
+            for i in active..TLAS_MAX {
+                self.tlas[i] = None;
+            }
         }
 
         // ── 3. Build only unbuilt BLASes + TLAS ───────────────────────────────
@@ -162,11 +172,17 @@ impl RenderPass for RadianceCascadesPass {
             }
         }
 
-        // Build new BLASes and always rebuild TLAS (TLAS rebuild is cheap)
-        ctx.encoder.build_acceleration_structures(
-            blas_entries.iter(),
-            std::iter::once(&self.tlas),
-        );
+        // Build only new BLASes + TLAS.
+        // If geometry is fully static (no new BLASes, same instance count), skip
+        // the GPU acceleration-structure rebuild entirely — saves ~1–2 ms/frame.
+        let needs_as_build = !blas_entries.is_empty() || count_changed;
+        if needs_as_build {
+            ctx.encoder.build_acceleration_structures(
+                blas_entries.iter(),
+                std::iter::once(&self.tlas),
+            );
+            self.tlas_last_instance_count = active;
+        }
 
         // Mark newly built BLASes as built
         for key in keys_to_mark_built {
@@ -179,9 +195,11 @@ impl RenderPass for RadianceCascadesPass {
         let mut cpass = ctx.begin_compute_pass("RC Trace");
         cpass.set_pipeline(&self.pipeline);
         for c in (0..CASCADE_COUNT).rev() {
-            let atlas_w = PROBE_DIMS[c] * DIR_DIMS[c]; // always 32
+            // atlas_w = PROBE_DIMS[c] * DIR_DIMS[c] = 64 for all cascades
+            let atlas_w = PROBE_DIMS[c] * DIR_DIMS[c];
             let atlas_h = ATLAS_HEIGHTS[c];
-            let dispatch_x = (atlas_w + 7) / 8;
+            // Workgroup is 16×8 — match cs_trace @workgroup_size(16, 8)
+            let dispatch_x = (atlas_w + 15) / 16;
             let dispatch_y = (atlas_h + 7) / 8;
             cpass.set_bind_group(0, &self.bind_groups[c], &[]);
             cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);

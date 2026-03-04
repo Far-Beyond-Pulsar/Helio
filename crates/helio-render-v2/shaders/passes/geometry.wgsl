@@ -109,8 +109,8 @@ struct GpuLight {
     range:       f32,
     color:       vec3<f32>,
     intensity:   f32,
-    inner_angle: f32,
-    outer_angle: f32,
+    cos_inner:   f32,   // precomputed cos(inner_angle)
+    cos_outer:   f32,   // precomputed cos(outer_angle)
     _pad:        vec2<f32>,
 }
 
@@ -287,7 +287,7 @@ fn pbr_direct_light(
         var atten    = falloff * falloff;
         if light.light_type > 1.5 {
             let cos_a = dot(-L, normalize(light.direction));
-            atten    *= smoothstep(cos(light.outer_angle), cos(light.inner_angle), cos_a);
+            atten    *= smoothstep(light.cos_outer, light.cos_inner, cos_a);
         }
         radiance = light.color * light.intensity * atten;
     }
