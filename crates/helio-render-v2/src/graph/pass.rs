@@ -2,6 +2,7 @@
 
 use crate::Result;
 use crate::resources::ResourceManager;
+use crate::profiler::GpuProfiler;
 use super::PassResourceBuilder;
 
 /// Render pass trait - implemented by all rendering passes
@@ -37,9 +38,39 @@ pub struct PassContext<'a> {
     pub has_sky: bool,
     /// Sky uniforms bind group (group 1 in sky pipeline)
     pub sky_bind_group: Option<&'a wgpu::BindGroup>,
+    /// Raw pointer to the active `GpuProfiler`, or null when profiling is
+    /// disabled.  Passes may call `scope_begin` / `scope_end` to record
+    /// named GPU timing sub-scopes within their `execute()` impl.
+    /// SAFETY: valid for the duration of the graph execute loop (single-threaded).
+    pub(crate) profiler: *mut GpuProfiler,
 }
 
 impl<'a> PassContext<'a> {
+    /// Begin a named GPU timing sub-scope inside this pass.
+    ///
+    /// Records a `write_timestamp` into the command encoder and returns an
+    /// opaque end-slot handle.  Pass the handle to [`scope_end`] once the
+    /// GPU commands for this scope have been recorded.
+    /// Returns `None` when no profiler is active.
+    pub fn scope_begin(&mut self, name: &str) -> Option<u32> {
+        if self.profiler.is_null() { return None; }
+        // SAFETY: profiler is valid and exclusively accessed on this thread.
+        let p = unsafe { &mut *self.profiler };
+        let (begin, end) = p.allocate_scope(name)?;
+        self.encoder.write_timestamp(p.query_set(), begin);
+        Some(end)
+    }
+
+    /// End a named GPU timing sub-scope started by [`scope_begin`].
+    pub fn scope_end(&mut self, end_slot: Option<u32>) {
+        if let Some(end) = end_slot {
+            if !self.profiler.is_null() {
+                let p = unsafe { &mut *self.profiler };
+                self.encoder.write_timestamp(p.query_set(), end);
+            }
+        }
+    }
+
     /// Begin a render pass
     pub fn begin_render_pass(
         &mut self,

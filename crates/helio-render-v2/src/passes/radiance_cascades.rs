@@ -163,10 +163,12 @@ impl RenderPass for RadianceCascadesPass {
         }
 
         // Build new BLASes and always rebuild TLAS (TLAS rebuild is cheap)
+        let t_accel = ctx.scope_begin("rc/accel_build");
         ctx.encoder.build_acceleration_structures(
             blas_entries.iter(),
             std::iter::once(&self.tlas),
         );
+        ctx.scope_end(t_accel);
 
         // Mark newly built BLASes as built
         for key in keys_to_mark_built {
@@ -176,19 +178,24 @@ impl RenderPass for RadianceCascadesPass {
         }
 
         // ── 4. Dispatch cascades coarse → fine (4 → 0) ───────────────────────
-        let mut cpass = ctx.begin_compute_pass("RC Trace");
-        cpass.set_pipeline(&self.pipeline);
+        // One compute pass per cascade so each can be timed independently.
         for c in (0..CASCADE_COUNT).rev() {
             let atlas_w = PROBE_DIMS[c] * DIR_DIMS[c]; // always 32
             let atlas_h = ATLAS_HEIGHTS[c];
             let dispatch_x = (atlas_w + 7) / 8;
             let dispatch_y = (atlas_h + 7) / 8;
+
+            let t_cas = ctx.scope_begin(&format!("rc/cascade_{c}"));
+            let mut cpass = ctx.begin_compute_pass(&format!("RC Cascade {c}"));
+            cpass.set_pipeline(&self.pipeline);
             cpass.set_bind_group(0, &self.bind_groups[c], &[]);
             cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+            drop(cpass);
+            ctx.scope_end(t_cas);
         }
-        drop(cpass);
 
         // ── 5. Copy output → history for temporal accumulation next frame ─────
+        let t_hist = ctx.scope_begin("rc/history_copy");
         for c in 0..CASCADE_COUNT {
             let extent = wgpu::Extent3d {
                 width: ATLAS_W,
@@ -211,6 +218,7 @@ impl RenderPass for RadianceCascadesPass {
                 extent,
             );
         }
+        ctx.scope_end(t_hist);
 
         Ok(())
     }

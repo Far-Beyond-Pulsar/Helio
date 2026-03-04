@@ -227,6 +227,7 @@ impl RenderGraph {
                 sky_color: ctx.sky_color,
                 has_sky: ctx.has_sky,
                 sky_bind_group: ctx.sky_bind_group,
+                profiler: profiler_raw,
             };
 
             self.passes[pass_idx].pass.execute(&mut pass_ctx)?;
