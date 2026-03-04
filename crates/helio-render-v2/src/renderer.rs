@@ -1001,8 +1001,14 @@ impl Renderer {
     pub fn print_timings_every(&self, interval: u64) {
         if self.frame_count % interval != 0 { return; }
         if let Some(p) = &self.profiler {
-            p.print_timings();
-        } else if self.frame_count % interval == 0 {
+            // Clone the snapshot so the print can happen on a detached thread
+            // without blocking the render loop.
+            let timings = p.last_timings.clone();
+            let total   = p.last_total_gpu_ms;
+            std::thread::spawn(move || {
+                crate::profiler::GpuProfiler::print_snapshot(timings, total);
+            });
+        } else {
             log::info!("[TIMING] TIMESTAMP_QUERY unavailable — add wgpu::Features::TIMESTAMP_QUERY to device descriptor");
         }
     }

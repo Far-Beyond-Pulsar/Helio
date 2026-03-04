@@ -304,10 +304,20 @@ impl GpuProfiler {
     ///       face_0       0.03 ms gpu
     ///       face_4       9.87 ms gpu   ← the bad one
     /// ```
+    /// Convenience wrapper — prints synchronously on the calling thread.
+    /// For the render loop, prefer cloning the snapshot and calling
+    /// [`Profiler::print_snapshot`] on a background thread instead.
     pub fn print_timings(&self) {
-        if self.last_timings.is_empty() {
-            return;
+        if !self.last_timings.is_empty() {
+            Self::print_snapshot(self.last_timings.clone(), self.last_total_gpu_ms);
         }
+    }
+
+    /// Format and print a timing snapshot to stderr.
+    /// Accepts owned data so it can be sent to a background thread without
+    /// borrowing the profiler.
+    pub fn print_snapshot(timings: Vec<PassTiming>, total_gpu_ms: f32) {
+        if timings.is_empty() { return; }
 
         const RESET:  &str = "\x1b[0m";
         const BOLD:   &str = "\x1b[1m";
@@ -317,7 +327,7 @@ impl GpuProfiler {
 
         eprintln!("{}[GPU TIMING]{}", BOLD, RESET);
 
-        for t in &self.last_timings {
+        for t in &timings {
             let depth = t.name.chars().filter(|&c| c == '/').count();
             let display = t.name.rsplitn(2, '/').next().unwrap_or(&t.name);
 
@@ -343,6 +353,6 @@ impl GpuProfiler {
 
         eprintln!("  {}─────────────────────────────────{}", DIM, RESET);
         eprintln!("  {}{:<24}{}{:>7.2} ms{} gpu{}",
-            BOLD, "total", YELLOW, self.last_total_gpu_ms, RESET, RESET);
+            BOLD, "total", YELLOW, total_gpu_ms, RESET, RESET);
     }
 }
