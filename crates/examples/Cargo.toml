@@ -11,6 +11,39 @@ path = "render_v2_basic.rs"
 name = "render_v2_sky"
 path = "render_v2_sky.rs"
 
+[[bin]]
+name = "indoor_room"
+path = "indoor_room.rs"
+
+[[bin]]
+name = "indoor_corridor"
+path = "indoor_corridor.rs"
+
+[[bin]]
+name = "outdoor_night"
+path = "outdoor_night.rs"
+
+[[bin]]
+name = "outdoor_canyon"
+path = "outdoor_canyon.rs"
+
+[[bin]]
+name = "indoor_cathedral"
+path = "indoor_cathedral.rs"
+
+[[bin]]
+name = "indoor_server_room"
+path = "indoor_server_room.rs"
+
+[[bin]]
+name = "outdoor_city"
+path = "outdoor_city.rs"
+
+[[bin]]
+name = "outdoor_volcano"
+path = "outdoor_volcano.rs"
+
+
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }
 image = { version = "0.25", default-features = false, features = ["png"] }
