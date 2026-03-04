@@ -27,15 +27,54 @@ use winit::{
 use std::collections::HashSet;
 use std::sync::Arc;
 
-fn load_sprite(path: &str) -> (Vec<u8>, u32, u32) {
-    let img = image::open(path)
-        .unwrap_or_else(|_| {
-            log::warn!("Could not load sprite '{}', using white fallback", path);
-            image::DynamicImage::new_rgba8(1, 1)
-        })
+fn load_sprite() -> (Vec<u8>, u32, u32) {
+    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
         .into_rgba8();
     let (w, h) = img.dimensions();
     (img.into_raw(), w, h)
+}
+
+fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
+    let img = image::load_from_memory(include_bytes!("../../probe.png"))
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
+
+const RC_WORLD_MIN: [f32; 3] = [-3.5, -0.3, -3.5];
+const RC_WORLD_MAX: [f32; 3] = [3.5, 5.0, 3.5];
+
+fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
+    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
+    const COLORS: [[f32; 4]; 4] = [
+        [0.0, 1.0, 1.0, 0.85],
+        [0.0, 1.0, 0.0, 0.80],
+        [1.0, 1.0, 0.0, 0.75],
+        [1.0, 0.35, 0.0, 0.70],
+    ];
+    const SIZES: [[f32; 2]; 4] = [
+        [0.04, 0.04],
+        [0.10, 0.10],
+        [0.22, 0.22],
+        [0.45, 0.45],
+    ];
+    let mut out = Vec::new();
+    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
+        for i in 0..dim {
+            for j in 0..dim {
+                for k in 0..dim {
+                    let x = world_min[0] + (i as f32 + 0.5) / dim as f32 * (world_max[0] - world_min[0]);
+                    let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
+                    let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
+                    out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
+                        .with_color(COLORS[c]));
+                }
+            }
+        }
+    }
+    out
 }
 
 fn main() {
@@ -71,6 +110,10 @@ struct AppState {
     keys:      HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
+
+    probe_vis: bool,
+    sprite_w: u32,
+    sprite_h: u32,
 }
 
 impl App {
@@ -149,12 +192,12 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         // Features — data-free: all content comes from the Scene
-        let (sprite_rgba, sprite_w, sprite_h) = load_sprite("spotlight.png");
+        let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
         let feature_registry = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
             .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.2))
             .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h))
+            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000))
             .with_feature(
                 RadianceCascadesFeature::new()
                     .with_world_bounds([-3.5, -0.3, -3.5], [3.5, 5.0, 3.5]),
@@ -192,6 +235,9 @@ impl ApplicationHandler for App {
             keys:      HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            probe_vis: false,
+            sprite_w,
+            sprite_h,
         });
     }
 
@@ -219,6 +265,30 @@ impl ApplicationHandler for App {
                     state.window.set_cursor_visible(true);
                 } else {
                     event_loop.exit();
+                }
+            }
+
+            // ── Probe visualization toggle ────────────────────────────────────
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Digit3),
+                    ..
+                },
+                ..
+            } => {
+                state.probe_vis = !state.probe_vis;
+                let raw: &[u8] = if state.probe_vis {
+                    include_bytes!("../../probe.png")
+                } else {
+                    include_bytes!("../../spotlight.png")
+                };
+                let img = image::load_from_memory(raw)
+                    .unwrap_or_else(|_| image::DynamicImage::new_rgba8(state.sprite_w, state.sprite_h))
+                    .resize_exact(state.sprite_w, state.sprite_h, image::imageops::FilterType::Triangle)
+                    .into_rgba8();
+                if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
+                    bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
                 }
             }
 
@@ -347,7 +417,7 @@ impl AppState {
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
 
-        let scene = Scene::new()
+        let mut scene = Scene::new()
             // Lighting objects
             .add_light(SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0))
             .add_light(SceneLight::point(p1, [0.25, 0.5,  1.0], 5.0, 6.0))
@@ -357,12 +427,19 @@ impl AppState {
             .add_object(self.cube1.clone())
             .add_object(self.cube2.clone())
             .add_object(self.cube3.clone())
-            .add_object(self.ground.clone())
+            .add_object(self.ground.clone());
 
+        if self.probe_vis {
+            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                scene = scene.add_billboard(b);
+            }
+        } else {
             // Billboards co-located with each light
-            .add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]))
-            .add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5,  1.0, 1.0]))
-            .add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3,  0.5, 1.0]));
+            scene = scene
+                .add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]))
+                .add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5,  1.0, 1.0]))
+                .add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3,  0.5, 1.0]));
+        }
 
         if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
             log::error!("Render error: {:?}", e);

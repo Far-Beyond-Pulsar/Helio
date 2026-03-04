@@ -702,6 +702,11 @@ impl Renderer {
         Ok(())
     }
 
+    /// Get a mutable reference to a registered feature by name and type.
+    pub fn get_feature_mut<T: crate::features::Feature + 'static>(&mut self, name: &str) -> Option<&mut T> {
+        self.features.get_typed_mut::<T>(name)
+    }
+
     // ── Frame rendering ───────────────────────────────────────────────────────
 
     /// Render a frame.  Call `draw_mesh()` BEFORE calling this.

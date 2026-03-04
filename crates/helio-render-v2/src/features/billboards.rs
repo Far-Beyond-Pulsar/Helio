@@ -68,6 +68,12 @@ pub struct BillboardsFeature {
     max_instances: u32,
     /// Optional sprite image: raw RGBA8 bytes + dimensions
     sprite_rgba: Option<(Vec<u8>, u32, u32)>,
+    /// Live sprite texture (stored so we can re-upload data at runtime)
+    sprite_texture: Option<Arc<wgpu::Texture>>,
+    /// Pixel dimensions of the sprite texture (set after register())
+    sprite_dims: (u32, u32),
+    /// New RGBA8 pixels waiting to be written to the GPU texture (set by set_sprite)
+    pending_sprite: Option<Vec<u8>>,
     // Shared with BillboardPass via Arc
     vertex_buffer: Option<Arc<wgpu::Buffer>>,
     index_buffer: Option<Arc<wgpu::Buffer>>,
@@ -82,6 +88,9 @@ impl BillboardsFeature {
             instances: Vec::new(),
             max_instances: 1024,
             sprite_rgba: None,
+            sprite_texture: None,
+            sprite_dims: (0, 0),
+            pending_sprite: None,
             vertex_buffer: None,
             index_buffer: None,
             instance_buffer: None,
@@ -93,6 +102,31 @@ impl BillboardsFeature {
     pub fn with_sprite(mut self, rgba: Vec<u8>, width: u32, height: u32) -> Self {
         self.sprite_rgba = Some((rgba, width, height));
         self
+    }
+
+    /// Set the maximum number of billboard instances (must be called before renderer init)
+    pub fn with_max_instances(mut self, n: u32) -> Self {
+        self.max_instances = n;
+        self
+    }
+
+    /// Returns the pixel dimensions of the registered sprite texture, or `None` before init.
+    pub fn sprite_dims(&self) -> Option<(u32, u32)> {
+        if self.sprite_dims.0 > 0 { Some(self.sprite_dims) } else { None }
+    }
+
+    /// Queue a new sprite image to be uploaded to the GPU on the next frame.
+    /// `width` and `height` must match the existing sprite texture dimensions.
+    pub fn set_sprite(&mut self, rgba: Vec<u8>, width: u32, height: u32) {
+        let (sw, sh) = self.sprite_dims;
+        if sw == width && sh == height {
+            self.pending_sprite = Some(rgba);
+        } else {
+            log::warn!(
+                "BillboardsFeature::set_sprite: dims {}×{} don't match existing sprite {}×{} — ignored",
+                width, height, sw, sh
+            );
+        }
     }
 
     pub fn add_billboard(&mut self, instance: BillboardInstance) {
@@ -182,7 +216,7 @@ impl Feature for BillboardsFeature {
         }));
 
         // Build the sprite texture (or a 1×1 white fallback)
-        let (sprite_tex, tex_w, tex_h) = if let Some((ref rgba, w, h)) = self.sprite_rgba {
+        let (sprite_tex_arc, tex_w, tex_h) = if let Some((ref rgba, w, h)) = self.sprite_rgba {
             let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Billboard Sprite"),
                 size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
@@ -198,7 +232,7 @@ impl Feature for BillboardsFeature {
                 wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
                 wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
             );
-            (tex, w, h)
+            (Arc::new(tex), w, h)
         } else {
             // 1×1 white fallback
             let tex = ctx.device.create_texture(&wgpu::TextureDescriptor {
@@ -216,11 +250,11 @@ impl Feature for BillboardsFeature {
                 wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
                 wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             );
-            (tex, 1u32, 1u32)
+            (Arc::new(tex), 1u32, 1u32)
         };
-        let _ = (tex_w, tex_h);
+        self.sprite_dims = (tex_w, tex_h);
 
-        let sprite_view = sprite_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let sprite_view = sprite_tex_arc.create_view(&wgpu::TextureViewDescriptor::default());
         let sprite_sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Billboard Sprite Sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -249,12 +283,26 @@ impl Feature for BillboardsFeature {
         self.vertex_buffer = Some(vertex_buffer);
         self.index_buffer = Some(index_buffer);
         self.instance_buffer = Some(instance_buffer);
+        self.sprite_texture = Some(sprite_tex_arc);
 
         log::info!("Billboards feature registered: max {} instances", self.max_instances);
         Ok(())
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
+        // Re-upload sprite pixels if set_sprite() was called since last frame
+        if let Some(pending) = self.pending_sprite.take() {
+            if let Some(tex) = &self.sprite_texture {
+                let (sw, sh) = self.sprite_dims;
+                ctx.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { texture: tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                    &pending,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(sw * 4), rows_per_image: Some(sh) },
+                    wgpu::Extent3d { width: sw, height: sh, depth_or_array_layers: 1 },
+                );
+            }
+        }
+
         let count = self.instances.len().min(self.max_instances as usize);
 
         if let Some(buf) = &self.instance_buffer {
