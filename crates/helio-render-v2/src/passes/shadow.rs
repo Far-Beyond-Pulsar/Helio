@@ -17,12 +17,16 @@ pub struct ShadowPass {
     shadow_matrix_buffer: Arc<wgpu::Buffer>,
     /// Actual number of lights this frame (updated by Renderer before graph exec)
     light_count: Arc<AtomicU32>,
+    /// Active face count per light: 6=point, 4=directional (CSM), 1=spot.
+    /// Skipping unused faces avoids rendering geometry into identity-matrix layers.
+    light_face_counts: Arc<Mutex<Vec<u8>>>,
     pipeline: Arc<wgpu::RenderPipeline>,
     bind_group: wgpu::BindGroup,
 }
 
 impl ShadowPass {
     pub fn new(
+        light_face_counts: Arc<Mutex<Vec<u8>>>,
         layer_views: Vec<Arc<wgpu::TextureView>>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
@@ -116,6 +120,7 @@ impl ShadowPass {
             draw_list,
             shadow_matrix_buffer,
             light_count,
+            light_face_counts,
             pipeline: Arc::new(pipeline),
             bind_group,
         }
@@ -143,9 +148,15 @@ impl RenderPass for ShadowPass {
         }
 
         let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+        let face_counts = self.light_face_counts.lock().unwrap();
 
         for i in 0..actual_count {
-            for face in 0u32..6u32 {
+            // Only render faces that have valid (non-identity) matrices:
+            //   point light  → 6 cube faces
+            //   directional  → 4 CSM cascades (slots 0-3)
+            //   spot light   → 1 projection   (slot 0)
+            let max_faces = face_counts.get(i).copied().unwrap_or(6) as u32;
+            for face in 0u32..max_faces {
                 let layer_idx = i as u32 * 6 + face;
 
                 let mut pass = ctx.begin_render_pass(

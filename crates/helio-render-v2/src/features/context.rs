@@ -24,6 +24,9 @@ pub struct FeatureContext<'a> {
     pub shadow_matrix_buffer: Arc<wgpu::Buffer>,
     /// Shared light count — updated by Renderer each frame; ShadowPass reads it
     pub light_count_arc: Arc<AtomicU32>,
+    /// Per-light face counts: 6 for point, 4 for directional (CSM), 1 for spot.
+    /// Updated by Renderer each frame so ShadowPass can skip identity-matrix faces.
+    pub light_face_counts: Arc<Mutex<Vec<u8>>>,
 
     // ── Outputs set by features during register() ───────────────────────────
     /// Light storage buffer set by LightingFeature
@@ -49,6 +52,7 @@ impl<'a> FeatureContext<'a> {
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
         light_count_arc: Arc<AtomicU32>,
+        light_face_counts: Arc<Mutex<Vec<u8>>>,
     ) -> Self {
         Self {
             device,
@@ -60,6 +64,7 @@ impl<'a> FeatureContext<'a> {
             draw_list,
             shadow_matrix_buffer,
             light_count_arc,
+            light_face_counts,
             light_buffer: None,
             shadow_atlas_view: None,
             shadow_sampler: None,

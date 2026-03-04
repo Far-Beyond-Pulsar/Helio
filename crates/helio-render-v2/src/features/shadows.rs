@@ -141,6 +141,7 @@ impl Feature for ShadowsFeature {
         ctx.shadow_sampler = self.shadow_sampler.clone();
 
         ctx.graph.add_pass(ShadowPass::new(
+            ctx.light_face_counts.clone(),
             layer_views,
             ctx.draw_list.clone(),
             ctx.shadow_matrix_buffer.clone(),

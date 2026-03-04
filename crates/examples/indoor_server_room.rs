@@ -210,7 +210,7 @@ impl ApplicationHandler for App {
         let features = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
             .with_feature(BloomFeature::new().with_intensity(0.7).with_threshold(0.8))
-            .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
+            .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
             .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000))
             .with_feature(RadianceCascadesFeature::new()
                 .with_world_bounds([-12.0, -0.1, -8.0], [12.0, 5.0, 8.0]))

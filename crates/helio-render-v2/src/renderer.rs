@@ -282,6 +282,8 @@ pub struct Renderer {
     shadow_matrix_buffer: Arc<wgpu::Buffer>,
     // Shared light count for ShadowPass (updated each frame before graph exec)
     light_count_arc: Arc<AtomicU32>,
+    // Per-light active face counts: 6=point, 4=directional, 1=spot
+    light_face_counts: Arc<std::sync::Mutex<Vec<u8>>>,
     // Current scene ambient (updated by render_scene)
     scene_ambient_color: [f32; 3],
     scene_ambient_intensity: f32,
@@ -366,6 +368,9 @@ impl Renderer {
 
         // Shared light count — updated each frame; read by ShadowPass
         let light_count_arc = Arc::new(AtomicU32::new(0));
+        // Per-light face counts — updated each frame; read by ShadowPass
+        let light_face_counts: Arc<std::sync::Mutex<Vec<u8>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
 
         // ── Sky pass (added FIRST so it runs before geometry) ─────────────────
         let sky_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -493,6 +498,7 @@ impl Renderer {
                 draw_list.clone(),
                 shadow_matrix_buffer.clone(),
                 light_count_arc.clone(),
+                light_face_counts.clone(),
             );
             features.register_all(&mut ctx)?;
             (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler,
@@ -644,6 +650,7 @@ impl Renderer {
             light_buffer,
             shadow_matrix_buffer,
             light_count_arc,
+            light_face_counts,
             scene_ambient_color: [0.0, 0.0, 0.0],
             scene_ambient_intensity: 0.0,
             scene_light_count: 0,
@@ -850,8 +857,20 @@ impl Renderer {
         shadow_mats.resize(MAX_LIGHTS as usize * 6, GpuShadowMatrix::zeroed());
         self.queue.write_buffer(&self.shadow_matrix_buffer, 0, bytemuck::cast_slice(&shadow_mats));
 
-        // Update shared light count (ShadowPass reads this before drawing)
+        // Update shared light count and per-light face counts (ShadowPass reads these)
         self.light_count_arc.store(count as u32, Ordering::Relaxed);
+        {
+            let mut fc = self.light_face_counts.lock().unwrap();
+            fc.clear();
+            for l in &scene.lights[..count] {
+                let faces: u8 = match l.light_type {
+                    crate::features::LightType::Point       => 6,
+                    crate::features::LightType::Directional => 4, // CSM cascades 0-3 only
+                    crate::features::LightType::Spot { .. } => 1, // single projection
+                };
+                fc.push(faces);
+            }
+        }
 
         // Update billboard instances from scene
         if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
