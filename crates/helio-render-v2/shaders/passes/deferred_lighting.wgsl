@@ -66,6 +66,19 @@ struct LightMatrix { mat: mat4x4<f32> }
 @group(2) @binding(4) var<storage, read> shadow_matrices: array<LightMatrix>;
 @group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
+@group(2) @binding(7) var<storage, read> cluster_light_offsets: array<u32>;
+@group(2) @binding(8) var<storage, read> cluster_light_indices: array<u32>;
+
+const CLUSTER_TILE_SIZE_PX: u32 = 16u;
+const CLUSTER_Z_BINS: u32 = 16u;
+const CLUSTER_NEAR: f32 = 0.1;
+const CLUSTER_FAR:  f32 = 3000.0;
+
+fn cluster_z_from_distance(distance: f32) -> u32 {
+    let d = clamp(distance, CLUSTER_NEAR, CLUSTER_FAR);
+    let t = log(d / CLUSTER_NEAR) / log(CLUSTER_FAR / CLUSTER_NEAR);
+    return min(u32(floor(t * f32(CLUSTER_Z_BINS))), CLUSTER_Z_BINS - 1u);
+}
 
 // ── Fullscreen-triangle vertex shader ────────────────────────────────────────
 
@@ -110,26 +123,8 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
     }
 }
 
-fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
-    if !ENABLE_SHADOWS { return 1.0; }
-    if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
-
-    let light = lights[light_idx];
-    var layer: u32;
-    if light.light_type > 0.5 && light.light_type < 1.5 {
-        let to_frag = world_pos - light.position;
-        layer = light_idx * 6u + point_light_face(to_frag);
-    } else if light.light_type < 0.5 {
-        let dist = length(world_pos - camera.position);
-        var cascade = 3u;
-        if      dist < globals.csm_splits.x { cascade = 0u; }
-        else if dist < globals.csm_splits.y { cascade = 1u; }
-        else if dist < globals.csm_splits.z { cascade = 2u; }
-        layer = light_idx * 6u + cascade;
-    } else {
-        layer = light_idx * 6u;
-    }
-
+// Helper: Sample shadow from a specific cascade layer with PCF
+fn sample_cascade_shadow(layer: u32, depth_bias: f32, cascade_scale: f32, world_pos: vec3<f32>) -> f32 {
     let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
     if light_clip.w <= 0.0 { return 1.0; }
 
@@ -141,15 +136,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
         return 1.0;
     }
 
-    let depth_bias   = select(0.0003, 0.0008, light.light_type > 1.5);
     let biased_depth = ndc.z - depth_bias;
-
-    var cascade_scale = 1.0;
-    if light.light_type < 0.5 {
-        let cascade_idx = layer - light_idx * 6u;
-        cascade_scale = 1.0 + f32(cascade_idx) * 1.5;
-    }
-
     let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
     var lit_sum = 0.0;
     for (var i = 0; i < 4; i++) {
@@ -162,6 +149,97 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
         );
     }
     return lit_sum * 0.25;
+}
+
+fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
+    if !ENABLE_SHADOWS { return 1.0; }
+    if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
+
+    let light = lights[light_idx];
+    var layer: u32;
+    if light.light_type > 0.5 && light.light_type < 1.5 {
+        let to_frag = world_pos - light.position;
+        layer = light_idx * 6u + point_light_face(to_frag);
+        let depth_bias   = 0.0008;
+        let cascade_scale = 1.0;
+        return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
+    } else if light.light_type < 0.5 {
+        let dist = length(world_pos - camera.position);
+        let splits = globals.csm_splits;
+        
+        // Determine cascades and blend factor
+        var cascade_a = 3u;
+        var cascade_b = 3u;
+        var blend = 0.0;
+        
+        const BLEND_ZONE = 0.1;  // 10% blend zone around boundaries
+        
+        if dist < splits.x * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 0u;
+        } else if dist < splits.x * (1.0 + BLEND_ZONE / 2.0) {
+            // Blend zone between cascade 0 and 1
+            cascade_a = 0u;
+            cascade_b = 1u;
+            blend = smoothstep(
+                splits.x * (1.0 - BLEND_ZONE / 2.0),
+                splits.x * (1.0 + BLEND_ZONE / 2.0),
+                dist
+            );
+        } else if dist < splits.y * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 1u;
+        } else if dist < splits.y * (1.0 + BLEND_ZONE / 2.0) {
+            // Blend zone between cascade 1 and 2
+            cascade_a = 1u;
+            cascade_b = 2u;
+            blend = smoothstep(
+                splits.y * (1.0 - BLEND_ZONE / 2.0),
+                splits.y * (1.0 + BLEND_ZONE / 2.0),
+                dist
+            );
+        } else if dist < splits.z * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 2u;
+        } else if dist < splits.z * (1.0 + BLEND_ZONE / 2.0) {
+            // Blend zone between cascade 2 and 3
+            cascade_a = 2u;
+            cascade_b = 3u;
+            blend = smoothstep(
+                splits.z * (1.0 - BLEND_ZONE / 2.0),
+                splits.z * (1.0 + BLEND_ZONE / 2.0),
+                dist
+            );
+        } else {
+            cascade_a = 3u;
+        }
+        
+        let depth_bias = 0.0003;
+        let layer_a = light_idx * 6u + cascade_a;
+        let cascade_scale_a = 1.0 + f32(cascade_a) * 1.5;
+        let shadow_a = sample_cascade_shadow(layer_a, depth_bias, cascade_scale_a, world_pos);
+        
+        // If no blending needed, return immediately
+        if blend <= 0.001 { return shadow_a; }
+        if blend >= 0.999 && cascade_b != cascade_a {
+            let layer_b = light_idx * 6u + cascade_b;
+            let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
+            let shadow_b = sample_cascade_shadow(layer_b, depth_bias, cascade_scale_b, world_pos);
+            return mix(shadow_a, shadow_b, blend);
+        }
+        
+        // Blend between cascades
+        if cascade_b != cascade_a {
+            let layer_b = light_idx * 6u + cascade_b;
+            let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
+            let shadow_b = sample_cascade_shadow(layer_b, depth_bias, cascade_scale_b, world_pos);
+            return mix(shadow_a, shadow_b, blend);
+        }
+        
+        return shadow_a;
+    } else {
+        layer = light_idx * 6u;
+        let depth_bias   = 0.0003;
+        let cascade_scale = 1.0;
+        return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
+    }
 }
 
 // ── BRDF helpers ─────────────────────────────────────────────────────────────
@@ -395,11 +473,33 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var Lo            = vec3<f32>(0.0);
     var sky_occlusion = 1.0;
     if ENABLE_LIGHTING {
-        for (var i = 0u; i < globals.light_count; i++) {
-            let sf = shadow_factor(i, world_pos);
-            if lights[i].light_type < 0.5 { sky_occlusion = sf; }
-            Lo += pbr_direct_light(lights[i], world_pos, N, V,
-                                   F0, albedo, roughness, metallic, sf);
+        let cluster_count_x = (u32(screen_size.x) + CLUSTER_TILE_SIZE_PX - 1u) / CLUSTER_TILE_SIZE_PX;
+        let cluster_count_y = (u32(screen_size.y) + CLUSTER_TILE_SIZE_PX - 1u) / CLUSTER_TILE_SIZE_PX;
+        let cx = min(u32(in.clip_pos.x) / CLUSTER_TILE_SIZE_PX, cluster_count_x - 1u);
+        let cy = min(u32(in.clip_pos.y) / CLUSTER_TILE_SIZE_PX, cluster_count_y - 1u);
+        let cz = cluster_z_from_distance(length(world_pos - camera.position));
+        let cluster_idx = (cz * cluster_count_y + cy) * cluster_count_x + cx;
+
+        let offsets_len = arrayLength(&cluster_light_offsets);
+        if cluster_idx + 1u < offsets_len {
+            let begin = cluster_light_offsets[cluster_idx];
+            let end   = cluster_light_offsets[cluster_idx + 1u];
+            for (var k = begin; k < end; k++) {
+                let i = cluster_light_indices[k];
+                if i >= globals.light_count { continue; }
+                let sf = shadow_factor(i, world_pos);
+                if lights[i].light_type < 0.5 { sky_occlusion = sf; }
+                Lo += pbr_direct_light(lights[i], world_pos, N, V,
+                                       F0, albedo, roughness, metallic, sf);
+            }
+        } else {
+            // Fallback for unexpectedly large resolutions beyond MAX_TILES.
+            for (var i = 0u; i < globals.light_count; i++) {
+                let sf = shadow_factor(i, world_pos);
+                if lights[i].light_type < 0.5 { sky_occlusion = sf; }
+                Lo += pbr_direct_light(lights[i], world_pos, N, V,
+                                       F0, albedo, roughness, metallic, sf);
+            }
         }
     }
 

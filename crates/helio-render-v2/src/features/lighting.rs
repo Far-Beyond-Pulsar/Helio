@@ -58,8 +58,11 @@ pub(crate) struct GpuLight {
     pub _pad:       [f32; 2],
 }
 
-/// Maximum number of lights supported per frame
-pub(crate) const MAX_LIGHTS: u32 = 16;
+/// Soft upper bound for lights uploaded to the GPU per frame.
+///
+/// With tiled light lists, per-pixel cost is no longer O(total_lights), so we
+/// can keep this reasonably high without exploding fragment cost.
+pub(crate) const MAX_LIGHTS: u32 = 2048;
 
 /// Lighting feature
 ///

@@ -85,16 +85,19 @@ pub struct GpuMesh {
 impl GpuMesh {
     pub fn new(device: &wgpu::Device, vertices: &[PackedVertex], indices: &[u32]) -> Self {
         use wgpu::util::DeviceExt;
+        // Only add BLAS_INPUT when the device actually has ray-tracing enabled;
+        // requesting it without the feature causes a validation error.
+        let has_rt = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let blas_flag = if has_rt { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
         let vertex_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Mesh Vertex Buffer"),
             contents: bytemuck::cast_slice(vertices),
-            // BLAS_INPUT needed so RT can use this buffer as geometry source
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::BLAS_INPUT,
+            usage: wgpu::BufferUsages::VERTEX | blas_flag,
         }));
         let index_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Mesh Index Buffer"),
             contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT,
+            usage: wgpu::BufferUsages::INDEX | blas_flag,
         }));
         // Bounding sphere: centroid + max-distance radius.
         // Centroid approximation is conservative and fast; the tiny extra radius

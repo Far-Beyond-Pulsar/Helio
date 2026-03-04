@@ -7,6 +7,8 @@
 //!   WASD        — move forward/left/back/right
 //!   Space/Shift — move up/down
 //!   Mouse drag  — look around (click to grab cursor)
+//!   3           — toggle RC probe visualisation
+//!   4           — toggle GPU timing printout (stderr)
 //!   Escape      — release cursor / exit
 
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
@@ -294,6 +296,15 @@ impl ApplicationHandler for App {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
                 }
             }
+            // ── GPU debug printout ────────────────────────────────────────────
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Digit4),
+                    ..
+                },
+                ..
+            } => { state.renderer.debug_key_pressed(); }
 
             // ── Keyboard held state ───────────────────────────────────────────
             WindowEvent::KeyboardInput {

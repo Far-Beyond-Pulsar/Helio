@@ -75,12 +75,25 @@ impl FeatureRegistry {
         self.active_flags
     }
 
-    /// Get shader defines from all features (enabled or not)
-    /// Disabled features contribute their default (off) values so the shader
-    /// always has every override constant it needs.
+    /// Get shader defines from all features (enabled or not).
+    ///
+    /// Safe "off" defaults are pre-populated for every known override constant
+    /// so that shaders compile even when a feature is not registered at all.
+    /// Registered features then overwrite these defaults with their actual values.
     pub fn collect_shader_defines(&self) -> HashMap<String, ShaderDefine> {
         let mut defines = HashMap::new();
 
+        // ── Fallback defaults (all features absent / disabled) ──────────────
+        // These must mirror every `override` constant declared in the WGSL
+        // passes (deferred_lighting.wgsl, geometry.wgsl, …).
+        defines.insert("ENABLE_LIGHTING".into(),   ShaderDefine::Bool(false));
+        defines.insert("ENABLE_SHADOWS".into(),    ShaderDefine::Bool(false));
+        defines.insert("MAX_SHADOW_LIGHTS".into(), ShaderDefine::U32(0));
+        defines.insert("ENABLE_BLOOM".into(),      ShaderDefine::Bool(false));
+        defines.insert("BLOOM_INTENSITY".into(),   ShaderDefine::F32(0.3));
+        defines.insert("BLOOM_THRESHOLD".into(),   ShaderDefine::F32(1.0));
+
+        // Registered features overwrite the defaults above.
         for feature in self.features.values() {
             defines.extend(feature.shader_defines());
         }

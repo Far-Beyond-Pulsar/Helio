@@ -319,6 +319,11 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit4), ..
+            }, .. } => {
+                state.renderer.debug_key_pressed();
+            }
+            WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
                 match ks {
@@ -497,8 +502,5 @@ impl AppState {
             log::error!("Render: {:?}", e);
         }
         output.present();
-
-        // Print per-pass GPU + CPU timings every 120 frames (~2 s at 60 fps)
-        self.renderer.print_timings_every(120);
     }
 }

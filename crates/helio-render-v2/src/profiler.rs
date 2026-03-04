@@ -74,6 +74,10 @@ pub struct GpuProfiler {
     pub last_timings:  Vec<PassTiming>,
     /// Sum of all per-pass GPU times from `last_timings` (ms).
     pub last_total_gpu_ms: f32,
+    /// Sum of all per-pass CPU times from `last_timings` (ms).
+    pub last_total_cpu_ms: f32,
+    /// Wall-clock frame time from last render (ms).
+    pub last_frame_time_ms: f32,
 }
 
 impl GpuProfiler {
@@ -125,6 +129,8 @@ impl GpuProfiler {
             needs_readback:    [false, false],
             last_timings:      Vec::new(),
             last_total_gpu_ms: 0.0,
+            last_total_cpu_ms: 0.0,
+            last_frame_time_ms: 0.0,
         })
     }
 
@@ -154,6 +160,11 @@ impl GpuProfiler {
         if let Some(s) = self.current_scopes.last_mut() {
             s.cpu_ms = cpu_ms;
         }
+    }
+
+    /// Update the wall-clock frame time (in milliseconds).
+    pub fn set_frame_time_ms(&mut self, frame_time_ms: f32) {
+        self.last_frame_time_ms = frame_time_ms;
     }
 
     /// Reference to the underlying QuerySet (needed by the graph to call write_timestamp).
@@ -283,8 +294,10 @@ impl GpuProfiler {
                 self.staging_bufs[read_idx].unmap();
                 self.pending[read_idx] = None;
 
+                let total_cpu = new_timings.iter().map(|t| t.cpu_ms).sum();
                 self.last_timings     = new_timings;
                 self.last_total_gpu_ms = total;
+                self.last_total_cpu_ms = total_cpu;
             }
         }
 
@@ -309,14 +322,14 @@ impl GpuProfiler {
     /// [`Profiler::print_snapshot`] on a background thread instead.
     pub fn print_timings(&self) {
         if !self.last_timings.is_empty() {
-            Self::print_snapshot(self.last_timings.clone(), self.last_total_gpu_ms);
+            Self::print_snapshot(self.last_timings.clone(), self.last_total_gpu_ms, self.last_total_cpu_ms, self.last_frame_time_ms);
         }
     }
 
     /// Format and print a timing snapshot to stderr.
     /// Accepts owned data so it can be sent to a background thread without
     /// borrowing the profiler.
-    pub fn print_snapshot(timings: Vec<PassTiming>, total_gpu_ms: f32) {
+    pub fn print_snapshot(timings: Vec<PassTiming>, total_gpu_ms: f32, total_cpu_ms: f32, frame_time_ms: f32) {
         if timings.is_empty() { return; }
 
         const RESET:  &str = "\x1b[0m";
@@ -352,7 +365,9 @@ impl GpuProfiler {
         }
 
         eprintln!("  {}─────────────────────────────────{}", DIM, RESET);
-        eprintln!("  {}{:<24}{}{:>7.2} ms{} gpu{}",
-            BOLD, "total", YELLOW, total_gpu_ms, RESET, RESET);
+        eprintln!("  {}{:<24}{}{:>7.2} ms{} gpu  {}{:>7.2} ms{} cpu{}",
+            BOLD, "total", YELLOW, total_gpu_ms, RESET, DIM, total_cpu_ms, RESET, RESET);
+        eprintln!("  {}{:<24}{}{:>7.2} ms{} frame{}",
+            DIM, "frame time", RESET, frame_time_ms, RESET, RESET);
     }
 }

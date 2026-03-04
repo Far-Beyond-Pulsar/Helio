@@ -12,6 +12,8 @@
 //!   Space/Shift — move up/down
 //!   Q/E         — rotate sun left/right (changes time of day)
 //!   Mouse drag  — look around (click to grab cursor)
+//!   3           — toggle RC probe visualisation
+//!   4           — toggle GPU timing printout (stderr)
 //!   Escape      — release cursor / exit
 
 use helio_render_v2::{
@@ -288,6 +290,15 @@ impl ApplicationHandler for App {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
                 }
             }
+
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Digit4),
+                    ..
+                },
+                ..
+            } => { state.renderer.debug_key_pressed(); }
 
             WindowEvent::KeyboardInput {
                 event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, ..

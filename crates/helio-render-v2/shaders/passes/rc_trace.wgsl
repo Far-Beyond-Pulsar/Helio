@@ -21,8 +21,8 @@ struct GpuLight {
     range:       f32,
     color:       vec3<f32>,
     intensity:   f32,
-    inner_angle: f32,
-    outer_angle: f32,
+    cos_inner:   f32,   // cos(inner_angle), precomputed on CPU
+    cos_outer:   f32,   // cos(outer_angle), precomputed on CPU
     _pad:        vec2<f32>,
 }
 
@@ -51,7 +51,7 @@ struct CascadeStatic {
 @group(0) @binding(2) var<uniform>  rc_dyn:  RCDynamic;
 @group(0) @binding(3) var<uniform>  rc_stat: CascadeStatic;
 @group(0) @binding(4) var acc_struct: acceleration_structure;
-@group(0) @binding(5) var<storage, read> lights: array<GpuLight, 16>;
+@group(0) @binding(5) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(6) var cascade_history:        texture_2d<f32>;
 @group(0) @binding(7) var cascade_history_write:  texture_storage_2d<rgba16float, write>;
 
@@ -107,8 +107,8 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
         atten    = atten * atten;
         if light.light_type > 1.5 {
             let cos_angle  = dot(-to_light, light.direction);
-            let cos_outer  = cos(light.outer_angle);
-            let cos_inner  = cos(light.inner_angle);
+            let cos_outer  = light.cos_outer;
+            let cos_inner  = light.cos_inner;
             let spot_atten = clamp((cos_angle - cos_outer) / (cos_inner - cos_outer + 0.001), 0.0, 1.0);
             atten *= spot_atten;
         }

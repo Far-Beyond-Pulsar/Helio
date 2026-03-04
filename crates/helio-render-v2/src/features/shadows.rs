@@ -73,18 +73,20 @@ impl Feature for ShadowsFeature {
     }
 
     fn register(&mut self, ctx: &mut FeatureContext) -> Result<()> {
-        // Ensure max_shadow_lights covers all lights that can be sent to the GPU.
-        // A lower limit causes unshadowed lights to sample out-of-bounds atlas
-        // layers, producing phantom shadows on wrong surfaces.
         use crate::features::lighting::MAX_LIGHTS;
-        if self.max_shadow_lights < MAX_LIGHTS {
+        
+        // Cap shadow atlas layers to GPU limits: most support 256-2048 array layers.
+        // Each light needs 6 layers (cube faces), so max ~42 lights on conservative GPUs.
+        const MAX_ATLAS_LAYERS: u32 = 256;
+        let max_safe_lights = MAX_ATLAS_LAYERS / 6;  // 42 lights
+        
+        if self.max_shadow_lights > max_safe_lights {
             log::warn!(
-                "ShadowsFeature: max_shadow_lights ({}) < MAX_LIGHTS ({}). \
-                 Raising to {} so all lights can cast shadows. \
-                 Performance may suffer with many shadow-casting lights.",
-                self.max_shadow_lights, MAX_LIGHTS, MAX_LIGHTS,
+                "ShadowsFeature: max_shadow_lights ({}) exceeds GPU limit ({}). \
+                 Clamping to {} to avoid texture array overflow.",
+                self.max_shadow_lights, max_safe_lights, max_safe_lights,
             );
-            self.max_shadow_lights = MAX_LIGHTS;
+            self.max_shadow_lights = max_safe_lights;
         }
 
         // Shadow atlas: 6 layers per light (cube faces), one layer per face per light
@@ -165,12 +167,16 @@ impl Feature for ShadowsFeature {
     }
 
     fn shader_defines(&self) -> HashMap<String, ShaderDefine> {
-        use crate::features::lighting::MAX_LIGHTS;
         let mut defines = HashMap::new();
         defines.insert("ENABLE_SHADOWS".into(), ShaderDefine::Bool(self.enabled));
-        // Must match the atlas layer count — always raised to MAX_LIGHTS
-        // (same logic as register(), but shader_defines() runs first)
-        let effective = if self.enabled { self.max_shadow_lights.max(MAX_LIGHTS) } else { 0 };
+        // GPU texture array layer limit: 256 layers ÷ 6 faces = 42 lights max
+        const MAX_ATLAS_LAYERS: u32 = 256;
+        let max_safe_lights = MAX_ATLAS_LAYERS / 6;
+        let effective = if self.enabled {
+            self.max_shadow_lights.min(max_safe_lights)
+        } else {
+            0
+        };
         defines.insert("MAX_SHADOW_LIGHTS".into(), ShaderDefine::U32(effective));
         defines
     }

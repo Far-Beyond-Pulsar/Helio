@@ -47,6 +47,14 @@ path = "outdoor_volcano.rs"
 name = "space_station"
 path = "space_station.rs"
 
+[[bin]]
+name = "light_benchmark"
+path = "light_benchmark.rs"
+
+[[bin]]
+name = "rc_benchmark"
+path = "rc_benchmark.rs"
+
 
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }

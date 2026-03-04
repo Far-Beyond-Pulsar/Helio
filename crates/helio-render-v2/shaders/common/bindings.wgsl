@@ -51,8 +51,8 @@ struct GpuLight {
     range: f32,
     color: vec3<f32>,
     intensity: f32,
-    inner_angle: f32,
-    outer_angle: f32,
+    cos_inner:   f32,   // cos(inner_angle), precomputed on CPU
+    cos_outer:   f32,   // cos(outer_angle), precomputed on CPU
     width: f32,
     height: f32,
 }
