@@ -46,13 +46,14 @@ struct CascadeStatic {
     _pad1: u32,
 }
 
-@group(0) @binding(0) var cascade_out:    texture_storage_2d<rgba16float, write>;
-@group(0) @binding(1) var cascade_parent: texture_2d<f32>;
+@group(0) @binding(0) var cascade_out:           texture_storage_2d<rgba16float, write>;
+@group(0) @binding(1) var cascade_parent:         texture_2d<f32>;
 @group(0) @binding(2) var<uniform>  rc_dyn:  RCDynamic;
 @group(0) @binding(3) var<uniform>  rc_stat: CascadeStatic;
 @group(0) @binding(4) var acc_struct: acceleration_structure;
 @group(0) @binding(5) var<storage, read> lights: array<GpuLight, 16>;
-@group(0) @binding(6) var cascade_history: texture_2d<f32>;
+@group(0) @binding(6) var cascade_history:        texture_2d<f32>;
+@group(0) @binding(7) var cascade_history_write:  texture_storage_2d<rgba16float, write>;
 
 // Y-up octahedral decode (Y is the pole — uv center = +Y)
 fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
@@ -247,6 +248,10 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     radiance   = mix(hist.rgb, radiance,   alpha);
     throughput = mix(hist.w,   throughput, alpha);
 
-    textureStore(cascade_out, vec2<i32>(i32(gid.x), i32(gid.y)),
+    textureStore(cascade_out,           vec2<i32>(i32(gid.x), i32(gid.y)),
+        vec4<f32>(radiance, throughput));
+    // Write the same value into the history ping-pong buffer so the next
+    // frame can read it without a copy_texture_to_texture blit pass.
+    textureStore(cascade_history_write, vec2<i32>(i32(gid.x), i32(gid.y)),
         vec4<f32>(radiance, throughput));
 }

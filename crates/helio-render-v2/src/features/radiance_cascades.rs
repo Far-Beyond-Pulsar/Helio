@@ -135,10 +135,12 @@ impl Feature for RadianceCascadesFeature {
         };
         // output: what RC writes each frame; what geometry reads
         let (output_textures, output_views) =
-            make_cascade_set("RC Output", wgpu::TextureUsages::COPY_SRC);
-        // history: previous frame's output, blended into current
-        let (history_textures, history_views) =
-            make_cascade_set("RC History", wgpu::TextureUsages::COPY_DST);
+            make_cascade_set("RC Output", wgpu::TextureUsages::empty());
+        // Two history ping-pong sets: shader reads one, writes the other each frame
+        let (hist_a_textures, hist_a_views) =
+            make_cascade_set("RC History A", wgpu::TextureUsages::empty());
+        let (hist_b_textures, hist_b_views) =
+            make_cascade_set("RC History B", wgpu::TextureUsages::empty());
 
         // Dummy parent texture for cascade 3 (no coarser parent)
         let dummy_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -225,30 +227,45 @@ impl Feature for RadianceCascadesFeature {
         let bg_layout = pipeline.get_bind_group_layout(0);
 
         // ── Bind groups ───────────────────────────────────────────────────────
-        // 0: output[c]   – storage write (current frame result)
-        // 1: output[c+1] – parent cascade already written this frame
+        // 0: output[c]      – storage write (current frame result)
+        // 1: output[c+1]    – parent cascade already written this frame
         // 2: rc_dyn uniform  3: cascade_static uniform  4: TLAS  5: lights
-        // 6: history[c]  – read previous frame's result for temporal blend
-        let bind_groups: Vec<wgpu::BindGroup> = (0..CASCADE_COUNT).map(|c| {
-            let parent_view: &wgpu::TextureView = if c + 1 < CASCADE_COUNT {
-                &output_views[c + 1]
-            } else {
-                &dummy_view
-            };
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("RC BG {c}")),
-                layout: &bg_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&output_views[c]) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(parent_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: rc_dyn_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: static_bufs[c].as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::AccelerationStructure(&tlas) },
-                    wgpu::BindGroupEntry { binding: 5, resource: light_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&history_views[c]) },
-                ],
-            })
-        }).collect();
+        // 6: history_read[c] – read previous frame's result for temporal blend
+        // 7: history_write[c]– write this frame's result for next frame to read
+        //
+        // Two sets alternate each frame (ping-pong) so no copy is needed:
+        //   bind_groups_a: read hist_a, write hist_b  (even frames)
+        //   bind_groups_b: read hist_b, write hist_a  (odd frames)
+        let make_bgs = |hist_read: &Vec<Arc<wgpu::TextureView>>,
+                        hist_write: &Vec<Arc<wgpu::TextureView>>|
+            -> Vec<wgpu::BindGroup>
+        {
+            (0..CASCADE_COUNT).map(|c| {
+                let parent_view: &wgpu::TextureView = if c + 1 < CASCADE_COUNT {
+                    &output_views[c + 1]
+                } else {
+                    &dummy_view
+                };
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some(&format!("RC BG {c}")),
+                    layout: &bg_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&output_views[c]) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(parent_view) },
+                        wgpu::BindGroupEntry { binding: 2, resource: rc_dyn_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: static_bufs[c].as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::AccelerationStructure(&tlas) },
+                        wgpu::BindGroupEntry { binding: 5, resource: light_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&hist_read[c]) },
+                        wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&hist_write[c]) },
+                    ],
+                })
+            }).collect()
+        };
+        // even frames: read hist_a, write hist_b
+        let bind_groups_a = make_bgs(&hist_a_views, &hist_b_views);
+        // odd frames:  read hist_b, write hist_a
+        let bind_groups_b = make_bgs(&hist_b_views, &hist_a_views);
 
         // ── Set context outputs ──────────────────────────────────────────────
         ctx.rc_cascade0_view = Some(output_views[0].clone());
@@ -257,8 +274,8 @@ impl Feature for RadianceCascadesFeature {
         // Keep GPU objects alive in the feature struct
         self.output_views     = output_views;
         self.output_textures  = output_textures.clone();
-        self.history_views    = history_views;
-        self.history_textures = history_textures.clone();
+        self.history_views    = hist_a_views;
+        self.history_textures = hist_a_textures.clone();
         self._dummy_view = Some(dummy_view);
         self._dummy_tex = Some(dummy_tex);
         self._static_bufs = static_bufs;
@@ -270,9 +287,11 @@ impl Feature for RadianceCascadesFeature {
             ctx.device_arc.clone(),
             ctx.draw_list.clone(),
             pipeline,
-            bind_groups,
+            bind_groups_a,
+            bind_groups_b,
             output_textures,
-            history_textures,
+            // hist_b is kept alive via the pass (moved in)
+            hist_b_textures,
             rc_dyn_buf,
             tlas,
             self.world_min,

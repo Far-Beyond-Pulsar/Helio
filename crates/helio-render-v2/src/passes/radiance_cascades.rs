@@ -3,7 +3,7 @@
 //! Runs once per frame, cascades 4→0 (coarse to fine so each cascade can
 //! read from its already-computed parent).
 
-use crate::features::radiance_cascades::{CASCADE_COUNT, PROBE_DIMS, DIR_DIMS, ATLAS_HEIGHTS, ATLAS_W};
+use crate::features::radiance_cascades::{CASCADE_COUNT, PROBE_DIMS, DIR_DIMS, ATLAS_HEIGHTS};
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::mesh::DrawCall;
 use crate::Result;
@@ -30,17 +30,20 @@ pub struct RadianceCascadesPass {
     device: Arc<wgpu::Device>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     pipeline: Arc<wgpu::ComputePipeline>,
-    /// One bind group per cascade (index == cascade level)
-    bind_groups: Vec<wgpu::BindGroup>,
+    /// Bind groups for even frames: read hist_a, write hist_b
+    bind_groups_a: Vec<wgpu::BindGroup>,
+    /// Bind groups for odd frames: read hist_b, write hist_a
+    bind_groups_b: Vec<wgpu::BindGroup>,
     /// Output textures (what RC writes; geometry reads these)
     output_textures: Vec<Arc<wgpu::Texture>>,
-    /// History textures (previous frame; copy output→history after each dispatch)
-    history_textures: Vec<Arc<wgpu::Texture>>,
+    /// hist_b textures — kept alive here (hist_a lives in the feature struct)
+    _hist_b_textures: Vec<Arc<wgpu::Texture>>,
     rc_dynamic_buf: Arc<wgpu::Buffer>,
     tlas: wgpu::Tlas,
     blas_cache: HashMap<usize, BlasEntry>,
     world_min: [f32; 3],
     world_max: [f32; 3],
+    frame_idx: u64,
 }
 
 impl RadianceCascadesPass {
@@ -49,9 +52,10 @@ impl RadianceCascadesPass {
         device: Arc<wgpu::Device>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         pipeline: Arc<wgpu::ComputePipeline>,
-        bind_groups: Vec<wgpu::BindGroup>,
+        bind_groups_a: Vec<wgpu::BindGroup>,
+        bind_groups_b: Vec<wgpu::BindGroup>,
         output_textures: Vec<Arc<wgpu::Texture>>,
-        history_textures: Vec<Arc<wgpu::Texture>>,
+        hist_b_textures: Vec<Arc<wgpu::Texture>>,
         rc_dynamic_buf: Arc<wgpu::Buffer>,
         tlas: wgpu::Tlas,
         world_min: [f32; 3],
@@ -61,14 +65,16 @@ impl RadianceCascadesPass {
             device,
             draw_list,
             pipeline,
-            bind_groups,
+            bind_groups_a,
+            bind_groups_b,
             output_textures,
-            history_textures,
+            _hist_b_textures: hist_b_textures,
             rc_dynamic_buf,
             tlas,
             blas_cache: HashMap::new(),
             world_min,
             world_max,
+            frame_idx: 0,
         }
     }
 }
@@ -178,6 +184,16 @@ impl RenderPass for RadianceCascadesPass {
         }
 
         // ── 4. Dispatch cascades coarse → fine (4 → 0) ───────────────────────
+        // Select ping-pong bind group set: even frames use A (read hist_a, write hist_b),
+        // odd frames use B (read hist_b, write hist_a). The shader writes history
+        // directly via binding 7, so no copy_texture_to_texture is ever needed.
+        let bind_groups = if self.frame_idx % 2 == 0 {
+            &self.bind_groups_a
+        } else {
+            &self.bind_groups_b
+        };
+        self.frame_idx += 1;
+
         // One compute pass per cascade so each can be timed independently.
         for c in (0..CASCADE_COUNT).rev() {
             let atlas_w = PROBE_DIMS[c] * DIR_DIMS[c]; // always 32
@@ -188,37 +204,11 @@ impl RenderPass for RadianceCascadesPass {
             let t_cas = ctx.scope_begin(&format!("rc/cascade_{c}"));
             let mut cpass = ctx.begin_compute_pass(&format!("RC Cascade {c}"));
             cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(0, &self.bind_groups[c], &[]);
+            cpass.set_bind_group(0, &bind_groups[c], &[]);
             cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
             drop(cpass);
             ctx.scope_end(t_cas);
         }
-
-        // ── 5. Copy output → history for temporal accumulation next frame ─────
-        let t_hist = ctx.scope_begin("rc/history_copy");
-        for c in 0..CASCADE_COUNT {
-            let extent = wgpu::Extent3d {
-                width: ATLAS_W,
-                height: ATLAS_HEIGHTS[c],
-                depth_or_array_layers: 1,
-            };
-            ctx.encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.output_textures[c],
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.history_textures[c],
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                extent,
-            );
-        }
-        ctx.scope_end(t_hist);
 
         Ok(())
     }
