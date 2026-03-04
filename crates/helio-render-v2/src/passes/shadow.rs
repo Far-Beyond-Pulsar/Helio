@@ -89,9 +89,8 @@ impl ShadowPass {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                // Front-face culling: only back faces are written to the shadow map,
-                // so a surface can never shadow itself — no bias needed.
-                cull_mode: Some(wgpu::Face::Front),
+                // Back-face culling: render front faces to shadow map (standard approach)
+                cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -99,7 +98,14 @@ impl ShadowPass {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // Depth bias prevents self-shadowing (shadow acne)
+                // slope_scale adds bias based on surface angle relative to light
+                // constant offset adds fixed bias regardless of angle
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.5,
+                    clamp: 0.0,
+                },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,

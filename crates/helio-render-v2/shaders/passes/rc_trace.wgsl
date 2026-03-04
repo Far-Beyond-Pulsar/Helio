@@ -197,8 +197,14 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     var throughput: f32;
 
     if isect.kind != RAY_QUERY_INTERSECTION_NONE {
-        let hit_pos    = probe_pos + dir * isect.t;
-        let hit_normal = select(dir, -dir, isect.front_face);
+        let hit_pos = probe_pos + dir * isect.t;
+
+        // IMPORTANT: Ray queries don't provide geometric normals, only hit position.
+        // For radiance cascades, we approximate the normal as the inverse ray direction.
+        // This assumes surfaces generally face back toward the probe, which is valid
+        // for indirect lighting (GI) since we're sampling the hemisphere around the probe.
+        // For direct lighting shadow rays, this works because we only care about visibility.
+        let hit_normal = select(-dir, dir, isect.front_face);
 
         // Accumulate all scene lights at hit point
         var light_contrib = vec3<f32>(0.0);
