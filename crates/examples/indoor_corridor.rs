@@ -347,8 +347,8 @@ impl AppState {
             scene = scene
                 .add_light(SceneLight::spot(
                     p, [0.0, -1.0, 0.0],
-                    [0.9, 0.95, 1.0], 3.5, 6.0,
-                    0.52, /* inner ~30° */ 0.70, /* outer ~40° */
+                    [0.9, 0.95, 1.0], 3.5, 9.0,
+                    1.22, /* inner ~70° */ 1.48, /* outer ~85° */
                 ));
         }
 
