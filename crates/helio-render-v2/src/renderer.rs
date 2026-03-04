@@ -1012,14 +1012,25 @@ impl Renderer {
         if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
 
         // Submit and clear the draw list for next frame
+        let submit_start = std::time::Instant::now();
         self.queue.submit(Some(encoder.finish()));
+        let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+        if submit_ms > 10.0 {
+            eprintln!("⚠️  queue.submit() blocked for {:.2}ms", submit_ms);
+        }
+        
         self.draw_list.lock().unwrap().clear();
 
         // Schedule map_async AFTER submit so the buffer is no longer used by the encoder
         if let Some(p) = &mut self.profiler { p.begin_readback(); }
 
         // Non-blocking readback of the previous frame's timing results
+        let poll_start = std::time::Instant::now();
         if let Some(p) = &mut self.profiler { p.poll_results(&self.device); }
+        let poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
+        if poll_ms > 10.0 {
+            eprintln!("⚠️  poll_results() blocked for {:.2}ms", poll_ms);
+        }
 
         // Measure frame-to-frame latency (time from start of previous frame to start of this frame)
         let frame_to_frame_ms = if let Some(last_start) = self.last_frame_start {
@@ -1036,6 +1047,10 @@ impl Renderer {
         self.last_frame_end = Some(std::time::Instant::now());
 
         if self.debug_printout && self.frame_count % 60 == 0 {
+            let total_elapsed_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+            eprintln!("🎮 RENDERER: total elapsed from render() start: {:.2}ms (submit={:.2}ms, poll={:.2}ms)", 
+                total_elapsed_ms, submit_ms, poll_ms);
+            
             if let Some(p) = &mut self.profiler {
                 p.set_frame_time_ms(frame_time_ms);
                 p.set_frame_to_frame_ms(frame_to_frame_ms);

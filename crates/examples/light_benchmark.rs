@@ -166,6 +166,11 @@ struct AppState {
     light_intensity_multiplier: f32,
     sprite_w: u32,
     sprite_h: u32,
+    
+    // event loop timing trackers
+    time_render_end: Option<std::time::Instant>,
+    time_about_to_wait_start: Option<std::time::Instant>,
+    time_redraw_requested: Option<std::time::Instant>,
 }
 
 impl ApplicationHandler for App {
@@ -287,6 +292,9 @@ impl ApplicationHandler for App {
             probe_vis: false,
             light_intensity_multiplier: 1.0,
             sprite_w, sprite_h,
+            time_render_end: None,
+            time_about_to_wait_start: None,
+            time_redraw_requested: None,
         });
     }
 
@@ -391,10 +399,28 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
+                
+                // Track FULL cycle from last render_end to this RedrawRequested
+                if let Some(last_render_end) = state.time_render_end {
+                    let full_cycle_ms = last_render_end.elapsed().as_secs_f32() * 1000.0;
+                    if state.renderer.frame_count() % 60 == 0 {
+                        eprintln!("🔄 render_end → next RedrawRequested: {:.2}ms", full_cycle_ms);
+                    }
+                }
+                
+                // Track time from about_to_wait to RedrawRequested
+                if let Some(about_to_wait_start) = state.time_about_to_wait_start {
+                    let gap_ms = about_to_wait_start.elapsed().as_secs_f32() * 1000.0;
+                    if gap_ms > 2.0 {
+                        eprintln!("⏱️  about_to_wait → RedrawRequested: {:.2}ms", gap_ms);
+                    }
+                }
+                
+                state.time_redraw_requested = Some(now);
                 let dt  = (now - state.last_frame).as_secs_f32();
                 state.last_frame = now;
                 state.render(dt);
-                state.window.request_redraw();
+                // Don't call request_redraw() here - about_to_wait() handles it
             }
             _ => {}
         }
@@ -413,12 +439,30 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(s) = &self.state { s.window.request_redraw(); }
+        if let Some(s) = &mut self.state {
+            let now = std::time::Instant::now();
+            if let Some(render_end) = s.time_render_end {
+                let gap_ms = render_end.elapsed().as_secs_f32() * 1000.0;
+                if gap_ms > 2.0 {
+                    eprintln!("⏱️  render_end → about_to_wait: {:.2}ms", gap_ms);
+                }
+            }
+            s.time_about_to_wait_start = Some(now);
+            s.window.request_redraw();
+        }
     }
 }
 
 impl AppState {
     fn render(&mut self, dt: f32) {
+        // Track time from RedrawRequested event to start of render()
+        if let Some(redraw_time) = self.time_redraw_requested {
+            let gap_ms = redraw_time.elapsed().as_secs_f32() * 1000.0;
+            if gap_ms > 2.0 {
+                eprintln!("⏱️  RedrawRequested → render(): {:.2}ms", gap_ms);
+            }
+        }
+        
         const SPEED: f32 = 8.0;
         const SENS:  f32 = 0.002;
 
@@ -453,10 +497,16 @@ impl AppState {
             time,
         );
 
+        // Time get_current_texture() - this can block waiting for GPU
+        let get_texture_start = std::time::Instant::now();
         let output = match self.surface.get_current_texture() {
             Ok(t)  => t,
             Err(e) => { log::warn!("Surface error: {:?}", e); return; }
         };
+        let get_texture_ms = get_texture_start.elapsed().as_secs_f32() * 1000.0;
+        if get_texture_ms > 10.0 {
+            eprintln!("⚠️  get_current_texture() blocked for {:.2}ms", get_texture_ms);
+        }
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut lights = build_lights();
@@ -491,6 +541,24 @@ impl AppState {
         if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }
+        
+        // Time the present() call to see if it's blocking
+        let present_start = std::time::Instant::now();
         output.present();
+        let present_ms = present_start.elapsed().as_secs_f32() * 1000.0;
+        
+        // Track when render() completes
+        let render_complete = std::time::Instant::now();
+        self.time_render_end = Some(render_complete);
+        
+        // Print full render cycle timing every 60 frames
+        if self.renderer.frame_count() % 60 == 0 {
+            let total_render_ms = if let Some(redraw_time) = self.time_redraw_requested {
+                redraw_time.elapsed().as_secs_f32() * 1000.0
+            } else {
+                0.0
+            };
+            eprintln!("🔄 Full cycle: total_render={:.2}ms, present={:.2}ms", total_render_ms, present_ms);
+        }
     }
 }
