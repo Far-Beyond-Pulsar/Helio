@@ -162,6 +162,10 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
 fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) -> f32 {
     if !ENABLE_SHADOWS { return 1.0; }
 
+    // Only the first MAX_SHADOW_LIGHTS lights have shadow atlas layers.
+    // Lights beyond that limit have no shadow data — treat as fully lit.
+    if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
+
     let light = lights[light_idx];
     var layer: u32;
     if light.light_type > 0.5 && light.light_type < 1.5 {

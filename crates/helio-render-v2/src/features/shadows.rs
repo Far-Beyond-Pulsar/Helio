@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 /// Default shadow atlas resolution per shadow map face
 pub const DEFAULT_SHADOW_ATLAS_SIZE: u32 = 2048;
-/// Default maximum number of shadow-casting lights
-pub const DEFAULT_MAX_SHADOW_LIGHTS: u32 = 8;
+/// Default maximum number of shadow-casting lights.
+/// Automatically raised to match scene light count at registration time.
+pub const DEFAULT_MAX_SHADOW_LIGHTS: u32 = 16;
 
 /// Shadow mapping feature
 ///
@@ -72,6 +73,20 @@ impl Feature for ShadowsFeature {
     }
 
     fn register(&mut self, ctx: &mut FeatureContext) -> Result<()> {
+        // Ensure max_shadow_lights covers all lights that can be sent to the GPU.
+        // A lower limit causes unshadowed lights to sample out-of-bounds atlas
+        // layers, producing phantom shadows on wrong surfaces.
+        use crate::features::lighting::MAX_LIGHTS;
+        if self.max_shadow_lights < MAX_LIGHTS {
+            log::warn!(
+                "ShadowsFeature: max_shadow_lights ({}) < MAX_LIGHTS ({}). \
+                 Raising to {} so all lights can cast shadows. \
+                 Performance may suffer with many shadow-casting lights.",
+                self.max_shadow_lights, MAX_LIGHTS, MAX_LIGHTS,
+            );
+            self.max_shadow_lights = MAX_LIGHTS;
+        }
+
         // Shadow atlas: 6 layers per light (cube faces), one layer per face per light
         let total_layers = self.max_shadow_lights * 6;
         let atlas = ctx.device.create_texture(&wgpu::TextureDescriptor {
@@ -148,12 +163,13 @@ impl Feature for ShadowsFeature {
     }
 
     fn shader_defines(&self) -> HashMap<String, ShaderDefine> {
+        use crate::features::lighting::MAX_LIGHTS;
         let mut defines = HashMap::new();
         defines.insert("ENABLE_SHADOWS".into(), ShaderDefine::Bool(self.enabled));
-        defines.insert(
-            "MAX_SHADOW_LIGHTS".into(),
-            ShaderDefine::U32(if self.enabled { self.max_shadow_lights } else { 0 }),
-        );
+        // Must match the atlas layer count — always raised to MAX_LIGHTS
+        // (same logic as register(), but shader_defines() runs first)
+        let effective = if self.enabled { self.max_shadow_lights.max(MAX_LIGHTS) } else { 0 };
+        defines.insert("MAX_SHADOW_LIGHTS".into(), ShaderDefine::U32(effective));
         defines
     }
 
