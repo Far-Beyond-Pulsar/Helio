@@ -156,6 +156,7 @@ impl RenderPass for ShadowPass {
             //   directional  → 4 CSM cascades (slots 0-3)
             //   spot light   → 1 projection   (slot 0)
             let max_faces = face_counts.get(i).copied().unwrap_or(6) as u32;
+            let t_light = ctx.scope_begin(&format!("shadow/light_{i}"));
             for face in 0u32..max_faces {
                 let layer_idx = i as u32 * 6 + face;
 
@@ -186,6 +187,7 @@ impl RenderPass for ShadowPass {
                     pass.draw_indexed(0..dc.index_count, 0, layer_idx..(layer_idx + 1));
                 }
             }
+            ctx.scope_end(t_light);
         }
 
         Ok(())

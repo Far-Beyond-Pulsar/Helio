@@ -273,7 +273,11 @@ impl GpuProfiler {
                     })
                 }).collect();
 
-                let total = new_timings.iter().map(|t| t.gpu_ms).sum();
+                // Only sum top-level passes (no '/') so sub-scopes aren't double-counted.
+                let total: f32 = new_timings.iter()
+                    .filter(|t| !t.name.contains('/'))
+                    .map(|t| t.gpu_ms)
+                    .sum();
                 drop(raw);
                 self.staging_bufs[read_idx].unmap();
                 self.pending[read_idx] = None;
@@ -289,25 +293,64 @@ impl GpuProfiler {
 
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Pretty-print timings to stderr.  Convenient for one-line call from the render loop.
+    /// Pretty-print timings to stderr as an indented ANSI tree.
     ///
-    /// Example output (one line, printed when `interval_frames` frames have elapsed):
+    /// Top-level passes are printed flush-left (2-space margin); sub-scopes
+    /// (names containing `/`) are indented and the prefix is stripped:
     /// ```text
-    /// [GPU TIMING]  sky_lut 0.12ms  sky 0.45ms  radiance_cascades 8.73ms  geometry 1.22ms  | total 10.52ms
+    /// [GPU TIMING]
+    ///   shadow          39.21 ms gpu   0.27 ms cpu
+    ///     light_0        9.80 ms gpu
+    ///     light_1        9.71 ms gpu
+    ///   radiance_cascades  1.13 ms gpu
+    ///     accel_build    0.26 ms gpu
+    ///     cascade_3      0.01 ms gpu
+    ///   ──────────────────────────────────
+    ///   total           41.45 ms gpu
     /// ```
     pub fn print_timings(&self) {
         if self.last_timings.is_empty() {
             return;
         }
-        let mut line = String::from("[GPU TIMING] ");
+
+        // ANSI escape helpers (work on Windows Terminal / most modern terminals).
+        const RESET:  &str = "\x1b[0m";
+        const BOLD:   &str = "\x1b[1m";
+        const DIM:    &str = "\x1b[2m";
+        const CYAN:   &str = "\x1b[36m";
+        const YELLOW: &str = "\x1b[33m";
+
+        eprintln!("{}[GPU TIMING]{}", BOLD, RESET);
+
         for t in &self.last_timings {
-            if t.gpu_ms > 0.0 {
-                line.push_str(&format!(" {}: {:.2}ms(gpu) {:.2}ms(cpu) |", t.name, t.gpu_ms, t.cpu_ms));
+            let is_child = t.name.contains('/');
+            // For children strip the "prefix/" so the line stays compact.
+            let display = if is_child {
+                t.name.splitn(2, '/').nth(1).unwrap_or(&t.name)
             } else {
-                line.push_str(&format!(" {}: {:.2}ms(cpu) |", t.name, t.cpu_ms));
-            }
+                &t.name
+            };
+
+            let indent     = if is_child { "    " } else { "  " };
+            let name_width = if is_child { 22usize } else { 24usize };
+
+            let gpu_col = if t.gpu_ms >= 0.005 { CYAN } else { DIM };
+            let gpu_str = format!("{}{:>7.2} ms{} gpu", gpu_col, t.gpu_ms, RESET);
+
+            // Only show cpu time on top-level passes to keep children uncluttered.
+            let cpu_str = if !is_child {
+                format!("  {}{:>7.2} ms{} cpu", DIM, t.cpu_ms, RESET)
+            } else {
+                String::new()
+            };
+
+            eprintln!("{}{:<name_width$}{}{}",
+                indent, display, gpu_str, cpu_str,
+                name_width = name_width);
         }
-        line.push_str(&format!(" total_gpu: {:.2}ms", self.last_total_gpu_ms));
-        eprintln!("{}", line);
+
+        eprintln!("  {}─────────────────────────────────{}", DIM, RESET);
+        eprintln!("  {}{:<24}{}{:>7.2} ms{} gpu{}",
+            BOLD, "total", YELLOW, self.last_total_gpu_ms, RESET, RESET);
     }
 }
