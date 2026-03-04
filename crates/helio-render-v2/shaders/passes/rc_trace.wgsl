@@ -13,18 +13,17 @@
 
 enable wgpu_ray_query;
 
-// GpuLight (matches Rust GpuLight in lighting.rs, 64 bytes)
-// cos_inner / cos_outer are precomputed on the CPU to avoid per-ray transcendental calls.
+// GpuLight (matches Rust GpuLight in lighting.rs, 48 bytes)
 struct GpuLight {
-    position:   vec3<f32>,
-    light_type: f32,   // 0=directional, 1=point, 2=spot
-    direction:  vec3<f32>,
-    range:      f32,
-    color:      vec3<f32>,
-    intensity:  f32,
-    cos_inner:  f32,   // cos(inner_angle) — precomputed on CPU
-    cos_outer:  f32,   // cos(outer_angle) — precomputed on CPU
-    _pad:       vec2<f32>,
+    position:    vec3<f32>,
+    light_type:  f32,   // 0=directional, 1=point, 2=spot
+    direction:   vec3<f32>,
+    range:       f32,
+    color:       vec3<f32>,
+    intensity:   f32,
+    inner_angle: f32,
+    outer_angle: f32,
+    _pad:        vec2<f32>,
 }
 
 struct RCDynamic {
@@ -84,31 +83,9 @@ fn read_parent_probe(ppx: u32, ppy: u32, ppz: u32,
     return textureLoad(cascade_parent, vec2<i32>(ax, ay), 0);
 }
 
-// ── Fast PCG hash — cheap, high-quality, no LUT ──────────────────────────
-fn pcg_hash(seed: u32) -> u32 {
-    var s = seed * 747796405u + 2891336453u;
-    let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
-    return (w >> 22u) ^ w;
-}
-
-// Per-probe, per-frame, per-light jitter in [-1,1]^2 for shadow disk sampling.
-// Different probes get uncorrelated offsets → noise white in probe space,
-// which integrates to correct soft shadows via temporal EMA accumulation.
-fn shadow_jitter(px: u32, py: u32, pz: u32, frame: u32, li: u32) -> vec2<f32> {
-    let seed  = pcg_hash(px ^ (py * 3731u) ^ (pz * 65537u) ^ (frame * 2654435761u) ^ (li * 12345u));
-    let seed2 = pcg_hash(seed ^ 0xDEADBEEFu);
-    return vec2<f32>(
-        f32(seed  & 0xFFFFu) * (1.0 / 65535.0) * 2.0 - 1.0,
-        f32(seed2 & 0xFFFFu) * (1.0 / 65535.0) * 2.0 - 1.0,
-    );
-}
-
-// Evaluate a single light at a surface point.
-//  - Directional: one hard-shadow ray toward the sun.
-//  - Point/Spot:  ONE jittered shadow ray (4× cheaper than 4-sample);
-//                 temporal EMA converges this to correct soft shadows.
-fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>,
-              px: u32, py: u32, pz: u32, frame: u32) -> vec3<f32> {
+// Evaluate a single light at a surface point with soft shadow (4 samples on a light disk).
+// Gradual visibility prevents the hard snap as lights move past shadow boundaries.
+fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>) -> vec3<f32> {
     let light = lights[li];
     var to_light: vec3<f32>;
     var dist:     f32;
@@ -125,13 +102,13 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>,
         dist     = length(diff);
         if dist >= light.range { return vec3<f32>(0.0); }
         to_light = diff / dist;
-        let t = clamp(1.0 - (dist / light.range), 0.0, 1.0);
-        atten   = t * t;
+        atten    = clamp(1.0 - (dist / light.range), 0.0, 1.0);
+        atten    = atten * atten;
         if light.light_type > 1.5 {
-            // cos_inner / cos_outer are precomputed on CPU — no transcendental here
             let cos_angle  = dot(-to_light, light.direction);
-            let spot_atten = clamp((cos_angle - light.cos_outer) /
-                                   (light.cos_inner - light.cos_outer + 0.001), 0.0, 1.0);
+            let cos_outer  = cos(light.outer_angle);
+            let cos_inner  = cos(light.inner_angle);
+            let spot_atten = clamp((cos_angle - cos_outer) / (cos_inner - cos_outer + 0.001), 0.0, 1.0);
             atten *= spot_atten;
         }
     }
@@ -139,42 +116,54 @@ fn eval_light(li: u32, hit_pos: vec3<f32>, hit_normal: vec3<f32>,
     let ndotl = max(0.0, dot(hit_normal, to_light));
     if ndotl < 0.001 || atten < 0.001 { return vec3<f32>(0.0); }
 
+    // Shadow visibility — behaviour differs by light type:
+    //   Directional: cast rays in exactly to_light direction (no disk spread needed,
+    //                just a single hard-shadow ray since the sun is infinitely far away)
+    //   Point/Spot:  soft shadow disk around the light position
     let origin = hit_pos + hit_normal * 0.004;
-    var vis    = 0.0;
+    var vis = 0.0;
 
     if light.light_type < 0.5 {
-        // Directional — single hard-shadow ray
+        // Directional — single ray toward the sun, t_max = effectively infinite
         var sq: ray_query;
         rayQueryInitialize(&sq, acc_struct,
             RayDesc(0x01u, 0xFFu, 0.005, 9999.0, origin, to_light));
         rayQueryProceed(&sq);
-        vis = select(0.0, 1.0, rayQueryGetCommittedIntersection(&sq).kind == RAY_QUERY_INTERSECTION_NONE);
+        if rayQueryGetCommittedIntersection(&sq).kind == RAY_QUERY_INTERSECTION_NONE {
+            vis = 1.0;
+        }
     } else {
-        // Point / Spot — single jittered shadow ray.
-        // Replaces the old 4-sample loop: 4× fewer ray queries, same quality over time.
+        // Point / Spot — soft shadow: 4 rays in a rotated square pattern (better vectorization)
         let light_radius = 0.35;
-        let perp  = normalize(cross(to_light,
-            select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(to_light.y) < 0.9)));
-        let perp2       = cross(to_light, perp);
-        let jitter      = shadow_jitter(px, py, pz, frame, li);
-        let light_point = light.position + perp * (jitter.x * light_radius)
-                                         + perp2 * (jitter.y * light_radius);
-        // Reuse the vector for both length (t_max) and direction — costs one rsqrt not two
-        let to_lp    = light_point - hit_pos;
-        let ray_dist = length(to_lp);
-        let ray_dir  = to_lp * (1.0 / ray_dist);
-        var sq: ray_query;
-        rayQueryInitialize(&sq, acc_struct,
-            RayDesc(0x01u, 0xFFu, 0.005, ray_dist - 0.005, origin, ray_dir));
-        rayQueryProceed(&sq);
-        vis = select(0.0, 1.0, rayQueryGetCommittedIntersection(&sq).kind == RAY_QUERY_INTERSECTION_NONE);
+        let perp  = normalize(cross(to_light, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(to_light.y) < 0.9)));
+        let perp2 = cross(to_light, perp);
+
+        // Rotated square pattern - better coverage than cross pattern
+        var offsets: array<vec2<f32>, 4>;
+        offsets[0] = vec2<f32>( 0.707,  0.707);
+        offsets[1] = vec2<f32>(-0.707,  0.707);
+        offsets[2] = vec2<f32>(-0.707, -0.707);
+        offsets[3] = vec2<f32>( 0.707, -0.707);
+
+        for (var si: u32 = 0u; si < 4u; si++) {
+            let off         = offsets[si] * light_radius;
+            let light_point = light.position + perp * off.x + perp2 * off.y;
+            let ray_dir     = normalize(light_point - hit_pos);
+            let ray_dist    = length(light_point - hit_pos);
+            var sq: ray_query;
+            rayQueryInitialize(&sq, acc_struct,
+                RayDesc(0x01u, 0xFFu, 0.005, ray_dist - 0.005, origin, ray_dir));
+            rayQueryProceed(&sq);
+            if rayQueryGetCommittedIntersection(&sq).kind == RAY_QUERY_INTERSECTION_NONE {
+                vis += 0.25; // 1/4
+            }
+        }
     }
 
     return light.color * light.intensity * atten * ndotl * vis;
 }
 
-// 16×8 workgroup: 128 threads/group vs old 64 — better occupancy on 32-wide SIMD GPUs.
-@compute @workgroup_size(16, 8)
+@compute @workgroup_size(8, 8)
 fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let probe_dim = rc_stat.probe_dim;
     let dir_dim   = rc_stat.dir_dim;
@@ -193,17 +182,6 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     let world_size = rc_dyn.world_max.xyz - rc_dyn.world_min.xyz;
     let cell_size  = world_size / f32(probe_dim);
     let probe_pos  = rc_dyn.world_min.xyz + (vec3<f32>(f32(px), f32(py), f32(pz)) + 0.5) * cell_size;
-
-    // ── Checkerboard probe skip: update only half the probes per frame ────────
-    // Probes where (px+py+pz+frame) is odd are frozen this frame; their history
-    // value is forwarded unchanged so temporal EMA stays stable.
-    // Combined with the 1-jittered-shadow-ray change this roughly halves total
-    // GPU ray cost with zero visual artefacts at normal temporal blend speeds.
-    if ((px + py + pz + rc_dyn.frame) & 1u) != 0u {
-        let fwd = textureLoad(cascade_history, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
-        textureStore(cascade_out, vec2<i32>(i32(gid.x), i32(gid.y)), fwd);
-        return;
-    }
 
     let dir_uv = (vec2<f32>(f32(dx), f32(dy)) + 0.5) / f32(dir_dim);
     let dir    = oct_decode(dir_uv);
@@ -231,7 +209,7 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Accumulate all scene lights at hit point
         var light_contrib = vec3<f32>(0.0);
         for (var li: u32 = 0u; li < rc_dyn.light_count; li++) {
-            light_contrib += eval_light(li, hit_pos, hit_normal, px, py, pz, rc_dyn.frame);
+            light_contrib += eval_light(li, hit_pos, hit_normal);
         }
 
         radiance   = light_contrib;
@@ -243,7 +221,9 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         throughput = 1.0;
     }
 
-    // Nearest-neighbor parent probe lookup (1 texture load vs 32 for trilinear)
+    // OPTIMIZED: Nearest-neighbor parent probe lookup instead of trilinear
+    // Reduces from 8 probe reads (32 texture loads) to 1 probe read (1 texture load)
+    // The slight reduction in smoothness is imperceptible due to temporal accumulation
     if rc_stat.cascade_index < 3u && rc_stat.parent_dir_dim > 0u {
         let pdim  = rc_stat.parent_dir_dim;
         let ppdim = rc_stat.parent_probe_dim;
@@ -261,10 +241,9 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // ── Temporal accumulation: EMA blend with previous frame ──────────────
-    // alpha=0.25 — slightly higher than 0.15 to compensate for checkerboard
-    // half-rate updates; keeps effective convergence speed similar (~8 frames).
+    // alpha=0.15 → ~6-frame convergence. First frame (history=0) blends cleanly.
     let hist = textureLoad(cascade_history, vec2<i32>(i32(gid.x), i32(gid.y)), 0);
-    let alpha = 0.25;
+    let alpha = 0.15;
     radiance   = mix(hist.rgb, radiance,   alpha);
     throughput = mix(hist.w,   throughput, alpha);
 

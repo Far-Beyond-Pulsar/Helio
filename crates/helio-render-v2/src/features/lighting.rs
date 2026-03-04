@@ -40,9 +40,7 @@ impl Default for LightConfig {
     }
 }
 
-/// GPU-side light data (must match WGSL struct in geometry.wgsl and rc_trace.wgsl)
-/// cos_inner_angle / cos_outer_angle are precomputed on the CPU so shaders
-/// never need to call cos() in hot ray-tracing paths.
+/// GPU-side light data (must match WGSL struct in geometry.wgsl)
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct GpuLight {
@@ -52,10 +50,8 @@ pub(crate) struct GpuLight {
     pub range: f32,
     pub color: [f32; 3],
     pub intensity: f32,
-    /// cos(inner_angle) — precomputed to avoid transcendental calls in shaders
-    pub cos_inner_angle: f32,
-    /// cos(outer_angle) — precomputed to avoid transcendental calls in shaders
-    pub cos_outer_angle: f32,
+    pub inner_angle: f32,
+    pub outer_angle: f32,
     pub _pad: [f32; 2],
 }
 
