@@ -13,7 +13,8 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 /// Maximum pass-level scopes per frame.
 /// Each scope uses 2 query slots (begin + end).
-const MAX_SCOPES: u32 = 64;
+/// Budget: 6 top-level + 16 lights + 16×6 faces + 6 RC sub-scopes = ~125; 192 gives headroom.
+const MAX_SCOPES: u32 = 192;
 const SLOT_COUNT: u32 = MAX_SCOPES * 2;
 const SLOT_BYTES: u64 = SLOT_COUNT as u64 * 8; // each timestamp is a u64
 
@@ -295,25 +296,19 @@ impl GpuProfiler {
 
     /// Pretty-print timings to stderr as an indented ANSI tree.
     ///
-    /// Top-level passes are printed flush-left (2-space margin); sub-scopes
-    /// (names containing `/`) are indented and the prefix is stripped:
+    /// Supports up to 3 levels (0, 1, or 2 slashes in the name):
     /// ```text
     /// [GPU TIMING]
-    ///   shadow          39.21 ms gpu   0.27 ms cpu
-    ///     light_0        9.80 ms gpu
-    ///     light_1        9.71 ms gpu
-    ///   radiance_cascades  1.13 ms gpu
-    ///     accel_build    0.26 ms gpu
-    ///     cascade_3      0.01 ms gpu
-    ///   ──────────────────────────────────
-    ///   total           41.45 ms gpu
+    ///   shadow          39.21 ms gpu
+    ///     light_8       10.21 ms gpu
+    ///       face_0       0.03 ms gpu
+    ///       face_4       9.87 ms gpu   ← the bad one
     /// ```
     pub fn print_timings(&self) {
         if self.last_timings.is_empty() {
             return;
         }
 
-        // ANSI escape helpers (work on Windows Terminal / most modern terminals).
         const RESET:  &str = "\x1b[0m";
         const BOLD:   &str = "\x1b[1m";
         const DIM:    &str = "\x1b[2m";
@@ -323,22 +318,19 @@ impl GpuProfiler {
         eprintln!("{}[GPU TIMING]{}", BOLD, RESET);
 
         for t in &self.last_timings {
-            let is_child = t.name.contains('/');
-            // For children strip the "prefix/" so the line stays compact.
-            let display = if is_child {
-                t.name.splitn(2, '/').nth(1).unwrap_or(&t.name)
-            } else {
-                &t.name
-            };
+            let depth = t.name.chars().filter(|&c| c == '/').count();
+            let display = t.name.rsplitn(2, '/').next().unwrap_or(&t.name);
 
-            let indent     = if is_child { "    " } else { "  " };
-            let name_width = if is_child { 22usize } else { 24usize };
+            let (indent, name_width) = match depth {
+                0 => ("  ",     24usize),
+                1 => ("    ",   22usize),
+                _ => ("      ", 20usize),
+            };
 
             let gpu_col = if t.gpu_ms >= 0.005 { CYAN } else { DIM };
             let gpu_str = format!("{}{:>7.2} ms{} gpu", gpu_col, t.gpu_ms, RESET);
 
-            // Only show cpu time on top-level passes to keep children uncluttered.
-            let cpu_str = if !is_child {
+            let cpu_str = if depth == 0 {
                 format!("  {}{:>7.2} ms{} cpu", DIM, t.cpu_ms, RESET)
             } else {
                 String::new()

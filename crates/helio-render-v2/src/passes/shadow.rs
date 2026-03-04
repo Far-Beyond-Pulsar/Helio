@@ -220,6 +220,7 @@ impl RenderPass for ShadowPass {
                     range_filtered.iter().copied().collect()
                 };
 
+                let t_face = ctx.scope_begin(&format!("shadow/light_{i}/face_{face}"));
                 let mut pass = ctx.begin_render_pass(
                     &format!("Shadow Light {i} Face {face}"),
                     &[],
@@ -233,10 +234,6 @@ impl RenderPass for ShadowPass {
                     }),
                 );
 
-                if face_draws.is_empty() {
-                    continue;
-                }
-
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
 
@@ -246,6 +243,8 @@ impl RenderPass for ShadowPass {
                     // instance_index = layer_idx selects the correct face matrix in the vertex shader
                     pass.draw_indexed(0..dc.index_count, 0, layer_idx..(layer_idx + 1));
                 }
+                drop(pass); // end render pass before writing end timestamp
+                ctx.scope_end(t_face);
             }
             ctx.scope_end(t_light);
         }
