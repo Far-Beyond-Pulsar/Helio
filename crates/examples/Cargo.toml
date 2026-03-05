@@ -12,6 +12,10 @@ name = "render_v2_sky"
 path = "render_v2_sky.rs"
 
 [[bin]]
+name = "debug_shapes"
+path = "debug_shapes.rs"
+
+[[bin]]
 name = "indoor_room"
 path = "indoor_room.rs"
 
