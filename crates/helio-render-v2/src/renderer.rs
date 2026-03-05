@@ -1287,6 +1287,8 @@ impl Renderer {
         // Point lights: 6 real cube-face matrices.
         let identity = Mat4::IDENTITY;
         let mut shadow_mats: Vec<GpuShadowMatrix> = Vec::with_capacity(MAX_LIGHTS as usize * 6);
+        // Per-light FNV hash of the computed matrices; used by ShadowPass cache.
+        let mut shadow_matrix_hashes: Vec<u64> = Vec::with_capacity(sorted_lights.len());
         for l in &sorted_lights {
             let six: [Mat4; 6] = match l.light_type {
                 crate::features::LightType::Point => {
@@ -1305,6 +1307,16 @@ impl Renderer {
                     [m0, identity, identity, identity, identity, identity]
                 }
             };
+            // Hash all 6 matrices (96 f32 values) for the shadow cache.
+            let mat_hash = {
+                let bits: Vec<u64> = six.iter()
+                    .flat_map(|m| m.to_cols_array().iter().map(|f| f.to_bits() as u64).collect::<Vec<_>>())
+                    .collect();
+                let mut h: u64 = 0xcbf29ce484222325;
+                for &v in &bits { h ^= v; h = h.wrapping_mul(0x100000001b3); }
+                h
+            };
+            shadow_matrix_hashes.push(mat_hash);
             for m in &six {
                 shadow_mats.push(GpuShadowMatrix { mat: m.to_cols_array() });
             }
@@ -1330,7 +1342,7 @@ impl Renderer {
         {
             let mut cull = self.shadow_cull_lights.lock().unwrap();
             cull.clear();
-            for l in &sorted_lights {
+            for (idx, l) in sorted_lights.iter().enumerate() {
                 // Aggressive shadow range to render as many shadows as possible:
                 // - Extends point/spot lights by 5x to fill atlas with quality shadows
                 // - Directional (sun) shadows fade at 2.2x as before
@@ -1345,6 +1357,7 @@ impl Renderer {
                     range:          shadow_cull_range,
                     is_directional: matches!(l.light_type, crate::features::LightType::Directional),
                     is_point:       matches!(l.light_type, crate::features::LightType::Point),
+                    matrix_hash:    shadow_matrix_hashes.get(idx).copied().unwrap_or(0),
                 });
             }
         }

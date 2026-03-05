@@ -27,6 +27,10 @@ pub struct ShadowCullLight {
     pub is_directional: bool,
     /// Point lights get the per-face hemisphere cull in addition to the range cull.
     pub is_point:       bool,
+    /// FNV-1a hash of this light's computed shadow matrix/matrices.
+    /// Using the post-snap matrix hash means the cache only invalidates when the
+    /// shadow output actually changes (e.g. camera crosses a texel boundary for CSM).
+    pub matrix_hash:    u64,
 }
 
 /// FNV-1a 64-bit hash over a slice of u64 values.
@@ -241,30 +245,17 @@ impl RenderPass for ShadowPass {
             let light = cull_lights.get(i).copied().unwrap_or_default();
 
             // ── Light hash ───────────────────────────────────────────────────
-            // Captures every light property that affects the shadow matrices.
-            // Directional lights additionally encode camera position because CSM
-            // cascade splits are camera-relative and change as the camera moves.
-            let light_hash = {
-                let mut vals = [
-                    light.position[0].to_bits() as u64,
-                    light.position[1].to_bits() as u64,
-                    light.position[2].to_bits() as u64,
-                    light.direction[0].to_bits() as u64,
-                    light.direction[1].to_bits() as u64,
-                    light.direction[2].to_bits() as u64,
-                    light.range.to_bits() as u64,
-                    light.is_directional as u64,
-                    light.is_point as u64,
-                    max_faces as u64,
-                    // Camera position for directional: CSM cascade splits depend on it.
-                    // Encoded unconditionally to keep array size fixed; contributes 0
-                    // to point/spot hashes only if camera coincidentally aligns.
-                    if light.is_directional { ctx.camera_position.x.to_bits() as u64 } else { 0 },
-                    if light.is_directional { ctx.camera_position.y.to_bits() as u64 } else { 0 },
-                    if light.is_directional { ctx.camera_position.z.to_bits() as u64 } else { 0 },
-                ];
-                fnv64(&vals)
-            };
+            // Based on the pre-computed shadow matrix hash rather than raw camera
+            // position. CSM matrices are texel-snapped, so this hash only changes
+            // when the shadow output actually differs (camera crossed a texel
+            // boundary), not on every sub-texel camera movement.
+            let light_hash = fnv64(&[
+                light.matrix_hash,
+                light.range.to_bits() as u64,
+                light.is_directional as u64,
+                light.is_point as u64,
+                max_faces as u64,
+            ]);
 
             // ── Cache check ──────────────────────────────────────────────────
             // Skip all face renders if both the light parameters and the visible
