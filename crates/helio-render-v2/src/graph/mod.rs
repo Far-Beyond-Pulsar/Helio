@@ -228,6 +228,7 @@ impl RenderGraph {
                 has_sky: ctx.has_sky,
                 sky_bind_group: ctx.sky_bind_group,
                 profiler: profiler_raw,
+                camera_position: ctx.camera_position,
             };
 
             self.passes[pass_idx].pass.execute(&mut pass_ctx)?;
@@ -304,6 +305,8 @@ pub struct GraphContext<'a> {
     pub has_sky: bool,
     /// Sky bind group (group 1 in SkyPass pipeline), None when no sky
     pub sky_bind_group: Option<&'a wgpu::BindGroup>,
+    /// Camera world-space position for distance-based culling
+    pub camera_position: glam::Vec3,
 }
 
 /// Builder for declaring pass resource dependencies

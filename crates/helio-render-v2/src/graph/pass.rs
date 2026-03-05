@@ -43,6 +43,8 @@ pub struct PassContext<'a> {
     /// named GPU timing sub-scopes within their `execute()` impl.
     /// SAFETY: valid for the duration of the graph execute loop (single-threaded).
     pub(crate) profiler: *mut GpuProfiler,
+    /// Camera world-space position for distance-based culling
+    pub camera_position: glam::Vec3,
 }
 
 impl<'a> PassContext<'a> {

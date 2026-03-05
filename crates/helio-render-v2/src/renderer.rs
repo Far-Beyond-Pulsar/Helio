@@ -971,6 +971,7 @@ impl Renderer {
             sky_color: self.scene_sky_color,
             has_sky: self.scene_has_sky,
             sky_bind_group: None,
+            camera_position: camera.position,
         };
 
         if let Some(p) = &mut self.profiler { p.begin_frame(); }

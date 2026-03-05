@@ -465,38 +465,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var sky_occlusion = 1.0;
     if ENABLE_LIGHTING {
         for (var i = 0u; i < globals.light_count; i++) {
-            let cam_to_light = lights[i].position - camera.position;
-            let dist_to_light = length(cam_to_light);
-            let light_range = max(lights[i].range, 0.001);
-            
-            // Distance-based fade: keep lights visible much further for shadow coverage
-            // For point/spot: fade from 3.0x to 5.0x range (matches CPU-side 5x shadow rendering)
-            // For directional: fade from 2.0x to 2.2x range (already covers whole scene)
-            var fade_in_dist = light_range * 3.0;
-            var fade_out_dist = light_range * 5.0;
-            
-            // Directional lights use standard fade (sun cascades)
-            if lights[i].light_type < 0.5 {
-                fade_in_dist = light_range * 2.0;
-                fade_out_dist = light_range * 2.2;
-            }
-            
-            let distance_fade = 1.0 - smoothstep(fade_in_dist, fade_out_dist, dist_to_light);
-            
-            // Only skip if we're WAY beyond the light (past fade zone) to avoid wasting computation
-            // For point/spot lights within 5x range, compute shadows even if contribution is fading
-            if distance_fade < 0.001 { continue; }
-            
+            // FIXED: Removed all camera-to-light distance-based culling and shadow fading.
+            // Shadows are now computed at full strength regardless of camera position.
             let sf = shadow_factor(i, world_pos);
             if lights[i].light_type < 0.5 { sky_occlusion = sf; }
             
-            // Apply same fade to shadow that we apply to light
-            // This keeps shadow visibility correlated with light intensity
-            let sf_faded = mix(1.0, sf, distance_fade);
-            
             let light_contrib = pbr_direct_light(lights[i], world_pos, N, V,
-                                   F0, albedo, roughness, metallic, sf_faded);
-            Lo += light_contrib * distance_fade;
+                                   F0, albedo, roughness, metallic, sf);
+            Lo += light_contrib;
         }
     }
 

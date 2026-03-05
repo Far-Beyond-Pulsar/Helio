@@ -179,6 +179,9 @@ impl RenderPass for ShadowPass {
         let face_counts  = self.light_face_counts.lock().unwrap();
         let cull_lights  = self.cull_lights.lock().unwrap();
 
+        // Distance from camera at which shadows stop being rendered (in meters)
+        const SHADOW_MAX_DISTANCE: f32 = 300.0;
+
         for i in 0..actual_count {
             // Only render faces that have valid (non-identity) matrices:
             //   point light  → 6 cube faces
@@ -186,47 +189,26 @@ impl RenderPass for ShadowPass {
             //   spot light   → 1 projection   (slot 0)
             let max_faces = face_counts.get(i).copied().unwrap_or(6) as u32;
 
-            // ── Stage 1: range-sphere cull (aggressive for atlas fullness) ────────
-            // Directional lights use ortho cascades covering the whole scene.
-            // Point/Spot lights: cull range is extended to 5x light.range to ensure
-            // that nearby objects always cast shadows, prioritizing screen-space visibility.
-            // This aggressive approach fills the shadow atlas with quality shadows rather
-            // than conservatively culling them away. The hemisphere cull (stage 2) still
-            // prevents wasted rendering for impossible face directions.
-            let cull = cull_lights.get(i).copied().unwrap_or_default();
-            let range_filtered: Vec<&DrawCall> = if cull.is_directional {
-                draw_calls.iter().collect()
-            } else {
-                draw_calls.iter().filter(|dc| {
-                    let dx = dc.bounds_center[0] - cull.position[0];
-                    let dy = dc.bounds_center[1] - cull.position[1];
-                    let dz = dc.bounds_center[2] - cull.position[2];
-                    let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-                    dist - dc.bounds_radius <= cull.range
-                }).collect()
-            };
+            // ── Stage 1: Camera distance culling ────────
+            // Render objects only if they're within SHADOW_MAX_DISTANCE from the camera.
+            // The light's view projection will naturally exclude objects not visible
+            // from that light's perspective.
+            let range_filtered: Vec<&DrawCall> = draw_calls.iter()
+                .filter(|dc| {
+                    let dist_to_camera = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
+                    dist_to_camera <= SHADOW_MAX_DISTANCE
+                })
+                .collect();
 
             let t_light = ctx.scope_begin(&format!("shadow/light_{i}"));
             for face in 0u32..max_faces {
                 let layer_idx = i as u32 * 6 + face;
 
-                // ── Stage 2: per-face hemisphere cull (point lights only) ────────
-                // Face ordering matches compute_point_light_matrices in renderer.rs:
-                //   face 0 = +X,  face 1 = −1X
-                //   face 2 = +Y,  face 3 = −1Y
-                //   face 4 = +Z,  face 5 = −1Z
-                // A mesh entirely behind the axis of this face can never appear
-                // in its depth map, so skip it.
-                let face_draws: Vec<&DrawCall> = if cull.is_point {
-                    let axis = (face / 2) as usize; // 0=X, 1=Y, 2=Z
-                    let sign = if face % 2 == 0 { 1.0f32 } else { -1.0 };
-                    range_filtered.iter().copied().filter(|dc| {
-                        let offset = (dc.bounds_center[axis] - cull.position[axis]) * sign;
-                        offset + dc.bounds_radius >= 0.0
-                    }).collect()
-                } else {
-                    range_filtered.iter().copied().collect()
-                };
+                // ── Stage 2: per-face rendering ────────
+                // Render all camera-distance-filtered objects into each face.
+                // The light's view projection will naturally exclude objects not visible
+                // from that light's direction.
+                let face_draws: Vec<&DrawCall> = range_filtered.iter().copied().collect();
 
                 let t_face = ctx.scope_begin(&format!("shadow/light_{i}/face_{face}"));
                 let mut pass = ctx.begin_render_pass(
