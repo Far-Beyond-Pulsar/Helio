@@ -494,8 +494,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let hemi_t       = N.y * 0.5 + 0.5;
     let hemi_ambient = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
 
+    // RC indirect is NOT occluded by shadow — that's the whole point of GI!
     let rc_weight       = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-    let ambient_fallback = mix(hemi_ambient, diff_ind * sky_occlusion, rc_weight);
+    let ambient_fallback = mix(hemi_ambient, diff_ind, rc_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
     let indirect  = (ambient_fallback + spec_ind) * ao;

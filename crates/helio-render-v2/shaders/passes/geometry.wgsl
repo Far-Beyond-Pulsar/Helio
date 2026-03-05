@@ -537,8 +537,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
 
     // RC irradiance replaces the hemisphere ambient where probe coverage exists
     // (rc_irr fades to 0 outside the volume, so hemi_ambient fills in cleanly).
+    // RC indirect is NOT occluded by shadow — that's the whole point of GI!
     let rc_weight    = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-    let ambient_fallback = mix(hemi_ambient, diffuse_indirect * sky_occlusion, rc_weight);
+    let ambient_fallback = mix(hemi_ambient, diffuse_indirect, rc_weight);
 
     // ── Combine: direct + indirect (AO applied to indirect only) ─────────────
     let indirect = (ambient_fallback + specular_indirect) * ao;
