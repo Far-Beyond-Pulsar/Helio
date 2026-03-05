@@ -8,16 +8,18 @@ use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 /// Per-light data written by the `Renderer` each frame and read by `ShadowPass::execute`
 /// to skip draw calls that cannot contribute to a given shadow face.
 ///
-/// Two cull stages are applied:
-/// 1. **Range cull** – skip the mesh if its bounding sphere does not intersect
-///    the light's influence sphere (`dist(center, light_pos) - radius > range`).
+/// Culling strategy: **Aggressive shadow rendering**
+/// 1. **Range cull** – extended to 5x for point/spot lights (instead of 1x) to fill
+///    the atlas with quality shadows for visible objects. The wider range ensures
+///    that objects casting shadows on camera-visible surfaces are included, even
+///    if their light source has a modest range.
 /// 2. **Hemisphere cull** (point lights only) – skip the mesh if it lies entirely
 ///    in the hemisphere opposite the cube face being rendered.
 #[derive(Clone, Copy, Default)]
 pub struct ShadowCullLight {
     /// World-space position (ignored for directional lights).
     pub position:       [f32; 3],
-    /// Maximum influence radius in metres.
+    /// Maximum influence radius in metres (extended to 5x for point/spot lights).
     pub range:          f32,
     /// Directional lights use ortho CSM covering the whole scene — skip all culling.
     pub is_directional: bool,
@@ -116,8 +118,10 @@ impl ShadowPass {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
-                // Back-face culling: render front faces to shadow map (standard approach)
-                cull_mode: Some(wgpu::Face::Back),
+                // Two-sided shadow casters: avoids missing shadows on meshes with
+                // mixed/inconsistent winding and matches a conservative "never miss
+                // a caster" policy for indoor scenes.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -129,8 +133,8 @@ impl ShadowPass {
                 // slope_scale adds bias based on surface angle relative to light
                 // constant offset adds fixed bias regardless of angle
                 bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.5,
+                    constant: 0,
+                    slope_scale: 1.0,
                     clamp: 0.0,
                 },
             }),
@@ -182,9 +186,13 @@ impl RenderPass for ShadowPass {
             //   spot light   → 1 projection   (slot 0)
             let max_faces = face_counts.get(i).copied().unwrap_or(6) as u32;
 
-            // ── Stage 1: range-sphere cull (once per light) ─────────────────────
-            // Directional lights use ortho cascades covering the whole scene —
-            // skip the test so we never accidentally cull a distant shadow caster.
+            // ── Stage 1: range-sphere cull (aggressive for atlas fullness) ────────
+            // Directional lights use ortho cascades covering the whole scene.
+            // Point/Spot lights: cull range is extended to 5x light.range to ensure
+            // that nearby objects always cast shadows, prioritizing screen-space visibility.
+            // This aggressive approach fills the shadow atlas with quality shadows rather
+            // than conservatively culling them away. The hemisphere cull (stage 2) still
+            // prevents wasted rendering for impossible face directions.
             let cull = cull_lights.get(i).copied().unwrap_or_default();
             let range_filtered: Vec<&DrawCall> = if cull.is_directional {
                 draw_calls.iter().collect()

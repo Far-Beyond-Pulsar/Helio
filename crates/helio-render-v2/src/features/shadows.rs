@@ -10,8 +10,9 @@ use std::sync::Arc;
 /// Default shadow atlas resolution per shadow map face
 pub const DEFAULT_SHADOW_ATLAS_SIZE: u32 = 2048;
 /// Default maximum number of shadow-casting lights.
-/// Automatically raised to match scene light count at registration time.
-pub const DEFAULT_MAX_SHADOW_LIGHTS: u32 = 16;
+/// Set to 40 to maximize coverage without exceeding conservative GPU texture array limits.
+/// 40 lights × 6 faces/light = 240 layers (under the 256-layer conservative cap).
+pub const DEFAULT_MAX_SHADOW_LIGHTS: u32 = 40;
 
 /// Shadow mapping feature
 ///

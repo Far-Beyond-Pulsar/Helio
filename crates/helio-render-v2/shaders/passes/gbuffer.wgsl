@@ -26,9 +26,8 @@ struct Material {
     _pad:            f32,
 }
 
-@group(0) @binding(0) var<uniform> camera:   Camera;
-
-@group(1) @binding(0) var<uniform> material:         Material;
+@group(0) @binding(0) var <uniform> camera:   Camera;
+@group(1) @binding(0) var <uniform> material: Material;
 @group(1) @binding(1) var base_color_texture: texture_2d<f32>;
 @group(1) @binding(2) var normal_map:         texture_2d<f32>;
 @group(1) @binding(3) var material_sampler:   sampler;
@@ -85,13 +84,13 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let alpha      = material.base_color.a  * tex_sample.a;
 
     // ── Normal mapping – derivative-based TBN ────────────────────────────────
-    let N_geom = normalize(input.world_normal);
-    let q0     = dpdx(input.world_position);
-    let q1     = dpdy(input.world_position);
-    let st0    = dpdx(uv);
-    let st1    = dpdy(uv);
-    let q1perp = cross(q1, N_geom);
-    let q0perp = cross(N_geom, q0);
+    let N_geom  = normalize(input.world_normal);
+    let q0      = dpdx(input.world_position);
+    let q1      = dpdy(input.world_position);
+    let st0     = dpdx(uv);
+    let st1     = dpdy(uv);
+    let q1perp  = cross(q1, N_geom);
+    let q0perp  = cross(N_geom, q0);
     let T_deriv = q1perp * st0.x + q0perp * st1.x;
     let B_deriv = q1perp * st0.y + q0perp * st1.y;
     let det     = max(dot(T_deriv, T_deriv), dot(B_deriv, B_deriv));
@@ -104,7 +103,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     );
 
     // ── ORM ───────────────────────────────────────────────────────────────────
-    let orm      = textureSample(orm_texture, material_sampler, uv).rgb;
+    let orm       = textureSample(orm_texture, material_sampler, uv).rgb;
     let ao        = material.ao       * orm.r;
     let roughness = clamp(material.roughness * orm.g, 0.04, 1.0);
     let metallic  = clamp(material.metallic  * orm.b, 0.0,  1.0);

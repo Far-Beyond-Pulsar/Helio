@@ -1086,18 +1086,39 @@ impl Renderer {
                         // Keep directional lights at highest priority (sun/moon).
                         f32::MAX
                     }
-                    crate::features::LightType::Point | crate::features::LightType::Spot { .. } => {
+                    crate::features::LightType::Point => {
                         let lp = glam::Vec3::from(light.position);
-                        let d  = camera_pos.distance(lp);
+                        let d  = camera_pos.distance(lp).max(0.25);
                         let r  = light.range.max(0.001);
-                        if d >= r {
-                            0.0
-                        } else {
-                            // Smooth attenuation proxy in [0, 1], stronger near light center.
-                            let x = d / r;
-                            let attenuation = (1.0 - x * x).max(0.0);
-                            light.intensity.max(0.0) * attenuation
-                        }
+                        let intensity = light.intensity.max(0.0);
+
+                        // Stable screen-impact proxy (higher when larger on screen and brighter).
+                        // Never drops to 0 at d>=r, so ordering is deterministic and avoids
+                        // arbitrary shadow loss for lights that are still camera-relevant.
+                        let angular = (r / d).min(8.0);
+                        let proximity = 1.0 / (1.0 + (d / r) * (d / r));
+                        intensity * (angular * angular) * proximity
+                    }
+                    crate::features::LightType::Spot { inner_angle, outer_angle } => {
+                        let lp = glam::Vec3::from(light.position);
+                        let d  = camera_pos.distance(lp).max(0.25);
+                        let r  = light.range.max(0.001);
+                        let intensity = light.intensity.max(0.0);
+
+                        let angular = (r / d).min(8.0);
+                        let proximity = 1.0 / (1.0 + (d / r) * (d / r));
+
+                        // Slightly prefer spot lights whose cone points toward the camera.
+                        let to_camera = (camera_pos - lp).normalize_or_zero();
+                        let dir = glam::Vec3::from(light.direction).normalize_or_zero();
+                        let cos_a = dir.dot(to_camera);
+                        let inner_cos = inner_angle.cos();
+                        let outer_cos = outer_angle.cos();
+                        let denom = (inner_cos - outer_cos).max(1e-6);
+                        let t = ((cos_a - outer_cos) / denom).clamp(0.0, 1.0);
+                        let cone = t * t * (3.0 - 2.0 * t);
+
+                        intensity * (angular * angular) * proximity * (0.25 + 0.75 * cone)
                     }
                 }
             }
@@ -1213,9 +1234,17 @@ impl Renderer {
             let mut cull = self.shadow_cull_lights.lock().unwrap();
             cull.clear();
             for l in &sorted_lights {
+                // Aggressive shadow range to render as many shadows as possible:
+                // - Extends point/spot lights by 5x to fill atlas with quality shadows
+                // - Directional (sun) shadows fade at 2.2x as before
+                // - Ensures shadows render for any object reasonably close to camera
+                let shadow_cull_range = match l.light_type {
+                    crate::features::LightType::Directional => l.range * 2.2,
+                    _ => l.range * 5.0,  // Point/Spot: aggressive range
+                };
                 cull.push(ShadowCullLight {
                     position:       l.position,
-                    range:          l.range,
+                    range:          shadow_cull_range,
                     is_directional: matches!(l.light_type, crate::features::LightType::Directional),
                     is_point:       matches!(l.light_type, crate::features::LightType::Point),
                 });

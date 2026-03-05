@@ -48,8 +48,8 @@ struct GpuLight {
 
 struct LightMatrix { mat: mat4x4<f32> }
 
-@group(0) @binding(0) var<uniform> camera:  Camera;
-@group(0) @binding(1) var<uniform> globals: Globals;
+@group(0) @binding(0) var <uniform> camera:  Camera;
+@group(0) @binding(1) var <uniform> globals: Globals;
 
 // Group 1 – G-buffer inputs (read-only, textureLoad)
 @group(1) @binding(0) var gbuf_albedo:   texture_2d<f32>;       // Rgba8Unorm   albedo.rgb + alpha
@@ -59,11 +59,11 @@ struct LightMatrix { mat: mat4x4<f32> }
 @group(1) @binding(4) var gbuf_depth:    texture_depth_2d;      // Depth32Float
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
-@group(2) @binding(0) var<storage, read> lights:          array<GpuLight>;
+@group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
 @group(2) @binding(1) var shadow_atlas:   texture_depth_2d_array;
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
 @group(2) @binding(3) var env_cube:       texture_cube<f32>;
-@group(2) @binding(4) var<storage, read> shadow_matrices: array<LightMatrix>;
+@group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
 @group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
 // cluster bindings removed - GPU-driven architecture
@@ -150,7 +150,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
     if light.light_type > 0.5 && light.light_type < 1.5 {
         let to_frag = world_pos - light.position;
         layer = light_idx * 6u + point_light_face(to_frag);
-        let depth_bias   = 0.0008;
+        let depth_bias   = 0.0002;
         let cascade_scale = 1.0;
         return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
     } else if light.light_type < 0.5 {
@@ -201,7 +201,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
             cascade_a = 3u;
         }
         
-        let depth_bias = 0.0003;
+        let depth_bias = 0.00012;
         let layer_a = light_idx * 6u + cascade_a;
         let cascade_scale_a = 1.0 + f32(cascade_a) * 1.5;
         let shadow_a = sample_cascade_shadow(layer_a, depth_bias, cascade_scale_a, world_pos);
@@ -226,7 +226,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
         return shadow_a;
     } else {
         layer = light_idx * 6u;
-        let depth_bias   = 0.0003;
+        let depth_bias   = 0.00015;
         let cascade_scale = 1.0;
         return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
     }
@@ -465,21 +465,37 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var sky_occlusion = 1.0;
     if ENABLE_LIGHTING {
         for (var i = 0u; i < globals.light_count; i++) {
-            let sf = shadow_factor(i, world_pos);
-            if lights[i].light_type < 0.5 { sky_occlusion = sf; }
-            
-            // Distance-based fade: smooth fade-out as light goes beyond render distance
             let cam_to_light = lights[i].position - camera.position;
             let dist_to_light = length(cam_to_light);
             let light_range = max(lights[i].range, 0.001);
             
-            // Fade zone: fully visible at 2.0x range, fade out toward 2.2x range
-            let fade_in_dist = light_range * 2.0;
-            let fade_out_dist = light_range * 2.2;
+            // Distance-based fade: keep lights visible much further for shadow coverage
+            // For point/spot: fade from 3.0x to 5.0x range (matches CPU-side 5x shadow rendering)
+            // For directional: fade from 2.0x to 2.2x range (already covers whole scene)
+            var fade_in_dist = light_range * 3.0;
+            var fade_out_dist = light_range * 5.0;
+            
+            // Directional lights use standard fade (sun cascades)
+            if lights[i].light_type < 0.5 {
+                fade_in_dist = light_range * 2.0;
+                fade_out_dist = light_range * 2.2;
+            }
+            
             let distance_fade = 1.0 - smoothstep(fade_in_dist, fade_out_dist, dist_to_light);
             
+            // Only skip if we're WAY beyond the light (past fade zone) to avoid wasting computation
+            // For point/spot lights within 5x range, compute shadows even if contribution is fading
+            if distance_fade < 0.001 { continue; }
+            
+            let sf = shadow_factor(i, world_pos);
+            if lights[i].light_type < 0.5 { sky_occlusion = sf; }
+            
+            // Apply same fade to shadow that we apply to light
+            // This keeps shadow visibility correlated with light intensity
+            let sf_faded = mix(1.0, sf, distance_fade);
+            
             let light_contrib = pbr_direct_light(lights[i], world_pos, N, V,
-                                   F0, albedo, roughness, metallic, sf);
+                                   F0, albedo, roughness, metallic, sf_faded);
             Lo += light_contrib * distance_fade;
         }
     }
