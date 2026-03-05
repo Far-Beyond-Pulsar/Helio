@@ -19,12 +19,33 @@ use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 pub struct ShadowCullLight {
     /// World-space position (ignored for directional lights).
     pub position:       [f32; 3],
+    /// World-space direction (used for directional/spot light cache key).
+    pub direction:      [f32; 3],
     /// Maximum influence radius in metres (extended to 5x for point/spot lights).
     pub range:          f32,
     /// Directional lights use ortho CSM covering the whole scene — skip all culling.
     pub is_directional: bool,
     /// Point lights get the per-face hemisphere cull in addition to the range cull.
     pub is_point:       bool,
+}
+
+/// FNV-1a 64-bit hash over a slice of u64 values.
+fn fnv64(vals: &[u64]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &v in vals {
+        h ^= v;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// Per-light shadow cache entry. Stores hashes of the light state and visible
+/// geometry; if both match the previous frame the shadow faces are skipped.
+#[derive(Clone, Copy, Default)]
+struct ShadowLightCache {
+    light_hash: u64,
+    geom_hash:  u64,
+    valid:      bool,
 }
 
 /// Depth-only pass that fills shadow atlas layers
@@ -46,6 +67,8 @@ pub struct ShadowPass {
     cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
     pipeline: Arc<wgpu::RenderPipeline>,
     bind_group: wgpu::BindGroup,
+    /// Per-light shadow cache — skip re-rendering when light and geometry are unchanged.
+    shadow_cache: Vec<ShadowLightCache>,
 }
 
 impl ShadowPass {
@@ -142,6 +165,7 @@ impl ShadowPass {
             multiview_mask: None,
         });
 
+        let max_lights = layer_views.len() / 6;
         Self {
             layer_views,
             draw_list,
@@ -151,6 +175,7 @@ impl ShadowPass {
             cull_lights,
             pipeline: Arc::new(pipeline),
             bind_group,
+            shadow_cache: vec![ShadowLightCache::default(); max_lights],
         }
     }
 }
@@ -182,23 +207,74 @@ impl RenderPass for ShadowPass {
         // Distance from camera at which shadows stop being rendered (in meters)
         const SHADOW_MAX_DISTANCE: f32 = 300.0;
 
+        // ── Camera-distance filter (shared across all lights) ────────────────
+        // Compute once outside the light loop; each light renders the same set.
+        let range_filtered: Vec<&DrawCall> = draw_calls.iter()
+            .filter(|dc| {
+                let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
+                dist <= SHADOW_MAX_DISTANCE
+            })
+            .collect();
+
+        // ── Geometry hash (shared) ───────────────────────────────────────────
+        // Hashes world-space identity + bounds of every camera-visible caster.
+        // Changes when objects are added/removed/moved within shadow distance.
+        let geom_hash = {
+            let mut vals: Vec<u64> = Vec::with_capacity(range_filtered.len() * 5 + 1);
+            vals.push(range_filtered.len() as u64);
+            for dc in &range_filtered {
+                vals.push(dc.bounds_center[0].to_bits() as u64);
+                vals.push(dc.bounds_center[1].to_bits() as u64);
+                vals.push(dc.bounds_center[2].to_bits() as u64);
+                vals.push(dc.bounds_radius.to_bits() as u64);
+                vals.push(Arc::as_ptr(&dc.vertex_buffer) as u64);
+            }
+            fnv64(&vals)
+        };
+
         for i in 0..actual_count {
             // Only render faces that have valid (non-identity) matrices:
             //   point light  → 6 cube faces
             //   directional  → 4 CSM cascades (slots 0-3)
             //   spot light   → 1 projection   (slot 0)
             let max_faces = face_counts.get(i).copied().unwrap_or(6) as u32;
+            let light = cull_lights.get(i).copied().unwrap_or_default();
 
-            // ── Stage 1: Camera distance culling ────────
-            // Render objects only if they're within SHADOW_MAX_DISTANCE from the camera.
-            // The light's view projection will naturally exclude objects not visible
-            // from that light's perspective.
-            let range_filtered: Vec<&DrawCall> = draw_calls.iter()
-                .filter(|dc| {
-                    let dist_to_camera = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
-                    dist_to_camera <= SHADOW_MAX_DISTANCE
-                })
-                .collect();
+            // ── Light hash ───────────────────────────────────────────────────
+            // Captures every light property that affects the shadow matrices.
+            // Directional lights additionally encode camera position because CSM
+            // cascade splits are camera-relative and change as the camera moves.
+            let light_hash = {
+                let mut vals = [
+                    light.position[0].to_bits() as u64,
+                    light.position[1].to_bits() as u64,
+                    light.position[2].to_bits() as u64,
+                    light.direction[0].to_bits() as u64,
+                    light.direction[1].to_bits() as u64,
+                    light.direction[2].to_bits() as u64,
+                    light.range.to_bits() as u64,
+                    light.is_directional as u64,
+                    light.is_point as u64,
+                    max_faces as u64,
+                    // Camera position for directional: CSM cascade splits depend on it.
+                    // Encoded unconditionally to keep array size fixed; contributes 0
+                    // to point/spot hashes only if camera coincidentally aligns.
+                    if light.is_directional { ctx.camera_position.x.to_bits() as u64 } else { 0 },
+                    if light.is_directional { ctx.camera_position.y.to_bits() as u64 } else { 0 },
+                    if light.is_directional { ctx.camera_position.z.to_bits() as u64 } else { 0 },
+                ];
+                fnv64(&vals)
+            };
+
+            // ── Cache check ──────────────────────────────────────────────────
+            // Skip all face renders if both the light parameters and the visible
+            // geometry are identical to the previous rendered frame.
+            {
+                let cached = &self.shadow_cache[i];
+                if cached.valid && cached.light_hash == light_hash && cached.geom_hash == geom_hash {
+                    continue;
+                }
+            }
 
             let t_light = ctx.scope_begin(&format!("shadow/light_{i}"));
             for face in 0u32..max_faces {
@@ -237,6 +313,9 @@ impl RenderPass for ShadowPass {
                 ctx.scope_end(t_face);
             }
             ctx.scope_end(t_light);
+
+            // Update cache now that this light's shadow maps are fresh.
+            self.shadow_cache[i] = ShadowLightCache { light_hash, geom_hash, valid: true };
         }
 
         Ok(())

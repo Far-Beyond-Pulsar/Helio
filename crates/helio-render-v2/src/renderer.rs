@@ -1341,6 +1341,7 @@ impl Renderer {
                 };
                 cull.push(ShadowCullLight {
                     position:       l.position,
+                    direction:      l.direction,
                     range:          shadow_cull_range,
                     is_directional: matches!(l.light_type, crate::features::LightType::Directional),
                     is_point:       matches!(l.light_type, crate::features::LightType::Point),
