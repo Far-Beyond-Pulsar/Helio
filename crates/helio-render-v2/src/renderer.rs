@@ -4,10 +4,11 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{GeometryPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass};
+use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
+use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
@@ -335,6 +336,10 @@ pub struct Renderer {
 
     // Draw list (shared with GeometryPass)
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
+    // Debug draw primitives queued by user each frame.
+    debug_shapes: Arc<Mutex<Vec<DebugShape>>>,
+    // GPU batch built from debug_shapes before graph execution.
+    debug_batch: Arc<Mutex<Option<DebugDrawBatch>>>,
 
     // Light buffer for scene writes
     light_buffer: Arc<wgpu::Buffer>,
@@ -445,6 +450,8 @@ impl Renderer {
         // ── Geometry pass — must be added to graph BEFORE features so it ────────
         // ── executes first (billboard/post passes render on top).           ────────
         let draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let debug_shapes: Arc<Mutex<Vec<DebugShape>>> = Arc::new(Mutex::new(Vec::new()));
+        let debug_batch: Arc<Mutex<Option<DebugDrawBatch>>> = Arc::new(Mutex::new(None));
 
         // Shadow matrix buffer: 16 lights × 6 faces × mat4x4<f32> = 6144 bytes
         let shadow_matrix_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -759,6 +766,15 @@ impl Renderer {
         let deferred_pass = DeferredLightingPass::new(deferred_bg.clone(), deferred_pipeline);
         graph.add_pass(deferred_pass);
 
+        // ── Debug draw pass (overlay after deferred + feature passes) ──────────
+        let debug_draw_pass = DebugDrawPass::new(
+            &device,
+            &resources.bind_group_layouts.global,
+            config.surface_format,
+            debug_batch.clone(),
+        );
+        graph.add_pass(debug_draw_pass);
+
         // Build the render graph
         graph.build()?;
 
@@ -781,6 +797,8 @@ impl Renderer {
             lighting_layout,
             default_material_bind_group,
             draw_list,
+            debug_shapes,
+            debug_batch,
             light_buffer,
             light_buffer_capacity_lights: MAX_LIGHTS,
             lighting_shadow_view: shadow_view,
@@ -846,6 +864,78 @@ impl Renderer {
     /// Queue a mesh with a custom material bind group
     pub fn draw_mesh_with_material(&self, mesh: &GpuMesh, material: Arc<wgpu::BindGroup>) {
         self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material));
+    }
+
+    pub fn debug_shape(&self, shape: DebugShape) {
+        self.debug_shapes.lock().unwrap().push(shape);
+    }
+
+    pub fn debug_line(&self, start: Vec3, end: Vec3, color: [f32; 4], thickness: f32) {
+        self.debug_shape(DebugShape::Line {
+            start,
+            end,
+            color,
+            thickness,
+        });
+    }
+
+    pub fn debug_cone(
+        &self,
+        apex: Vec3,
+        direction: Vec3,
+        height: f32,
+        radius: f32,
+        color: [f32; 4],
+        thickness: f32,
+    ) {
+        self.debug_shape(DebugShape::Cone {
+            apex,
+            direction,
+            height,
+            radius,
+            color,
+            thickness,
+        });
+    }
+
+    pub fn debug_box(
+        &self,
+        center: Vec3,
+        half_extents: Vec3,
+        rotation: glam::Quat,
+        color: [f32; 4],
+        thickness: f32,
+    ) {
+        self.debug_shape(DebugShape::Box {
+            center,
+            half_extents,
+            rotation,
+            color,
+            thickness,
+        });
+    }
+
+    pub fn debug_sphere(&self, center: Vec3, radius: f32, color: [f32; 4], thickness: f32) {
+        self.debug_shape(DebugShape::Sphere {
+            center,
+            radius,
+            color,
+            thickness,
+        });
+    }
+
+    pub fn debug_capsule(&self, start: Vec3, end: Vec3, radius: f32, color: [f32; 4], thickness: f32) {
+        self.debug_shape(DebugShape::Capsule {
+            start,
+            end,
+            radius,
+            color,
+            thickness,
+        });
+    }
+
+    pub fn clear_debug_shapes(&self) {
+        self.debug_shapes.lock().unwrap().clear();
     }
 
     fn rebuild_lighting_bind_group(&mut self) {
@@ -955,6 +1045,10 @@ impl Renderer {
         );
         self.features.prepare_all(&prep_ctx)?;
 
+        // Build GPU debug batch from shapes submitted since the previous frame.
+        let debug_shapes = self.debug_shapes.lock().unwrap().clone();
+        *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
+
         // Execute render graph
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
@@ -990,6 +1084,8 @@ impl Renderer {
         }
         
         self.draw_list.lock().unwrap().clear();
+        self.debug_shapes.lock().unwrap().clear();
+        *self.debug_batch.lock().unwrap() = None;
 
         // Schedule map_async AFTER submit so the buffer is no longer used by the encoder
         if let Some(p) = &mut self.profiler { p.begin_readback(); }

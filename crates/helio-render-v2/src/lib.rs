@@ -20,6 +20,7 @@ pub mod mesh;
 pub mod scene;
 pub mod material;
 pub mod profiler;
+pub mod debug_draw;
 
 mod renderer;
 mod camera;
@@ -30,6 +31,7 @@ pub use profiler::{GpuProfiler, PassTiming};
 pub use mesh::{GpuMesh, PackedVertex, DrawCall};
 pub use scene::{Scene, SceneObject, SceneLight, SkyAtmosphere, VolumetricClouds, Skylight};
 pub use material::{Material, GpuMaterial, TextureData};
+pub use debug_draw::DebugShape;
 
 /// Result type for renderer operations
 pub type Result<T> = std::result::Result<T, Error>;
