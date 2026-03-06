@@ -1168,6 +1168,27 @@ impl Renderer {
             _ => &self.pre_aa_view,
         };
 
+        // Clear pre_aa_texture at the start of each frame when AA is enabled
+        // This ensures clean content even if SkyPass doesn't render (when has_sky=false)
+        if !matches!(self.aa_mode, AntiAliasingMode::None | AntiAliasingMode::Msaa(_)) {
+            let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Pre-AA Clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.pre_aa_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+
         let mut graph_ctx = GraphContext {
             encoder: &mut encoder,
             resources: &self.resources,
