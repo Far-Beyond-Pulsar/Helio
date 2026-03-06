@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceCascadesFeature};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass, SsaoConfig, AntiAliasingMode, TaaConfig, FxaaPass, SmaaPass, TaaPass};
+use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, SsaoConfig, AntiAliasingMode, TaaConfig, FxaaPass, SmaaPass, TaaPass};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -822,6 +822,16 @@ impl Renderer {
         let deferred_pass = DeferredLightingPass::new(deferred_bg.clone(), deferred_pipeline);
         graph.add_pass(deferred_pass);
 
+        // ── Transparent pass (forward blended, depth read-only) ───────────────
+        let transparent_pipeline = pipelines.get_or_create(
+            include_str!("../shaders/passes/geometry.wgsl"),
+            "transparent_forward".to_string(),
+            &defines,
+            PipelineVariant::TransparentForward,
+        )?;
+        let transparent_pass = TransparentPass::new(transparent_pipeline, draw_list.clone());
+        graph.add_pass(transparent_pass);
+
         // ── Debug draw pass (overlay after deferred + feature passes) ──────────
         let debug_draw_pass = DebugDrawPass::new(
             &device,
@@ -966,12 +976,17 @@ impl Renderer {
 
     /// Queue a mesh to be drawn this frame using the default white material
     pub fn draw_mesh(&self, mesh: &GpuMesh) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, self.default_material_bind_group.clone()));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, self.default_material_bind_group.clone(), false));
     }
 
-    /// Queue a mesh with a custom material bind group
+    /// Queue a mesh with a custom GPU material (preserves transparency mode)
+    pub fn draw_mesh_with_gpu_material(&self, mesh: &GpuMesh, material: &GpuMaterial) {
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material.bind_group.clone(), material.transparent_blend));
+    }
+
+    /// Queue a mesh with a custom material bind group (legacy opaque path)
     pub fn draw_mesh_with_material(&self, mesh: &GpuMesh, material: Arc<wgpu::BindGroup>) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material, false));
     }
 
     pub fn debug_shape(&self, shape: DebugShape) {
@@ -1352,7 +1367,7 @@ impl Renderer {
         // Queue draw calls for all objects
         for obj in &scene.objects {
             match &obj.material {
-                Some(mat_bg) => self.draw_mesh_with_material(&obj.mesh, mat_bg.clone()),
+                Some(mat) => self.draw_mesh_with_gpu_material(&obj.mesh, mat),
                 None => self.draw_mesh(&obj.mesh),
             }
         }

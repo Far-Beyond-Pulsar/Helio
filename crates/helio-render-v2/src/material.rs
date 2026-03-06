@@ -50,6 +50,11 @@ pub struct Material {
     /// G-buffer/geometry shader paths. Use this for foliage, fences, decals,
     /// and other texture-mask transparency in deferred rendering.
     pub alpha_cutoff: f32,
+    /// Force forward alpha blending path.
+    ///
+    /// When false, the material may still be auto-routed to transparent pass
+    /// if the base-color texture contains alpha < 1 and `alpha_cutoff == 0`.
+    pub transparent_blend: bool,
 
     // ── Optional textures ────────────────────────────────────────────────────
     /// sRGB RGBA albedo texture.
@@ -72,6 +77,7 @@ impl Material {
             emissive_color: [0.0; 3],
             emissive_factor: 0.0,
             alpha_cutoff: 0.0,
+            transparent_blend: false,
             ..Default::default()
         }
     }
@@ -89,6 +95,11 @@ impl Material {
         self.alpha_cutoff = cutoff.clamp(0.0, 1.0);
         self
     }
+    /// Force this material to use forward alpha blending.
+    pub fn with_alpha_blend(mut self) -> Self {
+        self.transparent_blend = true;
+        self
+    }
     pub fn with_base_color_texture(mut self, t: TextureData) -> Self { self.base_color_texture = Some(t); self }
     pub fn with_normal_map(mut self, t: TextureData) -> Self { self.normal_map = Some(t); self }
     pub fn with_orm_texture(mut self, t: TextureData) -> Self { self.orm_texture = Some(t); self }
@@ -99,12 +110,13 @@ impl Material {
 #[derive(Clone)]
 pub struct GpuMaterial {
     pub bind_group: Arc<wgpu::BindGroup>,
+    pub transparent_blend: bool,
 }
 
 impl GpuMaterial {
     /// Build from an already-created wgpu bind group (advanced use).
     pub fn from_bind_group(bg: Arc<wgpu::BindGroup>) -> Self {
-        Self { bind_group: bg }
+        Self { bind_group: bg, transparent_blend: false }
     }
 }
 
@@ -180,6 +192,12 @@ pub(crate) fn build_gpu_material(
     mat: &Material,
     defaults: &DefaultMaterialViews,
 ) -> GpuMaterial {
+        let has_texture_alpha = mat.base_color_texture.as_ref().map(|t| {
+            t.data.chunks_exact(4).any(|px| px[3] < 255)
+        }).unwrap_or(false);
+        let transparent_blend = mat.transparent_blend
+            || (has_texture_alpha && mat.alpha_cutoff <= 0.0);
+
     let uniform: MaterialUniform = mat.into();
     let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Material Uniform"),
@@ -233,7 +251,10 @@ pub(crate) fn build_gpu_material(
         ],
     });
 
-    GpuMaterial { bind_group: Arc::new(bind_group) }
+    GpuMaterial {
+        bind_group: Arc::new(bind_group),
+        transparent_blend,
+    }
 }
 
 /// Default 1×1 fallback texture views kept alive by the Renderer.

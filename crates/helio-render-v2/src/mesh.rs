@@ -215,6 +215,7 @@ pub struct DrawCall {
     pub index_count: u32,
     pub vertex_count: u32,
     pub material_bind_group: Arc<wgpu::BindGroup>,
+    pub transparent_blend: bool,
     /// World-space bounding sphere centre, copied from the source `GpuMesh`.
     pub bounds_center: [f32; 3],
     /// Bounding sphere radius, copied from the source `GpuMesh`.
@@ -222,13 +223,14 @@ pub struct DrawCall {
 }
 
 impl DrawCall {
-    pub fn new(mesh: &GpuMesh, material: Arc<wgpu::BindGroup>) -> Self {
+    pub fn new(mesh: &GpuMesh, material: Arc<wgpu::BindGroup>, transparent_blend: bool) -> Self {
         Self {
             vertex_buffer: mesh.vertex_buffer.clone(),
             index_buffer: mesh.index_buffer.clone(),
             index_count: mesh.index_count,
             vertex_count: mesh.vertex_count,
             material_bind_group: material,
+            transparent_blend,
             bounds_center: mesh.bounds_center,
             bounds_radius: mesh.bounds_radius,
         }

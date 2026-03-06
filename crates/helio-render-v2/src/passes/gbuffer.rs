@@ -116,6 +116,9 @@ impl RenderPass for GBufferPass {
         // group 2 is NOT set here — gbuffer.wgsl has no group 2 bindings
 
         for dc in &draw_calls {
+            if dc.transparent_blend {
+                continue;
+            }
             pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

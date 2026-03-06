@@ -3,7 +3,6 @@
 use crate::features::{BillboardInstance, LightType};
 use crate::mesh::GpuMesh;
 use crate::material::GpuMaterial;
-use std::sync::Arc;
 
 // ── Sky scene objects ─────────────────────────────────────────────────────────
 
@@ -141,7 +140,7 @@ impl Skylight {
 pub struct SceneObject {
     pub mesh: GpuMesh,
     /// Per-object material.  `None` → renderer uses its built-in default white material.
-    pub material: Option<Arc<wgpu::BindGroup>>,
+    pub material: Option<GpuMaterial>,
 }
 
 impl SceneObject {
@@ -150,7 +149,7 @@ impl SceneObject {
     }
 
     pub fn with_material(mesh: GpuMesh, material: GpuMaterial) -> Self {
-        Self { mesh, material: Some(material.bind_group) }
+        Self { mesh, material: Some(material) }
     }
 }
 
