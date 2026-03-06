@@ -1272,6 +1272,7 @@ impl Renderer {
             has_sky: self.scene_has_sky,
             sky_bind_group: None,
             camera_position: camera.position,
+            camera_forward: camera.forward(),
         };
 
         // Timestamp profiling is expensive (query writes + resolve + readback).

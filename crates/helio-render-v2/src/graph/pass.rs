@@ -45,6 +45,8 @@ pub struct PassContext<'a> {
     pub(crate) profiler: *mut GpuProfiler,
     /// Camera world-space position for distance-based culling
     pub camera_position: glam::Vec3,
+    /// Camera forward direction for view-depth sorting/culling.
+    pub camera_forward: glam::Vec3,
 }
 
 impl<'a> PassContext<'a> {

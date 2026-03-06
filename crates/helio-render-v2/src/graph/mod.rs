@@ -229,6 +229,7 @@ impl RenderGraph {
                 sky_bind_group: ctx.sky_bind_group,
                 profiler: profiler_raw,
                 camera_position: ctx.camera_position,
+                camera_forward: ctx.camera_forward,
             };
 
             self.passes[pass_idx].pass.execute(&mut pass_ctx)?;
@@ -307,6 +308,8 @@ pub struct GraphContext<'a> {
     pub sky_bind_group: Option<&'a wgpu::BindGroup>,
     /// Camera world-space position for distance-based culling
     pub camera_position: glam::Vec3,
+    /// Camera forward direction for view-depth sorting/culling
+    pub camera_forward: glam::Vec3,
 }
 
 /// Builder for declaring pass resource dependencies

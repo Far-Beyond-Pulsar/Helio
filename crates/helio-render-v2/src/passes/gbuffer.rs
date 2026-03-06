@@ -22,6 +22,7 @@ pub struct GBufferPass {
     targets:   Arc<Mutex<GBufferTargets>>,
     pipeline:  Arc<wgpu::RenderPipeline>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
+    sorted_opaque_indices: Vec<usize>,
 }
 
 impl GBufferPass {
@@ -30,7 +31,12 @@ impl GBufferPass {
         pipeline:  Arc<wgpu::RenderPipeline>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
     ) -> Self {
-        Self { targets, pipeline, draw_list }
+        Self {
+            targets,
+            pipeline,
+            draw_list,
+            sorted_opaque_indices: Vec::new(),
+        }
     }
 }
 
@@ -46,6 +52,37 @@ impl RenderPass for GBufferPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let draw_calls = self.draw_list.lock().unwrap();
+        let cam = ctx.camera_position;
+        let fwd = ctx.camera_forward;
+
+        // Build a stable, front-to-back opaque draw order.
+        self.sorted_opaque_indices.clear();
+        self.sorted_opaque_indices.reserve(
+            draw_calls
+                .len()
+                .saturating_sub(self.sorted_opaque_indices.capacity()),
+        );
+        for (idx, dc) in draw_calls.iter().enumerate() {
+            if !dc.transparent_blend {
+                self.sorted_opaque_indices.push(idx);
+            }
+        }
+
+        self.sorted_opaque_indices.sort_by(|&ia, &ib| {
+            let a = &draw_calls[ia];
+            let b = &draw_calls[ib];
+
+            let za = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd) - a.bounds_radius;
+            let zb = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd) - b.bounds_radius;
+
+            za.partial_cmp(&zb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let ma = Arc::as_ptr(&a.material_bind_group) as usize;
+                    let mb = Arc::as_ptr(&b.material_bind_group) as usize;
+                    ma.cmp(&mb)
+                })
+        });
 
         let targets = self.targets.lock().unwrap();
 
@@ -115,11 +152,14 @@ impl RenderPass for GBufferPass {
         pass.set_bind_group(0, ctx.global_bind_group, &[]);
         // group 2 is NOT set here — gbuffer.wgsl has no group 2 bindings
 
-        for dc in draw_calls.iter() {
-            if dc.transparent_blend {
-                continue;
+        let mut last_material: Option<usize> = None;
+        for &idx in &self.sorted_opaque_indices {
+            let dc = &draw_calls[idx];
+            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+            if last_material != Some(mat_ptr) {
+                pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+                last_material = Some(mat_ptr);
             }
-            pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..dc.index_count, 0, 0..1);
