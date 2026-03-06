@@ -77,6 +77,15 @@ pub struct RadianceCascadesFeature {
     _static_bufs: Vec<wgpu::Buffer>,
     rc_dynamic_buf: Option<Arc<wgpu::Buffer>>,
     light_count_arc: Option<Arc<AtomicU32>>,
+    last_uploaded_dyn_state: Option<CachedDynState>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+struct CachedDynState {
+    world_min: [f32; 3],
+    world_max: [f32; 3],
+    light_count: u32,
+    sky_color: [f32; 3],
 }
 
 impl RadianceCascadesFeature {
@@ -97,6 +106,7 @@ impl RadianceCascadesFeature {
             _static_bufs: Vec::new(),
             rc_dynamic_buf: None,
             light_count_arc: None,
+            last_uploaded_dyn_state: None,
         }
     }
 
@@ -346,8 +356,6 @@ impl Feature for RadianceCascadesFeature {
             hist_b_textures,
             rc_dyn_buf,
             tlas,
-            self.world_min,
-            self.world_max,
         ));
 
         log::trace!(
@@ -375,6 +383,20 @@ impl Feature for RadianceCascadesFeature {
         let light_count = self.light_count_arc.as_ref()
             .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
+        let dyn_state = CachedDynState {
+            world_min: self.world_min,
+            world_max: self.world_max,
+            light_count,
+            sky_color: self.sky_color,
+        };
+
+        // Delta upload: avoid writing unchanged dynamic data each frame.
+        // `frame` is currently unused by rc_trace.wgsl, so skipping writes here
+        // does not change visual output while reducing queue traffic.
+        if self.last_uploaded_dyn_state == Some(dyn_state) {
+            return Ok(());
+        }
+
         log::trace!("RC prepare: uploading {} lights to rc_dyn buffer", light_count);
         let dyn_data = RCDynamic {
             world_min:   [self.world_min[0], self.world_min[1], self.world_min[2], 0.0],
@@ -385,6 +407,7 @@ impl Feature for RadianceCascadesFeature {
             sky_color: [self.sky_color[0], self.sky_color[1], self.sky_color[2], 0.0],
         };
         ctx.queue.write_buffer(buf, 0, bytemuck::bytes_of(&dyn_data));
+        self.last_uploaded_dyn_state = Some(dyn_state);
         Ok(())
     }
 
@@ -404,5 +427,6 @@ impl Feature for RadianceCascadesFeature {
         self._dummy_view = None;
         self._static_bufs.clear();
         self.rc_dynamic_buf = None;
+        self.last_uploaded_dyn_state = None;
     }
 }

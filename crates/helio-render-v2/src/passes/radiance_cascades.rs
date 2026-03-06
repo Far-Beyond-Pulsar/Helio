@@ -35,14 +35,14 @@ pub struct RadianceCascadesPass {
     /// Bind groups for odd frames: read hist_b, write hist_a
     bind_groups_b: Vec<wgpu::BindGroup>,
     /// Output textures (what RC writes; geometry reads these)
-    output_textures: Vec<Arc<wgpu::Texture>>,
+    _output_textures: Vec<Arc<wgpu::Texture>>,
     /// hist_b textures — kept alive here (hist_a lives in the feature struct)
     _hist_b_textures: Vec<Arc<wgpu::Texture>>,
-    rc_dynamic_buf: Arc<wgpu::Buffer>,
+    _rc_dynamic_buf: Arc<wgpu::Buffer>,
     tlas: wgpu::Tlas,
     blas_cache: HashMap<usize, BlasEntry>,
-    world_min: [f32; 3],
-    world_max: [f32; 3],
+    last_active_mesh_keys: Vec<usize>,
+    last_active_count: usize,
     frame_idx: u64,
 }
 
@@ -58,8 +58,6 @@ impl RadianceCascadesPass {
         hist_b_textures: Vec<Arc<wgpu::Texture>>,
         rc_dynamic_buf: Arc<wgpu::Buffer>,
         tlas: wgpu::Tlas,
-        world_min: [f32; 3],
-        world_max: [f32; 3],
     ) -> Self {
         Self {
             device,
@@ -67,13 +65,13 @@ impl RadianceCascadesPass {
             pipeline,
             bind_groups_a,
             bind_groups_b,
-            output_textures,
+            _output_textures: output_textures,
             _hist_b_textures: hist_b_textures,
-            rc_dynamic_buf,
+            _rc_dynamic_buf: rc_dynamic_buf,
             tlas,
             blas_cache: HashMap::new(),
-            world_min,
-            world_max,
+            last_active_mesh_keys: Vec::new(),
+            last_active_count: 0,
             frame_idx: 0,
         }
     }
@@ -88,22 +86,26 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+        const TLAS_MAX: usize = 2048;
+        let draw_calls = self.draw_list.lock().unwrap();
         if draw_calls.is_empty() {
             // No geometry → nothing to trace; textures stay at their initial state (zeros)
             log::warn!("RC: No draw calls! RC will output zeros");
             return Ok(());
         }
-        log::trace!("RC: Executing with {} draw calls, bounds [{:?} .. {:?}]", 
-            draw_calls.len(), self.world_min, self.world_max);
+        log::trace!("RC: Executing with {} draw calls", draw_calls.len());
         
         // Note: light_count is uploaded via rc_dyn buffer in feature prepare,
         // so we can't easily log it here. The compute shader will use whatever
         // light count was set in the last prepare() call.
 
-        // ── 1. Create new BLASes for meshes not yet in the cache ──────────────
-        for dc in &draw_calls {
+        // ── 1. Cache mesh BLASes and gather active scene signature ───────────
+        let active = draw_calls.len().min(TLAS_MAX);
+        let mut active_mesh_keys = Vec::with_capacity(active);
+
+        for dc in draw_calls[..active].iter() {
             let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
+            active_mesh_keys.push(key);
             if !self.blas_cache.contains_key(&key) {
                 let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
                     vertex_format: wgpu::VertexFormat::Float32x3,
@@ -132,26 +134,29 @@ impl RenderPass for RadianceCascadesPass {
             }
         }
 
-        // ── 2. Set TLAS instances (all active draw calls, capped at TLAS capacity) ──
-        const TLAS_MAX: usize = 2048;
-        let active = draw_calls.len().min(TLAS_MAX);
-        for (i, dc) in draw_calls[..active].iter().enumerate() {
-            let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
-            let blas_ref = &self.blas_cache[&key].blas;
-            self.tlas[i] = Some(wgpu::TlasInstance::new(blas_ref, IDENTITY_TRANSFORM, 0, 0xFF));
-        }
-        for i in active..TLAS_MAX {
-            self.tlas[i] = None;
+        // Detect structural scene changes so we can keep TLAS resident on GPU.
+        let scene_changed = self.last_active_count != active || self.last_active_mesh_keys != active_mesh_keys;
+
+        // ── 2. Update TLAS instances only when the active scene changes ───────
+        if scene_changed {
+            for (i, key) in active_mesh_keys.iter().enumerate() {
+                let blas_ref = &self.blas_cache[key].blas;
+                self.tlas[i] = Some(wgpu::TlasInstance::new(blas_ref, IDENTITY_TRANSFORM, 0, 0xFF));
+            }
+            for i in active..TLAS_MAX {
+                self.tlas[i] = None;
+            }
+            self.last_active_mesh_keys = active_mesh_keys;
+            self.last_active_count = active;
         }
 
-        // ── 3. Build only unbuilt BLASes + TLAS ───────────────────────────────
+        // ── 3. Build only unbuilt BLASes and rebuild TLAS only on scene change ─
         // Collect build entries only for BLASes that haven't been built yet.
         // Static geometry BLASes are built once and reused every frame.
         let mut blas_entries: Vec<wgpu::BlasBuildEntry> = Vec::new();
         let mut keys_to_mark_built: Vec<usize> = Vec::new();
 
-        for dc in &draw_calls {
-            let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
+        for key in self.last_active_mesh_keys.iter().copied() {
             let entry = &self.blas_cache[&key];
 
             // Only build if not already built
@@ -174,14 +179,25 @@ impl RenderPass for RadianceCascadesPass {
                 keys_to_mark_built.push(key);
             }
         }
+        drop(draw_calls);
 
-        // Build new BLASes and always rebuild TLAS (TLAS rebuild is cheap)
-        let t_accel = ctx.scope_begin("rc/accel_build");
-        ctx.encoder.build_acceleration_structures(
-            blas_entries.iter(),
-            std::iter::once(&self.tlas),
-        );
-        ctx.scope_end(t_accel);
+        let need_tlas_rebuild = scene_changed;
+
+        if !blas_entries.is_empty() || need_tlas_rebuild {
+            let t_accel = ctx.scope_begin("rc/accel_build");
+            if need_tlas_rebuild {
+                ctx.encoder.build_acceleration_structures(
+                    blas_entries.iter(),
+                    std::iter::once(&self.tlas),
+                );
+            } else {
+                ctx.encoder.build_acceleration_structures(
+                    blas_entries.iter(),
+                    std::iter::empty(),
+                );
+            }
+            ctx.scope_end(t_accel);
+        }
 
         // Mark newly built BLASes as built
         for key in keys_to_mark_built {
@@ -203,7 +219,7 @@ impl RenderPass for RadianceCascadesPass {
 
         // One compute pass per cascade so each can be timed independently.
         for c in (0..CASCADE_COUNT).rev() {
-            let atlas_w = PROBE_DIMS[c] * DIR_DIMS[c]; // always 32
+            let atlas_w = PROBE_DIMS[c] * DIR_DIMS[c]; // always 64
             let atlas_h = ATLAS_HEIGHTS[c];
             let dispatch_x = (atlas_w + 7) / 8;
             let dispatch_y = (atlas_h + 7) / 8;
