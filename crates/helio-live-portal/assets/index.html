@@ -31,7 +31,7 @@
     h1 { font-size: 18px; margin: 0 0 12px; letter-spacing: 0.08em; text-transform: uppercase; }
     h2 { font-size: 12px; margin: 0 0 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
 
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
     .card {
       border: 1px solid var(--line);
       border-radius: 10px;
@@ -51,7 +51,83 @@
     .val { color: var(--accent); font-weight: 700; }
     #status { color: var(--muted); font-size: 12px; margin-top: 8px; }
 
-    #flow { width: 100%; height: 360px; border: 1px solid var(--line); border-radius: 8px; background: #111a24; }
+    .flowchart-container {
+      position: relative;
+      width: 100%;
+      height: 520px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #111a24;
+      overflow: hidden;
+    }
+
+    #flow {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+
+    #flow:active { cursor: grabbing; }
+
+    .flowchart-controls {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      display: flex;
+      gap: 8px;
+      z-index: 100;
+    }
+
+    .ctrl-btn {
+      background: #1a2d42;
+      border: 1px solid var(--line);
+      color: var(--ink);
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 11px;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+
+    .ctrl-btn:hover {
+      background: #2a3d52;
+      border-color: var(--accent);
+    }
+
+    .search-box {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: #1a2d42;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 11px;
+      color: var(--ink);
+      width: 160px;
+      z-index: 100;
+    }
+
+    .search-box::placeholder { color: var(--muted); }
+
+    .tooltip {
+      position: absolute;
+      background: #0a1219;
+      border: 1px solid var(--accent);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 11px;
+      pointer-events: none;
+      z-index: 200;
+      max-width: 220px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+    }
+
+    .tooltip-title { color: var(--accent); font-weight: 700; margin-bottom: 4px; }
+    .tooltip-row { color: var(--muted); margin: 2px 0; display: flex; justify-content: space-between; gap: 12px; }
+    .tooltip-val { color: var(--ink); }
 
     .views { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
     .viewbox { border: 1px solid var(--line); border-radius: 8px; background: #101922; padding: 8px; }
@@ -65,9 +141,24 @@
     .gpu { color: var(--gpu); }
     .cpu { color: var(--cpu); }
 
+    .stat-bar {
+      display: inline-block;
+      height: 3px;
+      background: #304a60;
+      border-radius: 2px;
+      overflow: hidden;
+      margin: 0 4px;
+    }
+
+    .stat-bar-fill {
+      height: 100%;
+      background: var(--accent);
+      border-radius: 2px;
+    }
+
     @media (max-width: 1100px) {
-      .grid { grid-template-columns: 1fr; }
       .views { grid-template-columns: 1fr; }
+      .flowchart-container { height: 400px; }
     }
   </style>
 </head>
@@ -75,27 +166,20 @@
   <div class="wrap">
     <h1>Helio Live Pipeline + Scene Portal</h1>
 
-    <div class="grid">
-      <section class="card">
-        <h2>Frame Metrics</h2>
-        <div class="metrics">
-          <div class="pill">Frame <span class="val" id="frame">-</span></div>
-          <div class="pill">Frame ms <span class="val" id="frameMs">-</span></div>
-          <div class="pill">Frame-to-frame ms <span class="val" id="ftfMs">-</span></div>
-          <div class="pill">GPU total ms <span class="val" id="gpuTotal">-</span></div>
-          <div class="pill">CPU total ms <span class="val" id="cpuTotal">-</span></div>
-          <div class="pill">Objects <span class="val" id="objCount">-</span></div>
-          <div class="pill">Lights <span class="val" id="lightCount">-</span></div>
-          <div class="pill">Billboards <span class="val" id="bbCount">-</span></div>
-        </div>
-        <div id="status">Connecting...</div>
-      </section>
-
-      <section class="card">
-        <h2>Pipeline Flowchart (Live Times)</h2>
-        <svg id="flow" viewBox="0 0 1200 360" preserveAspectRatio="xMinYMin meet"></svg>
-      </section>
-    </div>
+    <section class="card">
+      <h2>Frame Metrics</h2>
+      <div class="metrics">
+        <div class="pill">Frame <span class="val" id="frame">-</span></div>
+        <div class="pill">Frame ms <span class="val" id="frameMs">-</span></div>
+        <div class="pill">Frame-to-frame ms <span class="val" id="ftfMs">-</span></div>
+        <div class="pill">GPU total ms <span class="val" id="gpuTotal">-</span></div>
+        <div class="pill">CPU total ms <span class="val" id="cpuTotal">-</span></div>
+        <div class="pill">Objects <span class="val" id="objCount">-</span></div>
+        <div class="pill">Lights <span class="val" id="lightCount">-</span></div>
+        <div class="pill">Billboards <span class="val" id="bbCount">-</span></div>
+      </div>
+      <div id="status">Connecting...</div>
+    </section>
 
     <section class="card" style="margin-top:14px">
       <h2>Scene Layout (Simulated Cameras)</h2>
@@ -116,14 +200,29 @@
     </section>
 
     <section class="card" style="margin-top:14px">
+      <h2>Pipeline Flowchart (Zoomable & Pannable)</h2>
+      <div class="flowchart-container">
+        <input type="text" id="searchBox" class="search-box" placeholder="Filter passes..." />
+        <div class="flowchart-controls">
+          <button class="ctrl-btn" id="zoomIn">+ Zoom</button>
+          <button class="ctrl-btn" id="zoomOut">- Zoom</button>
+          <button class="ctrl-btn" id="resetView">Reset</button>
+        </div>
+        <svg id="flow" viewBox="0 0 1200 360" preserveAspectRatio="xMinYMin meet"></svg>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:14px">
       <h2>Per-Pass Timings</h2>
       <div class="list">
         <table>
-          <thead><tr><th>Pass</th><th>GPU ms</th><th>CPU ms</th></tr></thead>
+          <thead><tr><th>Pass</th><th>GPU ms</th><th>CPU %</th><th>GPU %</th></tr></thead>
           <tbody id="rows"></tbody>
         </table>
       </div>
     </section>
+
+    <div id="tooltip" class="tooltip" style="display:none"></div>
   </div>
 
   <script>
@@ -138,12 +237,92 @@
     const bbCountEl = document.getElementById('bbCount');
     const rowsEl = document.getElementById('rows');
     const flowEl = document.getElementById('flow');
+    const searchBox = document.getElementById('searchBox');
+    const tooltipEl = document.getElementById('tooltip');
+    const zoomInBtn = document.getElementById('zoomIn');
+    const zoomOutBtn = document.getElementById('zoomOut');
+    const resetBtn = document.getElementById('resetView');
 
     const viewTop = document.getElementById('viewTop');
     const viewFront = document.getElementById('viewFront');
     const viewSide = document.getElementById('viewSide');
 
     let lastSnapshot = null;
+    let flowchartZoom = 1.0;
+    let panX = 0;
+    let panY = 0;
+    let isDragging = false;
+    let dragStart = { x: 0, y: 0 };
+    let filteredPasses = new Set();
+    let passMetadata = new Map();
+
+    // Flowchart zoom and pan
+    const flowContainer = document.querySelector('.flowchart-container');
+
+    flowEl.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      flowchartZoom *= delta;
+      flowchartZoom = Math.max(0.5, Math.min(flowchartZoom, 3));
+      updateFlowchartTransform();
+    });
+
+    flowEl.addEventListener('mousedown', (e) => {
+      isDragging = true;
+      dragStart = { x: e.clientX - panX, y: e.clientY - panY };
+    });
+
+    document.addEventListener('mousemove', (e) => {
+      if (isDragging) {
+        panX = e.clientX - dragStart.x;
+        panY = e.clientY - dragStart.y;
+        updateFlowchartTransform();
+      }
+    });
+
+    document.addEventListener('mouseup', () => {
+      isDragging = false;
+    });
+
+    zoomInBtn.addEventListener('click', () => {
+      flowchartZoom *= 1.2;
+      flowchartZoom = Math.min(flowchartZoom, 3);
+      updateFlowchartTransform();
+    });
+
+    zoomOutBtn.addEventListener('click', () => {
+      flowchartZoom *= 0.85;
+      flowchartZoom = Math.max(flowchartZoom, 0.5);
+      updateFlowchartTransform();
+    });
+
+    resetBtn.addEventListener('click', () => {
+      flowchartZoom = 1.0;
+      panX = 0;
+      panY = 0;
+      updateFlowchartTransform();
+      searchBox.value = '';
+      filteredPasses.clear();
+      drawFlowchart(lastSnapshot);
+    });
+
+    function updateFlowchartTransform() {
+      flowEl.style.transform = `translate(${panX}px, ${panY}px) scale(${flowchartZoom})`;
+      flowEl.style.transformOrigin = '0 0';
+    }
+
+    searchBox.addEventListener('input', (e) => {
+      const query = e.target.value.toLowerCase();
+      filteredPasses.clear();
+      if (query) {
+        for (const [name, _] of passMetadata) {
+          if (name.toLowerCase().includes(query)) {
+            filteredPasses.add(name);
+          }
+        }
+      }
+      drawFlowchart(lastSnapshot);
+    });
 
     function clearSvg(svg) {
       while (svg.firstChild) svg.removeChild(svg.firstChild);
@@ -162,20 +341,31 @@
       if (!order.length) return;
 
       const passMap = new Map();
-      for (const p of snapshot.pass_timings || []) passMap.set(p.name, p);
+      let totalGpu = 0;
+      let totalCpu = 0;
 
-      const marginX = 30;
-      const marginY = 24;
-      const boxW = Math.max(120, Math.floor((1200 - marginX * 2) / order.length) - 12);
-      const boxH = 96;
+      for (const p of snapshot.pass_timings || []) {
+        passMap.set(p.name, p);
+        totalGpu += p.gpu_ms;
+        totalCpu += p.cpu_ms;
+      }
+
+      passMetadata = passMap;
+
+      const marginX = 40;
+      const marginY = 30;
+      const boxW = Math.max(100, Math.floor((1200 - marginX * 2) / order.length) - 12);
+      const boxH = 110;
       const gap = 12;
-      const y = marginY + 100;
+      const y = marginY + 80;
 
       for (let i = 0; i < order.length; i++) {
         const name = order[i];
         const t = passMap.get(name) || { gpu_ms: 0, cpu_ms: 0 };
+        const isFiltered = filteredPasses.size > 0 && !filteredPasses.has(name);
         const x = marginX + i * (boxW + gap);
 
+        // Connection arrows
         if (i > 0) {
           const ax = x - 6;
           const ay = y + boxH / 2;
@@ -185,16 +375,19 @@
           line.setAttribute('y1', String(ay));
           line.setAttribute('x2', String(ax));
           line.setAttribute('y2', String(ay));
-          line.setAttribute('stroke', '#5c7388');
+          line.setAttribute('stroke', isFiltered ? '#3c5073' : '#5c7388');
           line.setAttribute('stroke-width', '2');
+          line.setAttribute('opacity', isFiltered ? '0.3' : '1');
           flowEl.appendChild(line);
 
           const tri = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
           tri.setAttribute('points', `${ax},${ay} ${ax-8},${ay-5} ${ax-8},${ay+5}`);
-          tri.setAttribute('fill', '#5c7388');
+          tri.setAttribute('fill', isFiltered ? '#3c5073' : '#5c7388');
+          tri.setAttribute('opacity', isFiltered ? '0.3' : '1');
           flowEl.appendChild(tri);
         }
 
+        // Main box
         const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
         rect.setAttribute('x', String(x));
         rect.setAttribute('y', String(y));
@@ -202,35 +395,142 @@
         rect.setAttribute('height', String(boxH));
         rect.setAttribute('rx', '10');
         rect.setAttribute('fill', boxColor(t.gpu_ms));
-        rect.setAttribute('stroke', '#6c89a5');
+        rect.setAttribute('stroke', isFiltered ? '#3c5073' : '#6c89a5');
+        rect.setAttribute('stroke-width', isFiltered ? '1' : '2');
+        rect.setAttribute('opacity', isFiltered ? '0.4' : '1');
+        rect.setAttribute('data-pass', name);
+        rect.setAttribute('class', 'flow-box');
         flowEl.appendChild(rect);
 
+        // Title
         const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        title.setAttribute('x', String(x + 10));
-        title.setAttribute('y', String(y + 24));
-        title.setAttribute('fill', '#e8f0f8');
+        title.setAttribute('x', String(x + 6));
+        title.setAttribute('y', String(y + 22));
+        title.setAttribute('fill', isFiltered ? '#5a7588' : '#e8f0f8');
         title.setAttribute('font-size', '12');
         title.setAttribute('font-weight', '700');
-        title.textContent = name;
+        title.textContent = name.substring(0, 14);
         flowEl.appendChild(title);
 
+        // GPU time
         const gpu = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        gpu.setAttribute('x', String(x + 10));
-        gpu.setAttribute('y', String(y + 50));
-        gpu.setAttribute('fill', '#ffb08a');
+        gpu.setAttribute('x', String(x + 6));
+        gpu.setAttribute('y', String(y + 48));
+        gpu.setAttribute('fill', isFiltered ? '#6a6a5a' : '#ffb08a');
         gpu.setAttribute('font-size', '11');
-        gpu.textContent = `GPU ${t.gpu_ms.toFixed(3)} ms`;
+        gpu.textContent = `GPU ${t.gpu_ms.toFixed(2)}ms`;
         flowEl.appendChild(gpu);
 
+        // GPU percentage
+        const gpuPct = totalGpu > 0 ? ((t.gpu_ms / totalGpu) * 100).toFixed(1) : '0';
+        const gpuPctEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        gpuPctEl.setAttribute('x', String(x + 6));
+        gpuPctEl.setAttribute('y', String(y + 62));
+        gpuPctEl.setAttribute('fill', isFiltered ? '#5a7588' : '#ff9960');
+        gpuPctEl.setAttribute('font-size', '10');
+        gpuPctEl.textContent = `(${gpuPct}%)`;
+        flowEl.appendChild(gpuPctEl);
+
+        // CPU time
         const cpu = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-        cpu.setAttribute('x', String(x + 10));
-        cpu.setAttribute('y', String(y + 70));
-        cpu.setAttribute('fill', '#9cf3be');
+        cpu.setAttribute('x', String(x + 6));
+        cpu.setAttribute('y', String(y + 78));
+        cpu.setAttribute('fill', isFiltered ? '#6a7a6a' : '#9cf3be');
         cpu.setAttribute('font-size', '11');
-        cpu.textContent = `CPU ${t.cpu_ms.toFixed(3)} ms`;
+        cpu.textContent = `CPU ${t.cpu_ms.toFixed(2)}ms`;
         flowEl.appendChild(cpu);
+
+        // CPU percentage
+        const cpuPct = totalCpu > 0 ? ((t.cpu_ms / totalCpu) * 100).toFixed(1) : '0';
+        const cpuPctEl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        cpuPctEl.setAttribute('x', String(x + 6));
+        cpuPctEl.setAttribute('y', String(y + 92));
+        cpuPctEl.setAttribute('fill', isFiltered ? '#5a7588' : '#8ae5a0');
+        cpuPctEl.setAttribute('font-size', '10');
+        cpuPctEl.textContent = `(${cpuPct}%)`;
+        flowEl.appendChild(cpuPctEl);
+
+        // Add click handler for tooltip
+        rect.addEventListener('mouseenter', (e) => showTooltip(e, name, t, gpuPct, cpuPct));
+        title.addEventListener('mouseenter', (e) => showTooltip(e, name, t, gpuPct, cpuPct));
+        gpu.addEventListener('mouseenter', (e) => showTooltip(e, name, t, gpuPct, cpuPct));
+        cpu.addEventListener('mouseenter', (e) => showTooltip(e, name, t, gpuPct, cpuPct));
       }
+
+      // Total stats bar at bottom
+      const statX = marginX;
+      const statY = y + boxH + 50;
+      const statBgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      statBgRect.setAttribute('x', String(statX));
+      statBgRect.setAttribute('y', String(statY - 20));
+      statBgRect.setAttribute('width', String(1200 - marginX * 2));
+      statBgRect.setAttribute('height', '40');
+      statBgRect.setAttribute('rx', '8');
+      statBgRect.setAttribute('fill', '#0a141c');
+      statBgRect.setAttribute('opacity', '0.6');
+      statBgRect.setAttribute('stroke', '#2a3f54');
+      flowEl.appendChild(statBgRect);
+
+      const totalLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      totalLabel.setAttribute('x', String(statX + 12));
+      totalLabel.setAttribute('y', String(statY + 2));
+      totalLabel.setAttribute('fill', '#94a8bb');
+      totalLabel.setAttribute('font-size', '11');
+      totalLabel.textContent = 'Frame Total:';
+      flowEl.appendChild(totalLabel);
+
+      const totalGpuText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      totalGpuText.setAttribute('x', String(statX + 140));
+      totalGpuText.setAttribute('y', String(statY + 2));
+      totalGpuText.setAttribute('fill', '#ffb08a');
+      totalGpuText.setAttribute('font-size', '11');
+      totalGpuText.setAttribute('font-weight', '700');
+      totalGpuText.textContent = `GPU ${totalGpu.toFixed(2)}ms`;
+      flowEl.appendChild(totalGpuText);
+
+      const totalCpuText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      totalCpuText.setAttribute('x', String(statX + 275));
+      totalCpuText.setAttribute('y', String(statY + 2));
+      totalCpuText.setAttribute('fill', '#9cf3be');
+      totalCpuText.setAttribute('font-size', '11');
+      totalCpuText.setAttribute('font-weight', '700');
+      totalCpuText.textContent = `CPU ${totalCpu.toFixed(2)}ms`;
+      flowEl.appendChild(totalCpuText);
+
+      const bottleneckText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      bottleneckText.setAttribute('x', String(statX + 410));
+      bottleneckText.setAttribute('y', String(statY + 2));
+      bottleneckText.setAttribute('fill', totalGpu > totalCpu ? '#ff9f70' : '#8bf0b0');
+      bottleneckText.setAttribute('font-size', '10');
+      bottleneckText.textContent = totalGpu > totalCpu ? '⚠️ GPU-bound' : '✓ CPU ahead';
+      flowEl.appendChild(bottleneckText);
     }
+
+    function showTooltip(e, passName, timing, gpuPct, cpuPct) {
+      const html = `
+        <div class="tooltip-title">${passName}</div>
+        <div class="tooltip-row">
+          <span>GPU:</span>
+          <span class="tooltip-val">${timing.gpu_ms.toFixed(3)}ms (${gpuPct}%)</span>
+        </div>
+        <div class="tooltip-row">
+          <span>CPU:</span>
+          <span class="tooltip-val">${timing.cpu_ms.toFixed(3)}ms (${cpuPct}%)</span>
+        </div>
+        <div class="tooltip-row">
+          <span>Total:</span>
+          <span class="tooltip-val">${(timing.gpu_ms + timing.cpu_ms).toFixed(3)}ms</span>
+        </div>
+      `;
+      tooltipEl.innerHTML = html;
+      tooltipEl.style.display = 'block';
+      tooltipEl.style.left = (e.clientX + 12) + 'px';
+      tooltipEl.style.top = (e.clientY - 40) + 'px';
+    }
+
+    flowEl.addEventListener('mouseleave', () => {
+      tooltipEl.style.display = 'none';
+    });
 
     function drawAxes(ctx, w, h) {
       ctx.strokeStyle = '#1f3142';
@@ -340,10 +640,15 @@
       lightCountEl.textContent = layout ? (layout.lights || []).length : 0;
       bbCountEl.textContent = layout ? (layout.billboards || []).length : 0;
 
+      const totalGpu = snapshot.total_gpu_ms || 0;
+      const totalCpu = snapshot.total_cpu_ms || 0;
+
       rowsEl.innerHTML = '';
       for (const t of snapshot.pass_timings || []) {
+        const gpuPct = totalGpu > 0 ? ((t.gpu_ms / totalGpu) * 100).toFixed(1) : '0';
+        const cpuPct = totalCpu > 0 ? ((t.cpu_ms / totalCpu) * 100).toFixed(1) : '0';
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${t.name}</td><td class="gpu">${t.gpu_ms.toFixed(3)}</td><td class="cpu">${t.cpu_ms.toFixed(3)}</td>`;
+        tr.innerHTML = `<td>${t.name}</td><td class="gpu">${t.gpu_ms.toFixed(3)}</td><td class="cpu">${cpuPct}%</td><td class="gpu">${gpuPct}%</td>`;
         rowsEl.appendChild(tr);
       }
 
