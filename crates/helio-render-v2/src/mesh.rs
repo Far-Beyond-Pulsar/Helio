@@ -220,6 +220,8 @@ pub struct DrawCall {
     pub bounds_center: [f32; 3],
     /// Bounding sphere radius, copied from the source `GpuMesh`.
     pub bounds_radius: f32,
+    /// Material ID for GPU-driven indirect rendering (0 if not assigned)
+    pub material_id: u32,
 }
 
 impl DrawCall {
@@ -233,6 +235,33 @@ impl DrawCall {
             transparent_blend,
             bounds_center: mesh.bounds_center,
             bounds_radius: mesh.bounds_radius,
+            material_id: 0,  // Will be assigned by renderer if GPU-driven is enabled
         }
     }
+}
+
+/// GPU representation of DrawCall for indirect rendering
+/// Matches the WGSL struct in indirect_dispatch.wgsl
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuDrawCall {
+    // Mesh buffer offsets
+    pub vertex_offset: u32,
+    pub index_offset: u32,
+    pub index_count: u32,
+    pub vertex_count: u32,
+    
+    // Material ID
+    pub material_id: u32,
+    
+    // Flags
+    pub transparent_blend: u32,
+    
+    // Padding to align to vec3f
+    pub _pad0: u32,
+    pub _pad1: u32,
+    
+    // Bounding volume (vec3f + f32 in WGSL)
+    pub bounds_center: [f32; 3],
+    pub bounds_radius: f32,
 }

@@ -28,7 +28,7 @@ mod camera;
 pub use renderer::{Renderer, RendererConfig};
 pub use camera::Camera;
 pub use profiler::{GpuProfiler, PassTiming};
-pub use mesh::{GpuMesh, PackedVertex, DrawCall};
+pub use mesh::{GpuMesh, PackedVertex, DrawCall, GpuDrawCall};
 pub use scene::{Scene, SceneObject, SceneLight, SkyAtmosphere, VolumetricClouds, Skylight};
 pub use material::{Material, GpuMaterial, TextureData};
 pub use debug_draw::DebugShape;

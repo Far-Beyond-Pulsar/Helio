@@ -16,6 +16,7 @@ pub mod aa_mode;
 pub mod fxaa;
 pub mod smaa;
 pub mod taa;
+pub mod indirect_dispatch;
 
 pub use geometry::GeometryPass;
 pub use shadow::{ShadowPass, ShadowCullLight};
@@ -33,3 +34,4 @@ pub use aa_mode::{AntiAliasingMode, MsaaSamples};
 pub use fxaa::FxaaPass;
 pub use smaa::SmaaPass;
 pub use taa::{TaaPass, TaaConfig};
+pub use indirect_dispatch::IndirectDispatchPass;
