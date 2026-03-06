@@ -347,6 +347,11 @@ impl Feature for RadianceCascadesFeature {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
         self.update_follow_bounds_from_camera(ctx.camera.position.to_array());
+        
+        if self.follow_camera {
+            log::debug!("RC camera-follow: camera_pos={:?}, bounds updated to [{:?} .. {:?}]",
+                ctx.camera.position, self.world_min, self.world_max);
+        }
 
         let Some(buf) = &self.rc_dynamic_buf else { return Ok(()); };
         let light_count = self.light_count_arc.as_ref()
