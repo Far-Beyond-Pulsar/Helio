@@ -449,6 +449,9 @@ pub struct Renderer {
     fxaa_pass: Option<FxaaPass>,
     smaa_pass: Option<SmaaPass>,
     taa_pass: Option<TaaPass>,
+    fxaa_bind_group: Option<wgpu::BindGroup>,
+    smaa_bind_group: Option<wgpu::BindGroup>,
+    taa_bind_group: Option<wgpu::BindGroup>,
 
     // Frame state
     frame_count: u64,
@@ -900,6 +903,17 @@ impl Renderer {
             }
         };
 
+        // Cache AA bind groups; update only when source views change (e.g. resize).
+        let fxaa_bind_group = fxaa_pass
+            .as_ref()
+            .map(|p| p.create_bind_group(&device, &pre_aa_view));
+        let smaa_bind_group = smaa_pass
+            .as_ref()
+            .map(|p| p.create_bind_group(&device, &pre_aa_view));
+        let taa_bind_group = taa_pass
+            .as_ref()
+            .map(|p| p.create_bind_group(&device, &pre_aa_view, &depth_view));
+
         log::trace!("Helio Render V2 initialized successfully");
 
         Ok(Self {
@@ -958,6 +972,9 @@ impl Renderer {
             fxaa_pass,
             smaa_pass,
             taa_pass,
+            fxaa_bind_group,
+            smaa_bind_group,
+            taa_bind_group,
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -1195,8 +1212,15 @@ impl Renderer {
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
         // Build GPU debug batch from shapes submitted since the previous frame.
-        let debug_shapes = self.debug_shapes.lock().unwrap().clone();
-        *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
+        let debug_shapes = {
+            let mut shapes = self.debug_shapes.lock().unwrap();
+            std::mem::take(&mut *shapes)
+        };
+        if debug_shapes.is_empty() {
+            *self.debug_batch.lock().unwrap() = None;
+        } else {
+            *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
+        }
 
         // Execute render graph
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1256,7 +1280,6 @@ impl Renderer {
 
         // Apply anti-aliasing post-processing if enabled
         if let Some(fxaa) = &self.fxaa_pass {
-            let bind_group = fxaa.create_bind_group(&self.device, &self.pre_aa_view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("FXAA Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1273,9 +1296,10 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            fxaa.execute_draw(&mut pass, &bind_group);
+            if let Some(bind_group) = &self.fxaa_bind_group {
+                fxaa.execute_draw(&mut pass, bind_group);
+            }
         } else if let Some(smaa) = &self.smaa_pass {
-            let bind_group = smaa.create_bind_group(&self.device, &self.pre_aa_view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("SMAA Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1292,9 +1316,10 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            smaa.execute_draw(&mut pass, &bind_group);
+            if let Some(bind_group) = &self.smaa_bind_group {
+                smaa.execute_draw(&mut pass, bind_group);
+            }
         } else if let Some(taa) = &self.taa_pass {
-            let bind_group = taa.create_bind_group(&self.device, &self.pre_aa_view, &self.depth_view);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TAA Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1311,7 +1336,9 @@ impl Renderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            taa.execute_draw(&mut pass, &bind_group);
+            if let Some(bind_group) = &self.taa_bind_group {
+                taa.execute_draw(&mut pass, bind_group);
+            }
         }
 
         // Resolve GPU timestamp queries only when profiling is active.
@@ -1328,7 +1355,6 @@ impl Renderer {
         }
         
         self.draw_list.lock().unwrap().clear();
-        self.debug_shapes.lock().unwrap().clear();
         *self.debug_batch.lock().unwrap() = None;
 
         // Schedule async map after submit and non-blocking poll for ready results.
@@ -1607,7 +1633,7 @@ impl Renderer {
 
         // Update billboard instances from scene
         if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
-            bb.set_billboards(scene.billboards.clone());
+            bb.set_billboards_slice(&scene.billboards);
         }
         let t5_billboards = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
@@ -1743,6 +1769,20 @@ impl Renderer {
             view_formats: &[],
         });
         self.pre_aa_view = self.pre_aa_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Rebuild cached AA bind groups because source textures/views changed.
+        self.fxaa_bind_group = self
+            .fxaa_pass
+            .as_ref()
+            .map(|p| p.create_bind_group(&self.device, &self.pre_aa_view));
+        self.smaa_bind_group = self
+            .smaa_pass
+            .as_ref()
+            .map(|p| p.create_bind_group(&self.device, &self.pre_aa_view));
+        self.taa_bind_group = self
+            .taa_pass
+            .as_ref()
+            .map(|p| p.create_bind_group(&self.device, &self.pre_aa_view, &self.depth_view));
     }
 
     pub fn frame_count(&self) -> u64 { self.frame_count }

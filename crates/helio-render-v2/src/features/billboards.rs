@@ -79,6 +79,7 @@ pub struct BillboardsFeature {
     index_buffer: Option<Arc<wgpu::Buffer>>,
     instance_buffer: Option<Arc<wgpu::Buffer>>,
     instance_count: Arc<std::sync::atomic::AtomicU32>,
+    gpu_staging: Vec<GpuBillboardInstance>,
 }
 
 impl BillboardsFeature {
@@ -95,6 +96,7 @@ impl BillboardsFeature {
             index_buffer: None,
             instance_buffer: None,
             instance_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            gpu_staging: Vec::new(),
         }
     }
 
@@ -135,6 +137,12 @@ impl BillboardsFeature {
 
     pub fn set_billboards(&mut self, instances: Vec<BillboardInstance>) {
         self.instances = instances;
+    }
+
+    /// Replace billboard list from a slice without forcing a fresh Vec allocation each frame.
+    pub fn set_billboards_slice(&mut self, instances: &[BillboardInstance]) {
+        self.instances.clear();
+        self.instances.extend_from_slice(instances);
     }
 
     pub fn clear_billboards(&mut self) {
@@ -307,18 +315,17 @@ impl Feature for BillboardsFeature {
 
         if let Some(buf) = &self.instance_buffer {
             if count > 0 {
-                let gpu: Vec<GpuBillboardInstance> = self.instances[..count]
-                    .iter()
-                    .map(|b| GpuBillboardInstance {
-                        position: b.position,
-                        _pad1: 0.0,
-                        scale: b.scale,
-                        screen_scale: b.screen_scale as u32,
-                        _pad2: 0,
-                        color: b.color,
-                    })
-                    .collect();
-                ctx.queue.write_buffer(buf, 0, bytemuck::cast_slice(&gpu));
+                self.gpu_staging.clear();
+                self.gpu_staging.reserve(count.saturating_sub(self.gpu_staging.capacity()));
+                self.gpu_staging.extend(self.instances[..count].iter().map(|b| GpuBillboardInstance {
+                    position: b.position,
+                    _pad1: 0.0,
+                    scale: b.scale,
+                    screen_scale: b.screen_scale as u32,
+                    _pad2: 0,
+                    color: b.color,
+                }));
+                ctx.queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.gpu_staging));
             }
         }
 
