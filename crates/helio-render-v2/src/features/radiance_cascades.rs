@@ -139,9 +139,11 @@ impl RadianceCascadesFeature {
         let cell_x = (hx * 2.0) / (PROBE_DIMS[0] as f32);
         let cell_y = (hy * 2.0) / (PROBE_DIMS[0] as f32);
         let cell_z = (hz * 2.0) / (PROBE_DIMS[0] as f32);
-        let anchor_x = (camera_pos[0] / cell_x).round() * cell_x;
-        let anchor_y = (camera_pos[1] / cell_y).round() * cell_y;
-        let anchor_z = (camera_pos[2] / cell_z).round() * cell_z;
+        // Floor-based snapping keeps the grid monotonic and avoids half-cell
+        // toggling when the camera jitters near a cell boundary.
+        let anchor_x = (camera_pos[0] / cell_x).floor() * cell_x;
+        let anchor_y = (camera_pos[1] / cell_y).floor() * cell_y;
+        let anchor_z = (camera_pos[2] / cell_z).floor() * cell_z;
 
         self.world_min = [anchor_x - hx, anchor_y - hy, anchor_z - hz];
         self.world_max = [anchor_x + hx, anchor_y + hy, anchor_z + hz];
