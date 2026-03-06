@@ -45,7 +45,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+        let draw_calls = self.draw_list.lock().unwrap();
 
         let targets = self.targets.lock().unwrap();
 
@@ -115,7 +115,7 @@ impl RenderPass for GBufferPass {
         pass.set_bind_group(0, ctx.global_bind_group, &[]);
         // group 2 is NOT set here — gbuffer.wgsl has no group 2 bindings
 
-        for dc in &draw_calls {
+        for dc in draw_calls.iter() {
             if dc.transparent_blend {
                 continue;
             }

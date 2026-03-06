@@ -1244,9 +1244,15 @@ impl Renderer {
             camera_position: camera.position,
         };
 
-        if let Some(p) = &mut self.profiler { p.begin_frame(); }
-
-        self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
+        // Timestamp profiling is expensive (query writes + resolve + readback).
+        // Keep it off the hot path unless debug printout is enabled.
+        let profiling_active = self.debug_printout;
+        if profiling_active {
+            if let Some(p) = &mut self.profiler { p.begin_frame(); }
+            self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
+        } else {
+            self.graph.execute(&mut graph_ctx, None)?;
+        }
 
         // Apply anti-aliasing post-processing if enabled
         if let Some(fxaa) = &self.fxaa_pass {
@@ -1308,14 +1314,16 @@ impl Renderer {
             taa.execute_draw(&mut pass, &bind_group);
         }
 
-        // Resolve GPU timestamp queries into staging buffers (before finish)
-        if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
+        // Resolve GPU timestamp queries only when profiling is active.
+        if profiling_active {
+            if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
+        }
 
         // Submit and clear the draw list for next frame
         let submit_start = std::time::Instant::now();
         self.queue.submit(Some(encoder.finish()));
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
-        if submit_ms > 10.0 {
+        if self.debug_printout && submit_ms > 10.0 {
             eprintln!("⚠️  queue.submit() blocked for {:.2}ms", submit_ms);
         }
         
@@ -1323,18 +1331,14 @@ impl Renderer {
         self.debug_shapes.lock().unwrap().clear();
         *self.debug_batch.lock().unwrap() = None;
 
-        // Schedule map_async AFTER submit so the buffer is no longer used by the encoder
-        if let Some(p) = &mut self.profiler { p.begin_readback(); }
-
-        // Non-blocking readback of the previous frame's timing results
-        // DISABLED: poll_results() was blocking for 10ms on GPU buffer readback
-        // GPU will asynchronously fill the buffer when ready
-        // let poll_start = std::time::Instant::now();
-        // if let Some(p) = &mut self.profiler { p.poll_results(&self.device); }
-        // let poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
-        // if poll_ms > 10.0 {
-        //     eprintln!("⚠️  poll_results() blocked for {:.2}ms", poll_ms);
-        // }
+        // Schedule async map after submit and non-blocking poll for ready results.
+        // PollType::Poll does not wait for GPU completion.
+        if profiling_active {
+            if let Some(p) = &mut self.profiler {
+                p.begin_readback();
+                p.poll_results(&self.device);
+            }
+        }
 
         // Measure frame-to-frame latency (time from start of previous frame to start of this frame)
         let frame_to_frame_ms = if let Some(last_start) = self.last_frame_start {
@@ -1545,11 +1549,14 @@ impl Renderer {
             };
             // Hash all 6 matrices (96 f32 values) for the shadow cache.
             let mat_hash = {
-                let bits: Vec<u64> = six.iter()
-                    .flat_map(|m| m.to_cols_array().iter().map(|f| f.to_bits() as u64).collect::<Vec<_>>())
-                    .collect();
                 let mut h: u64 = 0xcbf29ce484222325;
-                for &v in &bits { h ^= v; h = h.wrapping_mul(0x100000001b3); }
+                for m in &six {
+                    let cols = m.to_cols_array();
+                    for f in cols {
+                        h ^= f.to_bits() as u64;
+                        h = h.wrapping_mul(0x100000001b3);
+                    }
+                }
                 h
             };
             shadow_matrix_hashes.push(mat_hash);

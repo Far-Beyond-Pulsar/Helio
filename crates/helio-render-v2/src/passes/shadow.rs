@@ -43,6 +43,12 @@ fn fnv64(vals: &[u64]) -> u64 {
     h
 }
 
+#[inline]
+fn fnv64_push(mut h: u64, v: u64) -> u64 {
+    h ^= v;
+    h.wrapping_mul(0x100000001b3)
+}
+
 /// Per-light shadow cache entry. Stores hashes of the light state and visible
 /// geometry; if both match the previous frame the shadow faces are skipped.
 #[derive(Clone, Copy, Default)]
@@ -219,7 +225,7 @@ impl RenderPass for ShadowPass {
             return Ok(());
         }
 
-        let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+        let draw_calls = self.draw_list.lock().unwrap();
         let face_counts  = self.light_face_counts.lock().unwrap();
         let cull_lights  = self.cull_lights.lock().unwrap();
 
@@ -240,16 +246,16 @@ impl RenderPass for ShadowPass {
         // Hashes world-space identity + bounds of every camera-visible caster.
         // Changes when objects are added/removed/moved within shadow distance.
         let geom_hash = {
-            let mut vals: Vec<u64> = Vec::with_capacity(range_filtered.len() * 5 + 1);
-            vals.push(range_filtered.len() as u64);
+            let mut h: u64 = 0xcbf29ce484222325;
+            h = fnv64_push(h, range_filtered.len() as u64);
             for dc in &range_filtered {
-                vals.push(dc.bounds_center[0].to_bits() as u64);
-                vals.push(dc.bounds_center[1].to_bits() as u64);
-                vals.push(dc.bounds_center[2].to_bits() as u64);
-                vals.push(dc.bounds_radius.to_bits() as u64);
-                vals.push(Arc::as_ptr(&dc.vertex_buffer) as u64);
+                h = fnv64_push(h, dc.bounds_center[0].to_bits() as u64);
+                h = fnv64_push(h, dc.bounds_center[1].to_bits() as u64);
+                h = fnv64_push(h, dc.bounds_center[2].to_bits() as u64);
+                h = fnv64_push(h, dc.bounds_radius.to_bits() as u64);
+                h = fnv64_push(h, Arc::as_ptr(&dc.vertex_buffer) as u64);
             }
-            fnv64(&vals)
+            h
         };
 
         for i in 0..actual_count {
@@ -287,12 +293,6 @@ impl RenderPass for ShadowPass {
             for face in 0u32..max_faces {
                 let layer_idx = i as u32 * 6 + face;
 
-                // ── Stage 2: per-face rendering ────────
-                // Render all camera-distance-filtered objects into each face.
-                // The light's view projection will naturally exclude objects not visible
-                // from that light's direction.
-                let face_draws: Vec<&DrawCall> = range_filtered.iter().copied().collect();
-
                 let t_face = ctx.scope_begin(&format!("shadow/light_{i}/face_{face}"));
                 let mut pass = ctx.begin_render_pass(
                     &format!("Shadow Light {i} Face {face}"),
@@ -310,7 +310,7 @@ impl RenderPass for ShadowPass {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
 
-                for dc in face_draws {
+                for dc in &range_filtered {
                     pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
                     pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
                     pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);

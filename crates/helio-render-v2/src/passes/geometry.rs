@@ -41,8 +41,8 @@ impl RenderPass for GeometryPass {
         let global_bg   = ctx.global_bind_group;
         let lighting_bg = ctx.lighting_bind_group;
 
-        // Snapshot the draw list (cheap Arc clone, cheap lock)
-        let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+        // Borrow draw calls directly to avoid a full per-frame Vec clone.
+        let draw_calls = self.draw_list.lock().unwrap();
 
         // When SkyPass has already filled the color buffer, load it instead of clearing.
         let color_load = if ctx.has_sky {
@@ -96,7 +96,7 @@ impl RenderPass for GeometryPass {
         pass.set_bind_group(0, global_bg, &[]);
         pass.set_bind_group(2, lighting_bg, &[]);
 
-        for dc in &draw_calls {
+        for dc in draw_calls.iter() {
             pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
