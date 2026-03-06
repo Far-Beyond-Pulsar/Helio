@@ -449,6 +449,21 @@ pub struct Renderer {
     fxaa_pass: Option<FxaaPass>,
     smaa_pass: Option<SmaaPass>,
     taa_pass: Option<TaaPass>,
+
+    // ── TEMPORAL CACHING (Unreal engine style) ───────────────────────────
+    /// Cached sky state — skip LUT re-render if unchanged
+    cached_sky_color: [f32; 3],
+    cached_sky_has_sky: bool,
+    cached_sky_sun_direction: [f32; 3],
+    cached_sky_sun_intensity: f32,
+    sky_state_changed: bool,
+    
+    /// Cached light list state — skip sort if unchanged
+    cached_light_count: usize,
+    cached_light_position_hash: u64,
+    cached_camera_pos: [f32; 3],
+    camera_move_threshold: f32,  // meters
+    light_sort_cache_valid: bool,
     fxaa_bind_group: Option<wgpu::BindGroup>,
     smaa_bind_group: Option<wgpu::BindGroup>,
     taa_bind_group: Option<wgpu::BindGroup>,
@@ -1001,6 +1016,19 @@ impl Renderer {
             last_frame_end: None,
             profiler,
             debug_printout: false,
+            
+            // Temporal caching for AAA optimizations
+            cached_sky_color: [0.0; 3],
+            cached_sky_has_sky: false,
+            cached_sky_sun_direction: [0.0, -1.0, 0.0],
+            cached_sky_sun_intensity: 1.0,
+            sky_state_changed: true,  // Enable LUT render on first frame
+            
+            cached_light_count: 0,
+            cached_light_position_hash: 0,
+            cached_camera_pos: [0.0; 3],
+            camera_move_threshold: 0.5,  // 0.5 meters = skip sort threshold
+            light_sort_cache_valid: false,  // Rebuild on first frame
         })
     }
 
@@ -1440,6 +1468,40 @@ impl Renderer {
         }
         let t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
+        // ────────────────────────────────────────────────────────────────────
+        // TEMPORAL LIGHT SORTING CACHE (Unreal-style frame coherence)
+        // ────────────────────────────────────────────────────────────────────
+        
+        // Compute hash of light positions this frame
+        let mut light_pos_hash: u64 = 0xcbf29ce484222325;  // FNV-1a offset basis
+        for light in &scene.lights {
+            let bits = light.position[0].to_bits() as u64
+                     ^ light.position[1].to_bits() as u64
+                     ^ light.position[2].to_bits() as u64;
+            light_pos_hash ^= bits;
+            light_pos_hash = light_pos_hash.wrapping_mul(0x100000001b3);
+        }
+        
+        // Detect camera movement
+        let camera_moved = {
+            let dx = camera.position[0] - self.cached_camera_pos[0];
+            let dy = camera.position[1] - self.cached_camera_pos[1];
+            let dz = camera.position[2] - self.cached_camera_pos[2];
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+            dist > self.camera_move_threshold
+        };
+        
+        // SKIP light sort if: same light count, same positions, camera barely moved
+        let should_re_sort = 
+            scene.lights.len() != self.cached_light_count
+            || light_pos_hash != self.cached_light_position_hash  
+            || camera_moved;
+        
+        // Update cache regardless
+        self.cached_light_count = scene.lights.len();
+        self.cached_light_position_hash = light_pos_hash;
+        self.cached_camera_pos = camera.position.into();
+
         // Upload scene lights to GPU buffer.
         // Lights are sorted by relevance so the limited shadow budget is spent
         // on lights that actually contribute near the current camera view.
@@ -1460,56 +1522,60 @@ impl Renderer {
             }
         }
         
-        // Sort remaining visible lights by contribution
+        // Sort remaining visible lights by contribution (ONLY if cache invalid)
         let mut sorted_lights = visible_lights;
-        sorted_lights.sort_by(|a, b| {
-            fn score(light: &crate::scene::SceneLight, camera_pos: glam::Vec3) -> f32 {
-                match light.light_type {
-                    crate::features::LightType::Directional => {
-                        // Keep directional lights at highest priority (sun/moon).
-                        f32::MAX
-                    }
-                    crate::features::LightType::Point => {
-                        let lp = glam::Vec3::from(light.position);
-                        let d  = camera_pos.distance(lp).max(0.25);
-                        let r  = light.range.max(0.001);
-                        let intensity = light.intensity.max(0.0);
+        if should_re_sort {
+            sorted_lights.sort_by(|a, b| {
+                fn score(light: &crate::scene::SceneLight, camera_pos: glam::Vec3) -> f32 {
+                    match light.light_type {
+                        crate::features::LightType::Directional => {
+                            // Keep directional lights at highest priority (sun/moon).
+                            f32::MAX
+                        }
+                        crate::features::LightType::Point => {
+                            let lp = glam::Vec3::from(light.position);
+                            let d  = camera_pos.distance(lp).max(0.25);
+                            let r  = light.range.max(0.001);
+                            let intensity = light.intensity.max(0.0);
 
-                        // Stable screen-impact proxy (higher when larger on screen and brighter).
-                        // Never drops to 0 at d>=r, so ordering is deterministic and avoids
-                        // arbitrary shadow loss for lights that are still camera-relevant.
-                        let angular = (r / d).min(8.0);
-                        let proximity = 1.0 / (1.0 + (d / r) * (d / r));
-                        intensity * (angular * angular) * proximity
-                    }
-                    crate::features::LightType::Spot { inner_angle, outer_angle } => {
-                        let lp = glam::Vec3::from(light.position);
-                        let d  = camera_pos.distance(lp).max(0.25);
-                        let r  = light.range.max(0.001);
-                        let intensity = light.intensity.max(0.0);
+                            // Stable screen-impact proxy (higher when larger on screen and brighter).
+                            // Never drops to 0 at d>=r, so ordering is deterministic and avoids
+                            // arbitrary shadow loss for lights that are still camera-relevant.
+                            let angular = (r / d).min(8.0);
+                            let proximity = 1.0 / (1.0 + (d / r) * (d / r));
+                            intensity * (angular * angular) * proximity
+                        }
+                        crate::features::LightType::Spot { inner_angle, outer_angle } => {
+                            let lp = glam::Vec3::from(light.position);
+                            let d  = camera_pos.distance(lp).max(0.25);
+                            let r  = light.range.max(0.001);
+                            let intensity = light.intensity.max(0.0);
 
-                        let angular = (r / d).min(8.0);
-                        let proximity = 1.0 / (1.0 + (d / r) * (d / r));
+                            let angular = (r / d).min(8.0);
+                            let proximity = 1.0 / (1.0 + (d / r) * (d / r));
 
-                        // Slightly prefer spot lights whose cone points toward the camera.
-                        let to_camera = (camera_pos - lp).normalize_or_zero();
-                        let dir = glam::Vec3::from(light.direction).normalize_or_zero();
-                        let cos_a = dir.dot(to_camera);
-                        let inner_cos = inner_angle.cos();
-                        let outer_cos = outer_angle.cos();
-                        let denom = (inner_cos - outer_cos).max(1e-6);
-                        let t = ((cos_a - outer_cos) / denom).clamp(0.0, 1.0);
-                        let cone = t * t * (3.0 - 2.0 * t);
+                            // Slightly prefer spot lights whose cone points toward the camera.
+                            let to_camera = (camera_pos - lp).normalize_or_zero();
+                            let dir = glam::Vec3::from(light.direction).normalize_or_zero();
+                            let cos_a = dir.dot(to_camera);
+                            let inner_cos = inner_angle.cos();
+                            let outer_cos = outer_angle.cos();
+                            let denom = (inner_cos - outer_cos).max(1e-6);
+                            let t = ((cos_a - outer_cos) / denom).clamp(0.0, 1.0);
+                            let cone = t * t * (3.0 - 2.0 * t);
 
-                        intensity * (angular * angular) * proximity * (0.25 + 0.75 * cone)
+                            intensity * (angular * angular) * proximity * (0.25 + 0.75 * cone)
+                        }
                     }
                 }
-            }
 
-            let sb = score(b, camera.position);
-            let sa = score(a, camera.position);
-            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-        });
+                let sb = score(b, camera.position);
+                let sa = score(a, camera.position);
+                sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
+            });
+        } else if self.frame_count % 60 == 0 {
+            log::trace!("⚡ Light sort cache HIT — skipping re-sort");
+        }
         
         // No hard cap anymore - distance culling controls light count
         // (GPU can handle many lights per pixel with proper attenuation)
@@ -1677,8 +1743,46 @@ impl Renderer {
         self.scene_ambient_intensity = scene.ambient_intensity;
         self.scene_light_count = count as u32;
         self.scene_sky_color = scene.sky_color;
-        self.scene_has_sky = scene.sky_atmosphere.is_some();
+        
+        // ────────────────────────────────────────────────────────────────────
+        // TEMPORAL SKY LUT CACHING (Unreal engine style)
+        // Only re-render LUT when sky state actually changes
+        // ────────────────────────────────────────────────────────────────────
+        let sky_state_changed = {
+            let has_sky_now = scene.sky_atmosphere.is_some();
+            let sky_color_changed = self.cached_sky_color != scene.sky_color;
+            
+            if has_sky_now != self.cached_sky_has_sky || sky_color_changed {
+                true
+            } else {
+                // If sky is enabled, check sun direction/intensity changes
+                if let Some(atm) = &scene.sky_atmosphere {
+                    let sun_dir = scene.lights.iter()
+                        .find(|l| matches!(l.light_type, crate::features::LightType::Directional))
+                        .map(|l| {
+                            let d = Vec3::from(l.direction).normalize();
+                            [-d.x, -d.y, -d.z]
+                        })
+                        .unwrap_or([0.0, 1.0, 0.0]);
+                    
+                    let sun_moved = (sun_dir[0] - self.cached_sky_sun_direction[0]).abs() > 0.01
+                                 || (sun_dir[1] - self.cached_sky_sun_direction[1]).abs() > 0.01
+                                 || (sun_dir[2] - self.cached_sky_sun_direction[2]).abs() > 0.01;
+                    let intensity_changed = (atm.sun_intensity - self.cached_sky_sun_intensity).abs() > 0.01;
+                    
+                    sun_moved || intensity_changed
+                } else {
+                    false
+                }
+            }
+        };
+        
+        self.sky_state_changed = sky_state_changed;
+        self.cached_sky_has_sky = scene.sky_atmosphere.is_some();
+        self.cached_sky_color = scene.sky_color;
+        
         // CSM splits are static constants; stored so render() can pass them to globals
+        self.scene_has_sky = scene.sky_atmosphere.is_some();
         self.scene_csm_splits = CSM_SPLITS;
 
         // Build and upload sky uniforms (even when sky is disabled the buffer exists)
@@ -1692,6 +1796,10 @@ impl Renderer {
                     [-d.x, -d.y, -d.z]
                 })
                 .unwrap_or([0.0, 1.0, 0.0]);
+
+            // Cache sun state for next frame comparison
+            self.cached_sky_sun_direction = sun_dir;
+            self.cached_sky_sun_intensity = atm.sun_intensity;
 
             let clouds = atm.clouds.as_ref();
             let sky_uni = SkyUniform {
@@ -1718,7 +1826,13 @@ impl Renderer {
                 skylight_intensity: scene.skylight.as_ref().map(|sl| sl.intensity).unwrap_or(1.0),
                 _pad0: 0.0, _pad1: 0.0, _pad2: 0.0,
             };
-            self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&sky_uni));
+            
+            // TEMPORAL CACHE: Only upload sky buffer if state changed
+            if self.sky_state_changed {
+                self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&sky_uni));
+            } else if self.frame_count % 60 == 0 {
+                log::trace!("⚡ Sky LUT cache HIT — skipping re-render");
+            }
 
             // Inject sky-based ambient when a Skylight is present.
             // ambient_color = sky colour * tint (colour of the fill light)
@@ -1735,6 +1849,9 @@ impl Renderer {
                 ];
                 self.scene_ambient_intensity = scene.ambient_intensity.max(skylight.intensity);
             }
+        } else {
+            // Sky disabled this frame — mark state changed so it re-renders if enabled next frame
+            self.sky_state_changed = true;
         }
 
         // Feed the computed sky/ambient colour into the RC feature so sky-miss
