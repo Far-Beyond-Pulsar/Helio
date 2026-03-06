@@ -1376,7 +1376,7 @@ impl Renderer {
 
     /// Convenience: start live portal on the default port.
     pub fn start_live_portal_default(&mut self) -> Result<String> {
-        self.start_live_portal("0.0.0.0:7878")
+        self.start_live_portal("127.0.0.1:7878")
     }
 
     /// Check if GPU-driven indirect rendering is enabled
