@@ -96,7 +96,13 @@ impl RenderPass for TransparentPass {
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: ctx.depth_view,
-                depth_ops: None,
+                // Transparent pass must still depth-test against opaque depth.
+                // We load existing depth and keep it unchanged (pipeline has
+                // depth_write_enabled = false).
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
                 stencil_ops: None,
             }),
             timestamp_writes: None,
