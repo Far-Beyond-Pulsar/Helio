@@ -77,6 +77,7 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
 
                 let app = Router::new()
                     .route("/", get(index))
+                  .route("/favicon.ico", get(favicon))
                     .route("/ws", get(ws_upgrade))
                     .with_state(broadcast_tx);
 
@@ -122,6 +123,10 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn favicon() -> impl IntoResponse {
+  axum::http::StatusCode::NO_CONTENT
+}
+
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(tx): State<broadcast::Sender<String>>,
@@ -138,10 +143,10 @@ async fn ws_client(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 }
 
 const INDEX_HTML: &str = r#"<!doctype html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Helio Live Portal</title>
   <style>
     :root {
@@ -178,32 +183,32 @@ const INDEX_HTML: &str = r#"<!doctype html>
   </style>
 </head>
 <body>
-  <div class=\"wrap\">
+  <div class="wrap">
     <h1>Helio Live Pipeline Portal</h1>
-    <div class=\"row\">
-      <section class=\"card\">
+    <div class="row">
+      <section class="card">
         <h2>Frame Metrics</h2>
-        <div class=\"metric\">
-          <div class=\"pill\">Frame <span class=\"val\" id=\"frame\">-</span></div>
-          <div class=\"pill\">Frame ms <span class=\"val\" id=\"frameMs\">-</span></div>
-          <div class=\"pill\">Frame-to-frame ms <span class=\"val\" id=\"ftfMs\">-</span></div>
-          <div class=\"pill\">GPU total ms <span class=\"val\" id=\"gpuTotal\">-</span></div>
-          <div class=\"pill\">CPU total ms <span class=\"val\" id=\"cpuTotal\">-</span></div>
+        <div class="metric">
+          <div class="pill">Frame <span class="val" id="frame">-</span></div>
+          <div class="pill">Frame ms <span class="val" id="frameMs">-</span></div>
+          <div class="pill">Frame-to-frame ms <span class="val" id="ftfMs">-</span></div>
+          <div class="pill">GPU total ms <span class="val" id="gpuTotal">-</span></div>
+          <div class="pill">CPU total ms <span class="val" id="cpuTotal">-</span></div>
         </div>
-        <div class=\"status\" id=\"status\">Connecting...</div>
+        <div class="status" id="status">Connecting...</div>
       </section>
-      <section class=\"card\">
+      <section class="card">
         <h2>Pipeline Layout</h2>
-        <div class=\"pipeline\" id=\"pipeline\"></div>
+        <div class="pipeline" id="pipeline"></div>
       </section>
     </div>
 
-    <section class=\"card\" style=\"margin-top:16px\">
+    <section class="card" style="margin-top:16px">
       <h2>Per-Pass Timings</h2>
-      <div class=\"list\">
+      <div class="list">
         <table>
           <thead><tr><th>Pass</th><th>GPU ms</th><th>CPU ms</th></tr></thead>
-          <tbody id=\"rows\"></tbody>
+          <tbody id="rows"></tbody>
         </table>
       </div>
     </section>
@@ -229,7 +234,7 @@ const INDEX_HTML: &str = r#"<!doctype html>
       rowsEl.innerHTML = '';
       for (const t of snapshot.pass_timings) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `<td class=\"name\">${t.name}</td><td class=\"gpu\">${t.gpu_ms.toFixed(3)}</td><td class=\"cpu\">${t.cpu_ms.toFixed(3)}</td>`;
+        tr.innerHTML = `<td class="name">${t.name}</td><td class="gpu">${t.gpu_ms.toFixed(3)}</td><td class="cpu">${t.cpu_ms.toFixed(3)}</td>`;
         rowsEl.appendChild(tr);
       }
 
