@@ -1416,40 +1416,43 @@ impl Renderer {
         // ── GPU-DRIVEN RENDERING: Assign material IDs and upload draw list ──────
         if self.gpu_driven {
             if let Some(ref draw_list_buf) = self.draw_list_gpu_buffer {
-                let mut draw_calls = self.draw_list.lock().unwrap();
-                
-                // Assign material IDs to new materials
-                for dc in draw_calls.iter_mut() {
-                    let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-                    if !self.material_id_map.contains_key(&mat_ptr) {
-                        self.material_id_map.insert(mat_ptr, self.next_material_id);
-                        self.next_material_id += 1;
+                // Scope the draw_calls lock to release it as soon as we're done
+                let gpu_draws = {
+                    let mut draw_calls = self.draw_list.lock().unwrap();
+                    
+                    // Assign material IDs to new materials
+                    for dc in draw_calls.iter_mut() {
+                        let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+                        if !self.material_id_map.contains_key(&mat_ptr) {
+                            self.material_id_map.insert(mat_ptr, self.next_material_id);
+                            self.next_material_id += 1;
+                        }
+                        dc.material_id = *self.material_id_map.get(&mat_ptr).unwrap();
                     }
-                    dc.material_id = *self.material_id_map.get(&mat_ptr).unwrap();
-                }
-                
-                // Build GPU representation of draw list
-                // NOTE: Current limitation - vertex_offset and index_offset are set to 0
-                // because each DrawCall has its own separate vertex/index buffers.
-                // For true GPU-driven indirect rendering, we need:
-                // 1. Unified vertex/index buffer pools (all geometry in one buffer)
-                // 2. Bindless textures for materials
-                // 3. GPU scene representation
-                // This infrastructure is ready for when we implement unified buffers.
-                let gpu_draws: Vec<GpuDrawCall> = draw_calls.iter().map(|dc| {
-                    GpuDrawCall {
-                        vertex_offset: 0,  // TODO: Unified vertex buffer with real offsets
-                        index_offset: 0,   // TODO: Unified index buffer with real offsets
-                        index_count: dc.index_count,
-                        vertex_count: dc.vertex_count,
-                        material_id: dc.material_id,
-                        transparent_blend: if dc.transparent_blend { 1 } else { 0 },
-                        _pad0: 0,
-                        _pad1: 0,
-                        bounds_center: dc.bounds_center,
-                        bounds_radius: dc.bounds_radius,
-                    }
-                }).collect();
+                    
+                    // Build GPU representation of draw list
+                    // NOTE: Current limitation - vertex_offset and index_offset are set to 0
+                    // because each DrawCall has its own separate vertex/index buffers.
+                    // For true GPU-driven indirect rendering, we need:
+                    // 1. Unified vertex/index buffer pools (all geometry in one buffer)
+                    // 2. Bindless textures for materials
+                    // 3. GPU scene representation
+                    // This infrastructure is ready for when we implement unified buffers.
+                    draw_calls.iter().map(|dc| {
+                        GpuDrawCall {
+                            vertex_offset: 0,  // TODO: Unified vertex buffer with real offsets
+                            index_offset: 0,   // TODO: Unified index buffer with real offsets
+                            index_count: dc.index_count,
+                            vertex_count: dc.vertex_count,
+                            material_id: dc.material_id,
+                            transparent_blend: if dc.transparent_blend { 1 } else { 0 },
+                            _pad0: 0,
+                            _pad1: 0,
+                            bounds_center: dc.bounds_center,
+                            bounds_radius: dc.bounds_radius,
+                        }
+                    }).collect::<Vec<_>>()
+                };  // Lock is released here
                 
                 // Upload to GPU (will be read by IndirectDispatchPass compute shader)
                 if !gpu_draws.is_empty() {
