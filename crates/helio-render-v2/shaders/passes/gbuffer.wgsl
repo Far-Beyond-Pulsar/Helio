@@ -23,7 +23,7 @@ struct Material {
     emissive_factor: f32,
     ao:              f32,
     emissive_color:  vec3<f32>,
-    _pad:            f32,
+    alpha_cutoff:    f32,
 }
 
 @group(0) @binding(0) var <uniform> camera:   Camera;
@@ -82,6 +82,11 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let tex_sample = textureSample(base_color_texture, material_sampler, uv);
     let albedo     = material.base_color.rgb * tex_sample.rgb;
     let alpha      = material.base_color.a  * tex_sample.a;
+
+    // Deferred path transparency support: alpha cutout / masked materials.
+    if alpha < material.alpha_cutoff {
+        discard;
+    }
 
     // ── Normal mapping – derivative-based TBN ────────────────────────────────
     let N_geom  = normalize(input.world_normal);

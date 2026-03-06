@@ -44,6 +44,12 @@ pub struct Material {
     pub emissive_color: [f32; 3],
     /// Emissive strength multiplier.  Default 0 (no emission).
     pub emissive_factor: f32,
+    /// Alpha cutout threshold in [0, 1].
+    ///
+    /// Pixels with computed alpha below this value are discarded in the
+    /// G-buffer/geometry shader paths. Use this for foliage, fences, decals,
+    /// and other texture-mask transparency in deferred rendering.
+    pub alpha_cutoff: f32,
 
     // ── Optional textures ────────────────────────────────────────────────────
     /// sRGB RGBA albedo texture.
@@ -65,6 +71,7 @@ impl Material {
             ao: 1.0,
             emissive_color: [0.0; 3],
             emissive_factor: 0.0,
+            alpha_cutoff: 0.0,
             ..Default::default()
         }
     }
@@ -76,6 +83,10 @@ impl Material {
     pub fn with_emissive(mut self, color: [f32; 3], factor: f32) -> Self {
         self.emissive_color = color;
         self.emissive_factor = factor;
+        self
+    }
+    pub fn with_alpha_cutoff(mut self, cutoff: f32) -> Self {
+        self.alpha_cutoff = cutoff.clamp(0.0, 1.0);
         self
     }
     pub fn with_base_color_texture(mut self, t: TextureData) -> Self { self.base_color_texture = Some(t); self }
@@ -109,7 +120,7 @@ pub(crate) struct MaterialUniform {
     pub emissive_factor: f32,        // offset 24
     pub ao: f32,                     // offset 28
     pub emissive_color: [f32; 3],   // offset 32, 12 bytes
-    pub _pad: f32,                   // offset 44
+    pub alpha_cutoff: f32,           // offset 44
     // total: 48 bytes (multiple of 16 — satisfies vec3 alignment)
 }
 
@@ -122,7 +133,7 @@ impl From<&Material> for MaterialUniform {
             emissive_factor: m.emissive_factor,
             ao: m.ao,
             emissive_color: m.emissive_color,
-            _pad: 0.0,
+            alpha_cutoff: m.alpha_cutoff,
         }
     }
 }

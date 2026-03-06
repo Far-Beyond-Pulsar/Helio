@@ -1,7 +1,7 @@
 //! Main renderer implementation
 
 use crate::resources::ResourceManager;
-use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
+use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceCascadesFeature};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass, SsaoConfig, AntiAliasingMode, TaaConfig, FxaaPass, SmaaPass, TaaPass};
@@ -679,7 +679,7 @@ impl Renderer {
         let mat_uniform = MaterialUniform {
             base_color: [1.0, 1.0, 1.0, 1.0],
             metallic: 0.0, roughness: 0.5, emissive_factor: 0.0, ao: 1.0,
-            emissive_color: [0.0; 3], _pad: 0.0,
+            emissive_color: [0.0; 3], alpha_cutoff: 0.0,
         };
         let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Default Material Uniform"),
@@ -1132,8 +1132,24 @@ impl Renderer {
         let frame_start = std::time::Instant::now();
         log::trace!("Rendering frame {}", self.frame_count);
 
-        // Update global uniforms
+        // Update camera uniform first (features may use camera-dependent logic in prepare).
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
+
+        // Prepare features (upload lights etc.)
+        let prep_ctx = PrepareContext::new(
+            &self.device, &self.queue, &self.resources,
+            self.frame_count, delta_time, camera,
+        );
+        self.features.prepare_all(&prep_ctx)?;
+
+        // Pull live RC bounds after feature prepare so GI volume can follow camera.
+        if let Some(rc) = self.features.get_typed_mut::<RadianceCascadesFeature>("radiance_cascades") {
+            let (mn, mx) = rc.world_bounds();
+            self.rc_world_min = mn;
+            self.rc_world_max = mx;
+        }
+
+        // Update globals after feature prepare so all per-frame feature outputs are current.
         let globals = GlobalsUniform {
             frame: self.frame_count as u32,
             delta_time,
@@ -1145,13 +1161,6 @@ impl Renderer {
             csm_splits: self.scene_csm_splits,
         };
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
-
-        // Prepare features (upload lights etc.)
-        let prep_ctx = PrepareContext::new(
-            &self.device, &self.queue, &self.resources,
-            self.frame_count, delta_time, camera,
-        );
-        self.features.prepare_all(&prep_ctx)?;
 
         // Build GPU debug batch from shapes submitted since the previous frame.
         let debug_shapes = self.debug_shapes.lock().unwrap().clone();

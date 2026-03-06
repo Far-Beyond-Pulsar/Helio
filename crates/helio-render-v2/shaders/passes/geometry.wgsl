@@ -40,7 +40,7 @@ struct Material {
     emissive_factor: f32,          // offset 24
     ao:              f32,          // offset 28
     emissive_color:  vec3<f32>,   // offset 32  (alignment 16 — ok)
-    _pad:            f32,          // offset 44
+    alpha_cutoff:    f32,         // offset 44
 }
 
 @group(0) @binding(0) var<uniform> camera:  Camera;
@@ -454,6 +454,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let tex_sample = textureSample(base_color_texture, material_sampler, uv);
     let albedo     = material.base_color.rgb * tex_sample.rgb;
     let alpha      = material.base_color.a  * tex_sample.a;
+
+    // Deferred-compatible transparency: alpha-cutout for masked textures.
+    if alpha < material.alpha_cutoff {
+        discard;
+    }
 
     // ── Normal mapping – derivative-based TBN (Schuler/ShaderX5, used by Three.js) ──
     // Reconstructs the tangent frame entirely from screen-space position + UV

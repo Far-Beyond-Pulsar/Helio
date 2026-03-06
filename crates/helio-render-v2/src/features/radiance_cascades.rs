@@ -59,6 +59,8 @@ pub struct RadianceCascadesFeature {
     enabled: bool,
     world_min: [f32; 3],
     world_max: [f32; 3],
+    follow_camera: bool,
+    follow_half_extents: [f32; 3],
     // output textures: what RC writes each frame; what geometry reads
     output_textures:  Vec<Arc<wgpu::Texture>>,
     output_views:     Vec<Arc<wgpu::TextureView>>,
@@ -78,6 +80,8 @@ impl RadianceCascadesFeature {
             enabled: true,
             world_min: [-10.0, -1.0, -10.0],
             world_max: [10.0, 10.0, 10.0],
+            follow_camera: false,
+            follow_half_extents: [10.0, 5.5, 10.0],
             output_textures:  Vec::new(),
             output_views:     Vec::new(),
             history_textures: Vec::new(),
@@ -94,7 +98,43 @@ impl RadianceCascadesFeature {
     pub fn with_world_bounds(mut self, min: [f32; 3], max: [f32; 3]) -> Self {
         self.world_min = min;
         self.world_max = max;
+        self.follow_camera = false;
         self
+    }
+
+    /// Enable camera-following RC bounds.
+    ///
+    /// The volume is centered on the camera and snapped to cascade-0 cell size
+    /// in X/Z to reduce temporal shimmer while moving.
+    pub fn with_camera_follow(mut self, half_extents: [f32; 3]) -> Self {
+        self.follow_camera = true;
+        self.follow_half_extents = half_extents;
+        self
+    }
+
+    /// Current world bounds used by RC this frame.
+    pub fn world_bounds(&self) -> ([f32; 3], [f32; 3]) {
+        (self.world_min, self.world_max)
+    }
+
+    fn update_follow_bounds_from_camera(&mut self, camera_pos: [f32; 3]) {
+        if !self.follow_camera { return; }
+
+        let hx = self.follow_half_extents[0].max(0.01);
+        let hy = self.follow_half_extents[1].max(0.01);
+        let hz = self.follow_half_extents[2].max(0.01);
+
+        // Snap to cascade-0 probe cell size to keep GI stable while moving.
+        let cell_x = (hx * 2.0) / (PROBE_DIMS[0] as f32);
+        let cell_z = (hz * 2.0) / (PROBE_DIMS[0] as f32);
+        let anchor_x = (camera_pos[0] / cell_x).round() * cell_x;
+        let anchor_z = (camera_pos[2] / cell_z).round() * cell_z;
+
+        // Keep Y continuous so vertical traversal does not jump aggressively.
+        let anchor_y = camera_pos[1];
+
+        self.world_min = [anchor_x - hx, anchor_y - hy, anchor_z - hz];
+        self.world_max = [anchor_x + hx, anchor_y + hy, anchor_z + hz];
     }
 
 }
@@ -306,6 +346,8 @@ impl Feature for RadianceCascadesFeature {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
+        self.update_follow_bounds_from_camera(ctx.camera.position.to_array());
+
         let Some(buf) = &self.rc_dynamic_buf else { return Ok(()); };
         let light_count = self.light_count_arc.as_ref()
             .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
