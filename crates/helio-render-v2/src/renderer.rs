@@ -775,13 +775,12 @@ impl Renderer {
             view_formats: &[],
         });
         let default_rc_view = default_rc_tex.create_view(&Default::default());
-        let rc_view = feat_rc_view.unwrap_or_else(|| {
-            log::warn!("RC feature output view not set - using dummy black 1x1 texture!");
-            Arc::new(default_rc_view)
-        });
         if feat_rc_view.is_some() {
             log::info!("RC feature provided valid output texture view");
+        } else {
+            log::warn!("RC feature output view not set - using dummy black 1x1 texture!");
         }
+        let rc_view = feat_rc_view.unwrap_or_else(|| Arc::new(default_rc_view));
         let rc_world_min = feat_rc_bounds.map(|(mn, _)| mn).unwrap_or([0.0; 3]);
         let rc_world_max = feat_rc_bounds.map(|(_, mx)| mx).unwrap_or([0.0; 3]);
 
