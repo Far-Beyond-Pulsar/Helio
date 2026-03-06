@@ -14,7 +14,16 @@ use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
 use crate::profiler::{GpuProfiler, PassTiming};
 use crate::{Result, Error};
-use helio_live_portal::{LivePortalHandle, PortalFrameSnapshot, PortalPassTiming};
+use helio_live_portal::{
+    LivePortalHandle,
+    PortalFrameSnapshot,
+    PortalPassTiming,
+    PortalSceneLayout,
+    PortalSceneObject,
+    PortalSceneLight,
+    PortalSceneBillboard,
+    PortalSceneCamera,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -527,6 +536,8 @@ pub struct Renderer {
     debug_printout: bool,
     /// Optional live web dashboard handle for real-time pipeline/perf telemetry.
     live_portal: Option<LivePortalHandle>,
+    /// Last captured scene layout snapshot forwarded to the portal thread.
+    latest_scene_layout: Option<PortalSceneLayout>,
 }
 
 impl Renderer {
@@ -1144,6 +1155,7 @@ impl Renderer {
             profiler,
             debug_printout: false,
             live_portal: None,
+            latest_scene_layout: None,
             
             // GPU-driven rendering flags and buffers
             gpu_driven: config.gpu_driven,
@@ -1702,6 +1714,7 @@ impl Renderer {
                 total_cpu_ms: p.last_total_cpu_ms,
                 pass_timings,
                 pipeline_order: self.graph.execution_pass_names(),
+                scene_layout: self.latest_scene_layout.clone(),
                 timestamp_ms: now_ms,
             };
 
@@ -1717,6 +1730,11 @@ impl Renderer {
     /// Render the full scene. Everything in the scene is drawn; nothing else.
     pub fn render_scene(&mut self, scene: &Scene, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         let render_scene_start = std::time::Instant::now();
+
+        // Capture scene layout for the portal thread before render mutates state.
+        if self.live_portal.is_some() {
+            self.latest_scene_layout = Some(build_portal_scene_layout(scene, camera));
+        }
         
         // Queue draw calls for all objects
         for obj in &scene.objects {
@@ -2235,6 +2253,39 @@ impl Renderer {
     }
     pub fn device(&self) -> &wgpu::Device { &self.device }
     pub fn queue(&self) -> &wgpu::Queue { &self.queue }
+}
+
+fn build_portal_scene_layout(scene: &Scene, camera: &Camera) -> PortalSceneLayout {
+    let objects = scene.objects.iter().map(|obj| PortalSceneObject {
+        bounds_center: obj.mesh.bounds_center,
+        bounds_radius: obj.mesh.bounds_radius,
+        has_material: obj.material.is_some(),
+    }).collect::<Vec<_>>();
+
+    let lights = scene.lights.iter().map(|l| PortalSceneLight {
+        position: l.position,
+        color: l.color,
+        intensity: l.intensity,
+        range: l.range,
+    }).collect::<Vec<_>>();
+
+    let billboards = scene.billboards.iter().map(|b| PortalSceneBillboard {
+        position: b.position,
+        scale: b.scale,
+    }).collect::<Vec<_>>();
+
+    let forward = camera.forward();
+    let cam = PortalSceneCamera {
+        position: [camera.position.x, camera.position.y, camera.position.z],
+        forward: [forward.x, forward.y, forward.z],
+    };
+
+    PortalSceneLayout {
+        objects,
+        lights,
+        billboards,
+        camera: Some(cam),
+    }
 }
 
 fn open_url_in_browser(url: &str) {

@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Helio Live Portal</title>
+  <style>
+    :root {
+      --bg: #0f1720;
+      --panel: #182432;
+      --ink: #e4edf5;
+      --muted: #94a8bb;
+      --line: #2a3f54;
+      --accent: #6ad7ff;
+      --gpu: #ff9f70;
+      --cpu: #8bf0b0;
+      --hot: #ff5f4a;
+      --ok: #41c67a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(800px 520px at 15% -20%, #264259 0%, transparent 52%),
+        radial-gradient(900px 620px at 100% 0%, #1f3448 0%, transparent 56%),
+        var(--bg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 18px; margin: 0 0 12px; letter-spacing: 0.08em; text-transform: uppercase; }
+    h2 { font-size: 12px; margin: 0 0 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
+
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: linear-gradient(180deg, #1c2a38, var(--panel));
+      padding: 12px;
+      min-height: 120px;
+    }
+
+    .metrics { display: flex; gap: 10px; flex-wrap: wrap; }
+    .pill {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #12202c;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+    .val { color: var(--accent); font-weight: 700; }
+    #status { color: var(--muted); font-size: 12px; margin-top: 8px; }
+
+    #flow { width: 100%; height: 360px; border: 1px solid var(--line); border-radius: 8px; background: #111a24; }
+
+    .views { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
+    .viewbox { border: 1px solid var(--line); border-radius: 8px; background: #101922; padding: 8px; }
+    .viewtitle { color: var(--muted); font-size: 11px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.06em; }
+    canvas { width: 100%; height: 200px; display: block; border: 1px solid #24384c; border-radius: 6px; background: #0d141c; }
+
+    .list { max-height: 330px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 7px 9px; border-bottom: 1px solid #223547; font-size: 12px; }
+    th { text-align: left; color: var(--muted); background: #132231; position: sticky; top: 0; }
+    .gpu { color: var(--gpu); }
+    .cpu { color: var(--cpu); }
+
+    @media (max-width: 1100px) {
+      .grid { grid-template-columns: 1fr; }
+      .views { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Helio Live Pipeline + Scene Portal</h1>
+
+    <div class="grid">
+      <section class="card">
+        <h2>Frame Metrics</h2>
+        <div class="metrics">
+          <div class="pill">Frame <span class="val" id="frame">-</span></div>
+          <div class="pill">Frame ms <span class="val" id="frameMs">-</span></div>
+          <div class="pill">Frame-to-frame ms <span class="val" id="ftfMs">-</span></div>
+          <div class="pill">GPU total ms <span class="val" id="gpuTotal">-</span></div>
+          <div class="pill">CPU total ms <span class="val" id="cpuTotal">-</span></div>
+          <div class="pill">Objects <span class="val" id="objCount">-</span></div>
+          <div class="pill">Lights <span class="val" id="lightCount">-</span></div>
+          <div class="pill">Billboards <span class="val" id="bbCount">-</span></div>
+        </div>
+        <div id="status">Connecting...</div>
+      </section>
+
+      <section class="card">
+        <h2>Pipeline Flowchart (Live Times)</h2>
+        <svg id="flow" viewBox="0 0 1200 360" preserveAspectRatio="xMinYMin meet"></svg>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top:14px">
+      <h2>Scene Layout (Simulated Cameras)</h2>
+      <div class="views">
+        <div class="viewbox">
+          <div class="viewtitle">Top (XZ)</div>
+          <canvas id="viewTop" width="420" height="220"></canvas>
+        </div>
+        <div class="viewbox">
+          <div class="viewtitle">Front (XY)</div>
+          <canvas id="viewFront" width="420" height="220"></canvas>
+        </div>
+        <div class="viewbox">
+          <div class="viewtitle">Side (ZY)</div>
+          <canvas id="viewSide" width="420" height="220"></canvas>
+        </div>
+      </div>
+    </section>
+
+    <section class="card" style="margin-top:14px">
+      <h2>Per-Pass Timings</h2>
+      <div class="list">
+        <table>
+          <thead><tr><th>Pass</th><th>GPU ms</th><th>CPU ms</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const frameEl = document.getElementById('frame');
+    const frameMsEl = document.getElementById('frameMs');
+    const ftfMsEl = document.getElementById('ftfMs');
+    const gpuTotalEl = document.getElementById('gpuTotal');
+    const cpuTotalEl = document.getElementById('cpuTotal');
+    const objCountEl = document.getElementById('objCount');
+    const lightCountEl = document.getElementById('lightCount');
+    const bbCountEl = document.getElementById('bbCount');
+    const rowsEl = document.getElementById('rows');
+    const flowEl = document.getElementById('flow');
+
+    const viewTop = document.getElementById('viewTop');
+    const viewFront = document.getElementById('viewFront');
+    const viewSide = document.getElementById('viewSide');
+
+    let lastSnapshot = null;
+
+    function clearSvg(svg) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+    }
+
+    function boxColor(ms) {
+      if (ms >= 2.0) return '#7f2c21';
+      if (ms >= 1.0) return '#5f3a27';
+      if (ms >= 0.4) return '#2f4f3b';
+      return '#27414f';
+    }
+
+    function drawFlowchart(snapshot) {
+      clearSvg(flowEl);
+      const order = snapshot.pipeline_order || [];
+      if (!order.length) return;
+
+      const passMap = new Map();
+      for (const p of snapshot.pass_timings || []) passMap.set(p.name, p);
+
+      const marginX = 30;
+      const marginY = 24;
+      const boxW = Math.max(120, Math.floor((1200 - marginX * 2) / order.length) - 12);
+      const boxH = 96;
+      const gap = 12;
+      const y = marginY + 100;
+
+      for (let i = 0; i < order.length; i++) {
+        const name = order[i];
+        const t = passMap.get(name) || { gpu_ms: 0, cpu_ms: 0 };
+        const x = marginX + i * (boxW + gap);
+
+        if (i > 0) {
+          const ax = x - 6;
+          const ay = y + boxH / 2;
+          const prevX = x - gap + 2;
+          const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+          line.setAttribute('x1', String(prevX));
+          line.setAttribute('y1', String(ay));
+          line.setAttribute('x2', String(ax));
+          line.setAttribute('y2', String(ay));
+          line.setAttribute('stroke', '#5c7388');
+          line.setAttribute('stroke-width', '2');
+          flowEl.appendChild(line);
+
+          const tri = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+          tri.setAttribute('points', `${ax},${ay} ${ax-8},${ay-5} ${ax-8},${ay+5}`);
+          tri.setAttribute('fill', '#5c7388');
+          flowEl.appendChild(tri);
+        }
+
+        const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        rect.setAttribute('x', String(x));
+        rect.setAttribute('y', String(y));
+        rect.setAttribute('width', String(boxW));
+        rect.setAttribute('height', String(boxH));
+        rect.setAttribute('rx', '10');
+        rect.setAttribute('fill', boxColor(t.gpu_ms));
+        rect.setAttribute('stroke', '#6c89a5');
+        flowEl.appendChild(rect);
+
+        const title = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        title.setAttribute('x', String(x + 10));
+        title.setAttribute('y', String(y + 24));
+        title.setAttribute('fill', '#e8f0f8');
+        title.setAttribute('font-size', '12');
+        title.setAttribute('font-weight', '700');
+        title.textContent = name;
+        flowEl.appendChild(title);
+
+        const gpu = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        gpu.setAttribute('x', String(x + 10));
+        gpu.setAttribute('y', String(y + 50));
+        gpu.setAttribute('fill', '#ffb08a');
+        gpu.setAttribute('font-size', '11');
+        gpu.textContent = `GPU ${t.gpu_ms.toFixed(3)} ms`;
+        flowEl.appendChild(gpu);
+
+        const cpu = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        cpu.setAttribute('x', String(x + 10));
+        cpu.setAttribute('y', String(y + 70));
+        cpu.setAttribute('fill', '#9cf3be');
+        cpu.setAttribute('font-size', '11');
+        cpu.textContent = `CPU ${t.cpu_ms.toFixed(3)} ms`;
+        flowEl.appendChild(cpu);
+      }
+    }
+
+    function drawAxes(ctx, w, h) {
+      ctx.strokeStyle = '#1f3142';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2);
+      ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h);
+      ctx.stroke();
+    }
+
+    function drawSceneProjection(canvas, layout, mode) {
+      const ctx = canvas.getContext('2d');
+      const w = canvas.width;
+      const h = canvas.height;
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = '#0c141b';
+      ctx.fillRect(0, 0, w, h);
+      drawAxes(ctx, w, h);
+
+      if (!layout) return;
+
+      let minA = Infinity, maxA = -Infinity, minB = Infinity, maxB = -Infinity;
+
+      function extract(obj) {
+        const c = obj.bounds_center;
+        if (mode === 'top') return [c[0], c[2]];
+        if (mode === 'front') return [c[0], c[1]];
+        return [c[2], c[1]];
+      }
+
+      for (const o of layout.objects || []) {
+        const [a, b] = extract(o);
+        minA = Math.min(minA, a); maxA = Math.max(maxA, a);
+        minB = Math.min(minB, b); maxB = Math.max(maxB, b);
+      }
+      for (const l of layout.lights || []) {
+        const c = l.position;
+        const p = mode === 'top' ? [c[0], c[2]] : (mode === 'front' ? [c[0], c[1]] : [c[2], c[1]]);
+        minA = Math.min(minA, p[0]); maxA = Math.max(maxA, p[0]);
+        minB = Math.min(minB, p[1]); maxB = Math.max(maxB, p[1]);
+      }
+      if (!isFinite(minA)) { minA = -10; maxA = 10; minB = -10; maxB = 10; }
+
+      const spanA = Math.max(1, maxA - minA);
+      const spanB = Math.max(1, maxB - minB);
+      const pad = 14;
+      const sx = (w - pad * 2) / spanA;
+      const sy = (h - pad * 2) / spanB;
+      const s = Math.min(sx, sy);
+
+      function toScreen(a, b) {
+        const x = pad + (a - minA) * s;
+        const y = h - (pad + (b - minB) * s);
+        return [x, y];
+      }
+
+      ctx.strokeStyle = '#304a60';
+      ctx.lineWidth = 1;
+      for (const o of layout.objects || []) {
+        const [a, b] = extract(o);
+        const [x, y] = toScreen(a, b);
+        const r = Math.max(1.5, o.bounds_radius * s * 0.2);
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      ctx.fillStyle = '#ffb06e';
+      for (const l of layout.lights || []) {
+        const c = l.position;
+        const p = mode === 'top' ? [c[0], c[2]] : (mode === 'front' ? [c[0], c[1]] : [c[2], c[1]]);
+        const [x, y] = toScreen(p[0], p[1]);
+        ctx.beginPath();
+        ctx.arc(x, y, 3, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = '#7ff1b2';
+      for (const b of layout.billboards || []) {
+        const c = b.position;
+        const p = mode === 'top' ? [c[0], c[2]] : (mode === 'front' ? [c[0], c[1]] : [c[2], c[1]]);
+        const [x, y] = toScreen(p[0], p[1]);
+        ctx.fillRect(x - 1, y - 1, 2, 2);
+      }
+
+      if (layout.camera) {
+        const c = layout.camera.position;
+        const p = mode === 'top' ? [c[0], c[2]] : (mode === 'front' ? [c[0], c[1]] : [c[2], c[1]]);
+        const [x, y] = toScreen(p[0], p[1]);
+        ctx.fillStyle = '#69d8ff';
+        ctx.beginPath();
+        ctx.arc(x, y, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    function render(snapshot) {
+      lastSnapshot = snapshot;
+      frameEl.textContent = snapshot.frame;
+      frameMsEl.textContent = snapshot.frame_time_ms.toFixed(2);
+      ftfMsEl.textContent = snapshot.frame_to_frame_ms.toFixed(2);
+      gpuTotalEl.textContent = snapshot.total_gpu_ms.toFixed(2);
+      cpuTotalEl.textContent = snapshot.total_cpu_ms.toFixed(2);
+
+      const layout = snapshot.scene_layout || null;
+      objCountEl.textContent = layout ? (layout.objects || []).length : 0;
+      lightCountEl.textContent = layout ? (layout.lights || []).length : 0;
+      bbCountEl.textContent = layout ? (layout.billboards || []).length : 0;
+
+      rowsEl.innerHTML = '';
+      for (const t of snapshot.pass_timings || []) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${t.name}</td><td class="gpu">${t.gpu_ms.toFixed(3)}</td><td class="cpu">${t.cpu_ms.toFixed(3)}</td>`;
+        rowsEl.appendChild(tr);
+      }
+
+      drawFlowchart(snapshot);
+      drawSceneProjection(viewTop, layout, 'top');
+      drawSceneProjection(viewFront, layout, 'front');
+      drawSceneProjection(viewSide, layout, 'side');
+
+      const dt = new Date(snapshot.timestamp_ms).toLocaleTimeString();
+      statusEl.textContent = `Connected · last update ${dt}`;
+    }
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    ws.onopen = () => { statusEl.textContent = 'Connected · waiting for first frame...'; };
+    ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
+    ws.onerror = () => { statusEl.textContent = 'Socket error'; };
+    ws.onmessage = (ev) => {
+      try {
+        const snapshot = JSON.parse(ev.data);
+        render(snapshot);
+      } catch (_) {}
+    };
+  </script>
+</body>
+</html>
