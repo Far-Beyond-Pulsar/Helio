@@ -533,13 +533,15 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
     let ground_color = sky_color * 0.15; // ground bounce is dimmer and warmer
     let hemi_t       = N.y * 0.5 + 0.5; // 0 = fully down, 1 = fully up
-    let hemi_ambient = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
-
-    // RC irradiance replaces the hemisphere ambient where probe coverage exists
-    // (rc_irr fades to 0 outside the volume, so hemi_ambient fills in cleanly).
+    
+    // Split hemisphere into shadowed and non-shadowed components
+    let hemi_lit = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
+    let hemi_base = mix(ground_color, sky_color, hemi_t) * albedo * 0.15; // minimum fill (15% of hemisphere)
+    
+    // RC irradiance replaces the hemisphere ambient where probe coverage exists.
     // RC indirect is NOT occluded by shadow — that's the whole point of GI!
-    let rc_weight    = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-    let ambient_fallback = mix(hemi_ambient, diffuse_indirect, rc_weight);
+    let rc_weight = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+    let ambient_fallback = mix(hemi_lit, diffuse_indirect, rc_weight) + hemi_base;
 
     // ── Combine: direct + indirect (AO applied to indirect only) ─────────────
     let indirect = (ambient_fallback + specular_indirect) * ao;

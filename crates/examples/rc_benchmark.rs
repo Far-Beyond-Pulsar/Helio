@@ -196,10 +196,9 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig {
-            width: size.width, height: size.height,
-            surface_format: fmt, features,
-        }).expect("renderer");
+        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
+            size.width, size.height, fmt, features
+        )).expect("renderer");
 
         // ── Cornell-box geometry (12 m room) ──────────────────────────────────
         let floor   = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 5.0);

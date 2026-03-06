@@ -219,7 +219,7 @@ impl ApplicationHandler for App {
             .build();
 
         let renderer = Renderer::new(device.clone(), queue.clone(),
-            RendererConfig { width: size.width, height: size.height, surface_format: format, features },
+            RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
         let island_ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 55.0);

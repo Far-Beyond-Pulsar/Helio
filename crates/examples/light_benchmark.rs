@@ -244,10 +244,9 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig {
-            width: size.width, height: size.height,
-            surface_format: fmt, features,
-        }).expect("renderer");
+        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
+            size.width, size.height, fmt, features
+        )).expect("renderer");
 
         // ── Geometry ──────────────────────────────────────────────────────────
         let floor = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 20.0);

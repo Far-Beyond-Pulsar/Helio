@@ -217,7 +217,7 @@ impl ApplicationHandler for App {
             .build();
 
         let renderer = Renderer::new(device.clone(), queue.clone(),
-            RendererConfig { width: size.width, height: size.height, surface_format: format, features },
+            RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
         // Room: 24 m wide (X: -12..+12), 12 m deep (Z: -6..+6), 4 m tall

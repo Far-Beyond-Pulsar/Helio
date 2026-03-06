@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass};
+use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass, SsaoConfig, AntiAliasingMode, TaaConfig};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -25,6 +25,51 @@ pub struct RendererConfig {
     pub height: u32,
     pub surface_format: wgpu::TextureFormat,
     pub features: FeatureRegistry,
+    pub enable_ssao: bool,
+    pub ssao_config: SsaoConfig,
+    pub aa_mode: AntiAliasingMode,
+    pub taa_config: TaaConfig,
+}
+
+impl RendererConfig {
+    /// Create a basic config without AO or AA
+    pub fn new(width: u32, height: u32, surface_format: wgpu::TextureFormat, features: FeatureRegistry) -> Self {
+        Self {
+            width,
+            height,
+            surface_format,
+            features,
+            enable_ssao: false,
+            ssao_config: SsaoConfig::default(),
+            aa_mode: AntiAliasingMode::None,
+            taa_config: TaaConfig::default(),
+        }
+    }
+
+    /// Enable SSAO with default settings
+    pub fn with_ssao(mut self) -> Self {
+        self.enable_ssao = true;
+        self
+    }
+
+    /// Enable SSAO with custom settings
+    pub fn with_ssao_config(mut self, config: SsaoConfig) -> Self {
+        self.enable_ssao = true;
+        self.ssao_config = config;
+        self
+    }
+
+    /// Set anti-aliasing mode
+    pub fn with_aa(mut self, mode: AntiAliasingMode) -> Self {
+        self.aa_mode = mode;
+        self
+    }
+
+    /// Set TAA config (only used if aa_mode is TAA)
+    pub fn with_taa_config(mut self, config: TaaConfig) -> Self {
+        self.taa_config = config;
+        self
+    }
 }
 
 /// Globals uniform data
@@ -388,6 +433,14 @@ pub struct Renderer {
     gbuffer_targets: Arc<Mutex<GBufferTargets>>,
     /// Shared with DeferredLightingPass.  Swapped on resize.
     deferred_bg: Arc<Mutex<Arc<wgpu::BindGroup>>>,
+
+    // ── AO and AA resources ───────────────────────────────────────────────
+    enable_ssao: bool,
+    ssao_texture: Option<wgpu::Texture>,
+    ssao_view: Option<wgpu::TextureView>,
+    aa_mode: AntiAliasingMode,
+    pre_aa_texture: Option<wgpu::Texture>,
+    pre_aa_view: Option<wgpu::TextureView>,
 
     // Frame state
     frame_count: u64,
@@ -830,6 +883,12 @@ impl Renderer {
             gbuffer_targets,
             deferred_bg,
             default_material_views,
+            enable_ssao: config.enable_ssao,
+            ssao_texture: None,
+            ssao_view: None,
+            aa_mode: config.aa_mode,
+            pre_aa_texture: None,
+            pre_aa_view: None,
             frame_count: 0,
             width: config.width,
             height: config.height,

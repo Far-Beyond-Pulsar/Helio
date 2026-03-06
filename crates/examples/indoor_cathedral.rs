@@ -232,7 +232,7 @@ impl ApplicationHandler for App {
             .build();
 
         let renderer = Renderer::new(device.clone(), queue.clone(),
-            RendererConfig { width: size.width, height: size.height, surface_format: format, features },
+            RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m

@@ -186,7 +186,7 @@ impl ApplicationHandler for App {
 
         let renderer = Renderer::new(
             device.clone(), queue.clone(),
-            RendererConfig { width: size.width, height: size.height, surface_format: format, features },
+            RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18)

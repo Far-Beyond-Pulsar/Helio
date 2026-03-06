@@ -212,12 +212,7 @@ impl ApplicationHandler for App {
         let renderer = Renderer::new(
             device.clone(),
             queue.clone(),
-            RendererConfig {
-                width: size.width,
-                height: size.height,
-                surface_format,
-                features: feature_registry,
-            },
+            RendererConfig::new(size.width, size.height, surface_format, feature_registry),
         )
         .expect("Failed to create renderer");
 

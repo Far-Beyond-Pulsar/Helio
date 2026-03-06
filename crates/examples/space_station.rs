@@ -183,10 +183,9 @@ impl ApplicationHandler for App {
                 .with_world_bounds(RC_WORLD_MIN, RC_WORLD_MAX))
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig {
-            width: size.width, height: size.height,
-            surface_format: fmt, features,
-        }).expect("renderer");
+        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
+            size.width, size.height, fmt, features
+        )).expect("renderer");
 
         let meshes = build_station(&device);
         log::info!("Space station: {} meshes", meshes.len());
