@@ -1162,6 +1162,7 @@ impl Renderer {
             let (mn, mx) = rc.world_bounds();
             self.rc_world_min = mn;
             self.rc_world_max = mx;
+            log::debug!("RC bounds pulled from feature: [{:?} .. {:?}]", mn, mx);
         }
 
         // Update globals after feature prepare so all per-frame feature outputs are current.
@@ -1175,6 +1176,7 @@ impl Renderer {
             rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
             csm_splits: self.scene_csm_splits,
         };
+        log::debug!("Uploading globals with RC bounds: [{:?} .. {:?}]", self.rc_world_min, self.rc_world_max);
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
         // Build GPU debug batch from shapes submitted since the previous frame.
