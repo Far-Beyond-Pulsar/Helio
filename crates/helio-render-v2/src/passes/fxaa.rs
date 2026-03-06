@@ -111,6 +111,13 @@ impl FxaaPass {
             ],
         })
     }
+
+    /// Draw the FXAA fullscreen triangle into the current render pass
+    pub fn execute_draw(&self, pass: &mut wgpu::RenderPass, bind_group: &wgpu::BindGroup) {
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 impl RenderPass for FxaaPass {

@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass, SsaoConfig, AntiAliasingMode, TaaConfig};
+use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass, SsaoConfig, AntiAliasingMode, TaaConfig, FxaaPass, SmaaPass, TaaPass};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -439,8 +439,11 @@ pub struct Renderer {
     ssao_texture: Option<wgpu::Texture>,
     ssao_view: Option<wgpu::TextureView>,
     aa_mode: AntiAliasingMode,
-    pre_aa_texture: Option<wgpu::Texture>,
-    pre_aa_view: Option<wgpu::TextureView>,
+    pre_aa_texture: wgpu::Texture,
+    pre_aa_view: wgpu::TextureView,
+    fxaa_pass: Option<FxaaPass>,
+    smaa_pass: Option<SmaaPass>,
+    taa_pass: Option<TaaPass>,
 
     // Frame state
     frame_count: u64,
@@ -834,6 +837,49 @@ impl Renderer {
         // Create profiler if TIMESTAMP_QUERY was requested on this device
         let profiler = GpuProfiler::new(&device, &queue);
 
+        // Create pre-AA texture for post-processing
+        let pre_aa_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Pre-AA Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let pre_aa_view = pre_aa_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create AA passes based on config
+        let (fxaa_pass, smaa_pass, taa_pass) = match config.aa_mode {
+            AntiAliasingMode::Fxaa => {
+                log::info!("AA: FXAA enabled");
+                let pass = FxaaPass::new(&device, config.surface_format);
+                (Some(pass), None, None)
+            }
+            AntiAliasingMode::Smaa => {
+                log::info!("AA: SMAA enabled");
+                let pass = SmaaPass::new(&device, &queue, config.surface_format);
+                (None, Some(pass), None)
+            }
+            AntiAliasingMode::Taa => {
+                log::info!("AA: TAA enabled");
+                let pass = TaaPass::new(&device, config.surface_format, config.taa_config);
+                (None, None, Some(pass))
+            }
+            AntiAliasingMode::Msaa(samples) => {
+                log::info!("AA: MSAA {:?} enabled", samples);
+                (None, None, None)
+            }
+            AntiAliasingMode::None => {
+                (None, None, None)
+            }
+        };
+
         log::info!("Helio Render V2 initialized successfully");
 
         Ok(Self {
@@ -887,8 +933,11 @@ impl Renderer {
             ssao_texture: None,
             ssao_view: None,
             aa_mode: config.aa_mode,
-            pre_aa_texture: None,
-            pre_aa_view: None,
+            pre_aa_texture,
+            pre_aa_view,
+            fxaa_pass,
+            smaa_pass,
+            taa_pass,
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -1113,10 +1162,16 @@ impl Renderer {
             label: Some("Render Encoder"),
         });
 
+        // Determine render target: if AA is enabled, write to pre_aa texture first
+        let graph_target = match self.aa_mode {
+            AntiAliasingMode::None | AntiAliasingMode::Msaa(_) => target,
+            _ => &self.pre_aa_view,
+        };
+
         let mut graph_ctx = GraphContext {
             encoder: &mut encoder,
             resources: &self.resources,
-            target,
+            target: graph_target,
             depth_view: &self.depth_view,
             frame: self.frame_count,
             global_bind_group: &self.global_bind_group,
@@ -1130,6 +1185,66 @@ impl Renderer {
         if let Some(p) = &mut self.profiler { p.begin_frame(); }
 
         self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
+
+        // Apply anti-aliasing post-processing if enabled
+        if let Some(fxaa) = &self.fxaa_pass {
+            let bind_group = fxaa.create_bind_group(&self.device, &self.pre_aa_view);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("FXAA Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            fxaa.execute_draw(&mut pass, &bind_group);
+        } else if let Some(smaa) = &self.smaa_pass {
+            let bind_group = smaa.create_bind_group(&self.device, &self.pre_aa_view);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("SMAA Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            smaa.execute_draw(&mut pass, &bind_group);
+        } else if let Some(taa) = &self.taa_pass {
+            let bind_group = taa.create_bind_group(&self.device, &self.pre_aa_view, &self.depth_view);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TAA Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            taa.execute_draw(&mut pass, &bind_group);
+        }
 
         // Resolve GPU timestamp queries into staging buffers (before finish)
         if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }

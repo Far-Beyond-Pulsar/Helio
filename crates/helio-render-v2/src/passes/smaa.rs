@@ -242,6 +242,38 @@ impl SmaaPass {
         let view = texture.create_view(&Default::default());
         (texture, view)
     }
+
+    pub fn create_bind_group(
+        &self,
+        device: &wgpu::Device,
+        input_view: &wgpu::TextureView,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("SMAA Bind Group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(input_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_point),
+                },
+            ],
+        })
+    }
+
+    /// Draw the SMAA fullscreen triangle into the current render pass
+    pub fn execute_draw(&self, pass: &mut wgpu::RenderPass, bind_group: &wgpu::BindGroup) {
+        pass.set_pipeline(&self.neighborhood_blend_pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }
 
 impl RenderPass for SmaaPass {
