@@ -84,6 +84,7 @@ impl ShadowPass {
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
         light_count: Arc<AtomicU32>,
         device: &wgpu::Device,
+        material_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // Bind group layout: binding 0 = shadow matrices storage buffer (vertex stage)
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -118,7 +119,7 @@ impl ShadowPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[Some(&bgl)],
+            bind_group_layouts: &[Some(&bgl), Some(material_layout)],
             immediate_size: 0,
         });
 
@@ -130,18 +131,32 @@ impl ShadowPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 buffers: &[wgpu::VertexBufferLayout {
-                    // Matches PackedVertex stride; only position at offset 0 is used
+                    // Matches PackedVertex stride
                     array_stride: 32,
                     step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x3,
-                        offset: 0,
-                        shader_location: 0,
-                    }],
+                    attributes: &[
+                        // position: vec3<f32>
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        // tex_coords: vec2<f32>
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 16,
+                            shader_location: 2,
+                        },
+                    ],
                 }],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
-            fragment: None, // depth-only
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 front_face: wgpu::FrontFace::Ccw,
@@ -213,11 +228,11 @@ impl RenderPass for ShadowPass {
 
         // ── Camera-distance filter (shared across all lights) ────────────────
         // Compute once outside the light loop; each light renders the same set.
-        // Exclude transparent objects - they should not cast shadows.
+        // Transparent objects now cast alpha-tested shadows.
         let range_filtered: Vec<&DrawCall> = draw_calls.iter()
             .filter(|dc| {
                 let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
-                dist <= SHADOW_MAX_DISTANCE && !dc.transparent_blend
+                dist <= SHADOW_MAX_DISTANCE
             })
             .collect();
 
@@ -296,6 +311,7 @@ impl RenderPass for ShadowPass {
                 pass.set_bind_group(0, &self.bind_group, &[]);
 
                 for dc in face_draws {
+                    pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
                     pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
                     pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                     // instance_index = layer_idx selects the correct face matrix in the vertex shader

@@ -151,6 +151,7 @@ impl Feature for ShadowsFeature {
             ctx.shadow_matrix_buffer.clone(),
             ctx.light_count_arc.clone(),
             ctx.device,
+            &ctx.resources.bind_group_layouts.material,
         ));
 
         log::info!(
