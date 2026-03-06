@@ -60,9 +60,16 @@ impl Camera {
     
     /// Get camera forward direction (normalized)
     pub fn forward(&self) -> Vec3 {
-        // Extract forward from view_proj_inv matrix
-        // The forward vector is -Z axis of the view matrix
+        // Reconstruct the center view ray by unprojecting NDC center at near/far.
+        // This works for both perspective and orthographic projections.
         let inv = self.view_proj_inv;
-        Vec3::new(-inv.z_axis.x, -inv.z_axis.y, -inv.z_axis.z).normalize()
+
+        let near_h = inv * glam::Vec4::new(0.0, 0.0, 0.0, 1.0);
+        let far_h = inv * glam::Vec4::new(0.0, 0.0, 1.0, 1.0);
+
+        let near = near_h.truncate() / near_h.w.max(1e-6);
+        let far = far_h.truncate() / far_h.w.max(1e-6);
+
+        (far - near).normalize_or_zero()
     }
 }

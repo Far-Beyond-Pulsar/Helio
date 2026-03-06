@@ -36,6 +36,7 @@ impl RenderPass for TransparentPass {
 
     fn declare_resources(&self, builder: &mut PassResourceBuilder) {
         builder.read(ResourceHandle::named("color_target"));
+        builder.write(ResourceHandle::named("color_target"));
         builder.read(ResourceHandle::named("gbuffer"));
     }
 
@@ -57,9 +58,7 @@ impl RenderPass for TransparentPass {
             return Ok(());
         }
 
-        // Back-to-front for standard alpha blending.
-        // Use camera-forward depth (not radial distance) so stacked transparent
-        // meshes along the view direction sort correctly.
+        // Back-to-front for standard alpha blending using view depth.
         let cam = ctx.camera_position;
         let fwd = ctx.camera_forward;
         self.sorted_transparent_indices.sort_by(|&ia, &ib| {
@@ -68,12 +67,10 @@ impl RenderPass for TransparentPass {
             let oa = glam::Vec3::from(a.bounds_center) - cam;
             let ob = glam::Vec3::from(b.bounds_center) - cam;
 
-            // Approximate the farthest point on each sphere along view ray.
-            // Larger depth should be drawn first (back-to-front).
-            let da = oa.dot(fwd) + a.bounds_radius;
-            let db = ob.dot(fwd) + b.bounds_radius;
+            let da = oa.dot(fwd);
+            let db = ob.dot(fwd);
 
-            da.partial_cmp(&db)
+            db.partial_cmp(&da)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 // Deterministic fallback when depths match closely.
                 .then_with(|| {
