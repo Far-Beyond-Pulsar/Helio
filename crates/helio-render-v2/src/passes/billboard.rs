@@ -129,12 +129,17 @@ impl BillboardPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                // Read depth to be occluded by geometry, but don't write —
-                // alpha-blended quads must not clobber the depth buffer.
+                // For debug visualization, billboards should show through geometry.
+                // Use LessEqual so they render at their depth, with a small bias to push
+                // them slightly forward to avoid Z-fighting.
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,  // Pull billboards slightly toward camera
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
