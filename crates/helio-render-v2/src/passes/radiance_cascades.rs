@@ -91,8 +91,11 @@ impl RenderPass for RadianceCascadesPass {
         let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
         if draw_calls.is_empty() {
             // No geometry → nothing to trace; textures stay at their initial state (zeros)
+            log::warn!("RC: No draw calls! RC will output zeros");
             return Ok(());
         }
+        log::info!("RC: Executing with {} draw calls, bounds [{:?} .. {:?}]", 
+            draw_calls.len(), self.world_min, self.world_max);
 
         // ── 1. Create new BLASes for meshes not yet in the cache ──────────────
         for dc in &draw_calls {
