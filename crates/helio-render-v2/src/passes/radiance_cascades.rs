@@ -96,6 +96,10 @@ impl RenderPass for RadianceCascadesPass {
         }
         log::info!("RC: Executing with {} draw calls, bounds [{:?} .. {:?}]", 
             draw_calls.len(), self.world_min, self.world_max);
+        
+        // Note: light_count is uploaded via rc_dyn buffer in feature prepare,
+        // so we can't easily log it here. The compute shader will use whatever
+        // light count was set in the last prepare() call.
 
         // ── 1. Create new BLASes for meshes not yet in the cache ──────────────
         for dc in &draw_calls {
