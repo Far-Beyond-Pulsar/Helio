@@ -1651,6 +1651,23 @@ impl Renderer {
             &self.depth_sample_view,
         ));
         *self.deferred_bg.lock().unwrap() = new_bg;
+
+        // Recreate pre-AA texture at new resolution
+        self.pre_aa_texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Pre-AA Texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.pre_aa_texture.format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.pre_aa_view = self.pre_aa_texture.create_view(&wgpu::TextureViewDescriptor::default());
     }
 
     pub fn frame_count(&self) -> u64 { self.frame_count }
