@@ -248,6 +248,13 @@
     const viewSide = document.getElementById('viewSide');
 
     let lastSnapshot = null;
+    // Maintain scene state with ID-based tracking for delta application
+    let sceneState = {
+      objects: new Map(),     // id -> PortalSceneObject
+      lights: new Map(),      // id -> PortalSceneLight
+      billboards: new Map(),  // id -> PortalSceneBillboard
+      camera: null
+    };
     let flowchartZoom = 1.0;
     let panX = 0;
     let panY = 0;
@@ -627,6 +634,66 @@
       }
     }
 
+    function applySceneDelta(delta) {
+      if (!delta) return;
+      
+      // Apply object changes (add/update)
+      if (delta.object_changes) {
+        for (const obj of delta.object_changes) {
+          sceneState.objects.set(obj.id, obj);
+        }
+      }
+      
+      // Remove deleted objects
+      if (delta.removed_object_ids) {
+        for (const id of delta.removed_object_ids) {
+          sceneState.objects.delete(id);
+        }
+      }
+      
+      // Apply light changes
+      if (delta.light_changes) {
+        for (const light of delta.light_changes) {
+          sceneState.lights.set(light.id, light);
+        }
+      }
+      
+      // Remove deleted lights
+      if (delta.removed_light_ids) {
+        for (const id of delta.removed_light_ids) {
+          sceneState.lights.delete(id);
+        }
+      }
+      
+      // Apply billboard changes
+      if (delta.billboard_changes) {
+        for (const bb of delta.billboard_changes) {
+          sceneState.billboards.set(bb.id, bb);
+        }
+      }
+      
+      // Remove deleted billboards
+      if (delta.removed_billboard_ids) {
+        for (const id of delta.removed_billboard_ids) {
+          sceneState.billboards.delete(id);
+        }
+      }
+      
+      // Update camera if changed
+      if (delta.camera !== undefined) {
+        sceneState.camera = delta.camera;
+      }
+    }
+
+    function getSceneLayoutFromState() {
+      return {
+        objects: Array.from(sceneState.objects.values()),
+        lights: Array.from(sceneState.lights.values()),
+        billboards: Array.from(sceneState.billboards.values()),
+        camera: sceneState.camera
+      };
+    }
+
     function render(snapshot) {
       lastSnapshot = snapshot;
       frameEl.textContent = snapshot.frame;
@@ -635,10 +702,13 @@
       gpuTotalEl.textContent = snapshot.total_gpu_ms.toFixed(2);
       cpuTotalEl.textContent = snapshot.total_cpu_ms.toFixed(2);
 
-      const layout = snapshot.scene_layout || null;
-      objCountEl.textContent = layout ? (layout.objects || []).length : 0;
-      lightCountEl.textContent = layout ? (layout.lights || []).length : 0;
-      bbCountEl.textContent = layout ? (layout.billboards || []).length : 0;
+      // Apply scene delta to update state
+      applySceneDelta(snapshot.scene_delta);
+      const layout = getSceneLayoutFromState();
+
+      objCountEl.textContent = layout.objects.length;
+      lightCountEl.textContent = layout.lights.length;
+      bbCountEl.textContent = layout.billboards.length;
 
       const totalGpu = snapshot.total_gpu_ms || 0;
       const totalCpu = snapshot.total_cpu_ms || 0;

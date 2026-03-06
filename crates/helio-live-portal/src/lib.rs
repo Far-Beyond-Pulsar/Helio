@@ -15,39 +15,64 @@ pub struct PortalPassTiming {
     pub cpu_ms: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PortalSceneObject {
+    pub id: u32,
     pub bounds_center: [f32; 3],
     pub bounds_radius: f32,
     pub has_material: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PortalSceneLight {
+    pub id: u32,
     pub position: [f32; 3],
     pub color: [f32; 3],
     pub intensity: f32,
     pub range: f32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PortalSceneBillboard {
+    pub id: u32,
     pub position: [f32; 3],
     pub scale: [f32; 2],
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PortalSceneCamera {
     pub position: [f32; 3],
     pub forward: [f32; 3],
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PortalSceneLayout {
     pub objects: Vec<PortalSceneObject>,
     pub lights: Vec<PortalSceneLight>,
     pub billboards: Vec<PortalSceneBillboard>,
     pub camera: Option<PortalSceneCamera>,
+}
+
+/// Delta update: only includes changed elements to reduce bandwidth
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct PortalSceneLayoutDelta {
+    /// Objects to add or update: send full data on add, sparse data on update
+    pub object_changes: Vec<PortalSceneObject>,
+    /// Object IDs to remove (not present in object_changes)
+    pub removed_object_ids: Vec<u32>,
+    
+    /// Lights to add or update
+    pub light_changes: Vec<PortalSceneLight>,
+    /// Light IDs to remove
+    pub removed_light_ids: Vec<u32>,
+    
+    /// Billboards to add or update
+    pub billboard_changes: Vec<PortalSceneBillboard>,
+    /// Billboard IDs to remove
+    pub removed_billboard_ids: Vec<u32>,
+    
+    /// Only present if camera changed
+    pub camera: Option<Option<PortalSceneCamera>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -59,7 +84,8 @@ pub struct PortalFrameSnapshot {
     pub total_cpu_ms: f32,
     pub pass_timings: Vec<PortalPassTiming>,
     pub pipeline_order: Vec<String>,
-    pub scene_layout: Option<PortalSceneLayout>,
+    /// Delta updates for scene data (only changes sent, except first frame which is full)
+    pub scene_delta: Option<PortalSceneLayoutDelta>,
     pub timestamp_ms: u128,
 }
 

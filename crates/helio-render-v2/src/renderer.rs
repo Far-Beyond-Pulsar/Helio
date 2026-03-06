@@ -19,6 +19,7 @@ use helio_live_portal::{
     PortalFrameSnapshot,
     PortalPassTiming,
     PortalSceneLayout,
+    PortalSceneLayoutDelta,
     PortalSceneObject,
     PortalSceneLight,
     PortalSceneBillboard,
@@ -538,6 +539,8 @@ pub struct Renderer {
     live_portal: Option<LivePortalHandle>,
     /// Last captured scene layout snapshot forwarded to the portal thread.
     latest_scene_layout: Option<PortalSceneLayout>,
+    /// Previous scene layout for delta computation (reduces bandwidth).
+    previous_scene_layout: Option<PortalSceneLayout>,
 }
 
 impl Renderer {
@@ -1156,6 +1159,7 @@ impl Renderer {
             debug_printout: false,
             live_portal: None,
             latest_scene_layout: None,
+            previous_scene_layout: None,
             
             // GPU-driven rendering flags and buffers
             gpu_driven: config.gpu_driven,
@@ -1372,7 +1376,7 @@ impl Renderer {
 
     /// Convenience: start live portal on the default port.
     pub fn start_live_portal_default(&mut self) -> Result<String> {
-        self.start_live_portal("127.0.0.1:7878")
+        self.start_live_portal("0.0.0.0:7878")
     }
 
     /// Check if GPU-driven indirect rendering is enabled
@@ -1706,6 +1710,11 @@ impl Renderer {
                 })
                 .collect::<Vec<_>>();
 
+            // Compute scene delta: on first frame send full state, then only changes
+            let scene_delta = self.latest_scene_layout.as_ref().map(|current| {
+                compute_scene_delta(current, self.previous_scene_layout.as_ref())
+            });
+
             let snapshot = PortalFrameSnapshot {
                 frame: self.frame_count,
                 frame_time_ms,
@@ -1714,11 +1723,14 @@ impl Renderer {
                 total_cpu_ms: p.last_total_cpu_ms,
                 pass_timings,
                 pipeline_order: self.graph.execution_pass_names(),
-                scene_layout: self.latest_scene_layout.clone(),
+                scene_delta,
                 timestamp_ms: now_ms,
             };
 
             portal.publish(snapshot);
+
+            // Update previous layout for next frame's delta computation
+            self.previous_scene_layout = self.latest_scene_layout.clone();
         }
 
         self.frame_count += 1;
@@ -2256,20 +2268,23 @@ impl Renderer {
 }
 
 fn build_portal_scene_layout(scene: &Scene, camera: &Camera) -> PortalSceneLayout {
-    let objects = scene.objects.iter().map(|obj| PortalSceneObject {
+    let objects = scene.objects.iter().enumerate().map(|(id, obj)| PortalSceneObject {
+        id: id as u32,
         bounds_center: obj.mesh.bounds_center,
         bounds_radius: obj.mesh.bounds_radius,
         has_material: obj.material.is_some(),
     }).collect::<Vec<_>>();
 
-    let lights = scene.lights.iter().map(|l| PortalSceneLight {
+    let lights = scene.lights.iter().enumerate().map(|(id, l)| PortalSceneLight {
+        id: id as u32,
         position: l.position,
         color: l.color,
         intensity: l.intensity,
         range: l.range,
     }).collect::<Vec<_>>();
 
-    let billboards = scene.billboards.iter().map(|b| PortalSceneBillboard {
+    let billboards = scene.billboards.iter().enumerate().map(|(id, b)| PortalSceneBillboard {
+        id: id as u32,
         position: b.position,
         scale: b.scale,
     }).collect::<Vec<_>>();
@@ -2286,6 +2301,88 @@ fn build_portal_scene_layout(scene: &Scene, camera: &Camera) -> PortalSceneLayou
         billboards,
         camera: Some(cam),
     }
+}
+
+/// Compute delta between current and previous scene layouts
+fn compute_scene_delta(current: &PortalSceneLayout, previous: Option<&PortalSceneLayout>) -> PortalSceneLayoutDelta {
+    let mut delta = PortalSceneLayoutDelta::default();
+    
+    // Build maps of current and previous objects by ID
+    let curr_obj_map: std::collections::HashMap<u32, _> = current.objects.iter().map(|o| (o.id, o)).collect();
+    let prev_obj_map: std::collections::HashMap<u32, _> = previous.map_or(std::collections::HashMap::new(), |p| {
+        p.objects.iter().map(|o| (o.id, o)).collect()
+    });
+    
+    // Find objects to add or update
+    for obj in &current.objects {
+        if let Some(&prev_obj) = prev_obj_map.get(&obj.id) {
+            // Object exists: check if changed
+            if prev_obj != obj {
+                delta.object_changes.push(obj.clone());
+            }
+        } else {
+            // New object
+            delta.object_changes.push(obj.clone());
+        }
+    }
+    
+    // Find removed objects
+    for id in prev_obj_map.keys() {
+        if !curr_obj_map.contains_key(id) {
+            delta.removed_object_ids.push(*id);
+        }
+    }
+    
+    // Same for lights
+    let curr_light_map: std::collections::HashMap<u32, _> = current.lights.iter().map(|l| (l.id, l)).collect();
+    let prev_light_map: std::collections::HashMap<u32, _> = previous.map_or(std::collections::HashMap::new(), |p| {
+        p.lights.iter().map(|l| (l.id, l)).collect()
+    });
+    
+    for light in &current.lights {
+        if let Some(&prev_light) = prev_light_map.get(&light.id) {
+            if prev_light != light {
+                delta.light_changes.push(light.clone());
+            }
+        } else {
+            delta.light_changes.push(light.clone());
+        }
+    }
+    
+    for id in prev_light_map.keys() {
+        if !curr_light_map.contains_key(id) {
+            delta.removed_light_ids.push(*id);
+        }
+    }
+    
+    // Same for billboards
+    let curr_bb_map: std::collections::HashMap<u32, _> = current.billboards.iter().map(|b| (b.id, b)).collect();
+    let prev_bb_map: std::collections::HashMap<u32, _> = previous.map_or(std::collections::HashMap::new(), |p| {
+        p.billboards.iter().map(|b| (b.id, b)).collect()
+    });
+    
+    for bb in &current.billboards {
+        if let Some(&prev_bb) = prev_bb_map.get(&bb.id) {
+            if prev_bb != bb {
+                delta.billboard_changes.push(bb.clone());
+            }
+        } else {
+            delta.billboard_changes.push(bb.clone());
+        }
+    }
+    
+    for id in prev_bb_map.keys() {
+        if !curr_bb_map.contains_key(id) {
+            delta.removed_billboard_ids.push(*id);
+        }
+    }
+    
+    // Check camera
+    if previous.map_or(true, |p| p.camera != current.camera) {
+        delta.camera = Some(current.camera.clone());
+    }
+    
+    delta
 }
 
 fn open_url_in_browser(url: &str) {
