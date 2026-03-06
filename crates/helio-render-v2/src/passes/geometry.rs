@@ -97,10 +97,6 @@ impl RenderPass for GeometryPass {
         pass.set_bind_group(2, lighting_bg, &[]);
 
         for dc in &draw_calls {
-            // Skip transparent objects — they're rendered separately in TransparentForward pass
-            if dc.transparent_blend {
-                continue;
-            }
             pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
