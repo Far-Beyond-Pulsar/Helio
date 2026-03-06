@@ -94,7 +94,7 @@ impl RenderPass for RadianceCascadesPass {
             log::warn!("RC: No draw calls! RC will output zeros");
             return Ok(());
         }
-        log::info!("RC: Executing with {} draw calls, bounds [{:?} .. {:?}]", 
+        log::trace!("RC: Executing with {} draw calls, bounds [{:?} .. {:?}]", 
             draw_calls.len(), self.world_min, self.world_max);
         
         // Note: light_count is uploaded via rc_dyn buffer in feature prepare,

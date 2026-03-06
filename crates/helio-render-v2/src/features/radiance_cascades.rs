@@ -10,7 +10,7 @@ use crate::passes::RadianceCascadesPass;
 use crate::Result;
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::AtomicU32};
+use std::sync::{Arc, atomic::AtomicU32};s
 
 pub const CASCADE_COUNT: usize = 4;
 /// Probe grid dimension per cascade (cubed = total probes per cascade)
@@ -349,7 +349,7 @@ impl Feature for RadianceCascadesFeature {
             self.world_max,
         ));
 
-        log::info!(
+        log::trace!(
             "RadianceCascades feature registered: {} cascades, world [{:?} .. {:?}]",
             CASCADE_COUNT, self.world_min, self.world_max,
         );
@@ -357,14 +357,14 @@ impl Feature for RadianceCascadesFeature {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
-        log::info!("RC prepare called - updating bounds from camera");
+        log::trace!("RC prepare called - updating bounds from camera");
         self.update_follow_bounds_from_camera(ctx.camera.position.to_array());
         
         if self.follow_camera {
-            log::info!("RC camera-follow: camera_pos={:?}, bounds updated to [{:?} .. {:?}]",
+            log::trace!("RC camera-follow: camera_pos={:?}, bounds updated to [{:?} .. {:?}]",
                 ctx.camera.position, self.world_min, self.world_max);
         } else {
-            log::info!("RC: camera-follow DISABLED");
+            log::trace!("RC: camera-follow DISABLED");
         }
 
         let Some(buf) = &self.rc_dynamic_buf else { 
@@ -374,7 +374,7 @@ impl Feature for RadianceCascadesFeature {
         let light_count = self.light_count_arc.as_ref()
             .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
-        log::info!("RC prepare: uploading {} lights to rc_dyn buffer", light_count);
+        log::trace!("RC prepare: uploading {} lights to rc_dyn buffer", light_count);
         let dyn_data = RCDynamic {
             world_min:   [self.world_min[0], self.world_min[1], self.world_min[2], 0.0],
             world_max:   [self.world_max[0], self.world_max[1], self.world_max[2], 0.0],
