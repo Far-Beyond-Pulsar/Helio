@@ -473,9 +473,9 @@ impl Renderer {
         queue: Arc<wgpu::Queue>,
         config: RendererConfig,
     ) -> Result<Self> {
-        log::info!("Creating Helio Render V2");
-        log::info!("  Surface format: {:?}", config.surface_format);
-        log::info!("  Resolution: {}x{}", config.width, config.height);
+        log::trace!("Creating Helio Render V2");
+        log::trace!("  Surface format: {:?}", config.surface_format);
+        log::trace!("  Resolution: {}x{}", config.width, config.height);
 
         let mut resources = ResourceManager::new(device.clone());
         let lighting_layout = resources.bind_group_layouts.lighting.clone();
@@ -781,7 +781,7 @@ impl Renderer {
         });
         let default_rc_view = default_rc_tex.create_view(&Default::default());
         if feat_rc_view.is_some() {
-            log::info!("RC feature provided valid output texture view");
+            log::trace!("RC feature provided valid output texture view");
         } else {
             log::warn!("RC feature output view not set - using dummy black 1x1 texture!");
         }
@@ -877,22 +877,22 @@ impl Renderer {
         // Create AA passes based on config
         let (fxaa_pass, smaa_pass, taa_pass) = match config.aa_mode {
             AntiAliasingMode::Fxaa => {
-                log::info!("AA: FXAA enabled");
+                log::trace!("AA: FXAA enabled");
                 let pass = FxaaPass::new(&device, config.surface_format);
                 (Some(pass), None, None)
             }
             AntiAliasingMode::Smaa => {
-                log::info!("AA: SMAA enabled");
+                log::trace!("AA: SMAA enabled");
                 let pass = SmaaPass::new(&device, &queue, config.surface_format);
                 (None, Some(pass), None)
             }
             AntiAliasingMode::Taa => {
-                log::info!("AA: TAA enabled");
+                log::trace!("AA: TAA enabled");
                 let pass = TaaPass::new(&device, config.surface_format, config.taa_config);
                 (None, None, Some(pass))
             }
             AntiAliasingMode::Msaa(samples) => {
-                log::info!("AA: MSAA {:?} enabled", samples);
+                log::trace!("AA: MSAA {:?} enabled", samples);
                 (None, None, None)
             }
             AntiAliasingMode::None => {
@@ -900,7 +900,7 @@ impl Renderer {
             }
         };
 
-        log::info!("Helio Render V2 initialized successfully");
+        log::trace!("Helio Render V2 initialized successfully");
 
         Ok(Self {
             device,
@@ -1109,7 +1109,7 @@ impl Renderer {
         }));
         self.light_buffer_capacity_lights = new_capacity;
         self.rebuild_lighting_bind_group();
-        log::info!(
+        log::trace!(
             "Grew light buffer to {} lights ({} bytes)",
             new_capacity,
             new_size,
@@ -1123,7 +1123,7 @@ impl Renderer {
         self.features.enable(name)?;
         let flags = self.features.active_flags();
         self.pipelines.set_active_features(flags);
-        log::info!("Enabled feature: {}", name);
+        log::trace!("Enabled feature: {}", name);
         Ok(())
     }
 
@@ -1141,7 +1141,7 @@ impl Renderer {
         self.features.disable(name)?;
         let flags = self.features.active_flags();
         self.pipelines.set_active_features(flags);
-        log::info!("Disabled feature: {}", name);
+        log::trace!("Disabled feature: {}", name);
         Ok(())
     }
 
@@ -1173,7 +1173,7 @@ impl Renderer {
             let (mn, mx) = rc.world_bounds();
             self.rc_world_min = mn;
             self.rc_world_max = mx;
-            log::info!("✓ RC bounds pulled from feature: [{:?} .. {:?}]", mn, mx);
+            log::trace!("✓ RC bounds pulled from feature: [{:?} .. {:?}]", mn, mx);
         } else {
             log::warn!("✗ FAILED to pull RC bounds - feature not found in registry!");
         }
@@ -1189,7 +1189,7 @@ impl Renderer {
             rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
             csm_splits: self.scene_csm_splits,
         };
-        log::info!("Uploading globals: RC bounds min=[{:.1} {:.1} {:.1}] max=[{:.1} {:.1} {:.1}]", 
+        log::trace!("Uploading globals: RC bounds min=[{:.1} {:.1} {:.1}] max=[{:.1} {:.1} {:.1}]", 
                    self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2],
                    self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2]);
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
@@ -1466,7 +1466,7 @@ impl Renderer {
         
         let count = sorted_lights.len();
         if self.frame_count % 120 == 0 && total_lights > count {
-            log::info!("Light culling: {} visible of {} total", count, total_lights);
+            log::trace!("Light culling: {} visible of {} total", count, total_lights);
         }
 
         self.ensure_light_buffer_capacity(count as u32);
@@ -1690,7 +1690,7 @@ impl Renderer {
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
-        log::info!("Resizing renderer to {}x{}", width, height);
+        log::trace!("Resizing renderer to {}x{}", width, height);
         self.width = width;
         self.height = height;
 
@@ -1773,7 +1773,7 @@ impl Renderer {
                 crate::profiler::GpuProfiler::print_snapshot(timings, total_gpu, total_cpu, frame_time, frame_to_frame);
             });
         } else {
-            log::info!("[TIMING] TIMESTAMP_QUERY unavailable — add wgpu::Features::TIMESTAMP_QUERY to device descriptor");
+            log::trace!("[TIMING] TIMESTAMP_QUERY unavailable — add wgpu::Features::TIMESTAMP_QUERY to device descriptor");
         }
     }
     pub fn device(&self) -> &wgpu::Device { &self.device }
