@@ -1650,14 +1650,12 @@ impl Renderer {
 
             // Inject sky-based ambient when a Skylight is present.
             // RC cascades already handle most indirect diffuse; skylight should
-            // act as a subtle fill/tint (0.06 scale keeps it from overpowering
-            // direct lights and avoids double-counting with RC GI).
+            // act as a moderate fill so shadowed areas aren't pitch black.
             if let Some(skylight) = &scene.skylight {
                 let sun_elev = sun_dir[1].clamp(-1.0, 1.0);
                 let sky_amb  = estimate_sky_ambient(sun_elev, &atm.rayleigh_scatter);
                 let tint     = skylight.color_tint;
-                // ~0.004 = very subtle sky tint, will not overpower direct lights or GI
-                let si = skylight.intensity * 0.004;
+                let si = skylight.intensity * 0.06;
                 let base_i = scene.ambient_intensity;
                 self.scene_ambient_color = [
                     scene.ambient_color[0] * base_i + sky_amb[0] * tint[0] * si,
