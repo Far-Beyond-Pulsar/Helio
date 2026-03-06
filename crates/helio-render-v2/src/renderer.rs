@@ -1664,8 +1664,17 @@ impl Renderer {
                 self.scene_ambient_intensity = scene.ambient_intensity.max(0.15);
             }
         }
+
+        // Feed the computed sky/ambient colour into the RC feature so sky-miss
+        // rays contribute sky radiance (zero at night / indoors → correct).
+        if let Some(rc) = self.features.get_typed_mut::<RadianceCascadesFeature>("radiance_cascades") {
+            let c = self.scene_ambient_color;
+            let i = self.scene_ambient_intensity;
+            rc.set_sky_color([c[0] * i, c[1] * i, c[2] * i]);
+        }
+
         let t6_sky = render_scene_start.elapsed().as_secs_f32() * 1000.0;
-        
+
         if self.debug_printout && self.frame_count % 60 == 0 {
             eprintln!("🔧 render_scene CPU breakdown: queue={:.2}ms, lights={:.2}ms, cluster={:.2}ms, shadow={:.2}ms, bb={:.2}ms, sky={:.2}ms",
                 t1_queue_draws, t2_lights - t1_queue_draws, t3_clustering - t2_lights, 

@@ -36,6 +36,8 @@ pub struct RCDynamic {
     pub light_count: u32,
     pub _pad0: u32,
     pub _pad1: u32,
+    /// Sky radiance used for miss rays (rgb = linear colour, w unused).
+    pub sky_color:   [f32; 4],
 }
 
 /// GPU-side static per-cascade uniforms (constant after register)
@@ -61,6 +63,9 @@ pub struct RadianceCascadesFeature {
     world_max: [f32; 3],
     follow_camera: bool,
     follow_half_extents: [f32; 3],
+    /// Sky radiance for miss rays, set each frame by the renderer from
+    /// the scene's ambient/skylight colour.
+    sky_color: [f32; 3],
     // output textures: what RC writes each frame; what geometry reads
     output_textures:  Vec<Arc<wgpu::Texture>>,
     output_views:     Vec<Arc<wgpu::TextureView>>,
@@ -82,6 +87,7 @@ impl RadianceCascadesFeature {
             world_max: [10.0, 10.0, 10.0],
             follow_camera: false,
             follow_half_extents: [10.0, 5.5, 10.0],
+            sky_color: [0.0; 3],
             output_textures:  Vec::new(),
             output_views:     Vec::new(),
             history_textures: Vec::new(),
@@ -115,6 +121,11 @@ impl RadianceCascadesFeature {
     /// Current world bounds used by RC this frame.
     pub fn world_bounds(&self) -> ([f32; 3], [f32; 3]) {
         (self.world_min, self.world_max)
+    }
+
+    /// Set the sky radiance used for RC miss rays (driven by skylight/ambient).
+    pub fn set_sky_color(&mut self, color: [f32; 3]) {
+        self.sky_color = color;
     }
 
     fn update_follow_bounds_from_camera(&mut self, camera_pos: [f32; 3]) {
@@ -370,6 +381,7 @@ impl Feature for RadianceCascadesFeature {
             frame: ctx.frame as u32,
             light_count,
             _pad0: 0, _pad1: 0,
+            sky_color: [self.sky_color[0], self.sky_color[1], self.sky_color[2], 0.0],
         };
         ctx.queue.write_buffer(buf, 0, bytemuck::bytes_of(&dyn_data));
         Ok(())

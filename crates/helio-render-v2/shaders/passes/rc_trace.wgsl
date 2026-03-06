@@ -33,6 +33,8 @@ struct RCDynamic {
     light_count: u32,
     _pad0:       u32,
     _pad1:       u32,
+    /// Sky radiance for miss rays (rgb = linear colour, w unused).
+    sky_color:   vec4<f32>,
 }
 
 struct CascadeStatic {
@@ -216,10 +218,16 @@ fn cs_trace(@builtin(global_invocation_id) gid: vec3<u32>) {
         radiance   = light_contrib;
         throughput = 0.0;
     } else {
-        // All cascades: no ambient fill — sky-miss gives zero radiance,
-        // throughput=1 so parent radiance propagates through on merge.
-        radiance   = vec3<f32>(0.0);
-        throughput = 1.0;
+        // Sky miss — the ray escaped to the sky.  Contribute sky radiance
+        // based on the ray direction so the GI naturally fills shadowed areas
+        // with sky-coloured indirect light.
+        //
+        // sky_color is set each frame by the renderer from the scene's
+        // skylight / ambient system (zero at night or indoors → correct).
+        let sky_up   = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);   // 0=down, 1=up
+        let sky_base = rc_dyn.sky_color.rgb;
+        radiance   = mix(sky_base * 0.15, sky_base, sky_up);
+        throughput = 0.0;  // sky is terminal — no further propagation needed
     }
 
     // OPTIMIZED: Nearest-neighbor parent probe lookup instead of trilinear
