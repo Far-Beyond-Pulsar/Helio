@@ -567,7 +567,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // ── ACES tonemapping (HDR → LDR, matches sky shader) ─────────────────────
     color = aces_tonemap(color);
 
-    // Premultiply alpha for physically correct transparent blending
-    return vec4<f32>(color * alpha, alpha);
+    // Standard alpha blending: lighting is calculated normally,
+    // alpha controls how much background shows through
+    return vec4<f32>(color, alpha);
 }
 
