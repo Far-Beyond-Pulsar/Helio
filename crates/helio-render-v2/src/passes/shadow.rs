@@ -79,6 +79,7 @@ pub struct ShadowPass {
     bind_group: wgpu::BindGroup,
     /// Per-light shadow cache — skip re-rendering when light and geometry are unchanged.
     shadow_cache: Vec<ShadowLightCache>,
+    filtered_indices: Vec<usize>,
 }
 
 impl ShadowPass {
@@ -201,6 +202,7 @@ impl ShadowPass {
             pipeline: Arc::new(pipeline),
             bind_group,
             shadow_cache: vec![ShadowLightCache::default(); max_lights],
+            filtered_indices: Vec::new(),
         }
     }
 }
@@ -235,20 +237,27 @@ impl RenderPass for ShadowPass {
         // ── Camera-distance filter (shared across all lights) ────────────────
         // Compute once outside the light loop; each light renders the same set.
         // Transparent objects now cast alpha-tested shadows.
-        let range_filtered: Vec<&DrawCall> = draw_calls.iter()
-            .filter(|dc| {
+        self.filtered_indices.clear();
+        self.filtered_indices.reserve(
+            draw_calls
+                .len()
+                .saturating_sub(self.filtered_indices.capacity()),
+        );
+        for (idx, dc) in draw_calls.iter().enumerate() {
                 let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
-                dist <= SHADOW_MAX_DISTANCE
-            })
-            .collect();
+                if dist <= SHADOW_MAX_DISTANCE {
+                    self.filtered_indices.push(idx);
+                }
+            }
 
         // ── Geometry hash (shared) ───────────────────────────────────────────
         // Hashes world-space identity + bounds of every camera-visible caster.
         // Changes when objects are added/removed/moved within shadow distance.
         let geom_hash = {
             let mut h: u64 = 0xcbf29ce484222325;
-            h = fnv64_push(h, range_filtered.len() as u64);
-            for dc in &range_filtered {
+            h = fnv64_push(h, self.filtered_indices.len() as u64);
+            for &idx in &self.filtered_indices {
+                let dc = &draw_calls[idx];
                 h = fnv64_push(h, dc.bounds_center[0].to_bits() as u64);
                 h = fnv64_push(h, dc.bounds_center[1].to_bits() as u64);
                 h = fnv64_push(h, dc.bounds_center[2].to_bits() as u64);
@@ -310,7 +319,8 @@ impl RenderPass for ShadowPass {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
 
-                for dc in &range_filtered {
+                for &idx in &self.filtered_indices {
+                    let dc = &draw_calls[idx];
                     pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
                     pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
                     pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
