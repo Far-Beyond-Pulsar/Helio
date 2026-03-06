@@ -30,7 +30,8 @@ struct TaaUniform {
 pub struct TaaPass {
     pipeline: Arc<wgpu::RenderPipeline>,
     bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
+    sampler_linear: wgpu::Sampler,
+    sampler_point: wgpu::Sampler,
     uniform_buffer: wgpu::Buffer,
     config: TaaConfig,
     
@@ -79,7 +80,7 @@ impl TaaPass {
                     },
                     count: None,
                 },
-                // Velocity texture
+                // Velocity texture (non-filterable)
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -90,7 +91,7 @@ impl TaaPass {
                     },
                     count: None,
                 },
-                // Depth texture
+                // Depth texture (non-filterable)
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -101,16 +102,23 @@ impl TaaPass {
                     },
                     count: None,
                 },
-                // Sampler
+                // Linear Sampler (for filterable textures)
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // Uniform
+                // Point Sampler (for non-filterable textures)
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                // Uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -122,10 +130,17 @@ impl TaaPass {
             ],
         });
 
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("TAA Sampler"),
+        let sampler_linear = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("TAA Linear Sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let sampler_point = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("TAA Point Sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
 
@@ -172,7 +187,8 @@ impl TaaPass {
         Self {
             pipeline,
             bind_group_layout,
-            sampler,
+            sampler_linear,
+            sampler_point,
             uniform_buffer,
             config,
             history_texture: None,
@@ -269,10 +285,14 @@ impl TaaPass {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_linear),
                 },
                 wgpu::BindGroupEntry {
                     binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler_point),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
                     resource: self.uniform_buffer.as_entire_binding(),
                 },
             ],

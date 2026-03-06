@@ -5,6 +5,7 @@
 @group(0) @binding(2) var velocity_tex: texture_2d<f32>;
 @group(0) @binding(3) var depth_tex: texture_depth_2d;
 @group(0) @binding(4) var linear_sampler: sampler;
+@group(0) @binding(5) var point_sampler: sampler;
 
 struct TaaUniform {
     feedback_min: f32,
@@ -12,7 +13,7 @@ struct TaaUniform {
     jitter_offset: vec2<f32>,
 }
 
-@group(0) @binding(5) var<uniform> taa: TaaUniform;
+@group(0) @binding(6) var<uniform> taa: TaaUniform;
 
 struct VertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -90,8 +91,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample current frame
     let current_color = textureSample(current_frame, linear_sampler, in.uv).rgb;
     
-    // Sample velocity
-    let velocity = textureSample(velocity_tex, linear_sampler, in.uv).xy;
+    // Sample velocity (use point sampler for non-filterable texture)
+    let velocity = textureSample(velocity_tex, point_sampler, in.uv).xy;
     
     // Calculate history UV
     let history_uv = in.uv - velocity;
