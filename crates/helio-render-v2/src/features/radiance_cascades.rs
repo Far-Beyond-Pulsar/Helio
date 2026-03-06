@@ -10,7 +10,7 @@ use crate::passes::RadianceCascadesPass;
 use crate::Result;
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::AtomicU32};s
+use std::sync::{Arc, atomic::AtomicU32};
 
 pub const CASCADE_COUNT: usize = 4;
 /// Probe grid dimension per cascade (cubed = total probes per cascade)
