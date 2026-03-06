@@ -363,6 +363,7 @@ impl Feature for RadianceCascadesFeature {
         let light_count = self.light_count_arc.as_ref()
             .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
             .unwrap_or(0);
+        log::info!("RC prepare: uploading {} lights to rc_dyn buffer", light_count);
         let dyn_data = RCDynamic {
             world_min:   [self.world_min[0], self.world_min[1], self.world_min[2], 0.0],
             world_max:   [self.world_max[0], self.world_max[1], self.world_max[2], 0.0],
