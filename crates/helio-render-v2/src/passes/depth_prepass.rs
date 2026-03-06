@@ -93,6 +93,7 @@ impl RenderPass for DepthPrepassPass {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, ctx.global_bind_group, &[]);
+        pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
 
         let mut last_material: Option<usize> = None;
         for &idx in &self.sorted_opaque_indices {
