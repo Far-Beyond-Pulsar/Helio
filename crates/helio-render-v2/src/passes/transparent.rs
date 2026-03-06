@@ -73,7 +73,7 @@ impl RenderPass for TransparentPass {
             let da = oa.dot(fwd) + a.bounds_radius;
             let db = ob.dot(fwd) + b.bounds_radius;
 
-            db.partial_cmp(&da)
+            da.partial_cmp(&db)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 // Deterministic fallback when depths match closely.
                 .then_with(|| {
