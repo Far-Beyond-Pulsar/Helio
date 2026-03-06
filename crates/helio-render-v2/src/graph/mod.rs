@@ -83,30 +83,27 @@ impl RenderGraph {
     pub fn build(&mut self) -> Result<()> {
         log::info!("Building render graph with {} passes", self.passes.len());
 
-        // Build dependency graph using topological sort
+        // Build dependency graph using topological sort.
+        // Dependencies are constructed in pass registration order.
+        // Each pass depends on the LAST writer it sees for each resource it reads.
+        // This correctly handles read-modify-write chains (e.g., compositing into color_target).
 
-        // First pass: collect ALL resource writers before building edges.
-        // This makes ordering independent of pass registration order.
-        let mut resource_writers: HashMap<ResourceHandle, usize> = HashMap::new();
-        for (i, pass) in self.passes.iter().enumerate() {
-            for &resource in &pass.writes {
-                resource_writers.insert(resource, i);
-            }
-            for &resource in &pass.creates {
-                resource_writers.insert(resource, i);
-            }
-        }
-
-        // Second pass: build adjacency list based on reads
         let mut in_degree = vec![0; self.passes.len()];
         let mut adj_list: Vec<Vec<usize>> = vec![Vec::new(); self.passes.len()];
+        let mut last_writer: HashMap<ResourceHandle, usize> = HashMap::new();
 
         for (i, pass) in self.passes.iter().enumerate() {
+            // Add edges from all writers of resources this pass reads
             for &resource in &pass.reads {
-                if let Some(&writer_idx) = resource_writers.get(&resource) {
+                if let Some(&writer_idx) = last_writer.get(&resource) {
                     adj_list[writer_idx].push(i);
                     in_degree[i] += 1;
                 }
+            }
+
+            // Register this pass as the latest writer for all resources it writes/creates
+            for &resource in pass.writes.iter().chain(&pass.creates) {
+                last_writer.insert(resource, i);
             }
         }
 

@@ -93,7 +93,9 @@ impl RenderPass for DebugDrawPass {
     }
 
     fn declare_resources(&self, builder: &mut PassResourceBuilder) {
+        // Read-modify-write color target for debug overlay
         builder.read(ResourceHandle::named("color_target"));
+        builder.write(ResourceHandle::named("color_target"));
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {

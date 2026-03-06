@@ -150,8 +150,9 @@ impl RenderPass for BillboardPass {
     }
 
     fn declare_resources(&self, builder: &mut PassResourceBuilder) {
-        // Reads color target written by GeometryPass → enforces geometry-before-billboard order
+        // Read-modify-write color target for alpha-blended billboard instances
         builder.read(ResourceHandle::named("color_target"));
+        builder.write(ResourceHandle::named("color_target"));
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
