@@ -18,16 +18,28 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+
+
 use helio_render_v2::features::{
     FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance, RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey}, window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 // ── Scene data ────────────────────────────────────────────────────────────────
@@ -231,7 +243,7 @@ impl ApplicationHandler for App {
                 .with_world_bounds([-12.0, -0.1, -30.0], [12.0, 22.0, 30.0]))
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(),
+        let mut renderer = Renderer::new(device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
@@ -295,6 +307,7 @@ impl ApplicationHandler for App {
         let chandelier_rings: Vec<GpuMesh> = CHANDELIER_Z.iter().map(|&z| {
             GpuMesh::rect3d(&device, [0.0, 15.2, z], [1.2, 0.12, 1.2])
         }).collect();
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,

@@ -11,7 +11,13 @@
 //!   4           — toggle GPU timing printout (stderr)
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+
+
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
@@ -19,6 +25,8 @@ use helio_render_v2::features::{
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -26,7 +34,11 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 fn load_sprite() -> (Vec<u8>, u32, u32) {
@@ -209,7 +221,7 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
             RendererConfig::new(size.width, size.height, surface_format, feature_registry),
@@ -220,6 +232,7 @@ impl ApplicationHandler for App {
         let cube2  = GpuMesh::cube(&device, [-2.0, 0.4, -1.0], 0.4);
         let cube3  = GpuMesh::cube(&device, [ 2.0, 0.3,  0.5], 0.3);
         let ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 5.0);
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window,

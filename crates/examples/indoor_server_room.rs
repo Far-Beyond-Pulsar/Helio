@@ -15,16 +15,28 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+
+
 use helio_render_v2::features::{
     FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance, RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey}, window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 // ── Scene data ────────────────────────────────────────────────────────────────
@@ -216,7 +228,7 @@ impl ApplicationHandler for App {
                 .with_world_bounds([-12.0, -0.1, -8.0], [12.0, 5.0, 8.0]))
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(),
+        let mut renderer = Renderer::new(device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
@@ -271,6 +283,7 @@ impl ApplicationHandler for App {
         // Entry door on south wall (z = +6): frame + recessed panel
         let door_frame = GpuMesh::rect3d(&device, [0.0, 1.2, 5.9], [0.7, 1.2, 0.08]);
         let door_panel = GpuMesh::rect3d(&device, [0.0, 1.0, 5.95], [0.55, 1.0, 0.04]);
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,

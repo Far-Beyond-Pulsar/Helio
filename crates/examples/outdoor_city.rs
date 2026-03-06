@@ -16,19 +16,31 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{
     Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
+
+
 use helio_render_v2::features::{
     FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance, RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey}, window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 // ── Scene data ────────────────────────────────────────────────────────────────
@@ -224,7 +236,7 @@ impl ApplicationHandler for App {
                 .with_world_bounds([-35.0, -0.5, -40.0], [35.0, 30.0, 35.0]))
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(),
+        let mut renderer = Renderer::new(device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
@@ -245,6 +257,7 @@ impl ApplicationHandler for App {
             GpuMesh::rect3d(&device, [0.0, 0.04,  32.0], [32.0, 0.04, 0.35]),
         ];
         let road_center = GpuMesh::rect3d(&device, [0.0, 0.01, 0.0], [4.0, 0.01, 32.0]);
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,

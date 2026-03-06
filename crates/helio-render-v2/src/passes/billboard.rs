@@ -129,17 +129,12 @@ impl BillboardPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                // For debug visualization, billboards should show through geometry.
-                // Use LessEqual so they render at their depth, with a small bias to push
-                // them slightly forward to avoid Z-fighting.
+                // Read depth to be occluded by geometry, but don't write —
+                // alpha-blended quads must not clobber the depth buffer.
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState {
-                    constant: -1,  // Pull billboards slightly toward camera
-                    slope_scale: -1.0,
-                    clamp: 0.0,
-                },
+                bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -155,7 +150,10 @@ impl RenderPass for BillboardPass {
     }
 
     fn declare_resources(&self, builder: &mut PassResourceBuilder) {
-        // Read-modify-write color target for alpha-blended billboard instances
+        // Run after transparent composition and depth-producing geometry passes,
+        // then alpha-blend into the final color target with depth testing.
+        builder.read(ResourceHandle::named("transparent_done"));
+        builder.read(ResourceHandle::named("depth"));
         builder.read(ResourceHandle::named("color_target"));
         builder.write(ResourceHandle::named("color_target"));
     }

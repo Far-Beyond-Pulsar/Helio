@@ -4,6 +4,10 @@
 //! Press 1-5 to cycle through AA modes.
 //! Press A to toggle SSAO on/off.
 
+
+
+mod demo_portal;
+
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, WindowEvent},
@@ -11,8 +15,14 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
+
+
 use std::sync::Arc;
+
+
 use std::collections::HashSet;
+
+
 use helio_render_v2::{
     Renderer, RendererConfig,
     passes::{AntiAliasingMode, SsaoConfig, MsaaSamples},
@@ -21,6 +31,8 @@ use helio_render_v2::{
     camera::Camera,
     scene::Scene,
 };
+
+
 use glam::{Vec3, Mat4};
 
 struct AppState {
@@ -116,7 +128,7 @@ impl ApplicationHandler for App {
             })
             .with_aa(AntiAliasingMode::Taa);
 
-        let renderer = Renderer::new(device.clone(), queue.clone(), config)
+        let mut renderer = Renderer::new(device.clone(), queue.clone(), config)
             .expect("Failed to create renderer");
 
         // Create geometry - a Cornell box-like scene with various objects
@@ -134,6 +146,7 @@ impl ApplicationHandler for App {
             GpuMesh::cube(&device, [-1.5, 0.25, -1.5], 0.5),
             GpuMesh::cube(&device, [1.5, 0.5, 1.5], 1.0),
         ];
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window,

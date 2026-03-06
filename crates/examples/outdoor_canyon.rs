@@ -21,10 +21,16 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{
     Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
+
+
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
@@ -32,6 +38,8 @@ use helio_render_v2::features::{
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -39,7 +47,11 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 fn load_sprite() -> (Vec<u8>, u32, u32) {
@@ -210,7 +222,7 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
@@ -238,6 +250,7 @@ impl ApplicationHandler for App {
         let tent_b = GpuMesh::rect3d(&device, [ 0.0, 0.7, 7.5],  [0.9, 0.7, 1.3]);
         let tent_c = GpuMesh::rect3d(&device, [ 2.8, 0.55, 8.5], [0.7, 0.55, 1.1]);
         let firepit = GpuMesh::cube(&device,  [0.0, 0.15, 9.5], 0.2);
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,

@@ -15,11 +15,19 @@
 //!   +/-         — increase/decrease light intensity
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+
+
 use helio_render_v2::features::{
     FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance, RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -27,7 +35,11 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 // ── Light grid ─────────────────────────────────────────────────────────────────
@@ -244,7 +256,7 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
+        let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
             size.width, size.height, fmt, features
         )).expect("renderer");
 
@@ -277,6 +289,7 @@ impl ApplicationHandler for App {
         let crates = crate_defs.iter()
             .map(|&(pos, hs)| GpuMesh::cube(&device, pos, hs))
             .collect();
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,

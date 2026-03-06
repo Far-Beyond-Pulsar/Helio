@@ -16,10 +16,16 @@
 //!   4           — toggle GPU timing printout (stderr)
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{
     Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
+
+
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
@@ -27,6 +33,8 @@ use helio_render_v2::features::{
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -34,7 +42,11 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 fn load_sprite() -> (Vec<u8>, u32, u32) {
@@ -214,7 +226,7 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
             RendererConfig::new(size.width, size.height, surface_format, feature_registry),
@@ -228,6 +240,7 @@ impl ApplicationHandler for App {
         // Thin slab roof sitting just above the colored lights (y=2.7..3.0).
         // rect3d gives independent extents: wide/deep but only 0.15 thick.
         let roof   = GpuMesh::rect3d(&device, [0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format, renderer,

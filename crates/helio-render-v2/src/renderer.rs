@@ -13,9 +13,11 @@ use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
 use crate::profiler::{GpuProfiler, PassTiming};
-use crate::Result;
+use crate::{Result, Error};
+use helio_live_portal::{LivePortalHandle, PortalFrameSnapshot, PortalPassTiming};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
+use std::time::{SystemTime, UNIX_EPOCH};
 use wgpu::util::DeviceExt;
 use bytemuck::Zeroable;
 use glam::{Mat4, Vec3, Vec4Swizzles};
@@ -523,6 +525,8 @@ pub struct Renderer {
 
     /// When true, GPU timing stats are printed to stderr every frame (toggled by `debug_key_pressed`).
     debug_printout: bool,
+    /// Optional live web dashboard handle for real-time pipeline/perf telemetry.
+    live_portal: Option<LivePortalHandle>,
 }
 
 impl Renderer {
@@ -1139,6 +1143,7 @@ impl Renderer {
             last_frame_end: None,
             profiler,
             debug_printout: false,
+            live_portal: None,
             
             // GPU-driven rendering flags and buffers
             gpu_driven: config.gpu_driven,
@@ -1334,6 +1339,30 @@ impl Renderer {
             if self.debug_printout { "ON  (press 4 to hide)" } else { "OFF" });
     }
 
+    /// Start the live performance dashboard and open it in the user's browser.
+    ///
+    /// Returns the dashboard URL (for logs/UI).
+    pub fn start_live_portal(&mut self, bind_addr: &str) -> Result<String> {
+        if let Some(portal) = &self.live_portal {
+            return Ok(portal.url.clone());
+        }
+
+        let handle = helio_live_portal::start_live_portal(bind_addr)
+            .map_err(|e| Error::Resource(format!("Failed to start live portal on {bind_addr}: {e}")))?;
+        let url = handle.url.clone();
+
+        open_url_in_browser(&url);
+        log::info!("Helio live portal started at {url}");
+
+        self.live_portal = Some(handle);
+        Ok(url)
+    }
+
+    /// Convenience: start live portal on the default port.
+    pub fn start_live_portal_default(&mut self) -> Result<String> {
+        self.start_live_portal("127.0.0.1:7878")
+    }
+
     /// Check if GPU-driven indirect rendering is enabled
     pub fn is_gpu_driven(&self) -> bool {
         self.gpu_driven
@@ -1519,7 +1548,7 @@ impl Renderer {
 
         // Timestamp profiling is expensive (query writes + resolve + readback).
         // Keep it off the hot path unless debug printout is enabled.
-        let profiling_active = self.debug_printout;
+        let profiling_active = self.debug_printout || self.live_portal.is_some();
         if profiling_active {
             if let Some(p) = &mut self.profiler { p.begin_frame(); }
             self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
@@ -1648,6 +1677,35 @@ impl Renderer {
                     });
                 }
             }
+        }
+
+        if let (Some(portal), Some(p)) = (&self.live_portal, &self.profiler) {
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+
+            let pass_timings = p.last_timings
+                .iter()
+                .map(|t| PortalPassTiming {
+                    name: t.name.clone(),
+                    gpu_ms: t.gpu_ms,
+                    cpu_ms: t.cpu_ms,
+                })
+                .collect::<Vec<_>>();
+
+            let snapshot = PortalFrameSnapshot {
+                frame: self.frame_count,
+                frame_time_ms,
+                frame_to_frame_ms,
+                total_gpu_ms: p.last_total_gpu_ms,
+                total_cpu_ms: p.last_total_cpu_ms,
+                pass_timings,
+                pipeline_order: self.graph.execution_pass_names(),
+                timestamp_ms: now_ms,
+            };
+
+            portal.publish(snapshot);
         }
 
         self.frame_count += 1;
@@ -2177,4 +2235,23 @@ impl Renderer {
     }
     pub fn device(&self) -> &wgpu::Device { &self.device }
     pub fn queue(&self) -> &wgpu::Queue { &self.queue }
+}
+
+fn open_url_in_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
 }

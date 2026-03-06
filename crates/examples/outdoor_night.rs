@@ -11,7 +11,13 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+
+
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
@@ -19,6 +25,8 @@ use helio_render_v2::features::{
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -26,7 +34,11 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 fn load_sprite() -> (Vec<u8>, u32, u32) {
@@ -186,7 +198,7 @@ impl ApplicationHandler for App {
             )
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
@@ -205,6 +217,7 @@ impl ApplicationHandler for App {
         let lamp_pole_b = GpuMesh::rect3d(&device, [ 5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]);
         let lamp_pole_c = GpuMesh::rect3d(&device, [-5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
         let lamp_pole_d = GpuMesh::rect3d(&device, [ 5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,

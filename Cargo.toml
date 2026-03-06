@@ -2,6 +2,7 @@
 members = [
     "crates/helio-core",
     "crates/helio-render-v2",
+    "crates/helio-live-portal",
 
     "crates/examples",
 ]

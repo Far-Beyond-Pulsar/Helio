@@ -12,6 +12,7 @@ log = "0.4"
 thiserror = "1.0"
 petgraph = "0.6"
 rand = "0.8"
+helio-live-portal = { path = "../helio-live-portal" }
 
 [dev-dependencies]
 env_logger = "0.11"

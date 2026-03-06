@@ -18,11 +18,19 @@
 //!   Escape                — release cursor / exit
 //!   3                     — toggle RC probe visualization
 
+
+
+mod demo_portal;
+
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+
+
 use helio_render_v2::features::{
     FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance, RadianceCascadesFeature,
 };
+
+
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -30,7 +38,11 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
+
+
 use std::collections::HashSet;
+
+
 use std::sync::Arc;
 
 const RC_WORLD_MIN: [f32; 3] = [-130.0, -45.0, -75.0];
@@ -183,12 +195,13 @@ impl ApplicationHandler for App {
                 .with_world_bounds(RC_WORLD_MIN, RC_WORLD_MAX))
             .build();
 
-        let renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
+        let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
             size.width, size.height, fmt, features
         )).expect("renderer");
 
         let meshes = build_station(&device);
         log::info!("Space station: {} meshes", meshes.len());
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,

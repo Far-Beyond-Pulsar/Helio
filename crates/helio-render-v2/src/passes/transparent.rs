@@ -38,6 +38,9 @@ impl RenderPass for TransparentPass {
         builder.read(ResourceHandle::named("color_target"));
         builder.write(ResourceHandle::named("color_target"));
         builder.read(ResourceHandle::named("gbuffer"));
+        // Ordering token consumed by overlay passes (billboards/debug overlays)
+        // to ensure they execute after transparent composition.
+        builder.write(ResourceHandle::named("transparent_done"));
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {

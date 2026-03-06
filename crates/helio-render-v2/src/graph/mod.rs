@@ -92,12 +92,39 @@ impl RenderGraph {
         let mut adj_list: Vec<Vec<usize>> = vec![Vec::new(); self.passes.len()];
         let mut last_writer: HashMap<ResourceHandle, usize> = HashMap::new();
 
+        // Collect all writers first so we can resolve explicit single-writer
+        // ordering tokens (e.g. "transparent_done") even when the reader pass
+        // is registered before the writer pass.
+        let mut all_writers: HashMap<ResourceHandle, Vec<usize>> = HashMap::new();
+        for (idx, pass) in self.passes.iter().enumerate() {
+            for &resource in pass.writes.iter().chain(&pass.creates) {
+                all_writers.entry(resource).or_default().push(idx);
+            }
+        }
+
         for (i, pass) in self.passes.iter().enumerate() {
             // Add edges from all writers of resources this pass reads
             for &resource in &pass.reads {
+                let mut add_edge = |from: usize, to: usize| {
+                    if from != to && !adj_list[from].contains(&to) {
+                        adj_list[from].push(to);
+                        in_degree[to] += 1;
+                    }
+                };
+
+                // If a resource has exactly one writer globally, this read should
+                // depend on it regardless of registration order.
+                if let Some(writers) = all_writers.get(&resource) {
+                    if writers.len() == 1 {
+                        add_edge(writers[0], i);
+                        continue;
+                    }
+                }
+
+                // Multi-writer resource: preserve existing behavior that depends on
+                // the latest writer seen so far in registration order.
                 if let Some(&writer_idx) = last_writer.get(&resource) {
-                    adj_list[writer_idx].push(i);
-                    in_degree[i] += 1;
+                    add_edge(writer_idx, i);
                 }
             }
 
@@ -270,6 +297,14 @@ impl RenderGraph {
             }
         }
         Ok(())
+    }
+
+    /// Return current execution order as pass names.
+    pub fn execution_pass_names(&self) -> Vec<String> {
+        self.execution_order
+            .iter()
+            .map(|&idx| self.passes[idx].pass.name().to_string())
+            .collect()
     }
 
     /// Declare a transient resource
