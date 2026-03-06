@@ -111,7 +111,7 @@ impl RadianceCascadesFeature {
     /// Enable camera-following RC bounds.
     ///
     /// The volume is centered on the camera and snapped to cascade-0 cell size
-    /// in X/Z to reduce temporal shimmer while moving.
+    /// in X/Y/Z to keep probes stationary in world space while moving.
     pub fn with_camera_follow(mut self, half_extents: [f32; 3]) -> Self {
         self.follow_camera = true;
         self.follow_half_extents = half_extents;
@@ -137,12 +137,11 @@ impl RadianceCascadesFeature {
 
         // Snap to cascade-0 probe cell size to keep GI stable while moving.
         let cell_x = (hx * 2.0) / (PROBE_DIMS[0] as f32);
+        let cell_y = (hy * 2.0) / (PROBE_DIMS[0] as f32);
         let cell_z = (hz * 2.0) / (PROBE_DIMS[0] as f32);
         let anchor_x = (camera_pos[0] / cell_x).round() * cell_x;
+        let anchor_y = (camera_pos[1] / cell_y).round() * cell_y;
         let anchor_z = (camera_pos[2] / cell_z).round() * cell_z;
-
-        // Keep Y continuous so vertical traversal does not jump aggressively.
-        let anchor_y = camera_pos[1];
 
         self.world_min = [anchor_x - hx, anchor_y - hy, anchor_z - hz];
         self.world_max = [anchor_x + hx, anchor_y + hy, anchor_z + hz];
