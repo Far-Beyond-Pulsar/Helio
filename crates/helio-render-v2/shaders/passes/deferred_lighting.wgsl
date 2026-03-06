@@ -488,18 +488,29 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let spec_scale   = 1.0 - roughness * roughness;
     let spec_ind     = F_ibl * env_sample * spec_scale;
 
-    // ── Hemisphere ambient fallback ───────────────────────────────────────────
-    let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
-    let ground_color = sky_color * 0.15;
-    let hemi_t       = N.y * 0.5 + 0.5;
+    // ── INDIRECT LIGHTING STRATEGY ××××××××××××××××××××××××××××××××××××××××××
+    // With RC (GI-first approach):
+    //   - diff_ind from RC provides primary fill light (NOT shadow-occluded)
+    //   - hemi_base fallback REMOVED when RC is strong (rc_weight > 0.5)
+    // Without RC (legacy hemisphere ambient):
+    //   - hemi_lit provides shadow-aware ambient (can respond to direct light occlusion)
+    //   - hemi_base ensures minimum visibility in deep shadows
     
-    // Split hemisphere into shadowed and non-shadowed components
-    let hemi_lit = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
-    let hemi_base = mix(ground_color, sky_color, hemi_t) * albedo * 0.15; // minimum fill (15% of hemisphere)
+    let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
+    let ground_color   = sky_color * 0.15;
+    let hemi_t         = N.y * 0.5 + 0.5;
+    let hemi_lit       = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
+    let hemi_base      = mix(ground_color, sky_color, hemi_t) * albedo * 0.15;
     
-    // RC indirect is NOT occluded by shadow — that's the whole point of GI!
-    let rc_weight = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-    let ambient_fallback = mix(hemi_lit, diff_ind, rc_weight) + hemi_base;
+    // RC weight: 0 = no RC data, 1 = full RC coverage
+    let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+    
+    // When RC is active (rc_weight > 0), it provides all the fill light needed.
+    // The diff_ind is NOT shadow-occluded, providing proper GI behavior.
+    // When RC is inactive, fall back to legacy hemisphere ambient.
+    let gi_fill        = diff_ind;
+    let legacy_ambient = hemi_lit + hemi_base * (1.0 - min(rc_weight, 0.5));
+    let ambient_fallback = mix(legacy_ambient, gi_fill, rc_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
     let indirect  = (ambient_fallback + spec_ind) * ao;

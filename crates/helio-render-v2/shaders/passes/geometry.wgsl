@@ -535,23 +535,29 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let spec_scale  = (1.0 - roughness * roughness);
     let specular_indirect = F_ibl * env_sample * spec_scale;
 
-    // ── Hemisphere ambient (Valve HL2 / Ogre technique) ───────────────────────
-    // Blend between sky colour (surface faces up) and a dim ground-bounce
-    // colour (surface faces down) using the normal's Y component.
-    // This is analytically smooth across any surface size, zero cost, and
-    // removes the blocky appearance on large floors outside the RC volume.
-    let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
-    let ground_color = sky_color * 0.15; // ground bounce is dimmer and warmer
-    let hemi_t       = N.y * 0.5 + 0.5; // 0 = fully down, 1 = fully up
+    // ── INDIRECT LIGHTING STRATEGY ××××××××××××××××××××××××××××××××××××××××××
+    // With RC (GI-first approach):
+    //   - diffuse_indirect from RC provides primary fill light (NOT shadow-occluded)
+    //   - hemi_base fallback REMOVED when RC is strong (rc_weight > 0.5)
+    // Without RC (legacy hemisphere ambient):
+    //   - hemi_lit provides shadow-aware ambient (can respond to direct light occlusion)
+    //   - hemi_base ensures minimum visibility in deep shadows
     
-    // Split hemisphere into shadowed and non-shadowed components
-    let hemi_lit = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
-    let hemi_base = mix(ground_color, sky_color, hemi_t) * albedo * 0.15; // minimum fill (15% of hemisphere)
+    let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
+    let ground_color   = sky_color * 0.15;
+    let hemi_t         = N.y * 0.5 + 0.5;
+    let hemi_lit       = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
+    let hemi_base      = mix(ground_color, sky_color, hemi_t) * albedo * 0.15;
     
-    // RC irradiance replaces the hemisphere ambient where probe coverage exists.
-    // RC indirect is NOT occluded by shadow — that's the whole point of GI!
-    let rc_weight = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-    let ambient_fallback = mix(hemi_lit, diffuse_indirect, rc_weight) + hemi_base;
+    // RC weight: 0 = no RC data, 1 = full RC coverage
+    let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+    
+    // When RC is active (rc_weight > 0), it provides all the fill light needed.
+    // The diffuse_indirect is NOT shadow-occluded, providing proper GI behavior.
+    // When RC is inactive, fall back to legacy hemisphere ambient.
+    let gi_fill        = diffuse_indirect;
+    let legacy_ambient = hemi_lit + hemi_base * (1.0 - min(rc_weight, 0.5));
+    let ambient_fallback = mix(legacy_ambient, gi_fill, rc_weight);
 
     // ── Combine: direct + indirect (AO applied to indirect only) ─────────────
     let indirect = (ambient_fallback + specular_indirect) * ao;
