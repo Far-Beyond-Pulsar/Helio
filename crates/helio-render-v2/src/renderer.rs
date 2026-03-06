@@ -452,6 +452,9 @@ pub struct Renderer {
     fxaa_bind_group: Option<wgpu::BindGroup>,
     smaa_bind_group: Option<wgpu::BindGroup>,
     taa_bind_group: Option<wgpu::BindGroup>,
+    scratch_gpu_lights: Vec<GpuLight>,
+    scratch_shadow_mats: Vec<GpuShadowMatrix>,
+    scratch_shadow_matrix_hashes: Vec<u64>,
 
     // Frame state
     frame_count: u64,
@@ -975,6 +978,9 @@ impl Renderer {
             fxaa_bind_group,
             smaa_bind_group,
             taa_bind_group,
+            scratch_gpu_lights: Vec::new(),
+            scratch_shadow_mats: Vec::new(),
+            scratch_shadow_matrix_hashes: Vec::new(),
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -1501,7 +1507,13 @@ impl Renderer {
 
         self.ensure_light_buffer_capacity(count as u32);
 
-        let gpu_lights: Vec<GpuLight> = sorted_lights.iter().map(|l| {
+        self.scratch_gpu_lights.clear();
+        self.scratch_gpu_lights.reserve(
+            sorted_lights
+                .len()
+                .saturating_sub(self.scratch_gpu_lights.capacity()),
+        );
+        for l in &sorted_lights {
             let light_type = match l.light_type {
                 crate::features::LightType::Directional => 0.0,
                 crate::features::LightType::Point => 1.0,
@@ -1522,8 +1534,8 @@ impl Renderer {
             } else {
                 [0.0, -1.0, 0.0]
             };
-            
-            GpuLight {
+
+            self.scratch_gpu_lights.push(GpuLight {
                 position: l.position,
                 light_type,
                 direction,
@@ -1533,12 +1545,12 @@ impl Renderer {
                 cos_inner,
                 cos_outer,
                 _pad: [0.0; 2],
-            }
-        }).collect();
+            });
+        }
         
         // Write lights to GPU buffer
-        if !gpu_lights.is_empty() {
-            self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&gpu_lights));
+        if !self.scratch_gpu_lights.is_empty() {
+            self.queue.write_buffer(&self.light_buffer, 0, bytemuck::cast_slice(&self.scratch_gpu_lights));
         }
         let t2_lights = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
@@ -1552,9 +1564,17 @@ impl Renderer {
         // Directional lights: slots 0-3 = 4 CSM cascades, slots 4-5 = identity.
         // Point lights: 6 real cube-face matrices.
         let identity = Mat4::IDENTITY;
-        let mut shadow_mats: Vec<GpuShadowMatrix> = Vec::with_capacity(MAX_LIGHTS as usize * 6);
+        self.scratch_shadow_mats.clear();
+        self.scratch_shadow_mats.reserve(
+            (MAX_LIGHTS as usize * 6).saturating_sub(self.scratch_shadow_mats.capacity()),
+        );
         // Per-light FNV hash of the computed matrices; used by ShadowPass cache.
-        let mut shadow_matrix_hashes: Vec<u64> = Vec::with_capacity(sorted_lights.len());
+        self.scratch_shadow_matrix_hashes.clear();
+        self.scratch_shadow_matrix_hashes.reserve(
+            sorted_lights
+                .len()
+                .saturating_sub(self.scratch_shadow_matrix_hashes.capacity()),
+        );
         for l in &sorted_lights {
             let six: [Mat4; 6] = match l.light_type {
                 crate::features::LightType::Point => {
@@ -1585,13 +1605,13 @@ impl Renderer {
                 }
                 h
             };
-            shadow_matrix_hashes.push(mat_hash);
+            self.scratch_shadow_matrix_hashes.push(mat_hash);
             for m in &six {
-                shadow_mats.push(GpuShadowMatrix { mat: m.to_cols_array() });
+                self.scratch_shadow_mats.push(GpuShadowMatrix { mat: m.to_cols_array() });
             }
         }
-        shadow_mats.resize(MAX_LIGHTS as usize * 6, GpuShadowMatrix::zeroed());
-        self.queue.write_buffer(&self.shadow_matrix_buffer, 0, bytemuck::cast_slice(&shadow_mats));
+        self.scratch_shadow_mats.resize(MAX_LIGHTS as usize * 6, GpuShadowMatrix::zeroed());
+        self.queue.write_buffer(&self.shadow_matrix_buffer, 0, bytemuck::cast_slice(&self.scratch_shadow_mats));
         let t4_shadows = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // Update shared light count and per-light face counts (ShadowPass reads these)
@@ -1626,7 +1646,7 @@ impl Renderer {
                     range:          shadow_cull_range,
                     is_directional: matches!(l.light_type, crate::features::LightType::Directional),
                     is_point:       matches!(l.light_type, crate::features::LightType::Point),
-                    matrix_hash:    shadow_matrix_hashes.get(idx).copied().unwrap_or(0),
+                    matrix_hash:    self.scratch_shadow_matrix_hashes.get(idx).copied().unwrap_or(0),
                 });
             }
         }

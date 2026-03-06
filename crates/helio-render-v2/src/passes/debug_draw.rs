@@ -97,8 +97,8 @@ impl RenderPass for DebugDrawPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let batch = self.batch.lock().unwrap().clone();
-        let Some(batch) = batch else {
+        let batch_guard = self.batch.lock().unwrap();
+        let Some(batch) = batch_guard.as_ref() else {
             return Ok(());
         };
 
