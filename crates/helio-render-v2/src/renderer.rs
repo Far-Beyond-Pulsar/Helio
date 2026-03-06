@@ -1163,11 +1163,14 @@ impl Renderer {
         self.features.prepare_all(&prep_ctx)?;
 
         // Pull live RC bounds after feature prepare so GI volume can follow camera.
+        log::trace!("Attempting to pull RC bounds from feature registry");
         if let Some(rc) = self.features.get_typed_mut::<RadianceCascadesFeature>("radiance_cascades") {
             let (mn, mx) = rc.world_bounds();
             self.rc_world_min = mn;
             self.rc_world_max = mx;
-            log::debug!("RC bounds pulled from feature: [{:?} .. {:?}]", mn, mx);
+            log::info!("✓ RC bounds pulled from feature: [{:?} .. {:?}]", mn, mx);
+        } else {
+            log::warn!("✗ FAILED to pull RC bounds - feature not found in registry!");
         }
 
         // Update globals after feature prepare so all per-frame feature outputs are current.
@@ -1181,7 +1184,9 @@ impl Renderer {
             rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
             csm_splits: self.scene_csm_splits,
         };
-        log::debug!("Uploading globals with RC bounds: [{:?} .. {:?}]", self.rc_world_min, self.rc_world_max);
+        log::info!("Uploading globals: RC bounds min=[{:.1} {:.1} {:.1}] max=[{:.1} {:.1} {:.1}]", 
+                   self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2],
+                   self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2]);
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
         // Build GPU debug batch from shapes submitted since the previous frame.
