@@ -1663,7 +1663,17 @@ impl Renderer {
                     scene.ambient_color[2] * base_i + sky_amb[2] * tint[2] * si,
                 ];
                 self.scene_ambient_intensity = 1.0;
+                if self.frame_count % 120 == 0 {
+                    eprintln!("[Skylight] sun_elev={:.3} sky_amb=[{:.4},{:.4},{:.4}] si={:.4} → ambient=[{:.4},{:.4},{:.4}]",
+                        sun_elev, sky_amb[0], sky_amb[1], sky_amb[2], si,
+                        self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2]);
+                }
+            } else if self.frame_count % 120 == 0 {
+                eprintln!("[Skylight] sky_atmosphere present but NO skylight component on scene");
             }
+        } else if self.frame_count % 120 == 0 {
+            eprintln!("[Skylight] NO sky_atmosphere on scene (skylight={}) — ambient will be zero",
+                scene.skylight.is_some());
         }
         let t6_sky = render_scene_start.elapsed().as_secs_f32() * 1000.0;
         
