@@ -4,7 +4,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceCascadesFeature};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, SsaoConfig, AntiAliasingMode, TaaConfig, FxaaPass, SmaaPass, TaaPass};
+use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, SsaoConfig, AntiAliasingMode, TaaConfig, FxaaPass, SmaaPass, TaaPass};
 use crate::mesh::{GpuMesh, DrawCall};
 use crate::camera::Camera;
 use crate::scene::Scene;
@@ -653,6 +653,19 @@ impl Renderer {
         let (gbuf_albedo_texture, gbuf_normal_texture, gbuf_orm_texture, gbuf_emissive_texture, gbuf_targets) =
             create_gbuffer_textures(&device, config.width, config.height);
         let gbuffer_targets = Arc::new(Mutex::new(gbuf_targets));
+
+        // Depth prepass (early-Z rejection before GBuffer)
+        let depth_pipeline = pipelines.get_or_create(
+            include_str!("../shaders/passes/gbuffer.wgsl"),
+            "depth_prepass".to_string(),
+            &defines,
+            PipelineVariant::DepthOnly,
+        )?;
+        let depth_prepass = DepthPrepassPass::new(
+            depth_pipeline,
+            draw_list.clone(),
+        );
+        graph.add_pass(depth_prepass);
 
         // G-buffer write pass (replaces forward GeometryPass)
         let gbuf_pipeline = pipelines.get_or_create(
