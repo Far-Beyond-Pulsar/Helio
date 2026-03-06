@@ -455,6 +455,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let albedo     = material.base_color.rgb * tex_sample.rgb;
     let alpha      = material.base_color.a  * tex_sample.a;
 
+    // Always drop fully transparent texels from PNGs even when alpha_cutoff is 0.
+    if alpha <= 0.001 {
+        discard;
+    }
+
     // Deferred-compatible transparency: alpha-cutout for masked textures.
     if alpha < material.alpha_cutoff {
         discard;
