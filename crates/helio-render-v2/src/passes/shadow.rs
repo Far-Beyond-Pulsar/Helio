@@ -228,11 +228,12 @@ impl RenderPass for ShadowPass {
 
         // ── Camera-distance filter (shared across all lights) ────────────────
         // Compute once outside the light loop; each light renders the same set.
-        // Transparent objects now cast alpha-tested shadows.
+        // Alpha-cutout materials (foliage, fences) cast shadows, but blended
+        // transparent materials (glass, water) do not.
         let range_filtered: Vec<&DrawCall> = draw_calls.iter()
             .filter(|dc| {
                 let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
-                dist <= SHADOW_MAX_DISTANCE
+                dist <= SHADOW_MAX_DISTANCE && !dc.transparent_blend
             })
             .collect();
 

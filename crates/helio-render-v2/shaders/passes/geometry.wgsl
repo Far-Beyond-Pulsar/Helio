@@ -535,23 +535,34 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let spec_scale  = (1.0 - roughness * roughness);
     let specular_indirect = F_ibl * env_sample * spec_scale;
 
-    // ── Hemisphere ambient (Valve HL2 / Ogre technique) ───────────────────────
+    // ── Hemisphere ambient (Valve HL2 / Ogre technique) with GI weighting ──────
     // Blend between sky colour (surface faces up) and a dim ground-bounce
     // colour (surface faces down) using the normal's Y component.
-    // This is analytically smooth across any surface size, zero cost, and
-    // removes the blocky appearance on large floors outside the RC volume.
     let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
-    let ground_color = sky_color * 0.15; // ground bounce is dimmer and warmer
-    let hemi_t       = N.y * 0.5 + 0.5; // 0 = fully down, 1 = fully up
-    
-    // Split hemisphere into shadowed and non-shadowed components
+    let ground_color = sky_color * 0.15;
+    let hemi_t       = N.y * 0.5 + 0.5;
     let hemi_lit = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
-    let hemi_base = mix(ground_color, sky_color, hemi_t) * albedo * 0.15; // minimum fill (15% of hemisphere)
+    let hemi_base = mix(ground_color, sky_color, hemi_t) * albedo * 0.15;
     
-    // RC irradiance replaces the hemisphere ambient where probe coverage exists.
-    // RC indirect is NOT occluded by shadow — that's the whole point of GI!
+    // Indirect lighting priority:
+    // 1. RC GI + specular reflections (always use full strength)
+    // 2. If no ambient is set, rely entirely on RC + environment
+    // 3. If ambient is set, blend it with RC
     let rc_weight = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-    let ambient_fallback = mix(hemi_lit, diffuse_indirect, rc_weight) + hemi_base;
+    let has_ambient = length(sky_color) > 0.0001;
+    
+    var ambient_fallback: vec3<f32>;
+    if has_ambient {
+        // Explicit ambient is set: blend with RC
+        ambient_fallback = mix(hemi_lit, diffuse_indirect, rc_weight) + hemi_base;
+    } else {
+        // No ambient: use RC and environment directly without blend
+        // Ensures full diffuse_indirect strength always contributes
+        ambient_fallback = diffuse_indirect + vec3<f32>(0.05) * albedo;
+    }
+    
+    // Final safeguard: minimum visibility in deepest shadows
+    ambient_fallback = max(ambient_fallback, vec3<f32>(0.02) * albedo);
 
     // ── Combine: direct + indirect (AO applied to indirect only) ─────────────
     let indirect = (ambient_fallback + specular_indirect) * ao;

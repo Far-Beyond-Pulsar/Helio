@@ -88,9 +88,14 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+        let all_draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+        // Filter out transparent objects — RC only traces opaque geometry
+        let draw_calls: Vec<DrawCall> = all_draw_calls.into_iter()
+            .filter(|dc| !dc.transparent_blend)
+            .collect();
+        
         if draw_calls.is_empty() {
-            // No geometry → nothing to trace; textures stay at their initial state (zeros)
+            // No opaque geometry → nothing to trace; textures stay at their initial state (zeros)
             return Ok(());
         }
 
