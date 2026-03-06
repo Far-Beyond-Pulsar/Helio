@@ -459,17 +459,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let V   = normalize(camera.position - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
-    // ── Direct lighting — shadow computed ONCE per light, reused for sky_occ ──
-    // GPU-driven: iterate all visible lights (already culled on CPU by distance)
-    var Lo            = vec3<f32>(0.0);
-    var sky_occlusion = 1.0;
+    // ── Direct lighting ────────────────────────────────────────────────────────
+    // GPU-driven: iterate all visible lights (already culled on CPU by distance).
+    // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
+    // is handled separately — shadow maps do not occlude it (that is AO's job).
+    var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         for (var i = 0u; i < globals.light_count; i++) {
-            // FIXED: Removed all camera-to-light distance-based culling and shadow fading.
-            // Shadows are now computed at full strength regardless of camera position.
             let sf = shadow_factor(i, world_pos);
-            if lights[i].light_type < 0.5 { sky_occlusion = sf; }
-            
             let light_contrib = pbr_direct_light(lights[i], world_pos, N, V,
                                    F0, albedo, roughness, metallic, sf);
             Lo += light_contrib;
@@ -488,29 +485,25 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let spec_scale   = 1.0 - roughness * roughness;
     let spec_ind     = F_ibl * env_sample * spec_scale;
 
-    // ── INDIRECT LIGHTING STRATEGY ××××××××××××××××××××××××××××××××××××××××××
-    // With RC (GI-first approach):
-    //   - diff_ind from RC provides primary fill light (NOT shadow-occluded)
-    //   - hemi_base fallback REMOVED when RC is strong (rc_weight > 0.5)
-    // Without RC (legacy hemisphere ambient):
-    //   - hemi_lit provides shadow-aware ambient (can respond to direct light occlusion)
-    //   - hemi_base ensures minimum visibility in deep shadows
-    
+    // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
+    // Hemisphere ambient is shadow-INDEPENDENT.  Shadow maps only affect direct
+    // lighting (Lo above); ambient occlusion (ao from G-buffer ORM.r) handles
+    // indirect-light occlusion instead.  This ensures shadowed areas still
+    // receive fill light and are never pitch black.
+    //
+    // When RC GI is active it replaces the hemisphere fallback with physically-
+    // based global illumination.  When inactive the hemisphere ambient is used.
+
     let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
     let ground_color   = sky_color * 0.15;
     let hemi_t         = N.y * 0.5 + 0.5;
-    let hemi_lit       = mix(ground_color, sky_color, hemi_t) * albedo * sky_occlusion;
-    let hemi_base      = mix(ground_color, sky_color, hemi_t) * albedo * 0.15;
-    
+    let hemi           = mix(ground_color, sky_color, hemi_t) * albedo;
+
     // RC weight: 0 = no RC data, 1 = full RC coverage
     let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
-    
-    // When RC is active (rc_weight > 0), it provides all the fill light needed.
-    // The diff_ind is NOT shadow-occluded, providing proper GI behavior.
-    // When RC is inactive, fall back to legacy hemisphere ambient.
-    let gi_fill        = diff_ind;
-    let legacy_ambient = hemi_lit + hemi_base * (1.0 - min(rc_weight, 0.5));
-    let ambient_fallback = mix(legacy_ambient, gi_fill, rc_weight);
+
+    // Blend between hemisphere fallback and RC-based GI
+    let ambient_fallback = mix(hemi, diff_ind, rc_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
     let indirect  = (ambient_fallback + spec_ind) * ao;

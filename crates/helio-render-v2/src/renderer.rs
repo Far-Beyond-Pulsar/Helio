@@ -1649,31 +1649,20 @@ impl Renderer {
             self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&sky_uni));
 
             // Inject sky-based ambient when a Skylight is present.
-            // RC cascades already handle most indirect diffuse; skylight should
-            // act as a moderate fill so shadowed areas aren't pitch black.
+            // The skylight adds atmosphere-derived ambient colour on top of
+            // the scene's base ambient (which now defaults to a sensible value).
             if let Some(skylight) = &scene.skylight {
                 let sun_elev = sun_dir[1].clamp(-1.0, 1.0);
                 let sky_amb  = estimate_sky_ambient(sun_elev, &atm.rayleigh_scatter);
                 let tint     = skylight.color_tint;
                 let si = skylight.intensity * 0.06;
-                let base_i = scene.ambient_intensity;
                 self.scene_ambient_color = [
-                    scene.ambient_color[0] * base_i + sky_amb[0] * tint[0] * si,
-                    scene.ambient_color[1] * base_i + sky_amb[1] * tint[1] * si,
-                    scene.ambient_color[2] * base_i + sky_amb[2] * tint[2] * si,
+                    scene.ambient_color[0] + sky_amb[0] * tint[0] * si,
+                    scene.ambient_color[1] + sky_amb[1] * tint[1] * si,
+                    scene.ambient_color[2] + sky_amb[2] * tint[2] * si,
                 ];
-                self.scene_ambient_intensity = 1.0;
-                if self.frame_count % 120 == 0 {
-                    eprintln!("[Skylight] sun_elev={:.3} sky_amb=[{:.4},{:.4},{:.4}] si={:.4} → ambient=[{:.4},{:.4},{:.4}]",
-                        sun_elev, sky_amb[0], sky_amb[1], sky_amb[2], si,
-                        self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2]);
-                }
-            } else if self.frame_count % 120 == 0 {
-                eprintln!("[Skylight] sky_atmosphere present but NO skylight component on scene");
+                self.scene_ambient_intensity = scene.ambient_intensity.max(0.15);
             }
-        } else if self.frame_count % 120 == 0 {
-            eprintln!("[Skylight] NO sky_atmosphere on scene (skylight={}) — ambient will be zero",
-                scene.skylight.is_some());
         }
         let t6_sky = render_scene_start.elapsed().as_secs_f32() * 1000.0;
         
