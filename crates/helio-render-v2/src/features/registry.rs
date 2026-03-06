@@ -111,8 +111,12 @@ impl FeatureRegistry {
 
     /// Prepare all enabled features
     pub fn prepare_all(&mut self, ctx: &PrepareContext) -> Result<()> {
-        for feature in self.features.values_mut() {
-            if feature.is_enabled() {
+        log::info!("FeatureRegistry::prepare_all: {} features in registry", self.features.len());
+        for (name, feature) in self.features.iter_mut() {
+            let enabled = feature.is_enabled();
+            log::info!("Feature '{}': enabled={}", name, enabled);
+            if enabled {
+                log::info!("  → calling prepare() for '{}'", name);
                 feature.prepare(ctx)?;
             }
         }
