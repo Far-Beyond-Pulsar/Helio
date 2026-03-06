@@ -261,7 +261,7 @@ pub(crate) fn build_gpu_material(
 pub(crate) struct DefaultMaterialViews {
     pub white_srgb:    wgpu::TextureView,
     pub flat_normal:   wgpu::TextureView,
-    pub white_orm:     wgpu::TextureView,   // R=1(AO), G=1(roughness), B=0(metallic) → treated as factors
+    pub white_orm:     wgpu::TextureView,   // R=1(AO), G=1(roughness), B=1(metallic mult) → material.metallic controls final value
     pub black_emissive: wgpu::TextureView,
     pub sampler:       wgpu::Sampler,
 }
@@ -276,7 +276,7 @@ impl DefaultMaterialViews {
             device, queue, &[128, 128, 255, 255], 1, 1,
             wgpu::TextureFormat::Rgba8Unorm, "Default Flat Normal");
 
-        // ORM default: R=255 (AO=1), G=255 (roughness mult=1, uses material.roughness), B=0 (metallic mult=0)
+        // ORM default: R=255 (AO=1), G=255 (roughness mult=1), B=255 (metallic mult=1, material.metallic=0 → final 0)
         let white_orm = upload_texture_2d(
             device, queue, &[255, 255, 255, 255], 1, 1,
             wgpu::TextureFormat::Rgba8Unorm, "Default ORM");

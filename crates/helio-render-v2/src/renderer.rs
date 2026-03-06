@@ -339,14 +339,19 @@ fn create_gbuffer_bind_group(
 /// Approximate sky zenith ambient colour from sun elevation (-1=night, 0=horizon, 1=zenith).
 fn estimate_sky_ambient(sun_elev: f32, rayleigh: &[f32; 3]) -> [f32; 3] {
     if sun_elev < -0.05 {
+        // Night — deep twilight fading to near-black
         let t = ((-sun_elev - 0.05) / 0.95).clamp(0.0, 1.0);
         lerp3([0.04, 0.06, 0.15], [0.01, 0.01, 0.02], t)
     } else if sun_elev < 0.15 {
+        // Dawn/dusk — warm golden ambient transitioning to daylight
         let t = ((sun_elev + 0.05) / 0.2).clamp(0.0, 1.0);
         lerp3([0.04, 0.06, 0.15], [0.55, 0.38, 0.20], t)
     } else {
+        // Day — derive sky blue from Rayleigh scattering coefficients.
+        // Rayleigh coefficients are in km⁻¹ (~0.006–0.033 for Earth) so they
+        // need large multipliers to produce visible ambient colours.
         let t = ((sun_elev - 0.15) / 0.85).clamp(0.0, 1.0);
-        let day_blue = [rayleigh[0] * 8.0, rayleigh[1] * 5.5, rayleigh[2] * 3.5];
+        let day_blue = [rayleigh[0] * 70.0, rayleigh[1] * 45.0, rayleigh[2] * 25.0];
         let noon = [day_blue[0].min(0.7), day_blue[1].min(0.85), day_blue[2].min(1.0)];
         lerp3([0.55, 0.38, 0.20], noon, t)
     }
@@ -1649,19 +1654,19 @@ impl Renderer {
             self.queue.write_buffer(&self.sky_uniform_buffer, 0, bytemuck::bytes_of(&sky_uni));
 
             // Inject sky-based ambient when a Skylight is present.
-            // The skylight adds atmosphere-derived ambient colour on top of
-            // the scene's base ambient (which now defaults to a sensible value).
+            // ambient_color = sky colour * tint (colour of the fill light)
+            // ambient_intensity = skylight.intensity (brightness control)
+            // In the shader: sky_color = ambient_color * ambient_intensity
             if let Some(skylight) = &scene.skylight {
                 let sun_elev = sun_dir[1].clamp(-1.0, 1.0);
                 let sky_amb  = estimate_sky_ambient(sun_elev, &atm.rayleigh_scatter);
                 let tint     = skylight.color_tint;
-                let si = skylight.intensity * 0.06;
                 self.scene_ambient_color = [
-                    scene.ambient_color[0] + sky_amb[0] * tint[0] * si,
-                    scene.ambient_color[1] + sky_amb[1] * tint[1] * si,
-                    scene.ambient_color[2] + sky_amb[2] * tint[2] * si,
+                    scene.ambient_color[0] + sky_amb[0] * tint[0],
+                    scene.ambient_color[1] + sky_amb[1] * tint[1],
+                    scene.ambient_color[2] + sky_amb[2] * tint[2],
                 ];
-                self.scene_ambient_intensity = scene.ambient_intensity.max(0.15);
+                self.scene_ambient_intensity = scene.ambient_intensity.max(skylight.intensity);
             }
         }
 
