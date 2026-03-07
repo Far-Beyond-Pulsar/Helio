@@ -132,10 +132,9 @@
 
       return ce('div', {
         style: {
-          position: 'absolute', top: `${NODE_H}px`, left: `${BULGE_R}px`,
+          position: 'absolute', top: `${NODE_H}px`, left: 0,
           width: `${NODE_W}px`, height: `${BAR_CHART_H}px`,
-          background: '#0d1117', border: '1px solid #30363d',
-          borderTop: '1px solid #21262d', borderRadius: '0 0 6px 6px',
+          background: 'transparent',
           padding: `4px ${padX}px`, boxSizing: 'border-box', overflow: 'hidden',
           fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
         },
@@ -191,14 +190,12 @@
     function PipelineNode({ id, data: initialData }) {
       const [data, setData]     = React.useState(() => _nodeData.get(id) || initialData);
       const [expanded, setExpanded] = React.useState(false);
-      const updateNodeInternals = useUpdateNodeInternals();
       React.useEffect(() => {
         const latest = _nodeData.get(id);
         if (latest) setData(latest);
         _nodeSubs.set(id, setData);
         return () => { _nodeSubs.delete(id); };
       }, [id]);
-      React.useEffect(() => { updateNodeInternals(id); }, [expanded]);
 
       const ce       = React.createElement;
       const dotColor = data.kind === 'pass' ? '#388bfd' : '#d29922';
@@ -220,15 +217,22 @@
       }
       parts.push(`L ${OX} ${R}`, `Q ${OX} 0 ${OX + R} 0`, 'Z');
 
-      const containerH = expanded ? NODE_H + BAR_CHART_H : NODE_H;
+      // Expansion area: bottom-rounded rect drawn under the header card.
+      // Container height stays fixed at NODE_H so ReactFlow's node measurement never
+      // changes — handles and edges remain anchored to the header's midpoint.
+      const EH = H + BAR_CHART_H;
+      const expandPath = `M ${OX} ${H} L ${OX+W} ${H} L ${OX+W} ${EH-R} Q ${OX+W} ${EH} ${OX+W-R} ${EH} L ${OX+R} ${EH} Q ${OX} ${EH} ${OX} ${EH-R} Z`;
+
       return ce('div', {
-        style: { position: 'relative', overflow: 'visible', width: `${W}px`, height: `${containerH}px`, cursor: 'pointer' },
+        style: { position: 'relative', overflow: 'visible', width: `${W}px`, height: `${H}px`, cursor: 'pointer' },
         onClick: () => setExpanded(ex => !ex),
       },
         ce('svg', {
           style: { position: 'absolute', left: `${-BR}px`, top: 0, overflow: 'visible', pointerEvents: 'none', zIndex: 0 },
-          width: W + 2 * BR, height: H,
+          width: W + 2 * BR, height: expanded ? EH : H,
         },
+          expanded && ce('path', { d: expandPath, fill: '#0d1117', stroke: '#30363d', strokeWidth: 1 }),
+          expanded && ce('line', { x1: OX, y1: H, x2: OX + W, y2: H, stroke: '#21262d', strokeWidth: 1 }),
           ce('path', { d: parts.join(' '), fill: '#161b22', stroke: '#30363d', strokeWidth: 1 }),
           left   && ce('circle', { cx: OX - 1,         cy: half,    r: 4.5, fill: dotColor }),
           right  && ce('circle', { cx: OX + W + 1,     cy: half,    r: 4.5, fill: dotColor }),
