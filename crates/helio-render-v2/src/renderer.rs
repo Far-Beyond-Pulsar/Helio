@@ -511,9 +511,13 @@ pub struct Renderer {
     cached_sky_sun_intensity: f32,
     sky_state_changed: bool,
     
-    /// Monotonically increasing counter.  Incremented every `render_scene()` call.
+    /// Monotonically increasing counter.  Bumped only when the draw-list structure
+    /// (set of mesh+material+count tuples) actually changes between frames.
     /// Passes use this to decide whether to rebuild their RenderBundle cache.
     draw_list_generation: u64,
+    /// Commutative structural hash of the current frame's batch table.  Compared
+    /// against the previous frame; draw_list_generation is only incremented on change.
+    draw_list_structural_hash: u64,
 
     /// Cached light list state — skip sort if unchanged
     cached_light_count: usize,
@@ -1223,6 +1227,7 @@ impl Renderer {
             sky_state_changed: true,  // Enable LUT render on first frame
             
             draw_list_generation: 0,
+            draw_list_structural_hash: 0,
 
             cached_light_count: 0,
             cached_light_position_hash: 0,
@@ -1898,8 +1903,7 @@ impl Renderer {
     /// Render the full scene. Everything in the scene is drawn; nothing else.
     pub fn render_scene(&mut self, scene: &Scene, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         let render_scene_start = std::time::Instant::now();
-        // New scene submission — signal passes that their RenderBundle caches are stale.
-        self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
+        // draw_list_generation is bumped below, only when the batch table changes.
 
         // Capture scene layout for the portal thread before render mutates state.
         // Building the full layout is O(N objects+lights+billboards); skip the expensive
@@ -2004,6 +2008,30 @@ impl Renderer {
         // Return maps to their fields to retain bucket capacity for next frame.
         self.scratch_batches = batches;
         self.scratch_example_idx = example_idx;
+
+        // Only invalidate RenderBundle caches when the draw-list structure changes.
+        // For a fully static scene this is a no-op after the first frame, eliminating
+        // the per-frame bundle re-compilation cost (was ~9 ms at 5k draws).
+        //
+        // The hash is order-independent (XOR accumulation) so HashMap iteration
+        // order doesn't affect the result.
+        {
+            let mut h: u64 = self.scratch_batches.len() as u64;
+            for (&(mp, matp), mats) in &self.scratch_batches {
+                // Each entry contributes a unique rotation-mixed hash so that
+                // (a, b, n) ≠ (b, a, n) even after XOR folding.
+                let entry = (mp as u64)
+                    .wrapping_mul(0x9e3779b97f4a7c15)
+                    ^ (matp as u64).wrapping_mul(0x517cc1b727220a95)
+                    ^ (mats.len() as u64).wrapping_mul(0x6c62272e07bb0142);
+                h ^= entry.wrapping_mul(0xbf58476d1ce4e5b9); // finalise per-entry
+            }
+            if h != self.draw_list_structural_hash {
+                self.draw_list_structural_hash = h;
+                self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
+            }
+        }
+
         let t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // ────────────────────────────────────────────────────────────────────

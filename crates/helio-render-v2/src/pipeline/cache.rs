@@ -361,8 +361,11 @@ impl PipelineCache {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
+                // Depth is already written by DepthPrepassPass with Compare::Less.
+                // Use LessEqual so fragments at exactly the prepass depth pass the
+                // test.  Disable writes — depth is already correct from the prepass.
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

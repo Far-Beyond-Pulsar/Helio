@@ -184,8 +184,11 @@ impl RenderPass for GBufferPass {
 
         let depth_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
             view: ctx.depth_view,
+            // Load depth written by DepthPrepassPass so the GPU can reject occluded
+            // GBuffer fragments before running the expensive material shader.
+            // Must NOT clear here — that discards the prepass work entirely.
             depth_ops: Some(wgpu::Operations {
-                load:  wgpu::LoadOp::Clear(1.0),
+                load:  wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             }),
             stencil_ops: None,
