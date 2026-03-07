@@ -42,6 +42,11 @@ struct Vertex {
     @location(2) tex_coords:     vec2<f32>,
     @location(3) normal:         u32,
     @location(4) tangent:        u32,
+    // Per-instance model matrix (4 columns, VertexStepMode::Instance, slot 1)
+    @location(5) model_0: vec4<f32>,
+    @location(6) model_1: vec4<f32>,
+    @location(7) model_2: vec4<f32>,
+    @location(8) model_3: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -57,10 +62,16 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 
 @vertex
 fn vs_main(v: Vertex) -> VertexOutput {
+    let model = mat4x4<f32>(v.model_0, v.model_1, v.model_2, v.model_3);
+    let world_pos = model * vec4<f32>(v.position, 1.0);
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * vec4<f32>(v.position, 1.0);
-    out.world_position = v.position;
-    out.world_normal   = normalize(decode_snorm8x4(v.normal));
+    out.clip_position  = camera.view_proj * world_pos;
+    out.world_position = world_pos.xyz;
+    // Normal matrix: use the upper-left 3x3 of the model matrix.
+    // Correct for rigid-body + uniform-scale transforms (the common case).
+    // For non-uniform scale the caller should pre-normalise or send a dedicated normal matrix.
+    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+    out.world_normal   = normalize(normal_mat * decode_snorm8x4(v.normal));
     out.tex_coords     = v.tex_coords;
     return out;
 }

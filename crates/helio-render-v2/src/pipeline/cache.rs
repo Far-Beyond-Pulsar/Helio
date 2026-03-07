@@ -152,45 +152,7 @@ impl PipelineCache {
             vertex: wgpu::VertexState {
                 module: shader,
                 entry_point: Some("vs_main"),
-                buffers: &[
-                    // Vertex buffer layout matching PackedVertex from helio-core
-                    wgpu::VertexBufferLayout {
-                        array_stride: 32, // 3*4 + 4 + 2*4 + 4 + 4 = 32 bytes
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            // position: vec3<f32>
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            // bitangent_sign: f32
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32,
-                                offset: 12,
-                                shader_location: 1,
-                            },
-                            // tex_coords: vec2<f32>
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 16,
-                                shader_location: 2,
-                            },
-                            // normal: u32 (packed)
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 24,
-                                shader_location: 3,
-                            },
-                            // tangent: u32 (packed)
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 28,
-                                shader_location: 4,
-                            },
-                        ],
-                    },
-                ],
+                buffers: &Self::geometry_vertex_buffers(),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -240,19 +202,7 @@ impl PipelineCache {
             vertex: wgpu::VertexState {
                 module: shader,
                 entry_point: Some("vs_main"),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: 32,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 12, shader_location: 1 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 24, shader_location: 3 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 28, shader_location: 4 },
-                        ],
-                    },
-                ],
+                buffers: &Self::geometry_vertex_buffers(),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -290,19 +240,38 @@ impl PipelineCache {
         }))
     }
 
-    /// Standard 32-byte packed vertex layout shared by all geometry-writing pipelines.
-    fn geometry_vertex_buffers() -> [wgpu::VertexBufferLayout<'static>; 1] {
-        [wgpu::VertexBufferLayout {
-            array_stride: 32,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset:  0, shader_location: 0 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32,   offset: 12, shader_location: 1 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 24, shader_location: 3 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 28, shader_location: 4 },
-            ],
-        }]
+    /// Vertex buffer layouts for all geometry-writing pipelines.
+    /// Slot 0: per-vertex PackedVertex (32 bytes, locations 0-4).
+    /// Slot 1: per-instance model matrix — four Float32x4 columns (64 bytes, locations 5-8,
+    ///         VertexStepMode::Instance).  A persistent pool buffer is written by the renderer
+    ///         every frame via queue.write_buffer(); single-instance draws use a pre-allocated
+    ///         identity-matrix entry so the shader always receives a valid transform.
+    fn geometry_vertex_buffers() -> [wgpu::VertexBufferLayout<'static>; 2] {
+        [
+            // Slot 0 – per-vertex geometry
+            wgpu::VertexBufferLayout {
+                array_stride: 32,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset:  0, shader_location: 0 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32,   offset: 12, shader_location: 1 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 24, shader_location: 3 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 28, shader_location: 4 },
+                ],
+            },
+            // Slot 1 – per-instance model matrix (mat4x4<f32> packed as four vec4 columns)
+            wgpu::VertexBufferLayout {
+                array_stride: 64,  // 4 columns × 4 floats × 4 bytes
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                ],
+            },
+        ]
     }
 
     /// G-buffer write: 4 colour targets, depth-write, no lighting uniforms.
@@ -420,39 +389,7 @@ impl PipelineCache {
             vertex: wgpu::VertexState {
                 module: shader,
                 entry_point: Some("vs_main"),
-                buffers: &[
-                    wgpu::VertexBufferLayout {
-                        array_stride: 32,
-                        step_mode: wgpu::VertexStepMode::Vertex,
-                        attributes: &[
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32,
-                                offset: 12,
-                                shader_location: 1,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 16,
-                                shader_location: 2,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 24,
-                                shader_location: 3,
-                            },
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 28,
-                                shader_location: 4,
-                            },
-                        ],
-                    },
-                ],
+                buffers: &Self::geometry_vertex_buffers(),
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: None, // Depth-only, no fragment shader

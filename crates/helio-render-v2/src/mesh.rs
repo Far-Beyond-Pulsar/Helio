@@ -227,10 +227,20 @@ pub struct DrawCall {
     pub bounds_radius: f32,
     /// Material ID for GPU-driven indirect rendering (0 if not assigned)
     pub material_id: u32,
-    /// Optional per-instance transform buffer (mat4x4<f32> per instance)
+    /// Optional per-instance transform buffer.
+    /// When set, the geometry pass binds this at vertex slot 1 using the slice
+    /// [instance_slice_start..instance_slice_end].  For pool-backed draws this
+    /// points at the renderer's persistent transform pool; for manually
+    /// submitted instanced draws it may point at a caller-owned buffer.
     pub instance_buffer: Option<Arc<wgpu::Buffer>>,
     /// Number of instances encoded in `instance_buffer` (defaults to 1).
     pub instance_count: u32,
+    /// Byte offset (inclusive) into `instance_buffer` for this batch.
+    pub instance_slice_start: u64,
+    /// Byte offset (exclusive) into `instance_buffer` for this batch.
+    /// When equal to `instance_slice_start` the full buffer range is used
+    /// (backward-compatible with manually created instance buffers).
+    pub instance_slice_end: u64,
 }
 
 impl DrawCall {
@@ -247,6 +257,8 @@ impl DrawCall {
             material_id: 0,  // Will be assigned by renderer if GPU-driven is enabled
             instance_buffer: None,
             instance_count: 1,
+            instance_slice_start: 0,
+            instance_slice_end: 0,
         }
     }
 }

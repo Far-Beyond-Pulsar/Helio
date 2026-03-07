@@ -521,6 +521,23 @@ pub struct Renderer {
     scratch_shadow_mats: Vec<GpuShadowMatrix>,
     scratch_shadow_matrix_hashes: Vec<u64>,
 
+    // ── Instance transform pool ───────────────────────────────────────────
+    /// Pre-allocated GPU vertex buffer holding all per-instance mat4x4 transforms
+    /// for the current frame.  Written via `queue.write_buffer()` once per frame
+    /// inside `render_scene()` — avoids per-batch `create_buffer_init()` calls.
+    /// All geometry passes share this single buffer via slice offsets stored in
+    /// `DrawCall::instance_slice_start` / `instance_slice_end`.
+    instance_transform_pool: Arc<wgpu::Buffer>,
+    /// Capacity of the pool in number of mat4x4 transforms (64 bytes each).
+    instance_pool_capacity: u32,
+    /// CPU-side scratch vec reused each frame to accumulate instance data before
+    /// the single `write_buffer` upload.  Avoids per-frame allocations.
+    instance_pool_scratch: Vec<[f32; 16]>,
+    /// Single-entry buffer containing the identity matrix, used by `draw_mesh()`
+    /// and other manual submission helpers so the shader always receives a valid
+    /// model transform even when the caller doesn't know about instancing.
+    identity_instance_buffer: Arc<wgpu::Buffer>,
+
     // Frame state
     frame_count: u64,
     width: u32,
@@ -1088,6 +1105,29 @@ impl Renderer {
             }
         }
 
+        // ── Instance transform pool ──────────────────────────────────────────
+        // Pre-allocated VERTEX | COPY_DST buffer that holds all per-instance
+        // mat4x4 transforms for one frame.  Written via a single
+        // queue.write_buffer() call inside render_scene() instead of N
+        // create_buffer_init() calls.  Capacity: 65536 × 64 bytes = 4 MB.
+        let instance_pool_capacity: u32 = 65536;
+        let instance_transform_pool = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Instance Transform Pool"),
+            size: (instance_pool_capacity as u64) * 64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        // Single identity-matrix entry used by manual draw_mesh() calls so the
+        // shader always receives a valid model transform.
+        let identity_flat: [f32; 16] = glam::Mat4::IDENTITY.to_cols_array();
+        let identity_instance_buffer = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label: Some("Identity Instance Transform"),
+                contents: bytemuck::cast_slice(&identity_flat),
+                usage: wgpu::BufferUsages::VERTEX,
+            }
+        ));
+
         Ok(Self {
             device,
             queue,
@@ -1150,6 +1190,10 @@ impl Renderer {
             scratch_gpu_lights: Vec::new(),
             scratch_shadow_mats: Vec::new(),
             scratch_shadow_matrix_hashes: Vec::new(),
+            instance_transform_pool,
+            instance_pool_capacity,
+            instance_pool_scratch: Vec::with_capacity(512),
+            identity_instance_buffer,
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -1205,17 +1249,29 @@ impl Renderer {
 
     /// Queue a mesh to be drawn this frame using the default white material
     pub fn draw_mesh(&self, mesh: &GpuMesh) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, self.default_material_bind_group.clone(), false));
+        let mut dc = DrawCall::new(mesh, self.default_material_bind_group.clone(), false);
+        dc.instance_buffer = Some(Arc::clone(&self.identity_instance_buffer));
+        dc.instance_slice_start = 0;
+        dc.instance_slice_end = 64;
+        self.draw_list.lock().unwrap().push(dc);
     }
 
     /// Queue a mesh with a custom GPU material (preserves transparency mode)
     pub fn draw_mesh_with_gpu_material(&self, mesh: &GpuMesh, material: &GpuMaterial) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material.bind_group.clone(), material.transparent_blend));
+        let mut dc = DrawCall::new(mesh, material.bind_group.clone(), material.transparent_blend);
+        dc.instance_buffer = Some(Arc::clone(&self.identity_instance_buffer));
+        dc.instance_slice_start = 0;
+        dc.instance_slice_end = 64;
+        self.draw_list.lock().unwrap().push(dc);
     }
 
     /// Queue a mesh with a custom material bind group (legacy opaque path)
     pub fn draw_mesh_with_material(&self, mesh: &GpuMesh, material: Arc<wgpu::BindGroup>) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material, false));
+        let mut dc = DrawCall::new(mesh, material, false);
+        dc.instance_buffer = Some(Arc::clone(&self.identity_instance_buffer));
+        dc.instance_slice_start = 0;
+        dc.instance_slice_end = 64;
+        self.draw_list.lock().unwrap().push(dc);
     }
 
     pub fn debug_shape(&self, shape: DebugShape) {
@@ -1815,32 +1871,45 @@ impl Renderer {
             example.entry(key).or_insert((obj.mesh.clone(), obj.material.clone()));
         }
 
+        // --- pool-based single-upload instancing ---
+        // Collect all instance transforms into the CPU scratch buffer, then
+        // upload them all at once with a single queue.write_buffer().  This
+        // eliminates the per-batch device.create_buffer_init() allocations
+        // that caused the 43 ms submission times.
+        self.instance_pool_scratch.clear();
+        let mut pool_batches: Vec<(u64, u64, u32, GpuMesh, Option<GpuMaterial>)> =
+            Vec::with_capacity(batches.len());
+
         for (key, mats) in batches {
             let count = mats.len() as u32;
+            let byte_start = (self.instance_pool_scratch.len() as u64) * 64;
+            self.instance_pool_scratch.extend(mats.into_iter());
+            let byte_end = (self.instance_pool_scratch.len() as u64) * 64;
             let (mesh, mat_opt) = example.remove(&key).unwrap();
-            // instance buffer only when we have >1 instances
-            let inst_buf = if count > 1 {
-                let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Instance transforms"),
-                    contents: bytemuck::cast_slice(&mats),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                Some(Arc::new(buf))
-            } else {
-                None
-            };
+            pool_batches.push((byte_start, byte_end, count, mesh, mat_opt));
+        }
 
-            match mat_opt {
-                Some(mat) if count == 1 => self.draw_mesh_with_gpu_material(&mesh, &mat),
-                Some(mat) => {
-                    self.draw_mesh_instanced(&mesh, Arc::clone(&mat.bind_group), inst_buf.unwrap(), count);
-                }
-                None if count == 1 => self.draw_mesh(&mesh),
-                None => {
-                    let buf = inst_buf.unwrap();
-                    self.draw_mesh_instanced(&mesh, Arc::new(self.global_bind_group.clone()), buf, count);
-                }
-            }
+        if !self.instance_pool_scratch.is_empty() {
+            let cap = self.instance_pool_capacity as usize;
+            let to_upload = self.instance_pool_scratch.len().min(cap);
+            self.queue.write_buffer(
+                &self.instance_transform_pool,
+                0,
+                bytemuck::cast_slice(&self.instance_pool_scratch[..to_upload]),
+            );
+        }
+
+        for (byte_start, byte_end, count, mesh, mat_opt) in pool_batches {
+            let (mat_bg, transparent) = match &mat_opt {
+                Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
+                None => (self.default_material_bind_group.clone(), false),
+            };
+            let mut dc = DrawCall::new(&mesh, mat_bg, transparent);
+            dc.instance_buffer = Some(Arc::clone(&self.instance_transform_pool));
+            dc.instance_slice_start = byte_start;
+            dc.instance_slice_end = byte_end;
+            dc.instance_count = count;
+            self.draw_list.lock().unwrap().push(dc);
         }
         let t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 

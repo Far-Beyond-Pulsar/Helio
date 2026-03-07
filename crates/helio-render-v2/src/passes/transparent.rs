@@ -123,8 +123,17 @@ impl RenderPass for TransparentPass {
                 last_material = Some(mat_ptr);
             }
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+            if let Some(inst_buf) = &dc.instance_buffer {
+                let start = dc.instance_slice_start;
+                let end = if dc.instance_slice_end > dc.instance_slice_start {
+                    dc.instance_slice_end
+                } else {
+                    inst_buf.size()
+                };
+                pass.set_vertex_buffer(1, inst_buf.slice(start..end));
+            }
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..dc.index_count, 0, 0..1);
+            pass.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
         }
 
         Ok(())
