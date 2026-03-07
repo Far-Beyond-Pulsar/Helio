@@ -238,11 +238,7 @@ impl RenderPass for ShadowPass {
         // Compute once outside the light loop; each light renders the same set.
         // Transparent objects now cast alpha-tested shadows.
         self.filtered_indices.clear();
-        self.filtered_indices.reserve(
-            draw_calls
-                .len()
-                .saturating_sub(self.filtered_indices.capacity()),
-        );
+        self.filtered_indices.reserve(draw_calls.len());
         for (idx, dc) in draw_calls.iter().enumerate() {
                 let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
                 if dist <= SHADOW_MAX_DISTANCE {

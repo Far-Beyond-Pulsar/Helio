@@ -46,11 +46,7 @@ impl RenderPass for TransparentPass {
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let draw_calls = self.draw_list.lock().unwrap();
         self.sorted_transparent_indices.clear();
-        self.sorted_transparent_indices.reserve(
-            draw_calls
-                .len()
-                .saturating_sub(self.sorted_transparent_indices.capacity()),
-        );
+        self.sorted_transparent_indices.reserve(draw_calls.len());
         for (idx, dc) in draw_calls.iter().enumerate() {
             if dc.transparent_blend {
                 self.sorted_transparent_indices.push(idx);

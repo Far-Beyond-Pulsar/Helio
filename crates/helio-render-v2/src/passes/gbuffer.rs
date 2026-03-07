@@ -57,11 +57,7 @@ impl RenderPass for GBufferPass {
 
         // Build a stable, front-to-back opaque draw order.
         self.sorted_opaque_indices.clear();
-        self.sorted_opaque_indices.reserve(
-            draw_calls
-                .len()
-                .saturating_sub(self.sorted_opaque_indices.capacity()),
-        );
+        self.sorted_opaque_indices.reserve(draw_calls.len());
         for (idx, dc) in draw_calls.iter().enumerate() {
             if !dc.transparent_blend {
                 self.sorted_opaque_indices.push(idx);

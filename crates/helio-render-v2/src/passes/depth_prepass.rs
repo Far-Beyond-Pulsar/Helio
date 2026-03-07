@@ -46,11 +46,7 @@ impl RenderPass for DepthPrepassPass {
         // This maximizes the benefit of Z-test culling: nearby opaque geometry
         // writes depth first, rejecting all geometry behind it.
         self.sorted_opaque_indices.clear();
-        self.sorted_opaque_indices.reserve(
-            draw_calls
-                .len()
-                .saturating_sub(self.sorted_opaque_indices.capacity()),
-        );
+        self.sorted_opaque_indices.reserve(draw_calls.len());
         for (idx, dc) in draw_calls.iter().enumerate() {
             // Depth prepass only renders opaque geometry
             if !dc.transparent_blend {

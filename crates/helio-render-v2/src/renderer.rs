@@ -520,6 +520,12 @@ pub struct Renderer {
     scratch_gpu_lights: Vec<GpuLight>,
     scratch_shadow_mats: Vec<GpuShadowMatrix>,
     scratch_shadow_matrix_hashes: Vec<u64>,
+    /// Reusable batch transform accumulator — cleared at the start of `render_scene`.
+    scratch_batches: HashMap<(usize, usize), Vec<[f32; 16]>>,
+    /// Example mesh/material per batch key — cleared at the start of `render_scene`.
+    scratch_example: HashMap<(usize, usize), (GpuMesh, Option<GpuMaterial>)>,
+    /// Sorted indices into `scene.lights` — reused every frame to avoid per-frame allocation.
+    scratch_sorted_light_indices: Vec<usize>,
 
     // Frame state
     frame_count: u64,
@@ -1150,6 +1156,9 @@ impl Renderer {
             scratch_gpu_lights: Vec::new(),
             scratch_shadow_mats: Vec::new(),
             scratch_shadow_matrix_hashes: Vec::new(),
+            scratch_batches: HashMap::new(),
+            scratch_example: HashMap::new(),
+            scratch_sorted_light_indices: Vec::new(),
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -1795,11 +1804,13 @@ impl Renderer {
         // submitted as a single instanced call.  The key consists of the raw
         // pointer values of the mesh Arc and the material bind‑group Arc.  The
         // value is a vector of instance transforms (4×4 column-major matrices).
-        use std::collections::HashMap;
-        type BatchKey = (usize, usize); // mesh_ptr, material_bind_group_ptr
-        let mut batches: HashMap<BatchKey, Vec<[f32; 16]>> = HashMap::new();
-        // store an example object (mesh + optional material) per key
-        let mut example: HashMap<BatchKey, (GpuMesh, Option<GpuMaterial>)> = HashMap::new();
+        //
+        // Both maps are persistent fields whose bucket arrays grow amortised
+        // across frames.  Clear only the inner Vecs (not the outer map) so that
+        // Vec capacity is reused while the bucket array is never reallocated for
+        // a steady-state scene.
+        for v in self.scratch_batches.values_mut() { v.clear(); }
+        self.scratch_example.clear();
 
         for obj in &scene.objects {
             // use the underlying vertex buffer Arc as the identity key so
@@ -1811,18 +1822,23 @@ impl Renderer {
                 .map(|m| Arc::as_ptr(&m.bind_group) as usize)
                 .unwrap_or(0);
             let key = (mesh_ptr, mat_ptr);
-            batches.entry(key).or_default().push(obj.transform.to_cols_array());
-            example.entry(key).or_insert((obj.mesh.clone(), obj.material.clone()));
+            self.scratch_batches.entry(key).or_default().push(obj.transform.to_cols_array());
+            self.scratch_example.entry(key).or_insert_with(|| (obj.mesh.clone(), obj.material.clone()));
         }
 
-        for (key, mats) in batches {
+        // Take the maps out so &mut self draw methods can be called without
+        // conflicting borrows from the map contents.
+        let batches = std::mem::take(&mut self.scratch_batches);
+        let example = std::mem::take(&mut self.scratch_example);
+        for (key, mats) in &batches {
             let count = mats.len() as u32;
-            let (mesh, mat_opt) = example.remove(&key).unwrap();
+            if count == 0 { continue; } // stale entry from a shrunken scene
+            let (mesh, mat_opt) = &example[key];
             // instance buffer only when we have >1 instances
             let inst_buf = if count > 1 {
                 let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Instance transforms"),
-                    contents: bytemuck::cast_slice(&mats),
+                    contents: bytemuck::cast_slice(mats),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
                 Some(Arc::new(buf))
@@ -1831,17 +1847,20 @@ impl Renderer {
             };
 
             match mat_opt {
-                Some(mat) if count == 1 => self.draw_mesh_with_gpu_material(&mesh, &mat),
+                Some(mat) if count == 1 => self.draw_mesh_with_gpu_material(mesh, mat),
                 Some(mat) => {
-                    self.draw_mesh_instanced(&mesh, Arc::clone(&mat.bind_group), inst_buf.unwrap(), count);
+                    self.draw_mesh_instanced(mesh, Arc::clone(&mat.bind_group), inst_buf.unwrap(), count);
                 }
-                None if count == 1 => self.draw_mesh(&mesh),
+                None if count == 1 => self.draw_mesh(mesh),
                 None => {
-                    let buf = inst_buf.unwrap();
-                    self.draw_mesh_instanced(&mesh, Arc::new(self.global_bind_group.clone()), buf, count);
+                    let bg = Arc::new(self.global_bind_group.clone());
+                    self.draw_mesh_instanced(mesh, bg, inst_buf.unwrap(), count);
                 }
             }
         }
+        // Return maps to their fields to retain capacity for next frame.
+        self.scratch_batches = batches;
+        self.scratch_example = example;
         let t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // ────────────────────────────────────────────────────────────────────
@@ -1882,26 +1901,19 @@ impl Renderer {
         // Lights are sorted by relevance so the limited shadow budget is spent
         // on lights that actually contribute near the current camera view.
         let total_lights = scene.lights.len();
-        
-        // CULLING PASS: Remove lights beyond influence range.
-        let mut visible_lights: Vec<&crate::scene::SceneLight> = Vec::with_capacity(total_lights);
-        for light in &scene.lights {
-            match light.light_type {
-                crate::features::LightType::Directional => {
-                    // Directional lights affect entire scene
-                    visible_lights.push(light);
-                }
-                crate::features::LightType::Point | crate::features::LightType::Spot { .. } => {
-                    // Include all lights - GPU handles distance fade with smoothstep
-                    visible_lights.push(light);
-                }
-            }
+
+        // Build a sorted index list into scene.lights, reusing the pre-allocated
+        // scratch buffer to eliminate a per-frame heap allocation.
+        // All lights are included; distance/type culling happens on the GPU.
+        self.scratch_sorted_light_indices.clear();
+        self.scratch_sorted_light_indices.reserve(total_lights);
+        for i in 0..total_lights {
+            self.scratch_sorted_light_indices.push(i);
         }
-        
+
         // Sort remaining visible lights by contribution (ONLY if cache invalid)
-        let mut sorted_lights = visible_lights;
         if should_re_sort {
-            sorted_lights.sort_by(|a, b| {
+            self.scratch_sorted_light_indices.sort_by(|&ia, &ib| {
                 fn score(light: &crate::scene::SceneLight, camera_pos: glam::Vec3) -> f32 {
                     match light.light_type {
                         crate::features::LightType::Directional => {
@@ -1945,18 +1957,18 @@ impl Renderer {
                     }
                 }
 
-                let sb = score(b, camera.position);
-                let sa = score(a, camera.position);
+                let sb = score(&scene.lights[ib], camera.position);
+                let sa = score(&scene.lights[ia], camera.position);
                 sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
             });
         } else if self.frame_count % 60 == 0 {
             log::trace!("⚡ Light sort cache HIT — skipping re-sort");
         }
-        
+
         // No hard cap anymore - distance culling controls light count
         // (GPU can handle many lights per pixel with proper attenuation)
-        
-        let count = sorted_lights.len();
+
+        let count = self.scratch_sorted_light_indices.len();
         if self.frame_count % 120 == 0 && total_lights > count {
             log::trace!("Light culling: {} visible of {} total", count, total_lights);
         }
@@ -1964,12 +1976,9 @@ impl Renderer {
         self.ensure_light_buffer_capacity(count as u32);
 
         self.scratch_gpu_lights.clear();
-        self.scratch_gpu_lights.reserve(
-            sorted_lights
-                .len()
-                .saturating_sub(self.scratch_gpu_lights.capacity()),
-        );
-        for l in &sorted_lights {
+        self.scratch_gpu_lights.reserve(count);
+        for &idx in &self.scratch_sorted_light_indices {
+            let l = &scene.lights[idx];
             let light_type = match l.light_type {
                 crate::features::LightType::Directional => 0.0,
                 crate::features::LightType::Point => 1.0,
@@ -2021,17 +2030,12 @@ impl Renderer {
         // Point lights: 6 real cube-face matrices.
         let identity = Mat4::IDENTITY;
         self.scratch_shadow_mats.clear();
-        self.scratch_shadow_mats.reserve(
-            (MAX_LIGHTS as usize * 6).saturating_sub(self.scratch_shadow_mats.capacity()),
-        );
+        self.scratch_shadow_mats.reserve(MAX_LIGHTS as usize * 6);
         // Per-light FNV hash of the computed matrices; used by ShadowPass cache.
         self.scratch_shadow_matrix_hashes.clear();
-        self.scratch_shadow_matrix_hashes.reserve(
-            sorted_lights
-                .len()
-                .saturating_sub(self.scratch_shadow_matrix_hashes.capacity()),
-        );
-        for l in &sorted_lights {
+        self.scratch_shadow_matrix_hashes.reserve(count);
+        for &idx in &self.scratch_sorted_light_indices {
+            let l = &scene.lights[idx];
             let six: [Mat4; 6] = match l.light_type {
                 crate::features::LightType::Point => {
                     compute_point_light_matrices(l.position, l.range)
@@ -2075,7 +2079,8 @@ impl Renderer {
         {
             let mut fc = self.light_face_counts.lock().unwrap();
             fc.clear();
-            for l in &sorted_lights {
+            for &idx in &self.scratch_sorted_light_indices {
+                let l = &scene.lights[idx];
                 let faces: u8 = match l.light_type {
                     crate::features::LightType::Point       => 6,
                     crate::features::LightType::Directional => 4, // CSM cascades 0-3 only
@@ -2087,7 +2092,8 @@ impl Renderer {
         {
             let mut cull = self.shadow_cull_lights.lock().unwrap();
             cull.clear();
-            for (idx, l) in sorted_lights.iter().enumerate() {
+            for (slot, &li) in self.scratch_sorted_light_indices.iter().enumerate() {
+                let l = &scene.lights[li];
                 // Aggressive shadow range to render as many shadows as possible:
                 // - Extends point/spot lights by 5x to fill atlas with quality shadows
                 // - Directional (sun) shadows fade at 2.2x as before
@@ -2102,7 +2108,7 @@ impl Renderer {
                     range:          shadow_cull_range,
                     is_directional: matches!(l.light_type, crate::features::LightType::Directional),
                     is_point:       matches!(l.light_type, crate::features::LightType::Point),
-                    matrix_hash:    self.scratch_shadow_matrix_hashes.get(idx).copied().unwrap_or(0),
+                    matrix_hash:    self.scratch_shadow_matrix_hashes.get(slot).copied().unwrap_or(0),
                 });
             }
         }

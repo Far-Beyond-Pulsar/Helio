@@ -42,6 +42,8 @@ pub struct RadianceCascadesPass {
     tlas: wgpu::Tlas,
     blas_cache: HashMap<usize, BlasEntry>,
     last_active_mesh_keys: Vec<usize>,
+    /// Scratch buffer reused every frame to avoid per-frame Vec::with_capacity.
+    active_mesh_keys_scratch: Vec<usize>,
     last_active_count: usize,
     frame_idx: u64,
 }
@@ -71,6 +73,7 @@ impl RadianceCascadesPass {
             tlas,
             blas_cache: HashMap::new(),
             last_active_mesh_keys: Vec::new(),
+            active_mesh_keys_scratch: Vec::new(),
             last_active_count: 0,
             frame_idx: 0,
         }
@@ -101,11 +104,12 @@ impl RenderPass for RadianceCascadesPass {
 
         // ── 1. Cache mesh BLASes and gather active scene signature ───────────
         let active = draw_calls.len().min(TLAS_MAX);
-        let mut active_mesh_keys = Vec::with_capacity(active);
+        self.active_mesh_keys_scratch.clear();
+        self.active_mesh_keys_scratch.reserve(active);
 
         for dc in draw_calls[..active].iter() {
             let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
-            active_mesh_keys.push(key);
+            self.active_mesh_keys_scratch.push(key);
             if !self.blas_cache.contains_key(&key) {
                 let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
                     vertex_format: wgpu::VertexFormat::Float32x3,
@@ -135,18 +139,19 @@ impl RenderPass for RadianceCascadesPass {
         }
 
         // Detect structural scene changes so we can keep TLAS resident on GPU.
-        let scene_changed = self.last_active_count != active || self.last_active_mesh_keys != active_mesh_keys;
+        let scene_changed = self.last_active_count != active || self.last_active_mesh_keys != self.active_mesh_keys_scratch;
 
         // ── 2. Update TLAS instances only when the active scene changes ───────
         if scene_changed {
-            for (i, key) in active_mesh_keys.iter().enumerate() {
+            for (i, key) in self.active_mesh_keys_scratch.iter().enumerate() {
                 let blas_ref = &self.blas_cache[key].blas;
                 self.tlas[i] = Some(wgpu::TlasInstance::new(blas_ref, IDENTITY_TRANSFORM, 0, 0xFF));
             }
             for i in active..TLAS_MAX {
                 self.tlas[i] = None;
             }
-            self.last_active_mesh_keys = active_mesh_keys;
+            self.last_active_mesh_keys.clear();
+            self.last_active_mesh_keys.extend_from_slice(&self.active_mesh_keys_scratch);
             self.last_active_count = active;
         }
 
