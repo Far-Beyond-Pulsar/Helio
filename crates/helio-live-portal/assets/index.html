@@ -270,6 +270,28 @@
     #tooltip .tt-row   { color: var(--fg-muted); display: flex; justify-content: space-between; gap: 16px; margin: 2px 0; }
     #tooltip .tt-val   { color: var(--fg); font-family: ui-monospace, Menlo, monospace; }
 
+    /* ── Custom scrollbars ── */
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+      background: var(--canvas-inset);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 8px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: var(--accent);
+    }
+    .scrollbar-custom {
+      scrollbar-color: var(--border) var(--canvas-inset);
+      scrollbar-width: thin;
+    }
+    .table-wrap, .tree-wrap, .views-grid, .box-body {
+      scrollbar-color: var(--border) var(--canvas-inset);
+      scrollbar-width: thin;
+    }
+
     @media (max-width: 768px) {
       .views-grid { grid-template-columns: 1fr; }
       .stat-row   { flex-direction: column; }

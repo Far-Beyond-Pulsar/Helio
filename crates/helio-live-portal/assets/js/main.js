@@ -1,7 +1,5 @@
 // main.js - entry point for portal frontend, handles websocket and updates
 import { renderNodeGraph } from './nodeGraph.js';
-import { drawTimingTree } from './timingTree.js';
-// scene.js removed to speed up
 
 const statusEl = document.getElementById('status');
 const frameEl = document.getElementById('frame');
@@ -40,13 +38,13 @@ function render(snapshot) {
     const gpuPct = totalGpu > 0 ? ((t.gpu_ms / totalGpu) * 100).toFixed(1) : '0';
     const cpuPct = totalCpu > 0 ? ((t.cpu_ms / totalCpu) * 100).toFixed(1) : '0';
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${t.name}</td><td class=\"gpu\">${t.gpu_ms.toFixed(3)}</td><td class=\"cpu\">${cpuPct}%</td><td class=\"gpu\">${gpuPct}%</td>`;
+    tr.innerHTML = `<td>${t.name}</td><td class="gpu">${t.gpu_ms.toFixed(3)}</td><td class="cpu">${cpuPct}%</td><td class="gpu">${gpuPct}%</td>`;
     rowsEl.appendChild(tr);
   }
 
   const filter = searchBox ? searchBox.value.toLowerCase() : '';
   cyInstance = renderNodeGraph(snapshot, filter);
-  drawTimingTree(snapshot);
+  if (window.renderTimingTreeGraph) window.renderTimingTreeGraph(snapshot);
   // skip scene projections
 
   const dt = new Date(snapshot.timestamp_ms).toLocaleTimeString();
