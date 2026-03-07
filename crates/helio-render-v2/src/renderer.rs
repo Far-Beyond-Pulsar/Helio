@@ -2331,16 +2331,20 @@ fn compute_scene_delta(current: &PortalSceneLayout, previous: Option<&PortalScen
         p.objects.iter().map(|o| (o.id, o)).collect()
     });
     
-    // Find objects to add or update
+    // Find objects to add or update, track moved ids separately
     for obj in &current.objects {
         if let Some(&prev_obj) = prev_obj_map.get(&obj.id) {
             // Object exists: check if changed
             if prev_obj != obj {
                 delta.object_changes.push(obj.clone());
+                if prev_obj.bounds_center != obj.bounds_center {
+                    delta.moved_object_ids.push(obj.id);
+                }
             }
         } else {
             // New object
             delta.object_changes.push(obj.clone());
+            delta.moved_object_ids.push(obj.id);
         }
     }
     

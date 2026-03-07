@@ -8,6 +8,58 @@ use axum::Router;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 
+// helper to serve javascript modules from assets/js
+async fn serve_js(axum::extract::Path(file): axum::extract::Path<String>) -> impl IntoResponse {
+    // compute absolute path based on manifest dir so it works from any cwd
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/js");
+    let path = base.join(&file);
+    match tokio::fs::read(&path).await {
+        Ok(data) => (
+            [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+            data
+        ).into_response(),
+        Err(_) => {
+            eprintln!("serve_js missing {}", path.display());
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
+async fn serve_vendor(axum::extract::Path(file): axum::extract::Path<String>) -> impl IntoResponse {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/vendor");
+    let path = base.join(&file);
+    let mime = match path.extension().and_then(|e| e.to_str()) {
+        Some("js")  => "application/javascript",
+        Some("css") => "text/css",
+        _           => "application/octet-stream",
+    };
+    match tokio::fs::read(&path).await {
+        Ok(data) => (
+            [(axum::http::header::CONTENT_TYPE, mime)],
+            data
+        ).into_response(),
+        Err(_) => {
+            eprintln!("serve_vendor missing {}", path.display());
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
+async fn serve_static(axum::extract::Path(file): axum::extract::Path<String>) -> impl IntoResponse {
+    let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
+    let path = base.join(&file);
+    match tokio::fs::read(&path).await {
+        Ok(data) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            data
+        ).into_response(),
+        Err(_) => {
+            eprintln!("serve_static missing {}", path.display());
+            axum::http::StatusCode::NOT_FOUND.into_response()
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortalPassTiming {
     pub name: String,
@@ -58,6 +110,8 @@ pub struct PortalSceneLayout {
 pub struct PortalSceneLayoutDelta {
     /// Objects to add or update: send full data on add, sparse data on update
     pub object_changes: Vec<PortalSceneObject>,
+    /// Object IDs that moved (position changed)
+    pub moved_object_ids: Vec<u32>,
     /// Object IDs to remove (not present in object_changes)
     pub removed_object_ids: Vec<u32>,
     
@@ -149,6 +203,10 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                 let app = Router::new()
                     .route("/", get(index))
                     .route("/favicon.ico", get(favicon))
+                    // serve JS modules and other static assets
+                    .route("/js/{*file}", get(serve_js))
+                    .route("/vendor/{*file}", get(serve_vendor))
+                    .route("/assets/{*file}", get(serve_static))
                     .route("/ws", get(ws_upgrade))
                     .with_state(broadcast_tx);
 
