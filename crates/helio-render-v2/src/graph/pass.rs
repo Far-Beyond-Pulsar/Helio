@@ -50,6 +50,9 @@ pub struct PassContext<'a> {
     pub camera_position: glam::Vec3,
     /// Camera forward direction for view-depth sorting/culling.
     pub camera_forward: glam::Vec3,
+    /// Monotonically increasing counter.  Compare against a cached value to
+    /// decide whether to rebuild a `wgpu::RenderBundle` for this pass.
+    pub draw_list_generation: u64,
 }
 
 impl<'a> PassContext<'a> {

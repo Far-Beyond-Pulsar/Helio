@@ -510,6 +510,10 @@ pub struct Renderer {
     cached_sky_sun_intensity: f32,
     sky_state_changed: bool,
     
+    /// Monotonically increasing counter.  Incremented every `render_scene()` call.
+    /// Passes use this to decide whether to rebuild their RenderBundle cache.
+    draw_list_generation: u64,
+
     /// Cached light list state — skip sort if unchanged
     cached_light_count: usize,
     cached_light_position_hash: u64,
@@ -799,6 +803,7 @@ impl Renderer {
             PipelineVariant::DepthOnly,
         )?;
         let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
+            device.clone(),
             depth_pipeline,
             draw_list.clone(),
         );
@@ -830,6 +835,7 @@ impl Renderer {
             PipelineVariant::GBufferWrite,
         )?;
         let gbuffer_pass = GBufferPass::new(
+            device.clone(),
             gbuffer_targets.clone(),
             gbuf_pipeline,
             draw_list.clone(),
@@ -1195,6 +1201,8 @@ impl Renderer {
             cached_sky_sun_intensity: 1.0,
             sky_state_changed: true,  // Enable LUT render on first frame
             
+            draw_list_generation: 0,
+
             cached_light_count: 0,
             cached_light_position_hash: 0,
             cached_camera_pos: [0.0; 3],
@@ -1580,6 +1588,7 @@ impl Renderer {
             sky_bind_group: None,
             camera_position: camera.position,
             camera_forward: camera.forward(),
+            draw_list_generation: self.draw_list_generation,
         };
 
         // Timestamp profiling is expensive (query writes + resolve + readback).
@@ -1667,12 +1676,20 @@ impl Renderer {
         }
         let resolve_ms = resolve_start.elapsed().as_secs_f32() * 1000.0;
 
+        // Separate encoder serialization from GPU submission so both are measured
+        // independently.  encoder.finish() is O(total recorded commands) — previously
+        // it was the invisible cost hidden inside "submit_ms" that scaled with draws.
+        // With RenderBundle the finish cost is O(passes), not O(draws).
+        let finish_start = std::time::Instant::now();
+        let cmd_buf = encoder.finish();
+        let finish_ms = finish_start.elapsed().as_secs_f32() * 1000.0;
+
         // Submit for execution; keep draw list intact until we gather portal stats
         let submit_start = std::time::Instant::now();
-        self.queue.submit(Some(encoder.finish()));
+        self.queue.submit(Some(cmd_buf));
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
-        if self.debug_printout && submit_ms > 10.0 {
-            eprintln!("⚠️  queue.submit() blocked for {:.2}ms", submit_ms);
+        if self.debug_printout && (finish_ms + submit_ms) > 10.0 {
+            eprintln!("⚠️  encoder.finish()={:.2}ms  queue.submit()={:.2}ms", finish_ms, submit_ms);
         }
         
         // clear debug batch immediately, but defer draw list clearing until after
@@ -1801,6 +1818,8 @@ impl Renderer {
     /// Render the full scene. Everything in the scene is drawn; nothing else.
     pub fn render_scene(&mut self, scene: &Scene, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         let render_scene_start = std::time::Instant::now();
+        // New scene submission — signal passes that their RenderBundle caches are stale.
+        self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
 
         // Capture scene layout for the portal thread before render mutates state.
         if self.live_portal.is_some() {

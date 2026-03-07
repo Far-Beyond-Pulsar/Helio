@@ -11,25 +11,37 @@ use crate::Result;
 
 /// Depth-only pass that writes depth for all opaque draw calls
 pub struct DepthPrepassPass {
+    device: Arc<wgpu::Device>,
     pipeline: Arc<wgpu::RenderPipeline>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     sorted_opaque_indices: Vec<usize>,
     /// Sorted opaque index list shared with GBufferPass so the front-to-back
     /// ordering is computed once here and read directly by GBuffer.
     pub shared_sorted: Arc<Mutex<Vec<usize>>>,
+    /// Cached RenderBundle.  A bundle pre-compiles all draw commands so the
+    /// main encoder only records a single execute_bundles command, reducing
+    /// encoder.finish() cost from O(N draws) to O(1).
+    bundle_cache: Option<wgpu::RenderBundle>,
+    /// Generation counter when the cached bundle was built.  When it differs
+    /// from PassContext::draw_list_generation the bundle is rebuilt.
+    cached_generation: u64,
 }
 
 impl DepthPrepassPass {
     pub fn new(
+        device: Arc<wgpu::Device>,
         pipeline: Arc<wgpu::RenderPipeline>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
     ) -> (Self, Arc<Mutex<Vec<usize>>>) {
         let shared_sorted = Arc::new(Mutex::new(Vec::new()));
         let pass = Self {
+            device,
             pipeline,
             draw_list,
             sorted_opaque_indices: Vec::new(),
             shared_sorted: shared_sorted.clone(),
+            bundle_cache: None,
+            cached_generation: u64::MAX,
         };
         (pass, shared_sorted)
     }
@@ -49,26 +61,18 @@ impl RenderPass for DepthPrepassPass {
         let fwd = ctx.camera_forward;
 
         // Sort opaque draws front-to-back for early-Z rejection.
-        // This maximizes the benefit of Z-test culling: nearby opaque geometry
-        // writes depth first, rejecting all geometry behind it.
         self.sorted_opaque_indices.clear();
         self.sorted_opaque_indices.reserve(draw_calls.len());
         for (idx, dc) in draw_calls.iter().enumerate() {
-            // Depth prepass only renders opaque geometry
             if !dc.transparent_blend {
                 self.sorted_opaque_indices.push(idx);
             }
         }
-
-        // sort_unstable_by: in-place introsort, no heap allocation vs sort_by's merge sort.
         self.sorted_opaque_indices.sort_unstable_by(|&ia, &ib| {
             let a = &draw_calls[ia];
             let b = &draw_calls[ib];
-
-            // Front-to-back: closest first (smallest depth)
             let za = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd) - a.bounds_radius;
             let zb = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd) - b.bounds_radius;
-
             za.partial_cmp(&zb)
                 .unwrap_or(std::cmp::Ordering::Equal)
                 .then_with(|| {
@@ -78,20 +82,62 @@ impl RenderPass for DepthPrepassPass {
                 })
         });
 
-        // Publish sorted order to GBufferPass so it skips its own identical sort.
+        // Publish sorted order to GBufferPass.
         {
             let mut shared = self.shared_sorted.lock().unwrap();
             shared.clear();
             shared.extend_from_slice(&self.sorted_opaque_indices);
         }
 
+        // Rebuild RenderBundle when the draw list content changes.
+        //
+        // A RenderBundle pre-compiles all draw commands into a replayable object.
+        // The main encoder records a single execute_bundles command per pass,
+        // so encoder.finish() is O(passes) rather than O(N draws × cmds/draw).
+        // Bind group data is still sourced from the live uniform buffers each
+        // frame via write_buffer — the bundle captures the BindGroup *reference*,
+        // not the buffer payload, so camera/light updates are reflected correctly.
+        if ctx.draw_list_generation != self.cached_generation {
+            let mut benc = self.device.create_render_bundle_encoder(
+                &wgpu::RenderBundleEncoderDescriptor {
+                    label: Some("depth_prepass_bundle"),
+                    color_formats: &[],
+                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_read_only: false,
+                        stencil_read_only: true,
+                    }),
+                    sample_count: 1,
+                    multiview: None,
+                },
+            );
+            benc.set_pipeline(&self.pipeline);
+            benc.set_bind_group(0, ctx.global_bind_group, &[]);
+            benc.set_bind_group(2, ctx.lighting_bind_group, &[]);
+            let mut last_material: Option<usize> = None;
+            for &idx in &self.sorted_opaque_indices {
+                let dc = &draw_calls[idx];
+                let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+                if last_material != Some(mat_ptr) {
+                    benc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+                    last_material = Some(mat_ptr);
+                }
+                benc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+                benc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                benc.draw_indexed(0..dc.index_count, 0, 0..1);
+            }
+            self.bundle_cache = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
+            self.cached_generation = ctx.draw_list_generation;
+        }
+        drop(draw_calls);
+
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Depth Prepass"),
-            color_attachments: &[],  // No color output — depth only
+            color_attachments: &[],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: ctx.depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),  // Far plane = 1.0
+                    load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -100,24 +146,9 @@ impl RenderPass for DepthPrepassPass {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, ctx.global_bind_group, &[]);
-        pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
-
-        let mut last_material: Option<usize> = None;
-        for &idx in &self.sorted_opaque_indices {
-            let dc = &draw_calls[idx];
-            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-            if last_material != Some(mat_ptr) {
-                pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                last_material = Some(mat_ptr);
-            }
-            pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-            pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..dc.index_count, 0, 0..1);
+        if let Some(bundle) = &self.bundle_cache {
+            pass.execute_bundles(std::iter::once(bundle));
         }
-
         Ok(())
     }
 }

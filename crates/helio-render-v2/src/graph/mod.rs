@@ -256,6 +256,7 @@ impl RenderGraph {
                 profiler: profiler_raw,
                 camera_position: ctx.camera_position,
                 camera_forward: ctx.camera_forward,
+                draw_list_generation: ctx.draw_list_generation,
             };
 
             self.passes[pass_idx].pass.execute(&mut pass_ctx)?;
@@ -346,6 +347,9 @@ pub struct GraphContext<'a> {
     pub camera_position: glam::Vec3,
     /// Camera forward direction for view-depth sorting/culling
     pub camera_forward: glam::Vec3,
+    /// Monotonically increasing counter from the Renderer.  Passes compare this
+    /// against their cached generation to decide whether to rebuild RenderBundles.
+    pub draw_list_generation: u64,
 }
 
 /// Builder for declaring pass resource dependencies
