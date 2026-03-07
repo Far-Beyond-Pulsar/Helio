@@ -232,6 +232,14 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
+        // start live portal so snapshots (draw counts, timings, scene layout) are
+        // published when the app runs.  Without this call `live_portal` remains
+        // `None` and the web UI will stay empty ("still 0" was caused by this).
+        match renderer.start_live_portal_default() {
+            Ok(url) => log::info!("Helio live portal: {url}"),
+            Err(e)  => log::warn!("Could not start live portal: {e}"),
+        }
+
         // Room: 24 m wide (X: -12..+12), 12 m deep (Z: -6..+6), 4 m tall
         let floor   = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 12.0);
         let ceiling = GpuMesh::rect3d(&device, [0.0, 4.0, 0.0], [12.0, 0.05, 6.0]);
