@@ -526,6 +526,10 @@ pub struct Renderer {
     scratch_example: HashMap<(usize, usize), (GpuMesh, Option<GpuMaterial>)>,
     /// Sorted indices into `scene.lights` — reused every frame to avoid per-frame allocation.
     scratch_sorted_light_indices: Vec<usize>,
+    /// Per-batch persistent instance transform buffers.
+    /// Maps batch key (mesh_ptr, mat_ptr) → (buffer, instance_count).
+    /// Reused across frames to eliminate the per-frame GPU buffer alloc/dealloc cycle.
+    instance_buffer_cache: HashMap<(usize, usize), (Arc<wgpu::Buffer>, u32)>,
 
     // Frame state
     frame_count: u64,
@@ -1159,6 +1163,7 @@ impl Renderer {
             scratch_batches: HashMap::new(),
             scratch_example: HashMap::new(),
             scratch_sorted_light_indices: Vec::new(),
+            instance_buffer_cache: HashMap::new(),
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -1569,6 +1574,7 @@ impl Renderer {
             lighting_bind_group: &self.lighting_bind_group,
             sky_color: self.scene_sky_color,
             has_sky: self.scene_has_sky,
+            sky_state_changed: self.sky_state_changed,
             sky_bind_group: None,
             camera_position: camera.position,
             camera_forward: camera.forward(),
@@ -1836,12 +1842,30 @@ impl Renderer {
             let (mesh, mat_opt) = &example[key];
             // instance buffer only when we have >1 instances
             let inst_buf = if count > 1 {
-                let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Instance transforms"),
-                    contents: bytemuck::cast_slice(mats),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-                Some(Arc::new(buf))
+                // Remove cached entry to obtain owned Arc (no outstanding reference
+                // into the map) then re-insert after the write_buffer call so we can
+                // freely borrow &self.queue in the same statement.
+                let cached = self.instance_buffer_cache.remove(key);
+                let buf = match cached {
+                    Some((arc, cached_count)) if cached_count == count => {
+                        // Same instance count: reuse the existing GPU buffer and
+                        // overwrite the transform data.  Eliminates the per-frame
+                        // alloc/dealloc cycle that was the main source of submit spikes.
+                        self.queue.write_buffer(&arc, 0, bytemuck::cast_slice(mats));
+                        arc
+                    }
+                    _ => {
+                        // Count changed or first use — allocate a fresh buffer.
+                        // COPY_DST allows write_buffer updates in subsequent frames.
+                        Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                            label: Some("Instance transforms"),
+                            contents: bytemuck::cast_slice(mats),
+                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        }))
+                    }
+                };
+                self.instance_buffer_cache.insert(*key, (buf.clone(), count));
+                Some(buf)
             } else {
                 None
             };

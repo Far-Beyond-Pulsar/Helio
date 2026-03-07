@@ -36,6 +36,9 @@ pub struct PassContext<'a> {
     pub sky_color: [f32; 3],
     /// True when SkyPass will render the background this frame
     pub has_sky: bool,
+    /// True when the sky atmosphere parameters changed since the last frame.
+    /// SkyLutPass uses this to skip re-rendering the LUT when nothing changed.
+    pub sky_state_changed: bool,
     /// Sky uniforms bind group (group 1 in sky pipeline)
     pub sky_bind_group: Option<&'a wgpu::BindGroup>,
     /// Raw pointer to the active `GpuProfiler`, or null when profiling is

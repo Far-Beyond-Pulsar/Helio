@@ -96,6 +96,9 @@ impl RenderPass for SkyLutPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         if !ctx.has_sky { return Ok(()); }
+        // Skip LUT re-render when sky parameters haven't changed since last frame.
+        // The LUT texture retains its previous contents and remains valid.
+        if !ctx.sky_state_changed { return Ok(()); }
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Sky LUT Pass"),

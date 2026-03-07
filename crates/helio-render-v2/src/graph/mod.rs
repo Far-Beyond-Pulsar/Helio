@@ -209,25 +209,26 @@ impl RenderGraph {
     pub fn execute(&mut self, ctx: &mut GraphContext, profiler: Option<&mut GpuProfiler>) -> Result<()> {
         log::trace!("Executing render graph (frame {})", ctx.frame);
 
-        // Clone execution order to avoid borrow checker issues
-        let execution_order = self.execution_order.clone();
-
         // Convert profiler to raw pointer so we can freely split borrows with
         // ctx.encoder inside the loop.  This is sound: profiler outlives the loop,
         // and it is only ever accessed from this (single) thread.
         let profiler_raw: *mut GpuProfiler =
             profiler.map(|p| p as *mut GpuProfiler).unwrap_or(std::ptr::null_mut());
 
-        // Execute passes in order
-        for (exec_idx, &pass_idx) in execution_order.iter().enumerate() {
-            let pass_name = self.passes[pass_idx].pass.name().to_string();
+        // Execute passes in order — iterate by index so we don't hold a borrow
+        // on self.execution_order while calling &mut self methods inside the loop.
+        let pass_count = self.execution_order.len();
+        for exec_idx in 0..pass_count {
+            let pass_idx = self.execution_order[exec_idx];
+            let pass_name = self.passes[pass_idx].pass.name();
             log::trace!("  Executing pass: {}", pass_name);
 
             // Allocate query slots and record begin timestamp
             let slot_pair: Option<(u32, u32)> = if !profiler_raw.is_null() {
                 // SAFETY: profiler_raw is valid, non-null, and exclusively accessed here.
                 let p = unsafe { &mut *profiler_raw };
-                p.allocate_scope(&pass_name).map(|(b, e)| {
+                // allocate_scope takes &str and stores name.to_string() only when profiling.
+                p.allocate_scope(pass_name).map(|(b, e)| {
                     ctx.encoder.write_timestamp(p.query_set(), b);
                     (b, e)
                 })
@@ -250,6 +251,7 @@ impl RenderGraph {
                 lighting_bind_group: ctx.lighting_bind_group,
                 sky_color: ctx.sky_color,
                 has_sky: ctx.has_sky,
+                sky_state_changed: ctx.sky_state_changed,
                 sky_bind_group: ctx.sky_bind_group,
                 profiler: profiler_raw,
                 camera_position: ctx.camera_position,
@@ -336,6 +338,8 @@ pub struct GraphContext<'a> {
     pub sky_color: [f32; 3],
     /// True when a SkyAtmosphere is present – SkyPass renders; GeometryPass uses LoadOp::Load
     pub has_sky: bool,
+    /// True when sky atmosphere parameters changed since the last frame.
+    pub sky_state_changed: bool,
     /// Sky bind group (group 1 in SkyPass pipeline), None when no sky
     pub sky_bind_group: Option<&'a wgpu::BindGroup>,
     /// Camera world-space position for distance-based culling
