@@ -136,20 +136,33 @@ impl Skylight {
 // ── Existing scene types ──────────────────────────────────────────────────────
 
 /// A single renderable object in the scene
+///
+/// `mesh` contains geometry in *model space*; its world transform is stored
+/// separately so that identical meshes can be instanced.  Older code that
+/// baked the transform into the vertex data will continue to work because the
+/// default transform is identity.
 #[derive(Clone)]
 pub struct SceneObject {
     pub mesh: GpuMesh,
     /// Per-object material.  `None` → renderer uses its built-in default white material.
     pub material: Option<GpuMaterial>,
+    /// Model‑to‑world transform for this object.
+    pub transform: glam::Mat4,
 }
 
 impl SceneObject {
     pub fn new(mesh: GpuMesh) -> Self {
-        Self { mesh, material: None }
+        Self { mesh, material: None, transform: glam::Mat4::IDENTITY }
     }
 
     pub fn with_material(mesh: GpuMesh, material: GpuMaterial) -> Self {
-        Self { mesh, material: Some(material) }
+        Self { mesh, material: Some(material), transform: glam::Mat4::IDENTITY }
+    }
+
+    /// Specify a world transform.
+    pub fn with_transform(mut self, t: glam::Mat4) -> Self {
+        self.transform = t;
+        self
     }
 }
 
@@ -267,9 +280,30 @@ impl Scene {
         self
     }
 
-    /// Add an object with a custom PBR material.
+    /// Add object with custom material and an explicit transform.
+    pub fn add_object_transform(mut self, mesh: GpuMesh, transform: glam::Mat4) -> Self {
+        let mut obj = SceneObject::new(mesh);
+        obj.transform = transform;
+        self.objects.push(obj);
+        self
+    }
+
+    /// Add an object with a custom PBR material (identity transform).
     pub fn add_object_with_material(mut self, mesh: GpuMesh, material: GpuMaterial) -> Self {
         self.objects.push(SceneObject::with_material(mesh, material));
+        self
+    }
+
+    /// Add an object with material and world transform.
+    pub fn add_object_with_material_transform(
+        mut self,
+        mesh: GpuMesh,
+        material: GpuMaterial,
+        transform: glam::Mat4,
+    ) -> Self {
+        let mut obj = SceneObject::with_material(mesh, material);
+        obj.transform = transform;
+        self.objects.push(obj);
         self
     }
 

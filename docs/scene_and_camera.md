@@ -109,9 +109,47 @@ pub struct Scene {
     pub sky_atmosphere: Option<SkyAtmosphere>,
     pub skylight: Option<Skylight>,
 }
+
+Each `SceneObject` now carries a **model‑to‑world transform**; meshes are expected in
+model space. The renderer will automatically batch objects that share the same
+`GpuMesh` (pointer equality) and material, writing the transforms to a GPU
+instance buffer. That means identical assets dropped into the scene multiple
+times – for example, rows of crates or tiles – will be drawn in a single
+`draw_indexed_instanced` call with no extra effort from the user.
+
+For backwards compatibility the old style (meshes baked at world position)
+is still supported: the default transform is identity, so the new system behaves
+exactly like before when you don’t supply any transformations.
 ```
 
 The design philosophy here is builder-pattern construction: you create an empty scene with `Scene::new()`, then chain method calls to add content. This produces readable code and makes it easy to conditionally add elements based on runtime logic.
+
+### Building a Scene
+
+#### Instanced geometry example
+
+```rust
+// assume `crate_mesh` is a unit cube centred at origin and `crate_mat` a material
+let mut scene = Scene::new().with_ambient([0.5,0.5,0.5], 1.0);
+
+for row in 0..4 {
+    for col in 0..8 {
+        let x = row as f32 * 1.2 - 4.2;
+        let z = col as f32 * 0.9 - 3.6;
+        let transform = glam::Mat4::from_translation(glam::vec3(x, 0.0, z));
+        scene = scene.add_object_with_material_transform(
+            crate_mesh.clone(),
+            crate_mat.clone(),
+            transform,
+        );
+    }
+}
+```
+
+The renderer will detect the 32 objects share the same mesh and material, and
+submit them as **one** instanced draw with 32 transforms.  You don’t need to
+call `draw_mesh_instanced` yourself – the batching in `render_scene` takes
+care of it.
 
 ### Building a Scene
 

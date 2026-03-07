@@ -208,6 +208,11 @@ impl GpuMesh {
 }
 
 /// A single queued geometry draw call
+///
+/// The renderer fills a `DrawCall` for every mesh submitted.  To support
+/// hardware instancing we optionally carry an instance buffer and count.  The
+/// geometry pass will bind the buffer as a second vertex stream and issue
+/// `draw_indexed_instanced` when `instance_count > 1`.
 #[derive(Clone)]
 pub struct DrawCall {
     pub vertex_buffer: Arc<wgpu::Buffer>,
@@ -222,6 +227,10 @@ pub struct DrawCall {
     pub bounds_radius: f32,
     /// Material ID for GPU-driven indirect rendering (0 if not assigned)
     pub material_id: u32,
+    /// Optional per-instance transform buffer (mat4x4<f32> per instance)
+    pub instance_buffer: Option<Arc<wgpu::Buffer>>,
+    /// Number of instances encoded in `instance_buffer` (defaults to 1).
+    pub instance_count: u32,
 }
 
 impl DrawCall {
@@ -236,6 +245,8 @@ impl DrawCall {
             bounds_center: mesh.bounds_center,
             bounds_radius: mesh.bounds_radius,
             material_id: 0,  // Will be assigned by renderer if GPU-driven is enabled
+            instance_buffer: None,
+            instance_count: 1,
         }
     }
 }

@@ -99,8 +99,15 @@ impl RenderPass for GeometryPass {
         for dc in draw_calls.iter() {
             pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+
+            // bind instance buffer if present as second vertex stream
+            if let Some(inst_buf) = &dc.instance_buffer {
+                pass.set_vertex_buffer(1, inst_buf.slice(..));
+            }
+
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..dc.index_count, 0, 0..1);
+            let instances = if dc.instance_count > 1 { dc.instance_count } else { 1 };
+            pass.draw_indexed(0..dc.index_count, 0, 0..instances);
         }
 
         Ok(())

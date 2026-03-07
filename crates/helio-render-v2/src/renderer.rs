@@ -1790,11 +1790,52 @@ impl Renderer {
             self.latest_scene_layout = Some(build_portal_scene_layout(scene, camera));
         }
         
-        // Queue draw calls for all objects
+        // ---------- automatic batching/instancing ----------
+        // Group objects by their mesh & material so that identical draws can be
+        // submitted as a single instanced call.  The key consists of the raw
+        // pointer values of the mesh Arc and the material bind‑group Arc.  The
+        // value is a vector of instance transforms (4×4 column-major matrices).
+        use std::collections::HashMap;
+        type BatchKey = (usize, usize); // mesh_ptr, material_ptr
+        let mut batches: HashMap<BatchKey, Vec<[f32; 16]>> = HashMap::new();
+        // also keep one example object per key so we can reconstruct the mesh/Mat
+        let mut example: HashMap<BatchKey, (&GpuMesh, Option<Arc<wgpu::BindGroup>>)> = HashMap::new();
+
         for obj in &scene.objects {
-            match &obj.material {
-                Some(mat) => self.draw_mesh_with_gpu_material(&obj.mesh, mat),
-                None => self.draw_mesh(&obj.mesh),
+            let mesh_ptr = Arc::as_ptr(&obj.mesh) as usize;
+            let mat_ptr = obj.material.as_ref().map_or(0_usize, |m| Arc::as_ptr(m) as usize);
+            let key = (mesh_ptr, mat_ptr);
+            let mats = batches.entry(key).or_default();
+            mats.push(obj.transform.to_cols_array());
+            example.entry(key).or_insert((obj.mesh.as_ref(), obj.material.clone()));
+        }
+
+        for (key, mats) in batches {
+            let count = mats.len() as u32;
+            let (mesh, mat_opt) = example.remove(&key).unwrap();
+            // create instance buffer only if more than one instance
+            let inst_buf = if count > 1 {
+                let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Instance transforms"),
+                    contents: bytemuck::cast_slice(&mats),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                Some(Arc::new(buf))
+            } else {
+                None
+            };
+
+            match mat_opt {
+                Some(mat) if count == 1 => self.draw_mesh_with_gpu_material(mesh, &mat),
+                Some(mat) => {
+                    self.draw_mesh_instanced(mesh, mat, inst_buf.unwrap(), count);
+                }
+                None if count == 1 => self.draw_mesh(mesh),
+                None => {
+                    // no material – use global bind group as fallback
+                    let buf = inst_buf.unwrap();
+                    self.draw_mesh_instanced(mesh, Arc::new(self.global_bind_group.clone()), buf, count);
+                }
             }
         }
         let t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
@@ -2202,6 +2243,25 @@ impl Renderer {
         }
 
         self.render(camera, target, delta_time)
+    }
+
+    /// Submit a mesh using per-instance transforms.
+    ///
+    /// The caller is responsible for constructing a buffer of 4×4 column-major
+    /// matrices and passing it along with the count.  When `count` is 1 the
+    /// instance buffer may be `None` and the call degenerates to a normal
+    /// non‑instanced draw.  This API is consumed automatically by
+    /// `render_scene` but remains public so user code can call it directly.
+    pub fn draw_mesh_instanced(&mut self,
+        mesh: &GpuMesh,
+        material: Arc<wgpu::BindGroup>,
+        instance_buf: Arc<wgpu::Buffer>,
+        count: u32,
+    ) {
+        let mut dc = mesh.to_draw_call(material, false);
+        dc.instance_buffer = Some(instance_buf);
+        dc.instance_count = count;
+        self.draw_list.lock().unwrap().push(dc);
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
