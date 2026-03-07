@@ -1411,6 +1411,7 @@ impl Renderer {
         log::trace!("Rendering frame {}", self.frame_count);
 
         // Update camera uniform first (features may use camera-dependent logic in prepare).
+        let upload_start = std::time::Instant::now();
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
 
         // Prepare features (upload lights etc.)
@@ -1418,7 +1419,9 @@ impl Renderer {
             &self.device, &self.queue, &self.resources,
             self.frame_count, delta_time, camera,
         );
+        let prep_start = std::time::Instant::now();
         self.features.prepare_all(&prep_ctx)?;
+        let prep_ms = prep_start.elapsed().as_secs_f32() * 1000.0;
 
         // Pull live RC bounds after feature prepare so GI volume can follow camera.
         log::trace!("Attempting to pull RC bounds from feature registry");
@@ -1565,14 +1568,18 @@ impl Renderer {
         // Timestamp profiling is expensive (query writes + resolve + readback).
         // Keep it off the hot path unless debug printout is enabled.
         let profiling_active = self.debug_printout || self.live_portal.is_some();
+        
+        let graph_start = std::time::Instant::now();
         if profiling_active {
             if let Some(p) = &mut self.profiler { p.begin_frame(); }
             self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
         } else {
             self.graph.execute(&mut graph_ctx, None)?;
         }
+        let graph_ms = graph_start.elapsed().as_secs_f32() * 1000.0;
 
         // Apply anti-aliasing post-processing if enabled
+        let aa_start = std::time::Instant::now();
         if let Some(fxaa) = &self.fxaa_pass {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("FXAA Pass"),
@@ -1634,11 +1641,14 @@ impl Renderer {
                 taa.execute_draw(&mut pass, bind_group);
             }
         }
+        let aa_ms = aa_start.elapsed().as_secs_f32() * 1000.0;
 
         // Resolve GPU timestamp queries only when profiling is active.
+        let resolve_start = std::time::Instant::now();
         if profiling_active {
             if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
         }
+        let resolve_ms = resolve_start.elapsed().as_secs_f32() * 1000.0;
 
         // Submit and clear the draw list for next frame
         let submit_start = std::time::Instant::now();
@@ -1653,16 +1663,18 @@ impl Renderer {
 
         // Schedule async map after submit and non-blocking poll for ready results.
         // PollType::Poll does not wait for GPU completion.
+        let poll_start = std::time::Instant::now();
         if profiling_active {
             if let Some(p) = &mut self.profiler {
                 p.begin_readback();
                 p.poll_results(&self.device);
             }
         }
+        let poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
 
         // Measure frame-to-frame latency (time from start of previous frame to start of this frame)
         let frame_to_frame_ms = if let Some(last_start) = self.last_frame_start {
-            last_start.elapsed().as_secs_f32() * 1000.0
+            frame_start.duration_since(last_start).as_secs_f32() * 1000.0
         } else {
             0.0 // First frame; no previous frame to measure from
         };
@@ -1670,15 +1682,14 @@ impl Renderer {
         // Measure render duration (time from start of this frame to end)
         let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         
+        // Account for untracked time (application layer between render calls)
+        let untracked_ms = frame_to_frame_ms - frame_time_ms;
+        
         // Track when this frame's render started for next frame's calculation
         self.last_frame_start = Some(frame_start);
         self.last_frame_end = Some(std::time::Instant::now());
 
         if self.debug_printout && self.frame_count % 60 == 0 {
-            let total_elapsed_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-            eprintln!("🎮 RENDERER: total elapsed from render() start: {:.2}ms (submit={:.2}ms)", 
-                total_elapsed_ms, submit_ms);
-            
             if let Some(p) = &mut self.profiler {
                 p.set_frame_time_ms(frame_time_ms);
                 p.set_frame_to_frame_ms(frame_to_frame_ms);
@@ -1725,6 +1736,13 @@ impl Renderer {
                 pipeline_order: self.graph.execution_pass_names(),
                 scene_delta,
                 timestamp_ms: now_ms,
+                prep_ms,
+                graph_ms,
+                aa_ms,
+                resolve_ms,
+                submit_ms,
+                poll_ms,
+                untracked_ms,
             };
 
             portal.publish(snapshot);

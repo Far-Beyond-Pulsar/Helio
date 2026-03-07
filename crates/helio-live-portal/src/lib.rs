@@ -87,6 +87,15 @@ pub struct PortalFrameSnapshot {
     /// Delta updates for scene data (only changes sent, except first frame which is full)
     pub scene_delta: Option<PortalSceneLayoutDelta>,
     pub timestamp_ms: u128,
+    
+    // CPU/GPU timing breakdown
+    pub prep_ms: f32,
+    pub graph_ms: f32,
+    pub aa_ms: f32,
+    pub resolve_ms: f32,
+    pub submit_ms: f32,
+    pub poll_ms: f32,
+    pub untracked_ms: f32,
 }
 
 pub struct LivePortalHandle {
