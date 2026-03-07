@@ -40,10 +40,22 @@
       min-height: 100vh;
     }
 
+    body {
+      position: relative;
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      top: 64px; left: 0; width: 100vw; height: calc(100vh - 64px);
+      pointer-events: none;
+      z-index: 0;
+      background-image: repeating-linear-gradient(0deg, rgba(48,54,61,0.08) 0px, rgba(48,54,61,0.08) 1px, transparent 1px, transparent 32px), repeating-linear-gradient(90deg, rgba(48,54,61,0.08) 0px, rgba(48,54,61,0.08) 1px, transparent 1px, transparent 32px);
+    }
+
     /* ── top nav ── */
     .gh-nav {
       height: 64px;
-      background: var(--canvas-subtle);
+      background: var(--canvas-inset);
       border-bottom: 1px solid var(--border);
       display: flex;
       align-items: center;
@@ -79,7 +91,7 @@
     .status-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
 
     /* ── page wrapper ── */
-    .page { max-width: 1280px; margin: 0 auto; padding: 24px 24px 48px; }
+    .page { max-width: 1280px; margin: 0 auto; padding: 24px 24px 48px; position: relative; z-index: 1; }
 
     /* ── GitHub box ── */
     .box {
