@@ -48,7 +48,7 @@ async function copyJson(data, btn) {
   const json = JSON.stringify(data, null, 2);
   try {
     await navigator.clipboard.writeText(json);
-    showToast('Copied to clipboard ✓');
+    showToast('Copied stats + graph to clipboard ✓');
     if (btn) {
       const orig = btn.querySelector('.btn-label') ? btn.querySelector('.btn-label').textContent : btn.textContent;
       btn.classList.add('copied');
