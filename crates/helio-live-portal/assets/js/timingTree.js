@@ -6,7 +6,9 @@ export function drawTimingTree(snapshot) {
 
   const frameToFrame = snapshot.frame_to_frame_ms || 0;
   const frameTm = snapshot.frame_time_ms || 0;
-  const untracked = snapshot.untracked_ms || 0;
+  const stages  = snapshot.stage_timings || [];
+  const untrackedStage = stages.find(s => s.id === 'untracked');
+  const untracked = untrackedStage ? untrackedStage.ms : (snapshot.untracked_ms || 0);
 
   const rootX = 80;
   const rootY = 50;
@@ -64,14 +66,9 @@ export function drawTimingTree(snapshot) {
   const untrackBox = drawBox(rootX, rootY+100,'Untracked',untracked, root);
   const renderBox = drawBox(rootX+colWidth, rootY+100,'render()', frameTm, root);
   const y2 = rootY+200;
-  const boxes = [
-    {label:'Prep', val: snapshot.prep_ms||0},
-    {label:'Graph', val: snapshot.graph_ms||0},
-    {label:'AA', val: snapshot.aa_ms||0},
-    {label:'Resolve', val: snapshot.resolve_ms||0},
-    {label:'Submit', val: snapshot.submit_ms||0},
-    {label:'Poll', val: snapshot.poll_ms||0},
-  ];
+  const boxes = stages
+    .filter(s => s.id !== 'untracked')
+    .map(s => ({ label: s.name, val: s.ms }));
   for (let i=0;i<boxes.length;i++){
     const x = rootX + colWidth + (i%3)*200;
     const y = y2 + Math.floor(i/3)*80;

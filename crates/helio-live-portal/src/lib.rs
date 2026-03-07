@@ -67,6 +67,18 @@ pub struct PortalPassTiming {
     pub cpu_ms: f32,
 }
 
+/// A single top-level CPU timing stage sent to the portal.
+/// The bridge auto-populates this from the individual *_ms fields so the JS
+/// frontend never has to hardcode struct field names.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PortalStageTiming {
+    /// Stable machine-friendly identifier used as the React node ID.
+    pub id: String,
+    /// Human-readable display label.
+    pub name: String,
+    pub ms: f32,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PortalSceneObject {
     pub id: u32,
@@ -150,6 +162,18 @@ pub struct PortalFrameSnapshot {
     pub submit_ms: f32,
     pub poll_ms: f32,
     pub untracked_ms: f32,
+
+    /// Top-level CPU timing stages as an ordered dynamic list.
+    /// Auto-populated by the portal bridge from the individual *_ms fields
+    /// when left empty, so callers do not need to fill this themselves.
+    #[serde(default)]
+    pub stage_timings: Vec<PortalStageTiming>,
+
+    /// ID of the stage node that owns the pass sub-graph
+    /// (pipeline_order / pass_timings). Auto-set to "pipeline" by the bridge
+    /// when pipeline_order is non-empty and this field is None.
+    #[serde(default)]
+    pub pipeline_stage_id: Option<String>,
 }
 
 pub struct LivePortalHandle {
@@ -193,7 +217,25 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                 let bridge_thread = std::thread::Builder::new()
                     .name("helio-live-portal-bridge".to_string())
                     .spawn(move || {
-                        while let Ok(snapshot) = rx.recv() {
+                        while let Ok(mut snapshot) = rx.recv() {
+                            // Auto-populate stage_timings from individual fields so the JS
+                            // frontend never has to hardcode struct field names.
+                            if snapshot.stage_timings.is_empty() {
+                                snapshot.stage_timings = vec![
+                                    PortalStageTiming { id: "untracked".into(), name: "Untracked".into(),       ms: snapshot.untracked_ms },
+                                    PortalStageTiming { id: "prep".into(),      name: "Prep".into(),            ms: snapshot.prep_ms },
+                                    PortalStageTiming { id: "pipeline".into(),  name: "Render Pipeline".into(), ms: snapshot.graph_ms },
+                                    PortalStageTiming { id: "aa".into(),        name: "AA".into(),              ms: snapshot.aa_ms },
+                                    PortalStageTiming { id: "resolve".into(),   name: "Resolve".into(),         ms: snapshot.resolve_ms },
+                                    PortalStageTiming { id: "submit".into(),    name: "Submit".into(),          ms: snapshot.submit_ms },
+                                    PortalStageTiming { id: "poll".into(),      name: "Poll".into(),            ms: snapshot.poll_ms },
+                                ];
+                            }
+                            // Auto-set pipeline_stage_id so the JS knows which stage
+                            // node spawns the pass sub-graph.
+                            if snapshot.pipeline_stage_id.is_none() && !snapshot.pipeline_order.is_empty() {
+                                snapshot.pipeline_stage_id = Some("pipeline".to_string());
+                            }
                             if let Ok(json) = serde_json::to_string(&snapshot) {
                                 let _ = bridge_tx.send(json);
                             }

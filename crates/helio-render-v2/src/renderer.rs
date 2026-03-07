@@ -1743,6 +1743,8 @@ impl Renderer {
                 submit_ms,
                 poll_ms,
                 untracked_ms,
+                stage_timings: vec![],       // auto-populated by portal bridge
+                pipeline_stage_id: None,     // auto-populated by portal bridge
             };
 
             portal.publish(snapshot);

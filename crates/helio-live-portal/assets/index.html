@@ -1,236 +1,417 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-color-mode="dark" data-dark-theme="dark">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Helio Live Portal</title>
-  <!-- React Flow requires its own stylesheet for edges/handles to render -->
   <link rel="stylesheet" href="/vendor/reactflow.style.css" />
-  <!-- React 18 + ReactFlow v11 UMD (served locally to avoid CORS) -->
   <script src="/vendor/react.development.js"></script>
   <script src="/vendor/react-dom.development.js"></script>
   <script src="/vendor/reactflow.min.js"></script>
   <script type="module" src="./js/main.js"></script>
-
   <style>
+    /* ── GitHub dark design tokens ── */
     :root {
-      --bg: #0f1720;
-      --panel: #182432;
-      --ink: #e4edf5;
-      --muted: #94a8bb;
-      --line: #2a3f54;
-      --accent: #6ad7ff;
-      --gpu: #ff9f70;
-      --cpu: #8bf0b0;
-      --hot: #ff5f4a;
-      --ok: #41c67a;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      color: var(--ink);
-      background:
-        radial-gradient(800px 520px at 15% -20%, #264259 0%, transparent 52%),
-        radial-gradient(900px 620px at 100% 0%, #1f3448 0%, transparent 56%),
-        var(--bg);
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-    }
-    .wrap { max-width: 1400px; margin: 0 auto; padding: 16px; }
-    h1 { font-size: 18px; margin: 0 0 12px; letter-spacing: 0.08em; text-transform: uppercase; }
-    h2 { font-size: 12px; margin: 0 0 10px; color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; }
-
-    .grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
-    .card {
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: linear-gradient(180deg, #1c2a38, var(--panel));
-      padding: 12px;
-      min-height: 120px;
+      --canvas:        #0d1117;
+      --canvas-subtle: #161b22;
+      --canvas-inset:  #010409;
+      --border:        #30363d;
+      --border-muted:  #21262d;
+      --fg:            #e6edf3;
+      --fg-muted:      #8b949e;
+      --fg-subtle:     #6e7681;
+      --accent:        #388bfd;
+      --success:       #3fb950;
+      --attention:     #d29922;
+      --danger:        #f85149;
+      --gpu-color:     #f0883e;
+      --cpu-color:     #56d364;
     }
 
-    .metrics { display: flex; gap: 10px; flex-wrap: wrap; }
-    .pill {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #12202c;
-      padding: 8px 10px;
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--canvas-inset);
+      color: var(--fg);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── top nav ── */
+    .gh-nav {
+      height: 64px;
+      background: var(--canvas-subtle);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      gap: 16px;
+    }
+    .gh-nav-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--fg);
+      text-decoration: none;
+    }
+    .gh-nav-logo svg { flex-shrink: 0; }
+    .gh-nav-divider { color: var(--fg-subtle); font-size: 18px; font-weight: 300; }
+    .gh-nav-sub { font-size: 14px; font-weight: 400; color: var(--fg-muted); }
+    .gh-nav-status {
+      margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 8px;
       font-size: 12px;
+      color: var(--fg-muted);
     }
-    .val { color: var(--accent); font-weight: 700; }
-    #status { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--fg-subtle);
+      flex-shrink: 0;
+    }
+    .status-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
 
-    .flowchart-container {
-      position: relative;
+    /* ── page wrapper ── */
+    .page { max-width: 1280px; margin: 0 auto; padding: 24px 24px 48px; }
+
+    /* ── GitHub box ── */
+    .box {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--canvas-subtle);
+      margin-bottom: 16px;
+    }
+    .box-header {
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .box-header h2 {
+      margin: 0;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--fg);
+      letter-spacing: 0.02em;
+    }
+    .box-header .counter {
+      background: var(--canvas-subtle);
+      border-radius: 2em;
+      padding: 0 8px;
+      font-size: 12px;
+      font-weight: 500;
+      color: var(--fg-muted);
+      line-height: 20px;
+    }
+    .box-body { padding: 16px; }
+    .box-body.flush { padding: 0; background: var(--canvas); }
+
+    /* ── stat pills row ── */
+    .stat-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .stat-pill {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      background: var(--canvas);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: 12px;
+      color: var(--fg-muted);
+    }
+    .stat-pill .label { font-weight: 500; }
+    .stat-pill .val {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+    }
+    .stat-pill.accent .val { color: var(--accent); }
+    .stat-pill.gpu    .val { color: var(--gpu-color); }
+    .stat-pill.cpu    .val { color: var(--cpu-color); }
+
+    /* ── search / filter ── */
+    .search-input {
+      background: var(--canvas-inset);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 5px 12px;
+      font-size: 12px;
+      color: var(--fg);
+      width: 220px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .search-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(56,139,253,0.15); }
+    .search-input::placeholder { color: var(--fg-subtle); }
+
+    /* ── node graph container ── */
+    #cy {
       width: 100%;
       height: 520px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #111a24;
+      border-radius: 0 0 6px 6px;
+      background: var(--canvas);
+      display: block;
+    }
+
+    /* ── timing tree ── */
+    .tree-wrap {
+      width: 100%;
+      overflow-x: auto;
+      background: var(--canvas);
+    }
+    #timingTree {
+      display: block;
+      min-width: 900px;
+      width: 100%;
+      height: 560px;
+    }
+
+    /* ── pass timings table ── */
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    thead th {
+      padding: 8px 16px;
+      text-align: left;
+      font-weight: 600;
+      font-size: 12px;
+      color: var(--fg-muted);
+      background: var(--canvas-subtle);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      white-space: nowrap;
+    }
+    tbody tr { border-bottom: 1px solid var(--border-muted); }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: var(--canvas); }
+    tbody td {
+      padding: 8px 16px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
+    }
+    td.pass-name { color: var(--fg); font-family: inherit; font-size: 13px; }
+    td.gpu { color: var(--gpu-color); }
+    td.cpu { color: var(--cpu-color); }
+
+    /* ── scene canvas views ── */
+    .views-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 1px;
+      background: var(--canvas-inset);
+      border-radius: 0 0 6px 6px;
       overflow: hidden;
     }
-
-    #flow {
-      width: 100%;
-      height: 100%;
-      display: block;
-      cursor: grab;
+    .view-cell {
+      background: var(--canvas);
+      padding: 12px;
     }
-
-    #flow:active { cursor: grabbing; }
-
-    .flowchart-controls {
-      position: absolute;
-      top: 10px;
-      right: 10px;
-      display: flex;
-      gap: 8px;
-      z-index: 100;
-    }
-
-    .ctrl-btn {
-      background: #1a2d42;
-      border: 1px solid var(--line);
-      color: var(--ink);
-      padding: 6px 10px;
-      border-radius: 6px;
-      cursor: pointer;
+    .view-label {
       font-size: 11px;
       font-weight: 600;
-      transition: all 0.2s;
+      color: var(--fg-subtle);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+    canvas {
+      width: 100%;
+      height: 160px;
+      display: block;
+      border-radius: 4px;
+      background: var(--canvas-inset);
+      border: 1px solid var(--border-muted);
     }
 
-    .ctrl-btn:hover {
-      background: #2a3d52;
-      border-color: var(--accent);
-    }
-
-    .search-box {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      background: #1a2d42;
-      border: 1px solid var(--line);
+    /* ── ghost tooltip ── */
+    #tooltip {
+      position: fixed;
+      background: var(--canvas-subtle);
+      border: 1px solid var(--border);
       border-radius: 6px;
-      padding: 6px 8px;
-      font-size: 11px;
-      color: var(--ink);
-      width: 160px;
-      z-index: 100;
-    }
-
-    .search-box::placeholder { color: var(--muted); }
-
-    .tooltip {
-      position: absolute;
-      background: #0a1219;
-      border: 1px solid var(--accent);
-      border-radius: 6px;
-      padding: 10px 12px;
-      font-size: 11px;
+      padding: 10px 14px;
+      font-size: 12px;
       pointer-events: none;
-      z-index: 200;
-      max-width: 220px;
-      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.6);
+      z-index: 9999;
+      max-width: 240px;
+      box-shadow: 0 8px 24px rgba(1,4,9,0.8);
+      display: none;
     }
+    #tooltip .tt-title { color: var(--fg); font-weight: 600; margin-bottom: 6px; }
+    #tooltip .tt-row   { color: var(--fg-muted); display: flex; justify-content: space-between; gap: 16px; margin: 2px 0; }
+    #tooltip .tt-val   { color: var(--fg); font-family: ui-monospace, Menlo, monospace; }
 
-    .tooltip-title { color: var(--accent); font-weight: 700; margin-bottom: 4px; }
-    .tooltip-row { color: var(--muted); margin: 2px 0; display: flex; justify-content: space-between; gap: 12px; }
-    .tooltip-val { color: var(--ink); }
-
-    .views { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
-    .viewbox { border: 1px solid var(--line); border-radius: 8px; background: #101922; padding: 8px; }
-    .viewtitle { color: var(--muted); font-size: 11px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.06em; }
-    canvas { width: 100%; height: 200px; display: block; border: 1px solid #24384c; border-radius: 6px; background: #0d141c; }
-
-    .list { max-height: 330px; overflow: auto; border: 1px solid var(--line); border-radius: 8px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { padding: 7px 9px; border-bottom: 1px solid #223547; font-size: 12px; }
-    th { text-align: left; color: var(--muted); background: #132231; position: sticky; top: 0; }
-    .gpu { color: var(--gpu); }
-    .cpu { color: var(--cpu); }
-
-    .stat-bar {
-      display: inline-block;
-      height: 3px;
-      background: #304a60;
-      border-radius: 2px;
-      overflow: hidden;
-      margin: 0 4px;
-    }
-
-    .stat-bar-fill {
-      height: 100%;
-      background: var(--accent);
-      border-radius: 2px;
-    }
-
-    @media (max-width: 1100px) {
-      .views { grid-template-columns: 1fr; }
-      .flowchart-container { height: 400px; }
+    @media (max-width: 768px) {
+      .views-grid { grid-template-columns: 1fr; }
+      .stat-row   { flex-direction: column; }
+      #cy         { height: 380px; }
     }
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>Helio Live Pipeline + Scene Portal</h1>
 
-    <section class="card">
-      <h2>Frame Metrics</h2>
-      <div class="metrics">
-        <div class="pill">Frame <span class="val" id="frame">-</span></div>
-        <div class="pill">Frame ms <span class="val" id="frameMs">-</span></div>
-        <div class="pill">Frame-to-frame ms <span class="val" id="ftfMs">-</span></div>
-        <div class="pill">GPU total ms <span class="val" id="gpuTotal">-</span></div>
-        <div class="pill">CPU total ms <span class="val" id="cpuTotal">-</span></div>
-        <div class="pill">Objects <span class="val" id="objCount">-</span></div>
-        <div class="pill">Lights <span class="val" id="lightCount">-</span></div>
-        <div class="pill">Billboards <span class="val" id="bbCount">-</span></div>
+  <!-- ── nav ── -->
+  <nav class="gh-nav">
+    <a class="gh-nav-logo" href="/">
+      <!-- Helio "H" mark in GitHub's octicon style -->
+      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect width="24" height="24" rx="4" fill="#388bfd" fill-opacity="0.15"/>
+        <path d="M6 5h2.5v5.5h7V5H18v14h-2.5v-6H8.5v6H6V5Z" fill="#388bfd"/>
+      </svg>
+      Helio
+    </a>
+    <span class="gh-nav-divider">/</span>
+    <span class="gh-nav-sub">Live Portal</span>
+    <div class="gh-nav-status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="status">Connecting…</span>
+    </div>
+  </nav>
+
+  <main class="page">
+
+    <!-- ── frame metrics ── -->
+    <div class="box">
+      <div class="box-header">
+        <h2>Frame Metrics</h2>
       </div>
-      <div id="status">Connecting...</div>
-    </section>
+      <div class="box-body">
+        <div class="stat-row">
+          <div class="stat-pill accent">
+            <span class="label">Frame</span>
+            <span class="val" id="frame">—</span>
+          </div>
+          <div class="stat-pill">
+            <span class="label">Frame time</span>
+            <span class="val" id="frameMs">—</span>
+            <span style="color:var(--fg-subtle);font-size:11px">ms</span>
+          </div>
+          <div class="stat-pill">
+            <span class="label">Frame-to-frame</span>
+            <span class="val" id="ftfMs">—</span>
+            <span style="color:var(--fg-subtle);font-size:11px">ms</span>
+          </div>
+          <div class="stat-pill gpu">
+            <span class="label">GPU total</span>
+            <span class="val" id="gpuTotal">—</span>
+            <span style="color:var(--fg-subtle);font-size:11px">ms</span>
+          </div>
+          <div class="stat-pill cpu">
+            <span class="label">CPU total</span>
+            <span class="val" id="cpuTotal">—</span>
+            <span style="color:var(--fg-subtle);font-size:11px">ms</span>
+          </div>
+          <div class="stat-pill">
+            <span class="label">Objects</span>
+            <span class="val" id="objCount">—</span>
+          </div>
+          <div class="stat-pill">
+            <span class="label">Lights</span>
+            <span class="val" id="lightCount">—</span>
+          </div>
+          <div class="stat-pill">
+            <span class="label">Billboards</span>
+            <span class="val" id="bbCount">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
 
-    <section class="card" style="margin-top:14px">
-      <h2>Scene Layout (Simulated Cameras)</h2>
-      <div class="views">
-        <div class="viewbox">
-          <div class="viewtitle">Top (XZ)</div>
+    <!-- ── pipeline node graph ── -->
+    <div class="box">
+      <div class="box-header" style="justify-content:space-between">
+        <h2>Render Pipeline</h2>
+        <input type="text" id="searchBox" class="search-input" placeholder="Filter passes…" />
+      </div>
+      <div id="cy"></div>
+    </div>
+
+    <!-- ── per-pass timings ── -->
+    <div class="box">
+      <div class="box-header">
+        <h2>Per-Pass Timings</h2>
+      </div>
+      <div class="box-body flush">
+        <div class="table-wrap" style="max-height:320px;overflow-y:auto">
+          <table>
+            <thead>
+              <tr>
+                <th>Pass</th>
+                <th>GPU ms</th>
+                <th>CPU %</th>
+                <th>GPU %</th>
+              </tr>
+            </thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── timing breakdown tree ── -->
+    <div class="box">
+      <div class="box-header">
+        <h2>Frame Timing Breakdown</h2>
+      </div>
+      <div class="box-body flush">
+        <div class="tree-wrap">
+          <svg id="timingTree" viewBox="0 0 1200 560" preserveAspectRatio="xMinYMin meet"></svg>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── scene views ── -->
+    <div class="box">
+      <div class="box-header">
+        <h2>Scene Projections</h2>
+      </div>
+      <div class="views-grid">
+        <div class="view-cell">
+          <div class="view-label">Top · XZ</div>
           <canvas id="viewTop" width="420" height="220"></canvas>
         </div>
-        <div class="viewbox">
-          <div class="viewtitle">Front (XY)</div>
+        <div class="view-cell">
+          <div class="view-label">Front · XY</div>
           <canvas id="viewFront" width="420" height="220"></canvas>
         </div>
-        <div class="viewbox">
-          <div class="viewtitle">Side (ZY)</div>
+        <div class="view-cell">
+          <div class="view-label">Side · ZY</div>
           <canvas id="viewSide" width="420" height="220"></canvas>
         </div>
       </div>
-    </section>
+    </div>
 
-    <section class="card" style="margin-top:14px">
-      <h2>Pipeline Node Graph (GitHub Actions Style)</h2>
-      <input type="text" id="searchBox" class="search-box" placeholder="Filter passes..." />
-      <div id="cy" style="width:100%;height:520px;border-radius:8px;background:#111a24;"></div>
-    </section>
+  </main>
 
-    <section class="card" style="margin-top:14px">
-      <h2>Frame Timing Breakdown (Tree)</h2>
-      <div class="flowchart-container">
-        <svg id="timingTree" viewBox="0 0 1200 600" preserveAspectRatio="xMinYMin meet"></svg>
-      </div>
-    </section>
-
-    <section class="card" style="margin-top:14px">
-      <h2>Per-Pass Timings</h2>
-      <div class="list">
-        <table>
-          <thead><tr><th>Pass</th><th>GPU ms</th><th>CPU %</th><th>GPU %</th></tr></thead>
-          <tbody id="rows"></tbody>
-        </table>
-      </div>
-    </section>
-
-    <div id="tooltip" class="tooltip" style="display:none"></div>
+  <div id="tooltip">
+    <div class="tt-title"></div>
   </div>
 
+  <script>
+    // Keep the status dot in sync with the #status text set by main.js
+    const _origStatus = document.getElementById('status');
+    const _dot        = document.getElementById('statusDot');
+    new MutationObserver(() => {
+      const connected = _origStatus.textContent.toLowerCase().includes('connected');
+      _dot.classList.toggle('connected', connected);
+    }).observe(_origStatus, { childList: true, subtree: true, characterData: true });
+  </script>
+</body>
 </html>

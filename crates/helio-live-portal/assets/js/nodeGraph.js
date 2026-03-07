@@ -144,15 +144,10 @@ function detectAnomalies(snapshot) {
     }
   };
 
-  flagOutliers([
-    { id: 'untracked', val: snapshot.untracked_ms || 0 },
-    { id: 'prep',      val: snapshot.prep_ms      || 0 },
-    { id: 'pipeline',  val: snapshot.graph_ms     || 0 },
-    { id: 'aa',        val: snapshot.aa_ms        || 0 },
-    { id: 'resolve',   val: snapshot.resolve_ms   || 0 },
-    { id: 'submit',    val: snapshot.submit_ms    || 0 },
-    { id: 'poll',      val: snapshot.poll_ms      || 0 },
-  ], 'High CPU time', 'ms', 2);
+  flagOutliers(
+    (snapshot.stage_timings || []).map(s => ({ id: s.id, val: s.ms })),
+    'High CPU time', 'ms', 2
+  );
 
   const passes = snapshot.pass_timings || [];
   flagOutliers(passes.map(p => ({ id: p.name, val: p.gpu_ms })), 'GPU bottleneck', 'ms GPU', 1);
@@ -357,15 +352,10 @@ function computeLayout(snapshot, filter) {
   const rawEdges  = [];
   const anomalies = detectAnomalies(snapshot);
 
-  const topSteps = [
-    { id: 'untracked', label: 'Untracked',      val: snapshot.untracked_ms  || 0 },
-    { id: 'prep',      label: 'Prep',            val: snapshot.prep_ms      || 0 },
-    { id: 'pipeline',  label: 'Render Pipeline', val: snapshot.graph_ms     || 0 },
-    { id: 'aa',        label: 'AA',              val: snapshot.aa_ms        || 0 },
-    { id: 'resolve',   label: 'Resolve',         val: snapshot.resolve_ms   || 0 },
-    { id: 'submit',    label: 'Submit',          val: snapshot.submit_ms    || 0 },
-    { id: 'poll',      label: 'Poll',            val: snapshot.poll_ms      || 0 },
-  ];
+  // Top-level stages come entirely from the backend — no field names hardcoded here.
+  const topSteps = (snapshot.stage_timings || []).map(s => ({
+    id: s.id, label: s.name, val: s.ms,
+  }));
 
   const match = (s) => !filter || s.toLowerCase().includes(filter);
 
@@ -390,10 +380,11 @@ function computeLayout(snapshot, filter) {
     }
   }
 
+  const pipelineStageId = snapshot.pipeline_stage_id || null;
   const passOrder = snapshot.pipeline_order || [];
-  if (passOrder.length > 0) {
-    const pipelineIdx    = 2;
-    const pipelineCenter = pipelineIdx * (NODE_W + H_GAP) + NODE_W / 2;
+  if (pipelineStageId && passOrder.length > 0) {
+    const pipelineNode   = rawNodes.find(n => n.id === pipelineStageId);
+    const pipelineCenter = pipelineNode ? pipelineNode.position.x + NODE_W / 2 : 0;
     const startX         = pipelineCenter;
     const visiblePasses  = [];
 
@@ -415,7 +406,7 @@ function computeLayout(snapshot, filter) {
 
       if (vi === 0) {
         rawEdges.push({
-          id: `e_pipeline_${name}`, source: 'pipeline', sourceHandle: 'bottom',
+          id: `e_${pipelineStageId}_${name}`, source: pipelineStageId, sourceHandle: 'bottom',
           target: name, targetHandle: 'left', type: 'gradient',
           style: { stroke: '#388bfd', strokeWidth: 2 },
         });
