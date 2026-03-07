@@ -1796,24 +1796,29 @@ impl Renderer {
         // pointer values of the mesh Arc and the material bind‑group Arc.  The
         // value is a vector of instance transforms (4×4 column-major matrices).
         use std::collections::HashMap;
-        type BatchKey = (usize, usize); // mesh_ptr, material_ptr
+        type BatchKey = (usize, usize); // mesh_ptr, material_bind_group_ptr
         let mut batches: HashMap<BatchKey, Vec<[f32; 16]>> = HashMap::new();
-        // also keep one example object per key so we can reconstruct the mesh/Mat
-        let mut example: HashMap<BatchKey, (&GpuMesh, Option<Arc<wgpu::BindGroup>>)> = HashMap::new();
+        // store an example object (mesh + optional material) per key
+        let mut example: HashMap<BatchKey, (GpuMesh, Option<GpuMaterial>)> = HashMap::new();
 
         for obj in &scene.objects {
-            let mesh_ptr = Arc::as_ptr(&obj.mesh) as usize;
-            let mat_ptr = obj.material.as_ref().map_or(0_usize, |m| Arc::as_ptr(m) as usize);
+            // use the underlying vertex buffer Arc as the identity key so
+            // cloned `GpuMesh` instances still group together
+            let mesh_ptr = Arc::as_ptr(&obj.mesh.vertex_buffer) as usize;
+            let mat_ptr = obj
+                .material
+                .as_ref()
+                .map(|m| Arc::as_ptr(&m.bind_group) as usize)
+                .unwrap_or(0);
             let key = (mesh_ptr, mat_ptr);
-            let mats = batches.entry(key).or_default();
-            mats.push(obj.transform.to_cols_array());
-            example.entry(key).or_insert((obj.mesh.as_ref(), obj.material.clone()));
+            batches.entry(key).or_default().push(obj.transform.to_cols_array());
+            example.entry(key).or_insert((obj.mesh.clone(), obj.material.clone()));
         }
 
         for (key, mats) in batches {
             let count = mats.len() as u32;
             let (mesh, mat_opt) = example.remove(&key).unwrap();
-            // create instance buffer only if more than one instance
+            // instance buffer only when we have >1 instances
             let inst_buf = if count > 1 {
                 let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Instance transforms"),
@@ -1826,15 +1831,14 @@ impl Renderer {
             };
 
             match mat_opt {
-                Some(mat) if count == 1 => self.draw_mesh_with_gpu_material(mesh, &mat),
+                Some(mat) if count == 1 => self.draw_mesh_with_gpu_material(&mesh, &mat),
                 Some(mat) => {
-                    self.draw_mesh_instanced(mesh, mat, inst_buf.unwrap(), count);
+                    self.draw_mesh_instanced(&mesh, Arc::clone(&mat.bind_group), inst_buf.unwrap(), count);
                 }
-                None if count == 1 => self.draw_mesh(mesh),
+                None if count == 1 => self.draw_mesh(&mesh),
                 None => {
-                    // no material – use global bind group as fallback
                     let buf = inst_buf.unwrap();
-                    self.draw_mesh_instanced(mesh, Arc::new(self.global_bind_group.clone()), buf, count);
+                    self.draw_mesh_instanced(&mesh, Arc::new(self.global_bind_group.clone()), buf, count);
                 }
             }
         }
@@ -2258,7 +2262,8 @@ impl Renderer {
         instance_buf: Arc<wgpu::Buffer>,
         count: u32,
     ) {
-        let mut dc = mesh.to_draw_call(material, false);
+        // recreate a DrawCall analogous to `draw_mesh_with_material`
+        let mut dc = DrawCall::new(mesh, material, false);
         dc.instance_buffer = Some(instance_buf);
         dc.instance_count = count;
         self.draw_list.lock().unwrap().push(dc);
