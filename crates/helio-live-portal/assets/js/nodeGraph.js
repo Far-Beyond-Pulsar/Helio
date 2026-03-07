@@ -145,12 +145,25 @@ function PipelineNode({ id, data: initialData }) {
 const nodeTypes = { pipeline: PipelineNode, pass: PipelineNode };
 
 // ── animated gradient edge ────────────────────────────────────────────────────
-// Comet driven by requestAnimationFrame with direct DOM mutation (no React state).
-// Position is a pure function of wall-clock time: (now * speed) % period — so
-// any remount (from ReactFlow fitView / reconcile) arrives at the same offset as
-// if the component had never been interrupted. No per-edge start time needed.
-const COMET_LEN   = 56;   // dash length in px
-const COMET_SPEED = 130;  // px / second
+// Uses SVG pathLength="1" to normalize all dash lengths to 0–1 of actual path,
+// eliminating any dependency on getTotalLength(). CSS animation runs on the
+// compositor thread and is immune to JS re-renders. animationDelay is computed
+// from wall-clock time once at mount and held constant in a ref — React's
+// reconciler only patches DOM properties that *change*, so animationDelay is
+// never touched again, even when ReactFlow updates edge geometry.
+//
+// Keyframe: dashoffset 1.15 → 0 with dasharray "0.15 1" (period 1.15):
+//   D=1.15 → comet at path start (0)
+//   D=0.15 → comet at path end (1.0)
+//   D∈[0,0.15) → comet past path end (invisible) — seamless loop back to start
+if (!document.getElementById('helio-edge-anim')) {
+  const s = document.createElement('style');
+  s.id = 'helio-edge-anim';
+  s.textContent = '@keyframes helioCometAnim { from { stroke-dashoffset: 1.15 } to { stroke-dashoffset: 0 } }';
+  document.head.appendChild(s);
+}
+
+const COMET_DURATION_MS = 2200; // ms per full source-to-target pass
 
 function GradientEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style = {} }) {
   const getSmoothStepPath = RF.getSmoothStepPath;
@@ -163,46 +176,38 @@ function GradientEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, 
   const color = style.stroke || '#30363d';
   const sw    = style.strokeWidth || 2;
 
-  const cometRef = React.useRef(null);
-  const rafRef   = React.useRef(null);
-
-  React.useEffect(() => {
-    const el = cometRef.current;
-    if (!el) return;
-
-    // Cache last good length so frames with getTotalLength()===0 don't cause a phase jump.
-    let lastLen = 0;
-
-    const tick = (now) => {
-      const measured = typeof el.getTotalLength === 'function' ? el.getTotalLength() : 0;
-      if (measured > 0) lastLen = measured;
-      const pathLen = lastLen || 200;
-      const period  = pathLen + COMET_LEN;
-
-      // Wall-clock phase: same value regardless of when this component mounted.
-      const phase = (now * COMET_SPEED / 1000) % period;
-      el.setAttribute('stroke-dasharray', `${COMET_LEN} ${period}`);
-      el.setAttribute('stroke-dashoffset', period - phase);
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, []); // [] — no deps, never restart from React
+  // Capture wall-clock phase exactly once per component instance.
+  // React.useRef persists across re-renders of the same instance, so
+  // phaseRef.current is set on first render and never overwritten.
+  // Constant animationDelay → React never patches the DOM property → no reset.
+  const phaseRef = React.useRef(null);
+  if (phaseRef.current === null) {
+    phaseRef.current = `${-(performance.now() % COMET_DURATION_MS)}ms`;
+  }
 
   return React.createElement('g', null,
-    // dim static base track — always visible so the wire reads clearly
+    // dim base track — always visible so the wire reads clearly
     React.createElement('path', {
       d: edgePath, fill: 'none',
       stroke: color, strokeWidth: sw, strokeOpacity: 0.15,
     }),
-    // animated comet — DOM-mutated directly, never causes React reconciliation
+    // comet — CSS-animated, never touched by React after first paint
     React.createElement('path', {
-      ref: cometRef,
       d: edgePath, fill: 'none',
+      pathLength: '1',            // normalize: all dash values are fractions of path length
       stroke: color,
       strokeWidth: sw + 1,
       strokeLinecap: 'round',
-      style: { filter: `drop-shadow(0 0 4px ${color}) drop-shadow(0 0 2px ${color})` },
+      strokeDasharray: '0.15 1',  // 15% comet, 100% gap (≥ path length)
+      style: {
+        animationName:           'helioCometAnim',
+        animationDuration:       `${COMET_DURATION_MS}ms`,
+        animationTimingFunction: 'linear',
+        animationIterationCount: 'infinite',
+        animationFillMode:       'none',
+        animationDelay:          phaseRef.current, // constant → never resets
+        filter:                  `drop-shadow(0 0 5px ${color}) drop-shadow(0 0 2px ${color})`,
+      },
     }),
   );
 }
@@ -216,7 +221,7 @@ function computeLayout(snapshot, filter) {
   const rawEdges = [];
 
   const topSteps = [
-    { id: 'untracked', label: 'Untracked',      val: snapshot.untracked_ms || 0 },
+    { id: 'untracked', label: 'Untracked',      val: snapshot.untracked_ms  || 0 },
     { id: 'prep',      label: 'Prep',            val: snapshot.prep_ms      || 0 },
     { id: 'pipeline',  label: 'Render Pipeline', val: snapshot.graph_ms     || 0 },
     { id: 'aa',        label: 'AA',              val: snapshot.aa_ms        || 0 },
