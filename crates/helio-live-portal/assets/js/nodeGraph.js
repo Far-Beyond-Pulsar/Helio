@@ -22,6 +22,7 @@ let reactRoot         = null;
 let graphStructureKey = '';        // comma-joined node IDs — detects structural changes
 const _nodeData       = new Map(); // id → latest node data; populated before first mount
 const _nodeSubs       = new Map(); // id → setData callback registered by each PipelineNode
+const _warnSubs       = new Map(); // id → setWarning callback registered by each WarningTooltip
 
 // ── layout constants (must precede PipelineNode so the SVG path can use them) ─
 const NODE_W  = 188;
@@ -29,6 +30,140 @@ const NODE_H  = 52;
 const H_GAP   = 40;
 const V_GAP   = 80;
 const BULGE_R = 11;   // radius of the status bulge that protrudes from the left edge
+
+// ── warning tooltip constants ─────────────────────────────────────────────────
+const TOOLTIP_W  = 162;  // tooltip width px
+const TOOLTIP_PX = 10;   // horizontal text padding
+const TOOLTIP_PY = 8;    // vertical text padding
+const TOOLTIP_LH = 15;   // line-height
+const TOOLTIP_CR = 6;    // corner radius
+const CHEV_BASE  = 14;   // chevron base width
+const CHEV_H     = 9;    // chevron height
+
+// Rounded-rect SVG path with a downward-pointing chevron at the bottom centre.
+// Always mounted — hides via display:none when no warning so there is never a
+// mount/unmount cycle that could cause a visible flicker. Subscribes to its own
+// entry in _warnSubs so PipelineNode never re-renders for warning changes.
+function WarningTooltip({ id }) {
+  const [warning, setWarning] = React.useState(() => (_nodeData.get(id) || {}).warning || null);
+  React.useEffect(() => {
+    _warnSubs.set(id, setWarning);
+    return () => { _warnSubs.delete(id); };
+  }, [id]);
+
+  const ce    = React.createElement;
+  const stats = warning ? (warning.stats || []) : [];
+  const TW    = TOOLTIP_W;
+  const TH    = TOOLTIP_PY * 2 + TOOLTIP_LH + stats.length * TOOLTIP_LH + (stats.length ? 3 : 0);
+  const R     = TOOLTIP_CR;
+  const mx    = TW / 2;
+
+  const d = [
+    `M ${R} 0`,
+    `L ${TW - R} 0`,
+    `Q ${TW} 0 ${TW} ${R}`,
+    `L ${TW} ${TH - R}`,
+    `Q ${TW} ${TH} ${TW - R} ${TH}`,
+    `L ${mx + CHEV_BASE / 2} ${TH}`,
+    `L ${mx} ${TH + CHEV_H}`,          // chevron tip — points at the flagged card
+    `L ${mx - CHEV_BASE / 2} ${TH}`,
+    `L ${R} ${TH}`,
+    `Q 0 ${TH} 0 ${TH - R}`,
+    `L 0 ${R}`,
+    `Q 0 0 ${R} 0`,
+    'Z',
+  ].join(' ');
+
+  return ce('div', {
+    style: {
+      position:      'absolute',
+      top:           `${-(TH + CHEV_H + 6)}px`,
+      left:          `${(NODE_W - TW) / 2}px`,
+      width:         `${TW}px`,
+      height:        `${TH + CHEV_H}px`,
+      overflow:      'visible',
+      pointerEvents: 'none',
+      zIndex:        20,
+      display:       warning ? 'block' : 'none', // hide in-place — never unmount
+    },
+  },
+    ce('svg', {
+      style: { position: 'absolute', top: 0, left: 0, overflow: 'visible' },
+      width: TW, height: TH + CHEV_H,
+    },
+      ce('path', {
+        d,
+        fill:        'rgba(210,153,34,0.10)',
+        stroke:      'rgba(210,153,34,0.78)',
+        strokeWidth: 1,
+      }),
+    ),
+    ce('div', {
+      style: {
+        position:   'absolute',
+        top:        `${TOOLTIP_PY}px`,
+        left:       `${TOOLTIP_PX}px`,
+        width:      `${TW - TOOLTIP_PX * 2}px`,
+        fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
+        fontSize:   '11px',
+        lineHeight: `${TOOLTIP_LH}px`,
+        color:      '#e3b341',
+        userSelect: 'none',
+      },
+    },
+      ce('div', { style: { fontWeight: 700 } }, warning ? `\u26a0 ${warning.message}` : ''),
+      ...stats.map((s, i) =>
+        ce('div', { key: i, style: { color: '#d29922', opacity: 0.88 } }, s)
+      ),
+    ),
+  );
+}
+
+// ── anomaly detection ─────────────────────────────────────────────────────────
+// Returns a map of node-id → { message, stats[] } for any node whose timing is
+// a statistical outlier within its group (mean + 2σ, minimum absolute threshold).
+function detectAnomalies(snapshot) {
+  const anomalies = {};
+
+  const flagOutliers = (pairs, message, unit, minMs) => {
+    const vals = pairs.map(p => p.val).filter(v => v > 0);
+    if (vals.length < 2) return;
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const std  = Math.sqrt(vals.map(v => (v - mean) ** 2).reduce((a, b) => a + b, 0) / vals.length);
+    const thr  = Math.max(mean + 2 * std, minMs);
+    for (const { id, val } of pairs) {
+      if (val > thr) {
+        anomalies[id] = {
+          message,
+          stats: [
+            `${val.toFixed(2)} ${unit}`,
+            `${((val / mean) * 100).toFixed(0)}% of group avg`,
+          ],
+        };
+      }
+    }
+  };
+
+  flagOutliers([
+    { id: 'untracked', val: snapshot.untracked_ms || 0 },
+    { id: 'prep',      val: snapshot.prep_ms      || 0 },
+    { id: 'pipeline',  val: snapshot.graph_ms     || 0 },
+    { id: 'aa',        val: snapshot.aa_ms        || 0 },
+    { id: 'resolve',   val: snapshot.resolve_ms   || 0 },
+    { id: 'submit',    val: snapshot.submit_ms    || 0 },
+    { id: 'poll',      val: snapshot.poll_ms      || 0 },
+  ], 'High CPU time', 'ms', 2);
+
+  const passes = snapshot.pass_timings || [];
+  flagOutliers(passes.map(p => ({ id: p.name, val: p.gpu_ms })), 'GPU bottleneck', 'ms GPU', 1);
+  // CPU flagging only for passes not already caught by GPU check
+  flagOutliers(
+    passes.filter(p => !anomalies[p.name]).map(p => ({ id: p.name, val: p.cpu_ms })),
+    'CPU bottleneck', 'ms CPU', 1
+  );
+
+  return anomalies;
+}
 
 // ── custom node component ─────────────────────────────────────────────────────
 // Card is a single SVG path: rounded-rect + optional semicircular bulges on
@@ -139,6 +274,7 @@ function PipelineNode({ id, data: initialData }) {
       style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
     Handle && ce(Handle, { type: 'source', id: 'bottom', position: Position.Bottom,
       style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
+    ce(WarningTooltip, { id }),  // always mounted — manages own visibility
   );
 }
 
@@ -217,8 +353,9 @@ const edgeTypes = { gradient: GradientEdge };
 // ── layout computation ────────────────────────────────────────────────────────
 
 function computeLayout(snapshot, filter) {
-  const rawNodes = [];
-  const rawEdges = [];
+  const rawNodes  = [];
+  const rawEdges  = [];
+  const anomalies = detectAnomalies(snapshot);
 
   const topSteps = [
     { id: 'untracked', label: 'Untracked',      val: snapshot.untracked_ms  || 0 },
@@ -240,7 +377,7 @@ function computeLayout(snapshot, filter) {
       id:       s.id,
       type:     'pipeline',
       position: { x: i * (NODE_W + H_GAP), y: 0 },
-      data:     { title: s.label, time, kind: 'top' },
+      data:     { title: s.label, time, kind: 'top', warning: anomalies[s.id] },
     });
     if (i > 0) {
       rawEdges.push({
@@ -273,7 +410,7 @@ function computeLayout(snapshot, filter) {
         id:       name,
         type:     'pass',
         position: { x: startX + vi * (NODE_W + H_GAP), y: NODE_H + V_GAP },
-        data:     { title: name, time, kind: 'pass' },
+        data:     { title: name, time, kind: 'pass', warning: anomalies[name] },
       });
 
       if (vi === 0) {
@@ -367,6 +504,8 @@ export function renderNodeGraph(snapshot, filter = '') {
       _nodeData.set(n.id, n.data);
       const cb = _nodeSubs.get(n.id);
       if (cb) cb(n.data);
+      const wcb = _warnSubs.get(n.id);
+      if (wcb) wcb(n.data.warning || null);
     }
   }
 
