@@ -1650,7 +1650,7 @@ impl Renderer {
         }
         let resolve_ms = resolve_start.elapsed().as_secs_f32() * 1000.0;
 
-        // Submit and clear the draw list for next frame
+        // Submit for execution; keep draw list intact until we gather portal stats
         let submit_start = std::time::Instant::now();
         self.queue.submit(Some(encoder.finish()));
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
@@ -1658,7 +1658,8 @@ impl Renderer {
             eprintln!("⚠️  queue.submit() blocked for {:.2}ms", submit_ms);
         }
         
-        self.draw_list.lock().unwrap().clear();
+        // clear debug batch immediately, but defer draw list clearing until after
+        // portal snapshot gathering below (it relies on the list contents)
         *self.debug_batch.lock().unwrap() = None;
 
         // Schedule async map after submit and non-blocking poll for ready results.
@@ -1726,7 +1727,7 @@ impl Renderer {
                 compute_scene_delta(current, self.previous_scene_layout.as_ref())
             });
 
-            // compute draw call statistics
+            // compute draw call statistics from remaining list
             let (draw_total, draw_opaque, draw_transparent) = {
                 let draws = self.draw_list.lock().unwrap();
                 let total = draws.len();
@@ -1770,6 +1771,9 @@ impl Renderer {
             // Update previous layout for next frame's delta computation
             self.previous_scene_layout = self.latest_scene_layout.clone();
         }
+
+        // finally, clear the draw list now that portal has sampled it
+        self.draw_list.lock().unwrap().clear();
 
         self.frame_count += 1;
         Ok(())
