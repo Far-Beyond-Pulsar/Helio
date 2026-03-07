@@ -28,6 +28,17 @@ function render(snapshot) {
   gpuTotalEl.textContent = snapshot.total_gpu_ms.toFixed(2);
   cpuTotalEl.textContent = snapshot.total_cpu_ms.toFixed(2);
 
+  // draw call metrics (added 3/2026)
+  const drawCallsEl = document.getElementById('drawCalls');
+  const drawDetailEl = document.getElementById('drawDetail');
+  if (drawCallsEl) drawCallsEl.textContent = snapshot.draw_calls.total;
+  if (drawDetailEl) drawDetailEl.textContent = `opaque ${snapshot.draw_calls.opaque}, transparent ${snapshot.draw_calls.transparent}`;
+
+  // scene counts
+  if (objCountEl) objCountEl.textContent = snapshot.object_count;
+  if (lightCountEl) lightCountEl.textContent = snapshot.light_count;
+  if (bbCountEl) bbCountEl.textContent = snapshot.billboard_count;
+
   // ignore scene data for now
 
   const totalGpu = snapshot.total_gpu_ms || 0;

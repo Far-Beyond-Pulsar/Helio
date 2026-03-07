@@ -1726,6 +1726,20 @@ impl Renderer {
                 compute_scene_delta(current, self.previous_scene_layout.as_ref())
             });
 
+            // compute draw call statistics
+            let (draw_total, draw_opaque, draw_transparent) = {
+                let draws = self.draw_list.lock().unwrap();
+                let total = draws.len();
+                let opaque = draws.iter().filter(|dc| !dc.transparent_blend).count();
+                let transparent = total.saturating_sub(opaque);
+                (total, opaque, transparent)
+            };
+
+            // scene counts come from last layout snapshot if available
+            let (obj_count, light_count, bb_count) = if let Some(layout) = &self.latest_scene_layout {
+                (layout.objects.len(), layout.lights.len(), layout.billboards.len())
+            } else { (0, 0, 0) };
+
             let snapshot = PortalFrameSnapshot {
                 frame: self.frame_count,
                 frame_time_ms,
@@ -1736,6 +1750,10 @@ impl Renderer {
                 pipeline_order: self.graph.execution_pass_names(),
                 scene_delta,
                 timestamp_ms: now_ms,
+                object_count: obj_count,
+                light_count: light_count,
+                billboard_count: bb_count,
+                draw_calls: helio_live_portal::DrawCallMetrics { total: draw_total, opaque: draw_opaque, transparent: draw_transparent },
                 prep_ms,
                 graph_ms,
                 aa_ms,

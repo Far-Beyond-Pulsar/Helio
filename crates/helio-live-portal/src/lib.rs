@@ -142,6 +142,13 @@ pub struct PortalSceneLayoutDelta {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DrawCallMetrics {
+    pub total: usize,
+    pub opaque: usize,
+    pub transparent: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortalFrameSnapshot {
     pub frame: u64,
     pub frame_time_ms: f32,
@@ -153,6 +160,14 @@ pub struct PortalFrameSnapshot {
     /// Delta updates for scene data (only changes sent, except first frame which is full)
     pub scene_delta: Option<PortalSceneLayoutDelta>,
     pub timestamp_ms: u128,
+    
+    // scene counts
+    pub object_count: usize,
+    pub light_count: usize,
+    pub billboard_count: usize,
+
+    // draw call summary
+    pub draw_calls: DrawCallMetrics,
     
     // CPU/GPU timing breakdown
     pub prep_ms: f32,
