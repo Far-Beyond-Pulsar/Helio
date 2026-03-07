@@ -23,6 +23,10 @@ pub struct GBufferPass {
     pipeline:  Arc<wgpu::RenderPipeline>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     sorted_opaque_indices: Vec<usize>,
+    /// Pre-computed front-to-back order shared by DepthPrepassPass.
+    /// DepthPrepass publishes its sorted result here each frame so GBuffer
+    /// skips an identical O(N log N) sort of the same data.
+    shared_sorted: Arc<Mutex<Vec<usize>>>,
 }
 
 impl GBufferPass {
@@ -30,12 +34,14 @@ impl GBufferPass {
         targets:   Arc<Mutex<GBufferTargets>>,
         pipeline:  Arc<wgpu::RenderPipeline>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
+        shared_sorted: Arc<Mutex<Vec<usize>>>,
     ) -> Self {
         Self {
             targets,
             pipeline,
             draw_list,
             sorted_opaque_indices: Vec::new(),
+            shared_sorted,
         }
     }
 }
@@ -55,30 +61,37 @@ impl RenderPass for GBufferPass {
         let cam = ctx.camera_position;
         let fwd = ctx.camera_forward;
 
-        // Build a stable, front-to-back opaque draw order.
-        self.sorted_opaque_indices.clear();
-        self.sorted_opaque_indices.reserve(draw_calls.len());
-        for (idx, dc) in draw_calls.iter().enumerate() {
-            if !dc.transparent_blend {
-                self.sorted_opaque_indices.push(idx);
+        // Read the sorted order that DepthPrepassPass already computed this frame.
+        // Falls back to building a fresh sort only on the first frame or if the
+        // shared vec is empty (e.g. DepthPrepass was skipped).
+        let shared = self.shared_sorted.lock().unwrap();
+        if !shared.is_empty() {
+            self.sorted_opaque_indices.clear();
+            self.sorted_opaque_indices.extend_from_slice(&shared);
+        } else {
+            // Fallback: build and sort locally (same logic as DepthPrepass).
+            self.sorted_opaque_indices.clear();
+            self.sorted_opaque_indices.reserve(draw_calls.len());
+            for (idx, dc) in draw_calls.iter().enumerate() {
+                if !dc.transparent_blend {
+                    self.sorted_opaque_indices.push(idx);
+                }
             }
+            self.sorted_opaque_indices.sort_unstable_by(|&ia, &ib| {
+                let a = &draw_calls[ia];
+                let b = &draw_calls[ib];
+                let za = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd) - a.bounds_radius;
+                let zb = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd) - b.bounds_radius;
+                za.partial_cmp(&zb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        let ma = Arc::as_ptr(&a.material_bind_group) as usize;
+                        let mb = Arc::as_ptr(&b.material_bind_group) as usize;
+                        ma.cmp(&mb)
+                    })
+            });
         }
-
-        self.sorted_opaque_indices.sort_by(|&ia, &ib| {
-            let a = &draw_calls[ia];
-            let b = &draw_calls[ib];
-
-            let za = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd) - a.bounds_radius;
-            let zb = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd) - b.bounds_radius;
-
-            za.partial_cmp(&zb)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then_with(|| {
-                    let ma = Arc::as_ptr(&a.material_bind_group) as usize;
-                    let mb = Arc::as_ptr(&b.material_bind_group) as usize;
-                    ma.cmp(&mb)
-                })
-        });
+        drop(shared);
 
         let targets = self.targets.lock().unwrap();
 

@@ -522,8 +522,9 @@ pub struct Renderer {
     scratch_shadow_matrix_hashes: Vec<u64>,
     /// Reusable batch transform accumulator — cleared at the start of `render_scene`.
     scratch_batches: HashMap<(usize, usize), Vec<[f32; 16]>>,
-    /// Example mesh/material per batch key — cleared at the start of `render_scene`.
-    scratch_example: HashMap<(usize, usize), (GpuMesh, Option<GpuMaterial>)>,
+    /// Index of the first scene.objects entry for each batch key.
+    /// Stores a plain usize instead of cloned Arc data — zero Arc atomic ops per frame.
+    scratch_example_idx: HashMap<(usize, usize), usize>,
     /// Sorted indices into `scene.lights` — reused every frame to avoid per-frame allocation.
     scratch_sorted_light_indices: Vec<usize>,
     /// Per-batch persistent instance transform buffers.
@@ -1161,7 +1162,7 @@ impl Renderer {
             scratch_shadow_mats: Vec::new(),
             scratch_shadow_matrix_hashes: Vec::new(),
             scratch_batches: HashMap::new(),
-            scratch_example: HashMap::new(),
+            scratch_example_idx: HashMap::new(),
             scratch_sorted_light_indices: Vec::new(),
             instance_buffer_cache: HashMap::new(),
             frame_count: 0,
@@ -1816,11 +1817,12 @@ impl Renderer {
         // Vec capacity is reused while the bucket array is never reallocated for
         // a steady-state scene.
         for v in self.scratch_batches.values_mut() { v.clear(); }
-        self.scratch_example.clear();
+        self.scratch_example_idx.clear();
 
-        for obj in &scene.objects {
-            // use the underlying vertex buffer Arc as the identity key so
-            // cloned `GpuMesh` instances still group together
+        // Build batch groups.  scratch_example_idx stores a plain usize (index into
+        // scene.objects) instead of cloning Arc<Buffer>/Arc<BindGroup> — this is the
+        // key win: N objects costs zero Arc atomic increments here.
+        for (i_obj, obj) in scene.objects.iter().enumerate() {
             let mesh_ptr = Arc::as_ptr(&obj.mesh.vertex_buffer) as usize;
             let mat_ptr = obj
                 .material
@@ -1829,40 +1831,36 @@ impl Renderer {
                 .unwrap_or(0);
             let key = (mesh_ptr, mat_ptr);
             self.scratch_batches.entry(key).or_default().push(obj.transform.to_cols_array());
-            self.scratch_example.entry(key).or_insert_with(|| (obj.mesh.clone(), obj.material.clone()));
+            self.scratch_example_idx.entry(key).or_insert(i_obj);
         }
 
-        // Take the maps out so &mut self draw methods can be called without
-        // conflicting borrows from the map contents.
+        // Build DrawCalls into a local buffer, then extend draw_list with a single
+        // mutex lock.  The previous pattern called draw_mesh*() per batch, each of
+        // which individually locked and unlocked the mutex — N lock cycles at 5k draws.
         let batches = std::mem::take(&mut self.scratch_batches);
-        let example = std::mem::take(&mut self.scratch_example);
+        let example_idx = std::mem::take(&mut self.scratch_example_idx);
+        let mut local_draws: Vec<DrawCall> = Vec::with_capacity(batches.len());
+
         for (key, mats) in &batches {
             let count = mats.len() as u32;
             if count == 0 { continue; } // stale entry from a shrunken scene
-            let (mesh, mat_opt) = &example[key];
+            let obj = &scene.objects[example_idx[key]];
+            let mesh = &obj.mesh;
+            let mat_opt = obj.material.as_ref();
+
             // instance buffer only when we have >1 instances
-            let inst_buf = if count > 1 {
-                // Remove cached entry to obtain owned Arc (no outstanding reference
-                // into the map) then re-insert after the write_buffer call so we can
-                // freely borrow &self.queue in the same statement.
+            let inst_buf: Option<Arc<wgpu::Buffer>> = if count > 1 {
                 let cached = self.instance_buffer_cache.remove(key);
                 let buf = match cached {
                     Some((arc, cached_count)) if cached_count == count => {
-                        // Same instance count: reuse the existing GPU buffer and
-                        // overwrite the transform data.  Eliminates the per-frame
-                        // alloc/dealloc cycle that was the main source of submit spikes.
                         self.queue.write_buffer(&arc, 0, bytemuck::cast_slice(mats));
                         arc
                     }
-                    _ => {
-                        // Count changed or first use — allocate a fresh buffer.
-                        // COPY_DST allows write_buffer updates in subsequent frames.
-                        Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("Instance transforms"),
-                            contents: bytemuck::cast_slice(mats),
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        }))
-                    }
+                    _ => Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Instance transforms"),
+                        contents: bytemuck::cast_slice(mats),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    })),
                 };
                 self.instance_buffer_cache.insert(*key, (buf.clone(), count));
                 Some(buf)
@@ -1870,21 +1868,25 @@ impl Renderer {
                 None
             };
 
-            match mat_opt {
-                Some(mat) if count == 1 => self.draw_mesh_with_gpu_material(mesh, mat),
-                Some(mat) => {
-                    self.draw_mesh_instanced(mesh, Arc::clone(&mat.bind_group), inst_buf.unwrap(), count);
-                }
-                None if count == 1 => self.draw_mesh(mesh),
-                None => {
-                    let bg = Arc::new(self.global_bind_group.clone());
-                    self.draw_mesh_instanced(mesh, bg, inst_buf.unwrap(), count);
-                }
+            let (bind_group, transparent) = match mat_opt {
+                Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
+                None      => (Arc::clone(&self.default_material_bind_group), false),
+            };
+
+            let mut dc = DrawCall::new(mesh, bind_group, transparent);
+            if let Some(buf) = inst_buf {
+                dc.instance_buffer = Some(buf);
+                dc.instance_count = count;
             }
+            local_draws.push(dc);
         }
-        // Return maps to their fields to retain capacity for next frame.
+
+        // Single lock for the entire frame's draw list submission.
+        self.draw_list.lock().unwrap().extend(local_draws);
+
+        // Return maps to their fields to retain bucket capacity for next frame.
         self.scratch_batches = batches;
-        self.scratch_example = example;
+        self.scratch_example_idx = example_idx;
         let t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
 
         // ────────────────────────────────────────────────────────────────────

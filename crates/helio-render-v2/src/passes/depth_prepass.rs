@@ -14,18 +14,24 @@ pub struct DepthPrepassPass {
     pipeline: Arc<wgpu::RenderPipeline>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     sorted_opaque_indices: Vec<usize>,
+    /// Sorted opaque index list shared with GBufferPass so the front-to-back
+    /// ordering is computed once here and read directly by GBuffer.
+    pub shared_sorted: Arc<Mutex<Vec<usize>>>,
 }
 
 impl DepthPrepassPass {
     pub fn new(
         pipeline: Arc<wgpu::RenderPipeline>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
-    ) -> Self {
-        Self {
+    ) -> (Self, Arc<Mutex<Vec<usize>>>) {
+        let shared_sorted = Arc::new(Mutex::new(Vec::new()));
+        let pass = Self {
             pipeline,
             draw_list,
             sorted_opaque_indices: Vec::new(),
-        }
+            shared_sorted: shared_sorted.clone(),
+        };
+        (pass, shared_sorted)
     }
 }
 
@@ -54,7 +60,8 @@ impl RenderPass for DepthPrepassPass {
             }
         }
 
-        self.sorted_opaque_indices.sort_by(|&ia, &ib| {
+        // sort_unstable_by: in-place introsort, no heap allocation vs sort_by's merge sort.
+        self.sorted_opaque_indices.sort_unstable_by(|&ia, &ib| {
             let a = &draw_calls[ia];
             let b = &draw_calls[ib];
 
@@ -70,6 +77,13 @@ impl RenderPass for DepthPrepassPass {
                     ma.cmp(&mb)
                 })
         });
+
+        // Publish sorted order to GBufferPass so it skips its own identical sort.
+        {
+            let mut shared = self.shared_sorted.lock().unwrap();
+            shared.clear();
+            shared.extend_from_slice(&self.sorted_opaque_indices);
+        }
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Depth Prepass"),
