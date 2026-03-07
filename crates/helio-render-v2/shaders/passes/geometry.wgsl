@@ -63,11 +63,6 @@ struct Vertex {
     @location(2) tex_coords:     vec2<f32>,
     @location(3) normal:         u32,   // Packed SNORM8x4
     @location(4) tangent:        u32,   // Packed SNORM8x4 (kept for buffer compat, TBN computed via derivatives)
-    // Per-instance model matrix (4 columns, VertexStepMode::Instance, slot 1)
-    @location(5) model_0: vec4<f32>,
-    @location(6) model_1: vec4<f32>,
-    @location(7) model_2: vec4<f32>,
-    @location(8) model_3: vec4<f32>,
 }
 
 struct VertexOutput {
@@ -87,13 +82,10 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 
 @vertex
 fn vs_main(vertex: Vertex) -> VertexOutput {
-    let model = mat4x4<f32>(vertex.model_0, vertex.model_1, vertex.model_2, vertex.model_3);
-    let world_pos = model * vec4<f32>(vertex.position, 1.0);
-    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
-    out.world_position = world_pos.xyz;
-    out.world_normal   = normalize(normal_mat * decode_snorm8x4(vertex.normal));
+    out.clip_position  = camera.view_proj * vec4<f32>(vertex.position, 1.0);
+    out.world_position = vertex.position;
+    out.world_normal   = normalize(decode_snorm8x4(vertex.normal));
     out.tex_coords     = vertex.tex_coords;
     return out;
 }
