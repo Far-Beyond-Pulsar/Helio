@@ -67,8 +67,15 @@ ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
 ws.onerror = () => { statusEl.textContent = 'Socket error'; };
 ws.onmessage = (evt) => {
   try {
-    const snapshot = JSON.parse(evt.data);
-    render(snapshot);
+    const data = JSON.parse(evt.data);
+    if (Array.isArray(data)) {
+      // batch of snapshots sent at once; process them in order
+      for (const snap of data) {
+        render(snap);
+      }
+    } else {
+      render(data);
+    }
   } catch (e) {
     console.error('parse error', e);
   }

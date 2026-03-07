@@ -4,6 +4,8 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Helio Live Portal</title>
+  <!-- JetBrains Mono font for consistent monospace display -->
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/vendor/reactflow.style.css" />
   <script src="/vendor/react.development.js"></script>
   <script src="/vendor/react-dom.development.js"></script>
@@ -36,7 +38,7 @@
       margin: 0; padding: 0;
       background: var(--canvas-inset);
       color: var(--fg);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 14px;
       line-height: 1.5;
       min-height: 100vh;
@@ -147,7 +149,7 @@
     }
     .stat-pill .label { font-weight: 500; }
     .stat-pill .val {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 13px;
       font-weight: 600;
       color: var(--fg);
@@ -217,7 +219,7 @@
     tbody tr:hover { background: var(--canvas); }
     tbody td {
       padding: 8px 16px;
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       white-space: nowrap;
     }
     td.pass-name { color: var(--fg); font-family: inherit; font-size: 13px; }
@@ -270,7 +272,7 @@
     }
     #tooltip .tt-title { color: var(--fg); font-weight: 600; margin-bottom: 6px; }
     #tooltip .tt-row   { color: var(--fg-muted); display: flex; justify-content: space-between; gap: 16px; margin: 2px 0; }
-    #tooltip .tt-val   { color: var(--fg); font-family: ui-monospace, Menlo, monospace; }
+    #tooltip .tt-val   { color: var(--fg); font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; }
 
     /* ── ReactFlow Controls ── */
     .react-flow__controls {

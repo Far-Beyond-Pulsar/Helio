@@ -217,27 +217,41 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                 let bridge_thread = std::thread::Builder::new()
                     .name("helio-live-portal-bridge".to_string())
                     .spawn(move || {
-                        while let Ok(mut snapshot) = rx.recv() {
-                            // Auto-populate stage_timings from individual fields so the JS
-                            // frontend never has to hardcode struct field names.
-                            if snapshot.stage_timings.is_empty() {
-                                snapshot.stage_timings = vec![
-                                    PortalStageTiming { id: "untracked".into(), name: "Untracked".into(),       ms: snapshot.untracked_ms },
-                                    PortalStageTiming { id: "prep".into(),      name: "Prep".into(),            ms: snapshot.prep_ms },
-                                    PortalStageTiming { id: "pipeline".into(),  name: "Render Pipeline".into(), ms: snapshot.graph_ms },
-                                    PortalStageTiming { id: "aa".into(),        name: "AA".into(),              ms: snapshot.aa_ms },
-                                    PortalStageTiming { id: "resolve".into(),   name: "Resolve".into(),         ms: snapshot.resolve_ms },
-                                    PortalStageTiming { id: "submit".into(),    name: "Submit".into(),          ms: snapshot.submit_ms },
-                                    PortalStageTiming { id: "poll".into(),      name: "Poll".into(),            ms: snapshot.poll_ms },
-                                ];
+                        use std::time::Duration;
+                        use std::sync::mpsc::RecvTimeoutError;
+
+                        let mut buffer = Vec::new();
+                        loop {
+                            match rx.recv_timeout(Duration::from_millis(100)) {
+                                Ok(mut snapshot) => {
+                                    // populate each snapshot before buffering
+                                    if snapshot.stage_timings.is_empty() {
+                                        snapshot.stage_timings = vec![
+                                            PortalStageTiming { id: "untracked".into(), name: "Untracked".into(),       ms: snapshot.untracked_ms },
+                                            PortalStageTiming { id: "prep".into(),      name: "Prep".into(),            ms: snapshot.prep_ms },
+                                            PortalStageTiming { id: "pipeline".into(),  name: "Render Pipeline".into(), ms: snapshot.graph_ms },
+                                            PortalStageTiming { id: "aa".into(),        name: "AA".into(),              ms: snapshot.aa_ms },
+                                            PortalStageTiming { id: "resolve".into(),   name: "Resolve".into(),         ms: snapshot.resolve_ms },
+                                            PortalStageTiming { id: "submit".into(),    name: "Submit".into(),          ms: snapshot.submit_ms },
+                                            PortalStageTiming { id: "poll".into(),      name: "Poll".into(),            ms: snapshot.poll_ms },
+                                        ];
+                                    }
+                                    if snapshot.pipeline_stage_id.is_none() && !snapshot.pipeline_order.is_empty() {
+                                        snapshot.pipeline_stage_id = Some("pipeline".to_string());
+                                    }
+                                    buffer.push(snapshot);
+                                }
+                                Err(RecvTimeoutError::Timeout) => {
+                                    // time to flush whatever we collected
+                                }
+                                Err(RecvTimeoutError::Disconnected) => break,
                             }
-                            // Auto-set pipeline_stage_id so the JS knows which stage
-                            // node spawns the pass sub-graph.
-                            if snapshot.pipeline_stage_id.is_none() && !snapshot.pipeline_order.is_empty() {
-                                snapshot.pipeline_stage_id = Some("pipeline".to_string());
-                            }
-                            if let Ok(json) = serde_json::to_string(&snapshot) {
-                                let _ = bridge_tx.send(json);
+
+                            if !buffer.is_empty() {
+                                if let Ok(json) = serde_json::to_string(&buffer) {
+                                    let _ = bridge_tx.send(json);
+                                }
+                                buffer.clear();
                             }
                         }
                     });

@@ -136,7 +136,7 @@
           width: `${NODE_W}px`, height: `${BAR_CHART_H}px`,
           background: 'transparent',
           padding: `4px ${padX}px`, boxSizing: 'border-box', overflow: 'hidden',
-          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
+          fontFamily: 'JetBrains Mono, monospace',
         },
       }, inner);
     }
@@ -176,7 +176,7 @@
           style: {
             position: 'absolute', top: `${TOOLTIP_PY}px`, left: `${TOOLTIP_PX}px`,
             width: `${TW - TOOLTIP_PX * 2}px`,
-            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
+            fontFamily: 'JetBrains Mono, monospace',
             fontSize: '11px', lineHeight: `${TOOLTIP_LH}px`, color: '#e3b341', userSelect: 'none',
           },
         },
@@ -244,7 +244,7 @@
             zIndex: 1, width: `${W}px`, height: `${H}px`, display: 'flex',
             flexDirection: 'column', justifyContent: 'center',
             padding: `0 14px 0 ${BR + 8}px`, color: '#e6edf3',
-            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
+            fontFamily: 'JetBrains Mono, monospace',
             fontSize: '13px', boxSizing: 'border-box', pointerEvents: 'none',
           },
         },
