@@ -1763,39 +1763,29 @@ impl Renderer {
         }
 
         if let (Some(portal), Some(p)) = (&self.live_portal, &self.profiler) {
+            // record minimal values locally
             let now_ms = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_millis())
                 .unwrap_or(0);
 
-            let pass_timings = p.last_timings
-                .iter()
-                .map(|t| PortalPassTiming {
-                    name: t.name.clone(),
-                    gpu_ms: t.gpu_ms,
-                    cpu_ms: t.cpu_ms,
-                })
-                .collect::<Vec<_>>();
+            let frame_num = self.frame_count;
+            let ft_time = frame_time_ms;
+            let ft_ff = frame_to_frame_ms;
+            let tot_gpu = p.last_total_gpu_ms;
+            let tot_cpu = p.last_total_cpu_ms;
 
-            // Compute scene delta.
-            // Fast path: when only the camera moved (object/light/billboard structure unchanged),
-            // skip the O(N) HashMap construction in compute_scene_delta and produce a
-            // camera-only delta in O(1).
-            let scene_delta = self.latest_scene_layout.as_ref().map(|current| {
-                if self.pending_layout_changed {
-                    compute_scene_delta(current, self.previous_scene_layout.as_ref())
-                } else {
-                    // Only camera may have changed.
-                    let prev_cam = self.previous_scene_layout.as_ref().and_then(|p| p.camera.clone());
-                    let mut d = PortalSceneLayoutDelta::default();
-                    if current.camera != prev_cam {
-                        d.camera = Some(current.camera.clone());
-                    }
-                    d
-                }
-            });
+            let pass_clone = p.last_timings.clone();
+            let pipeline_clone = self.cached_pass_names.clone();
 
-            // compute draw call statistics from remaining list
+            let current_layout = self.latest_scene_layout.clone();
+            let previous_layout = self.previous_scene_layout.clone();
+            let layout_changed = self.pending_layout_changed;
+            // keep a copy around for updating `self.previous_scene_layout` after the
+            // worker thread has been spawned (the original value moves into the
+            // closure below).
+            let layout_for_update = current_layout.clone();
+
             let (draw_total, draw_opaque, draw_transparent) = {
                 let draws = self.draw_list.lock().unwrap();
                 let total = draws.len();
@@ -1804,74 +1794,95 @@ impl Renderer {
                 (total, opaque, transparent)
             };
 
-            // scene counts come from last layout snapshot if available
-            let (obj_count, light_count, bb_count) = if let Some(layout) = &self.latest_scene_layout {
+            let (obj_count, light_count, bb_count) = if let Some(layout) = &current_layout {
                 (layout.objects.len(), layout.lights.len(), layout.billboards.len())
             } else { (0, 0, 0) };
 
-            let snapshot = PortalFrameSnapshot {
-                frame: self.frame_count,
-                frame_time_ms,
-                frame_to_frame_ms,
-                total_gpu_ms: p.last_total_gpu_ms,
-                total_cpu_ms: p.last_total_cpu_ms,
-                pass_timings,
-                pipeline_order: self.cached_pass_names.clone(),
-                scene_delta,
-                timestamp_ms: now_ms,
-                object_count: obj_count,
-                light_count: light_count,
-                billboard_count: bb_count,
-                draw_calls: helio_live_portal::DrawCallMetrics { total: draw_total, opaque: draw_opaque, transparent: draw_transparent },
-                prep_ms,
-                graph_ms,
-                aa_ms,
-                resolve_ms,
-                submit_ms,
-                poll_ms,
-                untracked_ms,
-                stage_timings: {
-                    // Break down the full frame_to_frame time into named stages.
-                    // render_scene stages come from pending_scene_stage_ms.
-                    // "App" is the residual: time between render() end and render_scene() start
-                    // on the next frame (pure application-side overhead).
-                    let s = &self.pending_scene_stage_ms;
-                    let scene_prep_total: f32 = s.iter().sum();
-                    let app_ms = (untracked_ms - scene_prep_total).max(0.0);
-                    vec![
-                        PortalStageTiming { id: "app".into(),          name: "App".into(),              ms: app_ms },
-                        PortalStageTiming { id: "scene_draws".into(),  name: "Scene: Draws".into(),     ms: s[0] },
-                        PortalStageTiming { id: "scene_lights".into(), name: "Scene: Lights".into(),    ms: s[1] },
-                        PortalStageTiming { id: "scene_cluster".into(),name: "Scene: Cluster".into(),   ms: s[2] },
-                        PortalStageTiming { id: "scene_shadow".into(), name: "Scene: Shadows".into(),   ms: s[3] },
-                        PortalStageTiming { id: "scene_bb".into(),     name: "Scene: Billboards".into(),ms: s[4] },
-                        PortalStageTiming { id: "scene_sky".into(),    name: "Scene: Sky".into(),       ms: s[5] },
-                        PortalStageTiming { id: "prep".into(),         name: "Prep".into(),             ms: prep_ms },
-                        PortalStageTiming { id: "pipeline".into(),     name: "Render Pipeline".into(),  ms: graph_ms },
-                        PortalStageTiming { id: "aa".into(),           name: "AA".into(),               ms: aa_ms },
-                        PortalStageTiming { id: "resolve".into(),      name: "Resolve".into(),          ms: resolve_ms },
-                        PortalStageTiming { id: "submit".into(),       name: "Submit".into(),           ms: submit_ms },
-                        PortalStageTiming { id: "poll".into(),         name: "Poll".into(),             ms: poll_ms },
-                    ]
-                },
-                pipeline_stage_id: Some("pipeline".to_string()),
-            };
+            let prep = prep_ms;
+            let graphm = graph_ms;
+            let aam = aa_ms;
+            let resolve = resolve_ms;
+            let submitm = submit_ms;
+            let pollm = poll_ms;
+            let untracked_val = untracked_ms;
+            let stage_copy = self.pending_scene_stage_ms;
 
-            portal.publish(snapshot);
+            let tx = portal.sender();
 
-            // Update previous layout for next frame's delta computation.
-            // When the scene structure changed, clone the full layout (O(N), but rare).
-            // Otherwise, only sync the camera in-place (O(1)) — objects/lights/billboards
-            // are identical between latest and previous so no clone is needed.
+            std::thread::spawn(move || {
+                // compute delta here
+                let scene_delta = current_layout.as_ref().map(|cur| {
+                    if layout_changed {
+                        compute_scene_delta(cur, previous_layout.as_ref())
+                    } else {
+                        let prev_cam = previous_layout.as_ref().and_then(|p| p.camera.clone());
+                        let mut d = PortalSceneLayoutDelta::default();
+                        if cur.camera != prev_cam {
+                            d.camera = Some(cur.camera.clone());
+                        }
+                        d
+                    }
+                });
+
+                let snapshot = PortalFrameSnapshot {
+                    frame: frame_num,
+                    frame_time_ms: ft_time,
+                    frame_to_frame_ms: ft_ff,
+                    total_gpu_ms: tot_gpu,
+                    total_cpu_ms: tot_cpu,
+                    pass_timings: pass_clone
+                        .iter()
+                        .map(|t| PortalPassTiming { name: t.name.clone(), gpu_ms: t.gpu_ms, cpu_ms: t.cpu_ms })
+                        .collect(),
+                    pipeline_order: pipeline_clone,
+                    scene_delta,
+                    timestamp_ms: now_ms,
+                    object_count: obj_count,
+                    light_count: light_count,
+                    billboard_count: bb_count,
+                    draw_calls: helio_live_portal::DrawCallMetrics { total: draw_total, opaque: draw_opaque, transparent: draw_transparent },
+                    prep_ms: prep,
+                    graph_ms: graphm,
+                    aa_ms: aam,
+                    resolve_ms: resolve,
+                    submit_ms: submitm,
+                    poll_ms: pollm,
+                    untracked_ms: untracked_val,
+                    stage_timings: {
+                        let s = &stage_copy;
+                        let scene_prep_total: f32 = s.iter().sum();
+                        let app_ms = (untracked_val - scene_prep_total).max(0.0);
+                        vec![
+                            PortalStageTiming { id: "app".into(),          name: "App".into(),              ms: app_ms },
+                            PortalStageTiming { id: "scene_draws".into(),  name: "Scene: Draws".into(),     ms: s[0] },
+                            PortalStageTiming { id: "scene_lights".into(), name: "Scene: Lights".into(),    ms: s[1] },
+                            PortalStageTiming { id: "scene_cluster".into(),name: "Scene: Cluster".into(),   ms: s[2] },
+                            PortalStageTiming { id: "scene_shadow".into(), name: "Scene: Shadows".into(),   ms: s[3] },
+                            PortalStageTiming { id: "scene_bb".into(),     name: "Scene: Billboards".into(),ms: s[4] },
+                            PortalStageTiming { id: "scene_sky".into(),    name: "Scene: Sky".into(),       ms: s[5] },
+                            PortalStageTiming { id: "prep".into(),         name: "Prep".into(),             ms: prep },
+                            PortalStageTiming { id: "pipeline".into(),     name: "Render Pipeline".into(),  ms: graphm },
+                            PortalStageTiming { id: "aa".into(),           name: "AA".into(),               ms: aam },
+                            PortalStageTiming { id: "resolve".into(),      name: "Resolve".into(),          ms: resolve },
+                            PortalStageTiming { id: "submit".into(),       name: "Submit".into(),           ms: submitm },
+                            PortalStageTiming { id: "poll".into(),         name: "Poll".into(),             ms: pollm },
+                        ]
+                    },
+                    pipeline_stage_id: Some("pipeline".to_string()),
+                };
+
+                let _ = tx.send(snapshot);
+            });
+
+            // update previous layout on main thread (cheap camera-only path)
             if self.pending_layout_changed {
-                self.previous_scene_layout = self.latest_scene_layout.clone();
+                self.previous_scene_layout = layout_for_update.clone();
             } else if let (Some(ref mut prev), Some(ref cur)) =
-                (&mut self.previous_scene_layout, &self.latest_scene_layout)
+                (&mut self.previous_scene_layout, &layout_for_update)
             {
                 prev.camera = cur.camera.clone();
             } else {
-                // previous was None (first frame) — seed it
-                self.previous_scene_layout = self.latest_scene_layout.clone();
+                self.previous_scene_layout = layout_for_update.clone();
             }
         }
 

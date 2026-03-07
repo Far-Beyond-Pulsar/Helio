@@ -201,6 +201,12 @@ impl LivePortalHandle {
     pub fn publish(&self, snapshot: PortalFrameSnapshot) {
         let _ = self.tx.send(snapshot);
     }
+
+    /// Return a clone of the internal sender so callers can dispatch from other
+    /// threads without holding on to the full handle.
+    pub fn sender(&self) -> std::sync::mpsc::Sender<PortalFrameSnapshot> {
+        self.tx.clone()
+    }
 }
 
 pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
