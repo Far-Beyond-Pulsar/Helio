@@ -150,7 +150,7 @@ impl Feature for ShadowsFeature {
             ctx.draw_list.clone(),
             ctx.shadow_matrix_buffer.clone(),
             ctx.light_count_arc.clone(),
-            ctx.device,
+            ctx.device_arc.clone(),
             &ctx.resources.bind_group_layouts.material,
         ));
 

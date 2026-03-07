@@ -64,6 +64,7 @@ struct ShadowLightCache {
 /// re-draws all shadow casters into that light's atlas layer, using the
 /// light-space view-proj matrix selected via `@builtin(instance_index)`.
 pub struct ShadowPass {
+    device: Arc<wgpu::Device>,
     /// One view per shadow-casting light (D2, single array layer each)
     layer_views: Vec<Arc<wgpu::TextureView>>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
@@ -80,6 +81,13 @@ pub struct ShadowPass {
     /// Per-light shadow cache — skip re-rendering when light and geometry are unchanged.
     shadow_cache: Vec<ShadowLightCache>,
     filtered_indices: Vec<usize>,
+    /// Per-face (light_idx*6+face) cached RenderBundle.  Rebuilt only when shadow-caster
+    /// geometry changes; light-matrix updates (CSM recalculation on camera rotation) are
+    /// handled by the GPU shadow-matrix buffer written each frame in `renderer.rs`, so the
+    /// bundle is replayed without re-encoding even when matrices change.
+    bundle_cache: Vec<Option<wgpu::RenderBundle>>,
+    /// Geometry hash when each light's bundles were last built.  `u64::MAX` = never built.
+    bundle_geom_hashes: Vec<u64>,
 }
 
 impl ShadowPass {
@@ -90,7 +98,7 @@ impl ShadowPass {
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
         light_count: Arc<AtomicU32>,
-        device: &wgpu::Device,
+        device: Arc<wgpu::Device>,
         material_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // Bind group layout: binding 0 = shadow matrices storage buffer (vertex stage)
@@ -193,6 +201,7 @@ impl ShadowPass {
 
         let max_lights = layer_views.len() / 6;
         Self {
+            device,
             layer_views,
             draw_list,
             shadow_matrix_buffer,
@@ -203,6 +212,8 @@ impl ShadowPass {
             bind_group,
             shadow_cache: vec![ShadowLightCache::default(); max_lights],
             filtered_indices: Vec::new(),
+            bundle_cache: (0..max_lights * 6).map(|_| None).collect(),
+            bundle_geom_hashes: vec![u64::MAX; max_lights],
         }
     }
 }
@@ -294,9 +305,15 @@ impl RenderPass for ShadowPass {
                 }
             }
 
+            // Geometry unchanged → replay cached bundles; shadow matrices are updated
+            // via write_buffer in renderer.rs every frame so the GPU reads fresh values.
+            // Only rebuild bundles when casters are added/removed/moved.
+            let need_bundle_rebuild = geom_hash != self.bundle_geom_hashes[i];
+
             let t_light = ctx.scope_begin(&format!("shadow/light_{i}"));
             for face in 0u32..max_faces {
                 let layer_idx = i as u32 * 6 + face;
+                let bundle_slot = i * 6 + face as usize;
 
                 let t_face = ctx.scope_begin(&format!("shadow/light_{i}/face_{face}"));
                 let mut pass = ctx.begin_render_pass(
@@ -312,21 +329,49 @@ impl RenderPass for ShadowPass {
                     }),
                 );
 
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-
-                for &idx in &self.filtered_indices {
-                    let dc = &draw_calls[idx];
-                    pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                    pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                    pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                    // instance_index = layer_idx selects the correct face matrix in the vertex shader
-                    pass.draw_indexed(0..dc.index_count, 0, layer_idx..(layer_idx + 1));
+                if need_bundle_rebuild {
+                    // Re-encode all draw calls into a new bundle for this face.
+                    let mut enc = self.device.create_render_bundle_encoder(
+                        &wgpu::RenderBundleEncoderDescriptor {
+                            label: Some("shadow_bundle"),
+                            color_formats: &[],
+                            depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                                format: wgpu::TextureFormat::Depth32Float,
+                                depth_read_only: false,
+                                stencil_read_only: true,
+                            }),
+                            sample_count: 1,
+                            multiview: None,
+                        },
+                    );
+                    enc.set_pipeline(&self.pipeline);
+                    enc.set_bind_group(0, &self.bind_group, &[]);
+                    for &idx in &self.filtered_indices {
+                        let dc = &draw_calls[idx];
+                        enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+                        enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+                        enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                        // instance_index = layer_idx selects the shadow matrix in the vertex shader
+                        enc.draw_indexed(0..dc.index_count, 0, layer_idx..(layer_idx + 1));
+                    }
+                    let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: None });
+                    pass.execute_bundles(std::iter::once(&bundle));
+                    self.bundle_cache[bundle_slot] = Some(bundle);
+                } else if let Some(bundle) = &self.bundle_cache[bundle_slot] {
+                    // Geometry stable: replay the cached bundle.  The shadow-matrix GPU
+                    // buffer was already updated this frame via write_buffer so the vertex
+                    // shader reads the correct (post-rotation) matrices automatically.
+                    pass.execute_bundles(std::iter::once(bundle));
                 }
+
                 drop(pass); // end render pass before writing end timestamp
                 ctx.scope_end(t_face);
             }
             ctx.scope_end(t_light);
+
+            if need_bundle_rebuild {
+                self.bundle_geom_hashes[i] = geom_hash;
+            }
 
             // Update cache now that this light's shadow maps are fresh.
             self.shadow_cache[i] = ShadowLightCache { light_hash, geom_hash, valid: true };
