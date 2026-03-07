@@ -236,11 +236,12 @@
         ),
         ce('div', {
           style: {
-            position: 'relative', zIndex: 1, height: '100%', display: 'flex',
+            position: 'absolute', top: 0, left: 0,
+            zIndex: 1, width: `${W}px`, height: `${H}px`, display: 'flex',
             flexDirection: 'column', justifyContent: 'center',
             padding: `0 14px 0 ${BR + 8}px`, color: '#e6edf3',
             fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
-            fontSize: '13px', boxSizing: 'border-box',
+            fontSize: '13px', boxSizing: 'border-box', pointerEvents: 'none',
           },
         },
           ce('div', { style: { fontWeight: 600, marginBottom: data.time ? '3px' : 0, letterSpacing: '0.01em', whiteSpace: 'nowrap' } }, data.title),
