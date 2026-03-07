@@ -18,7 +18,10 @@ const Position      = RF.Position     || { Left: 'left', Right: 'right', Top: 't
 
 if (!ReactFlowComp)  console.error('ReactFlow component not found in window.ReactFlow – check CDN URL');
 
-let reactRoot = null;
+let reactRoot         = null;
+let graphStructureKey = '';        // comma-joined node IDs — detects structural changes
+const _nodeData       = new Map(); // id → latest node data; populated before first mount
+const _nodeSubs       = new Map(); // id → setData callback registered by each PipelineNode
 
 // ── layout constants (must precede PipelineNode so the SVG path can use them) ─
 const NODE_W  = 188;
@@ -30,7 +33,17 @@ const BULGE_R = 11;   // radius of the status bulge that protrudes from the left
 // ── custom node component ─────────────────────────────────────────────────────
 // Card is a single SVG path: rounded-rect + optional semicircular bulges on
 // left / right / bottom — one per connected handle, zero seams.
-function PipelineNode({ data }) {
+function PipelineNode({ id, data: initialData }) {
+  // Each node owns its own live state, subscribed to the module-level store.
+  // This means status/time updates never touch ReactFlowComp or its edges.
+  const [data, setData] = React.useState(() => _nodeData.get(id) || initialData);
+  React.useEffect(() => {
+    const latest = _nodeData.get(id);
+    if (latest) setData(latest);
+    _nodeSubs.set(id, setData);
+    return () => { _nodeSubs.delete(id); };
+  }, [id]);
+
   const ce       = React.createElement;
   const dotColor = data.kind === 'pass' ? '#388bfd' : '#d29922';
   const { left = false, right = false, bottom = false } = data.connections || {};
@@ -131,6 +144,71 @@ function PipelineNode({ data }) {
 
 const nodeTypes = { pipeline: PipelineNode, pass: PipelineNode };
 
+// ── animated gradient edge ────────────────────────────────────────────────────
+// Comet driven by requestAnimationFrame with direct DOM mutation (no React state).
+// Position is a pure function of wall-clock time: (now * speed) % period — so
+// any remount (from ReactFlow fitView / reconcile) arrives at the same offset as
+// if the component had never been interrupted. No per-edge start time needed.
+const COMET_LEN   = 56;   // dash length in px
+const COMET_SPEED = 130;  // px / second
+
+function GradientEdge({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style = {} }) {
+  const getSmoothStepPath = RF.getSmoothStepPath;
+  if (!getSmoothStepPath) return null;
+  const [edgePath] = getSmoothStepPath({
+    sourceX, sourceY, sourcePosition,
+    targetX, targetY, targetPosition,
+    borderRadius: 12,
+  });
+  const color = style.stroke || '#30363d';
+  const sw    = style.strokeWidth || 2;
+
+  const cometRef = React.useRef(null);
+  const rafRef   = React.useRef(null);
+
+  React.useEffect(() => {
+    const el = cometRef.current;
+    if (!el) return;
+
+    // Cache last good length so frames with getTotalLength()===0 don't cause a phase jump.
+    let lastLen = 0;
+
+    const tick = (now) => {
+      const measured = typeof el.getTotalLength === 'function' ? el.getTotalLength() : 0;
+      if (measured > 0) lastLen = measured;
+      const pathLen = lastLen || 200;
+      const period  = pathLen + COMET_LEN;
+
+      // Wall-clock phase: same value regardless of when this component mounted.
+      const phase = (now * COMET_SPEED / 1000) % period;
+      el.setAttribute('stroke-dasharray', `${COMET_LEN} ${period}`);
+      el.setAttribute('stroke-dashoffset', period - phase);
+      rafRef.current = requestAnimationFrame(tick);
+    };
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, []); // [] — no deps, never restart from React
+
+  return React.createElement('g', null,
+    // dim static base track — always visible so the wire reads clearly
+    React.createElement('path', {
+      d: edgePath, fill: 'none',
+      stroke: color, strokeWidth: sw, strokeOpacity: 0.15,
+    }),
+    // animated comet — DOM-mutated directly, never causes React reconciliation
+    React.createElement('path', {
+      ref: cometRef,
+      d: edgePath, fill: 'none',
+      stroke: color,
+      strokeWidth: sw + 1,
+      strokeLinecap: 'round',
+      style: { filter: `drop-shadow(0 0 4px ${color}) drop-shadow(0 0 2px ${color})` },
+    }),
+  );
+}
+
+const edgeTypes = { gradient: GradientEdge };
+
 // ── layout computation ────────────────────────────────────────────────────────
 
 function computeLayout(snapshot, filter) {
@@ -148,8 +226,6 @@ function computeLayout(snapshot, filter) {
   ];
 
   const match = (s) => !filter || s.toLowerCase().includes(filter);
-  const edgeStyle = { stroke: '#30363d', strokeWidth: 2 };
-  const marker    = { type: MarkerType.ArrowClosed, color: '#30363d' };
 
   for (let i = 0; i < topSteps.length; i++) {
     const s = topSteps[i];
@@ -163,12 +239,11 @@ function computeLayout(snapshot, filter) {
     });
     if (i > 0) {
       rawEdges.push({
-        id:        `e_${topSteps[i-1].id}_${s.id}`,
-        source:    topSteps[i-1].id,
-        target:    s.id,
-        type:      'smoothstep',
-        style:     edgeStyle,
-        markerEnd: marker,
+        id:     `e_${topSteps[i-1].id}_${s.id}`,
+        source: topSteps[i-1].id,
+        target: s.id,
+        type:   'gradient',
+        style:  { stroke: '#30363d', strokeWidth: 2 },
       });
     }
   }
@@ -199,17 +274,15 @@ function computeLayout(snapshot, filter) {
       if (vi === 0) {
         rawEdges.push({
           id: `e_pipeline_${name}`, source: 'pipeline', sourceHandle: 'bottom',
-          target: name, targetHandle: 'left', type: 'smoothstep',
+          target: name, targetHandle: 'left', type: 'gradient',
           style: { stroke: '#388bfd', strokeWidth: 2 },
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#388bfd' },
         });
       } else {
         const prev = visiblePasses[vi - 1];
         rawEdges.push({
           id: `e_pass_${prev}_${name}`, source: prev, sourceHandle: 'right',
-          target: name, targetHandle: 'left', type: 'smoothstep',
+          target: name, targetHandle: 'left', type: 'gradient',
           style: { stroke: '#388bfd', strokeWidth: 2 },
-          markerEnd: { type: MarkerType.ArrowClosed, color: '#388bfd' },
         });
       }
     }
@@ -234,20 +307,19 @@ function computeLayout(snapshot, filter) {
   return { nodes, edges: rawEdges };
 }
 
-// ── inner flow component (plain React.useState — UMD build omits RF hooks) ────
+// ── inner flow component ─────────────────────────────────────────────────────
+// GraphInner holds NO state and never re-renders after mount.
+// Each PipelineNode subscribes to _nodeSubs for its own live data, so status
+// and timing changes bypass this component and ReactFlowComp entirely.
+// Edge DOM elements are never touched → CSS animations run uninterrupted.
 function GraphInner({ initNodes, initEdges }) {
-  const [nodes, setNodes] = React.useState(initNodes);
-  const [edges, setEdges] = React.useState(initEdges);
-
-  React.useEffect(() => { setNodes(initNodes); }, [initNodes]);
-  React.useEffect(() => { setEdges(initEdges); }, [initEdges]);
-
   return React.createElement(ReactFlowComp,
     {
-      nodes, edges,
+      nodes: initNodes, edges: initEdges,
       onNodesChange: () => {},
       onEdgesChange: () => {},
       nodeTypes,
+      edgeTypes,
       fitView: true,
       fitViewOptions: { padding: 0.15 },
       nodesDraggable:    true,
@@ -267,16 +339,31 @@ export function renderNodeGraph(snapshot, filter = '') {
   if (!container) { console.warn('nodeGraph: no #cy container'); return null; }
 
   const { nodes, edges } = computeLayout(snapshot, filter);
-  console.log(`nodeGraph: ${nodes.length} nodes, ${edges.length} edges`);
 
   if (!reactRoot) {
     reactRoot = ReactDOM.createRoot(container);
   }
 
-  // Render GraphInner directly — ReactFlowComp is its own provider
-  reactRoot.render(
-    React.createElement(GraphInner, { initNodes: nodes, initEdges: edges })
-  );
+  const structureKey = nodes.map(n => n.id).join(',');
+
+  if (structureKey !== graphStructureKey) {
+    // Structure changed (or first render) — pre-populate store then full mount.
+    // Edges get new DOM elements and animations restart from zero (correct: new graph).
+    for (const n of nodes) _nodeData.set(n.id, n.data);
+    graphStructureKey = structureKey;
+    reactRoot.render(
+      React.createElement(GraphInner, { initNodes: nodes, initEdges: edges })
+    );
+  } else {
+    // Data-only update (status/time changed, same node IDs).
+    // Push directly to each PipelineNode's own setState — GraphInner and
+    // ReactFlowComp are never touched, so edge SVG elements are never recreated.
+    for (const n of nodes) {
+      _nodeData.set(n.id, n.data);
+      const cb = _nodeSubs.get(n.id);
+      if (cb) cb(n.data);
+    }
+  }
 
   return { root: reactRoot };
 }
