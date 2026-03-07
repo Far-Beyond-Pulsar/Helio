@@ -1,0 +1,227 @@
+// helioGraph.js — shared ReactFlow graph factory used by both pipeline and timing graphs.
+// Must be loaded as a plain <script> after React/ReactDOM/ReactFlow UMD bundles.
+// Exposes: window.HelioGraph = { createGraph, NODE_W, NODE_H, H_GAP, V_GAP, BULGE_R }
+(function () {
+  'use strict';
+
+  const RF             = window.ReactFlow || {};
+  const React          = window.React;
+  const ReactDOM       = window.ReactDOM;
+  const ReactFlowComp  = RF.ReactFlow;
+  const Handle         = RF.Handle;
+  const Background     = RF.Background;
+  const Controls       = RF.Controls;
+  const Position       = RF.Position || { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' };
+
+  // ── layout constants ────────────────────────────────────────────────────────
+  const NODE_W  = 188;
+  const NODE_H  = 52;
+  const H_GAP   = 40;
+  const V_GAP   = 80;
+  const BULGE_R = 11;
+
+  // ── warning tooltip constants ───────────────────────────────────────────────
+  const TOOLTIP_W  = 162;
+  const TOOLTIP_PX = 10;
+  const TOOLTIP_PY = 8;
+  const TOOLTIP_LH = 15;
+  const TOOLTIP_CR = 6;
+  const CHEV_BASE  = 14;
+  const CHEV_H     = 9;
+
+  // ── comet edge animation (inject once) ─────────────────────────────────────
+  const COMET_MS = 2200;
+  if (!document.getElementById('helio-edge-anim')) {
+    const s = document.createElement('style');
+    s.id = 'helio-edge-anim';
+    s.textContent = '@keyframes helioCometAnim { from { stroke-dashoffset:1.15 } to { stroke-dashoffset:0 } }';
+    document.head.appendChild(s);
+  }
+
+  // ── GradientEdge — shared, stateless ───────────────────────────────────────
+  function GradientEdge({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, style = {} }) {
+    const gsp = RF.getSmoothStepPath;
+    if (!gsp) return null;
+    const [edgePath] = gsp({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition, borderRadius: 12 });
+    const color = style.stroke || '#30363d';
+    const sw    = style.strokeWidth || 2;
+    const phaseRef = React.useRef(null);
+    if (phaseRef.current === null) phaseRef.current = `${-(performance.now() % COMET_MS)}ms`;
+    return React.createElement('g', null,
+      React.createElement('path', { d: edgePath, fill: 'none', stroke: color, strokeWidth: sw, strokeOpacity: 0.15 }),
+      React.createElement('path', {
+        d: edgePath, fill: 'none', pathLength: '1',
+        stroke: color, strokeWidth: sw + 1, strokeLinecap: 'round', strokeDasharray: '0.15 1',
+        style: {
+          animationName: 'helioCometAnim', animationDuration: `${COMET_MS}ms`,
+          animationTimingFunction: 'linear', animationIterationCount: 'infinite',
+          animationFillMode: 'none', animationDelay: phaseRef.current,
+          filter: `drop-shadow(0 0 5px ${color}) drop-shadow(0 0 2px ${color})`,
+        },
+      }),
+    );
+  }
+
+  const edgeTypes = { gradient: GradientEdge };
+
+  // ── createGraph(containerId) ────────────────────────────────────────────────
+  // Returns { render(nodes, edges) }
+  // Each call creates isolated state so two graphs can coexist on one page.
+  function createGraph(containerId) {
+    const _nodeData = new Map();
+    const _nodeSubs = new Map();
+    const _warnSubs = new Map();
+    let reactRoot    = null;
+    let structureKey = '';
+
+    // ── WarningTooltip ──────────────────────────────────────────────────────
+    function WarningTooltip({ id }) {
+      const [warning, setWarning] = React.useState(() => (_nodeData.get(id) || {}).warning || null);
+      React.useEffect(() => {
+        _warnSubs.set(id, setWarning);
+        return () => { _warnSubs.delete(id); };
+      }, [id]);
+      const ce    = React.createElement;
+      const stats = warning ? (warning.stats || []) : [];
+      const TW    = TOOLTIP_W;
+      const TH    = TOOLTIP_PY * 2 + TOOLTIP_LH + stats.length * TOOLTIP_LH + (stats.length ? 3 : 0);
+      const R     = TOOLTIP_CR;
+      const mx    = TW / 2;
+      const d     = [
+        `M ${R} 0`, `L ${TW - R} 0`, `Q ${TW} 0 ${TW} ${R}`,
+        `L ${TW} ${TH - R}`, `Q ${TW} ${TH} ${TW - R} ${TH}`,
+        `L ${mx + CHEV_BASE / 2} ${TH}`, `L ${mx} ${TH + CHEV_H}`,
+        `L ${mx - CHEV_BASE / 2} ${TH}`, `L ${R} ${TH}`,
+        `Q 0 ${TH} 0 ${TH - R}`, `L 0 ${R}`, `Q 0 0 ${R} 0`, 'Z',
+      ].join(' ');
+      return ce('div', {
+        style: {
+          position: 'absolute', top: `${-(TH + CHEV_H + 6)}px`, left: `${(NODE_W - TW) / 2}px`,
+          width: `${TW}px`, height: `${TH + CHEV_H}px`,
+          overflow: 'visible', pointerEvents: 'none', zIndex: 20,
+          display: warning ? 'block' : 'none',
+        },
+      },
+        ce('svg', { style: { position: 'absolute', top: 0, left: 0, overflow: 'visible' }, width: TW, height: TH + CHEV_H },
+          ce('path', { d, fill: 'rgba(210,153,34,0.10)', stroke: 'rgba(210,153,34,0.78)', strokeWidth: 1 }),
+        ),
+        ce('div', {
+          style: {
+            position: 'absolute', top: `${TOOLTIP_PY}px`, left: `${TOOLTIP_PX}px`,
+            width: `${TW - TOOLTIP_PX * 2}px`,
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
+            fontSize: '11px', lineHeight: `${TOOLTIP_LH}px`, color: '#e3b341', userSelect: 'none',
+          },
+        },
+          ce('div', { style: { fontWeight: 700 } }, warning ? `\u26a0 ${warning.message}` : ''),
+          ...stats.map((s, i) => ce('div', { key: i, style: { color: '#d29922', opacity: 0.88 } }, s)),
+        ),
+      );
+    }
+
+    // ── PipelineNode ────────────────────────────────────────────────────────
+    function PipelineNode({ id, data: initialData }) {
+      const [data, setData] = React.useState(() => _nodeData.get(id) || initialData);
+      React.useEffect(() => {
+        const latest = _nodeData.get(id);
+        if (latest) setData(latest);
+        _nodeSubs.set(id, setData);
+        return () => { _nodeSubs.delete(id); };
+      }, [id]);
+
+      const ce       = React.createElement;
+      const dotColor = data.kind === 'pass' ? '#388bfd' : '#d29922';
+      const { left = false, right = false, bottom = false } = data.connections || {};
+      const W = NODE_W, H = NODE_H, R = 6, BR = BULGE_R, OX = BR, half = H / 2;
+
+      const parts = [`M ${OX + R} 0`, `L ${OX + W - R} 0`, `Q ${OX + W} 0 ${OX + W} ${R}`];
+      if (right) {
+        parts.push(`L ${OX + W} ${half - BR}`, `A ${BR} ${BR} 0 0 1 ${OX + W} ${half + BR}`);
+      }
+      parts.push(`L ${OX + W} ${H - R}`, `Q ${OX + W} ${H} ${OX + W - R} ${H}`);
+      if (bottom) {
+        const cx = OX + W / 2;
+        parts.push(`L ${cx + BR} ${H}`, `A ${BR} ${BR} 0 0 1 ${cx - BR} ${H}`);
+      }
+      parts.push(`L ${OX + R} ${H}`, `Q ${OX} ${H} ${OX} ${H - R}`);
+      if (left) {
+        parts.push(`L ${OX} ${half + BR}`, `A ${BR} ${BR} 0 0 1 ${OX} ${half - BR}`);
+      }
+      parts.push(`L ${OX} ${R}`, `Q ${OX} 0 ${OX + R} 0`, 'Z');
+
+      return ce('div', { style: { position: 'relative', overflow: 'visible', width: `${W}px`, height: `${H}px` } },
+        ce('svg', {
+          style: { position: 'absolute', left: `${-BR}px`, top: 0, overflow: 'visible', pointerEvents: 'none', zIndex: 0 },
+          width: W + 2 * BR, height: H,
+        },
+          ce('path', { d: parts.join(' '), fill: '#161b22', stroke: '#30363d', strokeWidth: 1 }),
+          left   && ce('circle', { cx: OX - 1,         cy: half,    r: 4.5, fill: dotColor }),
+          right  && ce('circle', { cx: OX + W + 1,     cy: half,    r: 4.5, fill: dotColor }),
+          bottom && ce('circle', { cx: OX + W / 2,     cy: H + 1,   r: 4.5, fill: '#388bfd' }),
+        ),
+        ce('div', {
+          style: {
+            position: 'relative', zIndex: 1, height: '100%', display: 'flex',
+            flexDirection: 'column', justifyContent: 'center',
+            padding: `0 14px 0 ${BR + 8}px`, color: '#e6edf3',
+            fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
+            fontSize: '13px', boxSizing: 'border-box',
+          },
+        },
+          ce('div', { style: { fontWeight: 600, marginBottom: data.time ? '3px' : 0, letterSpacing: '0.01em', whiteSpace: 'nowrap' } }, data.title),
+          data.time && ce('div', { style: { fontSize: '11px', color: '#8b949e', whiteSpace: 'nowrap' } }, data.time),
+        ),
+        Handle && ce(Handle, { type: 'target', position: Position.Left,   style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
+        Handle && ce(Handle, { type: 'target', id: 'left', position: Position.Left,   style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
+        Handle && ce(Handle, { type: 'source', position: Position.Right,  style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
+        Handle && ce(Handle, { type: 'source', id: 'right', position: Position.Right,  style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
+        Handle && ce(Handle, { type: 'source', id: 'bottom', position: Position.Bottom, style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
+        ce(WarningTooltip, { id }),
+      );
+    }
+
+    const nodeTypes = { pipeline: PipelineNode, pass: PipelineNode };
+
+    // ── GraphInner — zero state, never re-renders ───────────────────────────
+    function GraphInner({ initNodes, initEdges }) {
+      return React.createElement(ReactFlowComp, {
+        nodes: initNodes, edges: initEdges,
+        onNodesChange: () => {}, onEdgesChange: () => {},
+        nodeTypes, edgeTypes, fitView: true,
+        fitViewOptions: { padding: 0.15 },
+        nodesDraggable: true, nodesConnectable: false, elementsSelectable: true,
+        proOptions: { hideAttribution: true },
+        style: { background: '#0d1117' },
+      },
+        Background && React.createElement(Background, { color: '#21262d', gap: 20, style: { opacity: 0.5 } }),
+        Controls   && React.createElement(Controls,   { style: { background: '#161b22', border: '1px solid #30363d', borderRadius: '6px' } }),
+      );
+    }
+
+    // ── public render method ────────────────────────────────────────────────
+    function render(nodes, edges) {
+      const container = document.getElementById(containerId);
+      if (!container) { console.warn(`HelioGraph: no #${containerId} container`); return; }
+      if (!reactRoot) reactRoot = ReactDOM.createRoot(container);
+
+      const key = nodes.map(n => n.id).join(',');
+      if (key !== structureKey) {
+        // Structure changed — full mount
+        for (const n of nodes) _nodeData.set(n.id, n.data);
+        structureKey = key;
+        reactRoot.render(React.createElement(GraphInner, { initNodes: nodes, initEdges: edges }));
+      } else {
+        // Data-only update — push directly to each node's state, never re-render the graph
+        for (const n of nodes) {
+          _nodeData.set(n.id, n.data);
+          const cb  = _nodeSubs.get(n.id); if (cb)  cb(n.data);
+          const wcb = _warnSubs.get(n.id); if (wcb) wcb(n.data.warning || null);
+        }
+      }
+    }
+
+    return { render };
+  }
+
+  window.HelioGraph = { createGraph, NODE_W, NODE_H, H_GAP, V_GAP, BULGE_R };
+})();
