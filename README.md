@@ -39,6 +39,7 @@
     </table>
 </div>
 
+<img width="1594" height="1017" alt="image" src="https://github.com/user-attachments/assets/e2232053-fa0c-4f43-b4aa-447053959c58" />
 
 ## 🚀 Features
 
