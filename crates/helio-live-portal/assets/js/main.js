@@ -17,11 +17,83 @@ const viewSide = document.getElementById('viewSide');
 
 let lastSnapshot = null;
 
+// Ring buffer of the last 10 complete frame snapshots (scene_delta excluded
+// to keep the payload readable — full scene data can be large).
+const MAX_HISTORY = 10;
+const frameHistory = [];
+const historyCountEl = document.getElementById('historyCount');
+
+function pushHistory(snapshot) {
+  // Store a lightweight copy: omit scene_delta (can be huge) but keep everything else.
+  const { scene_delta: _omit, ...rest } = snapshot;
+  frameHistory.push(rest);
+  if (frameHistory.length > MAX_HISTORY) frameHistory.shift();
+  if (historyCountEl) historyCountEl.textContent = frameHistory.length;
+}
+
+// ── copy helpers ─────────────────────────────────────────────────────────────
+
+const toastEl = document.getElementById('copyToast');
+let toastTimer = null;
+
+function showToast(msg) {
+  if (!toastEl) return;
+  toastEl.textContent = msg;
+  toastEl.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => toastEl.classList.remove('show'), 1800);
+}
+
+async function copyJson(data, btn) {
+  const json = JSON.stringify(data, null, 2);
+  try {
+    await navigator.clipboard.writeText(json);
+    showToast('Copied to clipboard ✓');
+    if (btn) {
+      const orig = btn.querySelector('.btn-label') ? btn.querySelector('.btn-label').textContent : btn.textContent;
+      btn.classList.add('copied');
+      setTimeout(() => btn.classList.remove('copied'), 1200);
+    }
+  } catch {
+    // Fallback for browsers without clipboard API permission
+    const ta = document.createElement('textarea');
+    ta.value = json;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast('Copied to clipboard ✓');
+  }
+}
+
+const btnCopyFrame = document.getElementById('btnCopyFrame');
+const btnCopyHistory = document.getElementById('btnCopyHistory');
+
+if (btnCopyFrame) {
+  btnCopyFrame.addEventListener('click', () => {
+    if (!lastSnapshot) return;
+    const { scene_delta: _omit, ...rest } = lastSnapshot;
+    copyJson(rest, btnCopyFrame);
+  });
+}
+
+if (btnCopyHistory) {
+  btnCopyHistory.addEventListener('click', () => {
+    if (!frameHistory.length) return;
+    copyJson(frameHistory, btnCopyHistory);
+  });
+}
+
+// ── render ────────────────────────────────────────────────────────────────────
+
 let cyInstance = null;
 const searchBox = document.getElementById('searchBox');
 
 function render(snapshot) {
   lastSnapshot = snapshot;
+  pushHistory(snapshot);
+
   frameEl.textContent = snapshot.frame;
   frameMsEl.textContent = snapshot.frame_time_ms.toFixed(2);
   ftfMsEl.textContent = snapshot.frame_to_frame_ms.toFixed(2);
