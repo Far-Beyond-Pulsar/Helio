@@ -272,6 +272,38 @@
     #tooltip .tt-row   { color: var(--fg-muted); display: flex; justify-content: space-between; gap: 16px; margin: 2px 0; }
     #tooltip .tt-val   { color: var(--fg); font-family: ui-monospace, Menlo, monospace; }
 
+    /* ── ReactFlow Controls ── */
+    .react-flow__controls {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 6px;
+      box-shadow: 0 2px 8px #010409;
+      overflow: hidden;
+    }
+    .react-flow__controls-button {
+      background: #161b22;
+      border: none;
+      border-bottom: 1px solid #30363d;
+      color: #8b949e;
+      fill: #8b949e;
+      width: 28px;
+      height: 28px;
+      padding: 5px;
+      transition: background 0.15s, color 0.15s, fill 0.15s;
+    }
+    .react-flow__controls-button:last-child {
+      border-bottom: none;
+    }
+    .react-flow__controls-button:hover {
+      background: #21262d;
+      color: #e6edf3;
+      fill: #e6edf3;
+    }
+    .react-flow__controls-button svg {
+      max-width: 12px;
+      max-height: 12px;
+    }
+
     /* ── Custom scrollbars ── */
     ::-webkit-scrollbar {
       width: 8px;
