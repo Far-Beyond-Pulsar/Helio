@@ -11,14 +11,18 @@
   const Handle         = RF.Handle;
   const Background     = RF.Background;
   const Controls       = RF.Controls;
-  const Position       = RF.Position || { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' };
+  const Position             = RF.Position || { Left: 'left', Right: 'right', Top: 'top', Bottom: 'bottom' };
+  // Safe hook — falls back to a no-op when running outside ReactFlow context or on older builds
+  const useUpdateNodeInternals = RF.useUpdateNodeInternals || (() => () => {});
 
   // ── layout constants ────────────────────────────────────────────────────────
-  const NODE_W  = 188;
-  const NODE_H  = 52;
-  const H_GAP   = 40;
-  const V_GAP   = 80;
-  const BULGE_R = 11;
+  const NODE_W      = 188;
+  const NODE_H      = 52;
+  const H_GAP       = 40;
+  const V_GAP       = 80;
+  const BULGE_R     = 11;
+  const BAR_CHART_H = 76;  // height of the expanded metrics panel
+  const MAX_HISTORY = 24;  // max samples retained per node
 
   // ── warning tooltip constants ───────────────────────────────────────────────
   const TOOLTIP_W  = 162;
@@ -68,11 +72,75 @@
   // Returns { render(nodes, edges) }
   // Each call creates isolated state so two graphs can coexist on one page.
   function createGraph(containerId) {
-    const _nodeData = new Map();
-    const _nodeSubs = new Map();
-    const _warnSubs = new Map();
+    const _nodeData    = new Map();
+    const _nodeSubs    = new Map();
+    const _warnSubs    = new Map();
+    const _historyData = new Map(); // id → number[]  (ring-buffer of timing values)
     let reactRoot    = null;
     let structureKey = '';
+
+    function _pushHistory(id, timeStr) {
+      const m = (timeStr || '').match(/[\d.]+/);
+      if (!m) return;
+      const val = parseFloat(m[0]);
+      if (isNaN(val)) return;
+      const arr = _historyData.get(id) || [];
+      arr.push(val);
+      if (arr.length > MAX_HISTORY) arr.shift();
+      _historyData.set(id, arr);
+    }
+
+    // ── BarPanel — metrics history chart ───────────────────────────────────
+    function BarPanel({ id, data }) {
+      const ce      = React.createElement;
+      const history = _historyData.get(id) || [];
+      const accent  = (data.kind === 'pass') ? '#388bfd' : '#d29922';
+      const padX    = 8;
+      const barsW   = NODE_W - padX * 2;
+      const barsH   = 36;
+
+      const inner = history.length === 0
+        ? ce('div', { style: { display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' } },
+            ce('span', { style: { fontSize: '10px', color: '#484f58' } }, 'no data yet')
+          )
+        : ce(React.Fragment, null,
+            ce('div', { style: { fontSize: '10px', color: '#484f58', marginBottom: '3px', letterSpacing: '0.05em', textTransform: 'uppercase' } }, 'History'),
+            ce('svg', { width: barsW, height: barsH, style: { display: 'block' } },
+              ce('line', { x1: 0, y1: barsH * 0.5, x2: barsW, y2: barsH * 0.5, stroke: '#21262d', strokeWidth: 1 }),
+              ...(() => {
+                const max  = Math.max(...history, 0.001);
+                const n    = history.length;
+                const barW = (barsW - (n - 1)) / n;
+                return history.map((v, i) =>
+                  ce('rect', {
+                    key: i, rx: 1.5,
+                    x: i * (Math.max(1, barW) + 1),
+                    y: barsH - Math.max(2, (v / max) * barsH),
+                    width: Math.max(1, barW),
+                    height: Math.max(2, (v / max) * barsH),
+                    fill: accent,
+                    opacity: 0.25 + 0.75 * ((i + 1) / n),
+                  })
+                );
+              })(),
+            ),
+            ce('div', { style: { display: 'flex', justifyContent: 'space-between', marginTop: '3px', fontSize: '10px', color: '#484f58' } },
+              ce('span', null, '0'),
+              ce('span', null, `${Math.max(...history, 0.001).toFixed(2)} ms`),
+            ),
+          );
+
+      return ce('div', {
+        style: {
+          position: 'absolute', top: `${NODE_H}px`, left: `${BULGE_R}px`,
+          width: `${NODE_W}px`, height: `${BAR_CHART_H}px`,
+          background: '#0d1117', border: '1px solid #30363d',
+          borderTop: '1px solid #21262d', borderRadius: '0 0 6px 6px',
+          padding: `4px ${padX}px`, boxSizing: 'border-box', overflow: 'hidden',
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", monospace',
+        },
+      }, inner);
+    }
 
     // ── WarningTooltip ──────────────────────────────────────────────────────
     function WarningTooltip({ id }) {
@@ -121,13 +189,16 @@
 
     // ── PipelineNode ────────────────────────────────────────────────────────
     function PipelineNode({ id, data: initialData }) {
-      const [data, setData] = React.useState(() => _nodeData.get(id) || initialData);
+      const [data, setData]     = React.useState(() => _nodeData.get(id) || initialData);
+      const [expanded, setExpanded] = React.useState(false);
+      const updateNodeInternals = useUpdateNodeInternals();
       React.useEffect(() => {
         const latest = _nodeData.get(id);
         if (latest) setData(latest);
         _nodeSubs.set(id, setData);
         return () => { _nodeSubs.delete(id); };
       }, [id]);
+      React.useEffect(() => { updateNodeInternals(id); }, [expanded]);
 
       const ce       = React.createElement;
       const dotColor = data.kind === 'pass' ? '#388bfd' : '#d29922';
@@ -149,7 +220,11 @@
       }
       parts.push(`L ${OX} ${R}`, `Q ${OX} 0 ${OX + R} 0`, 'Z');
 
-      return ce('div', { style: { position: 'relative', overflow: 'visible', width: `${W}px`, height: `${H}px` } },
+      const containerH = expanded ? NODE_H + BAR_CHART_H : NODE_H;
+      return ce('div', {
+        style: { position: 'relative', overflow: 'visible', width: `${W}px`, height: `${containerH}px`, cursor: 'pointer' },
+        onClick: () => setExpanded(ex => !ex),
+      },
         ce('svg', {
           style: { position: 'absolute', left: `${-BR}px`, top: 0, overflow: 'visible', pointerEvents: 'none', zIndex: 0 },
           width: W + 2 * BR, height: H,
@@ -177,6 +252,7 @@
         Handle && ce(Handle, { type: 'source', id: 'right', position: Position.Right,  style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
         Handle && ce(Handle, { type: 'source', id: 'bottom', position: Position.Bottom, style: { background: 'transparent', border: 'none', width: 0, height: 0 } }),
         ce(WarningTooltip, { id }),
+        expanded && ce(BarPanel, { id, data }),
       );
     }
 
@@ -206,14 +282,15 @@
 
       const key = nodes.map(n => n.id).join(',');
       if (key !== structureKey) {
-        // Structure changed — full mount
-        for (const n of nodes) _nodeData.set(n.id, n.data);
+        // Structure changed — full mount; seed history for immediate expand
+        for (const n of nodes) { _nodeData.set(n.id, n.data); _pushHistory(n.id, n.data.time); }
         structureKey = key;
         reactRoot.render(React.createElement(GraphInner, { initNodes: nodes, initEdges: edges }));
       } else {
         // Data-only update — push directly to each node's state, never re-render the graph
         for (const n of nodes) {
           _nodeData.set(n.id, n.data);
+          _pushHistory(n.id, n.data.time);
           const cb  = _nodeSubs.get(n.id); if (cb)  cb(n.data);
           const wcb = _warnSubs.get(n.id); if (wcb) wcb(n.data.warning || null);
         }
