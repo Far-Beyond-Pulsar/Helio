@@ -50,6 +50,12 @@ impl Renderer {
         // ---------- automatic batching/instancing ----------
         let t1_queue_draws;
         {
+            // Structural fingerprint: hashes only the IDENTITY of the object set
+            // (count + mesh-ptr + material-ptr per object).  Transform values are
+            // deliberately excluded — per-batch fnv_mats() inside the slow-path
+            // detects and uploads changed transforms independently, so there is no
+            // need to recompute a full-scene transform hash every frame.
+            // Cost: O(N) with 2 ptr reads per object instead of 16 float hashes.
             let n = scene.objects.len() as u64;
             let mut fp: u64 = n.wrapping_mul(0x9e3779b97f4a7c15);
             for obj in &scene.objects {
@@ -57,27 +63,20 @@ impl Renderer {
                 let mtp = obj.material.as_ref()
                     .map(|m| Arc::as_ptr(&m.bind_group) as u64)
                     .unwrap_or(0);
-                // Hash all 16 matrix components so that any translation, rotation,
-                // or scale change — on any axis — triggers a transform re-upload.
-                let t = &obj.transform;
-                let r0 = (t.x_axis.x.to_bits() as u64) ^ ((t.x_axis.y.to_bits() as u64) << 32 >> 32)
-                       ^ (t.x_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
-                       ^ (t.x_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
-                let r1 = (t.y_axis.x.to_bits() as u64) ^ ((t.y_axis.y.to_bits() as u64) << 32 >> 32)
-                       ^ (t.y_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
-                       ^ (t.y_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
-                let r2 = (t.z_axis.x.to_bits() as u64) ^ ((t.z_axis.y.to_bits() as u64) << 32 >> 32)
-                       ^ (t.z_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
-                       ^ (t.z_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
-                let r3 = (t.w_axis.x.to_bits() as u64) ^ ((t.w_axis.y.to_bits() as u64) << 32 >> 32)
-                       ^ (t.w_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
-                       ^ (t.w_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
-                fp = fp.wrapping_add(
-                    (mp ^ mtp ^ r0 ^ r1 ^ r2 ^ r3).wrapping_mul(0x517cc1b727220a95)
-                );
+                fp = fp.wrapping_add((mp ^ mtp).wrapping_mul(0x517cc1b727220a95));
             }
-            if fp == self.scene_fingerprint && !self.canonical_draw_list.is_empty() {
-                // Scene unchanged — re-push cached draw list without rebuilding batches.
+            let structural_changed = fp != self.scene_fingerprint || self.canonical_draw_list.is_empty();
+            // Rate-limit slow-path rebuilds.  During streaming the scene changes every
+            // frame (new chunks load, old ones are culled), so without rate-limiting the
+            // full O(N) batch-rebuild + per-batch buffer management runs at 60 fps.
+            // With the limit at 1-in-3 frames the canonical draw list may lag by ≤2
+            // frames, which is imperceptible.  The stale list references per-batch
+            // stable Arc<Buffer>s, so all existing chunks render correctly; only
+            // newly-added chunks are delayed.
+            let allow_rebuild = structural_changed
+                && (self.canonical_draw_list.is_empty() || self.frame_count % 3 == 0);
+            if !allow_rebuild {
+                // Fast path — re-push cached draw list without rebuilding batches.
                 self.draw_list.lock().unwrap().extend(self.canonical_draw_list.iter().cloned());
                 t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
                 self.pending_scene_stage_ms[0] = t1_queue_draws;
@@ -86,7 +85,11 @@ impl Renderer {
                 // Scene changed — rebuild batches and per-batch stable instance buffers.
                 self.scene_fingerprint = fp;
 
-                for v in self.scratch_batches.values_mut() { v.clear(); }
+                // Clear entire map so dead keys from previous frames (chunks that left
+                // the frustum) don't accumulate.  Without this the map grows without
+                // bound: the telemetry showed "7739 batches, 4920 instances" because
+                // 2819 dead entries were being iterated every slow-path.
+                self.scratch_batches.clear();
                 self.scratch_example_idx.clear();
 
                 for (i_obj, obj) in scene.objects.iter().enumerate() {

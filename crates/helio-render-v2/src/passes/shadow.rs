@@ -108,6 +108,14 @@ pub struct ShadowPass {
     /// Per-slot (light*6+face) dirty counter value when this face was last rebuilt.
     /// Face is stale when `bundle_slot_built[slot] < bundle_dirty_gen[i]`.
     bundle_slot_built: Vec<u64>,
+    /// Monotonic frame counter (incremented once per execute() call).  Used to
+    /// rate-limit how often new dirty rounds start during chunk streaming.
+    frame_counter: u64,
+    /// Per-light frame_counter value when the most recent dirty round started.
+    /// A new round cannot start until at least MIN_SHADOW_INTERVAL frames have
+    /// elapsed since the last one, preventing the rebuild from chasing every
+    /// incremental stream-in event at full frame rate.
+    bundle_dirty_gen_start_frame: Vec<u64>,
 }
 
 impl ShadowPass {
@@ -284,6 +292,8 @@ impl ShadowPass {
             bundle_dirty_gen: vec![0; max_lights],
             bundle_geom_hashes: vec![0; max_lights],
             bundle_slot_built: vec![0; total_slots],
+            frame_counter: 0,
+            bundle_dirty_gen_start_frame: vec![0; max_lights],
         }
     }
 }
@@ -300,6 +310,7 @@ impl RenderPass for ShadowPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
+        self.frame_counter += 1;
         let light_count = self.light_count.load(Ordering::Relaxed) as usize;
         // Each light occupies 6 consecutive layers
         let actual_count = light_count.min(self.layer_views.len() / 6);
@@ -388,17 +399,29 @@ impl RenderPass for ShadowPass {
             let any_face_pending = (0..max_faces as usize)
                 .any(|f| self.bundle_slot_built[i * 6 + f] < self.bundle_dirty_gen[i]);
 
+            // Minimum frames between shadow dirty rounds per light.  During streaming
+            // new chunks enter shadow range every few frames; without this limit the
+            // shadow pass would start a new 4-face rebuild every ~2 frames, costing
+            // ~11 ms/frame on average.  With MIN_SHADOW_INTERVAL=8 the rebuild budget
+            // is amortised across 8 frames → ~2.75 ms/frame average.
+            // Shadow maps are at most (8 frames / 60fps) ≈ 133 ms stale during
+            // active streaming, which is imperceptible at normal movement speeds.
+            const MIN_SHADOW_INTERVAL: u64 = 8;
             if geom_hash != self.bundle_geom_hashes[i] {
-                if !any_face_pending {
-                    // No backlog: start a fresh dirty round.
+                let frames_since_last = self.frame_counter
+                    .saturating_sub(self.bundle_dirty_gen_start_frame[i]);
+                if !any_face_pending && frames_since_last >= MIN_SHADOW_INTERVAL {
+                    // No backlog AND rate-limit elapsed: start a fresh dirty round.
                     self.bundle_dirty_gen[i] = self.bundle_dirty_gen[i].wrapping_add(1);
                     self.bundle_geom_hashes[i] = geom_hash;
+                    self.bundle_dirty_gen_start_frame[i] = self.frame_counter;
                     eprintln!(
                         "⚠️ [Shadow] Caster set changed: light {}, {} visible casters → {} faces pending",
                         i, self.filtered_indices.len(), max_faces,
                     );
                 }
-                // else: absorb — in-flight rebuild already uses current filtered_indices
+                // else: absorb — either in-flight rebuild already covers current
+                // filtered_indices, or the rate-limit hasn't elapsed yet.
             }
 
             // ── Cache check ──────────────────────────────────────────────────
