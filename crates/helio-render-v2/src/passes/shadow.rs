@@ -96,16 +96,14 @@ pub struct ShadowPass {
     /// bundle.  Ensures buffers aren't freed while a stale bundle might still replay them
     /// (relevant during the amortised rebuild window when instance counts change).
     bundle_kept_arcs: Vec<Vec<Arc<wgpu::Buffer>>>,
-    /// Per-light monotonic dirty counter.  Incremented whenever either the draw-list
-    /// generation changes (new/removed batch) or the filtered caster set changes identity
-    /// (a caster entered or left shadow range).
+    /// Per-light monotonic dirty counter.  Incremented whenever the filtered shadow-caster
+    /// set changes identity (a caster entered/left shadow range, or a batch grew/shrank).
+    /// Does NOT increment on draw-list changes for out-of-range batches, which would cause
+    /// spurious full rebuilds every time a distant chunk streams in.
     bundle_dirty_gen: Vec<u64>,
-    /// Per-light `draw_list_generation` value seen when its dirty counter was last bumped.
-    /// Compared each frame to detect structural draw-list changes.
-    bundle_seen_draw_gen: Vec<u64>,
     /// Per-light geom hash (vertex-buffer ptrs + instance counts) seen when dirty counter
-    /// was last bumped.  Compared each frame to detect caster-set changes without relying
-    /// on camera position or world transforms, which would fire every frame.
+    /// was last bumped.  Compared each frame to detect in-range caster-set changes without
+    /// relying on camera position or world transforms, which would fire every frame.
     bundle_geom_hashes: Vec<u64>,
     /// Per-slot (light*6+face) dirty counter value when this face was last rebuilt.
     /// Face is stale when `bundle_slot_built[slot] < bundle_dirty_gen[i]`.
@@ -284,7 +282,6 @@ impl ShadowPass {
             bundle_cache: (0..total_slots).map(|_| None).collect(),
             bundle_kept_arcs: (0..total_slots).map(|_| Vec::new()).collect(),
             bundle_dirty_gen: vec![0; max_lights],
-            bundle_seen_draw_gen: vec![0; max_lights],
             bundle_geom_hashes: vec![0; max_lights],
             bundle_slot_built: vec![0; total_slots],
         }
@@ -370,45 +367,39 @@ impl RenderPass for ShadowPass {
             ]);
 
             // ── Invalidation check ───────────────────────────────────────────
-            // Detects two sources of change:
-            // (a) draw-list structure (new/removed batch)  → gen_changed
-            // (b) filtered caster set identity             → geom_changed
+            // Only the geom_hash is used to detect changes.  draw_list_generation
+            // is intentionally NOT checked here: it increments for every batch
+            // addition anywhere in the scene, including chunks loading outside the
+            // 300 m shadow sphere.  Those additions don't affect the shadow caster
+            // set at all, but would cause a full bundle rebuild every frame during
+            // streaming.  The geom_hash already covers every case that matters:
+            //   • new batch enters shadow range         → new ptr in filtered set
+            //   • batch removed / leaves shadow range   → ptr removed
+            //   • batch gains / loses instances         → instance_count changes
+            // Transforms are handled by per-batch stable instance buffers (no
+            // re-encode needed; write_buffer keeps GPU data current).
             //
-            // STREAMING ABSORPTION RULE: if any face from the current round is still
-            // pending, do NOT start a new round.  The pending faces will be encoded
-            // with the current frame's `filtered_indices`, so they already incorporate
-            // the new geometry.  Starting a new round while work is in flight causes
-            // `dirty_gen` to race ahead of `slot_built` indefinitely during chunk
-            // streaming, meaning faces 2+ are never reached by MAX_FACE_REBUILDS.
-            //
-            // When absorbing: always update `bundle_seen_draw_gen` so gen_changed
-            // doesn't keep firing, but leave `bundle_geom_hashes` at the round-start
-            // value so we can detect further geometry changes once the round drains.
+            // STREAMING ABSORPTION RULE: if any face from the current round is
+            // still pending, do NOT start a new round.  The pending faces will be
+            // encoded with the current frame's `filtered_indices`, so they already
+            // incorporate the latest geometry.  Starting a new round while work is
+            // in flight causes `dirty_gen` to race ahead of `slot_built`
+            // indefinitely, meaning later faces are never reached.
             let any_face_pending = (0..max_faces as usize)
                 .any(|f| self.bundle_slot_built[i * 6 + f] < self.bundle_dirty_gen[i]);
 
-            let gen_changed  = ctx.draw_list_generation != self.bundle_seen_draw_gen[i];
-            let geom_changed = geom_hash != self.bundle_geom_hashes[i];
-            if gen_changed || geom_changed {
-                // Suppress repeated gen_changed every frame regardless of absorption.
-                self.bundle_seen_draw_gen[i] = ctx.draw_list_generation;
-
+            if geom_hash != self.bundle_geom_hashes[i] {
                 if !any_face_pending {
                     // No backlog: start a fresh dirty round.
                     self.bundle_dirty_gen[i] = self.bundle_dirty_gen[i].wrapping_add(1);
                     self.bundle_geom_hashes[i] = geom_hash;
                     eprintln!(
-                        "⚠️ [Shadow] {} changed: light {}, {} visible casters → {} faces pending",
-                        if gen_changed { "Draw list gen" } else { "Caster set" },
+                        "⚠️ [Shadow] Caster set changed: light {}, {} visible casters → {} faces pending",
                         i, self.filtered_indices.len(), max_faces,
                     );
                 }
-                // else: absorb — the in-flight rebuild already uses current filtered_indices
+                // else: absorb — in-flight rebuild already uses current filtered_indices
             }
-
-            // Recompute after potential dirty_gen update.
-            let any_face_pending = (0..max_faces as usize)
-                .any(|f| self.bundle_slot_built[i * 6 + f] < self.bundle_dirty_gen[i]);
 
             // ── Cache check ──────────────────────────────────────────────────
             {
