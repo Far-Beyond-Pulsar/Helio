@@ -1,7 +1,7 @@
 //! Shadow depth pass - renders depth into the shadow atlas
 
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
-use crate::mesh::DrawCall;
+use crate::mesh::{DrawCall, INSTANCE_STRIDE};
 use crate::Result;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use wgpu::util::DeviceExt;
@@ -405,7 +405,9 @@ impl RenderPass for ShadowPass {
                         let dc = &draw_calls[idx];
                         enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
                         enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                        enc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(..));
+                        let inst_start = dc.instance_buffer_offset;
+                        let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
+                        enc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
                         enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                         enc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
                     }

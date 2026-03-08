@@ -178,7 +178,15 @@ pub struct Renderer {
     scratch_batches: HashMap<(usize, usize), Vec<[f32; 16]>>,
     scratch_example_idx: HashMap<(usize, usize), usize>,
     scratch_sorted_light_indices: Vec<usize>,
-    instance_buffer_cache: HashMap<(usize, usize), (Arc<wgpu::Buffer>, u32)>,
+    /// Unified instance transform buffer — all per-draw instance data packed contiguously.
+    /// Uploaded with a single `queue.write_buffer` call per `render_scene` slow path,
+    /// regardless of how many unique (mesh, material) batches exist.
+    shared_instance_buffer: Arc<wgpu::Buffer>,
+    /// Capacity of `shared_instance_buffer` in mat4×4 instances (64 bytes each).
+    /// Grows by doubling when total instance count exceeds this.
+    shared_instance_buffer_capacity: u32,
+    /// Flat CPU-side staging vec; cleared and rebuilt each slow-path execution.
+    scratch_instance_transforms: Vec<[f32; 16]>,
 
     // Frame state
     frame_count: u64,

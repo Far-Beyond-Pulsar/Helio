@@ -555,6 +555,16 @@ impl Renderer {
             }
         }
 
+        // ── Unified instance transform buffer ─────────────────────────────────
+        // Initial capacity: 8192 instances (512 KB). Grows by doubling on demand.
+        const INITIAL_INSTANCE_CAPACITY: u32 = 8192;
+        let shared_instance_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shared Instance Buffer"),
+            size: INITIAL_INSTANCE_CAPACITY as u64 * 64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
         Ok(Self {
             device,
             queue,
@@ -620,7 +630,9 @@ impl Renderer {
             scratch_batches: HashMap::new(),
             scratch_example_idx: HashMap::new(),
             scratch_sorted_light_indices: Vec::new(),
-            instance_buffer_cache: HashMap::new(),
+            shared_instance_buffer,
+            shared_instance_buffer_capacity: INITIAL_INSTANCE_CAPACITY,
+            scratch_instance_transforms: Vec::new(),
             frame_count: 0,
             width: config.width,
             height: config.height,

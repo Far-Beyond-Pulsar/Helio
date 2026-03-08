@@ -230,6 +230,10 @@ impl GpuMesh {
 /// hardware instancing we optionally carry an instance buffer and count.  The
 /// geometry pass will bind the buffer as a second vertex stream and issue
 /// `draw_indexed_instanced` when `instance_count > 1`.
+
+/// Byte stride of a single instance record: one `mat4x4<f32>` (4×4×4 bytes).
+pub const INSTANCE_STRIDE: u64 = std::mem::size_of::<[f32; 16]>() as u64;
+
 #[derive(Clone)]
 pub struct DrawCall {
     pub vertex_buffer: Arc<wgpu::Buffer>,
@@ -248,6 +252,9 @@ pub struct DrawCall {
     pub instance_buffer: Option<Arc<wgpu::Buffer>>,
     /// Number of instances encoded in `instance_buffer` (defaults to 1).
     pub instance_count: u32,
+    /// Byte offset into `instance_buffer` where this draw's instances begin.
+    /// For the unified shared instance buffer this is `batch_start_instance * INSTANCE_STRIDE`.
+    pub instance_buffer_offset: u64,
 }
 
 impl DrawCall {
@@ -264,6 +271,7 @@ impl DrawCall {
             material_id: 0,  // Will be assigned by renderer if GPU-driven is enabled
             instance_buffer: None,
             instance_count: 1,
+            instance_buffer_offset: 0,
         }
     }
 }

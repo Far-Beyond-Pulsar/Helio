@@ -80,6 +80,9 @@ impl Renderer {
                 let example_idx = std::mem::take(&mut self.scratch_example_idx);
                 let mut local_draws: Vec<DrawCall> = Vec::with_capacity(batches.len());
 
+                // ── Collect all transforms into flat staging buffer ──────────────────
+                // One queue.write_buffer at the end instead of one per batch.
+                self.scratch_instance_transforms.clear();
                 for (key, mats) in &batches {
                     let count = mats.len() as u32;
                     if count == 0 { continue; }
@@ -87,19 +90,8 @@ impl Renderer {
                     let mesh = &obj.mesh;
                     let mat_opt = obj.material.as_ref();
 
-                    let cached = self.instance_buffer_cache.remove(key);
-                    let inst_buf = match cached {
-                        Some((arc, cached_count)) if cached_count == count => {
-                            self.queue.write_buffer(&arc, 0, bytemuck::cast_slice(mats));
-                            arc
-                        }
-                        _ => Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                            label: Some("Instance transforms"),
-                            contents: bytemuck::cast_slice(mats),
-                            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        })),
-                    };
-                    self.instance_buffer_cache.insert(*key, (inst_buf.clone(), count));
+                    let instance_offset = self.scratch_instance_transforms.len() as u64;
+                    self.scratch_instance_transforms.extend_from_slice(mats);
 
                     let (bind_group, transparent) = match mat_opt {
                         Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
@@ -107,9 +99,41 @@ impl Renderer {
                     };
 
                     let mut dc = DrawCall::new(mesh, bind_group, transparent);
-                    dc.instance_buffer = Some(inst_buf);
-                    dc.instance_count = count;
+                    dc.instance_buffer        = Some(Arc::clone(&self.shared_instance_buffer));
+                    dc.instance_buffer_offset = instance_offset * 64;
+                    dc.instance_count         = count;
                     local_draws.push(dc);
+                }
+
+                // Grow the shared buffer when total instances exceed capacity (amortised doubling).
+                let total_instances = self.scratch_instance_transforms.len() as u32;
+                if total_instances > self.shared_instance_buffer_capacity {
+                    let new_cap = total_instances.next_power_of_two();
+                    let new_buf = Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("Shared Instance Buffer"),
+                        size: new_cap as u64 * 64,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                    self.shared_instance_buffer          = new_buf;
+                    self.shared_instance_buffer_capacity = new_cap;
+                    // Re-point all draw calls to the new Arc before the upload.
+                    for dc in &mut local_draws {
+                        dc.instance_buffer = Some(Arc::clone(&self.shared_instance_buffer));
+                    }
+                    log::debug!(
+                        "Shared instance buffer grown → {} instances ({} KB)",
+                        new_cap, new_cap * 64 / 1024
+                    );
+                }
+
+                // Single write_buffer for all instance data in every batch.
+                if !self.scratch_instance_transforms.is_empty() {
+                    self.queue.write_buffer(
+                        &self.shared_instance_buffer,
+                        0,
+                        bytemuck::cast_slice(&self.scratch_instance_transforms),
+                    );
                 }
 
                 self.canonical_draw_list = local_draws.clone();

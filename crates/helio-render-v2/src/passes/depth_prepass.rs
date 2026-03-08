@@ -6,7 +6,7 @@
 
 use std::sync::{Arc, Mutex};
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
-use crate::mesh::DrawCall;
+use crate::mesh::{DrawCall, INSTANCE_STRIDE};
 use crate::Result;
 
 /// Depth-only pass that writes depth for all opaque draw calls
@@ -121,7 +121,9 @@ impl RenderPass for DepthPrepassPass {
                     last_material = Some(mat_ptr);
                 }
                 benc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                benc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(..));
+                let inst_start = dc.instance_buffer_offset;
+                let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
+                benc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
                 benc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 benc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
             }
