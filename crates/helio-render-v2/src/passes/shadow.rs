@@ -297,6 +297,17 @@ impl RenderPass for ShadowPass {
 
         // Distance from camera at which shadows stop being rendered (in meters)
         const SHADOW_MAX_DISTANCE: f32 = 300.0;
+        // Grid size for snapping camera position when computing the shadow-caster
+        // filter.  The filtered set (and therefore geom_hash) only changes when the
+        // camera crosses a grid boundary — NOT on every sub-unit movement.
+        // Without this, any camera movement can add/remove objects near the 300m
+        // boundary, changing filtered_indices.len(), which changes geom_hash, which
+        // triggers a full shadow bundle rebuild for every light × face on every frame
+        // the camera moves.  At 4303 batches × 4 CSM cascades that is thousands of
+        // draw-call encodings per frame, visible as an unattributed graph_ms spike
+        // (CPU work inside shadow.execute() with no GPU profiler child scope).
+        const SHADOW_CULL_SNAP: f32 = 16.0;
+        let cull_cam = (ctx.camera_position / SHADOW_CULL_SNAP).round() * SHADOW_CULL_SNAP;
 
         // ── Camera-distance filter (shared across all lights) ────────────────
         // Compute once outside the light loop; each light renders the same set.
@@ -304,7 +315,7 @@ impl RenderPass for ShadowPass {
         self.filtered_indices.clear();
         self.filtered_indices.reserve(draw_calls.len());
         for (idx, dc) in draw_calls.iter().enumerate() {
-                let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
+                let dist = (glam::Vec3::from(dc.bounds_center) - cull_cam).length();
                 if dist <= SHADOW_MAX_DISTANCE {
                     self.filtered_indices.push(idx);
                 }
