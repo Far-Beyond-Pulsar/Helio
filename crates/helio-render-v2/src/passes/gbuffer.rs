@@ -28,7 +28,10 @@ pub struct GBufferPass {
     shared_sorted: Arc<Mutex<Vec<usize>>>,
     /// Cached RenderBundle — see DepthPrepassPass for rationale.
     bundle_cache: Option<wgpu::RenderBundle>,
-    cached_generation: u64,
+    /// FNV hash of the opaque draw set — see DepthPrepassPass for full rationale.
+    bundle_geom_hash: u64,
+    frame_counter: u64,
+    bundle_last_rebuild: u64,
 }
 
 impl GBufferPass {
@@ -47,7 +50,9 @@ impl GBufferPass {
             sorted_opaque_indices: Vec::new(),
             shared_sorted,
             bundle_cache: None,
-            cached_generation: u64::MAX,
+            bundle_geom_hash: u64::MAX,
+            frame_counter: 0,
+            bundle_last_rebuild: 0,
         }
     }
 }
@@ -63,43 +68,61 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
+        self.frame_counter += 1;
         let draw_calls = self.draw_list.lock().unwrap();
 
-        // Rebuild RenderBundle when the draw list content changes.
-        // The bundle pre-compiles all draw commands; the main encoder records a
-        // single execute_bundles command so encoder.finish() cost is O(1).
-        if ctx.draw_list_generation != self.cached_generation {
-            // Read the sorted order published by DepthPrepassPass.
-            let cam = ctx.camera_position;
-            let fwd = ctx.camera_forward;
+        // Same geom hash as DepthPrepassPass — only structural identity, not transforms.
+        let new_geom_hash = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for dc in draw_calls.iter() {
+                if dc.transparent_blend { continue; }
+                h ^= Arc::as_ptr(&dc.vertex_buffer) as u64;
+                h = h.wrapping_mul(0x100000001b3);
+                h ^= dc.instance_count as u64;
+                h = h.wrapping_mul(0x100000001b3);
+                if let Some(b) = &dc.instance_buffer {
+                    h ^= Arc::as_ptr(b) as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+            h
+        };
+
+        let set_changed = new_geom_hash != self.bundle_geom_hash;
+
+        // Update sorted index list from DepthPrepass (already sorted this frame)
+        // whenever the opaque set changes.  Fallback to self-sort if not available.
+        if set_changed {
             let shared = self.shared_sorted.lock().unwrap();
             if !shared.is_empty() {
                 self.sorted_opaque_indices.clear();
                 self.sorted_opaque_indices.extend_from_slice(&shared);
             } else {
+                let cam = ctx.camera_position;
+                let fwd = ctx.camera_forward;
                 self.sorted_opaque_indices.clear();
                 self.sorted_opaque_indices.reserve(draw_calls.len());
                 for (idx, dc) in draw_calls.iter().enumerate() {
-                    if !dc.transparent_blend {
-                        self.sorted_opaque_indices.push(idx);
-                    }
+                    if !dc.transparent_blend { self.sorted_opaque_indices.push(idx); }
                 }
                 self.sorted_opaque_indices.sort_unstable_by(|&ia, &ib| {
                     let a = &draw_calls[ia];
                     let b = &draw_calls[ib];
                     let za = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd) - a.bounds_radius;
                     let zb = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd) - b.bounds_radius;
-                    za.partial_cmp(&zb)
-                        .unwrap_or(std::cmp::Ordering::Equal)
+                    za.partial_cmp(&zb).unwrap_or(std::cmp::Ordering::Equal)
                         .then_with(|| {
-                            let ma = Arc::as_ptr(&a.material_bind_group) as usize;
-                            let mb = Arc::as_ptr(&b.material_bind_group) as usize;
-                            ma.cmp(&mb)
+                            Arc::as_ptr(&a.material_bind_group).cmp(
+                                &Arc::as_ptr(&b.material_bind_group))
                         })
                 });
             }
-            drop(shared);
+        }
 
+        let can_rebuild = self.bundle_cache.is_none()
+            || self.frame_counter.saturating_sub(self.bundle_last_rebuild) >= 4;
+
+        if set_changed && can_rebuild {
             let _bundle_t = std::time::Instant::now();
             let mut benc = self.device.create_render_bundle_encoder(
                 &wgpu::RenderBundleEncoderDescriptor {
@@ -136,8 +159,9 @@ impl RenderPass for GBufferPass {
                 benc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 benc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
             }
-            self.bundle_cache = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
-            self.cached_generation = ctx.draw_list_generation;
+            self.bundle_cache        = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
+            self.bundle_geom_hash    = new_geom_hash;
+            self.bundle_last_rebuild = self.frame_counter;
             eprintln!(
                 "⚠️ [GBuffer] Bundle rebuild: {} draw calls — {:.2}ms",
                 self.sorted_opaque_indices.len(),

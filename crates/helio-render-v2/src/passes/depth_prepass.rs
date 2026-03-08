@@ -22,9 +22,18 @@ pub struct DepthPrepassPass {
     /// main encoder only records a single execute_bundles command, reducing
     /// encoder.finish() cost from O(N draws) to O(1).
     bundle_cache: Option<wgpu::RenderBundle>,
-    /// Generation counter when the cached bundle was built.  When it differs
-    /// from PassContext::draw_list_generation the bundle is rebuilt.
-    cached_generation: u64,
+    /// FNV hash of the opaque draw set (vertex_buf_ptr × instance_buf_ptr ×
+    /// instance_count per call).  The bundle is valid when this matches the
+    /// current draw list.  Safe because all draw calls reference per-batch
+    /// stable Arc<Buffer> at offset 0 — the hash only changes on structural
+    /// identity changes, not on transform data updates (write_buffer handles those).
+    bundle_geom_hash: u64,
+    /// Incremented each execute() call.  Used to rate-limit re-encodes so a
+    /// burst of new chunks during streaming doesn't force a full rebuild every
+    /// single frame.
+    frame_counter: u64,
+    /// frame_counter value when the bundle was last fully re-encoded.
+    bundle_last_rebuild: u64,
 }
 
 impl DepthPrepassPass {
@@ -41,7 +50,9 @@ impl DepthPrepassPass {
             sorted_opaque_indices: Vec::new(),
             shared_sorted: shared_sorted.clone(),
             bundle_cache: None,
-            cached_generation: u64::MAX,
+            bundle_geom_hash: u64::MAX,
+            frame_counter: 0,
+            bundle_last_rebuild: 0,
         };
         (pass, shared_sorted)
     }
@@ -56,16 +67,36 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
+        self.frame_counter += 1;
         let draw_calls = self.draw_list.lock().unwrap();
 
-        // Rebuild index list and bundle when the draw list content changes.
-        // Sort by material bind-group pointer — camera-independent, so this
-        // sort and the resulting bundle remain valid across all camera moves.
-        // (Front-to-back depth sorting is unnecessary here: the depth prepass
-        // has no fragment cost and modern GPU hardware early-Z handles rejection
-        // automatically. The sort only needs to change when objects are
-        // added/removed/swapped, which is captured by draw_list_generation.)
-        if ctx.draw_list_generation != self.cached_generation {
+        // Compute geometric hash of the current opaque draw set.
+        // Covers (vertex_buf_ptr, instance_buf_ptr, instance_count) — NOT transform
+        // values.  Changes only when the opaque set identity changes (new batch, removed
+        // batch, instance count resized).  Safe to use because draw calls reference
+        // per-batch stable Arc<Buffer> at offset 0: existing buffer slots are never
+        // shifted by the addition of unrelated batches.
+        let new_geom_hash = {
+            let mut h: u64 = 0xcbf29ce484222325;
+            for dc in draw_calls.iter() {
+                if dc.transparent_blend { continue; }
+                h ^= Arc::as_ptr(&dc.vertex_buffer) as u64;
+                h = h.wrapping_mul(0x100000001b3);
+                h ^= dc.instance_count as u64;
+                h = h.wrapping_mul(0x100000001b3);
+                if let Some(b) = &dc.instance_buffer {
+                    h ^= Arc::as_ptr(b) as u64;
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+            h
+        };
+
+        let set_changed = new_geom_hash != self.bundle_geom_hash;
+
+        // Re-sort and publish to GBufferPass whenever the opaque set changes.
+        // Sort key is material-pointer (camera-independent, O(N log N) on cheap key).
+        if set_changed {
             self.sorted_opaque_indices.clear();
             self.sorted_opaque_indices.reserve(draw_calls.len());
             for (idx, dc) in draw_calls.iter().enumerate() {
@@ -73,13 +104,9 @@ impl RenderPass for DepthPrepassPass {
                     self.sorted_opaque_indices.push(idx);
                 }
             }
-            // Sort by material pointer to minimise bind-group state changes;
-            // this ordering is stable with respect to the camera.
             self.sorted_opaque_indices.sort_unstable_by_key(|&i| {
                 Arc::as_ptr(&draw_calls[i].material_bind_group) as usize
             });
-
-            // Publish the stable order to GBufferPass.
             {
                 let mut shared = self.shared_sorted.lock().unwrap();
                 shared.clear();
@@ -87,15 +114,14 @@ impl RenderPass for DepthPrepassPass {
             }
         }
 
-        // Rebuild RenderBundle when the draw list content changes.
-        //
-        // A RenderBundle pre-compiles all draw commands into a replayable object.
-        // The main encoder records a single execute_bundles command per pass,
-        // so encoder.finish() is O(passes) rather than O(N draws × cmds/draw).
-        // Bind group data is still sourced from the live uniform buffers each
-        // frame via write_buffer — the bundle captures the BindGroup *reference*,
-        // not the buffer payload, so camera/light updates are reflected correctly.
-        if ctx.draw_list_generation != self.cached_generation {
+        // Rate-limited bundle re-encode.  With per-batch stable buffers the stale
+        // bundle is safe to replay — existing batches' Arc<Buffer> references remain
+        // valid.  New chunks added since the last rebuild are absent from the bundle
+        // for at most ~4 frames (≈67 ms at 60 fps), which is imperceptible.
+        let can_rebuild = self.bundle_cache.is_none()
+            || self.frame_counter.saturating_sub(self.bundle_last_rebuild) >= 4;
+
+        if set_changed && can_rebuild {
             let _bundle_t = std::time::Instant::now();
             let mut benc = self.device.create_render_bundle_encoder(
                 &wgpu::RenderBundleEncoderDescriptor {
@@ -128,8 +154,9 @@ impl RenderPass for DepthPrepassPass {
                 benc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
                 benc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
             }
-            self.bundle_cache = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
-            self.cached_generation = ctx.draw_list_generation;
+            self.bundle_cache        = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
+            self.bundle_geom_hash    = new_geom_hash;
+            self.bundle_last_rebuild = self.frame_counter;
             eprintln!(
                 "⚠️ [DepthPrepass] Bundle rebuild: {} draw calls — {:.2}ms",
                 self.sorted_opaque_indices.len(),

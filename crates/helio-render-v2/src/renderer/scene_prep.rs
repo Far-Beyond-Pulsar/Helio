@@ -83,7 +83,7 @@ impl Renderer {
                 self.pending_scene_stage_ms[0] = t1_queue_draws;
             } else {
                 let _rebuild_t = std::time::Instant::now();
-                // Scene changed (or first frame) — full rebuild.
+                // Scene changed — rebuild batches and per-batch stable instance buffers.
                 self.scene_fingerprint = fp;
 
                 for v in self.scratch_batches.values_mut() { v.clear(); }
@@ -101,72 +101,77 @@ impl Renderer {
                     self.scratch_example_idx.entry(key).or_insert(i_obj);
                 }
 
-                let batches = std::mem::take(&mut self.scratch_batches);
+                let batches     = std::mem::take(&mut self.scratch_batches);
                 let example_idx = std::mem::take(&mut self.scratch_example_idx);
+
+                // ── Per-batch stable instance buffers ─────────────────────────────────
+                // One Arc<wgpu::Buffer> per unique (mesh, material) pair, shared by both
+                // the main draw list and the shadow draw list.  Adding a new batch only
+                // touches that batch's buffer; all existing draw-call buffer references
+                // stay valid across the change, so GBuffer / DepthPrepass / Shadow can
+                // safely replay stale bundles for unchanged batches while lazily
+                // re-encoding to include new arrivals (avoids a full rebuild every frame
+                // during streaming just because one new chunk appeared).
+                //
+                // A per-batch FNV hash of the raw transform data skips write_buffer calls
+                // for static geometry whose transforms didn't change this slow-path.
+                let mut instance_total: u32 = 0;
                 let mut local_draws: Vec<DrawCall> = Vec::with_capacity(batches.len());
-
-                // ── Collect all transforms into flat staging buffer ──────────────────
-                // One queue.write_buffer at the end instead of one per batch.
-                self.scratch_instance_transforms.clear();
-                for (key, mats) in &batches {
+                for (&key, mats) in &batches {
+                    if mats.is_empty() { continue; }
                     let count = mats.len() as u32;
-                    if count == 0 { continue; }
-                    let obj = &scene.objects[example_idx[key]];
-                    let mesh = &obj.mesh;
-                    let mat_opt = obj.material.as_ref();
-
-                    let instance_offset = self.scratch_instance_transforms.len() as u64;
-                    self.scratch_instance_transforms.extend_from_slice(mats);
-
-                    let (bind_group, transparent) = match mat_opt {
-                        Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
-                        None      => (Arc::clone(&self.default_material_bind_group), false),
-                    };
-
-                    let mut dc = DrawCall::new(mesh, bind_group, transparent);
-                    dc.instance_buffer        = Some(Arc::clone(&self.shared_instance_buffer));
-                    dc.instance_buffer_offset = instance_offset * 64;
-                    dc.instance_count         = count;
-                    local_draws.push(dc);
-                }
-
-                // Grow the shared buffer when total instances exceed capacity (amortised doubling).
-                let total_instances = self.scratch_instance_transforms.len() as u32;
-                if total_instances > self.shared_instance_buffer_capacity {
-                    let new_cap = total_instances.next_power_of_two();
-                    let new_buf = Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("Shared Instance Buffer"),
-                        size: new_cap as u64 * 64,
-                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }));
-                    self.shared_instance_buffer          = new_buf;
-                    self.shared_instance_buffer_capacity = new_cap;
-                    // Re-point all draw calls to the new Arc before the upload.
-                    for dc in &mut local_draws {
-                        dc.instance_buffer = Some(Arc::clone(&self.shared_instance_buffer));
+                    instance_total += count;
+                    let prev = self.shadow_batch_capacities.get(&key).copied().unwrap_or(0);
+                    if count != prev {
+                        // New or resized batch: (re)create buffer with current data.
+                        let buf = Arc::new(self.device.create_buffer_init(
+                            &wgpu::util::BufferInitDescriptor {
+                                label: Some("Batch Inst"),
+                                contents: bytemuck::cast_slice(mats),
+                                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                            },
+                        ));
+                        self.shadow_batch_buffers.insert(key, buf);
+                        self.shadow_batch_capacities.insert(key, count);
+                        self.shadow_batch_transform_hashes.insert(key, fnv_mats(mats));
+                    } else if let Some(buf) = self.shadow_batch_buffers.get(&key) {
+                        // Stable count: upload only when transforms actually changed.
+                        let h = fnv_mats(mats);
+                        let prev_h = self.shadow_batch_transform_hashes.get(&key).copied().unwrap_or(0);
+                        if h != prev_h {
+                            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(mats));
+                            self.shadow_batch_transform_hashes.insert(key, h);
+                        }
                     }
-                    eprintln!(
-                        "⚠️ [Scene] Instance buffer grew → {} instances ({} KB)",
-                        new_cap, new_cap * 64 / 1024
-                    );
+                    if let Some(buf) = self.shadow_batch_buffers.get(&key) {
+                        let i_obj = example_idx[&key];
+                        let obj = &scene.objects[i_obj];
+                        let (bind_group, transparent) = match obj.material.as_ref() {
+                            Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
+                            None      => (Arc::clone(&self.default_material_bind_group), false),
+                        };
+                        let mut dc = DrawCall::new(&obj.mesh, bind_group, transparent);
+                        dc.instance_buffer        = Some(Arc::clone(buf));
+                        dc.instance_buffer_offset = 0;
+                        dc.instance_count         = count;
+                        local_draws.push(dc);
+                    }
                 }
 
-                // Single write_buffer for all instance data in every batch.
-                if !self.scratch_instance_transforms.is_empty() {
-                    self.queue.write_buffer(
-                        &self.shared_instance_buffer,
-                        0,
-                        bytemuck::cast_slice(&self.scratch_instance_transforms),
-                    );
-                }
-
+                // Publish identical draw call sets to both consumers.
+                // Shadow draw list is persistent (not cleared between frames).
+                // Main draw list is cleared at frame-end and re-accumulated each frame.
                 self.canonical_draw_list = local_draws.clone();
-                self.draw_list.lock().unwrap().extend(local_draws);
-                self.scratch_batches = batches;
+                self.draw_list.lock().unwrap().extend(local_draws.iter().cloned());
+                *self.shadow_draw_list.lock().unwrap() = local_draws;
+
+                self.scratch_batches     = batches;
                 self.scratch_example_idx = example_idx;
 
-                // Only invalidate RenderBundle caches when the draw-list structure changes.
+                // Bump generation only on STRUCTURAL changes (batch added/removed or
+                // instance count changed).  Pure transform updates are handled above by
+                // write_buffer and do NOT need a generation bump: cached bundles reference
+                // per-batch stable buffers whose GPU contents are already current.
                 {
                     let mut h: u64 = self.scratch_batches.len() as u64;
                     for (&(mp, matp), mats) in &self.scratch_batches {
@@ -185,67 +190,10 @@ impl Renderer {
                 eprintln!(
                     "⚠️ [Scene] Rebuild: {} batches, {} instances, {:.1} KB upload — {:.2}ms",
                     self.scratch_batches.len(),
-                    total_instances,
-                    total_instances as f32 * 64.0 / 1024.0,
+                    instance_total,
+                    instance_total as f32 * 64.0 / 1024.0,
                     _rebuild_t.elapsed().as_secs_f32() * 1000.0,
                 );
-
-                // ── Shadow draw list (per-batch stable instance buffers) ──────────────
-                // Each batch gets its own Arc<wgpu::Buffer> that is (re)created only when
-                // the instance count changes.  ShadowPass can then safely amortise face
-                // bundle rebuilds: stale bundles reference these per-batch buffers rather
-                // than the shared opaque buffer, whose layout can shift on batch insert.
-                // A per-batch FNV hash of the raw transform data skips redundant write_buffer
-                // calls for static geometry (terrain chunks, props) even when the slow-path
-                // runs due to other batches changing.
-                {
-                    let mut shadow_dcs = Vec::with_capacity(self.scratch_batches.len());
-                    for (&key, mats) in &self.scratch_batches {
-                        if mats.is_empty() { continue; }
-                        let count = mats.len() as u32;
-                        let prev  = self.shadow_batch_capacities.get(&key).copied().unwrap_or(0);
-                        if count != prev {
-                            // Instance count changed (or brand-new batch): reallocate buffer.
-                            let buf = Arc::new(self.device.create_buffer_init(
-                                &wgpu::util::BufferInitDescriptor {
-                                    label: Some("Shadow Batch Inst"),
-                                    contents: bytemuck::cast_slice(mats),
-                                    usage: wgpu::BufferUsages::VERTEX
-                                        | wgpu::BufferUsages::COPY_DST,
-                                },
-                            ));
-                            self.shadow_batch_buffers.insert(key, buf);
-                            self.shadow_batch_capacities.insert(key, count);
-                            // Force hash mismatch on next frame (data was just written via
-                            // create_buffer_init; skip the write_buffer below).
-                            // Compute and store the hash so the next frame can short-circuit.
-                            let h = fnv_mats(mats);
-                            self.shadow_batch_transform_hashes.insert(key, h);
-                        } else if let Some(buf) = self.shadow_batch_buffers.get(&key) {
-                            // Same instance count.  Only upload if transforms actually changed.
-                            let h = fnv_mats(mats);
-                            let prev_h = self.shadow_batch_transform_hashes.get(&key).copied().unwrap_or(0);
-                            if h != prev_h {
-                                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(mats));
-                                self.shadow_batch_transform_hashes.insert(key, h);
-                            }
-                        }
-                        if let Some(buf) = self.shadow_batch_buffers.get(&key) {
-                            let i_obj = self.scratch_example_idx[&key];
-                            let obj   = &scene.objects[i_obj];
-                            let (bind_group, transparent) = match obj.material.as_ref() {
-                                Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
-                                None => (Arc::clone(&self.default_material_bind_group), false),
-                            };
-                            let mut dc = DrawCall::new(&obj.mesh, bind_group, transparent);
-                            dc.instance_buffer        = Some(Arc::clone(buf));
-                            dc.instance_buffer_offset = 0;
-                            dc.instance_count         = count;
-                            shadow_dcs.push(dc);
-                        }
-                    }
-                    *self.shadow_draw_list.lock().unwrap() = shadow_dcs;
-                }
 
                 t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
                 self.pending_scene_stage_ms[0] = t1_queue_draws;
