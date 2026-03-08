@@ -19,40 +19,30 @@ pub struct GBufferTargets {
 }
 
 pub struct GBufferPass {
-    device:    Arc<wgpu::Device>,
     targets:   Arc<Mutex<GBufferTargets>>,
     pipeline:  Arc<wgpu::RenderPipeline>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     sorted_opaque_indices: Vec<usize>,
-    /// Pre-computed front-to-back order shared by DepthPrepassPass.
+    /// Pre-computed material-order sort shared by DepthPrepassPass.
     shared_sorted: Arc<Mutex<Vec<usize>>>,
-    /// Cached RenderBundle — see DepthPrepassPass for rationale.
-    bundle_cache: Option<wgpu::RenderBundle>,
-    /// FNV hash of the opaque draw set — see DepthPrepassPass for full rationale.
-    bundle_geom_hash: u64,
-    frame_counter: u64,
-    bundle_last_rebuild: u64,
+    /// Order-independent (XOR) hash of the opaque draw set — see DepthPrepassPass.
+    sort_geom_hash: u64,
 }
 
 impl GBufferPass {
     pub fn new(
-        device:    Arc<wgpu::Device>,
         targets:   Arc<Mutex<GBufferTargets>>,
         pipeline:  Arc<wgpu::RenderPipeline>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shared_sorted: Arc<Mutex<Vec<usize>>>,
     ) -> Self {
         Self {
-            device,
             targets,
             pipeline,
             draw_list,
             sorted_opaque_indices: Vec::new(),
             shared_sorted,
-            bundle_cache: None,
-            bundle_geom_hash: u64::MAX,
-            frame_counter: 0,
-            bundle_last_rebuild: 0,
+            sort_geom_hash: u64::MAX,
         }
     }
 }
@@ -68,107 +58,42 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        self.frame_counter += 1;
         let draw_calls = self.draw_list.lock().unwrap();
 
-        // Same geom hash as DepthPrepassPass — only structural identity, not transforms.
-        let new_geom_hash = {
-            let mut h: u64 = 0xcbf29ce484222325;
+        // Same commutative XOR hash as DepthPrepassPass for sort invalidation.
+        let new_sort_hash = {
+            let mut h: u64 = draw_calls.iter().filter(|dc| !dc.transparent_blend).count() as u64;
             for dc in draw_calls.iter() {
-                if dc.transparent_blend { continue; }
-                h ^= Arc::as_ptr(&dc.vertex_buffer) as u64;
-                h = h.wrapping_mul(0x100000001b3);
-                h ^= dc.instance_count as u64;
-                h = h.wrapping_mul(0x100000001b3);
-                if let Some(b) = &dc.instance_buffer {
-                    h ^= Arc::as_ptr(b) as u64;
-                    h = h.wrapping_mul(0x100000001b3);
-                }
+                if dc.transparent_blend || dc.instance_buffer.is_none() { continue; }
+                let entry = (Arc::as_ptr(&dc.vertex_buffer) as u64)
+                    .wrapping_mul(0x9e3779b97f4a7c15)
+                    ^ (Arc::as_ptr(dc.instance_buffer.as_ref().unwrap()) as u64)
+                        .wrapping_mul(0x517cc1b727220a95)
+                    ^ (dc.instance_count as u64).wrapping_mul(0x6c62272e07bb0142);
+                h ^= entry.wrapping_mul(0xbf58476d1ce4e5b9);
             }
             h
         };
 
-        let set_changed = new_geom_hash != self.bundle_geom_hash;
-
-        // Update sorted index list from DepthPrepass (already sorted this frame)
-        // whenever the opaque set changes.  Fallback to self-sort if not available.
-        if set_changed {
+        // Sync sorted order from DepthPrepass (computed this frame); fall back to
+        // self-sort only when the shared list is empty (graph ordering race, rare).
+        if new_sort_hash != self.sort_geom_hash {
             let shared = self.shared_sorted.lock().unwrap();
             if !shared.is_empty() {
                 self.sorted_opaque_indices.clear();
                 self.sorted_opaque_indices.extend_from_slice(&shared);
             } else {
-                let cam = ctx.camera_position;
-                let fwd = ctx.camera_forward;
                 self.sorted_opaque_indices.clear();
                 self.sorted_opaque_indices.reserve(draw_calls.len());
                 for (idx, dc) in draw_calls.iter().enumerate() {
                     if !dc.transparent_blend { self.sorted_opaque_indices.push(idx); }
                 }
-                self.sorted_opaque_indices.sort_unstable_by(|&ia, &ib| {
-                    let a = &draw_calls[ia];
-                    let b = &draw_calls[ib];
-                    let za = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd) - a.bounds_radius;
-                    let zb = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd) - b.bounds_radius;
-                    za.partial_cmp(&zb).unwrap_or(std::cmp::Ordering::Equal)
-                        .then_with(|| {
-                            Arc::as_ptr(&a.material_bind_group).cmp(
-                                &Arc::as_ptr(&b.material_bind_group))
-                        })
+                self.sorted_opaque_indices.sort_unstable_by_key(|&i| {
+                    Arc::as_ptr(&draw_calls[i].material_bind_group) as usize
                 });
             }
+            self.sort_geom_hash = new_sort_hash;
         }
-
-        let can_rebuild = self.bundle_cache.is_none()
-            || self.frame_counter.saturating_sub(self.bundle_last_rebuild) >= 4;
-
-        if set_changed && can_rebuild {
-            let _bundle_t = std::time::Instant::now();
-            let mut benc = self.device.create_render_bundle_encoder(
-                &wgpu::RenderBundleEncoderDescriptor {
-                    label: Some("gbuffer_bundle"),
-                    color_formats: &[
-                        Some(wgpu::TextureFormat::Rgba8Unorm),
-                        Some(wgpu::TextureFormat::Rgba16Float),
-                        Some(wgpu::TextureFormat::Rgba8Unorm),
-                        Some(wgpu::TextureFormat::Rgba16Float),
-                    ],
-                    depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_read_only: false,
-                        stencil_read_only: true,
-                    }),
-                    sample_count: 1,
-                    multiview: None,
-                },
-            );
-            benc.set_pipeline(&self.pipeline);
-            benc.set_bind_group(0, ctx.global_bind_group, &[]);
-            let mut last_material: Option<usize> = None;
-            for &idx in &self.sorted_opaque_indices {
-                let dc = &draw_calls[idx];
-                let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-                if last_material != Some(mat_ptr) {
-                    benc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                    last_material = Some(mat_ptr);
-                }
-                benc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                let inst_start = dc.instance_buffer_offset;
-                let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
-                benc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
-                benc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                benc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
-            }
-            self.bundle_cache        = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
-            self.bundle_geom_hash    = new_geom_hash;
-            self.bundle_last_rebuild = self.frame_counter;
-            eprintln!(
-                "⚠️ [GBuffer] Bundle rebuild: {} draw calls — {:.2}ms",
-                self.sorted_opaque_indices.len(),
-                _bundle_t.elapsed().as_secs_f32() * 1000.0,
-            );
-        }
-        drop(draw_calls);
 
         let targets = self.targets.lock().unwrap();
 
@@ -237,10 +162,25 @@ impl RenderPass for GBufferPass {
             multiview_mask: None,
         });
 
-        if let Some(bundle) = &self.bundle_cache {
-            pass.execute_bundles(std::iter::once(bundle));
+        // Direct-encode all opaque draws — no RenderBundle compilation step.
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, ctx.global_bind_group, &[]);
+        let mut last_material: Option<usize> = None;
+        for &idx in &self.sorted_opaque_indices {
+            let dc = &draw_calls[idx];
+            if dc.instance_buffer.is_none() { continue; }
+            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+            if last_material != Some(mat_ptr) {
+                pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+                last_material = Some(mat_ptr);
+            }
+            pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+            let inst_start = dc.instance_buffer_offset;
+            let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
+            pass.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
+            pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
         }
-
         Ok(())
     }
 }

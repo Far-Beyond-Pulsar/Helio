@@ -188,20 +188,24 @@ pub struct Renderer {
     /// Flat CPU-side staging vec; cleared and rebuilt each slow-path execution.
     scratch_instance_transforms: Vec<[f32; 16]>,
 
-    /// Per-batch shadow instance buffers.  Each unique (mesh, material) batch gets its own
-    /// stable `Arc<wgpu::Buffer>` so shadow `RenderBundle`s can be amortised: a stale face
-    /// still references valid instance data rather than a shifted offset in the shared buffer.
+    /// Per-batch stable instance buffers.  One Arc<Buffer> per unique (mesh, material) pair.
+    /// Created once when a batch first appears; reallocated only when its instance count changes.
+    /// Shared by both the main draw list and the shadow draw list.  All DrawCalls reference
+    /// these buffers at offset 0 so no batch ever invalidates another's reference.
     shadow_batch_buffers: HashMap<(usize, usize), Arc<wgpu::Buffer>>,
-    /// Capacity (in instances) currently allocated for each per-batch shadow buffer.
+    /// Capacity (in instances) currently allocated for each per-batch buffer.
     shadow_batch_capacities: HashMap<(usize, usize), u32>,
-    /// FNV hash of the last-uploaded transform data per batch.  Used to skip redundant
-    /// `write_buffer` calls for static geometry (terrain chunks, props) whose instance data
-    /// is unchanged between slow-path frames triggered by other batches changing.
+    /// FNV hash of the last-uploaded transform data per batch.  Skips redundant write_buffer
+    /// calls for static geometry whose transforms haven't changed since last upload.
     shadow_batch_transform_hashes: HashMap<(usize, usize), u64>,
-    /// Shadow draw list backed by per-batch stable instance buffers (distinct from the opaque
-    /// `draw_list` which uses the shared buffer).  Passed to `ShadowPass` so bundle amortisation
-    /// is safe even when new chunks insert batches mid-stream.
+    /// Shadow draw list backed by per-batch stable instance buffers.
     shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
+    /// Persistent per-batch DrawCall map (mirrors Unreal's FPrimitiveSceneProxy).
+    /// Keys are (mesh_ptr, mat_ptr) — stable across frames while the batch exists.
+    /// Entries are added/removed incrementally; transforms update via write_buffer only.
+    /// The main draw_list is populated each frame by cloning pointers from this map,
+    /// which is O(N) pointer copies rather than a full O(N) rebuild from scratch.
+    persistent_batch_draws: HashMap<(usize, usize), DrawCall>,
 
     // Frame state
     frame_count: u64,

@@ -251,7 +251,6 @@ impl Renderer {
             PipelineVariant::DepthOnly,
         )?;
         let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
-            device.clone(),
             depth_pipeline,
             draw_list.clone(),
         );
@@ -283,7 +282,6 @@ impl Renderer {
             PipelineVariant::GBufferWrite,
         )?;
         let gbuffer_pass = GBufferPass::new(
-            device.clone(),
             gbuffer_targets.clone(),
             gbuf_pipeline,
             draw_list.clone(),
@@ -639,6 +637,7 @@ impl Renderer {
             shadow_batch_capacities: HashMap::new(),
             shadow_batch_transform_hashes: HashMap::new(),
             shadow_draw_list,
+            persistent_batch_draws: HashMap::new(),
             frame_count: 0,
             width: config.width,
             height: config.height,
