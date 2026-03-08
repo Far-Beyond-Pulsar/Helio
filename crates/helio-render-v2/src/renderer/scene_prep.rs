@@ -49,11 +49,11 @@ impl Renderer {
 
         // ---------- automatic batching/instancing ----------
         // Proxy lifetime: keep GPU buffers alive this many frames after a batch was
-        // last frustum-visible.  Camera rotation can cycle 500-1000 chunks out of the
-        // frustum and back within 1-2 frames; without this window every rotation
-        // triggers hundreds of create_buffer_init calls.  120 frames @ 60 fps = 2s,
-        // large enough to absorb any realistic camera sweep.
-        const BATCH_EVICT_FRAMES: u64 = 120;
+        // last frustum-visible.  Camera rotation can cycle chunks out/in within a few
+        // frames; without this window every rotation triggers create_buffer_init.
+        // 30 frames @ 60 fps = 500 ms — covers realistic rotation round-trips while
+        // bounding the alive set so shadow_draw_list stays near the visible-set size.
+        const BATCH_EVICT_FRAMES: u64 = 30;
 
         let t1_queue_draws;
         {
@@ -154,23 +154,60 @@ impl Renderer {
                 }
             }
 
-            // Step 4: draw_list = VISIBLE proxies only (frustum-culled set).
-            // Culled-but-alive proxies are not submitted for rasterization this frame.
+            // Step 4: draw_list AND shadow_draw_list = VISIBLE proxies this frame.
+            //
+            // Keys are sorted deterministically before iteration so that the Vec
+            // positions of each DrawCall are STABLE across frames when the visible set
+            // is identical.  This keeps TransparentPass sorted indices valid without a
+            // full re-sort every frame, and avoids the index-OOB crash that would
+            // occur when non-deterministic HashMap order assigned a different position
+            // to each DrawCall between frames.
+            //
+            // shadow_draw_list = visible set (same as draw_list).  Shadow does its own
+            // 300 m camera-distance cull per face.  Passing ALL alive proxies (the
+            // previous approach) causes the shadow distance-filter to iterate an
+            // unbounded set (alive → 14 000+ during exploration) and costs 20+ ms/face.
+            // Restricting to the visible set caps shadow input at ~5 000 items and
+            // ~7 ms/face regardless of how many proxies are alive.
             {
-                let mut dl = self.draw_list.lock().unwrap();
-                for &key in self.scratch_batches.keys() {
+                // Sort visible keys for deterministic draw_list ordering.
+                let mut vis_keys: Vec<(usize, usize)> =
+                    self.scratch_batches.keys().copied().collect();
+                vis_keys.sort_unstable();
+
+                let mut dl  = self.draw_list.lock().unwrap();
+                let mut sdl = self.shadow_draw_list.lock().unwrap();
+                sdl.clear();
+                for &key in &vis_keys {
                     if let Some(dc) = self.persistent_batch_draws.get(&key) {
                         dl.push(dc.clone());
+                        sdl.push(dc.clone());
                     }
                 }
             }
 
-            // shadow_draw_list = ALL alive proxies (shadow does per-face frustum culling).
-            // Only rebuild when proxies are added or evicted — not on frustum changes.
-            if eviction_count > 0 || addition_count > 0 {
-                *self.shadow_draw_list.lock().unwrap() =
-                    self.persistent_batch_draws.values().cloned().collect();
+            // Commutative XOR hash of VISIBLE keys — bumps draw_list_generation when
+            // the visible set composition changes (rotation, streaming in/out).  This
+            // ensures TransparentPass and any other generation-sensitive consumer
+            // invalidates stale sorted indices even when no proxy is added or evicted.
+            let visible_set_hash = {
+                let mut h: u64 = (self.scratch_batches.len() as u64)
+                    .wrapping_mul(0x9e3779b97f4a7c15);
+                for &(mp, matp) in self.scratch_batches.keys() {
+                    let e = (mp as u64).wrapping_mul(0x517cc1b727220a95)
+                        ^ (matp as u64).wrapping_mul(0x6c62272e07bb0142);
+                    h ^= e.wrapping_mul(0xbf58476d1ce4e5b9);
+                }
+                h
+            };
+            if visible_set_hash != self.last_visible_set_hash {
+                self.last_visible_set_hash = visible_set_hash;
                 self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
+            }
+
+            // Log only proxy structural events (chunks loaded / truly evicted),
+            // not routine frustum-visibility changes.
+            if eviction_count > 0 || addition_count > 0 {
                 eprintln!(
                     "⚠️ [Scene] proxy +{} evict {} | alive {} | visible {} | {:.1} KB",
                     addition_count, eviction_count,

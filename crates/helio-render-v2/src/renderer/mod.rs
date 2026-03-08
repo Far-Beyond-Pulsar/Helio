@@ -211,6 +211,11 @@ pub struct Renderer {
     /// create_buffer_init.  Mirrors Unreal's FPrimitiveSceneProxy lifetime model:
     /// proxies live until the component is unregistered, not until culled.
     batch_last_seen: HashMap<(usize, usize), u64>,
+    /// Commutative XOR hash of the visible set keys (mesh_ptr, mat_ptr) from the last
+    /// frame.  When it changes, draw_list_generation is bumped so consumers such as
+    /// TransparentPass invalidate stale sorted indices.  Independent of proxy add/evict
+    /// events — purely tracks what is VISIBLE this frame vs last frame.
+    last_visible_set_hash: u64,
 
     // Frame state
     frame_count: u64,

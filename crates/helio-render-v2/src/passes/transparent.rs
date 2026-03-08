@@ -34,6 +34,10 @@ pub struct TransparentPass {
     last_sort_cam_fwd: glam::Vec3,
     /// draw_list_generation value when sorted_transparent_indices was last computed.
     last_sort_generation: u64,
+    /// draw_calls.len() at the time sorted_transparent_indices was last computed.
+    /// Guards against index-OOB when draw_list shrinks without a generation bump
+    /// (e.g. frustum-visibility-only changes that don't add/evict proxies).
+    last_sort_draw_len: usize,
 }
 
 impl TransparentPass {
@@ -48,6 +52,7 @@ impl TransparentPass {
             last_sort_cam_pos: glam::Vec3::ZERO,
             last_sort_cam_fwd: glam::Vec3::NEG_Z,
             last_sort_generation: u64::MAX,
+            last_sort_draw_len: usize::MAX,
         }
     }
 }
@@ -77,7 +82,12 @@ impl RenderPass for TransparentPass {
         let fwd = ctx.camera_forward;
         let cam_moved = (cam - self.last_sort_cam_pos).length_squared() > 0.01
             || (fwd - self.last_sort_cam_fwd).length_squared() > 0.0001;
-        let need_sort = ctx.draw_list_generation != self.last_sort_generation || cam_moved;
+        // Re-sort if generation changed (visible set composition or proxy add/evict),
+        // camera moved (back-to-front order changed), or draw_list has a different
+        // number of entries than at last sort (safety net against index-OOB).
+        let need_sort = ctx.draw_list_generation != self.last_sort_generation
+            || cam_moved
+            || draw_calls.len() != self.last_sort_draw_len;
 
         if need_sort {
             let _sort_t = std::time::Instant::now();
@@ -107,6 +117,7 @@ impl RenderPass for TransparentPass {
             self.last_sort_cam_pos = cam;
             self.last_sort_cam_fwd = fwd;
             self.last_sort_generation = ctx.draw_list_generation;
+            self.last_sort_draw_len  = draw_calls.len();
             let _sort_ms = _sort_t.elapsed().as_secs_f32() * 1000.0;
             if _sort_ms > 0.1 {
                 eprintln!(
