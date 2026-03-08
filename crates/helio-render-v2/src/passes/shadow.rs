@@ -370,25 +370,43 @@ impl RenderPass for ShadowPass {
             ]);
 
             // ── Invalidation check ───────────────────────────────────────────
-            // Bump the per-light dirty counter when either:
-            // (a) the draw-list structure changed (new/removed batch), or
-            // (b) the filtered caster set changed identity (caster entered/left
-            //     shadow range, or batch grew/shrank).
-            // Using a separate dirty counter decouples the amortisation logic from
-            // the draw_list_generation value, and handles both sources uniformly.
+            // Detects two sources of change:
+            // (a) draw-list structure (new/removed batch)  → gen_changed
+            // (b) filtered caster set identity             → geom_changed
+            //
+            // STREAMING ABSORPTION RULE: if any face from the current round is still
+            // pending, do NOT start a new round.  The pending faces will be encoded
+            // with the current frame's `filtered_indices`, so they already incorporate
+            // the new geometry.  Starting a new round while work is in flight causes
+            // `dirty_gen` to race ahead of `slot_built` indefinitely during chunk
+            // streaming, meaning faces 2+ are never reached by MAX_FACE_REBUILDS.
+            //
+            // When absorbing: always update `bundle_seen_draw_gen` so gen_changed
+            // doesn't keep firing, but leave `bundle_geom_hashes` at the round-start
+            // value so we can detect further geometry changes once the round drains.
+            let any_face_pending = (0..max_faces as usize)
+                .any(|f| self.bundle_slot_built[i * 6 + f] < self.bundle_dirty_gen[i]);
+
             let gen_changed  = ctx.draw_list_generation != self.bundle_seen_draw_gen[i];
             let geom_changed = geom_hash != self.bundle_geom_hashes[i];
             if gen_changed || geom_changed {
-                self.bundle_dirty_gen[i] = self.bundle_dirty_gen[i].wrapping_add(1);
+                // Suppress repeated gen_changed every frame regardless of absorption.
                 self.bundle_seen_draw_gen[i] = ctx.draw_list_generation;
-                self.bundle_geom_hashes[i]   = geom_hash;
-                eprintln!(
-                    "⚠️ [Shadow] {} changed: light {}, {} visible casters → {} faces pending",
-                    if gen_changed { "Draw list gen" } else { "Caster set" },
-                    i, self.filtered_indices.len(), max_faces,
-                );
+
+                if !any_face_pending {
+                    // No backlog: start a fresh dirty round.
+                    self.bundle_dirty_gen[i] = self.bundle_dirty_gen[i].wrapping_add(1);
+                    self.bundle_geom_hashes[i] = geom_hash;
+                    eprintln!(
+                        "⚠️ [Shadow] {} changed: light {}, {} visible casters → {} faces pending",
+                        if gen_changed { "Draw list gen" } else { "Caster set" },
+                        i, self.filtered_indices.len(), max_faces,
+                    );
+                }
+                // else: absorb — the in-flight rebuild already uses current filtered_indices
             }
 
+            // Recompute after potential dirty_gen update.
             let any_face_pending = (0..max_faces as usize)
                 .any(|f| self.bundle_slot_built[i * 6 + f] < self.bundle_dirty_gen[i]);
 
