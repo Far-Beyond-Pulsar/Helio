@@ -43,13 +43,23 @@ impl Renderer {
                 let mtp = obj.material.as_ref()
                     .map(|m| Arc::as_ptr(&m.bind_group) as u64)
                     .unwrap_or(0);
+                // Hash all 16 matrix components so that any translation, rotation,
+                // or scale change — on any axis — triggers a transform re-upload.
                 let t = &obj.transform;
-                let tx = t.w_axis.x.to_bits() as u64;
-                let ty = t.w_axis.y.to_bits() as u64;
-                let tz = t.w_axis.z.to_bits() as u64;
-                let sx = t.x_axis.x.to_bits() as u64;
+                let r0 = (t.x_axis.x.to_bits() as u64) ^ ((t.x_axis.y.to_bits() as u64) << 32 >> 32)
+                       ^ (t.x_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
+                       ^ (t.x_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+                let r1 = (t.y_axis.x.to_bits() as u64) ^ ((t.y_axis.y.to_bits() as u64) << 32 >> 32)
+                       ^ (t.y_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
+                       ^ (t.y_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+                let r2 = (t.z_axis.x.to_bits() as u64) ^ ((t.z_axis.y.to_bits() as u64) << 32 >> 32)
+                       ^ (t.z_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
+                       ^ (t.z_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
+                let r3 = (t.w_axis.x.to_bits() as u64) ^ ((t.w_axis.y.to_bits() as u64) << 32 >> 32)
+                       ^ (t.w_axis.z.to_bits() as u64).wrapping_mul(0x6c62272e07bb0142)
+                       ^ (t.w_axis.w.to_bits() as u64).wrapping_mul(0xbf58476d1ce4e5b9);
                 fp = fp.wrapping_add(
-                    (mp ^ mtp ^ tx ^ ty ^ tz ^ sx).wrapping_mul(0x517cc1b727220a95)
+                    (mp ^ mtp ^ r0 ^ r1 ^ r2 ^ r3).wrapping_mul(0x517cc1b727220a95)
                 );
             }
             if fp == self.scene_fingerprint && !self.canonical_draw_list.is_empty() {
