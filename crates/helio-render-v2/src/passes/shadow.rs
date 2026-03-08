@@ -92,8 +92,13 @@ pub struct ShadowPass {
     /// handled by the GPU shadow-matrix buffer written each frame in `renderer.rs`, so the
     /// bundle is replayed without re-encoding even when matrices change.
     bundle_cache: Vec<Option<wgpu::RenderBundle>>,
-    /// Geometry hash when each light's bundles were last built.  `u64::MAX` = never built.
-    bundle_geom_hashes: Vec<u64>,
+    /// Per-light pending-rebuild generation.  Set to `ctx.draw_list_generation` when the
+    /// draw list structure changes.  When `bundle_built_gen[slot] < bundle_pending_gen[i]`
+    /// that face needs re-encoding.
+    bundle_pending_gen: Vec<u64>,
+    /// Per-slot (light*6+face) built generation.  Updated to `bundle_pending_gen[i]` after
+    /// a face bundle is successfully encoded.  Enables per-face amortised rebuild.
+    bundle_built_gen: Vec<u64>,
 }
 
 impl ShadowPass {
@@ -266,7 +271,8 @@ impl ShadowPass {
             shadow_cache: vec![ShadowLightCache::default(); max_lights],
             filtered_indices: Vec::new(),
             bundle_cache: (0..total_slots).map(|_| None).collect(),
-            bundle_geom_hashes: vec![u64::MAX; max_lights],
+            bundle_pending_gen: vec![0; max_lights],
+            bundle_built_gen: vec![0; total_slots],
         }
     }
 }
@@ -298,34 +304,25 @@ impl RenderPass for ShadowPass {
         // Distance from camera at which shadows stop being rendered (in meters)
         const SHADOW_MAX_DISTANCE: f32 = 300.0;
 
+        // Maximum face bundles re-encoded per execute() call.  Amortises the CPU cost of
+        // bundle rebuilds across frames; stale faces replay their previous bundle, which is
+        // safe because draw calls in the shadow list reference per-batch stable instance
+        // buffers rather than the shared opaque buffer (whose layout shifts on insert).
+        const MAX_FACE_REBUILDS: u32 = 2;
+
         // ── Camera-distance filter (shared across all lights) ────────────────
         // Compute once outside the light loop; each light renders the same set.
-        // Transparent objects now cast alpha-tested shadows.
         self.filtered_indices.clear();
         self.filtered_indices.reserve(draw_calls.len());
         for (idx, dc) in draw_calls.iter().enumerate() {
-                let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
-                if dist <= SHADOW_MAX_DISTANCE {
-                    self.filtered_indices.push(idx);
-                }
+            let dist = (glam::Vec3::from(dc.bounds_center) - ctx.camera_position).length();
+            if dist <= SHADOW_MAX_DISTANCE {
+                self.filtered_indices.push(idx);
             }
+        }
 
-        // ── Geometry hash (shared) ───────────────────────────────────────────
-        // Hashes world-space identity + bounds of every camera-visible caster.
-        // Changes when objects are added/removed/moved within shadow distance.
-        let geom_hash = {
-            let mut h: u64 = 0xcbf29ce484222325;
-            h = fnv64_push(h, self.filtered_indices.len() as u64);
-            for &idx in &self.filtered_indices {
-                let dc = &draw_calls[idx];
-                h = fnv64_push(h, dc.bounds_center[0].to_bits() as u64);
-                h = fnv64_push(h, dc.bounds_center[1].to_bits() as u64);
-                h = fnv64_push(h, dc.bounds_center[2].to_bits() as u64);
-                h = fnv64_push(h, dc.bounds_radius.to_bits() as u64);
-                h = fnv64_push(h, Arc::as_ptr(&dc.vertex_buffer) as u64);
-            }
-            h
-        };
+        // Budget of face rebuilds shared across all lights this frame.
+        let mut faces_rebuilt_this_frame: u32 = 0;
 
         for i in 0..actual_count {
             // Only render faces that have valid (non-identity) matrices:
@@ -348,30 +345,40 @@ impl RenderPass for ShadowPass {
                 max_faces as u64,
             ]);
 
+            // ── Pending-rebuild tracking ──────────────────────────────────────
+            // draw_list_generation is bumped whenever batches are added/removed.
+            // Per-batch shadow instance buffers ensure stale face bundles remain
+            // correct: each draw call holds its own Arc<Buffer> rather than a shared
+            // layout that shifts when new batches are inserted into the opaque list.
+            if ctx.draw_list_generation != self.bundle_pending_gen[i] {
+                eprintln!(
+                    "⚠️ [Shadow] Draw list gen {}→{}: light {}, {} visible casters → {} faces pending",
+                    self.bundle_pending_gen[i], ctx.draw_list_generation,
+                    i, self.filtered_indices.len(), max_faces,
+                );
+                self.bundle_pending_gen[i] = ctx.draw_list_generation;
+            }
+
+            let any_face_pending = (0..max_faces as usize)
+                .any(|f| self.bundle_built_gen[i * 6 + f] < self.bundle_pending_gen[i]);
+
             // ── Cache check ──────────────────────────────────────────────────
-            // Skip all face renders if both the light parameters and the visible
-            // geometry are identical to the previous rendered frame.
+            // Skip all face renders when the light is unchanged and every face
+            // bundle is up to date.  Shadow atlas layers retain their content
+            // when their render pass is not started.
             {
                 let cached = &self.shadow_cache[i];
-                if cached.valid && cached.light_hash == light_hash && cached.geom_hash == geom_hash {
+                if cached.valid && cached.light_hash == light_hash && !any_face_pending {
                     continue;
                 }
             }
 
-            // Geometry unchanged → replay cached bundles; shadow matrices are updated
-            // via write_buffer in renderer.rs every frame so the GPU reads fresh values.
-            // Only rebuild bundles when casters are added/removed/moved.
-            let need_bundle_rebuild = geom_hash != self.bundle_geom_hashes[i];
-            if need_bundle_rebuild {
-                eprintln!(
-                    "⚠️ [Shadow] Geom changed: light {}, {} visible casters → rebuilding {} faces",
-                    i, self.filtered_indices.len(), max_faces
-                );
-            }
             let t_light = ctx.scope_begin(&format!("shadow/light_{i}"));
             for face in 0u32..max_faces {
                 let layer_idx = i as u32 * 6 + face;
                 let bundle_slot = i * 6 + face as usize;
+                let face_pending =
+                    self.bundle_built_gen[bundle_slot] < self.bundle_pending_gen[i];
 
                 let t_face = ctx.scope_begin(&format!("shadow/light_{i}/face_{face}"));
                 let mut pass = ctx.begin_render_pass(
@@ -387,9 +394,9 @@ impl RenderPass for ShadowPass {
                     }),
                 );
 
-                if need_bundle_rebuild {
+                if face_pending && faces_rebuilt_this_frame < MAX_FACE_REBUILDS {
                     let _tb = std::time::Instant::now();
-                    // Re-encode all draw calls into a new bundle for this face.
+                    // Re-encode all visible shadow casters into a new bundle.
                     let mut enc = self.device.create_render_bundle_encoder(
                         &wgpu::RenderBundleEncoderDescriptor {
                             label: Some("shadow_bundle"),
@@ -420,15 +427,18 @@ impl RenderPass for ShadowPass {
                     let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: None });
                     pass.execute_bundles(std::iter::once(&bundle));
                     self.bundle_cache[bundle_slot] = Some(bundle);
+                    self.bundle_built_gen[bundle_slot] = self.bundle_pending_gen[i];
+                    faces_rebuilt_this_frame += 1;
                     eprintln!(
                         "⚠️ [Shadow]   face {}/{}: {} casters — {:.2}ms",
                         face, max_faces - 1, self.filtered_indices.len(),
                         _tb.elapsed().as_secs_f32() * 1000.0,
                     );
                 } else if let Some(bundle) = &self.bundle_cache[bundle_slot] {
-                    // Geometry stable: replay the cached bundle.  The shadow-matrix GPU
-                    // buffer was already updated this frame via write_buffer so the vertex
-                    // shader reads the correct (post-rotation) matrices automatically.
+                    // Replay the cached bundle.  The shadow-matrix GPU buffer was already
+                    // updated this frame via write_buffer so the vertex shader reads the
+                    // correct (post-rotation) matrices automatically.  Instance data in
+                    // shadow per-batch buffers is current for existing instance counts.
                     pass.execute_bundles(std::iter::once(bundle));
                 }
 
@@ -437,12 +447,9 @@ impl RenderPass for ShadowPass {
             }
             ctx.scope_end(t_light);
 
-            if need_bundle_rebuild {
-                self.bundle_geom_hashes[i] = geom_hash;
-            }
-
-            // Update cache now that this light's shadow maps are fresh.
-            self.shadow_cache[i] = ShadowLightCache { light_hash, geom_hash, valid: true };
+            // Update light cache.  geom_hash is 0 — invalidation is driven by
+            // draw_list_generation tracked in bundle_pending_gen, not by geom_hash.
+            self.shadow_cache[i] = ShadowLightCache { light_hash, geom_hash: 0, valid: true };
         }
 
         Ok(())

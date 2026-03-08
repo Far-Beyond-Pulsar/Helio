@@ -188,6 +188,17 @@ pub struct Renderer {
     /// Flat CPU-side staging vec; cleared and rebuilt each slow-path execution.
     scratch_instance_transforms: Vec<[f32; 16]>,
 
+    /// Per-batch shadow instance buffers.  Each unique (mesh, material) batch gets its own
+    /// stable `Arc<wgpu::Buffer>` so shadow `RenderBundle`s can be amortised: a stale face
+    /// still references valid instance data rather than a shifted offset in the shared buffer.
+    shadow_batch_buffers: HashMap<(usize, usize), Arc<wgpu::Buffer>>,
+    /// Capacity (in instances) currently allocated for each per-batch shadow buffer.
+    shadow_batch_capacities: HashMap<(usize, usize), u32>,
+    /// Shadow draw list backed by per-batch stable instance buffers (distinct from the opaque
+    /// `draw_list` which uses the shared buffer).  Passed to `ShadowPass` so bundle amortisation
+    /// is safe even when new chunks insert batches mid-stream.
+    shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
+
     // Frame state
     frame_count: u64,
     width: u32,

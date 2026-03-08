@@ -175,6 +175,51 @@ impl Renderer {
                     total_instances as f32 * 64.0 / 1024.0,
                     _rebuild_t.elapsed().as_secs_f32() * 1000.0,
                 );
+
+                // ── Shadow draw list (per-batch stable instance buffers) ──────────────
+                // Each batch gets its own Arc<wgpu::Buffer> that is (re)created only when
+                // the instance count changes.  ShadowPass can then safely amortise face
+                // bundle rebuilds: stale bundles reference these per-batch buffers rather
+                // than the shared opaque buffer, whose layout can shift on batch insert.
+                {
+                    let mut shadow_dcs = Vec::with_capacity(self.scratch_batches.len());
+                    for (&key, mats) in &self.scratch_batches {
+                        if mats.is_empty() { continue; }
+                        let count = mats.len() as u32;
+                        let prev = self.shadow_batch_capacities.get(&key).copied().unwrap_or(0);
+                        if count != prev {
+                            // Instance count changed (or new batch): create / resize buffer.
+                            let buf = Arc::new(self.device.create_buffer_init(
+                                &wgpu::util::BufferInitDescriptor {
+                                    label: Some("Shadow Batch Inst"),
+                                    contents: bytemuck::cast_slice(mats),
+                                    usage: wgpu::BufferUsages::VERTEX
+                                        | wgpu::BufferUsages::COPY_DST,
+                                },
+                            ));
+                            self.shadow_batch_buffers.insert(key, buf);
+                            self.shadow_batch_capacities.insert(key, count);
+                        } else if let Some(buf) = self.shadow_batch_buffers.get(&key) {
+                            // Stable count: re-upload transforms (handles moving objects).
+                            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(mats));
+                        }
+                        if let Some(buf) = self.shadow_batch_buffers.get(&key) {
+                            let i_obj = self.scratch_example_idx[&key];
+                            let obj = &scene.objects[i_obj];
+                            let (bind_group, transparent) = match obj.material.as_ref() {
+                                Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
+                                None => (Arc::clone(&self.default_material_bind_group), false),
+                            };
+                            let mut dc = DrawCall::new(&obj.mesh, bind_group, transparent);
+                            dc.instance_buffer = Some(Arc::clone(buf));
+                            dc.instance_buffer_offset = 0;
+                            dc.instance_count = count;
+                            shadow_dcs.push(dc);
+                        }
+                    }
+                    *self.shadow_draw_list.lock().unwrap() = shadow_dcs;
+                }
+
                 t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
                 self.pending_scene_stage_ms[0] = t1_queue_draws;
             } // end else (scene changed)

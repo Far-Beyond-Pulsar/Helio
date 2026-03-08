@@ -147,7 +147,7 @@ impl Feature for ShadowsFeature {
             ctx.light_face_counts.clone(),
             ctx.shadow_cull_lights.clone(),
             layer_views,
-            ctx.draw_list.clone(),
+            ctx.shadow_draw_list.clone(),
             ctx.shadow_matrix_buffer.clone(),
             ctx.light_count_arc.clone(),
             ctx.device_arc.clone(),

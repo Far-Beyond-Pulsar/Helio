@@ -50,6 +50,7 @@ impl Renderer {
         // ── Geometry pass — must be added to graph BEFORE features so it ────────
         // ── executes first (billboard/post passes render on top).           ────────
         let draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
+        let shadow_draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
         let debug_shapes: Arc<Mutex<Vec<DebugShape>>> = Arc::new(Mutex::new(Vec::new()));
         let debug_batch: Arc<Mutex<Option<DebugDrawBatch>>> = Arc::new(Mutex::new(None));
 
@@ -296,6 +297,7 @@ impl Renderer {
                 &device, &queue, &mut graph, &mut resources, config.surface_format,
                 device.clone(),
                 draw_list.clone(),
+                shadow_draw_list.clone(),
                 shadow_matrix_buffer.clone(),
                 light_count_arc.clone(),
                 light_face_counts.clone(),
@@ -633,6 +635,9 @@ impl Renderer {
             shared_instance_buffer,
             shared_instance_buffer_capacity: INITIAL_INSTANCE_CAPACITY,
             scratch_instance_transforms: Vec::new(),
+            shadow_batch_buffers: HashMap::new(),
+            shadow_batch_capacities: HashMap::new(),
+            shadow_draw_list,
             frame_count: 0,
             width: config.width,
             height: config.height,
