@@ -465,7 +465,7 @@ impl Renderer {
             &defines,
             PipelineVariant::TransparentForward,
         )?;
-        let transparent_pass = TransparentPass::new(transparent_pipeline, draw_list.clone());
+        let transparent_pass = TransparentPass::new(device.clone(), transparent_pipeline, draw_list.clone(), config.surface_format);
         graph.add_pass(transparent_pass);
 
         // ── Debug draw pass (overlay after deferred + feature passes) ──────────
