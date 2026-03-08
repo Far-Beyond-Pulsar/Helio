@@ -4,6 +4,25 @@ use crate::features::{BillboardInstance, LightType};
 use crate::mesh::GpuMesh;
 use crate::material::GpuMaterial;
 
+// ── Object identity ───────────────────────────────────────────────────────────
+
+/// Stable handle to a registered scene object.
+///
+/// `ObjectId` is returned by [`Renderer::add_object`] and is the only way to
+/// update or remove that object.  Internally it is a monotonically increasing
+/// `u64`; zero is never issued as a valid id.
+///
+/// This mirrors Unreal Engine's `FPrimitiveComponentId`: once issued the id is
+/// stable for the entire lifetime of the object — frustum culling, LOD switches,
+/// and camera movement never invalidate it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct ObjectId(pub(crate) u64);
+
+impl ObjectId {
+    /// The null / invalid sentinel (never returned by [`Renderer::add_object`]).
+    pub const INVALID: Self = Self(0);
+}
+
 // ── Sky scene objects ─────────────────────────────────────────────────────────
 
 /// Volumetric cloud layer parameters.

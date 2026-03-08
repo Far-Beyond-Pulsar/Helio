@@ -25,11 +25,11 @@ pub mod debug_draw;
 mod renderer;
 mod camera;
 
-pub use renderer::{Renderer, RendererConfig};
+pub use renderer::{Renderer, RendererConfig, SceneEnv};
 pub use camera::Camera;
 pub use profiler::{GpuProfiler, PassTiming};
 pub use mesh::{GpuMesh, PackedVertex, DrawCall, GpuDrawCall};
-pub use scene::{Scene, SceneObject, SceneLight, SkyAtmosphere, VolumetricClouds, Skylight};
+pub use scene::{Scene, SceneObject, SceneLight, SkyAtmosphere, VolumetricClouds, Skylight, ObjectId};
 pub use material::{Material, GpuMaterial, TextureData};
 pub use debug_draw::DebugShape;
 

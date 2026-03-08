@@ -555,15 +555,8 @@ impl Renderer {
             }
         }
 
-        // ── Unified instance transform buffer ─────────────────────────────────
-        // Initial capacity: 8192 instances (512 KB). Grows by doubling on demand.
-        const INITIAL_INSTANCE_CAPACITY: u32 = 8192;
-        let shared_instance_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Shared Instance Buffer"),
-            size: INITIAL_INSTANCE_CAPACITY as u64 * 64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
+        // The unified instance buffer is no longer needed — each proxy has its own
+        // 64-byte buffer.  Only legacy `draw_mesh_instanced` callers bring their own.
 
         Ok(Self {
             device,
@@ -624,22 +617,17 @@ impl Renderer {
             fxaa_bind_group,
             smaa_bind_group,
             taa_bind_group,
-            scratch_gpu_lights: Vec::new(),
-            scratch_shadow_mats: Vec::new(),
+            // ── Per-frame scratch (reused vec allocations) ─────────────────────
+            scratch_gpu_lights:           Vec::new(),
+            scratch_shadow_mats:          Vec::new(),
             scratch_shadow_matrix_hashes: Vec::new(),
-            scratch_batches: HashMap::new(),
-            scratch_example_idx: HashMap::new(),
             scratch_sorted_light_indices: Vec::new(),
-            shared_instance_buffer,
-            shared_instance_buffer_capacity: INITIAL_INSTANCE_CAPACITY,
-            scratch_instance_transforms: Vec::new(),
-            shadow_batch_buffers: HashMap::new(),
-            shadow_batch_capacities: HashMap::new(),
-            shadow_batch_transform_hashes: HashMap::new(),
             shadow_draw_list,
-            persistent_batch_draws: HashMap::new(),
-            batch_last_seen: HashMap::new(),
-            last_visible_set_hash: u64::MAX,
+            // ── Persistent proxy registry ──────────────────────────────────────
+            registered_objects: HashMap::new(),
+            next_object_id: 1,       // 0 is INVALID
+            pending_env: None,
+            // ── Frame state ────────────────────────────────────────────────────
             frame_count: 0,
             width: config.width,
             height: config.height,
@@ -654,8 +642,7 @@ impl Renderer {
             pending_layout_changed: false,
             portal_scene_key: (0, 0, 0),
             cached_pass_names,
-
-            // GPU-driven rendering flags and buffers
+            // ── GPU-driven rendering ───────────────────────────────────────────
             gpu_driven: config.gpu_driven,
             async_compute: config.async_compute,
             indirect_opaque_buffer,
@@ -664,24 +651,18 @@ impl Renderer {
             transparent_draw_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
             draw_list_gpu_buffer,
             material_id_map: HashMap::new(),
-            next_material_id: 1,  // Start at 1 (0 reserved for unassigned)
-
-            // Temporal caching for AAA optimizations
-            cached_sky_color: [0.0; 3],
-            cached_sky_has_sky: false,
+            next_material_id: 1,
+            // ── Sky / light temporal caching ───────────────────────────────────
+            cached_sky_color:         [0.0; 3],
+            cached_sky_has_sky:       false,
             cached_sky_sun_direction: [0.0, -1.0, 0.0],
             cached_sky_sun_intensity: 1.0,
-            sky_state_changed: true,  // Enable LUT render on first frame
-
-            draw_list_generation: 0,
-            draw_list_structural_hash: 0,
-            scene_fingerprint: 0,
-            canonical_draw_list: Vec::new(),
-
-            cached_light_count: 0,
+            sky_state_changed:        true,
+            draw_list_generation:     0,
+            cached_light_count:        0,
             cached_light_position_hash: 0,
-            cached_camera_pos: [0.0; 3],
-            camera_move_threshold: 0.5,  // 0.5 meters = skip sort threshold
+            cached_camera_pos:         [0.0; 3],
+            camera_move_threshold:     0.5,
         })
     }
 

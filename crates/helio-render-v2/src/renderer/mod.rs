@@ -17,7 +17,7 @@ use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
 use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
 use crate::camera::Camera;
-use crate::scene::Scene;
+use crate::scene::{Scene, ObjectId, SceneLight};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
@@ -40,6 +40,47 @@ use wgpu::util::DeviceExt;
 
 use self::uniforms::GlobalsUniform;
 use self::portal::{compute_scene_delta, open_url_in_browser};
+
+// ── Persistent proxy entry — one per registered object ───────────────────────
+//
+// Mirrors Unreal Engine's `FPrimitiveSceneProxy`.  Created once by `add_object`,
+// destroyed by `remove_object`.  Frustum culling, camera movement, and LOD
+// switches never create or destroy a `RegisteredProxy`.
+struct RegisteredProxy {
+    /// Pre-built draw call referencing the per-object instance transform buffer.
+    dc: DrawCall,
+    /// FNV-1a hash of the last-uploaded [f32; 16] transform matrix.
+    /// `update_transform` skips `write_buffer` when the hash is unchanged.
+    transform_hash: u64,
+    /// Dedicated single-instance GPU buffer (64 bytes).  Lives as long as the proxy.
+    instance_buf: Arc<wgpu::Buffer>,
+}
+
+/// Snapshot of per-frame environment data supplied by `set_scene_env`.
+/// Kept as a plain struct so `render()` can cheaply read it without locking.
+pub struct SceneEnv {
+    pub lights:            Vec<SceneLight>,
+    pub ambient_color:     [f32; 3],
+    pub ambient_intensity: f32,
+    pub sky_color:         [f32; 3],
+    pub sky_atmosphere:    Option<crate::scene::SkyAtmosphere>,
+    pub skylight:          Option<crate::scene::Skylight>,
+    pub billboards:        Vec<crate::features::BillboardInstance>,
+}
+
+impl Default for SceneEnv {
+    fn default() -> Self {
+        Self {
+            lights:            Vec::new(),
+            ambient_color:     [0.0; 3],
+            ambient_intensity: 0.0,
+            sky_color:         [0.0; 3],
+            sky_atmosphere:    None,
+            skylight:          None,
+            billboards:        Vec::new(),
+        }
+    }
+}
 
 /// Main renderer
 pub struct Renderer {
@@ -64,7 +105,7 @@ pub struct Renderer {
     // Default 1×1 texture views + sampler shared by all materials
     default_material_views: DefaultMaterialViews,
 
-    // Draw list (shared with GeometryPass)
+    // Draw list (shared with GeometryPass / TransparentPass)
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     // Debug draw primitives queued by user each frame.
     debug_shapes: Arc<Mutex<Vec<DebugShape>>>,
@@ -87,7 +128,7 @@ pub struct Renderer {
     light_face_counts: Arc<std::sync::Mutex<Vec<u8>>>,
     // Per-light position/range/type for ShadowPass draw-call culling
     shadow_cull_lights: Arc<std::sync::Mutex<Vec<ShadowCullLight>>>,
-    // Current scene ambient (updated by render_scene)
+    // Current scene ambient (updated by prepare_env)
     scene_ambient_color: [f32; 3],
     scene_ambient_intensity: f32,
     scene_light_count: u32,
@@ -119,103 +160,86 @@ pub struct Renderer {
     /// Shared with DeferredLightingPass.  Swapped on resize.
     deferred_bg: Arc<Mutex<Arc<wgpu::BindGroup>>>,
 
-    // ── AO and AA resources ───────────────────────────────────────────────
+    // ── Post-processing ────────────────────────────────────────────────────
     enable_ssao: bool,
     ssao_texture: Option<wgpu::Texture>,
-    ssao_view: Option<wgpu::TextureView>,
+    ssao_view:    Option<wgpu::TextureView>,
+
     aa_mode: AntiAliasingMode,
     pre_aa_texture: wgpu::Texture,
-    pre_aa_view: wgpu::TextureView,
-    fxaa_pass: Option<FxaaPass>,
-    smaa_pass: Option<SmaaPass>,
-    taa_pass: Option<TaaPass>,
+    pre_aa_view:    wgpu::TextureView,
+    fxaa_pass:      Option<FxaaPass>,
+    smaa_pass:      Option<SmaaPass>,
+    taa_pass:       Option<TaaPass>,
     fxaa_bind_group: Option<wgpu::BindGroup>,
     smaa_bind_group: Option<wgpu::BindGroup>,
-    taa_bind_group: Option<wgpu::BindGroup>,
+    taa_bind_group:  Option<wgpu::BindGroup>,
 
-    // ── GPU-DRIVEN RENDERING (optional indirect rendering) ─────────────────
-    gpu_driven: bool,
+    // ── GPU-driven indirect rendering ─────────────────────────────────────
+    gpu_driven:  bool,
     async_compute: bool,
-    /// Indirect draw buffer for opaque draws (built by compute each frame)
-    indirect_opaque_buffer: Option<Arc<wgpu::Buffer>>,
-    /// Indirect draw buffer for transparent draws (built by compute each frame)
+    indirect_opaque_buffer:      Option<Arc<wgpu::Buffer>>,
     indirect_transparent_buffer: Option<Arc<wgpu::Buffer>>,
-    /// Opaque draw count written by preprocessing compute
-    opaque_draw_count: Arc<std::sync::atomic::AtomicU32>,
-    /// Transparent draw count written by preprocessing compute
-    transparent_draw_count: Arc<std::sync::atomic::AtomicU32>,
-    /// Draw list upload buffer (GpuDrawCall array sent to compute shader)
+    opaque_draw_count:      Arc<AtomicU32>,
+    transparent_draw_count: Arc<AtomicU32>,
     draw_list_gpu_buffer: Option<Arc<wgpu::Buffer>>,
-    /// Material ID assignment: bind group pointer -> unique ID
-    material_id_map: HashMap<usize, u32>,
-    /// Next material ID to assign
+    material_id_map:  HashMap<usize, u32>,
     next_material_id: u32,
 
-    // ── TEMPORAL CACHING ──────────────────────────────────────────────────
-    /// Cached sky state — skip LUT re-render if unchanged
-    cached_sky_color: [f32; 3],
-    cached_sky_has_sky: bool,
+    // ── Sky LUT caching ───────────────────────────────────────────────────
+    cached_sky_color:         [f32; 3],
+    cached_sky_has_sky:       bool,
     cached_sky_sun_direction: [f32; 3],
     cached_sky_sun_intensity: f32,
-    sky_state_changed: bool,
+    sky_state_changed:        bool,
 
-    /// Monotonically increasing counter.  Bumped only when the draw-list structure
-    /// actually changes between frames.
+    // ── Temporal shadow / light caching ──────────────────────────────────
+    /// Monotonically increasing counter.  Bumped only when the registered object
+    /// set changes (add_object / remove_object).  Does NOT change on camera moves.
     draw_list_generation: u64,
-    draw_list_structural_hash: u64,
-    scene_fingerprint: u64,
-    canonical_draw_list: Vec<DrawCall>,
 
     /// Cached light list state — skip sort if unchanged
-    cached_light_count: usize,
+    cached_light_count:        usize,
     cached_light_position_hash: u64,
-    cached_camera_pos: [f32; 3],
-    camera_move_threshold: f32,
+    cached_camera_pos:         [f32; 3],
+    camera_move_threshold:     f32,
 
-    scratch_gpu_lights: Vec<GpuLight>,
-    scratch_shadow_mats: Vec<uniforms::GpuShadowMatrix>,
-    scratch_shadow_matrix_hashes: Vec<u64>,
-    scratch_batches: HashMap<(usize, usize), Vec<[f32; 16]>>,
-    scratch_example_idx: HashMap<(usize, usize), usize>,
-    scratch_sorted_light_indices: Vec<usize>,
-    /// Unified instance transform buffer — all per-draw instance data packed contiguously.
-    /// Uploaded with a single `queue.write_buffer` call per `render_scene` slow path,
-    /// regardless of how many unique (mesh, material) batches exist.
-    shared_instance_buffer: Arc<wgpu::Buffer>,
-    /// Capacity of `shared_instance_buffer` in mat4×4 instances (64 bytes each).
-    /// Grows by doubling when total instance count exceeds this.
-    shared_instance_buffer_capacity: u32,
-    /// Flat CPU-side staging vec; cleared and rebuilt each slow-path execution.
-    scratch_instance_transforms: Vec<[f32; 16]>,
+    // ── Per-frame scratch (reused allocations, no heap churn) ─────────────
+    scratch_gpu_lights:              Vec<GpuLight>,
+    scratch_shadow_mats:             Vec<uniforms::GpuShadowMatrix>,
+    scratch_shadow_matrix_hashes:    Vec<u64>,
+    scratch_sorted_light_indices:    Vec<usize>,
 
-    /// Per-batch stable instance buffers.  One Arc<Buffer> per unique (mesh, material) pair.
-    /// Created once when a batch first appears; reallocated only when its instance count changes.
-    /// Shared by both the main draw list and the shadow draw list.  All DrawCalls reference
-    /// these buffers at offset 0 so no batch ever invalidates another's reference.
-    shadow_batch_buffers: HashMap<(usize, usize), Arc<wgpu::Buffer>>,
-    /// Capacity (in instances) currently allocated for each per-batch buffer.
-    shadow_batch_capacities: HashMap<(usize, usize), u32>,
-    /// FNV hash of the last-uploaded transform data per batch.  Skips redundant write_buffer
-    /// calls for static geometry whose transforms haven't changed since last upload.
-    shadow_batch_transform_hashes: HashMap<(usize, usize), u64>,
-    /// Shadow draw list backed by per-batch stable instance buffers.
+    // ── Shadow draw list ──────────────────────────────────────────────────
+    /// Pointers to all registered-proxy DrawCalls, rebuilt O(N) each frame by
+    /// pointer-cloning.  ShadowPass culls this by light range on its own thread.
     shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
-    /// Persistent per-batch DrawCall map (mirrors Unreal's FPrimitiveSceneProxy).
-    /// Keys are (mesh_ptr, mat_ptr) — stable across frames while the batch exists.
-    /// Entries are added/removed incrementally; transforms update via write_buffer only.
-    /// The main draw_list receives VISIBLE entries only; shadow_draw_list all entries.
-    persistent_batch_draws: HashMap<(usize, usize), DrawCall>,
-    /// Last frame_count when each batch was present in the visible set (scene.objects).
-    /// Batches are NOT evicted just because they left the frustum this frame — they are
-    /// kept alive for BATCH_EVICT_FRAMES so camera rotation round-trips don't trigger
-    /// create_buffer_init.  Mirrors Unreal's FPrimitiveSceneProxy lifetime model:
-    /// proxies live until the component is unregistered, not until culled.
-    batch_last_seen: HashMap<(usize, usize), u64>,
-    /// Commutative XOR hash of the visible set keys (mesh_ptr, mat_ptr) from the last
-    /// frame.  When it changes, draw_list_generation is bumped so consumers such as
-    /// TransparentPass invalidate stale sorted indices.  Independent of proxy add/evict
-    /// events — purely tracks what is VISIBLE this frame vs last frame.
-    last_visible_set_hash: u64,
+
+    // ════════════════════════════════════════════════════════════════════════
+    // PERSISTENT SCENE PROXY REGISTRY
+    // ════════════════════════════════════════════════════════════════════════
+    //
+    // This is the Unreal FScene equivalent.  The application calls:
+    //   add_object(mesh, material, transform) -> ObjectId   (like AddPrimitive)
+    //   remove_object(id)                                   (like RemovePrimitive)
+    //   update_transform(id, transform)                     (like SendRenderTransform)
+    //
+    // The renderer stores one `RegisteredProxy` per id.  Every frame `render()`
+    // rebuilds `draw_list` and `shadow_draw_list` by pointer-cloning the existing
+    // DrawCall arcs — O(N) pointer increments, zero GPU allocations at steady state.
+    //
+    // Frustum culling, camera rotation, LOD paging — none of these touch this map.
+    // The ONLY writes are from add_object / remove_object / update_transform.
+    // ────────────────────────────────────────────────────────────────────────
+    /// Stable proxy map keyed by ObjectId.
+    registered_objects: HashMap<u64, RegisteredProxy>,
+    /// Next id to hand out.  Starts at 1; zero is INVALID.
+    next_object_id: u64,
+
+    // ── Environment (lights, sky, ambient, billboards) ────────────────────
+    /// Set by `set_scene_env` each frame (or once for static scenes).
+    /// Fully replaces `render_scene`'s scene-struct argument.
+    pending_env: Option<SceneEnv>,
 
     // Frame state
     frame_count: u64,
@@ -235,10 +259,9 @@ pub struct Renderer {
     latest_scene_layout: Option<PortalSceneLayout>,
     /// Previous scene layout for delta computation (reduces bandwidth).
     previous_scene_layout: Option<PortalSceneLayout>,
-    /// Per-stage CPU timings (ms) from the most recent `render_scene()` call.
-    /// [0]=draws, [1]=lights, [2]=shadows, [3]=billboards, [4]=sky.
+    /// Per-stage CPU timings (ms) from the most recent env-prepare call.
     pending_scene_stage_ms: [f32; 5],
-    /// True when render_scene() rebuilt the full layout (objects/lights/billboards changed).
+    /// True when object/light/billboard count changed this frame.
     pending_layout_changed: bool,
     portal_scene_key: (usize, usize, usize),
     /// Pass names cached once after `graph.build()` to avoid a `Vec<String>` alloc every frame.
@@ -342,12 +365,179 @@ impl Renderer {
     pub fn is_gpu_driven(&self) -> bool { self.gpu_driven }
     pub fn is_async_compute(&self) -> bool { self.async_compute }
 
-    // ── Frame rendering ───────────────────────────────────────────────────────
+    // ══════════════════════════════════════════════════════════════════════════
+    // PERSISTENT SCENE PROXY API  (Unreal FScene::AddPrimitive / RemovePrimitive)
+    // ══════════════════════════════════════════════════════════════════════════
 
-    /// Render a frame.  Call `draw_mesh()` BEFORE calling this.
+    /// Register a mesh into the persistent scene proxy registry.
+    ///
+    /// Equivalent to `UPrimitiveComponent::RegisterComponent()` → `FScene::AddPrimitive()`.
+    /// Creates a dedicated 64-byte per-object instance buffer on the GPU and stores
+    /// the initial `transform` in it.  Returns a stable [`ObjectId`] that uniquely
+    /// identifies this object for its entire lifetime in the scene.
+    ///
+    /// Cost: one `create_buffer_init` + one `HashMap::insert`.  Never called again
+    /// for the same object — subsequent transforms are O(1) `write_buffer`.
+    pub fn add_object(
+        &mut self,
+        mesh:      &GpuMesh,
+        material:  Option<&GpuMaterial>,
+        transform: glam::Mat4,
+    ) -> ObjectId {
+        let id = ObjectId(self.next_object_id);
+        self.next_object_id += 1;
+
+        let mat: [f32; 16] = transform.to_cols_array();
+        let transform_hash = fnv1a_mat(&mat);
+
+        // Allocate a dedicated 64-byte GPU buffer for this object's instance data.
+        // Single-instance, never resized — update via write_buffer only.
+        let instance_buf = Arc::new(self.device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label:    Some("Proxy Instance"),
+                contents: bytemuck::cast_slice(&mat),
+                usage:    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            },
+        ));
+
+        let (bind_group, transparent) = match material {
+            Some(m) => (Arc::clone(&m.bind_group), m.transparent_blend),
+            None    => (Arc::clone(&self.default_material_bind_group), false),
+        };
+
+        let mut dc = DrawCall::new(mesh, bind_group, transparent);
+        dc.instance_buffer        = Some(Arc::clone(&instance_buf));
+        dc.instance_buffer_offset = 0;
+        dc.instance_count         = 1;
+
+        self.registered_objects.insert(id.0, RegisteredProxy { dc, transform_hash, instance_buf });
+
+        // Any structural change bumps generation so TransparentPass invalidates cached sorts.
+        self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
+
+        id
+    }
+
+    /// Remove an object from the scene proxy registry.
+    ///
+    /// Equivalent to `UPrimitiveComponent::UnregisterComponent()` → `FScene::RemovePrimitive()`.
+    /// Drops the GPU instance buffer Arc immediately; the buffer is freed when all
+    /// in-flight GPU commands that reference it complete (wgpu tracks this automatically).
+    ///
+    /// Cost: one `HashMap::remove` + Arc drop.
+    pub fn remove_object(&mut self, id: ObjectId) {
+        if self.registered_objects.remove(&id.0).is_some() {
+            self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
+        }
+    }
+
+    /// Update the world transform of a registered object.
+    ///
+    /// Equivalent to `USceneComponent::SendRenderTransform()` → proxy `SetTransform()`.
+    /// Only issues a `write_buffer` when the FNV-1a hash of the new matrix differs from
+    /// the previously uploaded one — static geometry that never moves has zero GPU write cost.
+    ///
+    /// Cost: ~1 µs hash + conditional 64-byte `write_buffer`.
+    pub fn update_transform(&mut self, id: ObjectId, transform: glam::Mat4) {
+        if let Some(proxy) = self.registered_objects.get_mut(&id.0) {
+            let mat  = transform.to_cols_array();
+            let hash = fnv1a_mat(&mat);
+            if hash != proxy.transform_hash {
+                self.queue.write_buffer(&proxy.instance_buf, 0, bytemuck::cast_slice(&mat));
+                proxy.transform_hash = hash;
+                // update_transform does NOT bump draw_list_generation — the DrawCall arc
+                // and draw-order position are unchanged; only the GPU buffer contents change.
+            }
+        }
+    }
+
+    /// Batch-update many transforms in a single call.  More efficient than calling
+    /// `update_transform` in a loop because the loop over changed entries is inlined.
+    pub fn update_transforms(&mut self, updates: &[(ObjectId, glam::Mat4)]) {
+        for &(id, transform) in updates {
+            self.update_transform(id, transform);
+        }
+    }
+
+    /// Number of objects currently registered in the scene proxy registry.
+    pub fn object_count(&self) -> usize {
+        self.registered_objects.len()
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // SCENE ENVIRONMENT API  (lights, sky, ambient, billboards)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// Supply the per-frame environment snapshot: lights, sky, ambient, and billboards.
+    ///
+    /// Call once per frame (or whenever any environmental value changes).  The renderer
+    /// consumes this at the top of the next `render()` call via `prepare_env` and then
+    /// discards it — no allocation carry-over between frames.
+    ///
+    /// This replaces the old `render_scene(&Scene, ...)` call for the light/sky portion.
+    /// Registered objects are completely independent and never need to appear here.
+    pub fn set_scene_env(&mut self, env: SceneEnv) {
+        self.pending_env = Some(env);
+    }
+
+    /// Convenience: build a [`SceneEnv`] from a legacy [`crate::scene::Scene`] value and
+    /// supply it in one call.  Use this to migrate existing examples one line at a time.
+    ///
+    /// IMPORTANT: unlike the old `render_scene`, this method does NOT draw the objects
+    /// in the scene's `objects` vec via the new proxy system.  Objects from `scene.objects`
+    /// that were added with the legacy builder are drawn via `draw_mesh()` calls that you
+    /// supply, OR you should port them to `add_object` / `remove_object`.
+    pub fn set_env_from_scene(&mut self, scene: &crate::scene::Scene) {
+        self.pending_env = Some(SceneEnv {
+            lights:            scene.lights.clone(),
+            ambient_color:     scene.ambient_color,
+            ambient_intensity: scene.ambient_intensity,
+            sky_color:         scene.sky_color,
+            sky_atmosphere:    scene.sky_atmosphere.clone(),
+            skylight:          scene.skylight.clone(),
+            billboards:        scene.billboards.clone(),
+        });
+    }
+
+
+
+    /// Render a frame.
+    ///
+    /// Before calling this, either:
+    ///  - Supply environment via `set_scene_env()` / `set_env_from_scene()`, or
+    ///  - Call the legacy `render_scene()` which does all of the above for you.
+    ///
+    /// Registered objects (added via `add_object`) are included automatically —
+    /// no other per-frame object submission is required at steady state.
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         let frame_start = std::time::Instant::now();
         log::trace!("Rendering frame {}", self.frame_count);
+
+        // ── Step 0: process pending env (lights/sky/billboards) ──────────────
+        if let Some(env) = self.pending_env.take() {
+            self.prepare_env(env, camera);
+        }
+
+        // ── Step 1: populate draw_list from persistent proxy registry ─────────
+        //
+        // O(N) pointer-clone of all registered proxy DrawCalls.  This is the only
+        // thing render() does to build the draw list; no per-frame batch diffing,
+        // no eviction, no scratch map construction.
+        //
+        // Additional draws from `draw_mesh()` / `draw_mesh_instanced()` calls that
+        // arrived BEFORE this render() call are already in the list and are preserved.
+        {
+            let mut dl  = self.draw_list.lock().unwrap();
+            let mut sdl = self.shadow_draw_list.lock().unwrap();
+            sdl.clear();
+            // Reserve exact capacity; avoids mid-loop reallocs.
+            dl.reserve(self.registered_objects.len());
+            sdl.reserve(self.registered_objects.len());
+            for proxy in self.registered_objects.values() {
+                dl.push(proxy.dc.clone());
+                sdl.push(proxy.dc.clone());
+            }
+        }
 
         // ── Preparation: camera upload, feature prepare, globals, debug batch, GPU-driven ──
         let prep_start = std::time::Instant::now();
@@ -802,4 +992,18 @@ impl Renderer {
 
     pub fn device(&self) -> &wgpu::Device { &self.device }
     pub fn queue(&self) -> &wgpu::Queue { &self.queue }
+}
+
+// ── Module-level helpers ──────────────────────────────────────────────────────
+
+/// FNV-1a hash of a single [f32; 16] transform matrix.
+/// Used by `add_object` and `update_transform` to skip redundant `write_buffer`s.
+#[inline]
+fn fnv1a_mat(mat: &[f32; 16]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for &f in mat {
+        h ^= f.to_bits() as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
