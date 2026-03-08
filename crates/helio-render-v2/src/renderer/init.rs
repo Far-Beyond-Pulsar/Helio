@@ -638,6 +638,7 @@ impl Renderer {
             shadow_batch_transform_hashes: HashMap::new(),
             shadow_draw_list,
             persistent_batch_draws: HashMap::new(),
+            batch_last_seen: HashMap::new(),
             frame_count: 0,
             width: config.width,
             height: config.height,

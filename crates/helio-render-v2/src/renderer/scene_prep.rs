@@ -48,21 +48,28 @@ impl Renderer {
         }
 
         // ---------- automatic batching/instancing ----------
+        // Proxy lifetime: keep GPU buffers alive this many frames after a batch was
+        // last frustum-visible.  Camera rotation can cycle 500-1000 chunks out of the
+        // frustum and back within 1-2 frames; without this window every rotation
+        // triggers hundreds of create_buffer_init calls.  120 frames @ 60 fps = 2s,
+        // large enough to absorb any realistic camera sweep.
+        const BATCH_EVICT_FRAMES: u64 = 120;
+
         let t1_queue_draws;
         {
-            // ── Persistent delta-update (Unreal FPrimitiveSceneProxy model) ────────
-            // Instead of rebuilding all draw commands from scratch every N frames,
-            // we maintain a stable HashMap<(mesh_ptr, mat_ptr), DrawCall> and apply
-            // only the delta each frame:
-            //   • new batch (new chunk loaded):  allocate buffer, insert DrawCall
-            //   • removed batch (chunk unloaded): drop buffer, erase DrawCall
-            //   • stable batch, new transforms:   write_buffer only, keep DrawCall
-            //   • stable batch, same transforms:  skip (FNV hash match)
-            // Per-frame cost is O(N) for partitioning objects into batches (unavoidable)
-            // + O(delta) for GPU allocation / upload (near-zero at steady-state).
-            // The draw_list is populated by O(N) pointer clones from the persistent map.
+            // ── Persistent proxy model (Unreal FPrimitiveSceneProxy lifetime) ─────
+            //
+            // scene.objects = frustum-visible chunks ONLY (the app already frustum-culled).
+            // We separate three orthogonal concepts:
+            //   1. Proxy alive  — GPU buffer exists; evicted after BATCH_EVICT_FRAMES absent.
+            //   2. Visible now  — in scene.objects this frame → goes into draw_list.
+            //   3. Shadow caster — all alive proxies → shadow_draw_list (shadow culls itself).
+            //
+            // Per-frame cost: O(N_visible) partitioning + O(delta) GPU alloc/upload.
+            // At steady-state (no new chunks, just camera rotation): zero GPU alloc,
+            // zero draw_list_generation bumps, zero shadow_draw_list rebuilds.
 
-            // Step 1: partition current scene objects into (mesh, material) batches.
+            // Step 1: partition VISIBLE objects into (mesh_ptr, mat_ptr) batches.
             self.scratch_batches.clear();
             self.scratch_example_idx.clear();
             for (i_obj, obj) in scene.objects.iter().enumerate() {
@@ -75,31 +82,39 @@ impl Renderer {
                 self.scratch_example_idx.entry(key).or_insert(i_obj);
             }
 
-            // Step 2: evict batches that are no longer present (chunks unloaded).
+            // Step 2: evict proxies absent for > BATCH_EVICT_FRAMES.
+            // Proxies merely outside the frustum this frame are NOT evicted.
             let stale_keys: Vec<(usize, usize)> = self.persistent_batch_draws
                 .keys()
-                .filter(|k| !self.scratch_batches.contains_key(k))
+                .filter(|&&k| {
+                    let last = self.batch_last_seen.get(&k).copied().unwrap_or(0);
+                    self.frame_count.saturating_sub(last) > BATCH_EVICT_FRAMES
+                })
                 .copied()
                 .collect();
-            let removal_count = stale_keys.len();
+            let eviction_count = stale_keys.len();
             for key in stale_keys {
                 self.persistent_batch_draws.remove(&key);
+                self.batch_last_seen.remove(&key);
                 self.shadow_batch_buffers.remove(&key);
                 self.shadow_batch_capacities.remove(&key);
                 self.shadow_batch_transform_hashes.remove(&key);
             }
 
-            // Step 3: add new batches and refresh transform data for existing ones.
+            // Step 3: add new proxies / refresh buffers for currently-visible batches.
             let mut addition_count: u32 = 0;
             let mut instance_total: u32 = 0;
             for (&key, mats) in &self.scratch_batches {
                 if mats.is_empty() { continue; }
-                let count     = mats.len() as u32;
+                let count = mats.len() as u32;
                 instance_total += count;
-                let prev_cap  = self.shadow_batch_capacities.get(&key).copied().unwrap_or(0);
 
+                // Stamp visibility so the eviction clock resets on re-appearance.
+                self.batch_last_seen.insert(key, self.frame_count);
+
+                let prev_cap = self.shadow_batch_capacities.get(&key).copied().unwrap_or(0);
                 if count != prev_cap {
-                    // New batch or instance count changed: (re)allocate the buffer.
+                    // New proxy or instance count changed: (re)allocate buffer.
                     let new_buf = Arc::new(self.device.create_buffer_init(
                         &wgpu::util::BufferInitDescriptor {
                             label: Some("Batch Inst"),
@@ -112,8 +127,9 @@ impl Renderer {
                     self.shadow_batch_capacities.insert(key, count);
                     self.shadow_batch_transform_hashes.insert(key, fnv_mats(mats));
 
-                    // Build the DrawCall for this batch (insert or replace).
-                    addition_count += 1;
+                    let is_new = !self.persistent_batch_draws.contains_key(&key);
+                    if is_new { addition_count += 1; }
+
                     let i_obj = self.scratch_example_idx[&key];
                     let obj   = &scene.objects[i_obj];
                     let (bind_group, transparent) = match obj.material.as_ref() {
@@ -126,7 +142,7 @@ impl Renderer {
                     dc.instance_count         = count;
                     self.persistent_batch_draws.insert(key, dc);
                 } else {
-                    // Stable count: only upload when transform data changed.
+                    // Stable count: write_buffer only when transform data changed.
                     if let Some(buf) = self.shadow_batch_buffers.get(&key) {
                         let h      = fnv_mats(mats);
                         let prev_h = self.shadow_batch_transform_hashes.get(&key).copied().unwrap_or(0);
@@ -135,29 +151,31 @@ impl Renderer {
                             self.shadow_batch_transform_hashes.insert(key, h);
                         }
                     }
-                    // DrawCall already valid; instance_count is stable.
                 }
             }
 
-            // Step 4: push all persistent DrawCalls into the per-frame draw_list.
-            // This is O(N) pointer clones — cheap even at 6 000 batches.
+            // Step 4: draw_list = VISIBLE proxies only (frustum-culled set).
+            // Culled-but-alive proxies are not submitted for rasterization this frame.
             {
                 let mut dl = self.draw_list.lock().unwrap();
-                for dc in self.persistent_batch_draws.values() {
-                    dl.push(dc.clone());
+                for &key in self.scratch_batches.keys() {
+                    if let Some(dc) = self.persistent_batch_draws.get(&key) {
+                        dl.push(dc.clone());
+                    }
                 }
             }
 
-            // Update shadow draw list and bump generation counter when structure changes.
-            if removal_count > 0 || addition_count > 0 {
+            // shadow_draw_list = ALL alive proxies (shadow does per-face frustum culling).
+            // Only rebuild when proxies are added or evicted — not on frustum changes.
+            if eviction_count > 0 || addition_count > 0 {
                 *self.shadow_draw_list.lock().unwrap() =
                     self.persistent_batch_draws.values().cloned().collect();
                 self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
                 eprintln!(
-                    "⚠️ [Scene] Δ +{} -{} batches | {} total | {} instances | {:.1} KB",
-                    addition_count, removal_count,
+                    "⚠️ [Scene] proxy +{} evict {} | alive {} | visible {} | {:.1} KB",
+                    addition_count, eviction_count,
                     self.persistent_batch_draws.len(),
-                    instance_total,
+                    self.scratch_batches.len(),
                     instance_total as f32 * 64.0 / 1024.0,
                 );
             }

@@ -203,9 +203,14 @@ pub struct Renderer {
     /// Persistent per-batch DrawCall map (mirrors Unreal's FPrimitiveSceneProxy).
     /// Keys are (mesh_ptr, mat_ptr) — stable across frames while the batch exists.
     /// Entries are added/removed incrementally; transforms update via write_buffer only.
-    /// The main draw_list is populated each frame by cloning pointers from this map,
-    /// which is O(N) pointer copies rather than a full O(N) rebuild from scratch.
+    /// The main draw_list receives VISIBLE entries only; shadow_draw_list all entries.
     persistent_batch_draws: HashMap<(usize, usize), DrawCall>,
+    /// Last frame_count when each batch was present in the visible set (scene.objects).
+    /// Batches are NOT evicted just because they left the frustum this frame — they are
+    /// kept alive for BATCH_EVICT_FRAMES so camera rotation round-trips don't trigger
+    /// create_buffer_init.  Mirrors Unreal's FPrimitiveSceneProxy lifetime model:
+    /// proxies live until the component is unregistered, not until culled.
+    batch_last_seen: HashMap<(usize, usize), u64>,
 
     // Frame state
     frame_count: u64,
