@@ -8,6 +8,20 @@ use super::portal::build_portal_scene_layout;
 use bytemuck::Zeroable;
 use glam::{Mat4, Vec3};
 
+/// FNV-1a hash of a flat slice of `[f32; 16]` transform matrices.
+/// Used to skip redundant `write_buffer` calls when data hasn't changed.
+#[inline]
+fn fnv_mats(mats: &[[f32; 16]]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for mat in mats {
+        for &f in mat {
+            h ^= f.to_bits() as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
 impl Renderer {
     /// Render the full scene. Everything in the scene is drawn; nothing else.
     pub fn render_scene(&mut self, scene: &Scene, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
