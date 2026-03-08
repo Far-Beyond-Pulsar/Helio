@@ -362,7 +362,12 @@ impl RenderPass for ShadowPass {
             // via write_buffer in renderer.rs every frame so the GPU reads fresh values.
             // Only rebuild bundles when casters are added/removed/moved.
             let need_bundle_rebuild = geom_hash != self.bundle_geom_hashes[i];
-
+            if need_bundle_rebuild {
+                eprintln!(
+                    "⚠️ [Shadow] Geom changed: light {}, {} visible casters → rebuilding {} faces",
+                    i, self.filtered_indices.len(), max_faces
+                );
+            }
             let t_light = ctx.scope_begin(&format!("shadow/light_{i}"));
             for face in 0u32..max_faces {
                 let layer_idx = i as u32 * 6 + face;
@@ -383,6 +388,7 @@ impl RenderPass for ShadowPass {
                 );
 
                 if need_bundle_rebuild {
+                    let _tb = std::time::Instant::now();
                     // Re-encode all draw calls into a new bundle for this face.
                     let mut enc = self.device.create_render_bundle_encoder(
                         &wgpu::RenderBundleEncoderDescriptor {
@@ -414,6 +420,11 @@ impl RenderPass for ShadowPass {
                     let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: None });
                     pass.execute_bundles(std::iter::once(&bundle));
                     self.bundle_cache[bundle_slot] = Some(bundle);
+                    eprintln!(
+                        "⚠️ [Shadow]   face {}/{}: {} casters — {:.2}ms",
+                        face, max_faces - 1, self.filtered_indices.len(),
+                        _tb.elapsed().as_secs_f32() * 1000.0,
+                    );
                 } else if let Some(bundle) = &self.bundle_cache[bundle_slot] {
                     // Geometry stable: replay the cached bundle.  The shadow-matrix GPU
                     // buffer was already updated this frame via write_buffer so the vertex

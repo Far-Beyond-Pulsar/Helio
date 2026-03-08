@@ -80,6 +80,7 @@ impl RenderPass for TransparentPass {
         let need_sort = ctx.draw_list_generation != self.last_sort_generation || cam_moved;
 
         if need_sort {
+            let _sort_t = std::time::Instant::now();
             self.sorted_transparent_indices.clear();
             self.sorted_transparent_indices.reserve(draw_calls.len());
             for (idx, dc) in draw_calls.iter().enumerate() {
@@ -106,6 +107,14 @@ impl RenderPass for TransparentPass {
             self.last_sort_cam_pos = cam;
             self.last_sort_cam_fwd = fwd;
             self.last_sort_generation = ctx.draw_list_generation;
+            let _sort_ms = _sort_t.elapsed().as_secs_f32() * 1000.0;
+            if _sort_ms > 0.1 {
+                eprintln!(
+                    "⚠️ [Transparent] Sort: {} items — {:.2}ms",
+                    self.sorted_transparent_indices.len(),
+                    _sort_ms,
+                );
+            }
         }
 
         if self.sorted_transparent_indices.is_empty() {

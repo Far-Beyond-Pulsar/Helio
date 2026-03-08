@@ -68,6 +68,7 @@ impl Renderer {
                 t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
                 self.pending_scene_stage_ms[0] = t1_queue_draws;
             } else {
+                let _rebuild_t = std::time::Instant::now();
                 // Scene changed (or first frame) — full rebuild.
                 self.scene_fingerprint = fp;
 
@@ -131,8 +132,8 @@ impl Renderer {
                     for dc in &mut local_draws {
                         dc.instance_buffer = Some(Arc::clone(&self.shared_instance_buffer));
                     }
-                    log::debug!(
-                        "Shared instance buffer grown → {} instances ({} KB)",
+                    eprintln!(
+                        "⚠️ [Scene] Instance buffer grew → {} instances ({} KB)",
                         new_cap, new_cap * 64 / 1024
                     );
                 }
@@ -167,6 +168,13 @@ impl Renderer {
                     }
                 }
 
+                eprintln!(
+                    "⚠️ [Scene] Rebuild: {} batches, {} instances, {:.1} KB upload — {:.2}ms",
+                    self.scratch_batches.len(),
+                    total_instances,
+                    total_instances as f32 * 64.0 / 1024.0,
+                    _rebuild_t.elapsed().as_secs_f32() * 1000.0,
+                );
                 t1_queue_draws = render_scene_start.elapsed().as_secs_f32() * 1000.0;
                 self.pending_scene_stage_ms[0] = t1_queue_draws;
             } // end else (scene changed)
@@ -211,6 +219,7 @@ impl Renderer {
         }
 
         if should_re_sort {
+            let _light_sort_t = std::time::Instant::now();
             self.scratch_sorted_light_indices.sort_by(|&ia, &ib| {
                 fn score(light: &crate::scene::SceneLight, camera_pos: glam::Vec3) -> f32 {
                     match light.light_type {
@@ -248,8 +257,10 @@ impl Renderer {
                 let sb = score(&scene.lights[ib], camera.position);
                 let sa = score(&scene.lights[ia], camera.position);
                 sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
-            });
-        } else if self.frame_count % 60 == 0 {
+            });            let _lsort_ms = _light_sort_t.elapsed().as_secs_f32() * 1000.0;
+            if _lsort_ms > 0.5 {
+                eprintln!("⚠️ [Scene] Light sort: {} lights — {:.2}ms", total_lights, _lsort_ms);
+            }        } else if self.frame_count % 60 == 0 {
             log::trace!("⚡ Light sort cache HIT — skipping re-sort");
         }
 

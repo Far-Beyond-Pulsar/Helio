@@ -96,6 +96,7 @@ impl RenderPass for DepthPrepassPass {
         // frame via write_buffer — the bundle captures the BindGroup *reference*,
         // not the buffer payload, so camera/light updates are reflected correctly.
         if ctx.draw_list_generation != self.cached_generation {
+            let _bundle_t = std::time::Instant::now();
             let mut benc = self.device.create_render_bundle_encoder(
                 &wgpu::RenderBundleEncoderDescriptor {
                     label: Some("depth_prepass_bundle"),
@@ -129,6 +130,11 @@ impl RenderPass for DepthPrepassPass {
             }
             self.bundle_cache = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
             self.cached_generation = ctx.draw_list_generation;
+            eprintln!(
+                "⚠️ [DepthPrepass] Bundle rebuild: {} draw calls — {:.2}ms",
+                self.sorted_opaque_indices.len(),
+                _bundle_t.elapsed().as_secs_f32() * 1000.0,
+            );
         }
         drop(draw_calls);
 

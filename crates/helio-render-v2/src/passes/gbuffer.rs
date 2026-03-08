@@ -100,6 +100,7 @@ impl RenderPass for GBufferPass {
             }
             drop(shared);
 
+            let _bundle_t = std::time::Instant::now();
             let mut benc = self.device.create_render_bundle_encoder(
                 &wgpu::RenderBundleEncoderDescriptor {
                     label: Some("gbuffer_bundle"),
@@ -137,6 +138,11 @@ impl RenderPass for GBufferPass {
             }
             self.bundle_cache = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
             self.cached_generation = ctx.draw_list_generation;
+            eprintln!(
+                "⚠️ [GBuffer] Bundle rebuild: {} draw calls — {:.2}ms",
+                self.sorted_opaque_indices.len(),
+                _bundle_t.elapsed().as_secs_f32() * 1000.0,
+            );
         }
         drop(draw_calls);
 
