@@ -22,7 +22,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -309,6 +309,26 @@ impl ApplicationHandler for App {
         }).collect();
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&floor,           None, glam::Mat4::IDENTITY);
+        renderer.add_object(&nave_ceiling,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&aisle_ceil_l,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&aisle_ceil_r,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_left_outer,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_right_outer, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_front,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_back,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&altar_plinth,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&altar_step,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cross_vert,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cross_horiz,     None, glam::Mat4::IDENTITY);
+        for m in &colonnade_l       { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &colonnade_r       { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &columns           { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &pews_left         { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &pews_right        { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &chandelier_chains { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &chandelier_rings  { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -453,73 +473,47 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut scene = Scene::new()
-            .with_sky([0.0, 0.0, 0.0])
-            .with_ambient([0.65, 0.7, 0.85], 0.015); // very dim cold-stone fill
-
+        let mut lights = Vec::new();
         // Chandeliers – warm white
         for &z in CHANDELIER_Z {
             let p = [0.0_f32, 15.0, z];
-            scene = scene
-                .add_light(SceneLight::point(p, [1.0, 0.92, 0.78], 8.0 * flicker, 22.0));
+            lights.push(SceneLight::point(p, [1.0, 0.92, 0.78], 8.0 * flicker, 22.0));
         }
-
         // Stained glass shafts – coloured point lights from windows
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            // Low intensity: these colour the stone without overwhelming it
-            scene = scene.add_light(SceneLight::point([x, y, z], [r, g, b], 1.8, 8.0));
+            lights.push(SceneLight::point([x, y, z], [r, g, b], 1.8, 8.0));
         }
-
         // Candles near altar
         for &(x, y, z) in CANDLES {
             let p = [x, y, z];
-            scene = scene
-                .add_light(SceneLight::point(p, [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0));
+            lights.push(SceneLight::point(p, [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0));
         }
 
-        // Geometry
-        scene = scene
-            .add_object(self.floor.clone())
-            .add_object(self.nave_ceiling.clone())
-            .add_object(self.aisle_ceil_l.clone())
-            .add_object(self.aisle_ceil_r.clone())
-            .add_object(self.wall_left_outer.clone())
-            .add_object(self.wall_right_outer.clone())
-            .add_object(self.wall_front.clone())
-            .add_object(self.wall_back.clone())
-            .add_object(self.altar_plinth.clone())
-            .add_object(self.altar_step.clone())
-            .add_object(self.cross_vert.clone())
-            .add_object(self.cross_horiz.clone());
-
-        for m in &self.colonnade_l     { scene = scene.add_object(m.clone()); }
-        for m in &self.colonnade_r     { scene = scene.add_object(m.clone()); }
-        for m in &self.columns         { scene = scene.add_object(m.clone()); }
-        for m in &self.pews_left       { scene = scene.add_object(m.clone()); }
-        for m in &self.pews_right      { scene = scene.add_object(m.clone()); }
-        for m in &self.chandelier_chains { scene = scene.add_object(m.clone()); }
-        for m in &self.chandelier_rings  { scene = scene.add_object(m.clone()); }
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
+            let mut bb = Vec::new();
             for &z in CHANDELIER_Z {
                 let p = [0.0_f32, 15.0, z];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.4, 0.4])
-                        .with_color([1.0, 0.92, 0.78, 1.0]));
+                bb.push(BillboardInstance::new(p, [0.4, 0.4]).with_color([1.0, 0.92, 0.78, 1.0]));
             }
             for &(x, y, z) in CANDLES {
                 let p = [x, y, z];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.15, 0.15])
-                        .with_color([1.0, 0.6, 0.15, 1.0]));
+                bb.push(BillboardInstance::new(p, [0.15, 0.15]).with_color([1.0, 0.6, 0.15, 1.0]));
             }
-        }
+            bb
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights,
+            ambient_color: [0.65, 0.7, 0.85],
+            ambient_intensity: 0.015,
+            sky_color: [0.0, 0.0, 0.0],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

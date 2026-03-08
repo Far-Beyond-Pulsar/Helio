@@ -19,7 +19,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -293,6 +293,21 @@ impl ApplicationHandler for App {
         let door_panel = GpuMesh::rect3d(&device, [0.0, 1.0, 5.95], [0.55, 1.0, 0.04]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&floor,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&ceiling,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_n,     None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_s,     None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_e,     None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_w,     None, glam::Mat4::IDENTITY);
+        renderer.add_object(&door_frame, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&door_panel, None, glam::Mat4::IDENTITY);
+        for m in &floor_tiles      { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &racks            { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &hot_aisle_walls  { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &cable_trays      { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &ceiling_panels   { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &cooling_units    { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -429,34 +444,26 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut scene = Scene::new()
-            .with_sky([0.0, 0.0, 0.0])
-            .with_ambient([0.6, 0.72, 1.0], 0.06); // cool blue data-centre ambient
-
+        let mut lights = Vec::new();
         // Overhead fluorescent panels — cool white, downward spot (1 shadow face vs 6)
         // inner ≈ 70° half-angle, outer ≈ 85° for a wide soft-edge beam
         for &(px, pz) in CEILING_PANEL_XZ {
             let p = [px, 3.78, pz];
-            scene = scene
-                .add_light(SceneLight::spot(
-                    p, [0.0, -1.0, 0.0],
-                    [0.88, 0.93, 1.0], 4.5, 7.0,
-                    1.22, /* inner ~70° */ 1.48, /* outer ~85° */
-                ));
+            lights.push(SceneLight::spot(
+                p, [0.0, -1.0, 0.0],
+                [0.88, 0.93, 1.0], 4.5, 7.0,
+                1.22, /* inner ~70° */ 1.48, /* outer ~85° */
+            ));
         }
 
         // Per-row status LED strip at rack-top height
         for &(rx, tag) in RACK_ROWS {
             let col = row_color(tag);
-            // LED strip runs the full row length just above the racks
             let p = [rx, 2.1, 0.0];
-            scene = scene
-                .add_light(SceneLight::point(p, col, 2.5, 6.0));
-            // Additional LED at each end of the row
+            lights.push(SceneLight::point(p, col, 2.5, 6.0));
             for &end_z in &[-4.5_f32, 4.5] {
                 let pe = [rx, 2.1, end_z];
-                scene = scene
-                    .add_light(SceneLight::point(pe, col, 1.0, 3.5));
+                lights.push(SceneLight::point(pe, col, 1.0, 3.5));
             }
         }
 
@@ -464,62 +471,44 @@ impl AppState {
         for (i, cx) in [-9.0_f32, -3.0, 3.0, 9.0].iter().enumerate() {
             let p = [*cx, 2.8, -5.6];
             let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
-            scene = scene
-                .add_light(SceneLight::point(p, col, 0.8, 3.0));
+            lights.push(SceneLight::point(p, col, 0.8, 3.0));
         }
 
-        // Geometry
-        scene = scene
-            .add_object(self.floor.clone())
-            .add_object(self.ceiling.clone())
-            .add_object(self.wall_n.clone())
-            .add_object(self.wall_s.clone())
-            .add_object(self.wall_e.clone())
-            .add_object(self.wall_w.clone())
-            .add_object(self.door_frame.clone())
-            .add_object(self.door_panel.clone());
-
-        for m in &self.floor_tiles      { scene = scene.add_object(m.clone()); }
-        for m in &self.racks            { scene = scene.add_object(m.clone()); }
-        for m in &self.hot_aisle_walls  { scene = scene.add_object(m.clone()); }
-        for m in &self.cable_trays      { scene = scene.add_object(m.clone()); }
-        for m in &self.ceiling_panels   { scene = scene.add_object(m.clone()); }
-        for m in &self.cooling_units    { scene = scene.add_object(m.clone()); }
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
+            let mut bb = Vec::new();
             for &(px, pz) in CEILING_PANEL_XZ {
                 let p = [px, 3.78, pz];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.35, 0.12])
-                        .with_color([0.88, 0.93, 1.0, 1.0]));
+                bb.push(BillboardInstance::new(p, [0.35, 0.12]).with_color([0.88, 0.93, 1.0, 1.0]));
             }
             for &(rx, tag) in RACK_ROWS {
                 let col = row_color(tag);
                 let p = [rx, 2.1, 0.0];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.12, 0.08])
-                        .with_color([col[0], col[1], col[2], 1.0]));
+                bb.push(BillboardInstance::new(p, [0.12, 0.08]).with_color([col[0], col[1], col[2], 1.0]));
                 for &end_z in &[-4.5_f32, 4.5] {
                     let pe = [rx, 2.1, end_z];
-                    scene = scene
-                        .add_billboard(BillboardInstance::new(pe, [0.1, 0.08])
-                            .with_color([col[0], col[1], col[2], 0.9]));
+                    bb.push(BillboardInstance::new(pe, [0.1, 0.08]).with_color([col[0], col[1], col[2], 0.9]));
                 }
             }
             for (i, cx) in [-9.0_f32, -3.0, 3.0, 9.0].iter().enumerate() {
                 let p = [*cx, 2.8, -5.6];
                 let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.12, 0.08])
-                        .with_color([col[0], col[1], col[2], 0.85]));
+                bb.push(BillboardInstance::new(p, [0.12, 0.08]).with_color([col[0], col[1], col[2], 0.85]));
             }
-        }
+            bb
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights,
+            ambient_color: [0.6, 0.72, 1.0],
+            ambient_intensity: 0.06,
+            sky_color: [0.0, 0.0, 0.0],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

@@ -22,7 +22,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -203,6 +203,8 @@ impl ApplicationHandler for App {
         log::info!("Space station: {} meshes", meshes.len());
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        for mesh in &meshes { renderer.add_object(mesh, None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,
             last_frame: std::time::Instant::now(),
@@ -349,83 +351,66 @@ impl AppState {
         // Red warning beacon (1 Hz strobe)
         let beacon  = (0.5 + 0.5 * (time * 1.0 * TAU).sin()).max(0.0);
 
-        let scene = Scene::new()
-            // ── Ambient / sky ──────────────────────────────────────────────
-            .with_sky([0.003, 0.005, 0.015])
-            .with_ambient([0.08, 0.10, 0.18], 0.035)
-
-            // ── Distant cold starlight ─────────────────────────────────────
-            .add_light(SceneLight::directional(
-                [0.35, -0.65, 0.25], [0.72, 0.82, 1.0], 0.10,
-            ))
-
-            // ── Hub interior ───────────────────────────────────────────────
-            .add_light(SceneLight::point([0.0,  14.0, 0.0], [0.82, 0.90, 1.0], 8.0 * pulse, 28.0))
-            .add_light(SceneLight::point([0.0,  -9.0, 0.0], [0.70, 0.80, 1.0], 6.0 * pulse, 22.0))
-
-            // ── Hab Ring A — 4 cardinal lights ────────────────────────────
-            .add_light(SceneLight::point([ 35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0))
-            .add_light(SceneLight::point([-35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0))
-            .add_light(SceneLight::point([  0.0, 6.0,  35.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0))
-            .add_light(SceneLight::point([  0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0))
-
-            // ── Industrial Ring B — 4 cardinal lights ─────────────────────
-            .add_light(SceneLight::point([ 62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0))
-            .add_light(SceneLight::point([-62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0))
-            .add_light(SceneLight::point([  0.0, -3.0,  62.0], [0.62, 0.76, 1.0], 7.0, 28.0))
-            .add_light(SceneLight::point([  0.0, -3.0, -62.0], [0.62, 0.76, 1.0], 7.0, 28.0))
-
-            // ── Engine pods — orange glow ──────────────────────────────────
-            .add_light(SceneLight::point([ 5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0))
-            .add_light(SceneLight::point([-5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0))
-            .add_light(SceneLight::point([ 5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0))
-            .add_light(SceneLight::point([-5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0))
-
-            // ── Docking node floodlight ────────────────────────────────────
-            .add_light(SceneLight::point([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0))
-
-            // ── Warning beacons on ring B (strobe) ────────────────────────
-            .add_light(SceneLight::point([0.0, 6.0,  65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0))
-            .add_light(SceneLight::point([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0));
-
-        // Add all station geometry
-        let mut scene = scene;
-        for mesh in &self.meshes {
-            scene = scene.add_object(mesh.clone());
-        }
-
-        // Billboards
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
+            let mut bb = Vec::new();
             // Engine glow (4 pods)
             for &[ex, ey] in &[[5.0f32, 5.0], [-5.0, 5.0], [5.0, -5.0], [-5.0, -5.0]] {
-                scene = scene.add_billboard(
-                    BillboardInstance::new([ex, ey, 60.5], [2.2, 2.2])
-                        .with_color([1.0, 0.52, 0.10, 1.0]));
+                bb.push(BillboardInstance::new([ex, ey, 60.5], [2.2, 2.2]).with_color([1.0, 0.52, 0.10, 1.0]));
             }
             // Hub lights
-            scene = scene
-                .add_billboard(BillboardInstance::new([0.0,  14.0, 0.0], [0.5, 0.5]).with_color([0.82, 0.90, 1.0, 0.9]))
-                .add_billboard(BillboardInstance::new([0.0,  -9.0, 0.0], [0.4, 0.4]).with_color([0.70, 0.80, 1.0, 0.9]));
+            bb.push(BillboardInstance::new([0.0,  14.0, 0.0], [0.5, 0.5]).with_color([0.82, 0.90, 1.0, 0.9]));
+            bb.push(BillboardInstance::new([0.0,  -9.0, 0.0], [0.4, 0.4]).with_color([0.70, 0.80, 1.0, 0.9]));
             // Docking floodlight
-            scene = scene.add_billboard(
-                BillboardInstance::new([0.0, 0.0, -55.0], [0.7, 0.7]).with_color([1.0, 1.0, 0.92, 0.9]));
+            bb.push(BillboardInstance::new([0.0, 0.0, -55.0], [0.7, 0.7]).with_color([1.0, 1.0, 0.92, 0.9]));
             // Hab ring A cardinal lights
             for &[bx, bz] in &[[35.0f32, 0.0], [-35.0, 0.0], [0.0, 35.0], [0.0, -35.0]] {
-                scene = scene.add_billboard(
-                    BillboardInstance::new([bx, 7.0, bz], [0.4, 0.4]).with_color([0.78, 0.88, 1.0, 0.85]));
+                bb.push(BillboardInstance::new([bx, 7.0, bz], [0.4, 0.4]).with_color([0.78, 0.88, 1.0, 0.85]));
             }
             // Warning beacons (red strobe)
             let b_alpha = beacon.max(0.05);
-            scene = scene
-                .add_billboard(BillboardInstance::new([0.0, 7.5,  65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]))
-                .add_billboard(BillboardInstance::new([0.0, 7.5, -65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]));
-        }
+            bb.push(BillboardInstance::new([0.0, 7.5,  65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]));
+            bb.push(BillboardInstance::new([0.0, 7.5, -65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]));
+            bb
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights: vec![
+                // ── Distant cold starlight ─────────────────────────────────────
+                SceneLight::directional([0.35, -0.65, 0.25], [0.72, 0.82, 1.0], 0.10),
+                // ── Hub interior ───────────────────────────────────────────────
+                SceneLight::point([0.0,  14.0, 0.0], [0.82, 0.90, 1.0], 8.0 * pulse, 28.0),
+                SceneLight::point([0.0,  -9.0, 0.0], [0.70, 0.80, 1.0], 6.0 * pulse, 22.0),
+                // ── Hab Ring A — 4 cardinal lights ────────────────────────────
+                SceneLight::point([ 35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
+                SceneLight::point([-35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
+                SceneLight::point([  0.0, 6.0,  35.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
+                SceneLight::point([  0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
+                // ── Industrial Ring B — 4 cardinal lights ─────────────────────
+                SceneLight::point([ 62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0),
+                SceneLight::point([-62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0),
+                SceneLight::point([  0.0, -3.0,  62.0], [0.62, 0.76, 1.0], 7.0, 28.0),
+                SceneLight::point([  0.0, -3.0, -62.0], [0.62, 0.76, 1.0], 7.0, 28.0),
+                // ── Engine pods — orange glow ──────────────────────────────────
+                SceneLight::point([ 5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
+                SceneLight::point([-5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
+                SceneLight::point([ 5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
+                SceneLight::point([-5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
+                // ── Docking node floodlight ────────────────────────────────────
+                SceneLight::point([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0),
+                // ── Warning beacons on ring B (strobe) ────────────────────────
+                SceneLight::point([0.0, 6.0,  65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
+                SceneLight::point([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
+            ],
+            ambient_color: [0.08, 0.10, 0.18],
+            ambient_intensity: 0.035,
+            sky_color: [0.003, 0.005, 0.015],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("render error: {:?}", e);
         }
         output.present();

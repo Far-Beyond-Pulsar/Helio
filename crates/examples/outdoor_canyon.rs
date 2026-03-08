@@ -26,7 +26,7 @@
 mod demo_portal;
 
 use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight,
+    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
 
@@ -252,6 +252,23 @@ impl ApplicationHandler for App {
         let firepit = GpuMesh::cube(&device,  [0.0, 0.15, 9.5], 0.2);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&valley_floor, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_l1,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_l2,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_l3,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_r1,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_r2,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_r3,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&terrace_l1,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&terrace_l2,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&terrace_r1,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&terrace_r2,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&mesa,         None, glam::Mat4::IDENTITY);
+        renderer.add_object(&tent_a,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&tent_b,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&tent_c,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&firepit,      None, glam::Mat4::IDENTITY);
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -428,8 +445,21 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut scene = Scene::new()
-            .with_sky_atmosphere(
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
+        } else {
+            vec![BillboardInstance::new(fire_pos, [0.5, 0.5]).with_color([1.0, 0.45, 0.1, 1.0])]
+        };
+
+        let env = SceneEnv {
+            lights: vec![
+                SceneLight::directional(light_dir, sun_color, (sun_lux * 0.4).max(0.005)),
+                SceneLight::point(fire_pos, [1.0, 0.45, 0.1], 5.0 * flicker, 12.0),
+                SceneLight::point(ember_a,  [1.0, 0.35, 0.05], 1.5, 5.0),
+                SceneLight::point(ember_b,  [1.0, 0.35, 0.05], 1.5, 5.0),
+                SceneLight::directional(moon_dir, [0.5, 0.65, 1.0], 0.05),
+            ],
+            sky_atmosphere: Some(
                 SkyAtmosphere::new()
                     .with_sun_intensity(20.0)
                     .with_exposure(3.5)
@@ -441,50 +471,17 @@ impl AppState {
                             .with_layer(600.0, 1600.0)
                             .with_wind([0.7, 0.3], 0.05),
                     ),
-            )
-            .with_skylight(
+            ),
+            skylight: Some(
                 Skylight::new()
                     .with_intensity(0.10)
                     .with_tint([1.0, 0.92, 0.82]),
-            )
-            // Sun
-            .add_light(SceneLight::directional(light_dir, sun_color, (sun_lux * 0.4).max(0.005)))
-            // Campfire – warm deep-orange with flicker
-            .add_light(SceneLight::point(fire_pos,  [1.0, 0.45, 0.1], 5.0 * flicker, 12.0))
-            .add_light(SceneLight::point(ember_a,   [1.0, 0.35, 0.05], 1.5, 5.0))
-            .add_light(SceneLight::point(ember_b,   [1.0, 0.35, 0.05], 1.5, 5.0))
-            // Moonlight fill — directional, cool blue, very low intensity
-            .add_light(SceneLight::directional(moon_dir, [0.5, 0.65, 1.0], 0.05))
-            // Terrain
-            .add_object(self.valley_floor.clone())
-            .add_object(self.wall_l1.clone())
-            .add_object(self.wall_l2.clone())
-            .add_object(self.wall_l3.clone())
-            .add_object(self.wall_r1.clone())
-            .add_object(self.wall_r2.clone())
-            .add_object(self.wall_r3.clone())
-            .add_object(self.terrace_l1.clone())
-            .add_object(self.terrace_l2.clone())
-            .add_object(self.terrace_r1.clone())
-            .add_object(self.terrace_r2.clone())
-            .add_object(self.mesa.clone())
-            // Camp
-            .add_object(self.tent_a.clone())
-            .add_object(self.tent_b.clone())
-            .add_object(self.tent_c.clone())
-            .add_object(self.firepit.clone());
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
-        } else {
-            // Billboards
-            scene = scene
-                .add_billboard(BillboardInstance::new(fire_pos, [0.5, 0.5]).with_color([1.0, 0.45, 0.1, 1.0]));
-        }
-
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+            ),
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

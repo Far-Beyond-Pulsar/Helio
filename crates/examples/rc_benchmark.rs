@@ -17,7 +17,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -232,6 +232,14 @@ impl ApplicationHandler for App {
         ];
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&floor,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&ceiling, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_n,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_s,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_e,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_w,  None, glam::Mat4::IDENTITY);
+        for c in &cubes { renderer.add_object(c, None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,
             last_frame: std::time::Instant::now(),
@@ -436,43 +444,26 @@ impl AppState {
             light.intensity *= self.light_intensity_multiplier;
         }
 
-        let mut scene = Scene::new();
-        scene.ambient_color     = [0.02, 0.02, 0.03];
-        scene.ambient_intensity = 1.0;
-
-        // Geometry
-        scene = scene.add_object(self.floor.clone());
-        scene = scene.add_object(self.ceiling.clone());
-        scene = scene.add_object(self.wall_n.clone());
-        scene = scene.add_object(self.wall_s.clone());
-        scene = scene.add_object(self.wall_e.clone());
-        scene = scene.add_object(self.wall_w.clone());
-        for c in &self.cubes {
-            scene = scene.add_object(c.clone());
-        }
-
-        // Lights
-        for l in &lights {
-            scene = scene.add_light(l.clone());
-        }
-
-        // Billboards
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
-            for l in &lights {
+            lights.iter().map(|l| {
                 let col = l.color;
-                scene = scene.add_billboard(
-                    BillboardInstance::new(l.position, [0.2, 0.2])
-                        .with_color([col[0], col[1], col[2], 0.9])
-                        .with_screen_scale(true),
-                );
-            }
-        }
+                BillboardInstance::new(l.position, [0.2, 0.2])
+                    .with_color([col[0], col[1], col[2], 0.9])
+                    .with_screen_scale(true)
+            }).collect()
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights,
+            ambient_color: [0.02, 0.02, 0.03],
+            ambient_intensity: 1.0,
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }
         output.present();

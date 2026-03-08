@@ -15,7 +15,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -216,6 +216,16 @@ impl ApplicationHandler for App {
         let sofa     = GpuMesh::rect3d(&device, [-1.5, 0.35,  2.5], [1.2, 0.35, 0.5]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&floor,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&ceiling,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_n,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_s,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_e,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_w,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&table,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&bookcase, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&sofa,     None, glam::Mat4::IDENTITY);
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -362,40 +372,30 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut scene = Scene::new()
-            .with_sky([0.02, 0.02, 0.06]) // deep-night through "window"
-            .with_ambient([1.0, 0.95, 0.85], 0.05)
-            // Overhead incandescent light
-            .add_light(SceneLight::point(overhead_pos, [1.0, 0.85, 0.6], 4.0 * flicker, 7.0))
-            // Warm orange table lamp (left corner)
-            .add_light(SceneLight::point(lamp_a, [1.0, 0.55, 0.2], 2.5, 5.0))
-            // Cooler amber lamp (right corner)
-            .add_light(SceneLight::point(lamp_b, [1.0, 0.75, 0.35], 2.0, 4.5))
-            // Room surfaces
-            .add_object(self.floor.clone())
-            .add_object(self.ceiling.clone())
-            .add_object(self.wall_n.clone())
-            .add_object(self.wall_s.clone())
-            .add_object(self.wall_e.clone())
-            .add_object(self.wall_w.clone())
-            // Furniture
-            .add_object(self.table.clone())
-            .add_object(self.bookcase.clone())
-            .add_object(self.sofa.clone());
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
-            // Billboards show light positions
-            scene = scene
-                .add_billboard(BillboardInstance::new(overhead_pos, [0.25, 0.25]).with_color([1.0, 0.85, 0.6, 1.0]))
-                .add_billboard(BillboardInstance::new(lamp_a,       [0.2,  0.2 ]).with_color([1.0, 0.55, 0.2, 1.0]))
-                .add_billboard(BillboardInstance::new(lamp_b,       [0.2,  0.2 ]).with_color([1.0, 0.75, 0.35, 1.0]));
-        }
+            vec![
+                BillboardInstance::new(overhead_pos, [0.25, 0.25]).with_color([1.0, 0.85, 0.6, 1.0]),
+                BillboardInstance::new(lamp_a,       [0.2,  0.2 ]).with_color([1.0, 0.55, 0.2, 1.0]),
+                BillboardInstance::new(lamp_b,       [0.2,  0.2 ]).with_color([1.0, 0.75, 0.35, 1.0]),
+            ]
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights: vec![
+                SceneLight::point(overhead_pos, [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
+                SceneLight::point(lamp_a, [1.0, 0.55, 0.2], 2.5, 5.0),
+                SceneLight::point(lamp_b, [1.0, 0.75, 0.35], 2.0, 4.5),
+            ],
+            ambient_color: [1.0, 0.95, 0.85],
+            ambient_intensity: 0.05,
+            sky_color: [0.02, 0.02, 0.06],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

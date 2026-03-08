@@ -21,7 +21,7 @@
 mod demo_portal;
 
 use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight,
+    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
 
@@ -259,6 +259,12 @@ impl ApplicationHandler for App {
         let road_center = GpuMesh::rect3d(&device, [0.0, 0.01, 0.0], [4.0, 0.01, 32.0]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&ground,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&road_center, None, glam::Mat4::IDENTITY);
+        for m in &sidewalks  { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &buildings  { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &lamp_poles { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -408,8 +414,47 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut scene = Scene::new()
-            .with_sky_atmosphere(
+        // Streetlamps – sodium orange, activate as sun goes down.
+        // Real lamp heads have a reflector hood: wide downward spot, not omnidirectional.
+        // inner ~55° / outer ~70° half-angle gives a realistic cobra-head spread.
+        let lamp_on = (1.0 - sun_lux).clamp(0.0, 1.0);
+        let mut lights = vec![
+            SceneLight::directional(light_dir, sun_color, (sun_lux * 0.45).max(0.005)),
+        ];
+        for &(x, z) in LAMPS {
+            let p = [x, 5.55, z];
+            lights.push(SceneLight::spot(
+                p, [0.0, -1.0, 0.0],
+                [1.0, 0.72, 0.30], 5.5 * lamp_on, 14.0,
+                0.96, /* inner ~55° */ 1.22, /* outer ~70° */
+            ));
+        }
+
+        // Neon signs – always on, bloom harder at night
+        let neon_boost = 0.6 + lamp_on * 0.4;
+        for &(x, y, z, r, g, b) in NEONS {
+            let p = [x, y, z];
+            lights.push(SceneLight::point(p, [r, g, b], 5.0 * neon_boost, 12.0));
+        }
+
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
+        } else {
+            let mut bb = Vec::new();
+            for &(x, z) in LAMPS {
+                let p = [x, 5.55, z];
+                bb.push(BillboardInstance::new(p, [0.35, 0.35]).with_color([1.0, 0.72, 0.30, lamp_on]));
+            }
+            for &(x, y, z, r, g, b) in NEONS {
+                let p = [x, y, z];
+                bb.push(BillboardInstance::new(p, [0.7, 0.25]).with_color([r, g, b, 1.0]));
+            }
+            bb
+        };
+
+        let env = SceneEnv {
+            lights,
+            sky_atmosphere: Some(
                 SkyAtmosphere::new()
                     .with_sun_intensity(22.0)
                     .with_exposure(3.8)
@@ -419,58 +464,13 @@ impl AppState {
                         .with_density(0.6)
                         .with_layer(500.0, 1400.0)
                         .with_wind([1.0, 0.2], 0.06)),
-            )
-            .with_skylight(Skylight::new().with_intensity(0.08).with_tint([1.0, 0.9, 0.8]))
-            .add_light(SceneLight::directional(light_dir, sun_color, (sun_lux * 0.45).max(0.005)));
-
-        // Streetlamps – sodium orange, activate as sun goes down.
-        // Real lamp heads have a reflector hood: wide downward spot, not omnidirectional.
-        // inner ~55° / outer ~70° half-angle gives a realistic cobra-head spread.
-        let lamp_on = (1.0 - sun_lux).clamp(0.0, 1.0);
-        for &(x, z) in LAMPS {
-            let p = [x, 5.55, z];
-            scene = scene
-                .add_light(SceneLight::spot(
-                    p, [0.0, -1.0, 0.0],
-                    [1.0, 0.72, 0.30], 5.5 * lamp_on, 14.0,
-                    0.96, /* inner ~55° */ 1.22, /* outer ~70° */
-                ));
-        }
-
-        // Neon signs – always on, bloom harder at night
-        let neon_boost = 0.6 + lamp_on * 0.4;
-        for &(x, y, z, r, g, b) in NEONS {
-            let p = [x, y, z];
-            scene = scene
-                .add_light(SceneLight::point(p, [r, g, b], 5.0 * neon_boost, 12.0));
-        }
-
-        // Geometry
-        scene = scene.add_object(self.ground.clone()).add_object(self.road_center.clone());
-        for m in &self.sidewalks   { scene = scene.add_object(m.clone()); }
-        for m in &self.buildings   { scene = scene.add_object(m.clone()); }
-        for m in &self.lamp_poles  { scene = scene.add_object(m.clone()); }
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
-        } else {
-            for &(x, z) in LAMPS {
-                let p = [x, 5.55, z];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.35, 0.35])
-                        .with_color([1.0, 0.72, 0.30, lamp_on]));
-            }
-            for &(x, y, z, r, g, b) in NEONS {
-                let p = [x, y, z];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.7, 0.25])
-                        .with_color([r, g, b, 1.0]));
-            }
-        }
-
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+            ),
+            skylight: Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 0.9, 0.8])),
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

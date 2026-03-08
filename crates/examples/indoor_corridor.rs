@@ -16,7 +16,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -213,6 +213,15 @@ impl ApplicationHandler for App {
         let sconce_r  = GpuMesh::rect3d(&device, [ 1.85, 1.8, 0.0], [0.12, 0.08, 0.25]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&floor,     None, glam::Mat4::IDENTITY);
+        renderer.add_object(&ceiling,   None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_l,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_r,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_far,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&wall_near, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&sconce_l,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&sconce_r,  None, glam::Mat4::IDENTITY);
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -352,24 +361,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        // Row of 5 cool-white fluorescent overhead lights spaced every 6 m
-        // (ShadowsFeature caps shadow-casting lights at 4, extras still light via RC GI)
-        // Flush ceiling fixtures — spot with a wide downward cone (1 shadow face vs 6)
         let overhead_z: &[f32] = &[-14.0, -7.0, 0.0, 7.0, 14.0];
-        let mut scene = Scene::new()
-            .with_sky([0.0, 0.0, 0.0])
-            .with_ambient([0.85, 0.9, 1.0], 0.04);
-
-        for &z in overhead_z {
-            let p = [0.0f32, 2.88, z];
-            scene = scene
-                .add_light(SceneLight::spot(
-                    p, [0.0, -1.0, 0.0],
-                    [0.9, 0.95, 1.0], 3.5, 9.0,
-                    1.22, /* inner ~70° */ 1.48, /* outer ~85° */
-                ));
-        }
-
         // Emergency-exit red lights at both ends
         let exit_near = [0.0f32, 2.4,  17.5];
         let exit_far  = [0.0f32, 2.4, -17.5];
@@ -377,38 +369,45 @@ impl AppState {
         let sconce_lp = [-1.7f32, 1.85, 0.0];
         let sconce_rp = [ 1.7f32, 1.85, 0.0];
 
-        scene = scene
-            .add_light(SceneLight::point(exit_near, [1.0, 0.08, 0.08], 1.5, 4.0))
-            .add_light(SceneLight::point(exit_far,  [1.0, 0.08, 0.08], 1.5, 4.0))
-            .add_light(SceneLight::point(sconce_lp, [1.0, 0.65, 0.3],  2.0, 4.5))
-            .add_light(SceneLight::point(sconce_rp, [1.0, 0.65, 0.3],  2.0, 4.5))
-            .add_object(self.floor.clone())
-            .add_object(self.ceiling.clone())
-            .add_object(self.wall_l.clone())
-            .add_object(self.wall_r.clone())
-            .add_object(self.wall_far.clone())
-            .add_object(self.wall_near.clone())
-            .add_object(self.sconce_l.clone())
-            .add_object(self.sconce_r.clone());
+        let mut lights = Vec::new();
+        for &z in overhead_z {
+            let p = [0.0f32, 2.88, z];
+            lights.push(SceneLight::spot(
+                p, [0.0, -1.0, 0.0],
+                [0.9, 0.95, 1.0], 3.5, 9.0,
+                1.22, /* inner ~70° */ 1.48, /* outer ~85° */
+            ));
+        }
+        lights.push(SceneLight::point(exit_near, [1.0, 0.08, 0.08], 1.5, 4.0));
+        lights.push(SceneLight::point(exit_far,  [1.0, 0.08, 0.08], 1.5, 4.0));
+        lights.push(SceneLight::point(sconce_lp, [1.0, 0.65, 0.3],  2.0, 4.5));
+        lights.push(SceneLight::point(sconce_rp, [1.0, 0.65, 0.3],  2.0, 4.5));
 
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
+            let mut bb = Vec::new();
             for &z in overhead_z {
                 let p = [0.0f32, 2.88, z];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.2, 0.2]).with_color([0.9, 0.95, 1.0, 1.0]));
+                bb.push(BillboardInstance::new(p, [0.2, 0.2]).with_color([0.9, 0.95, 1.0, 1.0]));
             }
-            scene = scene
-                .add_billboard(BillboardInstance::new(exit_near, [0.3, 0.2]).with_color([1.0, 0.08, 0.08, 1.0]))
-                .add_billboard(BillboardInstance::new(exit_far,  [0.3, 0.2]).with_color([1.0, 0.08, 0.08, 1.0]))
-                .add_billboard(BillboardInstance::new(sconce_lp, [0.2, 0.2]).with_color([1.0, 0.65, 0.3, 1.0]))
-                .add_billboard(BillboardInstance::new(sconce_rp, [0.2, 0.2]).with_color([1.0, 0.65, 0.3, 1.0]));
-        }
+            bb.push(BillboardInstance::new(exit_near, [0.3, 0.2]).with_color([1.0, 0.08, 0.08, 1.0]));
+            bb.push(BillboardInstance::new(exit_far,  [0.3, 0.2]).with_color([1.0, 0.08, 0.08, 1.0]));
+            bb.push(BillboardInstance::new(sconce_lp, [0.2, 0.2]).with_color([1.0, 0.65, 0.3, 1.0]));
+            bb.push(BillboardInstance::new(sconce_rp, [0.2, 0.2]).with_color([1.0, 0.65, 0.3, 1.0]));
+            bb
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights,
+            ambient_color: [0.85, 0.9, 1.0],
+            ambient_intensity: 0.04,
+            sky_color: [0.0, 0.0, 0.0],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

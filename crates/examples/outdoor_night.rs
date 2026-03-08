@@ -15,7 +15,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -219,6 +219,17 @@ impl ApplicationHandler for App {
         let lamp_pole_d = GpuMesh::rect3d(&device, [ 5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&ground,      None, glam::Mat4::IDENTITY);
+        renderer.add_object(&bld_a,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&bld_b,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&bld_c,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&bld_d,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&bld_e,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&lamp_pole_a, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&lamp_pole_b, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&lamp_pole_c, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&lamp_pole_d, None, glam::Mat4::IDENTITY);
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -367,46 +378,36 @@ impl AppState {
         let neon_m = [ 8.0f32, 12.0, -5.8];
         let neon_c = [ 0.0f32, 16.5, -14.0];
 
-        let mut scene = Scene::new()
-            .with_sky([0.005, 0.005, 0.025])
-            .with_ambient([0.1, 0.15, 0.3], 0.06)
-            // Streetlamps – warm sodium orange
-            .add_light(SceneLight::point(lamp_a, [1.0, 0.72, 0.3], 6.0, 14.0))
-            .add_light(SceneLight::point(lamp_b, [1.0, 0.72, 0.3], 6.0, 14.0))
-            .add_light(SceneLight::point(lamp_c, [1.0, 0.72, 0.3], 6.0, 14.0))
-            .add_light(SceneLight::point(lamp_d, [1.0, 0.72, 0.3], 6.0, 14.0))
-            // Neon: magenta on tall building
-            .add_light(SceneLight::point(neon_m, [1.0, 0.05, 0.8], 5.0, 12.0))
-            // Neon: cyan on bg tower
-            .add_light(SceneLight::point(neon_c, [0.05, 0.9, 1.0], 4.0, 10.0))
-            // Geometry
-            .add_object(self.ground.clone())
-            .add_object(self.bld_a.clone())
-            .add_object(self.bld_b.clone())
-            .add_object(self.bld_c.clone())
-            .add_object(self.bld_d.clone())
-            .add_object(self.bld_e.clone())
-            .add_object(self.lamp_pole_a.clone())
-            .add_object(self.lamp_pole_b.clone())
-            .add_object(self.lamp_pole_c.clone())
-            .add_object(self.lamp_pole_d.clone());
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
-            // Billboards for all lights
-            scene = scene
-                .add_billboard(BillboardInstance::new(lamp_a, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]))
-                .add_billboard(BillboardInstance::new(lamp_b, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]))
-                .add_billboard(BillboardInstance::new(lamp_c, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]))
-                .add_billboard(BillboardInstance::new(lamp_d, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]))
-                .add_billboard(BillboardInstance::new(neon_m, [0.6, 0.25]).with_color([1.0, 0.05, 0.8, 1.0]))
-                .add_billboard(BillboardInstance::new(neon_c, [0.6, 0.25]).with_color([0.05, 0.9, 1.0, 1.0]));
-        }
+            vec![
+                BillboardInstance::new(lamp_a, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]),
+                BillboardInstance::new(lamp_b, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]),
+                BillboardInstance::new(lamp_c, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]),
+                BillboardInstance::new(lamp_d, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0]),
+                BillboardInstance::new(neon_m, [0.6, 0.25]).with_color([1.0, 0.05, 0.8, 1.0]),
+                BillboardInstance::new(neon_c, [0.6, 0.25]).with_color([0.05, 0.9, 1.0, 1.0]),
+            ]
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights: vec![
+                SceneLight::point(lamp_a, [1.0, 0.72, 0.3], 6.0, 14.0),
+                SceneLight::point(lamp_b, [1.0, 0.72, 0.3], 6.0, 14.0),
+                SceneLight::point(lamp_c, [1.0, 0.72, 0.3], 6.0, 14.0),
+                SceneLight::point(lamp_d, [1.0, 0.72, 0.3], 6.0, 14.0),
+                SceneLight::point(neon_m, [1.0, 0.05, 0.8], 5.0, 12.0),
+                SceneLight::point(neon_c, [0.05, 0.9, 1.0], 4.0, 10.0),
+            ],
+            ambient_color: [0.1, 0.15, 0.3],
+            ambient_intensity: 0.06,
+            sky_color: [0.005, 0.005, 0.025],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

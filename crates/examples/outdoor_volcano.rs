@@ -20,7 +20,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -284,6 +284,20 @@ impl ApplicationHandler for App {
         ];
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&island_ground, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cone_l1,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cone_l2,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cone_l3,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cone_l4,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cone_l5,       None, glam::Mat4::IDENTITY);
+        renderer.add_object(&crater_rim,    None, glam::Mat4::IDENTITY);
+        renderer.add_object(&lava_lake,     None, glam::Mat4::IDENTITY);
+        for m in &flow_left      { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &flow_right     { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &lava_pools     { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &boulders       { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+        for m in &scorch_patches { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -428,49 +442,33 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut scene = Scene::new()
-            .with_sky([0.06, 0.01, 0.01]) // deep volcanic red-black
-            .with_ambient([0.5, 0.1, 0.02], 0.04)
-            .add_light(ocean_light);
-
+        let mut lights = vec![ocean_light];
         for (i, &(x, y, z, r, g, b, intensity, range)) in LAVA_LIGHTS.iter().enumerate() {
             let phase = i as f32 * 1.37;
             let fi = f(phase, 8.0 + i as f32 * 1.1, 0.06 + (i % 3) as f32 * 0.03);
             let p = [x, y, z];
-            scene = scene
-                .add_light(SceneLight::point(p, [r, g, b], intensity * fi, range));
+            lights.push(SceneLight::point(p, [r, g, b], intensity * fi, range));
         }
 
-        scene = scene
-            .add_object(self.island_ground.clone())
-            .add_object(self.cone_l1.clone())
-            .add_object(self.cone_l2.clone())
-            .add_object(self.cone_l3.clone())
-            .add_object(self.cone_l4.clone())
-            .add_object(self.cone_l5.clone())
-            .add_object(self.crater_rim.clone())
-            .add_object(self.lava_lake.clone());
-
-        for m in &self.flow_left      { scene = scene.add_object(m.clone()); }
-        for m in &self.flow_right     { scene = scene.add_object(m.clone()); }
-        for m in &self.lava_pools     { scene = scene.add_object(m.clone()); }
-        for m in &self.boulders       { scene = scene.add_object(m.clone()); }
-        for m in &self.scorch_patches { scene = scene.add_object(m.clone()); }
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
-            for &(x, y, z, r, g, b, _intensity, _range) in LAVA_LIGHTS {
+            LAVA_LIGHTS.iter().map(|&(x, y, z, r, g, b, _intensity, _range)| {
                 let p = [x, y, z];
-                scene = scene
-                    .add_billboard(BillboardInstance::new(p, [0.6, 0.6])
-                        .with_color([r, g, b, 0.9]));
-            }
-        }
+                BillboardInstance::new(p, [0.6, 0.6]).with_color([r, g, b, 0.9])
+            }).collect()
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights,
+            ambient_color: [0.5, 0.1, 0.02],
+            ambient_intensity: 0.04,
+            sky_color: [0.06, 0.01, 0.01],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }
         output.present();

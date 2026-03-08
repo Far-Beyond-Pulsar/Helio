@@ -19,7 +19,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -291,6 +291,10 @@ impl ApplicationHandler for App {
             .collect();
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&floor, None, glam::Mat4::IDENTITY);
+        for p in &pillars { renderer.add_object(p, None, glam::Mat4::IDENTITY); }
+        for c in &crates  { renderer.add_object(c, None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,
             last_frame: std::time::Instant::now(),
@@ -542,35 +546,32 @@ impl AppState {
             light.intensity *= self.light_intensity_multiplier * time_fade;
         }
 
-        let mut scene = Scene::new();
-        scene.ambient_color     = [0.03, 0.03, 0.04];
-        scene.ambient_intensity = 1.0;
-        scene = scene.add_object(self.floor.clone());
-        for p in &self.pillars { scene = scene.add_object(p.clone()); }
-        for c in &self.crates  { scene = scene.add_object(c.clone()); }
-        for l in &lights       { scene = scene.add_light(l.clone()); }
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
-            for l in &lights {
+            lights.iter().map(|l| {
                 let col = l.color;
-                scene = scene.add_billboard(
-                    BillboardInstance::new(l.position, [0.15, 0.15])
-                        .with_color([col[0], col[1], col[2], 0.85])
-                        .with_screen_scale(true),
-                );
-            }
-        }
-        
+                BillboardInstance::new(l.position, [0.15, 0.15])
+                    .with_color([col[0], col[1], col[2], 0.85])
+                    .with_screen_scale(true)
+            }).collect()
+        };
+
+        let env = SceneEnv {
+            lights,
+            ambient_color: [0.03, 0.03, 0.04],
+            ambient_intensity: 1.0,
+            billboards,
+            ..Default::default()
+        };
+
         let scene_build_ms = scene_build_start.elapsed().as_secs_f32() * 1000.0;
         if scene_build_ms > 10.0 {
             eprintln!("⚠️  Scene construction took {:.2}ms", scene_build_ms);
         }
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }
         
