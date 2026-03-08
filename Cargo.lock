@@ -1057,6 +1057,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-render-v3"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "env_logger",
+ "glam",
+ "helio-live-portal",
+ "log",
+ "petgraph",
+ "rand 0.8.5",
+ "regex",
+ "thiserror 1.0.69",
+ "walkdir",
+ "wgpu",
+ "winit",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
