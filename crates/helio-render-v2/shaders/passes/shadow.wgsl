@@ -1,8 +1,10 @@
 //! Shadow pass shader with alpha testing support
 //!
 //! Renders all shadow casters into a single shadow atlas layer.
-//! The light index is carried via @builtin(instance_index), which the CPU
-//! sets by issuing one instance per light (draw_indexed(…, light_idx..light_idx+1)).
+//! The shadow atlas layer index is delivered as a push constant (var<immediate>),
+//! set once per face before encoding the draw bundle.  Geometry instancing uses
+//! @location(5-8) instance model matrices so every mesh is transformed to world
+//! space before the light-space projection is applied.
 //!
 //! Supports transparent textures: samples the material's base color alpha
 //! and discards fragments where alpha is below the cutoff threshold.
@@ -21,11 +23,25 @@ struct Material {
     alpha_cutoff:    f32,
 }
 
+/// Push constant: which shadow atlas layer (light_idx * 6 + face) to render into.
+struct ShadowImmediate {
+    layer_idx: u32,
+}
+var<immediate> shadow_pc: ShadowImmediate;
+
 @group(0) @binding(0) var<storage, read> light_matrices: array<LightMatrix>;
 
 @group(1) @binding(0) var<uniform> material: Material;
 @group(1) @binding(1) var base_color_texture: texture_2d<f32>;
 @group(1) @binding(3) var material_sampler: sampler;
+
+/// Per-instance model matrix, split into four vec4 columns (locations 5-8).
+struct Instance {
+    @location(5) model_0: vec4<f32>,
+    @location(6) model_1: vec4<f32>,
+    @location(7) model_2: vec4<f32>,
+    @location(8) model_3: vec4<f32>,
+}
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
@@ -36,10 +52,12 @@ struct VertexOutput {
 fn vs_main(
     @location(0) position:   vec3<f32>,
     @location(2) tex_coords: vec2<f32>,
-    @builtin(instance_index) light_idx: u32,
+    inst: Instance,
 ) -> VertexOutput {
+    let model     = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
+    let world_pos = model * vec4<f32>(position, 1.0);
     var out: VertexOutput;
-    out.clip_position = light_matrices[light_idx].mat * vec4<f32>(position, 1.0);
+    out.clip_position = light_matrices[shadow_pc.layer_idx].mat * world_pos;
     out.tex_coords = tex_coords;
     return out;
 }

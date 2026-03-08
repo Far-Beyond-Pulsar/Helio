@@ -135,7 +135,7 @@ impl ShadowPass {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
             bind_group_layouts: &[Some(&bgl), Some(material_layout)],
-            immediate_size: 0,
+            immediate_size: 4,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -145,25 +145,38 @@ impl ShadowPass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
-                    // Matches PackedVertex stride
-                    array_stride: 32,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        // position: vec3<f32>
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x3,
-                            offset: 0,
-                            shader_location: 0,
-                        },
-                        // tex_coords: vec2<f32>
-                        wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Float32x2,
-                            offset: 16,
-                            shader_location: 2,
-                        },
-                    ],
-                }],
+                buffers: &[
+                    wgpu::VertexBufferLayout {
+                        // Matches PackedVertex stride
+                        array_stride: 32,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[
+                            // position: vec3<f32>
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x3,
+                                offset: 0,
+                                shader_location: 0,
+                            },
+                            // tex_coords: vec2<f32>
+                            wgpu::VertexAttribute {
+                                format: wgpu::VertexFormat::Float32x2,
+                                offset: 16,
+                                shader_location: 2,
+                            },
+                        ],
+                    },
+                    // Instance model matrix (four vec4 columns, locations 5-8)
+                    wgpu::VertexBufferLayout {
+                        array_stride: 64,
+                        step_mode: wgpu::VertexStepMode::Instance,
+                        attributes: &[
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                        ],
+                    },
+                ],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -346,13 +359,16 @@ impl RenderPass for ShadowPass {
                     );
                     enc.set_pipeline(&self.pipeline);
                     enc.set_bind_group(0, &self.bind_group, &[]);
+                    // Bake the shadow atlas layer index as a push constant into this bundle.
+                    // Each bundle_slot is unique per face so this value is always correct on replay.
+                    enc.set_immediates(0, bytemuck::bytes_of(&layer_idx));
                     for &idx in &self.filtered_indices {
                         let dc = &draw_calls[idx];
                         enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
                         enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+                        enc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(..));
                         enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        // instance_index = layer_idx selects the shadow matrix in the vertex shader
-                        enc.draw_indexed(0..dc.index_count, 0, layer_idx..(layer_idx + 1));
+                        enc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
                     }
                     let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: None });
                     pass.execute_bundles(std::iter::once(&bundle));
