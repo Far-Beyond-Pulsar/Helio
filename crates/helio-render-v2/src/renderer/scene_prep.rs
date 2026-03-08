@@ -9,7 +9,6 @@ use super::*;
 use super::uniforms::{GpuShadowMatrix, SkyUniform};
 use super::shadow_math::{CSM_SPLITS, compute_point_light_matrices, compute_directional_cascades, compute_spot_matrix};
 use super::helpers::estimate_sky_ambient;
-use super::portal::build_portal_scene_layout;
 use bytemuck::Zeroable;
 use glam::{Mat4, Vec3};
 
@@ -295,86 +294,5 @@ impl Renderer {
         if self.debug_printout && self.frame_count % 60 == 0 {
             eprintln!("🔧 prepare_env: {:.2}ms (lights={}, sky={})", ms, count, self.scene_has_sky);
         }
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-    // COMPAT SHIM — for callers that haven't migrated to add_object yet
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Legacy API: provide a [`Scene`] snapshot each frame.  Internally converts
-    /// to `set_env_from_scene` + `render()`.  Geometry in `scene.objects` is pushed
-    /// directly onto the draw list (one-shot, no GPU buffer retained across frames).
-    ///
-    /// Prefer `add_object` / `set_scene_env` / `render()` for new code.
-    pub fn render_scene(&mut self, scene: &Scene, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
-        // Capture scene layout for the live-portal thread.
-        if self.live_portal.is_some() {
-            let current_key = (scene.objects.len(), scene.lights.len(), scene.billboards.len());
-            if self.portal_scene_key != current_key || self.latest_scene_layout.is_none() {
-                self.latest_scene_layout = Some(build_portal_scene_layout(scene, camera));
-                self.portal_scene_key    = current_key;
-                self.pending_layout_changed = true;
-            } else {
-                if let Some(ref mut layout) = self.latest_scene_layout {
-                    let forward = camera.forward();
-                    layout.camera = Some(PortalSceneCamera {
-                        position: [camera.position.x, camera.position.y, camera.position.z],
-                        forward:  [forward.x, forward.y, forward.z],
-                    });
-                }
-                self.pending_layout_changed = false;
-            }
-        }
-
-        // Push scene objects directly onto the draw list (legacy one-shot path).
-        // Callers that want zero per-frame GPU alloc should migrate to add_object().
-        {
-            let mut dl  = self.draw_list.lock().unwrap();
-            let mut sdl = self.shadow_draw_list.lock().unwrap();
-            sdl.clear();
-            for obj in &scene.objects {
-                let (bind_group, transparent) = match obj.material.as_ref() {
-                    Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
-                    None      => (Arc::clone(&self.default_material_bind_group), false),
-                };
-                let mut dc = DrawCall::new(&obj.mesh, bind_group, transparent);
-                // Single-instance: pack the transform directly on the DrawCall.
-                let cols = obj.transform.to_cols_array();
-                let instance_buf = Arc::new(self.device.create_buffer_init(
-                    &wgpu::util::BufferInitDescriptor {
-                        label: Some("legacy_inst"),
-                        contents: bytemuck::bytes_of(&cols),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    },
-                ));
-                dc.instance_buffer = Some(Arc::clone(&instance_buf));
-                dc.instance_count  = 1;
-                dl.push(dc.clone());
-                sdl.push(dc);
-                // NOTE: instance_buf drops here; DrawCall holds the Arc so it lives
-                // until the draw list is consumed by render().
-            }
-        }
-
-        // Convert scene lights/sky/billboards into a SceneEnv and process immediately.
-        self.set_env_from_scene(scene);
-        if let Some(env) = self.pending_env.take() {
-            self.prepare_env(env, camera);
-        }
-
-        self.render(camera, target, delta_time)
-    }
-
-    /// Submit a mesh using per-instance transforms.
-    pub fn draw_mesh_instanced(&mut self,
-        mesh: &GpuMesh,
-        material: Arc<wgpu::BindGroup>,
-        instance_buf: Arc<wgpu::Buffer>,
-        count: u32,
-    ) {
-        let mut dc = DrawCall::new(mesh, material, false);
-        dc.instance_buffer = Some(instance_buf);
-        dc.instance_count = count;
-        self.draw_list.lock().unwrap().push(dc);
     }
 }

@@ -29,7 +29,7 @@ use helio_render_v2::{
     features::{FeatureRegistry, LightingFeature, ShadowsFeature},
     mesh::GpuMesh,
     camera::Camera,
-    scene::Scene,
+    SceneEnv, SceneLight,
 };
 
 
@@ -148,6 +148,10 @@ impl ApplicationHandler for App {
         ];
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&floor, None, glam::Mat4::IDENTITY);
+        for sphere in &spheres { renderer.add_object(sphere, None, glam::Mat4::IDENTITY); }
+        for cube   in &cubes   { renderer.add_object(cube,   None, glam::Mat4::IDENTITY); }
+
         self.state = Some(AppState {
             window,
             surface,
@@ -213,29 +217,22 @@ impl ApplicationHandler for App {
                 let proj = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 100.0);
                 let camera = Camera::from_matrices(view, proj, state.cam_pos);
 
-                // Build scene
-                let mut scene = Scene::new();
-                scene.set_ambient_light([0.05, 0.05, 0.08], 1.0);
-                
-                // Main light
-                scene.add_point_light([0.0, 3.0, 0.0], [1.0, 0.95, 0.9], 10.0, 8.0);
-                
-                // Colored accent lights
-                scene.add_point_light([-3.0, 1.5, -3.0], [1.0, 0.3, 0.3], 5.0, 5.0);
-                scene.add_point_light([3.0, 1.5, 3.0], [0.3, 0.5, 1.0], 5.0, 5.0);
-
-                // Render
-                state.renderer.draw_mesh(&state.floor);
-                for sphere in &state.spheres {
-                    state.renderer.draw_mesh(sphere);
-                }
-                for cube in &state.cubes {
-                    state.renderer.draw_mesh(cube);
-                }
+                // Build environment
+                let env = SceneEnv {
+                    lights: vec![
+                        SceneLight::point([0.0,  3.0,  0.0], [1.0, 0.95, 0.9], 10.0, 8.0),
+                        SceneLight::point([-3.0, 1.5, -3.0], [1.0, 0.3,  0.3],  5.0, 5.0),
+                        SceneLight::point([ 3.0, 1.5,  3.0], [0.3, 0.5,  1.0],  5.0, 5.0),
+                    ],
+                    ambient_color:     [0.05, 0.05, 0.08],
+                    ambient_intensity: 1.0,
+                    ..Default::default()
+                };
 
                 let frame = state.surface.get_current_texture().unwrap();
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                state.renderer.render_scene(&view, &camera, &scene);
+                state.renderer.set_scene_env(env);
+                state.renderer.render(&camera, &view, dt).ok();
                 frame.present();
 
                 state.window.request_redraw();

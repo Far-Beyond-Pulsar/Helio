@@ -13,7 +13,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
 
 
 use helio_render_v2::features::{
@@ -232,6 +232,11 @@ impl ApplicationHandler for App {
         let ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 5.0);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cube2,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
+
         self.state = Some(AppState {
             window,
             surface,
@@ -437,31 +442,27 @@ impl AppState {
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
 
-        let mut scene = Scene::new()
-            // Lighting objects
-            .add_light(SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0))
-            .add_light(SceneLight::point(p1, [0.25, 0.5,  1.0], 5.0, 6.0))
-            .add_light(SceneLight::point(p2, [1.0, 0.3,  0.5],  5.0, 6.0))
-
-            // Geometry objects
-            .add_object(self.cube1.clone())
-            .add_object(self.cube2.clone())
-            .add_object(self.cube3.clone())
-            .add_object(self.ground.clone());
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
         } else {
-            // Billboards co-located with each light
-            scene = scene
-                .add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]))
-                .add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5,  1.0, 1.0]))
-                .add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3,  0.5, 1.0]));
-        }
+            vec![
+                BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]),
+                BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5,  1.0, 1.0]),
+                BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3,  0.5, 1.0]),
+            ]
+        };
 
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+        let env = SceneEnv {
+            lights: vec![
+                SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
+                SceneLight::point(p1, [0.25, 0.5,  1.0], 5.0, 6.0),
+                SceneLight::point(p2, [1.0, 0.3,  0.5],  5.0, 6.0),
+            ],
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }
 

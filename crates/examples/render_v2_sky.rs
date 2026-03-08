@@ -21,7 +21,7 @@
 mod demo_portal;
 
 use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight,
+    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
 
@@ -242,6 +242,12 @@ impl ApplicationHandler for App {
         let roof   = GpuMesh::rect3d(&device, [0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
+        renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cube2,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
+        renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
+        renderer.add_object(&roof,   None, glam::Mat4::IDENTITY);
+
         self.state = Some(AppState {
             window, surface, device, surface_format, renderer,
             last_frame: std::time::Instant::now(),
@@ -439,9 +445,24 @@ impl AppState {
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut scene = Scene::new()
-            // ── Atmosphere ───────────────────────────────────────────────────
-            .with_sky_atmosphere(
+        let billboards = if self.probe_vis {
+            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
+        } else {
+            vec![
+                BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0]),
+                BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0]),
+                BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0]),
+            ]
+        };
+
+        let env = SceneEnv {
+            lights: vec![
+                SceneLight::directional(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
+                SceneLight::point([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0),
+                SceneLight::point([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0),
+                SceneLight::point([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0),
+            ],
+            sky_atmosphere: Some(
                 SkyAtmosphere::new()
                     .with_sun_intensity(22.0)
                     .with_exposure(4.0)
@@ -453,55 +474,13 @@ impl AppState {
                             .with_layer(800.0, 1800.0)
                             .with_wind([1.0, 0.0], 0.08),
                     ),
-            )
-            // Sky-derived ambient fills shadowed areas with correct sky colour.
-            // Kept low so the colored point lights read clearly.
-            .with_skylight(
-                Skylight::new()
-                    .with_intensity(0.08)
-                    .with_tint([1.0, 1.0, 1.0]),
-            )
-            // ── Sun directional light ─────────────────────────────────────────
-            // Drives the sky's sun disc position; casts shadows + RC GI.
-            // Intensity scaled back so colored lights aren't drowned in white.
-            .add_light(
-                SceneLight::directional(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
-            )
-            // ── Colored point lights ──────────────────────────────────────────
-            // Three lights with distinct hues show how colored scene lights
-            // interact with the sky-lit scene: warm amber, cool blue, deep red.
-            .add_light(SceneLight::point([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0))
-            .add_light(SceneLight::point([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0))
-            .add_light(SceneLight::point([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0))
-            // ── Geometry ─────────────────────────────────────────────────────
-            .add_object(self.cube1.clone())
-            .add_object(self.cube2.clone())
-            .add_object(self.cube3.clone())
-            .add_object(self.ground.clone())
-            .add_object(self.roof.clone());
-
-        if self.probe_vis {
-            for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                scene = scene.add_billboard(b);
-            }
-        } else {
-            // ── Billboard markers (visible light sources) ─────────────────────
-            scene = scene
-                .add_billboard(
-                    BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35])
-                        .with_color([1.0, 0.85, 0.6, 1.0]),
-                )
-                .add_billboard(
-                    BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35])
-                        .with_color([0.4, 0.6, 1.0, 1.0]),
-                )
-                .add_billboard(
-                    BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35])
-                        .with_color([1.0, 0.3, 0.3, 1.0]),
-                );
-        }
-
-        if let Err(e) = self.renderer.render_scene(&scene, &camera, &view, dt) {
+            ),
+            skylight: Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 1.0, 1.0])),
+            billboards,
+            ..Default::default()
+        };
+        self.renderer.set_scene_env(env);
+        if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }
 

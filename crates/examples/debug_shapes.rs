@@ -17,7 +17,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, Scene};
+use helio_render_v2::{Renderer, RendererConfig, Camera, SceneEnv};
 
 
 use helio_render_v2::features::FeatureRegistry;
@@ -444,22 +444,17 @@ impl AppState {
 
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Create empty scene (we're only drawing debug shapes)
-        let scene = Scene::default();
-
-        // Create camera from free-fly controls
+        // Build camera from free-fly state
         let fwd = glam::Vec3::new(
             self.cam_yaw.sin() * self.cam_pitch.cos(),
             self.cam_pitch.sin(),
             -self.cam_yaw.cos() * self.cam_pitch.cos(),
         ).normalize();
-        let target = self.cam_pos + fwd;
-
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
         let camera = Camera::perspective(
             self.cam_pos,
-            target,
+            self.cam_pos + fwd,
             glam::Vec3::Y,
             70.0_f32.to_radians(),
             aspect,
@@ -468,7 +463,9 @@ impl AppState {
             self.time,
         );
 
-        self.renderer.render_scene(&scene, &camera, &view, 0.016).ok();
+        // Create empty environment (we're only drawing debug shapes)
+        self.renderer.set_scene_env(SceneEnv::default());
+        self.renderer.render(&camera, &view, 0.016).ok();
 
         output.present();
     }

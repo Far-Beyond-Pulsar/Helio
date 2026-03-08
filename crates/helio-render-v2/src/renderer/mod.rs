@@ -17,7 +17,7 @@ use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
 use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
 use crate::camera::Camera;
-use crate::scene::{Scene, ObjectId, SceneLight};
+use crate::scene::{ObjectId, SceneLight};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
@@ -480,33 +480,11 @@ impl Renderer {
         self.pending_env = Some(env);
     }
 
-    /// Convenience: build a [`SceneEnv`] from a legacy [`crate::scene::Scene`] value and
-    /// supply it in one call.  Use this to migrate existing examples one line at a time.
-    ///
-    /// IMPORTANT: unlike the old `render_scene`, this method does NOT draw the objects
-    /// in the scene's `objects` vec via the new proxy system.  Objects from `scene.objects`
-    /// that were added with the legacy builder are drawn via `draw_mesh()` calls that you
-    /// supply, OR you should port them to `add_object` / `remove_object`.
-    pub fn set_env_from_scene(&mut self, scene: &crate::scene::Scene) {
-        self.pending_env = Some(SceneEnv {
-            lights:            scene.lights.clone(),
-            ambient_color:     scene.ambient_color,
-            ambient_intensity: scene.ambient_intensity,
-            sky_color:         scene.sky_color,
-            sky_atmosphere:    scene.sky_atmosphere.clone(),
-            skylight:          scene.skylight.clone(),
-            billboards:        scene.billboards.clone(),
-        });
-    }
-
 
 
     /// Render a frame.
     ///
-    /// Before calling this, either:
-    ///  - Supply environment via `set_scene_env()` / `set_env_from_scene()`, or
-    ///  - Call the legacy `render_scene()` which does all of the above for you.
-    ///
+    /// Before calling this, supply the per-frame environment via `set_scene_env()`.
     /// Registered objects (added via `add_object`) are included automatically —
     /// no other per-frame object submission is required at steady state.
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
