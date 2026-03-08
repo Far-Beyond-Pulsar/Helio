@@ -403,11 +403,7 @@ impl Renderer {
             }
         }
 
-        let prep_ms = prep_start.elapsed().as_secs_f32() * 1000.0;
-
-        // ── Execute render graph ──────────────────────────────────────────────
-        let graph_start = std::time::Instant::now();
-
+        // ── Encoder + pre-AA clear (still part of prep) ──────────────────────
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -438,6 +434,9 @@ impl Renderer {
             });
         }
 
+        let prep_ms = prep_start.elapsed().as_secs_f32() * 1000.0;
+
+        // ── Execute render graph ──────────────────────────────────────────────
         let mut graph_ctx = GraphContext {
             encoder: &mut encoder,
             resources: &self.resources,
@@ -457,6 +456,7 @@ impl Renderer {
 
         let profiling_active = self.debug_printout || self.live_portal.is_some();
 
+        let graph_start = std::time::Instant::now();
         if profiling_active {
             if let Some(p) = &mut self.profiler { p.begin_frame(); }
             self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
