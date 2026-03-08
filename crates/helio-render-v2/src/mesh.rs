@@ -159,23 +159,6 @@ impl GpuMesh {
         Self::new(device, &vertices, &indices)
     }
 
-    /// Unit cube in local space, centered at the origin with half-size 0.5.
-    ///
-    /// Unlike [`Self::cube`] which bakes world-space positions into vertices,
-    /// this mesh is designed for GPU instancing: place and scale it with
-    /// `SceneObject::with_transform()` and the vertex shader applies the model matrix.
-    pub fn unit_cube(device: &wgpu::Device) -> Self {
-        Self::cube(device, [0.0, 0.0, 0.0], 0.5)
-    }
-
-    /// Local-space box with independent half-extents, centered at the origin.
-    ///
-    /// Designed for GPU instancing; use [`Self::rect3d`] when you want world-space
-    /// positions baked into vertices.
-    pub fn unit_rect3d(device: &wgpu::Device, half_extents: [f32; 3]) -> Self {
-        Self::rect3d(device, [0.0, 0.0, 0.0], half_extents)
-    }
-
     /// Build an axis-aligned box with independent half-extents on each axis.
     /// Useful for thin slabs, beams, or any non-uniform rectangular volume.
     pub fn rect3d(device: &wgpu::Device, center: [f32; 3], half_extents: [f32; 3]) -> Self {

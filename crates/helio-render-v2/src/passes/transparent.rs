@@ -148,9 +148,8 @@ impl RenderPass for TransparentPass {
                 last_material = Some(mat_ptr);
             }
             pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-            pass.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(..));
             pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
+            pass.draw_indexed(0..dc.index_count, 0, 0..1);
         }
 
         Ok(())

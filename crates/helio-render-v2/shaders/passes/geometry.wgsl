@@ -80,23 +80,12 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
-// Per-instance model transform (locations 5-8, VertexStepMode::Instance).
-struct Instance {
-    @location(5) model_0: vec4<f32>,
-    @location(6) model_1: vec4<f32>,
-    @location(7) model_2: vec4<f32>,
-    @location(8) model_3: vec4<f32>,
-}
-
 @vertex
-fn vs_main(vertex: Vertex, inst: Instance) -> VertexOutput {
-    let model      = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
-    let world_pos  = model * vec4<f32>(vertex.position, 1.0);
-    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+fn vs_main(vertex: Vertex) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position  = camera.view_proj * world_pos;
-    out.world_position = world_pos.xyz;
-    out.world_normal   = normalize(normal_mat * decode_snorm8x4(vertex.normal));
+    out.clip_position  = camera.view_proj * vec4<f32>(vertex.position, 1.0);
+    out.world_position = vertex.position;
+    out.world_normal   = normalize(decode_snorm8x4(vertex.normal));
     out.tex_coords     = vertex.tex_coords;
     return out;
 }

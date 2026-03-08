@@ -25,6 +25,12 @@ pub struct DepthPrepassPass {
     /// Generation counter when the cached bundle was built.  When it differs
     /// from PassContext::draw_list_generation the bundle is rebuilt.
     cached_generation: u64,
+    /// Camera position and forward at the time of the last sort.  Used to skip
+    /// re-sorting when neither the scene nor the camera has changed.
+    last_sort_cam_pos: glam::Vec3,
+    last_sort_cam_fwd: glam::Vec3,
+    /// draw_list_generation value when sorted_opaque_indices was last computed.
+    last_sort_generation: u64,
 }
 
 impl DepthPrepassPass {
@@ -42,6 +48,9 @@ impl DepthPrepassPass {
             shared_sorted: shared_sorted.clone(),
             bundle_cache: None,
             cached_generation: u64::MAX,
+            last_sort_cam_pos: glam::Vec3::ZERO,
+            last_sort_cam_fwd: glam::Vec3::NEG_Z,
+            last_sort_generation: u64::MAX,
         };
         (pass, shared_sorted)
     }
@@ -57,15 +66,18 @@ impl RenderPass for DepthPrepassPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let draw_calls = self.draw_list.lock().unwrap();
+        let cam = ctx.camera_position;
+        let fwd = ctx.camera_forward;
 
-        // Rebuild index list and bundle when the draw list content changes.
-        // Sort by material bind-group pointer — camera-independent, so this
-        // sort and the resulting bundle remain valid across all camera moves.
-        // (Front-to-back depth sorting is unnecessary here: the depth prepass
-        // has no fragment cost and modern GPU hardware early-Z handles rejection
-        // automatically. The sort only needs to change when objects are
-        // added/removed/swapped, which is captured by draw_list_generation.)
-        if ctx.draw_list_generation != self.cached_generation {
+        // Skip re-sort when neither the draw list nor the camera has changed.
+        // The sort is O(N log N) on 3-4k indices (~0.35 ms); skipping it on
+        // static frames saves significant CPU time each frame.
+        let cam_moved = (cam - self.last_sort_cam_pos).length_squared() > 0.01
+            || (fwd - self.last_sort_cam_fwd).length_squared() > 0.0001;
+        let need_sort = ctx.draw_list_generation != self.last_sort_generation || cam_moved;
+
+        if need_sort {
+            // Sort opaque draws front-to-back for early-Z rejection.
             self.sorted_opaque_indices.clear();
             self.sorted_opaque_indices.reserve(draw_calls.len());
             for (idx, dc) in draw_calls.iter().enumerate() {
@@ -73,18 +85,30 @@ impl RenderPass for DepthPrepassPass {
                     self.sorted_opaque_indices.push(idx);
                 }
             }
-            // Sort by material pointer to minimise bind-group state changes;
-            // this ordering is stable with respect to the camera.
-            self.sorted_opaque_indices.sort_unstable_by_key(|&i| {
-                Arc::as_ptr(&draw_calls[i].material_bind_group) as usize
+            self.sorted_opaque_indices.sort_unstable_by(|&ia, &ib| {
+                let a = &draw_calls[ia];
+                let b = &draw_calls[ib];
+                let za = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd) - a.bounds_radius;
+                let zb = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd) - b.bounds_radius;
+                za.partial_cmp(&zb)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        let ma = Arc::as_ptr(&a.material_bind_group) as usize;
+                        let mb = Arc::as_ptr(&b.material_bind_group) as usize;
+                        ma.cmp(&mb)
+                    })
             });
 
-            // Publish the stable order to GBufferPass.
+            // Publish sorted order to GBufferPass.
             {
                 let mut shared = self.shared_sorted.lock().unwrap();
                 shared.clear();
                 shared.extend_from_slice(&self.sorted_opaque_indices);
             }
+
+            self.last_sort_cam_pos = cam;
+            self.last_sort_cam_fwd = fwd;
+            self.last_sort_generation = ctx.draw_list_generation;
         }
 
         // Rebuild RenderBundle when the draw list content changes.
@@ -121,9 +145,8 @@ impl RenderPass for DepthPrepassPass {
                     last_material = Some(mat_ptr);
                 }
                 benc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                benc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(..));
                 benc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                benc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
+                benc.draw_indexed(0..dc.index_count, 0, 0..1);
             }
             self.bundle_cache = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
             self.cached_generation = ctx.draw_list_generation;

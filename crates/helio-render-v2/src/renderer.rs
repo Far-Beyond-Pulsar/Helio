@@ -2012,22 +2012,25 @@ impl Renderer {
             let mesh = &obj.mesh;
             let mat_opt = obj.material.as_ref();
 
-            // Every draw needs an instance buffer — the vertex shader always reads
-            // the per-instance model transform from slot 1.  Single-object batches
-            // reuse their SceneObject transform; multi-object batches pack all transforms.
-            let cached = self.instance_buffer_cache.remove(key);
-            let inst_buf = match cached {
-                Some((arc, cached_count)) if cached_count == count => {
-                    self.queue.write_buffer(&arc, 0, bytemuck::cast_slice(mats));
-                    arc
-                }
-                _ => Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Instance transforms"),
-                    contents: bytemuck::cast_slice(mats),
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                })),
+            // instance buffer only when we have >1 instances
+            let inst_buf: Option<Arc<wgpu::Buffer>> = if count > 1 {
+                let cached = self.instance_buffer_cache.remove(key);
+                let buf = match cached {
+                    Some((arc, cached_count)) if cached_count == count => {
+                        self.queue.write_buffer(&arc, 0, bytemuck::cast_slice(mats));
+                        arc
+                    }
+                    _ => Arc::new(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Instance transforms"),
+                        contents: bytemuck::cast_slice(mats),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    })),
+                };
+                self.instance_buffer_cache.insert(*key, (buf.clone(), count));
+                Some(buf)
+            } else {
+                None
             };
-            self.instance_buffer_cache.insert(*key, (inst_buf.clone(), count));
 
             let (bind_group, transparent) = match mat_opt {
                 Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
@@ -2035,8 +2038,10 @@ impl Renderer {
             };
 
             let mut dc = DrawCall::new(mesh, bind_group, transparent);
-            dc.instance_buffer = Some(inst_buf);
-            dc.instance_count = count;
+            if let Some(buf) = inst_buf {
+                dc.instance_buffer = Some(buf);
+                dc.instance_count = count;
+            }
             local_draws.push(dc);
         }
 
