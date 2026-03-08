@@ -129,8 +129,9 @@ impl RenderPass for GBufferPass {
                     last_material = Some(mat_ptr);
                 }
                 benc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+                benc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(..));
                 benc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                benc.draw_indexed(0..dc.index_count, 0, 0..1);
+                benc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
             }
             self.bundle_cache = Some(benc.finish(&wgpu::RenderBundleDescriptor { label: None }));
             self.cached_generation = ctx.draw_list_generation;
