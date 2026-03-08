@@ -4,6 +4,7 @@ use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle}
 use crate::mesh::DrawCall;
 use crate::Result;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
+use wgpu::util::DeviceExt;
 
 /// Per-light data written by the `Renderer` each frame and read by `ShadowPass::execute`
 /// to skip draw calls that cannot contribute to a given shadow face.
@@ -77,7 +78,12 @@ pub struct ShadowPass {
     /// Per-light position + range + type for CPU draw-call culling.
     cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
     pipeline: Arc<wgpu::RenderPipeline>,
-    bind_group: wgpu::BindGroup,
+    /// Per-face (light_idx*6+face) bind group. Each contains the shadow matrix storage buffer
+    /// at binding 0 and a tiny uniform buffer holding the layer index at binding 1.
+    /// This avoids needing push-constant (immediate) device support.
+    slot_bind_groups: Vec<wgpu::BindGroup>,
+    /// Backing u32 uniform buffers for `slot_bind_groups` — kept alive alongside the bind groups.
+    slot_idx_buffers: Vec<wgpu::Buffer>,
     /// Per-light shadow cache — skip re-rendering when light and geometry are unchanged.
     shadow_cache: Vec<ShadowLightCache>,
     filtered_indices: Vec<usize>,
@@ -101,28 +107,31 @@ impl ShadowPass {
         device: Arc<wgpu::Device>,
         material_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        // Bind group layout: binding 0 = shadow matrices storage buffer (vertex stage)
+        // BGL binding 0: shadow matrices storage; binding 1: per-face layer index uniform.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow Matrix BGL"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
                 },
-                count: None,
-            }],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Shadow Matrix Bind Group"),
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: shadow_matrix_buffer.as_entire_binding(),
-            }],
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
         });
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -135,7 +144,7 @@ impl ShadowPass {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
             bind_group_layouts: &[Some(&bgl), Some(material_layout)],
-            immediate_size: 4,
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -213,6 +222,36 @@ impl ShadowPass {
         });
 
         let max_lights = layer_views.len() / 6;
+        let total_slots = max_lights * 6;
+
+        // Pre-bake one bind group per atlas layer so each face's RenderBundle can
+        // embed the correct layer index without push-constant support.
+        let mut slot_idx_buffers = Vec::with_capacity(total_slots);
+        let mut slot_bind_groups = Vec::with_capacity(total_slots);
+        for slot in 0..total_slots {
+            let idx_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("shadow_layer_idx"),
+                contents: &(slot as u32).to_le_bytes(),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Shadow Slot BG"),
+                layout: &bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: shadow_matrix_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: idx_buf.as_entire_binding(),
+                    },
+                ],
+            });
+            slot_idx_buffers.push(idx_buf);
+            slot_bind_groups.push(bg);
+        }
+
         Self {
             device,
             layer_views,
@@ -222,10 +261,11 @@ impl ShadowPass {
             light_face_counts,
             cull_lights,
             pipeline: Arc::new(pipeline),
-            bind_group,
+            slot_bind_groups,
+            slot_idx_buffers,
             shadow_cache: vec![ShadowLightCache::default(); max_lights],
             filtered_indices: Vec::new(),
-            bundle_cache: (0..max_lights * 6).map(|_| None).collect(),
+            bundle_cache: (0..total_slots).map(|_| None).collect(),
             bundle_geom_hashes: vec![u64::MAX; max_lights],
         }
     }
@@ -358,10 +398,9 @@ impl RenderPass for ShadowPass {
                         },
                     );
                     enc.set_pipeline(&self.pipeline);
-                    enc.set_bind_group(0, &self.bind_group, &[]);
-                    // Bake the shadow atlas layer index as a push constant into this bundle.
-                    // Each bundle_slot is unique per face so this value is always correct on replay.
-                    enc.set_immediates(0, bytemuck::bytes_of(&layer_idx));
+                    // Each slot_bind_group has the layer index baked in at binding 1,
+                    // so replaying this bundle always selects the correct shadow matrix.
+                    enc.set_bind_group(0, &self.slot_bind_groups[bundle_slot], &[]);
                     for &idx in &self.filtered_indices {
                         let dc = &draw_calls[idx];
                         enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);

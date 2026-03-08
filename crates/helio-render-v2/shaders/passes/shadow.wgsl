@@ -23,11 +23,10 @@ struct Material {
     alpha_cutoff:    f32,
 }
 
-/// Push constant: which shadow atlas layer (light_idx * 6 + face) to render into.
-struct ShadowImmediate {
-    layer_idx: u32,
-}
-var<immediate> shadow_pc: ShadowImmediate;
+/// Which shadow atlas layer (light_idx * 6 + face) this draw encodes into.
+/// Stored in a tiny per-face uniform buffer so the RenderBundle can bake it
+/// without needing push-constant/immediates device support.
+@group(0) @binding(1) var<uniform> shadow_layer_idx: u32;
 
 @group(0) @binding(0) var<storage, read> light_matrices: array<LightMatrix>;
 
@@ -57,7 +56,7 @@ fn vs_main(
     let model     = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
     let world_pos = model * vec4<f32>(position, 1.0);
     var out: VertexOutput;
-    out.clip_position = light_matrices[shadow_pc.layer_idx].mat * world_pos;
+    out.clip_position = light_matrices[shadow_layer_idx].mat * world_pos;
     out.tex_coords = tex_coords;
     return out;
 }
