@@ -194,6 +194,10 @@ pub struct Renderer {
     shadow_batch_buffers: HashMap<(usize, usize), Arc<wgpu::Buffer>>,
     /// Capacity (in instances) currently allocated for each per-batch shadow buffer.
     shadow_batch_capacities: HashMap<(usize, usize), u32>,
+    /// FNV hash of the last-uploaded transform data per batch.  Used to skip redundant
+    /// `write_buffer` calls for static geometry (terrain chunks, props) whose instance data
+    /// is unchanged between slow-path frames triggered by other batches changing.
+    shadow_batch_transform_hashes: HashMap<(usize, usize), u64>,
     /// Shadow draw list backed by per-batch stable instance buffers (distinct from the opaque
     /// `draw_list` which uses the shared buffer).  Passed to `ShadowPass` so bundle amortisation
     /// is safe even when new chunks insert batches mid-stream.

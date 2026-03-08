@@ -181,14 +181,17 @@ impl Renderer {
                 // the instance count changes.  ShadowPass can then safely amortise face
                 // bundle rebuilds: stale bundles reference these per-batch buffers rather
                 // than the shared opaque buffer, whose layout can shift on batch insert.
+                // A per-batch FNV hash of the raw transform data skips redundant write_buffer
+                // calls for static geometry (terrain chunks, props) even when the slow-path
+                // runs due to other batches changing.
                 {
                     let mut shadow_dcs = Vec::with_capacity(self.scratch_batches.len());
                     for (&key, mats) in &self.scratch_batches {
                         if mats.is_empty() { continue; }
                         let count = mats.len() as u32;
-                        let prev = self.shadow_batch_capacities.get(&key).copied().unwrap_or(0);
+                        let prev  = self.shadow_batch_capacities.get(&key).copied().unwrap_or(0);
                         if count != prev {
-                            // Instance count changed (or new batch): create / resize buffer.
+                            // Instance count changed (or brand-new batch): reallocate buffer.
                             let buf = Arc::new(self.device.create_buffer_init(
                                 &wgpu::util::BufferInitDescriptor {
                                     label: Some("Shadow Batch Inst"),
@@ -199,21 +202,31 @@ impl Renderer {
                             ));
                             self.shadow_batch_buffers.insert(key, buf);
                             self.shadow_batch_capacities.insert(key, count);
+                            // Force hash mismatch on next frame (data was just written via
+                            // create_buffer_init; skip the write_buffer below).
+                            // Compute and store the hash so the next frame can short-circuit.
+                            let h = fnv_mats(mats);
+                            self.shadow_batch_transform_hashes.insert(key, h);
                         } else if let Some(buf) = self.shadow_batch_buffers.get(&key) {
-                            // Stable count: re-upload transforms (handles moving objects).
-                            self.queue.write_buffer(buf, 0, bytemuck::cast_slice(mats));
+                            // Same instance count.  Only upload if transforms actually changed.
+                            let h = fnv_mats(mats);
+                            let prev_h = self.shadow_batch_transform_hashes.get(&key).copied().unwrap_or(0);
+                            if h != prev_h {
+                                self.queue.write_buffer(buf, 0, bytemuck::cast_slice(mats));
+                                self.shadow_batch_transform_hashes.insert(key, h);
+                            }
                         }
                         if let Some(buf) = self.shadow_batch_buffers.get(&key) {
                             let i_obj = self.scratch_example_idx[&key];
-                            let obj = &scene.objects[i_obj];
+                            let obj   = &scene.objects[i_obj];
                             let (bind_group, transparent) = match obj.material.as_ref() {
                                 Some(mat) => (Arc::clone(&mat.bind_group), mat.transparent_blend),
                                 None => (Arc::clone(&self.default_material_bind_group), false),
                             };
                             let mut dc = DrawCall::new(&obj.mesh, bind_group, transparent);
-                            dc.instance_buffer = Some(Arc::clone(buf));
+                            dc.instance_buffer        = Some(Arc::clone(buf));
                             dc.instance_buffer_offset = 0;
-                            dc.instance_count = count;
+                            dc.instance_count         = count;
                             shadow_dcs.push(dc);
                         }
                     }

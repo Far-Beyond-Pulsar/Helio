@@ -637,6 +637,7 @@ impl Renderer {
             scratch_instance_transforms: Vec::new(),
             shadow_batch_buffers: HashMap::new(),
             shadow_batch_capacities: HashMap::new(),
+            shadow_batch_transform_hashes: HashMap::new(),
             shadow_draw_list,
             frame_count: 0,
             width: config.width,
