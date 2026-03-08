@@ -174,6 +174,7 @@ pub struct PortalFrameSnapshot {
     pub graph_ms: f32,
     pub aa_ms: f32,
     pub resolve_ms: f32,
+    pub finish_ms: f32,
     pub submit_ms: f32,
     pub poll_ms: f32,
     pub untracked_ms: f32,
@@ -253,6 +254,7 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                                             PortalStageTiming { id: "pipeline".into(),  name: "Render Pipeline".into(), ms: snapshot.graph_ms },
                                             PortalStageTiming { id: "aa".into(),        name: "AA".into(),              ms: snapshot.aa_ms },
                                             PortalStageTiming { id: "resolve".into(),   name: "Resolve".into(),         ms: snapshot.resolve_ms },
+                                            PortalStageTiming { id: "finish".into(),    name: "Encode".into(),          ms: snapshot.finish_ms },
                                             PortalStageTiming { id: "submit".into(),    name: "Submit".into(),          ms: snapshot.submit_ms },
                                             PortalStageTiming { id: "poll".into(),      name: "Poll".into(),            ms: snapshot.poll_ms },
                                         ];

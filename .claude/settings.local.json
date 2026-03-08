@@ -20,7 +20,9 @@
       "Bash(cat:*)",
       "Bash(Select-String -Pattern \"(error|warning:.*crates.helio-render-v2)\" -Context 0,2)",
       "Bash(dir:*)",
-      "Bash(copy:*)"
+      "Bash(copy:*)",
+      "Bash(cargo check:*)",
+      "Bash(wc:*)"
     ]
   }
 }

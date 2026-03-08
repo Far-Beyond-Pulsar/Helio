@@ -11,8 +11,6 @@
 //!   4           — toggle GPU timing printout (stderr)
 //!   Escape      — release cursor / exit
 
-
-
 mod demo_portal;
 
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, Scene, SceneLight};
