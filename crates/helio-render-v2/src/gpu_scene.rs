@@ -203,6 +203,13 @@ pub struct GpuScene {
     /// Generation at which the caches were last rebuilt.
     cached_generation: u64,
 
+    // ── Cached draw list partition ────────────────────────────────────────
+    /// Index of the first transparent draw in `cached_draw_list`.
+    /// `cached_draw_list[0..transparent_start]` = opaque (merged, sorted by material).
+    /// `cached_draw_list[transparent_start..]`  = transparent (one entry per object).
+    /// Rebuilt whenever `generation` changes; 0 when list is empty.
+    pub(crate) transparent_start: usize,
+
     // ── Stats ────────────────────────────────────────────────────────────
     /// Number of slots written to GPU this frame (for profiler).
     pub(crate) last_upload_slot_count: u32,
@@ -272,6 +279,7 @@ impl GpuScene {
             cached_draw_list: Vec::new(),
             cached_shadow_draw_list: Vec::new(),
             cached_generation: u64::MAX, // force rebuild on first frame
+            transparent_start: 0,
             last_upload_slot_count: 0,
             last_upload_bytes: 0,
         };
@@ -507,6 +515,7 @@ impl GpuScene {
             self.cached_draw_list.push(dc);
         }
         // Append transparent draws after all opaque batches.
+        self.transparent_start = self.cached_draw_list.len();
         self.cached_draw_list.extend(transparent);
 
         self.cached_generation = self.generation;

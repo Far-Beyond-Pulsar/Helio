@@ -52,7 +52,11 @@ const SLOT_BYTES: u64 = SLOT_COUNT as u64 * 8; // each timestamp is a u64
 #[macro_export]
 macro_rules! profile_scope {
     ($name:expr) => {
-        let _prof_guard = $crate::profiler::ScopeGuard::new($name);
+        // Single relaxed atomic load — branch-predictor-friendly on steady state.
+        // When the portal is disconnected this is a complete no-op: no allocation,
+        // no thread-local access, no timestamp.
+        let _prof_guard = $crate::profiler::profiling_active()
+            .then(|| $crate::profiler::ScopeGuard::new($name));
     };
 }
 
@@ -103,6 +107,23 @@ pub(crate) enum ProfileEvent {
 
 /// Global channel sender, initialised on first use.
 static PROFILE_TX: OnceLock<std::sync::mpsc::Sender<ProfileEvent>> = OnceLock::new();
+
+/// Set to `true` when a live portal is connected, `false` otherwise.
+/// `profile_scope!` checks this atomically and becomes a complete no-op
+/// when inactive — zero cost on the hot render path.
+static PROFILING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Activate or deactivate CPU scope recording.
+/// Call with `true` when a portal client connects, `false` on disconnect.
+pub fn set_profiling_active(active: bool) {
+    PROFILING_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+/// Returns `true` if scope recording is currently active.
+#[inline(always)]
+pub fn profiling_active() -> bool {
+    PROFILING_ACTIVE.load(Ordering::Relaxed)
+}
 
 /// Counter for scope indices within a frame.  Reset each frame by FrameEnd.
 static SCOPE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

@@ -16,8 +16,6 @@ use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceC
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
-use crate::passes::depth_prepass::{BundleInbox, PrecompiledBundles, sort_opaque_indices, build_depth_bundle};
-use crate::passes::gbuffer::build_gbuffer_bundle;
 use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight, LightId, BillboardId};
@@ -35,6 +33,10 @@ use helio_live_portal::{
     PortalStageTiming,
     PortalSceneLayout,
     PortalSceneLayoutDelta,
+    PortalSceneObject,
+    PortalSceneLight,
+    PortalSceneBillboard,
+    PortalSceneCamera,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
@@ -260,16 +262,6 @@ pub struct Renderer {
     /// Pointers to all registered-proxy DrawCalls, rebuilt O(N) each frame by
     /// pointer-cloning.  ShadowPass culls this by light range on its own thread.
     shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
-
-    // ── Parallel bundle pre-compilation (Unreal FParallelCommandListSet) ──
-    /// Shared inbox through which the Renderer delivers pre-compiled bundles
-    /// to DepthPrepassPass and GBufferPass before graph execution.
-    bundle_inbox: Arc<BundleInbox>,
-    /// Pipeline copies kept on the Renderer for the pre-compile thread pool.
-    depth_pipeline: Arc<wgpu::RenderPipeline>,
-    gbuffer_pipeline: Arc<wgpu::RenderPipeline>,
-    /// draw_list_generation value at the time bundles were last parallel pre-compiled.
-    last_precompile_gen: u64,
 
     // ════════════════════════════════════════════════════════════════════════
     // GPU-RESIDENT SCENE (Unreal FGPUScene equivalent)
@@ -800,112 +792,6 @@ impl Renderer {
             *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
         }
 
-        // ── Parallel bundle pre-compilation (Unreal FParallelCommandListSet) ────
-        //
-        // When the draw list changes (add/remove/enable/disable object), split the
-        // sorted opaque draw list into N chunks and compile each chunk into its own
-        // RenderBundle on a worker thread.  This is equivalent to:
-        //   UE4: FParallelCommandListSet → RHICmdList[i].DrawIndexedPrimitive(…)
-        //   D3D12: N secondary command lists → ExecuteCommandLists(N, pLists)
-        //   wgpu:  N RenderBundles → pass.execute_bundles(&bundles)
-        //
-        // The pre-compiled bundles are deposited into the shared BundleInbox.
-        // DepthPrepassPass and GBufferPass pick them up in their execute() methods,
-        // avoiding any inline compilation.  At steady state (no scene changes),
-        // this block is skipped entirely.
-        if self.draw_list_generation != self.last_precompile_gen {
-            crate::profile_scope!("parallel_precompile");
-            let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
-            let sorted = sort_opaque_indices(&draw_calls);
-
-            if sorted.len() >= 64 {
-                let num_chunks = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4)
-                    .min(8)
-                    .max(1);
-                let chunk_size = (sorted.len() + num_chunks - 1) / num_chunks;
-
-                // Rebind Arc-wrapped fields to local shared refs so scoped threads
-                // can capture them without borrowing `self`.
-                let device: &wgpu::Device        = &self.device;
-                let depth_pl: &wgpu::RenderPipeline  = &self.depth_pipeline;
-                let gbuf_pl: &wgpu::RenderPipeline   = &self.gbuffer_pipeline;
-                let global_bg: &wgpu::BindGroup  = &self.global_bind_group;
-                let lighting_bg: &wgpu::BindGroup = &self.lighting_bind_group;
-                let generation     = self.draw_list_generation;
-                let global_bg_ptr  = global_bg as *const _ as usize;
-                let lighting_bg_ptr = lighting_bg as *const _ as usize;
-                let dc_ref: &[DrawCall] = &draw_calls;
-                let sorted_ref: &[usize] = &sorted;
-
-                // Pre-collect chunks so spawn closures capture simple slices.
-                let chunks: Vec<&[usize]> = sorted_ref.chunks(chunk_size).collect();
-
-                let (depth_bundles, depth_kept, gbuf_bundles, gbuf_kept) = std::thread::scope(|s| {
-                    // Spawn N depth-prepass chunk threads.
-                    let depth_handles: Vec<_> = chunks.iter()
-                        .map(|&chunk| {
-                            s.spawn(move || build_depth_bundle(device, depth_pl, dc_ref, chunk, global_bg, lighting_bg))
-                        })
-                        .collect();
-
-                    // Spawn N gbuffer chunk threads (in parallel with depth).
-                    let gbuf_handles: Vec<_> = chunks.iter()
-                        .map(|&chunk| {
-                            s.spawn(move || build_gbuffer_bundle(device, gbuf_pl, dc_ref, chunk, global_bg))
-                        })
-                        .collect();
-
-                    // Collect depth results.
-                    let mut d_bundles = Vec::with_capacity(depth_handles.len());
-                    let mut d_kept = Vec::new();
-                    for h in depth_handles {
-                        let (bundle, kept) = h.join().unwrap();
-                        d_bundles.push(bundle);
-                        d_kept.extend(kept);
-                    }
-
-                    // Collect gbuffer results.
-                    let mut g_bundles = Vec::with_capacity(gbuf_handles.len());
-                    let mut g_kept = Vec::new();
-                    for h in gbuf_handles {
-                        let (bundle, kept) = h.join().unwrap();
-                        g_bundles.push(bundle);
-                        g_kept.extend(kept);
-                    }
-
-                    (d_bundles, d_kept, g_bundles, g_kept)
-                });
-
-                eprintln!(
-                    "⚠️ [Parallel Precompile] {} depth + {} gbuffer bundles, {} chunks, {} draws (gen {})",
-                    depth_bundles.len(), gbuf_bundles.len(), num_chunks, sorted.len(), generation,
-                );
-
-                // Deposit into inbox — passes will .take() during graph execution.
-                let sorted_clone = sorted.clone();
-                *self.bundle_inbox.depth_prepass.lock().unwrap() = Some(PrecompiledBundles {
-                    bundles: depth_bundles,
-                    kept_arcs: depth_kept,
-                    sorted_indices: sorted_clone,
-                    generation,
-                    global_bg_ptr,
-                    lighting_bg_ptr,
-                });
-                *self.bundle_inbox.gbuffer.lock().unwrap() = Some(PrecompiledBundles {
-                    bundles: gbuf_bundles,
-                    kept_arcs: gbuf_kept,
-                    sorted_indices: sorted,
-                    generation,
-                    global_bg_ptr,
-                    lighting_bg_ptr,
-                });
-            }
-
-            self.last_precompile_gen = self.draw_list_generation;
-        }
-
         // ── GPU-DRIVEN RENDERING: Assign material IDs and upload draw list ──────
         if self.gpu_driven {
             if let Some(ref draw_list_buf) = self.draw_list_gpu_buffer {
@@ -997,9 +883,13 @@ impl Renderer {
             camera_position: camera.position,
             camera_forward: camera.forward(),
             draw_list_generation: self.draw_list_generation,
+            transparent_start: self.gpu_scene.transparent_start,
         };
 
         let profiling_active = self.live_portal.is_some();
+        // Keep the global atomic in sync so profile_scope! is a true no-op
+        // when no portal client is connected.
+        crate::profiler::set_profiling_active(profiling_active);
 
         let graph_start = std::time::Instant::now();
         if profiling_active {
@@ -1009,60 +899,77 @@ impl Renderer {
             self.graph.execute(&mut graph_ctx, None)?;
         }
         let graph_ms = graph_start.elapsed().as_secs_f32() * 1000.0;
-        // Collect CPU scope timings emitted by profile_scope! calls inside the passes.
-        let cpu_scope_log = crate::profiler::take_frame_scope_log();
 
         // ── Anti-aliasing post-processing ─────────────────────────────────────
         let aa_start = std::time::Instant::now();
-        if let Some(fxaa) = &self.fxaa_pass {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("FXAA Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target, resolve_target: None, depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
-            });
-            if let Some(bind_group) = &self.fxaa_bind_group { fxaa.execute_draw(&mut pass, bind_group); }
-        } else if let Some(smaa) = &self.smaa_pass {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("SMAA Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target, resolve_target: None, depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
-            });
-            if let Some(bind_group) = &self.smaa_bind_group { smaa.execute_draw(&mut pass, bind_group); }
-        } else if let Some(taa) = &self.taa_pass {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TAA Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target, resolve_target: None, depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
-            });
-            if let Some(bind_group) = &self.taa_bind_group { taa.execute_draw(&mut pass, bind_group); }
-        }
+        {
+            crate::profile_scope!("encode/aa");
+            if let Some(fxaa) = &self.fxaa_pass {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("FXAA Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                });
+                if let Some(bind_group) = &self.fxaa_bind_group { fxaa.execute_draw(&mut pass, bind_group); }
+            } else if let Some(smaa) = &self.smaa_pass {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("SMAA Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                });
+                if let Some(bind_group) = &self.smaa_bind_group { smaa.execute_draw(&mut pass, bind_group); }
+            } else if let Some(taa) = &self.taa_pass {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("TAA Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                });
+                if let Some(bind_group) = &self.taa_bind_group { taa.execute_draw(&mut pass, bind_group); }
+            }
+        } // profile_scope!("encode/aa") drops here
         let aa_ms = aa_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Resolve GPU timestamp queries ─────────────────────────────────────
         let resolve_start = std::time::Instant::now();
-        if profiling_active {
-            if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
+        {
+            crate::profile_scope!("encode/resolve_timestamps");
+            if profiling_active {
+                if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
+            }
         }
         let resolve_ms = resolve_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Finalize command buffer ───────────────────────────────────────────
+        // finish() serialises all recorded commands into a CommandBuffer.
+        // On wgpu-dx12 this is the DX12 Close() call — it can be expensive when
+        // the command list is large (many draw calls, many passes).
         let finish_start = std::time::Instant::now();
-        let cmd_buf = encoder.finish();
+        let cmd_buf = {
+            crate::profile_scope!("encode/finish");
+            encoder.finish()
+        };
         let finish_ms = finish_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Submit to GPU ─────────────────────────────────────────────────────
         let submit_start = std::time::Instant::now();
-        self.queue.submit(Some(cmd_buf));
+        {
+            crate::profile_scope!("encode/submit");
+            self.queue.submit(Some(cmd_buf));
+        }
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+
+        // Collect CPU scope timings — must happen AFTER all profile_scope! guards
+        // above have dropped (encode/aa, encode/finish, encode/submit).
+        let cpu_scope_log = crate::profiler::take_frame_scope_log();
 
         *self.debug_batch.lock().unwrap() = None;
 
@@ -1092,44 +999,66 @@ impl Renderer {
         // ── Live portal snapshot ──────────────────────────────────────────────
         // Pack cheap scalars + one `take`'d Vec into a message and hand it to
         // the persistent worker thread.  No thread::spawn, no redundant clones.
-        if let (Some(wtx), Some(p)) = (&self.portal_worker_tx, &mut self.profiler) {
-            let (draw_total, draw_opaque, draw_transparent) = {
-                let draws = self.draw_list.lock().unwrap();
-                let total = draws.len();
-                let opaque = draws.iter().filter(|dc| !dc.transparent_blend).count();
-                (total, opaque, total.saturating_sub(opaque))
+        if self.portal_worker_tx.is_some() {
+            // Use transparent_start to derive opaque/transparent counts in O(1)
+            // instead of the previous O(N) filter scan over all draw calls.
+            let draw_total = {
+                let dl = self.draw_list.lock().unwrap();
+                dl.len()
             };
+            let draw_transparent = draw_total.saturating_sub(self.gpu_scene.transparent_start);
+            let draw_opaque      = draw_total - draw_transparent;
 
-            let msg = PortalFrameMsg {
-                frame: self.frame_count,
-                timestamp_ms: SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0),
-                frame_time_ms,
-                frame_to_frame_ms,
-                total_gpu_ms: p.last_total_gpu_ms,
-                total_cpu_ms: p.last_total_cpu_ms,
-                // take() is O(1) — profiler refills this next frame from readback.
-                pass_timings: std::mem::take(&mut p.last_timings),
-                current_layout: self.latest_scene_layout.take(),
-                layout_changed: self.pending_layout_changed,
-                draw_total,
-                draw_opaque,
-                draw_transparent,
-                prep_ms,
-                graph_ms,
-                aa_ms,
-                resolve_ms,
-                finish_ms,
-                submit_ms,
-                poll_ms,
-                untracked_ms,
-                stage_ms: self.pending_scene_stage_ms,
-                cpu_scope_log,
+            // Build portal scene layout from live renderer state.
+            // Layout is rebuilt only when scene composition changes (portal_scene_key diff).
+            // Do this BEFORE borrowing self.profiler to satisfy the borrow checker.
+            let new_key = (
+                self.gpu_scene.object_count() as usize,
+                self.gpu_light_scene.active_count as usize,
+                self.features.get_typed::<BillboardsFeature>("billboards")
+                    .map(|bb| bb.proxy_count()).unwrap_or(0),
+            );
+            let layout_changed = new_key != self.portal_scene_key;
+            let layout = if layout_changed || self.latest_scene_layout.is_none() {
+                self.portal_scene_key = new_key;
+                Some(self.build_portal_layout(camera))
+            } else {
+                self.latest_scene_layout.take()
             };
-            // Non-blocking: if the worker is behind, drop this frame's data.
-            let _ = wtx.try_send(msg);
+            self.pending_layout_changed = layout_changed;
+
+            if let (Some(wtx), Some(p)) = (&self.portal_worker_tx, &mut self.profiler) {
+                let msg = PortalFrameMsg {
+                    frame: self.frame_count,
+                    timestamp_ms: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0),
+                    frame_time_ms,
+                    frame_to_frame_ms,
+                    total_gpu_ms: p.last_total_gpu_ms,
+                    total_cpu_ms: p.last_total_cpu_ms,
+                    // take() is O(1) — profiler refills this next frame from readback.
+                    pass_timings: std::mem::take(&mut p.last_timings),
+                    current_layout: layout,
+                    layout_changed,
+                    draw_total,
+                    draw_opaque,
+                    draw_transparent,
+                    prep_ms,
+                    graph_ms,
+                    aa_ms,
+                    resolve_ms,
+                    finish_ms,
+                    submit_ms,
+                    poll_ms,
+                    untracked_ms,
+                    stage_ms: self.pending_scene_stage_ms,
+                    cpu_scope_log,
+                };
+                // Non-blocking: if the worker is behind, drop this frame's data.
+                let _ = wtx.try_send(msg);
+            }
         }
 
         // One-frame draws (from draw_mesh()) sit after `persistent_draw_count`
@@ -1142,6 +1071,66 @@ impl Renderer {
     }
 
     // ── Resize ────────────────────────────────────────────────────────────────
+    // ── Portal helpers ────────────────────────────────────────────────────────
+
+    /// Build a `PortalSceneLayout` from the renderer's live state.
+    ///
+    /// Objects come from the persistent draw_list (bounds data already cached).
+    /// Lights come from the GPU light scene's CPU mirror.
+    /// Billboards come from the billboard feature's proxy count.
+    /// This is called only when the portal is active and the scene has changed.
+    fn build_portal_layout(&self, camera: &Camera) -> PortalSceneLayout {
+        // Objects: use the persistent draw_list (opaque + transparent).
+        let objects = {
+            let dl = self.draw_list.lock().unwrap();
+            dl[..self.persistent_draw_count.min(dl.len())]
+                .iter()
+                .enumerate()
+                .map(|(id, dc)| PortalSceneObject {
+                    id:           id as u32,
+                    bounds_center: dc.bounds_center,
+                    bounds_radius: dc.bounds_radius,
+                    has_material: true,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Lights: CPU mirror in GpuLightScene (pub(super) from this module).
+        let lights = self.gpu_light_scene.cached_scene_lights
+            [..self.gpu_light_scene.active_count as usize]
+            .iter()
+            .enumerate()
+            .map(|(id, l)| PortalSceneLight {
+                id:        id as u32,
+                position:  l.position,
+                color:     l.color,
+                intensity: l.intensity,
+                range:     l.range,
+            })
+            .collect::<Vec<_>>();
+
+        // Billboards: proxy count from feature.
+        let billboards = self.features
+            .get_typed::<BillboardsFeature>("billboards")
+            .map(|bb| {
+                (0..bb.proxy_count() as u32)
+                    .map(|id| PortalSceneBillboard { id, position: [0.0; 3], scale: [1.0; 2] })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let fwd = camera.forward();
+        PortalSceneLayout {
+            objects,
+            lights,
+            billboards,
+            camera: Some(PortalSceneCamera {
+                position: [camera.position.x, camera.position.y, camera.position.z],
+                forward:  [fwd.x, fwd.y, fwd.z],
+            }),
+        }
+    }
+
 
     pub fn resize(&mut self, width: u32, height: u32) {
         log::trace!("Resizing renderer to {}x{}", width, height);
@@ -1232,33 +1221,37 @@ fn portal_worker_loop(
         let app_ms = (m.untracked_ms - scene_prep_total).max(0.0);
         let scope_map: HashMap<&str, f32> =
             m.cpu_scope_log.iter().map(|(n, ms)| (*n, *ms)).collect();
-        let mut stage_timings = vec![
-            PortalStageTiming { id: "app".into(),          name: "App".into(),              ms: app_ms },
-            PortalStageTiming { id: "scene_draws".into(),  name: "Scene: Draws".into(),     ms: s[0] },
-            PortalStageTiming { id: "scene_lights".into(), name: "Scene: Lights".into(),    ms: s[1] },
-            PortalStageTiming { id: "scene_shadow".into(), name: "Scene: Shadows".into(),   ms: s[2] },
-            PortalStageTiming { id: "scene_bb".into(),     name: "Scene: Billboards".into(),ms: s[3] },
-            PortalStageTiming { id: "scene_sky".into(),    name: "Scene: Sky".into(),       ms: s[4] },
-            PortalStageTiming { id: "prep".into(),         name: "Prep".into(),             ms: m.prep_ms },
-            PortalStageTiming { id: "pipeline".into(),     name: "Render Pipeline".into(),  ms: m.graph_ms },
-            PortalStageTiming { id: "aa".into(),           name: "AA".into(),               ms: m.aa_ms },
-            PortalStageTiming { id: "resolve".into(),      name: "Resolve".into(),          ms: m.resolve_ms },
-            PortalStageTiming { id: "finish".into(),       name: "Encode".into(),           ms: m.finish_ms },
-            PortalStageTiming { id: "submit".into(),       name: "Submit".into(),           ms: m.submit_ms },
-            PortalStageTiming { id: "poll".into(),         name: "Poll".into(),             ms: m.poll_ms },
+        // ── Stage timings: clean 2-level tree ────────────────────────────────
+        // Top-level entries have no '/' in name.
+        // Sub-scope entries have a '/' — prefix before '/' must match a top-level id.
+        // JS slots each top-level node wide enough to fit its children, so
+        // there is zero overlap by construction.
+        let sm = |key: &str| scope_map.get(key).copied().unwrap_or(0.0);
+
+        let stage_timings = vec![
+            // ── Top level (9 nodes) ──────────────────────────────────────────
+            PortalStageTiming { id: "app".into(),          name: "App".into(),          ms: app_ms },
+            PortalStageTiming { id: "scene".into(),        name: "Scene".into(),        ms: s[0]+s[1]+s[2]+s[3]+s[4] },
+            PortalStageTiming { id: "prep".into(),         name: "Prep".into(),         ms: m.prep_ms },
+            PortalStageTiming { id: "depth_prepass".into(),name: "Depth Prepass".into(),ms: sm("depth_prepass/sort") + sm("depth_prepass/record") },
+            PortalStageTiming { id: "gbuffer".into(),      name: "G-Buffer".into(),     ms: sm("gbuffer/record") },
+            PortalStageTiming { id: "shadow".into(),       name: "Shadow".into(),       ms: sm("shadow/compile") + sm("shadow/encode_bundles") },
+            PortalStageTiming { id: "transparent".into(),  name: "Transparent".into(),  ms: sm("transparent/compile") + sm("transparent/replay") },
+            PortalStageTiming { id: "encode".into(),       name: "Encode".into(),       ms: m.aa_ms + m.resolve_ms + m.finish_ms + m.submit_ms },
+            PortalStageTiming { id: "poll".into(),         name: "Poll".into(),         ms: m.poll_ms },
+            // ── Sub-scopes (prefix before '/' must match a top-level id) ────
+            PortalStageTiming { id: "depth_prepass_sort".into(),    name: "depth_prepass/sort".into(),    ms: sm("depth_prepass/sort") },
+            PortalStageTiming { id: "depth_prepass_record".into(),  name: "depth_prepass/record".into(),  ms: sm("depth_prepass/record") },
+            PortalStageTiming { id: "gbuffer_record".into(),        name: "gbuffer/record".into(),        ms: sm("gbuffer/record") },
+            PortalStageTiming { id: "shadow_compile".into(),        name: "shadow/compile".into(),        ms: sm("shadow/compile") },
+            PortalStageTiming { id: "shadow_bundles".into(),        name: "shadow/encode_bundles".into(), ms: sm("shadow/encode_bundles") },
+            PortalStageTiming { id: "transparent_compile".into(),   name: "transparent/compile".into(),   ms: sm("transparent/compile") },
+            PortalStageTiming { id: "transparent_replay".into(),    name: "transparent/replay".into(),    ms: sm("transparent/replay") },
+            PortalStageTiming { id: "encode_aa".into(),             name: "encode/aa".into(),             ms: m.aa_ms },
+            PortalStageTiming { id: "encode_resolve".into(),        name: "encode/resolve".into(),        ms: m.resolve_ms },
+            PortalStageTiming { id: "encode_finish".into(),         name: "encode/finish".into(),         ms: m.finish_ms },
+            PortalStageTiming { id: "encode_submit".into(),         name: "encode/submit".into(),         ms: m.submit_ms },
         ];
-        for &(name, id) in &[
-            ("dl_rebuild",            "dl_rebuild"),
-            ("depth_prepass/compile", "depth_prepass_compile"),
-            ("depth_prepass/replay",  "depth_prepass_replay"),
-            ("gbuffer/compile",       "gbuffer_compile"),
-            ("gbuffer/replay",        "gbuffer_replay"),
-        ] {
-            let ms = scope_map.get(name).copied().unwrap_or(0.0);
-            stage_timings.push(PortalStageTiming {
-                id: id.to_string(), name: name.to_string(), ms,
-            });
-        }
 
         let snapshot = PortalFrameSnapshot {
             frame: m.frame,
@@ -1290,7 +1283,7 @@ fn portal_worker_loop(
             poll_ms: m.poll_ms,
             untracked_ms: m.untracked_ms,
             stage_timings,
-            pipeline_stage_id: Some("pipeline".to_string()),
+            pipeline_stage_id: Some("depth_prepass".to_string()),
         };
 
         // Update previous layout tracking.

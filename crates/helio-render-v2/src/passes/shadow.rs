@@ -533,6 +533,7 @@ impl RenderPass for ShadowPass {
         // ═══ Phase 2: Parallel bundle encoding ═══════════════════════════════
         if !rebuild_jobs.is_empty() {
             let _t = std::time::Instant::now();
+            crate::profile_scope!("shadow/compile");
 
             // Pre-compute per-face filtered draw indices with frustum culling.
             let per_face_indices: Vec<Vec<usize>> = rebuild_jobs.iter().map(|job| {
@@ -561,6 +562,7 @@ impl RenderPass for ShadowPass {
                 let slot_bgs = &self.slot_bind_groups;
                 let dc_slice: &[DrawCall] = &draw_calls;
 
+                crate::profile_scope!("shadow/encode_bundles");
                 std::thread::scope(|s| {
                     let handles: Vec<_> = rebuild_jobs
                         .iter()
