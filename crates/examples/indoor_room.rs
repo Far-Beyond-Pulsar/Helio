@@ -15,7 +15,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -130,6 +130,10 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
 
+    // Scene state
+    overhead_light_id: LightId,
+    billboard_ids:     Vec<BillboardId>,
+
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
@@ -226,6 +230,21 @@ impl ApplicationHandler for App {
         renderer.add_object(&bookcase, None, glam::Mat4::IDENTITY);
         renderer.add_object(&sofa,     None, glam::Mat4::IDENTITY);
 
+        let overhead_pos = [0.0f32, 2.85, 0.0];
+        let lamp_a = [-2.5f32, 0.9, -2.5];
+        let lamp_b = [ 2.5f32, 0.9,  2.5];
+
+        let overhead_light_id = renderer.add_light(SceneLight::point(overhead_pos, [1.0, 0.85, 0.6], 4.0, 7.0));
+        renderer.add_light(SceneLight::point(lamp_a, [1.0, 0.55, 0.2], 2.5, 5.0));
+        renderer.add_light(SceneLight::point(lamp_b, [1.0, 0.75, 0.35], 2.0, 4.5));
+        renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
+        renderer.set_sky_color([0.02, 0.02, 0.06]);
+
+        let mut billboard_ids = Vec::new();
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(overhead_pos, [0.25, 0.25]).with_color([1.0, 0.85, 0.6, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(lamp_a,       [0.2,  0.2 ]).with_color([1.0, 0.55, 0.2, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(lamp_b,       [0.2,  0.2 ]).with_color([1.0, 0.75, 0.35, 1.0])));
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -234,6 +253,8 @@ impl ApplicationHandler for App {
             cam_pos: glam::Vec3::new(0.0, 1.6, 2.0),
             cam_yaw: std::f32::consts::PI, cam_pitch: 0.0,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
+            overhead_light_id,
+            billboard_ids,
             probe_vis: false,
             sprite_w,
             sprite_h,
@@ -270,6 +291,22 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                // Remove existing billboards and register new set
+                for id in state.billboard_ids.drain(..) {
+                    state.renderer.remove_billboard(id);
+                }
+                if state.probe_vis {
+                    for inst in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(inst));
+                    }
+                } else {
+                    let overhead_pos = [0.0f32, 2.85, 0.0];
+                    let lamp_a = [-2.5f32, 0.9, -2.5];
+                    let lamp_b = [ 2.5f32, 0.9,  2.5];
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(overhead_pos, [0.25, 0.25]).with_color([1.0, 0.85, 0.6, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(lamp_a,       [0.2,  0.2 ]).with_color([1.0, 0.55, 0.2, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(lamp_b,       [0.2,  0.2 ]).with_color([1.0, 0.75, 0.35, 1.0])));
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -362,9 +399,9 @@ impl AppState {
         // Overhead ceiling light pulses very slightly (candle-like flicker)
         let flicker = 1.0 + (time * 11.3).sin() * 0.04 + (time * 7.7).cos() * 0.02;
         let overhead_pos = [0.0f32, 2.85, 0.0];
-        // Two warm table-lamp lights in opposite corners
-        let lamp_a = [-2.5f32, 0.9, -2.5];
-        let lamp_b = [ 2.5f32, 0.9,  2.5];
+        self.renderer.update_light(self.overhead_light_id, SceneLight::point(overhead_pos, [1.0, 0.85, 0.6], 4.0 * flicker, 7.0));
+
+        // Scene state is persistent — no per-frame setup needed.
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
@@ -372,29 +409,6 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            vec![
-                BillboardInstance::new(overhead_pos, [0.25, 0.25]).with_color([1.0, 0.85, 0.6, 1.0]),
-                BillboardInstance::new(lamp_a,       [0.2,  0.2 ]).with_color([1.0, 0.55, 0.2, 1.0]),
-                BillboardInstance::new(lamp_b,       [0.2,  0.2 ]).with_color([1.0, 0.75, 0.35, 1.0]),
-            ]
-        };
-
-        let env = SceneEnv {
-            lights: vec![
-                SceneLight::point(overhead_pos, [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
-                SceneLight::point(lamp_a, [1.0, 0.55, 0.2], 2.5, 5.0),
-                SceneLight::point(lamp_b, [1.0, 0.75, 0.35], 2.0, 4.5),
-            ],
-            ambient_color: [1.0, 0.95, 0.85],
-            ambient_intensity: 0.05,
-            sky_color: [0.02, 0.02, 0.06],
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }

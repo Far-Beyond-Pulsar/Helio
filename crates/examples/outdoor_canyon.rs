@@ -26,7 +26,7 @@
 mod demo_portal;
 
 use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv,
+    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
 
@@ -154,6 +154,14 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
     sun_angle:      f32,
+
+    // Scene state
+    sun_light_id:   LightId,
+    fire_light_id:  LightId,
+    ember_a_id:     LightId,
+    ember_b_id:     LightId,
+    moon_light_id:  LightId,
+    billboard_ids:  Vec<BillboardId>,
 
     probe_vis: bool,
     sprite_w: u32,

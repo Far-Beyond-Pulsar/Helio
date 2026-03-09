@@ -23,6 +23,30 @@ impl ObjectId {
     pub const INVALID: Self = Self(0);
 }
 
+/// Stable handle to a registered scene light.
+///
+/// `LightId` is returned by [`Renderer::add_light`].  The id is stable for
+/// the lifetime of the light — use it to update position/color/intensity or
+/// remove the light without rebuilding the full scene environment every frame.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct LightId(pub(crate) u32);
+
+impl LightId {
+    pub const INVALID: Self = Self(u32::MAX);
+}
+
+/// Stable handle to a registered billboard instance.
+///
+/// `BillboardId` is returned by [`Renderer::add_billboard`].  Use it to
+/// update the billboard's world position/color or remove it without
+/// rebuilding the full billboard list every frame.
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+pub struct BillboardId(pub(crate) u32);
+
+impl BillboardId {
+    pub const INVALID: Self = Self(u32::MAX);
+}
+
 // ── Sky scene objects ─────────────────────────────────────────────────────────
 
 /// Volumetric cloud layer parameters.

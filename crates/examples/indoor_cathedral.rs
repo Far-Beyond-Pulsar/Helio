@@ -22,7 +22,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -186,6 +186,11 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
+    // Scene state
+    chandelier_light_ids: Vec<LightId>,
+    candle_light_ids: Vec<LightId>,
+    light_billboard_ids: Vec<BillboardId>,
+
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
@@ -329,6 +334,31 @@ impl ApplicationHandler for App {
         for m in &chandelier_chains { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
         for m in &chandelier_rings  { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
 
+        // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
+        let mut chandelier_light_ids = Vec::new();
+        for &z in CHANDELIER_Z {
+            chandelier_light_ids.push(renderer.add_light(SceneLight::point([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0, 22.0)));
+        }
+        // Stained glass shafts — static, no need to store ids
+        for &(x, y, z, r, g, b) in GLASS_LIGHTS {
+            renderer.add_light(SceneLight::point([x, y, z], [r, g, b], 1.8, 8.0));
+        }
+        let mut candle_light_ids = Vec::new();
+        for &(x, y, z) in CANDLES {
+            candle_light_ids.push(renderer.add_light(SceneLight::point([x, y, z], [1.0, 0.6, 0.15], 1.2, 4.0)));
+        }
+        renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
+        renderer.set_sky_color([0.0, 0.0, 0.0]);
+
+        // Register billboard markers (spotlight mode — switched to probe on key 3)
+        let mut light_billboard_ids = Vec::new();
+        for &z in CHANDELIER_Z {
+            light_billboard_ids.push(renderer.add_billboard(BillboardInstance::new([0.0_f32, 15.0, z], [0.4, 0.4]).with_color([1.0, 0.92, 0.78, 1.0])));
+        }
+        for &(x, y, z) in CANDLES {
+            light_billboard_ids.push(renderer.add_billboard(BillboardInstance::new([x, y, z], [0.15, 0.15]).with_color([1.0, 0.6, 0.15, 1.0])));
+        }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -342,6 +372,9 @@ impl ApplicationHandler for App {
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
             cam_yaw: std::f32::consts::PI, cam_pitch: -0.05,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
+            chandelier_light_ids,
+            candle_light_ids,
+            light_billboard_ids,
             probe_vis: false,
             sprite_w,
             sprite_h,
@@ -376,6 +409,22 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                // Remove existing billboards and register new set
+                for id in state.light_billboard_ids.drain(..) {
+                    state.renderer.remove_billboard(id);
+                }
+                if state.probe_vis {
+                    for inst in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.light_billboard_ids.push(state.renderer.add_billboard(inst));
+                    }
+                } else {
+                    for &z in CHANDELIER_Z {
+                        state.light_billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([0.0_f32, 15.0, z], [0.4, 0.4]).with_color([1.0, 0.92, 0.78, 1.0])));
+                    }
+                    for &(x, y, z) in CANDLES {
+                        state.light_billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([x, y, z], [0.15, 0.15]).with_color([1.0, 0.6, 0.15, 1.0])));
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -468,51 +517,25 @@ impl AppState {
         // Candle flicker — more pronounced
         let cflicker = 1.0 + (time * 14.3).sin() * 0.07 + (time * 8.9).cos() * 0.05;
 
+        // Update flickering chandelier intensities
+        for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
+            let z = CHANDELIER_Z[i];
+            self.renderer.update_light(id, SceneLight::point([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0 * flicker, 22.0));
+        }
+        // Update flickering candle intensities
+        for (i, &id) in self.candle_light_ids.iter().enumerate() {
+            let (x, y, z) = CANDLES[i];
+            self.renderer.update_light(id, SceneLight::point([x, y, z], [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0));
+        }
+
+        // Billboard probe toggle is handled in window_event (sprite swap + add/remove billboards)
+        // Scene state is persistent — no per-frame setup needed.
+
         let output = match self.surface.get_current_texture() {
             Ok(t) => t, Err(e) => { log::warn!("Surface: {:?}", e); return; }
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut lights = Vec::new();
-        // Chandeliers – warm white
-        for &z in CHANDELIER_Z {
-            let p = [0.0_f32, 15.0, z];
-            lights.push(SceneLight::point(p, [1.0, 0.92, 0.78], 8.0 * flicker, 22.0));
-        }
-        // Stained glass shafts – coloured point lights from windows
-        for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            lights.push(SceneLight::point([x, y, z], [r, g, b], 1.8, 8.0));
-        }
-        // Candles near altar
-        for &(x, y, z) in CANDLES {
-            let p = [x, y, z];
-            lights.push(SceneLight::point(p, [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0));
-        }
-
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            let mut bb = Vec::new();
-            for &z in CHANDELIER_Z {
-                let p = [0.0_f32, 15.0, z];
-                bb.push(BillboardInstance::new(p, [0.4, 0.4]).with_color([1.0, 0.92, 0.78, 1.0]));
-            }
-            for &(x, y, z) in CANDLES {
-                let p = [x, y, z];
-                bb.push(BillboardInstance::new(p, [0.15, 0.15]).with_color([1.0, 0.6, 0.15, 1.0]));
-            }
-            bb
-        };
-
-        let env = SceneEnv {
-            lights,
-            ambient_color: [0.65, 0.7, 0.85],
-            ambient_intensity: 0.015,
-            sky_color: [0.0, 0.0, 0.0],
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }

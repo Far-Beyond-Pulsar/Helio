@@ -639,7 +639,7 @@ impl Renderer {
             // ── GPU-resident scene + lights ───────────────────────────────────────
             gpu_scene,
             gpu_light_scene,
-            pending_env: None,
+            gpu_draws_staging: Vec::new(),
             // ── Frame state ────────────────────────────────────────────────────
             frame_count: 0,
             width: config.width,
@@ -665,12 +665,9 @@ impl Renderer {
             draw_list_gpu_buffer,
             material_id_map: HashMap::new(),
             next_material_id: 1,
-            // ── Sky / light temporal caching ───────────────────────────────────
-            cached_sky_color:         [0.0; 3],
-            cached_sky_has_sky:       false,
-            cached_sky_sun_direction: [0.0, -1.0, 0.0],
-            cached_sky_sun_intensity: 1.0,
-            sky_state_changed:        true,
+            // ── Persistent scene environment state ────────────────────────────
+            scene_state: SceneState::default(),
+            sky_state_changed: true, // first frame always renders the sky LUT
             draw_list_generation:     0,
             persistent_draw_count:   0,
             cached_draw_list_gen:    u64::MAX, // force rebuild on first frame

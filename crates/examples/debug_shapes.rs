@@ -17,7 +17,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera};
 
 
 use helio_render_v2::features::FeatureRegistry;
@@ -463,8 +463,7 @@ impl AppState {
             self.time,
         );
 
-        // Create empty environment (we're only drawing debug shapes)
-        self.renderer.set_scene_env(SceneEnv::default());
+        // Scene state is persistent — no per-frame setup needed.
         self.renderer.render(&camera, &view, 0.016).ok();
 
         output.present();

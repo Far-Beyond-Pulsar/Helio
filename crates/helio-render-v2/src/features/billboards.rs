@@ -4,6 +4,7 @@ use super::{FeatureContext, PrepareContext};
 use crate::features::{Feature, ShaderDefine};
 use crate::passes::BillboardPass;
 use crate::gpu_transfer;
+use crate::scene::BillboardId;
 use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,11 +63,25 @@ pub(crate) struct BillboardVertex {
     pub uv: [f32; 2],
 }
 
+/// Internal proxy for a registered billboard slot.
+struct BillboardProxy {
+    /// Index into the dense instance arrays.
+    index: u32,
+    data: BillboardInstance,
+}
+
 /// Billboard rendering feature
 pub struct BillboardsFeature {
     enabled: bool,
+    // ── Persistent registry ────────────────────────────────────────────────
+    proxies: HashMap<u32, BillboardProxy>,
+    next_billboard_id: u32,
+    /// Dense CPU-side list; matches layout of gpu_staging / instance_buffer.
     instances: Vec<BillboardInstance>,
+    /// True when any instance was added / removed / updated since last upload.
+    instances_dirty: bool,
     max_instances: u32,
+    // ── Sprite / texture state ─────────────────────────────────────────────
     /// Optional sprite image: raw RGBA8 bytes + dimensions
     sprite_rgba: Option<(Vec<u8>, u32, u32)>,
     /// Live sprite texture (stored so we can re-upload data at runtime)
@@ -75,11 +90,12 @@ pub struct BillboardsFeature {
     sprite_dims: (u32, u32),
     /// New RGBA8 pixels waiting to be written to the GPU texture (set by set_sprite)
     pending_sprite: Option<Vec<u8>>,
-    // Shared with BillboardPass via Arc
+    // ── Shared GPU resources ───────────────────────────────────────────────
     vertex_buffer: Option<Arc<wgpu::Buffer>>,
     index_buffer: Option<Arc<wgpu::Buffer>>,
     instance_buffer: Option<Arc<wgpu::Buffer>>,
     instance_count: Arc<std::sync::atomic::AtomicU32>,
+    /// Reused staging buffer (never reallocated at steady state).
     gpu_staging: Vec<GpuBillboardInstance>,
 }
 
@@ -87,7 +103,10 @@ impl BillboardsFeature {
     pub fn new() -> Self {
         Self {
             enabled: true,
+            proxies: HashMap::new(),
+            next_billboard_id: 1,
             instances: Vec::new(),
+            instances_dirty: false,
             max_instances: 1024,
             sprite_rgba: None,
             sprite_texture: None,
@@ -132,22 +151,105 @@ impl BillboardsFeature {
         }
     }
 
-    pub fn add_billboard(&mut self, instance: BillboardInstance) {
-        self.instances.push(instance);
+    // ── Persistent API (preferred) ─────────────────────────────────────────
+
+    /// Register a billboard and return a stable [`BillboardId`].  O(1).
+    pub fn add_billboard_persistent(&mut self, instance: BillboardInstance) -> BillboardId {
+        let id = BillboardId(self.next_billboard_id);
+        self.next_billboard_id += 1;
+
+        let index = self.instances.len() as u32;
+        self.instances.push(instance.clone());
+        self.proxies.insert(id.0, BillboardProxy { index, data: instance });
+        self.instances_dirty = true;
+        id
+    }
+
+    /// Remove a billboard by id.  Swap-removes to keep the array dense.  O(1).
+    pub fn remove_billboard_persistent(&mut self, id: BillboardId) {
+        let proxy = match self.proxies.remove(&id.0) {
+            Some(p) => p,
+            None => return,
+        };
+        let slot = proxy.index as usize;
+        let last = self.instances.len() - 1;
+        if slot != last {
+            self.instances.swap(slot, last);
+            // Update the swapped proxy's index.
+            for p in self.proxies.values_mut() {
+                if p.index as usize == last {
+                    p.index = slot as u32;
+                    p.data = self.instances[slot].clone();
+                    break;
+                }
+            }
+        }
+        self.instances.pop();
+        self.instances_dirty = true;
+    }
+
+    /// Update an existing billboard.  O(1).
+    pub fn update_billboard_persistent(&mut self, id: BillboardId, instance: BillboardInstance) {
+        let proxy = match self.proxies.get_mut(&id.0) {
+            Some(p) => p,
+            None => return,
+        };
+        let slot = proxy.index as usize;
+        proxy.data = instance.clone();
+        self.instances[slot] = instance;
+        self.instances_dirty = true;
+    }
+
+    /// Update only the world-space position of a billboard.  O(1).
+    pub fn move_billboard(&mut self, id: BillboardId, position: [f32; 3]) {
+        let proxy = match self.proxies.get_mut(&id.0) {
+            Some(p) => p,
+            None => return,
+        };
+        let slot = proxy.index as usize;
+        proxy.data.position = position;
+        self.instances[slot].position = position;
+        self.instances_dirty = true;
+    }
+
+    // ── Legacy snapshot API ────────────────────────────────────────────────
+
+    /// Replace the whole billboard list from a slice.
+    /// Prefer the persistent `add_billboard_persistent` / `remove_billboard_persistent`
+    /// API to avoid per-frame allocations.
+    pub fn set_billboards_slice(&mut self, instances: &[BillboardInstance]) {
+        // Only mark dirty if the content actually changed.
+        if self.instances.len() != instances.len()
+            || self.instances.iter().zip(instances.iter()).any(|(a, b)| {
+                a.position != b.position
+                    || a.scale != b.scale
+                    || a.color != b.color
+                    || a.screen_scale != b.screen_scale
+            })
+        {
+            self.instances.clear();
+            self.instances.extend_from_slice(instances);
+            // Clear the proxy map since the dense array was fully replaced.
+            self.proxies.clear();
+            self.instances_dirty = true;
+        }
     }
 
     pub fn set_billboards(&mut self, instances: Vec<BillboardInstance>) {
-        self.instances = instances;
+        self.set_billboards_slice(&instances);
     }
 
-    /// Replace billboard list from a slice without forcing a fresh Vec allocation each frame.
-    pub fn set_billboards_slice(&mut self, instances: &[BillboardInstance]) {
-        self.instances.clear();
-        self.instances.extend_from_slice(instances);
+    pub fn add_billboard(&mut self, instance: BillboardInstance) {
+        self.instances.push(instance);
+        self.instances_dirty = true;
     }
 
     pub fn clear_billboards(&mut self) {
-        self.instances.clear();
+        if !self.instances.is_empty() {
+            self.instances.clear();
+            self.proxies.clear();
+            self.instances_dirty = true;
+        }
     }
 
     pub fn billboards(&self) -> &[BillboardInstance] {
@@ -294,12 +396,15 @@ impl Feature for BillboardsFeature {
         self.instance_buffer = Some(instance_buffer);
         self.sprite_texture = Some(sprite_tex_arc);
 
+        // Mark dirty so the first frame uploads whatever was pre-loaded.
+        self.instances_dirty = true;
+
         log::info!("Billboards feature registered: max {} instances", self.max_instances);
         Ok(())
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
-        // Re-upload sprite pixels if set_sprite() was called since last frame
+        // Re-upload sprite pixels if set_sprite() was called since last frame.
         if let Some(pending) = self.pending_sprite.take() {
             if let Some(tex) = &self.sprite_texture {
                 let (sw, sh) = self.sprite_dims;
@@ -314,27 +419,32 @@ impl Feature for BillboardsFeature {
 
         let count = self.instances.len().min(self.max_instances as usize);
 
-        if let Some(buf) = &self.instance_buffer {
-            if count > 0 {
-                self.gpu_staging.clear();
-                self.gpu_staging.reserve(count.saturating_sub(self.gpu_staging.capacity()));
-                self.gpu_staging.extend(self.instances[..count].iter().map(|b| GpuBillboardInstance {
-                    position: b.position,
-                    _pad1: 0.0,
-                    scale: b.scale,
-                    screen_scale: b.screen_scale as u32,
-                    _pad2: 0,
-                    color: b.color,
-                }));
-                ctx.queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.gpu_staging));
-                gpu_transfer::track_upload(
-                    (self.gpu_staging.len() * std::mem::size_of::<GpuBillboardInstance>()) as u64,
-                );
+        // Only re-encode + upload when the instance list changed.
+        if self.instances_dirty {
+            if let Some(buf) = &self.instance_buffer {
+                if count > 0 {
+                    // Reuse staging buffer — no alloc at steady state.
+                    self.gpu_staging.clear();
+                    self.gpu_staging.reserve(count.saturating_sub(self.gpu_staging.capacity()));
+                    self.gpu_staging.extend(self.instances[..count].iter().map(|b| GpuBillboardInstance {
+                        position: b.position,
+                        _pad1: 0.0,
+                        scale: b.scale,
+                        screen_scale: b.screen_scale as u32,
+                        _pad2: 0,
+                        color: b.color,
+                    }));
+                    ctx.queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.gpu_staging));
+                    gpu_transfer::track_upload(
+                        (self.gpu_staging.len() * std::mem::size_of::<GpuBillboardInstance>()) as u64,
+                    );
+                }
             }
+            self.instance_count
+                .store(count as u32, std::sync::atomic::Ordering::Relaxed);
+            self.instances_dirty = false;
         }
 
-        self.instance_count
-            .store(count as u32, std::sync::atomic::Ordering::Relaxed);
         Ok(())
     }
 

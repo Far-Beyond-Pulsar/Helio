@@ -20,7 +20,7 @@ use crate::passes::depth_prepass::{BundleInbox, PrecompiledBundles, sort_opaque_
 use crate::passes::gbuffer::build_gbuffer_bundle;
 use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
 use crate::camera::Camera;
-use crate::scene::{ObjectId, SceneLight};
+use crate::scene::{ObjectId, SceneLight, LightId, BillboardId};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
 use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
@@ -71,9 +71,50 @@ struct PortalFrameMsg {
     cpu_scope_log: Vec<(&'static str, f32)>,
 }
 
-/// Snapshot of per-frame environment data supplied by `set_scene_env`.
-/// Kept as a plain struct so `render()` can cheaply read it without locking.
-pub struct SceneEnv {
+/// Persistent scene environment — ambient, sky, and their dirty flags.
+///
+/// Written by `set_ambient` / `set_sky_atmosphere` / `set_skylight` / `set_sky_color`.
+/// Read once per frame in `flush_scene_state`.  At steady state (nothing changed)
+/// all dirty flags are false → zero CPU work, zero GPU uploads.
+struct SceneState {
+    ambient_color:     [f32; 3],
+    ambient_intensity: f32,
+    sky_color:         [f32; 3],
+    sky_atmosphere:    Option<crate::scene::SkyAtmosphere>,
+    skylight:          Option<crate::scene::Skylight>,
+
+    /// SkyLutPass needs to re-render + SkyUniform needs upload.
+    sky_lut_dirty:   bool,
+    /// RC ambient color needs update.
+    ambient_dirty:   bool,
+    /// Cached for sun-direction change detection.
+    cached_sun_direction: [f32; 3],
+    cached_sun_intensity: f32,
+}
+
+impl Default for SceneState {
+    fn default() -> Self {
+        Self {
+            ambient_color:     [0.0; 3],
+            ambient_intensity: 0.0,
+            sky_color:         [0.0; 3],
+            sky_atmosphere:    None,
+            skylight:          None,
+            sky_lut_dirty:     true,  // first frame always renders LUT
+            ambient_dirty:     true,
+            cached_sun_direction: [0.0, -1.0, 0.0],
+            cached_sun_intensity: 1.0,
+        }
+    }
+}
+
+/// Legacy per-frame environment snapshot — now internal only.
+///
+/// Use the persistent API instead:
+///   `add_light` / `remove_light` / `update_light` for lights,
+///   `add_billboard` / `remove_billboard` / `update_billboard` for billboards,
+///   `set_ambient` / `set_sky_atmosphere` / `set_skylight` / `set_sky_color` for sky.
+struct SceneEnv {
     pub lights:            Vec<SceneLight>,
     pub ambient_color:     [f32; 3],
     pub ambient_intensity: f32,
@@ -139,10 +180,14 @@ pub struct Renderer {
     light_face_counts: Arc<std::sync::Mutex<Vec<u8>>>,
     // Per-light position/range/type for ShadowPass draw-call culling
     shadow_cull_lights: Arc<std::sync::Mutex<Vec<ShadowCullLight>>>,
-    // Current scene ambient (updated by prepare_env)
+    // Current scene ambient / sky state (updated by flush_scene_state)
+    scene_state: SceneState,
+    /// Cached light count forwarded to GlobalsUniform (from gpu_light_scene).
+    scene_light_count: u32,
+    /// Resolved ambient color (base + skylight contribution) for GlobalsUniform.
     scene_ambient_color: [f32; 3],
     scene_ambient_intensity: f32,
-    scene_light_count: u32,
+    /// Sky color forwarded to GraphContext.
     scene_sky_color: [f32; 3],
     scene_has_sky: bool,
     /// CSM cascade split distances uploaded each frame to GlobalsUniform.
@@ -197,12 +242,8 @@ pub struct Renderer {
     material_id_map:  HashMap<usize, u32>,
     next_material_id: u32,
 
-    // ── Sky LUT caching ───────────────────────────────────────────────────
-    cached_sky_color:         [f32; 3],
-    cached_sky_has_sky:       bool,
-    cached_sky_sun_direction: [f32; 3],
-    cached_sky_sun_intensity: f32,
-    sky_state_changed:        bool,
+    // ── Sky LUT change flag (forwarded to GraphContext each frame) ────────
+    sky_state_changed: bool,
 
     // ── Temporal shadow / light caching ──────────────────────────────────
     /// Monotonically increasing counter.  Bumped only when the registered object
@@ -252,10 +293,9 @@ pub struct Renderer {
     /// GPU-resident light + shadow matrix buffers (dirty-bit delta uploads).
     gpu_light_scene: gpu_light_scene::GpuLightScene,
 
-    // ── Environment (lights, sky, ambient, billboards) ────────────────────
-    /// Set by `set_scene_env` each frame (or once for static scenes).
-    /// Fully replaces `render_scene`'s scene-struct argument.
-    pending_env: Option<SceneEnv>,
+    // ── Pre-allocated GPU draw staging buffer ─────────────────────────────
+    /// Reused every frame for the GPU-driven path; avoids per-frame allocation.
+    gpu_draws_staging: Vec<GpuDrawCall>,
 
     // Frame state
     frame_count: u64,
@@ -498,19 +538,154 @@ impl Renderer {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // SCENE ENVIRONMENT API  (lights, sky, ambient, billboards)
+    // PERSISTENT SCENE ENVIRONMENT API  (lights, sky, ambient, billboards)
+    //
+    // Lights and billboards follow the same persistent-proxy pattern as mesh
+    // objects: add once, update/remove as needed, zero per-frame cost at
+    // steady state.  Sky/ambient are set via dirty-flagged setters.
     // ══════════════════════════════════════════════════════════════════════════
 
-    /// Supply the per-frame environment snapshot: lights, sky, ambient, and billboards.
-    ///
-    /// Call once per frame (or whenever any environmental value changes).  The renderer
-    /// consumes this at the top of the next `render()` call via `prepare_env` and then
-    /// discards it — no allocation carry-over between frames.
-    ///
-    /// This replaces the old `render_scene(&Scene, ...)` call for the light/sky portion.
-    /// Registered objects are completely independent and never need to appear here.
-    pub fn set_scene_env(&mut self, env: SceneEnv) {
-        self.pending_env = Some(env);
+    // ── Lights ───────────────────────────────────────────────────────────────
+
+    /// Register a new light.  Returns a stable [`LightId`] valid until
+    /// [`remove_light`] is called.  Equivalent to `ULightComponent::RegisterComponent`.
+    pub fn add_light(&mut self, light: SceneLight) -> LightId {
+        self.gpu_light_scene.add_light(light)
+    }
+
+    /// Remove a light permanently.
+    pub fn remove_light(&mut self, id: LightId) {
+        self.gpu_light_scene.remove_light(id);
+    }
+
+    /// Replace all parameters of an existing light (position, color, intensity, etc.).
+    pub fn update_light(&mut self, id: LightId, light: SceneLight) {
+        self.gpu_light_scene.update_light(id, light);
+    }
+
+    /// Update only the world-space position of a light.  O(1), no shadow-matrix
+    /// recompute until `flush_scene_state` runs.
+    pub fn move_light(&mut self, id: LightId, position: [f32; 3]) {
+        self.gpu_light_scene.move_light(id, position);
+    }
+
+    /// Update only color + intensity of a light (does not dirty shadow matrices).
+    pub fn set_light_params(&mut self, id: LightId, color: [f32; 3], intensity: f32) {
+        self.gpu_light_scene.set_light_params(id, color, intensity);
+    }
+
+    // ── Billboards ────────────────────────────────────────────────────────────
+
+    /// Register a billboard instance.  Returns a stable [`BillboardId`].
+    pub fn add_billboard(&mut self, instance: crate::features::BillboardInstance) -> BillboardId {
+        if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
+            bb.add_billboard_persistent(instance)
+        } else {
+            BillboardId::INVALID
+        }
+    }
+
+    /// Remove a billboard instance.
+    pub fn remove_billboard(&mut self, id: BillboardId) {
+        if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
+            bb.remove_billboard_persistent(id);
+        }
+    }
+
+    /// Update an existing billboard instance.
+    pub fn update_billboard(&mut self, id: BillboardId, instance: crate::features::BillboardInstance) {
+        if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
+            bb.update_billboard_persistent(id, instance);
+        }
+    }
+
+    /// Update only the world-space position of a billboard.
+    pub fn move_billboard(&mut self, id: BillboardId, position: [f32; 3]) {
+        if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
+            bb.move_billboard(id, position);
+        }
+    }
+
+    // ── Ambient / Sky ─────────────────────────────────────────────────────────
+
+    /// Set the base ambient light color and intensity.
+    pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
+        if self.scene_state.ambient_color != color
+            || self.scene_state.ambient_intensity.to_bits() != intensity.to_bits()
+        {
+            self.scene_state.ambient_color = color;
+            self.scene_state.ambient_intensity = intensity;
+            self.scene_state.ambient_dirty = true;
+        }
+    }
+
+    /// Set the background sky color (used when no `SkyAtmosphere` is active).
+    pub fn set_sky_color(&mut self, color: [f32; 3]) {
+        if self.scene_state.sky_color != color {
+            self.scene_state.sky_color = color;
+            self.scene_state.sky_lut_dirty = true;
+        }
+    }
+
+    /// Set or clear the physical atmosphere.  Triggers SkyLut re-render.
+    pub fn set_sky_atmosphere(&mut self, atm: Option<crate::scene::SkyAtmosphere>) {
+        self.scene_state.sky_atmosphere = atm;
+        self.scene_state.sky_lut_dirty = true;
+    }
+
+    /// Set or clear the sky-driven ambient light.
+    pub fn set_skylight(&mut self, skylight: Option<crate::scene::Skylight>) {
+        self.scene_state.skylight = skylight;
+        self.scene_state.ambient_dirty = true;
+    }
+
+    // ── Internal compat helper (not public) ──────────────────────────────────
+
+    #[allow(dead_code)]
+    fn set_scene_env(&mut self, env: SceneEnv) {
+        // Lights — delegate to sync_lights (compat diff path).
+        self.gpu_light_scene.sync_lights(&env.lights);
+
+        // Billboards — delegate to set_billboards_slice (dirty-checked).
+        if let Some(bb) = self.features.get_typed_mut::<BillboardsFeature>("billboards") {
+            bb.set_billboards_slice(&env.billboards);
+        }
+
+        // Ambient.
+        self.set_ambient(env.ambient_color, env.ambient_intensity);
+
+        // Sky.
+        let had_sky = self.scene_state.sky_atmosphere.is_some();
+        let has_sky = env.sky_atmosphere.is_some();
+        if self.scene_state.sky_color != env.sky_color || had_sky != has_sky {
+            self.scene_state.sky_color = env.sky_color;
+            self.scene_state.sky_lut_dirty = true;
+        }
+        if let Some(ref new_atm) = env.sky_atmosphere {
+            let sun_dir = env.lights.iter()
+                .find(|l| matches!(l.light_type, crate::features::LightType::Directional))
+                .map(|l| {
+                    let d = glam::Vec3::from(l.direction).normalize();
+                    [-d.x, -d.y, -d.z]
+                })
+                .unwrap_or([0.0, 1.0, 0.0]);
+            let sun_moved =
+                (sun_dir[0] - self.scene_state.cached_sun_direction[0]).abs() > 0.01
+                || (sun_dir[1] - self.scene_state.cached_sun_direction[1]).abs() > 0.01
+                || (sun_dir[2] - self.scene_state.cached_sun_direction[2]).abs() > 0.01;
+            if sun_moved
+                || (new_atm.sun_intensity - self.scene_state.cached_sun_intensity).abs() > 0.01
+                || !had_sky
+            {
+                self.scene_state.sky_lut_dirty = true;
+                self.scene_state.cached_sun_direction = sun_dir;
+                self.scene_state.cached_sun_intensity = new_atm.sun_intensity;
+            }
+        } else if had_sky {
+            self.scene_state.sky_lut_dirty = true;
+        }
+        self.scene_state.sky_atmosphere = env.sky_atmosphere;
+        self.scene_state.skylight = env.skylight;
     }
 
 
@@ -524,10 +699,14 @@ impl Renderer {
         let frame_start = std::time::Instant::now();
         log::trace!("Rendering frame {}", self.frame_count);
 
-        // ── Step 0: process pending env (lights/sky/billboards) ──────────────
-        if let Some(env) = self.pending_env.take() {
-            self.prepare_env(env, camera);
-        }
+        // ── Step 0: flush scene state (lights/sky/ambient) ───────────────────
+        //
+        // Processes only what changed since last frame:
+        //   • shadow matrices for dirty lights / camera movement
+        //   • GPU light buffer delta upload (zero-cost if nothing moved)
+        //   • sky uniform upload (zero-cost if sky unchanged)
+        //   • ambient/RC update (zero-cost if ambient unchanged)
+        self.flush_scene_state(camera);
 
         // ── Step 1: flush GPU scene (single delta write_buffer) ───────────────
         //
@@ -730,8 +909,10 @@ impl Renderer {
         // ── GPU-DRIVEN RENDERING: Assign material IDs and upload draw list ──────
         if self.gpu_driven {
             if let Some(ref draw_list_buf) = self.draw_list_gpu_buffer {
-                let gpu_draws = {
+                {
                     let mut draw_calls = self.draw_list.lock().unwrap();
+                    // Reuse pre-allocated staging buffer — zero heap alloc.
+                    self.gpu_draws_staging.clear();
                     for dc in draw_calls.iter_mut() {
                         let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
                         if !self.material_id_map.contains_key(&mat_ptr) {
@@ -739,9 +920,7 @@ impl Renderer {
                             self.next_material_id += 1;
                         }
                         dc.material_id = *self.material_id_map.get(&mat_ptr).unwrap();
-                    }
-                    draw_calls.iter().map(|dc| {
-                        GpuDrawCall {
+                        self.gpu_draws_staging.push(GpuDrawCall {
                             vertex_offset: 0,
                             index_offset: 0,
                             index_count: dc.index_count,
@@ -752,14 +931,14 @@ impl Renderer {
                             _pad1: 0,
                             bounds_center: dc.bounds_center,
                             bounds_radius: dc.bounds_radius,
-                        }
-                    }).collect::<Vec<_>>()
-                };
-                if !gpu_draws.is_empty() {
-                    let draw_bytes = (gpu_draws.len() * std::mem::size_of::<GpuDrawCall>()) as u64;
-                    self.queue.write_buffer(draw_list_buf, 0, bytemuck::cast_slice(&gpu_draws));
+                        });
+                    }
+                }
+                if !self.gpu_draws_staging.is_empty() {
+                    let draw_bytes = (self.gpu_draws_staging.len() * std::mem::size_of::<GpuDrawCall>()) as u64;
+                    self.queue.write_buffer(draw_list_buf, 0, bytemuck::cast_slice(&self.gpu_draws_staging));
                     gpu_transfer::track_upload(draw_bytes);
-                    log::trace!("GPU-driven: Uploaded {} draw calls for indirect rendering", gpu_draws.len());
+                    log::trace!("GPU-driven: Uploaded {} draw calls for indirect rendering", self.gpu_draws_staging.len());
                 }
                 if let (Some(ref _opaque_buf), Some(ref _transparent_buf)) =
                     (&self.indirect_opaque_buffer, &self.indirect_transparent_buffer) {

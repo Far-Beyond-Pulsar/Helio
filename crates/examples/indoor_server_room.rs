@@ -19,8 +19,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
-
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 use helio_render_v2::features::{
     FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
@@ -174,6 +173,14 @@ struct AppState {
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
+
+    // Persistent light handles — registered once, never rebuilt per-frame.
+    _light_ids: Vec<LightId>,
+    // Persistent billboard handles — swapped between spotlight and probe views.
+    billboard_ids: Vec<BillboardId>,
+    // Pre-computed probe billboard data so toggling doesn't allocate.
+    spotlight_billboards: Vec<BillboardInstance>,
+    probe_billboard_data: Vec<BillboardInstance>,
 }
 
 impl App {
@@ -308,6 +315,59 @@ impl ApplicationHandler for App {
         for m in &ceiling_panels   { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
         for m in &cooling_units    { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
 
+        // ── Register lights once — no per-frame Vec allocation ────────────
+        let mut light_ids: Vec<LightId> = Vec::new();
+        // Overhead fluorescent panels
+        for &(px, pz) in CEILING_PANEL_XZ {
+            light_ids.push(renderer.add_light(SceneLight::spot(
+                [px, 3.78, pz], [0.0, -1.0, 0.0],
+                [0.88, 0.93, 1.0], 4.5, 7.0, 1.22, 1.48,
+            )));
+        }
+        // Per-row status LED strips
+        for &(rx, tag) in RACK_ROWS {
+            let col = row_color(tag);
+            light_ids.push(renderer.add_light(SceneLight::point([rx, 2.1, 0.0], col, 2.5, 6.0)));
+            for &end_z in &[-4.5_f32, 4.5] {
+                light_ids.push(renderer.add_light(SceneLight::point([rx, 2.1, end_z], col, 1.0, 3.5)));
+            }
+        }
+        // Cooling unit indicator lights
+        for (i, cx) in [-9.0_f32, -3.0, 3.0, 9.0].iter().enumerate() {
+            let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
+            light_ids.push(renderer.add_light(SceneLight::point([*cx, 2.8, -5.6], col, 0.8, 3.0)));
+        }
+
+        // ── Ambient (set once, unchanged) ─────────────────────────────────
+        renderer.set_ambient([0.6, 0.72, 1.0], 0.06);
+
+        // ── Billboards: build both sets, register spotlight set first ─────
+        let spotlight_billboards: Vec<BillboardInstance> = {
+            let mut bb = Vec::new();
+            for &(px, pz) in CEILING_PANEL_XZ {
+                bb.push(BillboardInstance::new([px, 3.78, pz], [0.35, 0.12]).with_color([0.88, 0.93, 1.0, 1.0]));
+            }
+            for &(rx, tag) in RACK_ROWS {
+                let col = row_color(tag);
+                bb.push(BillboardInstance::new([rx, 2.1, 0.0], [0.12, 0.08]).with_color([col[0], col[1], col[2], 1.0]));
+                for &end_z in &[-4.5_f32, 4.5] {
+                    bb.push(BillboardInstance::new([rx, 2.1, end_z], [0.1, 0.08]).with_color([col[0], col[1], col[2], 0.9]));
+                }
+            }
+            for (i, cx) in [-9.0_f32, -3.0, 3.0, 9.0].iter().enumerate() {
+                let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
+                bb.push(BillboardInstance::new([*cx, 2.8, -5.6], [0.12, 0.08]).with_color([col[0], col[1], col[2], 0.85]));
+            }
+            bb
+        };
+        let probe_billboard_data = probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX);
+
+        // Register the initial (spotlight) set and keep handles.
+        let mut billboard_ids: Vec<BillboardId> = Vec::with_capacity(spotlight_billboards.len());
+        for inst in &spotlight_billboards {
+            billboard_ids.push(renderer.add_billboard(inst.clone()));
+        }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -321,6 +381,10 @@ impl ApplicationHandler for App {
             probe_vis: false,
             sprite_w,
             sprite_h,
+            _light_ids: light_ids,
+            billboard_ids,
+            spotlight_billboards,
+            probe_billboard_data,
         });
     }
 
@@ -341,6 +405,7 @@ impl ApplicationHandler for App {
                 state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit3), ..
             }, .. } => {
                 state.probe_vis = !state.probe_vis;
+                // Swap sprite texture.
                 let raw: &[u8] = if state.probe_vis {
                     include_bytes!("../../probe.png")
                 } else {
@@ -352,6 +417,21 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                // Swap billboard content in-place via persistent handles.
+                // Remove old set then add new set, keeping handle vec updated.
+                let new_data: &[BillboardInstance] = if state.probe_vis {
+                    &state.probe_billboard_data
+                } else {
+                    &state.spotlight_billboards
+                };
+                // Remove all existing billboard handles.
+                for id in state.billboard_ids.drain(..) {
+                    state.renderer.remove_billboard(id);
+                }
+                // Register the new set.
+                for inst in new_data {
+                    state.billboard_ids.push(state.renderer.add_billboard(inst.clone()));
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -444,70 +524,10 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut lights = Vec::new();
-        // Overhead fluorescent panels — cool white, downward spot (1 shadow face vs 6)
-        // inner ≈ 70° half-angle, outer ≈ 85° for a wide soft-edge beam
-        for &(px, pz) in CEILING_PANEL_XZ {
-            let p = [px, 3.78, pz];
-            lights.push(SceneLight::spot(
-                p, [0.0, -1.0, 0.0],
-                [0.88, 0.93, 1.0], 4.5, 7.0,
-                1.22, /* inner ~70° */ 1.48, /* outer ~85° */
-            ));
-        }
-
-        // Per-row status LED strip at rack-top height
-        for &(rx, tag) in RACK_ROWS {
-            let col = row_color(tag);
-            let p = [rx, 2.1, 0.0];
-            lights.push(SceneLight::point(p, col, 2.5, 6.0));
-            for &end_z in &[-4.5_f32, 4.5] {
-                let pe = [rx, 2.1, end_z];
-                lights.push(SceneLight::point(pe, col, 1.0, 3.5));
-            }
-        }
-
-        // Cooling unit indicator lights on the back wall
-        for (i, cx) in [-9.0_f32, -3.0, 3.0, 9.0].iter().enumerate() {
-            let p = [*cx, 2.8, -5.6];
-            let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
-            lights.push(SceneLight::point(p, col, 0.8, 3.0));
-        }
-
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            let mut bb = Vec::new();
-            for &(px, pz) in CEILING_PANEL_XZ {
-                let p = [px, 3.78, pz];
-                bb.push(BillboardInstance::new(p, [0.35, 0.12]).with_color([0.88, 0.93, 1.0, 1.0]));
-            }
-            for &(rx, tag) in RACK_ROWS {
-                let col = row_color(tag);
-                let p = [rx, 2.1, 0.0];
-                bb.push(BillboardInstance::new(p, [0.12, 0.08]).with_color([col[0], col[1], col[2], 1.0]));
-                for &end_z in &[-4.5_f32, 4.5] {
-                    let pe = [rx, 2.1, end_z];
-                    bb.push(BillboardInstance::new(pe, [0.1, 0.08]).with_color([col[0], col[1], col[2], 0.9]));
-                }
-            }
-            for (i, cx) in [-9.0_f32, -3.0, 3.0, 9.0].iter().enumerate() {
-                let p = [*cx, 2.8, -5.6];
-                let col: [f32; 3] = if i == 1 { [0.0, 1.0, 0.3] } else { [0.0, 0.6, 1.0] };
-                bb.push(BillboardInstance::new(p, [0.12, 0.08]).with_color([col[0], col[1], col[2], 0.85]));
-            }
-            bb
-        };
-
-        let env = SceneEnv {
-            lights,
-            ambient_color: [0.6, 0.72, 1.0],
-            ambient_intensity: 0.06,
-            sky_color: [0.0, 0.0, 0.0],
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
+        // ── Zero per-frame allocations ────────────────────────────────────
+        // Lights, billboards, and ambient were registered once in `resumed`.
+        // Nothing to submit here — the renderer's persistent state is already
+        // up to date.  Just render.
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }

@@ -1,21 +1,33 @@
 //! GPU-resident light + shadow matrix storage with dirty-bit delta uploads.
 //!
-//! Analogous to [`crate::gpu_scene::GpuScene`] for geometry: lights occupy
-//! stable GPU slots indexed by their position in the scene's light list.
-//! Each frame only **dirty** slots (lights whose data actually changed) are
-//! written to the GPU.  A scene with no moving lights produces **zero** GPU
-//! uploads — down from ~47 MB / 60 frames with the old full-buffer path.
+//! ## Architecture
 //!
-//! Shadow matrices (6 per light) live in a paired buffer.  They are
-//! recomputed only for dirty light slots and, for CSM directional lights,
-//! when the camera moves past a configurable threshold.  An FNV hash
-//! comparison guards against unnecessary writes even when a matrix was
-//! recomputed but didn't actually change values.
+//! Lights are managed via a **persistent proxy map** — identical to how
+//! `GpuScene` manages mesh objects.  `add_light` / `remove_light` /
+//! `update_light` are O(1) and set a dirty flag on the affected slot.
+//! At steady state (no light changes) the per-frame cost is:
 //!
-//! Both buffers are pre-allocated at `MAX_LIGHTS` capacity (same as before)
-//! so the `Arc<wgpu::Buffer>` references shared with `ShadowPass` / the
-//! lighting bind group remain valid forever — no rebind needed on growth.
+//! * `update_shadow_matrices` — O(N) matrix recompute, GPU write only when
+//!   the FNV hash changed (zero uploads for static lights at fixed camera).
+//! * `flush` — single coalesced `write_buffer` over the dirty range; no-op
+//!   when nothing is dirty.
+//!
+//! The legacy `sync_lights(&[SceneLight])` snapshot API is kept as a thin
+//! compatibility shim and delegates to the persistent path.
+//!
+//! ## Buffer layout
+//!
+//! Lights occupy a **dense array** indexed 0..active_count.  When a light is
+//! removed via `remove_light`, the last active light is swapped into the freed
+//! slot (tombstone-free swap-remove) so the array stays dense and `face_counts`
+//! / `shadow_cull_lights` remain contiguous.  The swapped light's slot is
+//! marked dirty so the GPU sees the updated position.
+//!
+//! Both buffers are pre-allocated at `MAX_LIGHTS` capacity so the
+//! `Arc<wgpu::Buffer>` references shared with `ShadowPass` / the lighting
+//! bind group remain valid forever — no rebind needed.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
@@ -26,7 +38,7 @@ use crate::features::LightType;
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::gpu_transfer;
 use crate::passes::ShadowCullLight;
-use crate::scene::SceneLight;
+use crate::scene::{LightId, SceneLight};
 
 use super::shadow_math::{
     compute_directional_cascades, compute_point_light_matrices, compute_spot_matrix,
@@ -36,6 +48,14 @@ use super::uniforms::GpuShadowMatrix;
 const FACES_PER_LIGHT: usize = 6;
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+/// Internal record for one persistent light slot.
+struct LightProxy {
+    /// Index into the dense arrays (`cpu_lights`, `face_counts`, etc.).
+    index: u32,
+    /// CPU mirror — kept for shadow matrix recomputation and compat shim.
+    data: SceneLight,
+}
 
 /// GPU-resident light + shadow matrix buffers with per-slot dirty tracking.
 ///
@@ -60,16 +80,31 @@ pub(super) struct GpuLightScene {
     /// uploads when a recomputed matrix is numerically identical.
     shadow_hashes: Vec<u64>,
 
-    // ── CPU-side scene mirror (for frame-to-frame diffing) ────────────────
-    cached_scene_lights: Vec<SceneLight>,
+    // ── Persistent proxy map ──────────────────────────────────────────────
+    /// LightId → proxy (index into dense arrays + CPU data mirror).
+    proxies: HashMap<u32, LightProxy>,
+    /// Monotonically increasing id counter (never reuses ids).
+    next_light_id: u32,
+
+    // ── Dense CPU mirror (same layout as GPU buffer) ──────────────────────
+    /// SceneLight data in slot order — used by update_shadow_matrices,
+    /// sync_lights, and flush_scene_state (directional sun direction).
+    pub(super) cached_scene_lights: Vec<SceneLight>,
 
     // ── Per-frame publishable state (forwarded to ShadowPass) ────────────
-    /// Number of active lights this frame.
+    /// Number of active lights.
     pub active_count: u32,
     /// Per-slot face count: 6 = point, 4 = directional, 1 = spot.
+    /// Rebuilt only on structural changes (add/remove), not every frame.
     pub face_counts: Vec<u8>,
-    /// Cull data for ShadowPass; rebuilt whenever the light set changes.
+    /// Cull data for ShadowPass; rebuilt every frame in update_shadow_matrices
+    /// (stores current shadow hash for skip-logic).
     pub shadow_cull_lights: Vec<ShadowCullLight>,
+
+    // ── Structural change flag ────────────────────────────────────────────
+    /// Set whenever a light is added or removed.  Callers gate expensive
+    /// work (face_counts clone into Mutex, etc.) on this flag and clear it.
+    pub structure_changed: bool,
 
     // ── Camera state for CSM dirty detection ─────────────────────────────
     last_camera_pos: [f32; 3],
@@ -78,9 +113,6 @@ pub(super) struct GpuLightScene {
 
 impl GpuLightScene {
     /// Wrap existing, already-allocated GPU buffers with dirty-tracking state.
-    ///
-    /// Both buffers must have been created with capacity for `MAX_LIGHTS`
-    /// lights (the same objects that live in the lighting bind group).
     pub fn new(
         light_buffer: Arc<wgpu::Buffer>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
@@ -96,43 +128,187 @@ impl GpuLightScene {
             shadow_dirty:    vec![false; cap],
             shadow_hashes:   vec![u64::MAX; cap],
 
+            proxies: HashMap::new(),
+            next_light_id: 1, // 0 reserved for INVALID
+
             cached_scene_lights: Vec::new(),
 
             active_count: 0,
             face_counts: Vec::new(),
             shadow_cull_lights: Vec::new(),
 
+            structure_changed: false,
+
             last_camera_pos: [f32::NAN; 3],
             camera_move_threshold: 0.5,
         }
     }
 
-    // ── Public API ────────────────────────────────────────────────────────
+    // ── Persistent API ────────────────────────────────────────────────────
+
+    /// Register a new light.  Returns a stable [`LightId`] valid until
+    /// [`remove_light`] is called.  O(1).
+    pub fn add_light(&mut self, light: SceneLight) -> LightId {
+        assert!(
+            self.active_count < MAX_LIGHTS as u32,
+            "GpuLightScene: MAX_LIGHTS ({}) exceeded", MAX_LIGHTS
+        );
+
+        let id = LightId(self.next_light_id);
+        self.next_light_id += 1;
+
+        let index = self.active_count as usize;
+        self.active_count += 1;
+
+        // Grow dense arrays if needed (they start at MAX_LIGHTS capacity so
+        // this is just a push into pre-allocated space).
+        if index >= self.cached_scene_lights.len() {
+            self.cached_scene_lights.push(light.clone());
+        } else {
+            self.cached_scene_lights[index] = light.clone();
+        }
+
+        self.cpu_lights[index] = scene_light_to_gpu(&light);
+        self.light_dirty[index] = true;
+        self.shadow_dirty[index] = true;
+        self.shadow_hashes[index] = u64::MAX;
+
+        // Rebuild face_counts (structural change).
+        self.face_counts.push(light_face_count(&light));
+
+        self.proxies.insert(id.0, LightProxy { index: index as u32, data: light });
+        self.structure_changed = true;
+
+        id
+    }
+
+    /// Remove a light by id.  The last active light is swap-removed into the
+    /// freed slot so the array stays dense.  O(1).
+    pub fn remove_light(&mut self, id: LightId) {
+        let proxy = match self.proxies.remove(&id.0) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let slot = proxy.index as usize;
+        let last = (self.active_count - 1) as usize;
+
+        if slot != last {
+            // Swap the last light into this slot.
+            let last_light = self.cached_scene_lights[last].clone();
+            self.cached_scene_lights[slot] = last_light.clone();
+            self.cpu_lights[slot] = scene_light_to_gpu(&last_light);
+            self.light_dirty[slot] = true;
+
+            // Copy shadow matrices from last slot into freed slot.
+            let src_base = last * FACES_PER_LIGHT;
+            let dst_base = slot * FACES_PER_LIGHT;
+            for j in 0..FACES_PER_LIGHT {
+                self.cpu_shadow_mats[dst_base + j] = self.cpu_shadow_mats[src_base + j];
+            }
+            self.shadow_hashes[slot] = self.shadow_hashes[last];
+            self.shadow_dirty[slot] = true;
+
+            self.face_counts[slot] = self.face_counts[last];
+
+            // Find which proxy pointed at `last` and update its index.
+            for proxy in self.proxies.values_mut() {
+                if proxy.index as usize == last {
+                    proxy.index = slot as u32;
+                    break;
+                }
+            }
+        }
+
+        // Zero out the now-unused last slot on the GPU.
+        self.cpu_lights[last] = GpuLight::zeroed();
+        self.light_dirty[last] = true;
+        let base = last * FACES_PER_LIGHT;
+        for j in 0..FACES_PER_LIGHT {
+            self.cpu_shadow_mats[base + j] = GpuShadowMatrix::zeroed();
+        }
+        self.shadow_dirty[last] = true;
+        self.shadow_hashes[last] = u64::MAX;
+
+        self.cached_scene_lights.truncate(last);
+        self.face_counts.truncate(last);
+        self.active_count -= 1;
+        self.structure_changed = true;
+    }
+
+    /// Update all parameters of an existing light.  O(1).
+    pub fn update_light(&mut self, id: LightId, light: SceneLight) {
+        let proxy = match self.proxies.get_mut(&id.0) {
+            Some(p) => p,
+            None => return,
+        };
+        let slot = proxy.index as usize;
+        proxy.data = light.clone();
+        self.cached_scene_lights[slot] = light.clone();
+        self.cpu_lights[slot] = scene_light_to_gpu(&light);
+        self.light_dirty[slot] = true;
+        self.shadow_dirty[slot] = true;
+    }
+
+    /// Update only the world-space position of a light (e.g. moving point
+    /// light).  Cheaper than a full `update_light` if other params are fixed.
+    pub fn move_light(&mut self, id: LightId, position: [f32; 3]) {
+        let proxy = match self.proxies.get_mut(&id.0) {
+            Some(p) => p,
+            None => return,
+        };
+        let slot = proxy.index as usize;
+        proxy.data.position = position;
+        self.cached_scene_lights[slot].position = position;
+        self.cpu_lights[slot].position = position;
+        self.light_dirty[slot] = true;
+        self.shadow_dirty[slot] = true;
+    }
+
+    /// Update color + intensity of a light without touching its transform.
+    pub fn set_light_params(&mut self, id: LightId, color: [f32; 3], intensity: f32) {
+        let proxy = match self.proxies.get_mut(&id.0) {
+            Some(p) => p,
+            None => return,
+        };
+        let slot = proxy.index as usize;
+        proxy.data.color = color;
+        proxy.data.intensity = intensity;
+        self.cached_scene_lights[slot].color = color;
+        self.cached_scene_lights[slot].intensity = intensity;
+        self.cpu_lights[slot].color = color;
+        self.cpu_lights[slot].intensity = intensity;
+        self.light_dirty[slot] = true;
+        // No shadow_dirty — shadow matrices don't depend on color/intensity.
+    }
+
+    // ── Compatibility shim ────────────────────────────────────────────────
 
     /// Diff `new_lights` against the cached CPU mirror and dirty-flag only
     /// changed / added / removed slots.
     ///
-    /// At steady state with no light movement this is a pure CPU compare —
-    /// O(N) comparisons, zero GPU writes queued.
+    /// This is the legacy snapshot API kept for backward compatibility.
+    /// New code should use `add_light` / `remove_light` / `update_light`.
     pub fn sync_lights(&mut self, new_lights: &[SceneLight]) {
         let new_count = new_lights.len();
         let old_count = self.cached_scene_lights.len();
 
-        // Diff: update GpuLight data for changed / new slots.
+        // Diff: update GpuLight data for changed slots.
         for i in 0..new_count.min(old_count) {
             if !scene_lights_bitwise_equal(&new_lights[i], &self.cached_scene_lights[i]) {
+                self.cached_scene_lights[i] = new_lights[i].clone();
                 self.cpu_lights[i] = scene_light_to_gpu(&new_lights[i]);
                 self.light_dirty[i] = true;
-                self.shadow_dirty[i] = true; // position/type changed → recompute shadow mats
+                self.shadow_dirty[i] = true;
             }
         }
 
         // Newly added lights.
         for i in old_count..new_count {
+            self.cached_scene_lights.push(new_lights[i].clone());
             self.cpu_lights[i] = scene_light_to_gpu(&new_lights[i]);
             self.light_dirty[i] = true;
             self.shadow_dirty[i] = true;
-            // Invalidate any stale shadow hash for this slot so it gets recomputed.
             self.shadow_hashes[i] = u64::MAX;
         }
 
@@ -140,7 +316,6 @@ impl GpuLightScene {
         for i in new_count..old_count {
             self.cpu_lights[i] = GpuLight::zeroed();
             self.light_dirty[i] = true;
-            // Zero the shadow matrices too so stale data is gone.
             let base = i * FACES_PER_LIGHT;
             for j in 0..FACES_PER_LIGHT {
                 self.cpu_shadow_mats[base + j] = GpuShadowMatrix::zeroed();
@@ -148,33 +323,31 @@ impl GpuLightScene {
             self.shadow_dirty[i] = true;
             self.shadow_hashes[i] = u64::MAX;
         }
+        self.cached_scene_lights.truncate(new_count);
 
-        // Rebuild per-frame helpers.
+        let old_active = self.active_count;
         self.active_count = new_count as u32;
-        self.face_counts.clear();
-        for l in new_lights {
-            self.face_counts.push(match l.light_type {
-                LightType::Point       => 6,
-                LightType::Directional => 4,
-                LightType::Spot { .. } => 1,
-            });
-        }
 
-        self.cached_scene_lights.clear();
-        self.cached_scene_lights.extend_from_slice(new_lights);
+        // Rebuild face_counts only when the light set changed structurally.
+        if new_count != old_count as usize || old_active != self.active_count {
+            self.face_counts.clear();
+            for l in new_lights {
+                self.face_counts.push(light_face_count(l));
+            }
+            self.structure_changed = true;
+        }
     }
+
+    // ── Shadow matrices ───────────────────────────────────────────────────
 
     /// Recompute shadow matrices for dirty light slots and for directional
     /// lights when the camera moves past the configured threshold.
-    ///
-    /// FNV hash comparison means even a "dirty" slot only queues a GPU write
-    /// when the numerical matrix values actually changed.
     pub fn update_shadow_matrices(&mut self, camera: &Camera) {
         let camera_pos: [f32; 3] = camera.position.into();
         let camera_moved = {
             let lp = self.last_camera_pos;
             if lp[0].is_nan() {
-                true // first frame
+                true
             } else {
                 let dx = camera_pos[0] - lp[0];
                 let dy = camera_pos[1] - lp[1];
@@ -187,23 +360,23 @@ impl GpuLightScene {
         }
 
         let identity = Mat4::IDENTITY;
-        let count = self.cached_scene_lights.len();
+        let count = self.active_count as usize;
 
         self.shadow_cull_lights.clear();
         self.shadow_cull_lights.reserve(count);
 
-        for (i, light) in self.cached_scene_lights.iter().enumerate() {
+        for (i, light) in self.cached_scene_lights[..count].iter().enumerate() {
             let is_directional = matches!(light.light_type, LightType::Directional);
             let needs_update = self.shadow_dirty[i] || (camera_moved && is_directional);
 
             if !needs_update {
                 self.shadow_cull_lights.push(ShadowCullLight {
-                    position:       light.position,
-                    direction:      light.direction,
-                    range:          shadow_cull_range(light),
+                    position:    light.position,
+                    direction:   light.direction,
+                    range:       shadow_cull_range(light),
                     is_directional,
-                    is_point:       matches!(light.light_type, LightType::Point),
-                    matrix_hash:    self.shadow_hashes[i],
+                    is_point:    matches!(light.light_type, LightType::Point),
+                    matrix_hash: self.shadow_hashes[i],
                 });
                 continue;
             }
@@ -242,39 +415,24 @@ impl GpuLightScene {
                 self.shadow_hashes[i] = new_hash;
                 self.shadow_dirty[i] = true;
             } else {
-                // Matrices are identical — nothing to upload.
                 self.shadow_dirty[i] = false;
             }
 
             self.shadow_cull_lights.push(ShadowCullLight {
-                position:       light.position,
-                direction:      light.direction,
-                range:          shadow_cull_range(light),
+                position:    light.position,
+                direction:   light.direction,
+                range:       shadow_cull_range(light),
                 is_directional,
-                is_point:       matches!(light.light_type, LightType::Point),
-                matrix_hash:    self.shadow_hashes[i],
+                is_point:    matches!(light.light_type, LightType::Point),
+                matrix_hash: self.shadow_hashes[i],
             });
-        }
-
-        // Clear light dirty flags after shadow matrix processing since
-        // shadow_dirty now reflects whether a GPU write is needed.
-        for i in 0..count {
-            // shadow_dirty[i] was set by sync_lights *or* update_shadow_matrices
-            // (hash mismatch) and cleared on hash match above — leave as is.
-            // light_dirty[i] is cleared by flush().
-            let _ = i;
         }
     }
 
     /// Write all dirty light slots and dirty shadow matrix slots to the GPU.
-    ///
-    /// Uses a single coalesced `write_buffer` call for the dirty range of the
-    /// light buffer (lo..=hi), and one per-slot call for shadow matrices
-    /// (often only a handful even in animated scenes).
-    ///
     /// Zero cost when nothing changed.
     pub fn flush(&mut self, queue: &wgpu::Queue) {
-        let count = self.cached_scene_lights.len();
+        let count = self.active_count as usize;
         if count == 0 {
             return;
         }
@@ -317,6 +475,14 @@ impl GpuLightScene {
 
 // ── Helper functions ──────────────────────────────────────────────────────────
 
+fn light_face_count(l: &SceneLight) -> u8 {
+    match l.light_type {
+        LightType::Point       => 6,
+        LightType::Directional => 4,
+        LightType::Spot { .. } => 1,
+    }
+}
+
 /// Bitwise equality check for SceneLight (avoids PartialEq on f32 NaN issues).
 fn scene_lights_bitwise_equal(a: &SceneLight, b: &SceneLight) -> bool {
     if a.light_type != b.light_type {
@@ -336,7 +502,7 @@ fn scene_lights_bitwise_equal(a: &SceneLight, b: &SceneLight) -> bool {
         && a.range.to_bits() == b.range.to_bits()
 }
 
-fn scene_light_to_gpu(l: &SceneLight) -> GpuLight {
+pub(super) fn scene_light_to_gpu(l: &SceneLight) -> GpuLight {
     let light_type = match l.light_type {
         LightType::Directional => 0.0,
         LightType::Point       => 1.0,

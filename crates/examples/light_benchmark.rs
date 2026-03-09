@@ -19,7 +19,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -160,10 +160,15 @@ struct AppState {
     renderer:       Renderer,
     last_frame:     std::time::Instant,
 
-    // geometry (built once, cloned into Scene each frame)
+    // geometry
     floor:   GpuMesh,
     pillars: Vec<GpuMesh>,
     crates:  Vec<GpuMesh>,
+
+    // scene state
+    light_ids:     Vec<LightId>,
+    base_lights:   Vec<SceneLight>,
+    billboard_ids: Vec<BillboardId>,
 
     // camera
     cam_pos:        glam::Vec3,
@@ -178,7 +183,7 @@ struct AppState {
     light_intensity_multiplier: f32,
     sprite_w: u32,
     sprite_h: u32,
-    
+
     // event loop timing trackers
     time_render_end: Option<std::time::Instant>,
     time_about_to_wait_start: Option<std::time::Instant>,
@@ -295,10 +300,31 @@ impl ApplicationHandler for App {
         for p in &pillars { renderer.add_object(p, None, glam::Mat4::IDENTITY); }
         for c in &crates  { renderer.add_object(c, None, glam::Mat4::IDENTITY); }
 
+        let base_lights = build_lights();
+        let mut light_ids = Vec::new();
+        for light in &base_lights {
+            light_ids.push(renderer.add_light(light.clone()));
+        }
+        renderer.set_ambient([0.03, 0.03, 0.04], 1.0);
+
+        // Register billboard markers for each light
+        let mut billboard_ids = Vec::new();
+        for light in &base_lights {
+            let col = light.color;
+            billboard_ids.push(renderer.add_billboard(
+                BillboardInstance::new(light.position, [0.15, 0.15])
+                    .with_color([col[0], col[1], col[2], 0.85])
+                    .with_screen_scale(true)
+            ));
+        }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,
             last_frame: std::time::Instant::now(),
             floor, pillars, crates,
+            light_ids,
+            base_lights,
+            billboard_ids,
             cam_pos:        glam::Vec3::new(0.0, 4.0, 22.0),
             cam_yaw:        0.0,
             cam_pitch:      -0.18,
@@ -349,6 +375,24 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                // Remove existing billboards and register new set
+                for id in state.billboard_ids.drain(..) {
+                    state.renderer.remove_billboard(id);
+                }
+                if state.probe_vis {
+                    for inst in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(inst));
+                    }
+                } else {
+                    for light in &state.base_lights {
+                        let col = light.color;
+                        state.billboard_ids.push(state.renderer.add_billboard(
+                            BillboardInstance::new(light.position, [0.15, 0.15])
+                                .with_color([col[0], col[1], col[2], 0.85])
+                                .with_screen_scale(true)
+                        ));
+                    }
                 }
             }
 
@@ -527,50 +571,32 @@ impl AppState {
 
         // Time scene construction
         let scene_build_start = std::time::Instant::now();
-        
-        let mut lights = build_lights();
-        
+
         // Smooth fade-in over first 2 seconds (~120 frames at 60fps)
         let fade_in_frames = 120.0;
         let frame_age = (self.renderer.frame_count() as f32).min(fade_in_frames);
         let time_fade = if frame_age < fade_in_frames {
-            // Smoothstep: smooth curve from 0 to 1
             let t = frame_age / fade_in_frames;
             t * t * (3.0 - 2.0 * t)  // Hermite smoothstep
         } else {
             1.0
         };
-        
-        // Apply time-based fade-in only (GPU will handle distance fade)
-        for light in &mut lights {
-            light.intensity *= self.light_intensity_multiplier * time_fade;
+
+        // Apply time-based fade-in and intensity multiplier via update_light
+        let multiplier = self.light_intensity_multiplier * time_fade;
+        for (i, &id) in self.light_ids.iter().enumerate() {
+            let mut light = self.base_lights[i].clone();
+            light.intensity *= multiplier;
+            self.renderer.update_light(id, light);
         }
 
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            lights.iter().map(|l| {
-                let col = l.color;
-                BillboardInstance::new(l.position, [0.15, 0.15])
-                    .with_color([col[0], col[1], col[2], 0.85])
-                    .with_screen_scale(true)
-            }).collect()
-        };
-
-        let env = SceneEnv {
-            lights,
-            ambient_color: [0.03, 0.03, 0.04],
-            ambient_intensity: 1.0,
-            billboards,
-            ..Default::default()
-        };
+        // Scene state is persistent — no per-frame setup needed.
 
         let scene_build_ms = scene_build_start.elapsed().as_secs_f32() * 1000.0;
         if scene_build_ms > 10.0 {
             eprintln!("⚠️  Scene construction took {:.2}ms", scene_build_ms);
         }
 
-        self.renderer.set_scene_env(env);
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }

@@ -29,7 +29,7 @@ use helio_render_v2::{
     features::{FeatureRegistry, LightingFeature, ShadowsFeature},
     mesh::GpuMesh,
     camera::Camera,
-    SceneEnv, SceneLight,
+    SceneLight, LightId,
 };
 
 
@@ -41,12 +41,15 @@ struct AppState {
     device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
-    
+
     // Geometry
     floor: GpuMesh,
     spheres: Vec<GpuMesh>,
     cubes: Vec<GpuMesh>,
-    
+
+    // Scene state
+    light_ids: Vec<LightId>,
+
     // Camera
     cam_pos: Vec3,
     cam_yaw: f32,
@@ -54,11 +57,11 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f64, f64),
-    
+
     // Settings
     aa_mode: AntiAliasingMode,
     ssao_enabled: bool,
-    
+
     last_frame: std::time::Instant,
 }
 
@@ -152,6 +155,12 @@ impl ApplicationHandler for App {
         for sphere in &spheres { renderer.add_object(sphere, None, glam::Mat4::IDENTITY); }
         for cube   in &cubes   { renderer.add_object(cube,   None, glam::Mat4::IDENTITY); }
 
+        let mut light_ids = Vec::new();
+        light_ids.push(renderer.add_light(SceneLight::point([0.0,  3.0,  0.0], [1.0, 0.95, 0.9], 10.0, 8.0)));
+        light_ids.push(renderer.add_light(SceneLight::point([-3.0, 1.5, -3.0], [1.0, 0.3,  0.3],  5.0, 5.0)));
+        light_ids.push(renderer.add_light(SceneLight::point([ 3.0, 1.5,  3.0], [0.3, 0.5,  1.0],  5.0, 5.0)));
+        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
+
         self.state = Some(AppState {
             window,
             surface,
@@ -161,6 +170,7 @@ impl ApplicationHandler for App {
             floor,
             spheres,
             cubes,
+            light_ids,
             cam_pos: Vec3::new(0.0, 3.0, 8.0),
             cam_yaw: 0.0,
             cam_pitch: -0.3,
@@ -217,21 +227,10 @@ impl ApplicationHandler for App {
                 let proj = Mat4::perspective_rh(60.0_f32.to_radians(), aspect, 0.1, 100.0);
                 let camera = Camera::from_matrices(view, proj, state.cam_pos);
 
-                // Build environment
-                let env = SceneEnv {
-                    lights: vec![
-                        SceneLight::point([0.0,  3.0,  0.0], [1.0, 0.95, 0.9], 10.0, 8.0),
-                        SceneLight::point([-3.0, 1.5, -3.0], [1.0, 0.3,  0.3],  5.0, 5.0),
-                        SceneLight::point([ 3.0, 1.5,  3.0], [0.3, 0.5,  1.0],  5.0, 5.0),
-                    ],
-                    ambient_color:     [0.05, 0.05, 0.08],
-                    ambient_intensity: 1.0,
-                    ..Default::default()
-                };
+                // Scene state is persistent — no per-frame setup needed.
 
                 let frame = state.surface.get_current_texture().unwrap();
                 let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
-                state.renderer.set_scene_env(env);
                 state.renderer.render(&camera, &view, dt).ok();
                 frame.present();
 
