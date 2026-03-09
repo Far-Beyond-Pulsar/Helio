@@ -277,6 +277,40 @@ impl ApplicationHandler for App {
         renderer.add_object(&tent_c,       None, glam::Mat4::IDENTITY);
         renderer.add_object(&firepit,      None, glam::Mat4::IDENTITY);
 
+        // Register initial lights (sun & moon updated per-frame; fire has flicker)
+        let fire_pos = [0.0f32, 0.5, 9.5];
+        let ember_a  = [-0.4f32, 0.4, 9.2];
+        let ember_b  = [ 0.4f32, 0.4, 9.8];
+        let moon_dir_v = glam::Vec3::new(0.4, -0.7, 0.3).normalize();
+        let initial_sun_dir: [f32; 3] = [-0.0, -1.0, -0.5];
+        let sun_light_id  = renderer.add_light(SceneLight::directional(initial_sun_dir, [1.0, 0.9, 0.7], 0.005));
+        let fire_light_id = renderer.add_light(SceneLight::point(fire_pos, [1.0, 0.45, 0.1], 5.0, 12.0));
+        let ember_a_id    = renderer.add_light(SceneLight::point(ember_a,  [1.0, 0.35, 0.05], 1.5, 5.0));
+        let ember_b_id    = renderer.add_light(SceneLight::point(ember_b,  [1.0, 0.35, 0.05], 1.5, 5.0));
+        let moon_light_id = renderer.add_light(SceneLight::directional(
+            [moon_dir_v.x, moon_dir_v.y, moon_dir_v.z], [0.5, 0.65, 1.0], 0.05,
+        ));
+        renderer.set_sky_atmosphere(Some(
+            SkyAtmosphere::new()
+                .with_sun_intensity(20.0)
+                .with_exposure(3.5)
+                .with_mie_g(0.78)
+                .with_clouds(
+                    VolumetricClouds::new()
+                        .with_coverage(0.20)
+                        .with_density(0.5)
+                        .with_layer(600.0, 1600.0)
+                        .with_wind([0.7, 0.3], 0.05),
+                ),
+        ));
+        renderer.set_skylight(Some(
+            Skylight::new().with_intensity(0.10).with_tint([1.0, 0.92, 0.82]),
+        ));
+
+        // Register fire billboard marker
+        let mut billboard_ids = Vec::new();
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(fire_pos, [0.5, 0.5]).with_color([1.0, 0.45, 0.1, 1.0])));
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -290,6 +324,12 @@ impl ApplicationHandler for App {
             cam_yaw: std::f32::consts::PI, cam_pitch: -0.15,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
             sun_angle: 0.45, // golden-hour low sun
+            sun_light_id,
+            fire_light_id,
+            ember_a_id,
+            ember_b_id,
+            moon_light_id,
+            billboard_ids,
             probe_vis: false,
             sprite_w,
             sprite_h,
@@ -326,6 +366,18 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                // Remove existing billboards and register new set
+                for id in state.billboard_ids.drain(..) {
+                    state.renderer.remove_billboard(id);
+                }
+                if state.probe_vis {
+                    for inst in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(inst));
+                    }
+                } else {
+                    let fire_pos = [0.0f32, 0.5, 9.5];
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(fire_pos, [0.5, 0.5]).with_color([1.0, 0.45, 0.1, 1.0])));
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -439,13 +491,12 @@ impl AppState {
         // Campfire flicker
         let flicker = 1.0 + (time * 13.1).sin() * 0.08 + (time * 7.3).cos() * 0.05;
         let fire_pos = [0.0f32, 0.5, 9.5];
-        // Additional campfire satellites
-        let ember_a = [-0.4f32, 0.4, 9.2];
-        let ember_b = [ 0.4f32, 0.4, 9.8];
-        // Moonlight: directional so rays are parallel — no position-based divergence.
-        // Direction = toward scene from upper-left-back (roughly 40° elevation).
-        let moon_dir_v = glam::Vec3::new(0.4, -0.7, 0.3).normalize();
-        let moon_dir = [moon_dir_v.x, moon_dir_v.y, moon_dir_v.z];
+
+        // Update dynamic lights
+        self.renderer.update_light(self.sun_light_id, SceneLight::directional(light_dir, sun_color, (sun_lux * 0.4).max(0.005)));
+        self.renderer.update_light(self.fire_light_id, SceneLight::point(fire_pos, [1.0, 0.45, 0.1], 5.0 * flicker, 12.0));
+
+        // Scene state is persistent — no per-frame setup needed.
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
@@ -453,42 +504,6 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            vec![BillboardInstance::new(fire_pos, [0.5, 0.5]).with_color([1.0, 0.45, 0.1, 1.0])]
-        };
-
-        let env = SceneEnv {
-            lights: vec![
-                SceneLight::directional(light_dir, sun_color, (sun_lux * 0.4).max(0.005)),
-                SceneLight::point(fire_pos, [1.0, 0.45, 0.1], 5.0 * flicker, 12.0),
-                SceneLight::point(ember_a,  [1.0, 0.35, 0.05], 1.5, 5.0),
-                SceneLight::point(ember_b,  [1.0, 0.35, 0.05], 1.5, 5.0),
-                SceneLight::directional(moon_dir, [0.5, 0.65, 1.0], 0.05),
-            ],
-            sky_atmosphere: Some(
-                SkyAtmosphere::new()
-                    .with_sun_intensity(20.0)
-                    .with_exposure(3.5)
-                    .with_mie_g(0.78)
-                    .with_clouds(
-                        VolumetricClouds::new()
-                            .with_coverage(0.20)
-                            .with_density(0.5)
-                            .with_layer(600.0, 1600.0)
-                            .with_wind([0.7, 0.3], 0.05),
-                    ),
-            ),
-            skylight: Some(
-                Skylight::new()
-                    .with_intensity(0.10)
-                    .with_tint([1.0, 0.92, 0.82]),
-            ),
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }

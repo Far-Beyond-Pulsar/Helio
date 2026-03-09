@@ -21,7 +21,7 @@
 mod demo_portal;
 
 use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv,
+    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
 
@@ -179,6 +179,14 @@ struct AppState {
     mouse_delta: (f32, f32),
     sun_angle: f32,
 
+    // Scene state
+    sun_light_id:  LightId,
+    lamp_light_ids: Vec<LightId>,
+    neon_light_ids: Vec<LightId>,
+    lamp_bb_ids:   Vec<BillboardId>,
+    neon_bb_ids:   Vec<BillboardId>,
+    billboard_ids: Vec<BillboardId>, // unified list for probe toggle
+
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
@@ -265,6 +273,46 @@ impl ApplicationHandler for App {
         for m in &buildings  { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
         for m in &lamp_poles { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
 
+        // Register lights (sun updated per-frame; lamps/neons updated when sun_angle changes)
+        let sun_light_id = renderer.add_light(SceneLight::directional([-0.35, -0.38, -0.45], [1.0, 0.9, 0.7], 0.005));
+        let mut lamp_light_ids = Vec::new();
+        for &(x, z) in LAMPS {
+            let p = [x, 5.55, z];
+            lamp_light_ids.push(renderer.add_light(SceneLight::spot(
+                p, [0.0, -1.0, 0.0], [1.0, 0.72, 0.30], 0.0, 14.0, 0.96, 1.22,
+            )));
+        }
+        let mut neon_light_ids = Vec::new();
+        for &(x, y, z, r, g, b) in NEONS {
+            let p = [x, y, z];
+            neon_light_ids.push(renderer.add_light(SceneLight::point(p, [r, g, b], 3.0, 12.0)));
+        }
+        renderer.set_sky_atmosphere(Some(
+            SkyAtmosphere::new()
+                .with_sun_intensity(22.0)
+                .with_exposure(3.8)
+                .with_mie_g(0.80)
+                .with_clouds(VolumetricClouds::new()
+                    .with_coverage(0.25)
+                    .with_density(0.6)
+                    .with_layer(500.0, 1400.0)
+                    .with_wind([1.0, 0.2], 0.06)),
+        ));
+        renderer.set_skylight(Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 0.9, 0.8])));
+
+        // Register billboard markers
+        let mut lamp_bb_ids = Vec::new();
+        for &(x, z) in LAMPS {
+            let p = [x, 5.55, z];
+            lamp_bb_ids.push(renderer.add_billboard(BillboardInstance::new(p, [0.35, 0.35]).with_color([1.0, 0.72, 0.30, 0.0])));
+        }
+        let mut neon_bb_ids = Vec::new();
+        for &(x, y, z, r, g, b) in NEONS {
+            let p = [x, y, z];
+            neon_bb_ids.push(renderer.add_billboard(BillboardInstance::new(p, [0.7, 0.25]).with_color([r, g, b, 1.0])));
+        }
+        let mut billboard_ids: Vec<BillboardId> = lamp_bb_ids.iter().chain(neon_bb_ids.iter()).copied().collect();
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -273,6 +321,12 @@ impl ApplicationHandler for App {
             cam_yaw: std::f32::consts::PI, cam_pitch: -0.1,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
             sun_angle: 0.38, // low golden-hour sun
+            sun_light_id,
+            lamp_light_ids,
+            neon_light_ids,
+            lamp_bb_ids,
+            neon_bb_ids,
+            billboard_ids,
             probe_vis: false,
             sprite_w,
             sprite_h,
@@ -307,6 +361,31 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                // Swap between probe billboards and light marker billboards
+                for id in state.billboard_ids.drain(..) {
+                    state.renderer.remove_billboard(id);
+                }
+                if state.probe_vis {
+                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(b));
+                    }
+                } else {
+                    // Re-register lamp + neon markers
+                    state.lamp_bb_ids.clear();
+                    for &(x, z) in LAMPS {
+                        let p = [x, 5.55, z];
+                        let id = state.renderer.add_billboard(BillboardInstance::new(p, [0.35, 0.35]).with_color([1.0, 0.72, 0.30, 0.0]));
+                        state.lamp_bb_ids.push(id);
+                        state.billboard_ids.push(id);
+                    }
+                    state.neon_bb_ids.clear();
+                    for &(x, y, z, r, g, b) in NEONS {
+                        let p = [x, y, z];
+                        let id = state.renderer.add_billboard(BillboardInstance::new(p, [0.7, 0.25]).with_color([r, g, b, 1.0]));
+                        state.neon_bb_ids.push(id);
+                        state.billboard_ids.push(id);
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
@@ -418,12 +497,15 @@ impl AppState {
         // Real lamp heads have a reflector hood: wide downward spot, not omnidirectional.
         // inner ~55° / outer ~70° half-angle gives a realistic cobra-head spread.
         let lamp_on = (1.0 - sun_lux).clamp(0.0, 1.0);
-        let mut lights = vec![
-            SceneLight::directional(light_dir, sun_color, (sun_lux * 0.45).max(0.005)),
-        ];
-        for &(x, z) in LAMPS {
+
+        // Update sun direction and intensity dynamically
+        self.renderer.update_light(self.sun_light_id, SceneLight::directional(light_dir, sun_color, (sun_lux * 0.45).max(0.005)));
+
+        // Update lamp spot intensities based on time of day
+        for (i, &id) in self.lamp_light_ids.iter().enumerate() {
+            let (x, z) = LAMPS[i];
             let p = [x, 5.55, z];
-            lights.push(SceneLight::spot(
+            self.renderer.update_light(id, SceneLight::spot(
                 p, [0.0, -1.0, 0.0],
                 [1.0, 0.72, 0.30], 5.5 * lamp_on, 14.0,
                 0.96, /* inner ~55° */ 1.22, /* outer ~70° */
@@ -432,44 +514,20 @@ impl AppState {
 
         // Neon signs – always on, bloom harder at night
         let neon_boost = 0.6 + lamp_on * 0.4;
-        for &(x, y, z, r, g, b) in NEONS {
+        for (i, &id) in self.neon_light_ids.iter().enumerate() {
+            let (x, y, z, r, g, b) = NEONS[i];
             let p = [x, y, z];
-            lights.push(SceneLight::point(p, [r, g, b], 5.0 * neon_boost, 12.0));
+            self.renderer.update_light(id, SceneLight::point(p, [r, g, b], 5.0 * neon_boost, 12.0));
         }
 
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            let mut bb = Vec::new();
-            for &(x, z) in LAMPS {
+        // Update lamp billboard alpha to reflect lamp activation
+        if !self.probe_vis {
+            for (i, &id) in self.lamp_bb_ids.iter().enumerate() {
+                let (x, z) = LAMPS[i];
                 let p = [x, 5.55, z];
-                bb.push(BillboardInstance::new(p, [0.35, 0.35]).with_color([1.0, 0.72, 0.30, lamp_on]));
+                self.renderer.update_billboard(id, BillboardInstance::new(p, [0.35, 0.35]).with_color([1.0, 0.72, 0.30, lamp_on]));
             }
-            for &(x, y, z, r, g, b) in NEONS {
-                let p = [x, y, z];
-                bb.push(BillboardInstance::new(p, [0.7, 0.25]).with_color([r, g, b, 1.0]));
-            }
-            bb
-        };
-
-        let env = SceneEnv {
-            lights,
-            sky_atmosphere: Some(
-                SkyAtmosphere::new()
-                    .with_sun_intensity(22.0)
-                    .with_exposure(3.8)
-                    .with_mie_g(0.80)
-                    .with_clouds(VolumetricClouds::new()
-                        .with_coverage(0.25)
-                        .with_density(0.6)
-                        .with_layer(500.0, 1400.0)
-                        .with_wind([1.0, 0.2], 0.06)),
-            ),
-            skylight: Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 0.9, 0.8])),
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
+        }
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }

@@ -20,7 +20,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -173,6 +173,11 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
+    // Scene state
+    ocean_light_id: LightId,
+    lava_light_ids: Vec<LightId>,
+    billboard_ids: Vec<BillboardId>,
+
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
@@ -298,6 +303,25 @@ impl ApplicationHandler for App {
         for m in &boulders       { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
         for m in &scorch_patches { renderer.add_object(m, None, glam::Mat4::IDENTITY); }
 
+        // Ocean/sky directional fill — cool blue, very dim
+        let ocean_dir = glam::Vec3::new(-0.3, -0.6, 0.2).normalize();
+        let ocean_light_id = renderer.add_light(SceneLight::directional(
+            [ocean_dir.x, ocean_dir.y, ocean_dir.z], [0.3, 0.5, 1.0], 0.04,
+        ));
+        let mut lava_light_ids = Vec::new();
+        for &(x, y, z, r, g, b, intensity, range) in LAVA_LIGHTS {
+            let p = [x, y, z];
+            lava_light_ids.push(renderer.add_light(SceneLight::point(p, [r, g, b], intensity, range)));
+        }
+        renderer.set_ambient([0.5, 0.1, 0.02], 0.04);
+        renderer.set_sky_color([0.06, 0.01, 0.01]);
+
+        let mut billboard_ids = Vec::new();
+        for &(x, y, z, r, g, b, _intensity, _range) in LAVA_LIGHTS {
+            let p = [x, y, z];
+            billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p, [0.6, 0.6]).with_color([r, g, b, 0.9])));
+        }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
@@ -307,6 +331,9 @@ impl ApplicationHandler for App {
             cam_pos: glam::Vec3::new(0.0, 8.0, 38.0),
             cam_yaw: std::f32::consts::PI, cam_pitch: -0.15,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
+            ocean_light_id,
+            lava_light_ids,
+            billboard_ids,
             probe_vis: false,
             sprite_w,
             sprite_h,
