@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
+use crate::gpu_transfer;
 use crate::Result;
 
 /// SSAO configuration
@@ -73,6 +74,7 @@ impl SsaoPass {
             mapped_at_creation: false,
         });
         queue.write_buffer(&sample_buffer, 0, bytemuck::cast_slice(&samples));
+        gpu_transfer::track_upload((samples.len() * std::mem::size_of::<[f32; 4]>()) as u64);
 
         // Generate noise texture (4x4 random rotation vectors)
         let noise_texture = Self::create_noise_texture(device, queue);
@@ -287,6 +289,7 @@ impl SsaoPass {
             _pad: [0.0; 2],
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+        gpu_transfer::track_upload(std::mem::size_of::<SsaoUniform>() as u64);
     }
 }
 

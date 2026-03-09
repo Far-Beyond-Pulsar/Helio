@@ -271,7 +271,7 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit4), ..
             }, .. } => {
-                state.renderer.debug_key_pressed();
+                let _ = state.renderer.start_live_portal_default();
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ks, physical_key: PhysicalKey::Code(key), ..

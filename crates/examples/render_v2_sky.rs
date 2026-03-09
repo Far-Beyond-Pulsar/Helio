@@ -317,7 +317,7 @@ impl ApplicationHandler for App {
                     ..
                 },
                 ..
-            } => { state.renderer.debug_key_pressed(); }
+            } => { let _ = state.renderer.start_live_portal_default(); }
 
             WindowEvent::KeyboardInput {
                 event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, ..

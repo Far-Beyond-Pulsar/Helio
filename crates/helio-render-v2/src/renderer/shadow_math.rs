@@ -4,10 +4,10 @@ use glam::{Mat4, Vec3, Vec4Swizzles};
 
 /// World-space distance thresholds for the 4 CSM cascade boundaries.
 /// Cascade i covers [CSM_SPLITS[i-1], CSM_SPLITS[i]] (cascade 0 starts at 0).
-pub(super) const CSM_SPLITS: [f32; 4] = [16.0, 80.0, 300.0, 1400.0];
+pub(crate) const CSM_SPLITS: [f32; 4] = [16.0, 80.0, 300.0, 1400.0];
 
 /// Compute 6 cube-face view-proj matrices for a point light (±X, ±Y, ±Z).
-pub(super) fn compute_point_light_matrices(position: [f32; 3], range: f32) -> [Mat4; 6] {
+pub(crate) fn compute_point_light_matrices(position: [f32; 3], range: f32) -> [Mat4; 6] {
     let pos = Vec3::from(position);
     let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.05, range.max(0.1));
     let views = [
@@ -36,7 +36,7 @@ pub(super) fn compute_point_light_matrices(position: [f32; 3], range: f32) -> [M
 ///
 /// Slots 0-3 hold the four cascade matrices; slots 4-5 are identity (reserved
 /// for point-light cube faces which are not used for directional lights).
-pub(super) fn compute_directional_cascades(
+pub(crate) fn compute_directional_cascades(
     cam_pos: Vec3,
     view_proj_inv: Mat4,
     direction: [f32; 3],
@@ -129,7 +129,7 @@ pub(super) fn compute_directional_cascades(
 }
 
 /// Compute the light-space matrix for a spot light (perspective projection).
-pub(super) fn compute_spot_matrix(position: [f32; 3], direction: [f32; 3], range: f32, outer_angle: f32) -> Mat4 {
+pub(crate) fn compute_spot_matrix(position: [f32; 3], direction: [f32; 3], range: f32, outer_angle: f32) -> Mat4 {
     let pos = Vec3::from(position);
     let dir = Vec3::from(direction).normalize();
     let up = if dir.dot(Vec3::Y).abs() > 0.99 { Vec3::Z } else { Vec3::Y };

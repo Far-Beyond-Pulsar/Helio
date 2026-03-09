@@ -3,6 +3,7 @@
 use super::{FeatureContext, PrepareContext};
 use crate::features::{Feature, ShaderDefine};
 use crate::passes::BillboardPass;
+use crate::gpu_transfer;
 use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -326,6 +327,9 @@ impl Feature for BillboardsFeature {
                     color: b.color,
                 }));
                 ctx.queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.gpu_staging));
+                gpu_transfer::track_upload(
+                    (self.gpu_staging.len() * std::mem::size_of::<GpuBillboardInstance>()) as u64,
+                );
             }
         }
 

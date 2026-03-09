@@ -4,6 +4,7 @@ use super::*;
 use super::uniforms::{GlobalsUniform, SkyUniform};
 use super::helpers::{create_depth_texture, create_gbuffer_textures, create_gbuffer_bind_group};
 use super::shadow_math::CSM_SPLITS;
+use crate::features::lighting::MAX_LIGHTS;
 
 impl Renderer {
     /// Create a new renderer
@@ -393,7 +394,6 @@ impl Renderer {
 
         // Pick the real resources if features provided them, otherwise use defaults
         let light_buf     = feat_light_buf.unwrap_or_else(|| Arc::new(null_light_buf));
-        let light_buffer  = light_buf.clone();
         let shadow_view   = feat_shadow_view.unwrap_or_else(|| Arc::new(default_shadow_atlas_view));
         let shadow_samp   = feat_shadow_sampler.unwrap_or_else(|| Arc::new(default_comparison_sampler));
 
@@ -557,6 +557,11 @@ impl Renderer {
 
         // The unified instance buffer is no longer needed — each proxy has its own
         // 64-byte buffer.  Only legacy `draw_mesh_instanced` callers bring their own.
+        let gpu_scene = GpuScene::new(&device);
+        let gpu_light_scene = gpu_light_scene::GpuLightScene::new(
+            light_buf.clone(),
+            shadow_matrix_buffer.clone(),
+        );
 
         Ok(Self {
             device,
@@ -574,14 +579,11 @@ impl Renderer {
             draw_list,
             debug_shapes,
             debug_batch,
-            light_buffer,
-            light_buffer_capacity_lights: MAX_LIGHTS,
             lighting_shadow_view: shadow_view,
             lighting_shadow_sampler: shadow_samp,
             lighting_env_cube_view: Arc::new(cube_view),
             lighting_rc_view: rc_view,
             lighting_env_sampler: Arc::new(env_linear_sampler),
-            shadow_matrix_buffer,
             light_count_arc,
             light_face_counts,
             shadow_cull_lights,
@@ -617,15 +619,10 @@ impl Renderer {
             fxaa_bind_group,
             smaa_bind_group,
             taa_bind_group,
-            // ── Per-frame scratch (reused vec allocations) ─────────────────────
-            scratch_gpu_lights:           Vec::new(),
-            scratch_shadow_mats:          Vec::new(),
-            scratch_shadow_matrix_hashes: Vec::new(),
-            scratch_sorted_light_indices: Vec::new(),
             shadow_draw_list,
-            // ── Persistent proxy registry ──────────────────────────────────────
-            registered_objects: HashMap::new(),
-            next_object_id: 1,       // 0 is INVALID
+            // ── GPU-resident scene + lights ───────────────────────────────────────
+            gpu_scene,
+            gpu_light_scene,
             pending_env: None,
             // ── Frame state ────────────────────────────────────────────────────
             frame_count: 0,
@@ -634,7 +631,6 @@ impl Renderer {
             last_frame_start: None,
             last_frame_end: None,
             profiler,
-            debug_printout: false,
             live_portal: None,
             latest_scene_layout: None,
             previous_scene_layout: None,
@@ -659,10 +655,8 @@ impl Renderer {
             cached_sky_sun_intensity: 1.0,
             sky_state_changed:        true,
             draw_list_generation:     0,
-            cached_light_count:        0,
-            cached_light_position_hash: 0,
-            cached_camera_pos:         [0.0; 3],
-            camera_move_threshold:     0.5,
+            persistent_draw_count:   0,
+            cached_draw_list_gen:    u64::MAX, // force rebuild on first frame
         })
     }
 
@@ -685,43 +679,14 @@ impl Renderer {
             label: Some("Lighting Bind Group"),
             layout: &self.lighting_layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.light_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.gpu_light_scene.light_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.lighting_shadow_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.lighting_shadow_sampler) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.lighting_env_cube_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: self.shadow_matrix_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.gpu_light_scene.shadow_matrix_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.lighting_rc_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.lighting_env_sampler) },
             ],
         }));
-    }
-
-    pub(super) fn ensure_light_buffer_capacity(&mut self, required_lights: u32) {
-        if required_lights <= self.light_buffer_capacity_lights {
-            return;
-        }
-
-        let mut new_capacity = self.light_buffer_capacity_lights.max(1);
-        while new_capacity < required_lights {
-            new_capacity = new_capacity.saturating_mul(2);
-            if new_capacity == u32::MAX {
-                break;
-            }
-        }
-
-        let new_size = (std::mem::size_of::<GpuLight>() as u64) * (new_capacity as u64);
-        self.light_buffer = Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Light Storage Buffer"),
-            size: new_size,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        self.light_buffer_capacity_lights = new_capacity;
-        self.rebuild_lighting_bind_group();
-        log::trace!(
-            "Grew light buffer to {} lights ({} bytes)",
-            new_capacity,
-            new_size,
-        );
     }
 }

@@ -1,201 +1,47 @@
-//! Scene CPU preparation: light sorting, shadow matrix computation, sky uniforms.
+//! Scene CPU preparation: light sync, shadow matrix updates, sky uniforms.
 //!
-//! The old per-frame batch-diffing / instancing logic has been removed.  Geometry
-//! is now registered once via `Renderer::add_object` and lives in the persistent
-//! proxy registry (`registered_objects`).  This file only handles the *environment*
-//! side: lights, shadows, billboards, sky uniforms.
+//! Geometry lives permanently in `GpuScene` (delta uploads, zero cost when
+//! static).  Lights and shadow matrices now live in `GpuLightScene` — the
+//! same persistent delta-upload pattern.  `prepare_env` drives those systems
+//! and handles sky/ambient/billboard uniforms.
 
 use super::*;
-use super::uniforms::{GpuShadowMatrix, SkyUniform};
-use super::shadow_math::{CSM_SPLITS, compute_point_light_matrices, compute_directional_cascades, compute_spot_matrix};
+use super::uniforms::SkyUniform;
+use super::shadow_math::CSM_SPLITS;
 use super::helpers::estimate_sky_ambient;
-use bytemuck::Zeroable;
-use glam::{Mat4, Vec3};
+use glam::Vec3;
 
 impl Renderer {
     // ─────────────────────────────────────────────────────────────────────────
     // PRIMARY PATH — called from render() via pending_env
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Process a [`SceneEnv`]: upload lights, shadow matrices, billboards and sky
-    /// uniforms.  Called at the top of `render()` whenever `pending_env` is `Some`.
+    /// Process a [`SceneEnv`]: sync lights to the GPU, update shadow matrices,
+    /// upload billboards, and write sky uniforms.
+    ///
+    /// Light and shadow data is uploaded in **delta mode** — only dirty slots
+    /// (lights whose data actually changed) incur GPU writes.  A scene with no
+    /// moving lights produces zero uploads for lights and shadows.
     pub(crate) fn prepare_env(&mut self, env: SceneEnv, camera: &Camera) {
         let t_start = std::time::Instant::now();
 
-        // ── Temporal light sort cache ────────────────────────────────────────
-        let mut light_pos_hash: u64 = 0xcbf29ce484222325;
-        for light in &env.lights {
-            let bits = light.position[0].to_bits() as u64
-                     ^ light.position[1].to_bits() as u64
-                     ^ light.position[2].to_bits() as u64;
-            light_pos_hash ^= bits;
-            light_pos_hash  = light_pos_hash.wrapping_mul(0x100000001b3);
-        }
-        let camera_moved = {
-            let dx = camera.position[0] - self.cached_camera_pos[0];
-            let dy = camera.position[1] - self.cached_camera_pos[1];
-            let dz = camera.position[2] - self.cached_camera_pos[2];
-            let d  = (dx*dx + dy*dy + dz*dz).sqrt();
-            d > self.camera_move_threshold
-        };
-        let should_re_sort =
-            env.lights.len() != self.cached_light_count
-            || light_pos_hash  != self.cached_light_position_hash
-            || camera_moved;
+        // ── Lights + shadow matrices (GPU-resident, delta upload) ─────────────
+        self.gpu_light_scene.sync_lights(&env.lights);
+        self.gpu_light_scene.update_shadow_matrices(camera);
+        self.gpu_light_scene.flush(&self.queue);
 
-        self.cached_light_count         = env.lights.len();
-        self.cached_light_position_hash = light_pos_hash;
-        self.cached_camera_pos          = camera.position.into();
-
-        // ── Sort light indices by importance ─────────────────────────────────
-        let total_lights = env.lights.len();
-        self.scratch_sorted_light_indices.clear();
-        self.scratch_sorted_light_indices.reserve(total_lights);
-        for i in 0..total_lights { self.scratch_sorted_light_indices.push(i); }
-
-        if should_re_sort {
-            let _t = std::time::Instant::now();
-            self.scratch_sorted_light_indices.sort_by(|&ia, &ib| {
-                fn score(light: &crate::scene::SceneLight, cam: glam::Vec3) -> f32 {
-                    match light.light_type {
-                        crate::features::LightType::Directional => f32::MAX,
-                        crate::features::LightType::Point => {
-                            let lp = glam::Vec3::from(light.position);
-                            let d  = cam.distance(lp).max(0.25);
-                            let r  = light.range.max(0.001);
-                            let ang = (r / d).min(8.0);
-                            let prox = 1.0 / (1.0 + (d/r)*(d/r));
-                            light.intensity.max(0.0) * ang * ang * prox
-                        }
-                        crate::features::LightType::Spot { inner_angle, outer_angle } => {
-                            let lp  = glam::Vec3::from(light.position);
-                            let d   = cam.distance(lp).max(0.25);
-                            let r   = light.range.max(0.001);
-                            let ang = (r / d).min(8.0);
-                            let prox = 1.0 / (1.0 + (d/r)*(d/r));
-                            let to_cam  = (cam - lp).normalize_or_zero();
-                            let dir     = glam::Vec3::from(light.direction).normalize_or_zero();
-                            let cos_a   = dir.dot(to_cam);
-                            let ic = inner_angle.cos(); let oc = outer_angle.cos();
-                            let denom = (ic - oc).max(1e-6);
-                            let t = ((cos_a - oc) / denom).clamp(0.0, 1.0);
-                            let cone = t*t*(3.0 - 2.0*t);
-                            light.intensity.max(0.0) * ang * ang * prox * (0.25 + 0.75*cone)
-                        }
-                    }
-                }
-                score(&env.lights[ib], camera.position)
-                    .partial_cmp(&score(&env.lights[ia], camera.position))
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-            let ms = _t.elapsed().as_secs_f32() * 1000.0;
-            if ms > 0.5 { eprintln!("⚠️ [Env] Light sort: {} lights — {:.2}ms", total_lights, ms); }
-        }
-
-        // ── Upload GPU lights ─────────────────────────────────────────────────
-        let count = self.scratch_sorted_light_indices.len();
-        self.ensure_light_buffer_capacity(count as u32);
-        self.scratch_gpu_lights.clear();
-        self.scratch_gpu_lights.reserve(count);
-        for &idx in &self.scratch_sorted_light_indices {
-            let l = &env.lights[idx];
-            let light_type = match l.light_type {
-                crate::features::LightType::Directional  => 0.0,
-                crate::features::LightType::Point        => 1.0,
-                crate::features::LightType::Spot { .. }  => 2.0,
-            };
-            let (cos_inner, cos_outer) = match l.light_type {
-                crate::features::LightType::Spot { inner_angle, outer_angle } =>
-                    (inner_angle.cos(), outer_angle.cos()),
-                _ => (0.0, 0.0),
-            };
-            let dir_len = (l.direction[0]*l.direction[0]
-                         + l.direction[1]*l.direction[1]
-                         + l.direction[2]*l.direction[2]).sqrt();
-            let direction = if dir_len > 1e-6 {
-                [l.direction[0]/dir_len, l.direction[1]/dir_len, l.direction[2]/dir_len]
-            } else { [0.0, -1.0, 0.0] };
-            self.scratch_gpu_lights.push(GpuLight {
-                position: l.position, light_type,
-                direction, range: l.range,
-                color: l.color, intensity: l.intensity,
-                cos_inner, cos_outer, _pad: [0.0; 2],
-            });
-        }
-        if !self.scratch_gpu_lights.is_empty() {
-            self.queue.write_buffer(&self.light_buffer, 0,
-                bytemuck::cast_slice(&self.scratch_gpu_lights));
-        }
-
-        // ── Shadow matrices ────────────────────────────────────────────────────
-        let identity = Mat4::IDENTITY;
-        self.scratch_shadow_mats.clear();
-        self.scratch_shadow_mats.reserve(MAX_LIGHTS as usize * 6);
-        self.scratch_shadow_matrix_hashes.clear();
-        self.scratch_shadow_matrix_hashes.reserve(count);
-        for &idx in &self.scratch_sorted_light_indices {
-            let l = &env.lights[idx];
-            let six: [Mat4; 6] = match l.light_type {
-                crate::features::LightType::Point => {
-                    compute_point_light_matrices(l.position, l.range)
-                }
-                crate::features::LightType::Directional => {
-                    let [c0,c1,c2,c3] = compute_directional_cascades(
-                        camera.position, camera.view_proj_inv, l.direction);
-                    [c0, c1, c2, c3, identity, identity]
-                }
-                crate::features::LightType::Spot { outer_angle, .. } => {
-                    let m = compute_spot_matrix(l.position, l.direction, l.range, outer_angle);
-                    [m, identity, identity, identity, identity, identity]
-                }
-            };
-            let mat_hash = {
-                let mut h: u64 = 0xcbf29ce484222325;
-                for m in &six {
-                    for f in m.to_cols_array() {
-                        h ^= f.to_bits() as u64;
-                        h  = h.wrapping_mul(0x100000001b3);
-                    }
-                }
-                h
-            };
-            self.scratch_shadow_matrix_hashes.push(mat_hash);
-            for m in &six { self.scratch_shadow_mats.push(GpuShadowMatrix { mat: m.to_cols_array() }); }
-        }
-        self.scratch_shadow_mats.resize(MAX_LIGHTS as usize * 6, GpuShadowMatrix::zeroed());
-        self.queue.write_buffer(&self.shadow_matrix_buffer, 0,
-            bytemuck::cast_slice(&self.scratch_shadow_mats));
-
-        // ── Light count / face counts / cull lights ────────────────────────────
-        self.light_count_arc.store(count as u32, Ordering::Relaxed);
+        // Forward per-frame state to ShadowPass via Arc<Mutex<>> channels.
+        let count = self.gpu_light_scene.active_count;
+        self.scene_light_count = count;
+        self.light_count_arc.store(count, Ordering::Relaxed);
         {
             let mut fc = self.light_face_counts.lock().unwrap();
             fc.clear();
-            for &idx in &self.scratch_sorted_light_indices {
-                fc.push(match env.lights[idx].light_type {
-                    crate::features::LightType::Point       => 6,
-                    crate::features::LightType::Directional => 4,
-                    crate::features::LightType::Spot { .. } => 1,
-                });
-            }
+            fc.extend_from_slice(&self.gpu_light_scene.face_counts);
         }
         {
             let mut cull = self.shadow_cull_lights.lock().unwrap();
-            cull.clear();
-            for (slot, &li) in self.scratch_sorted_light_indices.iter().enumerate() {
-                let l = &env.lights[li];
-                let shadow_cull_range = match l.light_type {
-                    crate::features::LightType::Directional => l.range * 2.2,
-                    _                                        => l.range * 5.0,
-                };
-                cull.push(ShadowCullLight {
-                    position: l.position, direction: l.direction,
-                    range: shadow_cull_range,
-                    is_directional: matches!(l.light_type, crate::features::LightType::Directional),
-                    is_point:       matches!(l.light_type, crate::features::LightType::Point),
-                    matrix_hash: self.scratch_shadow_matrix_hashes.get(slot).copied().unwrap_or(0),
-                });
-            }
+            *cull = self.gpu_light_scene.shadow_cull_lights.clone();
         }
 
         // ── Billboards ──────────────────────────────────────────────────────────
@@ -291,8 +137,6 @@ impl Renderer {
         }
 
         let ms = t_start.elapsed().as_secs_f32() * 1000.0;
-        if self.debug_printout && self.frame_count % 60 == 0 {
-            eprintln!("🔧 prepare_env: {:.2}ms (lights={}, sky={})", ms, count, self.scene_has_sky);
-        }
+        log::trace!("prepare_env: {:.2}ms (lights={}, sky={})", ms, count, self.scene_has_sky);
     }
 }

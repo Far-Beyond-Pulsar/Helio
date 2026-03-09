@@ -1,6 +1,7 @@
 //! GPU mesh types and draw-call submission for V2 renderer
 
 use std::sync::Arc;
+use crate::gpu_transfer;
 
 /// Vertex format matching the geometry.wgsl shader exactly (32 bytes)
 #[repr(C)]
@@ -99,6 +100,9 @@ impl GpuMesh {
             contents: bytemuck::cast_slice(indices),
             usage: wgpu::BufferUsages::INDEX | blas_flag,
         }));
+        let vb_bytes = (vertices.len() * std::mem::size_of::<PackedVertex>()) as u64;
+        let ib_bytes = (indices.len() * std::mem::size_of::<u32>()) as u64;
+        gpu_transfer::track_alloc(vb_bytes + ib_bytes);
         // Bounding sphere: centroid + max-distance radius.
         // Centroid approximation is conservative and fast; the tiny extra radius
         // vs a min-bounding-sphere algorithm only means slightly fewer culled draws.

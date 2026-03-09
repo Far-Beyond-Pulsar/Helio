@@ -21,17 +21,20 @@ pub mod scene;
 pub mod material;
 pub mod profiler;
 pub mod debug_draw;
+pub mod gpu_scene;
+pub mod gpu_transfer;
 
 mod renderer;
 mod camera;
 
 pub use renderer::{Renderer, RendererConfig, SceneEnv};
 pub use camera::Camera;
-pub use profiler::{GpuProfiler, PassTiming};
+pub use profiler::{GpuProfiler, PassTiming, ScopeGuard};
 pub use mesh::{GpuMesh, PackedVertex, DrawCall, GpuDrawCall};
 pub use scene::{SceneLight, SkyAtmosphere, VolumetricClouds, Skylight, ObjectId};
 pub use material::{Material, GpuMaterial, TextureData};
 pub use debug_draw::DebugShape;
+pub use gpu_scene::{GpuScene, GpuInstanceData};
 
 /// Result type for renderer operations
 pub type Result<T> = std::result::Result<T, Error>;

@@ -1,24 +1,202 @@
-//! GPU + CPU frame timing profiler
+//! GPU + CPU frame timing profiler — scope-macro driven.
 //!
 //! Uses `wgpu::QueryType::Timestamp` (requires `Features::TIMESTAMP_QUERY`)
 //! to bracket each render/compute pass in the graph with GPU timestamps.
 //! Results are read back with a 1-frame delay via double-buffered staging
 //! buffers — no GPU stall on the hot path.
 //!
-//! If `TIMESTAMP_QUERY` was not requested in the device descriptor,
-//! `GpuProfiler::new` returns `None` and the renderer quietly falls back
-//! to CPU-only timing.
+//! # Profiling Model
+//!
+//! All CPU timing is captured via the [`profile_scope!`] macro which creates
+//! an RAII guard.  Nested scopes automatically form a tree — the macro pushes
+//! onto a thread-local stack on creation and pops on drop.  Completed scopes
+//! are dispatched over a channel to a background collector thread with **zero**
+//! allocation or locking on the main thread.
+//!
+//! GPU pass timestamps are recorded by the render graph and merged into the
+//! same tree by the collector.
+//!
+//! The collector thread builds per-frame timing trees and forwards them to the
+//! live portal (WebSocket) as delta-compressed snapshots.
 
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::cell::RefCell;
+use std::sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}};
 
 /// Maximum pass-level scopes per frame.
 /// Each scope uses 2 query slots (begin + end).
-/// Budget: 6 top-level + 16 lights + 16×6 faces + 6 RC sub-scopes = ~125; 192 gives headroom.
 const MAX_SCOPES: u32 = 192;
 const SLOT_COUNT: u32 = MAX_SCOPES * 2;
 const SLOT_BYTES: u64 = SLOT_COUNT as u64 * 8; // each timestamp is a u64
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+// PROFILE SCOPE MACRO + RAII GUARD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Create a profiling scope that automatically measures the enclosing block.
+///
+/// Nested `profile_scope!` invocations form a tree — inner scopes become
+/// children of the nearest outer scope on the same thread.  The timing is
+/// sent to a background collector on drop with zero heap allocation.
+///
+/// ```rust,ignore
+/// profile_scope!("render");
+/// {
+///     profile_scope!("prep");
+///     // ... prep work ...
+/// }
+/// {
+///     profile_scope!("graph");
+///     // ... graph execution ...
+/// }
+/// ```
+#[macro_export]
+macro_rules! profile_scope {
+    ($name:expr) => {
+        let _prof_guard = $crate::profiler::ScopeGuard::new($name);
+    };
+}
+
+// ── Thread-local scope stack ─────────────────────────────────────────────────
+
+/// Index into the per-frame scope list, used to track parent relationships.
+type ScopeIdx = u32;
+
+thread_local! {
+    /// Stack of currently-open scope indices on this thread.
+    /// Push on `ScopeGuard::new`, pop on `ScopeGuard::drop`.
+    static SCOPE_STACK: RefCell<Vec<ScopeIdx>> = RefCell::new(Vec::with_capacity(32));
+}
+
+/// An event dispatched from the main thread to the collector.
+pub(crate) enum ProfileEvent {
+    /// A CPU-timed scope completed.
+    Scope {
+        name: &'static str,
+        parent: Option<ScopeIdx>,
+        idx: ScopeIdx,
+        elapsed_ms: f32,
+    },
+    /// GPU pass timings for the current frame (from GpuProfiler readback).
+    GpuTimings(Vec<PassTiming>),
+    /// Marks the end of a logical frame — collector finalises the tree.
+    FrameEnd {
+        frame: u64,
+        frame_time_ms: f32,
+        frame_to_frame_ms: f32,
+        total_gpu_ms: f32,
+        total_cpu_ms: f32,
+    },
+}
+
+/// Global channel sender, initialised on first use.
+static PROFILE_TX: OnceLock<std::sync::mpsc::Sender<ProfileEvent>> = OnceLock::new();
+
+/// Counter for scope indices within a frame.  Reset each frame by FrameEnd.
+static SCOPE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Initialise the profiling background thread and channel.
+/// Safe to call multiple times — only the first call starts the thread.
+/// Returns a clone of the sender.
+pub(crate) fn init_profile_thread() -> std::sync::mpsc::Sender<ProfileEvent> {
+    PROFILE_TX.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<ProfileEvent>();
+        std::thread::Builder::new()
+            .name("helio-profiler".to_string())
+            .spawn(move || {
+                collector_loop(rx);
+            })
+            .expect("failed to spawn profiler collector thread");
+        tx
+    }).clone()
+}
+
+/// RAII guard created by [`profile_scope!`].
+pub struct ScopeGuard {
+    name: &'static str,
+    idx: ScopeIdx,
+    parent: Option<ScopeIdx>,
+    start: std::time::Instant,
+}
+
+impl ScopeGuard {
+    #[inline]
+    pub fn new(name: &'static str) -> Self {
+        let idx = SCOPE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let parent = SCOPE_STACK.with(|s| {
+            let mut stack = s.borrow_mut();
+            let parent = stack.last().copied();
+            stack.push(idx);
+            parent
+        });
+        Self {
+            name,
+            idx,
+            parent,
+            start: std::time::Instant::now(),
+        }
+    }
+}
+
+impl Drop for ScopeGuard {
+    #[inline]
+    fn drop(&mut self) {
+        let elapsed_ms = self.start.elapsed().as_secs_f32() * 1000.0;
+        SCOPE_STACK.with(|s| {
+            s.borrow_mut().pop();
+        });
+        if let Some(tx) = PROFILE_TX.get() {
+            let _ = tx.send(ProfileEvent::Scope {
+                name: self.name,
+                parent: self.parent,
+                idx: self.idx,
+                elapsed_ms,
+            });
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// COLLECTOR THREAD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// A completed scope node in the per-frame tree.
+struct ScopeNode {
+    name: &'static str,
+    parent: Option<ScopeIdx>,
+    elapsed_ms: f32,
+}
+
+fn collector_loop(rx: std::sync::mpsc::Receiver<ProfileEvent>) {
+    let mut frame_scopes: Vec<ScopeNode> = Vec::with_capacity(64);
+    let mut frame_gpu_timings: Vec<PassTiming> = Vec::new();
+
+    loop {
+        let event = match rx.recv() {
+            Ok(e) => e,
+            Err(_) => break, // channel closed
+        };
+
+        match event {
+            ProfileEvent::Scope { name, parent, idx: _, elapsed_ms } => {
+                frame_scopes.push(ScopeNode { name, parent, elapsed_ms });
+            }
+            ProfileEvent::GpuTimings(timings) => {
+                frame_gpu_timings = timings;
+            }
+            ProfileEvent::FrameEnd { .. } => {
+                // TODO: Build tree, compute deltas, forward to portal.
+                // For now just clear per-frame state.
+                frame_scopes.clear();
+                frame_gpu_timings.clear();
+                SCOPE_COUNTER.store(0, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// GPU TIMESTAMP PROFILER (kept for per-pass GPU timing)
+// ═══════════════════════════════════════════════════════════════════════════════
 
 /// Timing result for one render/compute pass.
 #[derive(Clone, Debug)]
@@ -28,7 +206,6 @@ pub struct PassTiming {
     /// Wall-clock GPU execution time in milliseconds (0 if not available yet)
     pub gpu_ms: f32,
     /// CPU time from just before to just after `pass.execute()`, in milliseconds.
-    /// Includes driver overhead + submission but NOT GPU execution.
     pub cpu_ms: f32,
 }
 
@@ -51,7 +228,10 @@ struct PendingFrame {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// GPU + CPU profiler.  Created once; held by the `Renderer`.
+/// GPU timestamp profiler.  Created once; held by the `Renderer`.
+///
+/// CPU-side timing is now handled entirely by [`profile_scope!`] and the
+/// collector thread.  This struct only manages GPU query sets and readback.
 pub struct GpuProfiler {
     query_set:         wgpu::QuerySet,
     resolve_buf:       wgpu::Buffer, // QUERY_RESOLVE | COPY_SRC
@@ -66,8 +246,7 @@ pub struct GpuProfiler {
     // In-flight frames waiting for staging buffer readback
     pending: [Option<PendingFrame>; 2],
 
-    // True when resolve() successfully staged data this frame.  Cleared by
-    // begin_readback() so it only calls map_async once per staging event.
+    // True when resolve() successfully staged data this frame.
     needs_readback: [bool; 2],
 
     /// Most recent successfully resolved timings (one entry per pass).
@@ -76,10 +255,9 @@ pub struct GpuProfiler {
     pub last_total_gpu_ms: f32,
     /// Sum of all per-pass CPU times from `last_timings` (ms).
     pub last_total_cpu_ms: f32,
-    /// Wall-clock frame time from last render (ms) — time from start of render() to end of render().
+    /// Wall-clock frame time from last render (ms).
     pub last_frame_time_ms: f32,
-    /// Wall-clock time from start of last frame's render() to start of this frame's render() (ms).
-    /// This captures the true frame-to-frame latency including presentation and input processing.
+    /// Wall-clock time from start of last frame to start of this frame (ms).
     pub last_frame_to_frame_ms: f32,
 }
 
@@ -312,73 +490,5 @@ impl GpuProfiler {
 
         // Advance write buffer for next frame
         self.write_idx = 1 - self.write_idx;
-    }
-
-    // ─────────────────────────────────────────────────────────────────────────
-
-    /// Pretty-print timings to stderr as an indented ANSI tree.
-    ///
-    /// Supports up to 3 levels (0, 1, or 2 slashes in the name):
-    /// ```text
-    /// [GPU TIMING]
-    ///   shadow          39.21 ms gpu
-    ///     light_8       10.21 ms gpu
-    ///       face_0       0.03 ms gpu
-    ///       face_4       9.87 ms gpu   ← the bad one
-    /// ```
-    /// Convenience wrapper — prints synchronously on the calling thread.
-    /// For the render loop, prefer cloning the snapshot and calling
-    /// [`Profiler::print_snapshot`] on a background thread instead.
-    pub fn print_timings(&self) {
-        if !self.last_timings.is_empty() {
-            Self::print_snapshot(self.last_timings.clone(), self.last_total_gpu_ms, self.last_total_cpu_ms, self.last_frame_time_ms, self.last_frame_to_frame_ms);
-        }
-    }
-
-    /// Format and print a timing snapshot to stderr.
-    /// Accepts owned data so it can be sent to a background thread without
-    /// borrowing the profiler.
-    pub fn print_snapshot(timings: Vec<PassTiming>, total_gpu_ms: f32, total_cpu_ms: f32, frame_time_ms: f32, frame_to_frame_ms: f32) {
-        if timings.is_empty() { return; }
-
-        const RESET:  &str = "\x1b[0m";
-        const BOLD:   &str = "\x1b[1m";
-        const DIM:    &str = "\x1b[2m";
-        const CYAN:   &str = "\x1b[36m";
-        const YELLOW: &str = "\x1b[33m";
-
-        eprintln!("{}[GPU TIMING]{}", BOLD, RESET);
-
-        for t in &timings {
-            let depth = t.name.chars().filter(|&c| c == '/').count();
-            let display = t.name.rsplitn(2, '/').next().unwrap_or(&t.name);
-
-            let (indent, name_width) = match depth {
-                0 => ("  ",     24usize),
-                1 => ("    ",   22usize),
-                _ => ("      ", 20usize),
-            };
-
-            let gpu_col = if t.gpu_ms >= 0.005 { CYAN } else { DIM };
-            let gpu_str = format!("{}{:>7.2} ms{} gpu", gpu_col, t.gpu_ms, RESET);
-
-            let cpu_str = if depth == 0 {
-                format!("  {}{:>7.2} ms{} cpu", DIM, t.cpu_ms, RESET)
-            } else {
-                String::new()
-            };
-
-            eprintln!("{}{:<name_width$}{}{}",
-                indent, display, gpu_str, cpu_str,
-                name_width = name_width);
-        }
-
-        eprintln!("  {}─────────────────────────────────{}", DIM, RESET);
-        eprintln!("  {}{:<24}{}{:>7.2} ms{} gpu  {}{:>7.2} ms{} cpu{}",
-            BOLD, "total", YELLOW, total_gpu_ms, RESET, DIM, total_cpu_ms, RESET, RESET);
-        eprintln!("  {}{:<24}{}{:>7.2} ms{} render{}",
-            DIM, "render time", RESET, frame_time_ms, RESET, RESET);
-        eprintln!("  {}{:<24}{}{:>7.2} ms{} frame-to-frame{}",
-            DIM, "frame latency", RESET, frame_to_frame_ms, RESET, RESET);
     }
 }

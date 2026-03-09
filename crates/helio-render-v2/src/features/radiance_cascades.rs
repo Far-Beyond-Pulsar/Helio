@@ -7,6 +7,7 @@
 use super::{FeatureContext, PrepareContext};
 use crate::features::{Feature, ShaderDefine};
 use crate::passes::RadianceCascadesPass;
+use crate::gpu_transfer;
 use crate::Result;
 use bytemuck::{Pod, Zeroable};
 use std::collections::HashMap;
@@ -407,6 +408,7 @@ impl Feature for RadianceCascadesFeature {
             sky_color: [self.sky_color[0], self.sky_color[1], self.sky_color[2], 0.0],
         };
         ctx.queue.write_buffer(buf, 0, bytemuck::bytes_of(&dyn_data));
+        gpu_transfer::track_upload(std::mem::size_of::<RCDynamic>() as u64);
         self.last_uploaded_dyn_state = Some(dyn_state);
         Ok(())
     }

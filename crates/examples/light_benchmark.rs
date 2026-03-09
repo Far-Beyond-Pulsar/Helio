@@ -352,11 +352,11 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // Toggle GPU timing printout
+            // Live profiler portal
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,
                 physical_key: PhysicalKey::Code(KeyCode::Digit4), ..
-            }, .. } => { state.renderer.debug_key_pressed(); }
+            }, .. } => { let _ = state.renderer.start_live_portal_default(); }
 
             // Decrease light intensity
             WindowEvent::KeyboardInput { event: KeyEvent {

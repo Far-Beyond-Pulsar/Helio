@@ -7,6 +7,7 @@ mod uniforms;
 mod shadow_math;
 mod helpers;
 mod portal;
+mod gpu_light_scene;
 
 pub use config::RendererConfig;
 
@@ -19,10 +20,11 @@ use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
-use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
-use crate::profiler::{GpuProfiler, PassTiming};
+use crate::profiler::GpuProfiler;
+use crate::gpu_transfer;
+use crate::gpu_scene::GpuScene;
 use crate::{Result, Error};
 use helio_live_portal::{
     LivePortalHandle,
@@ -31,7 +33,6 @@ use helio_live_portal::{
     PortalStageTiming,
     PortalSceneLayout,
     PortalSceneLayoutDelta,
-    PortalSceneCamera,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
@@ -40,21 +41,6 @@ use wgpu::util::DeviceExt;
 
 use self::uniforms::GlobalsUniform;
 use self::portal::{compute_scene_delta, open_url_in_browser};
-
-// ── Persistent proxy entry — one per registered object ───────────────────────
-//
-// Mirrors Unreal Engine's `FPrimitiveSceneProxy`.  Created once by `add_object`,
-// destroyed by `remove_object`.  Frustum culling, camera movement, and LOD
-// switches never create or destroy a `RegisteredProxy`.
-struct RegisteredProxy {
-    /// Pre-built draw call referencing the per-object instance transform buffer.
-    dc: DrawCall,
-    /// FNV-1a hash of the last-uploaded [f32; 16] transform matrix.
-    /// `update_transform` skips `write_buffer` when the hash is unchanged.
-    transform_hash: u64,
-    /// Dedicated single-instance GPU buffer (64 bytes).  Lives as long as the proxy.
-    instance_buf: Arc<wgpu::Buffer>,
-}
 
 /// Snapshot of per-frame environment data supplied by `set_scene_env`.
 /// Kept as a plain struct so `render()` can cheaply read it without locking.
@@ -113,15 +99,11 @@ pub struct Renderer {
     debug_batch: Arc<Mutex<Option<DebugDrawBatch>>>,
 
     // Light buffer for scene writes
-    light_buffer: Arc<wgpu::Buffer>,
-    light_buffer_capacity_lights: u32,
     lighting_shadow_view: Arc<wgpu::TextureView>,
     lighting_shadow_sampler: Arc<wgpu::Sampler>,
     lighting_env_cube_view: Arc<wgpu::TextureView>,
     lighting_rc_view: Arc<wgpu::TextureView>,
     lighting_env_sampler: Arc<wgpu::Sampler>,
-    // Shadow light-space matrix buffer (shared with ShadowPass)
-    shadow_matrix_buffer: Arc<wgpu::Buffer>,
     // Shared light count for ShadowPass (updated each frame before graph exec)
     light_count_arc: Arc<AtomicU32>,
     // Per-light active face counts: 6=point, 4=directional, 1=spot
@@ -197,18 +179,12 @@ pub struct Renderer {
     /// Monotonically increasing counter.  Bumped only when the registered object
     /// set changes (add_object / remove_object).  Does NOT change on camera moves.
     draw_list_generation: u64,
-
-    /// Cached light list state — skip sort if unchanged
-    cached_light_count:        usize,
-    cached_light_position_hash: u64,
-    cached_camera_pos:         [f32; 3],
-    camera_move_threshold:     f32,
-
-    // ── Per-frame scratch (reused allocations, no heap churn) ─────────────
-    scratch_gpu_lights:              Vec<GpuLight>,
-    scratch_shadow_mats:             Vec<uniforms::GpuShadowMatrix>,
-    scratch_shadow_matrix_hashes:    Vec<u64>,
-    scratch_sorted_light_indices:    Vec<usize>,
+    /// Number of persistent draw calls at the start of draw_list (from gpu_scene).
+    /// One-frame draws from `draw_mesh()` sit after this index and are truncated
+    /// at the start of the next `render()`.
+    persistent_draw_count: usize,
+    /// Generation value when persistent draw_list was last rebuilt.
+    cached_draw_list_gen: u64,
 
     // ── Shadow draw list ──────────────────────────────────────────────────
     /// Pointers to all registered-proxy DrawCalls, rebuilt O(N) each frame by
@@ -216,25 +192,26 @@ pub struct Renderer {
     shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
 
     // ════════════════════════════════════════════════════════════════════════
-    // PERSISTENT SCENE PROXY REGISTRY
+    // GPU-RESIDENT SCENE (Unreal FGPUScene equivalent)
     // ════════════════════════════════════════════════════════════════════════
     //
-    // This is the Unreal FScene equivalent.  The application calls:
-    //   add_object(mesh, material, transform) -> ObjectId   (like AddPrimitive)
-    //   remove_object(id)                                   (like RemovePrimitive)
-    //   update_transform(id, transform)                     (like SendRenderTransform)
+    // All per-object instance data lives in a single GPU storage buffer +
+    // a parallel vertex buffer for the mat4 transforms.  Objects are
+    // assigned stable slots via a free-list; transforms are uploaded as a
+    // single delta write per frame.  Static objects have ZERO CPU→GPU cost.
     //
-    // The renderer stores one `RegisteredProxy` per id.  Every frame `render()`
-    // rebuilds `draw_list` and `shadow_draw_list` by pointer-cloning the existing
-    // DrawCall arcs — O(N) pointer increments, zero GPU allocations at steady state.
+    // The application API is identical to before:
+    //   add_object(mesh, material, transform) -> ObjectId
+    //   remove_object(id)
+    //   update_transform(id, transform)
     //
-    // Frustum culling, camera rotation, LOD paging — none of these touch this map.
-    // The ONLY writes are from add_object / remove_object / update_transform.
+    // Internally, add/remove/update delegate to GpuScene which manages
+    // slot allocation, dirty tracking, and the per-frame flush.
     // ────────────────────────────────────────────────────────────────────────
-    /// Stable proxy map keyed by ObjectId.
-    registered_objects: HashMap<u64, RegisteredProxy>,
-    /// Next id to hand out.  Starts at 1; zero is INVALID.
-    next_object_id: u64,
+    /// GPU-resident scene buffer (slot allocator + dirty tracking + delta upload).
+    gpu_scene: GpuScene,
+    /// GPU-resident light + shadow matrix buffers (dirty-bit delta uploads).
+    gpu_light_scene: gpu_light_scene::GpuLightScene,
 
     // ── Environment (lights, sky, ambient, billboards) ────────────────────
     /// Set by `set_scene_env` each frame (or once for static scenes).
@@ -251,8 +228,6 @@ pub struct Renderer {
     /// GPU + CPU pass-level profiler.  `None` when TIMESTAMP_QUERY is unavailable.
     profiler: Option<GpuProfiler>,
 
-    /// When true, GPU timing stats are printed to stderr every frame.
-    debug_printout: bool,
     /// Optional live web dashboard handle for real-time pipeline/perf telemetry.
     live_portal: Option<LivePortalHandle>,
     /// Last captured scene layout snapshot forwarded to the portal thread.
@@ -336,13 +311,6 @@ impl Renderer {
         self.features.get_typed_mut::<T>(name)
     }
 
-    /// Toggle the per-frame GPU timing printout.
-    pub fn debug_key_pressed(&mut self) {
-        self.debug_printout = !self.debug_printout;
-        eprintln!("[Helio] GPU timing printout: {}",
-            if self.debug_printout { "ON  (press 4 to hide)" } else { "OFF" });
-    }
-
     /// Start the live performance dashboard and open it in the user's browser.
     pub fn start_live_portal(&mut self, bind_addr: &str) -> Result<String> {
         if let Some(portal) = &self.live_portal {
@@ -369,99 +337,84 @@ impl Renderer {
     // PERSISTENT SCENE PROXY API  (Unreal FScene::AddPrimitive / RemovePrimitive)
     // ══════════════════════════════════════════════════════════════════════════
 
-    /// Register a mesh into the persistent scene proxy registry.
+    /// Register a mesh into the GPU-resident scene.
     ///
     /// Equivalent to `UPrimitiveComponent::RegisterComponent()` → `FScene::AddPrimitive()`.
-    /// Creates a dedicated 64-byte per-object instance buffer on the GPU and stores
-    /// the initial `transform` in it.  Returns a stable [`ObjectId`] that uniquely
-    /// identifies this object for its entire lifetime in the scene.
+    /// Allocates a slot in the GPU scene buffer and writes the initial transform.
+    /// Returns a stable [`ObjectId`] for the object's lifetime in the scene.
     ///
-    /// Cost: one `create_buffer_init` + one `HashMap::insert`.  Never called again
-    /// for the same object — subsequent transforms are O(1) `write_buffer`.
+    /// Cost: one slot alloc + one CPU-mirror write.  GPU upload is deferred to
+    /// `flush()` which batches all dirty slots into a single `write_buffer`.
     pub fn add_object(
         &mut self,
         mesh:      &GpuMesh,
         material:  Option<&GpuMaterial>,
         transform: glam::Mat4,
     ) -> ObjectId {
-        let id = ObjectId(self.next_object_id);
-        self.next_object_id += 1;
+        let id = self.gpu_scene.add_object(
+            &self.device,
+            mesh,
+            material,
+            &self.default_material_bind_group,
+            transform,
+        );
 
-        let mat: [f32; 16] = transform.to_cols_array();
-        let transform_hash = fnv1a_mat(&mat);
-
-        // Allocate a dedicated 64-byte GPU buffer for this object's instance data.
-        // Single-instance, never resized — update via write_buffer only.
-        let instance_buf = Arc::new(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label:    Some("Proxy Instance"),
-                contents: bytemuck::cast_slice(&mat),
-                usage:    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            },
-        ));
-
-        let (bind_group, transparent) = match material {
-            Some(m) => (Arc::clone(&m.bind_group), m.transparent_blend),
-            None    => (Arc::clone(&self.default_material_bind_group), false),
-        };
-
-        let mut dc = DrawCall::new(mesh, bind_group, transparent);
-        dc.instance_buffer        = Some(Arc::clone(&instance_buf));
-        dc.instance_buffer_offset = 0;
-        dc.instance_count         = 1;
-
-        self.registered_objects.insert(id.0, RegisteredProxy { dc, transform_hash, instance_buf });
-
-        // Any structural change bumps generation so TransparentPass invalidates cached sorts.
-        self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
+        // Structural change bumps generation so TransparentPass invalidates cached sorts.
+        self.draw_list_generation = self.gpu_scene.generation;
 
         id
     }
 
-    /// Remove an object from the scene proxy registry.
+    /// Remove an object from the GPU-resident scene.
     ///
     /// Equivalent to `UPrimitiveComponent::UnregisterComponent()` → `FScene::RemovePrimitive()`.
-    /// Drops the GPU instance buffer Arc immediately; the buffer is freed when all
-    /// in-flight GPU commands that reference it complete (wgpu tracks this automatically).
+    /// Frees the slot in the GPU scene buffer; the zeroed slot is uploaded next flush.
     ///
-    /// Cost: one `HashMap::remove` + Arc drop.
+    /// Cost: one slot free + one CPU-mirror zero.
     pub fn remove_object(&mut self, id: ObjectId) {
-        if self.registered_objects.remove(&id.0).is_some() {
-            self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
-        }
+        self.gpu_scene.remove_object(id);
+        self.draw_list_generation = self.gpu_scene.generation;
     }
 
     /// Update the world transform of a registered object.
     ///
     /// Equivalent to `USceneComponent::SendRenderTransform()` → proxy `SetTransform()`.
-    /// Only issues a `write_buffer` when the FNV-1a hash of the new matrix differs from
-    /// the previously uploaded one — static geometry that never moves has zero GPU write cost.
-    ///
-    /// Cost: ~1 µs hash + conditional 64-byte `write_buffer`.
+    /// Only marks the slot dirty if the FNV-1a hash changed — static geometry has zero cost.
+    /// GPU upload is deferred to `flush()`.
     pub fn update_transform(&mut self, id: ObjectId, transform: glam::Mat4) {
-        if let Some(proxy) = self.registered_objects.get_mut(&id.0) {
-            let mat  = transform.to_cols_array();
-            let hash = fnv1a_mat(&mat);
-            if hash != proxy.transform_hash {
-                self.queue.write_buffer(&proxy.instance_buf, 0, bytemuck::cast_slice(&mat));
-                proxy.transform_hash = hash;
-                // update_transform does NOT bump draw_list_generation — the DrawCall arc
-                // and draw-order position are unchanged; only the GPU buffer contents change.
-            }
-        }
+        self.gpu_scene.update_transform(id, transform);
     }
 
-    /// Batch-update many transforms in a single call.  More efficient than calling
-    /// `update_transform` in a loop because the loop over changed entries is inlined.
+    /// Batch-update many transforms in a single call.
     pub fn update_transforms(&mut self, updates: &[(ObjectId, glam::Mat4)]) {
-        for &(id, transform) in updates {
-            self.update_transform(id, transform);
-        }
+        self.gpu_scene.update_transforms(updates);
     }
 
-    /// Number of objects currently registered in the scene proxy registry.
+    /// Number of objects currently registered in the GPU scene.
     pub fn object_count(&self) -> usize {
-        self.registered_objects.len()
+        self.gpu_scene.object_count() as usize
+    }
+
+    /// Enable an object so it appears in all draw lists.
+    pub fn enable_object(&mut self, id: ObjectId) {
+        self.gpu_scene.set_object_enabled(id, true);
+        self.draw_list_generation = self.gpu_scene.generation;
+    }
+
+    /// Disable an object so it is excluded from all draw lists (keeps its GPU slot).
+    pub fn disable_object(&mut self, id: ObjectId) {
+        self.gpu_scene.set_object_enabled(id, false);
+        self.draw_list_generation = self.gpu_scene.generation;
+    }
+
+    /// Returns `true` if the object exists and is currently enabled.
+    pub fn is_object_enabled(&self, id: ObjectId) -> bool {
+        self.gpu_scene.is_object_enabled(id)
+    }
+
+    /// Override the bounding sphere radius used for culling for a registered object.
+    pub fn set_object_bounds(&mut self, id: ObjectId, radius: f32) {
+        self.gpu_scene.set_object_bounds(id, radius);
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -496,24 +449,41 @@ impl Renderer {
             self.prepare_env(env, camera);
         }
 
-        // ── Step 1: populate draw_list from persistent proxy registry ─────────
+        // ── Step 1: flush GPU scene (single delta write_buffer) ───────────────
         //
-        // O(N) pointer-clone of all registered proxy DrawCalls.  This is the only
-        // thing render() does to build the draw list; no per-frame batch diffing,
-        // no eviction, no scratch map construction.
+        // Uploads only the dirty slot range to both the storage buffer (for future
+        // compute culling) and the vertex buffer (for draw-call instance binding).
+        // At steady state with no moved objects, this is a complete no-op.
+        self.gpu_scene.flush(&self.queue);
+
+        // ── Step 2: populate draw_list from GPU scene (persistent cache) ────
         //
-        // Additional draws from `draw_mesh()` / `draw_mesh_instanced()` calls that
-        // arrived BEFORE this render() call are already in the list and are preserved.
+        // The draw list is rebuilt ONLY when gpu_scene.generation changes
+        // (add_object / remove_object / update_material).  At steady state
+        // this block does NOTHING — zero Arc clones, zero iteration.
+        //
+        // One-frame draws from `draw_mesh()` that were pushed between frames
+        // sit after the persistent portion and are truncated here.
         {
             let mut dl  = self.draw_list.lock().unwrap();
             let mut sdl = self.shadow_draw_list.lock().unwrap();
-            sdl.clear();
-            // Reserve exact capacity; avoids mid-loop reallocs.
-            dl.reserve(self.registered_objects.len());
-            sdl.reserve(self.registered_objects.len());
-            for proxy in self.registered_objects.values() {
-                dl.push(proxy.dc.clone());
-                sdl.push(proxy.dc.clone());
+
+            if self.gpu_scene.generation != self.cached_draw_list_gen {
+                // Structural change — full rebuild from gpu_scene cache.
+                let (scene_dl, scene_sdl) = self.gpu_scene.draw_lists();
+
+                dl.clear();
+                dl.extend_from_slice(scene_dl);
+
+                sdl.clear();
+                sdl.extend_from_slice(scene_sdl);
+
+                self.persistent_draw_count = dl.len();
+                self.cached_draw_list_gen = self.gpu_scene.generation;
+            } else {
+                // Steady state — trim any one-frame draws from previous frame.
+                dl.truncate(self.persistent_draw_count);
+                sdl.truncate(self.persistent_draw_count);
             }
         }
 
@@ -522,6 +492,7 @@ impl Renderer {
 
         // Upload camera uniform (features may use camera-dependent logic in prepare).
         self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
+        gpu_transfer::track_upload(std::mem::size_of::<Camera>() as u64);
 
         // Prepare features (upload lights etc.)
         let prep_ctx = PrepareContext::new(
@@ -556,6 +527,7 @@ impl Renderer {
                    self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2],
                    self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2]);
         self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
+        gpu_transfer::track_upload(std::mem::size_of::<GlobalsUniform>() as u64);
 
         // Build GPU debug batch from shapes submitted since the previous frame.
         let debug_shapes = {
@@ -597,7 +569,9 @@ impl Renderer {
                     }).collect::<Vec<_>>()
                 };
                 if !gpu_draws.is_empty() {
+                    let draw_bytes = (gpu_draws.len() * std::mem::size_of::<GpuDrawCall>()) as u64;
                     self.queue.write_buffer(draw_list_buf, 0, bytemuck::cast_slice(&gpu_draws));
+                    gpu_transfer::track_upload(draw_bytes);
                     log::trace!("GPU-driven: Uploaded {} draw calls for indirect rendering", gpu_draws.len());
                 }
                 if let (Some(ref _opaque_buf), Some(ref _transparent_buf)) =
@@ -659,7 +633,7 @@ impl Renderer {
             draw_list_generation: self.draw_list_generation,
         };
 
-        let profiling_active = self.debug_printout || self.live_portal.is_some();
+        let profiling_active = self.live_portal.is_some();
 
         let graph_start = std::time::Instant::now();
         if profiling_active {
@@ -721,9 +695,6 @@ impl Renderer {
         let submit_start = std::time::Instant::now();
         self.queue.submit(Some(cmd_buf));
         let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
-        if self.debug_printout && (finish_ms + submit_ms) > 10.0 {
-            eprintln!("⚠️  encoder.finish()={:.2}ms  queue.submit()={:.2}ms", finish_ms, submit_ms);
-        }
 
         *self.debug_batch.lock().unwrap() = None;
 
@@ -749,24 +720,6 @@ impl Renderer {
 
         self.last_frame_start = Some(frame_start);
         self.last_frame_end = Some(std::time::Instant::now());
-
-        // ── Debug printout (every 60 frames) ──────────────────────────────────
-        if self.debug_printout && self.frame_count % 60 == 0 {
-            if let Some(p) = &mut self.profiler {
-                p.set_frame_time_ms(frame_time_ms);
-                p.set_frame_to_frame_ms(frame_to_frame_ms);
-            }
-            if let Some(p) = &self.profiler {
-                if !p.last_timings.is_empty() {
-                    let timings = p.last_timings.clone();
-                    let total_gpu   = p.last_total_gpu_ms;
-                    let total_cpu   = p.last_total_cpu_ms;
-                    std::thread::spawn(move || {
-                        crate::profiler::GpuProfiler::print_snapshot(timings, total_gpu, total_cpu, frame_time_ms, frame_to_frame_ms);
-                    });
-                }
-            }
-        }
 
         // ── Live portal snapshot ──────────────────────────────────────────────
         if let (Some(portal), Some(p)) = (&self.live_portal, &self.profiler) {
@@ -889,10 +842,12 @@ impl Renderer {
             }
         }
 
-        // finally, clear the draw list now that portal has sampled it
-        self.draw_list.lock().unwrap().clear();
+        // One-frame draws (from draw_mesh()) sit after `persistent_draw_count`
+        // and are truncated at the start of the next render() call.
+        // The persistent portion survives across frames — zero-cost at steady state.
 
         self.frame_count += 1;
+        gpu_transfer::end_frame();
         Ok(())
     }
 
@@ -944,44 +899,6 @@ impl Renderer {
 
     pub fn frame_count(&self) -> u64 { self.frame_count }
 
-    // ── Profiling ─────────────────────────────────────────────────────────────
-
-    pub fn last_frame_timings(&self) -> &[PassTiming] {
-        self.profiler.as_ref()
-            .map(|p| p.last_timings.as_slice())
-            .unwrap_or(&[])
-    }
-
-    pub fn print_timings_every(&self, interval: u64) {
-        if self.frame_count % interval != 0 { return; }
-        if let Some(p) = &self.profiler {
-            let timings = p.last_timings.clone();
-            let total_gpu   = p.last_total_gpu_ms;
-            let total_cpu   = p.last_total_cpu_ms;
-            let frame_time  = p.last_frame_time_ms;
-            let frame_to_frame = p.last_frame_to_frame_ms;
-            std::thread::spawn(move || {
-                crate::profiler::GpuProfiler::print_snapshot(timings, total_gpu, total_cpu, frame_time, frame_to_frame);
-            });
-        } else {
-            log::trace!("[TIMING] TIMESTAMP_QUERY unavailable — add wgpu::Features::TIMESTAMP_QUERY to device descriptor");
-        }
-    }
-
     pub fn device(&self) -> &wgpu::Device { &self.device }
     pub fn queue(&self) -> &wgpu::Queue { &self.queue }
-}
-
-// ── Module-level helpers ──────────────────────────────────────────────────────
-
-/// FNV-1a hash of a single [f32; 16] transform matrix.
-/// Used by `add_object` and `update_transform` to skip redundant `write_buffer`s.
-#[inline]
-fn fnv1a_mat(mat: &[f32; 16]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for &f in mat {
-        h ^= f.to_bits() as u64;
-        h = h.wrapping_mul(0x100000001b3);
-    }
-    h
 }

@@ -48,6 +48,6 @@ pub(super) struct SkyUniform {
 /// GPU shadow light-space matrix (must match WGSL LightMatrix struct = 64 bytes)
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub(super) struct GpuShadowMatrix {
+pub(crate) struct GpuShadowMatrix {
     pub mat: [f32; 16],
 }

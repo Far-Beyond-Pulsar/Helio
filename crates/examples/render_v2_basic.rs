@@ -307,7 +307,7 @@ impl ApplicationHandler for App {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
                 }
             }
-            // ── GPU debug printout ────────────────────────────────────────────
+            // ── Live profiler portal ──────────────────────────────────────────
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
@@ -315,7 +315,7 @@ impl ApplicationHandler for App {
                     ..
                 },
                 ..
-            } => { state.renderer.debug_key_pressed(); }
+            } => { let _ = state.renderer.start_live_portal_default(); }
 
             // ── Keyboard held state ───────────────────────────────────────────
             WindowEvent::KeyboardInput {

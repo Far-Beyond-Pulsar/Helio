@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
+use crate::gpu_transfer;
 use crate::Result;
 
 /// TAA configuration
@@ -253,6 +254,7 @@ impl TaaPass {
             jitter_offset: self.get_jitter_offset(),
         };
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+        gpu_transfer::track_upload(std::mem::size_of::<TaaUniform>() as u64);
     }
 
     pub fn create_bind_group(
