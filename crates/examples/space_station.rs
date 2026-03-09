@@ -346,6 +346,24 @@ impl ApplicationHandler for App {
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
                 }
+                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
+                if state.probe_vis {
+                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(b));
+                    }
+                } else {
+                    for &[ex, ey] in &[[5.0f32, 5.0], [-5.0, 5.0], [5.0, -5.0], [-5.0, -5.0]] {
+                        state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([ex, ey, 60.5], [2.2, 2.2]).with_color([1.0, 0.52, 0.10, 1.0])));
+                    }
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([0.0,  14.0, 0.0], [0.5, 0.5]).with_color([0.82, 0.90, 1.0, 0.9])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([0.0,  -9.0, 0.0], [0.4, 0.4]).with_color([0.70, 0.80, 1.0, 0.9])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([0.0, 0.0, -55.0], [0.7, 0.7]).with_color([1.0, 1.0, 0.92, 0.9])));
+                    for &[bx, bz] in &[[35.0f32, 0.0], [-35.0, 0.0], [0.0, 35.0], [0.0, -35.0]] {
+                        state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([bx, 7.0, bz], [0.4, 0.4]).with_color([0.78, 0.88, 1.0, 0.85])));
+                    }
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([0.0, 7.5,  65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, 0.05])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([0.0, 7.5, -65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, 0.05])));
+                }
             }
 
             // ── Live portal (L) ───────────────────────────────────────────
@@ -448,65 +466,30 @@ impl AppState {
         // Red warning beacon (1 Hz strobe)
         let beacon  = (0.5 + 0.5 * (time * 1.0 * TAU).sin()).max(0.0);
 
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            let mut bb = Vec::new();
-            // Engine glow (4 pods)
-            for &[ex, ey] in &[[5.0f32, 5.0], [-5.0, 5.0], [5.0, -5.0], [-5.0, -5.0]] {
-                bb.push(BillboardInstance::new([ex, ey, 60.5], [2.2, 2.2]).with_color([1.0, 0.52, 0.10, 1.0]));
-            }
-            // Hub lights
-            bb.push(BillboardInstance::new([0.0,  14.0, 0.0], [0.5, 0.5]).with_color([0.82, 0.90, 1.0, 0.9]));
-            bb.push(BillboardInstance::new([0.0,  -9.0, 0.0], [0.4, 0.4]).with_color([0.70, 0.80, 1.0, 0.9]));
-            // Docking floodlight
-            bb.push(BillboardInstance::new([0.0, 0.0, -55.0], [0.7, 0.7]).with_color([1.0, 1.0, 0.92, 0.9]));
-            // Hab ring A cardinal lights
-            for &[bx, bz] in &[[35.0f32, 0.0], [-35.0, 0.0], [0.0, 35.0], [0.0, -35.0]] {
-                bb.push(BillboardInstance::new([bx, 7.0, bz], [0.4, 0.4]).with_color([0.78, 0.88, 1.0, 0.85]));
-            }
-            // Warning beacons (red strobe)
-            let b_alpha = beacon.max(0.05);
-            bb.push(BillboardInstance::new([0.0, 7.5,  65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]));
-            bb.push(BillboardInstance::new([0.0, 7.5, -65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]));
-            bb
-        };
+        // Update pulsing hub lights
+        self.renderer.update_light(self.hub_light_ids[0], SceneLight::point([0.0,  14.0, 0.0], [0.82, 0.90, 1.0], 8.0 * pulse, 28.0));
+        self.renderer.update_light(self.hub_light_ids[1], SceneLight::point([0.0,  -9.0, 0.0], [0.70, 0.80, 1.0], 6.0 * pulse, 22.0));
+        // Update pulsing hab ring lights
+        let hab_pos = [[ 35.0f32, 6.0,  0.0], [-35.0, 6.0,  0.0], [  0.0, 6.0,  35.0], [  0.0, 6.0, -35.0]];
+        for (i, &id) in self.hab_ring_light_ids.iter().enumerate() {
+            self.renderer.update_light(id, SceneLight::point(hab_pos[i], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0));
+        }
+        // Update engine flicker lights
+        let eng_pos = [[ 5.0f32,  5.0, 58.0], [-5.0,  5.0, 58.0], [ 5.0, -5.0, 58.0], [-5.0, -5.0, 58.0]];
+        for (i, &id) in self.engine_light_ids.iter().enumerate() {
+            self.renderer.update_light(id, SceneLight::point(eng_pos[i], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0));
+        }
+        // Update beacon strobe lights
+        self.renderer.update_light(self.beacon_light_ids[0], SceneLight::point([0.0, 6.0,  65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0));
+        self.renderer.update_light(self.beacon_light_ids[1], SceneLight::point([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0));
 
-        let env = SceneEnv {
-            lights: vec![
-                // ── Distant cold starlight ─────────────────────────────────────
-                SceneLight::directional([0.35, -0.65, 0.25], [0.72, 0.82, 1.0], 0.10),
-                // ── Hub interior ───────────────────────────────────────────────
-                SceneLight::point([0.0,  14.0, 0.0], [0.82, 0.90, 1.0], 8.0 * pulse, 28.0),
-                SceneLight::point([0.0,  -9.0, 0.0], [0.70, 0.80, 1.0], 6.0 * pulse, 22.0),
-                // ── Hab Ring A — 4 cardinal lights ────────────────────────────
-                SceneLight::point([ 35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
-                SceneLight::point([-35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
-                SceneLight::point([  0.0, 6.0,  35.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
-                SceneLight::point([  0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5 * pulse, 20.0),
-                // ── Industrial Ring B — 4 cardinal lights ─────────────────────
-                SceneLight::point([ 62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0),
-                SceneLight::point([-62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0),
-                SceneLight::point([  0.0, -3.0,  62.0], [0.62, 0.76, 1.0], 7.0, 28.0),
-                SceneLight::point([  0.0, -3.0, -62.0], [0.62, 0.76, 1.0], 7.0, 28.0),
-                // ── Engine pods — orange glow ──────────────────────────────────
-                SceneLight::point([ 5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
-                SceneLight::point([-5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
-                SceneLight::point([ 5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
-                SceneLight::point([-5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0 * flicker, 22.0),
-                // ── Docking node floodlight ────────────────────────────────────
-                SceneLight::point([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0),
-                // ── Warning beacons on ring B (strobe) ────────────────────────
-                SceneLight::point([0.0, 6.0,  65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
-                SceneLight::point([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 6.0 * beacon, 14.0),
-            ],
-            ambient_color: [0.08, 0.10, 0.18],
-            ambient_intensity: 0.035,
-            sky_color: [0.003, 0.005, 0.015],
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
+        // Update beacon billboard alpha
+        if !self.probe_vis && self.billboard_ids.len() >= 2 {
+            let b_alpha = beacon.max(0.05);
+            let n = self.billboard_ids.len();
+            self.renderer.update_billboard(self.billboard_ids[n - 2], BillboardInstance::new([0.0, 7.5,  65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]));
+            self.renderer.update_billboard(self.billboard_ids[n - 1], BillboardInstance::new([0.0, 7.5, -65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, b_alpha]));
+        }
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("render error: {:?}", e);
         }
