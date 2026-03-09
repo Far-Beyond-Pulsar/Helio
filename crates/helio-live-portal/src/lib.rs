@@ -15,7 +15,10 @@ async fn serve_js(axum::extract::Path(file): axum::extract::Path<String>) -> imp
     let path = base.join(&file);
     match tokio::fs::read(&path).await {
         Ok(data) => (
-            [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+            [
+                (axum::http::header::CONTENT_TYPE,  "application/javascript"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
             data
         ).into_response(),
         Err(_) => {
@@ -35,7 +38,10 @@ async fn serve_vendor(axum::extract::Path(file): axum::extract::Path<String>) ->
     };
     match tokio::fs::read(&path).await {
         Ok(data) => (
-            [(axum::http::header::CONTENT_TYPE, mime)],
+            [
+                (axum::http::header::CONTENT_TYPE,  mime),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
             data
         ).into_response(),
         Err(_) => {
