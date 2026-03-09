@@ -152,6 +152,7 @@ impl Feature for ShadowsFeature {
             ctx.light_count_arc.clone(),
             ctx.device_arc.clone(),
             &ctx.resources.bind_group_layouts.material,
+            &ctx.resources.bind_group_layouts.gpu_scene,
         ));
 
         log::info!(

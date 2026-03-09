@@ -14,14 +14,16 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceCascadesFeature};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
-use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
+use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass, PostProcessPass, PhysicalBloomPass, BloomConfig, SsrPass, GodRaysPass, DofPass};
+use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall, INSTANCE_STRIDE};
+use crate::gpu_scene::{GpuScene, GpuPrimitive, PrimitiveSlot, PRIM_TRANSPARENT};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
 use crate::features::lighting::{GpuLight, MAX_LIGHTS};
 use crate::features::BillboardsFeature;
-use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
+use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews};
+use crate::material_registry::MaterialRegistry;
 use crate::profiler::{GpuProfiler, PassTiming};
 use crate::{Result, Error};
 use helio_live_portal::{
@@ -44,16 +46,28 @@ use self::portal::{compute_scene_delta, open_url_in_browser};
 // ── Persistent proxy entry — one per registered object ───────────────────────
 //
 // Mirrors Unreal Engine's `FPrimitiveSceneProxy`.  Created once by `add_object`,
-// destroyed by `remove_object`.  Frustum culling, camera movement, and LOD
-// switches never create or destroy a `RegisteredProxy`.
+// destroyed by `remove_object`.  Frustum culling, enable/disable, and
+// transform updates never allocate or free GPU resources.
+//
+// The transform is stored in CPU memory and batched into a shared per-frame
+// `scene_instance_buf` by `render()` Step 1, grouped with all other objects
+// that share the same (vertex_buffer, index_buffer, material_bind_group) key.
+// This mirrors Unreal's per-frame GPU scene instance buffer construction.
 struct RegisteredProxy {
-    /// Pre-built draw call referencing the per-object instance transform buffer.
+    /// Draw call template: vertex/index buffers + material bind group.
     dc: DrawCall,
-    /// FNV-1a hash of the last-uploaded [f32; 16] transform matrix.
-    /// `update_transform` skips `write_buffer` when the hash is unchanged.
+    /// Slot in the GPU Scene persistent storage buffer.
+    /// This is both the `first_instance` for the per-frame prim-id staging
+    /// buffer AND the index the vertex shader uses to read model transforms.
+    slot: PrimitiveSlot,
+    /// FNV-1a hash of the last set transform matrix for change detection.
     transform_hash: u64,
-    /// Dedicated single-instance GPU buffer (64 bytes).  Lives as long as the proxy.
-    instance_buf: Arc<wgpu::Buffer>,
+    /// Whether this proxy renders this frame.
+    enabled: bool,
+    /// World-space bounding sphere centre (for CPU frustum culling).
+    bounding_center: glam::Vec3,
+    /// World-space bounding sphere radius (f32::INFINITY = never culled).
+    bounding_radius: f32,
 }
 
 /// Snapshot of per-frame environment data supplied by `set_scene_env`.
@@ -175,6 +189,22 @@ pub struct Renderer {
     smaa_bind_group: Option<wgpu::BindGroup>,
     taa_bind_group:  Option<wgpu::BindGroup>,
 
+    // ── HDR intermediate buffer + new post-process stack ──────────────────
+    /// Rgba16Float render target.  All scene passes write here; post-process
+    /// stack reads here; PostProcess writes to pre_aa_view / swapchain.
+    hdr_texture:      wgpu::Texture,
+    hdr_view:         wgpu::TextureView,
+    /// Copy of HDR used as SSR scene_color input (avoids read-write hazard).
+    hdr_prev_texture: wgpu::Texture,
+    hdr_prev_view:    wgpu::TextureView,
+    bloom_pass:       PhysicalBloomPass,
+    ssr_pass:         SsrPass,
+    god_rays_pass:    GodRaysPass,
+    dof_pass:         DofPass,
+    post_process_pass: PostProcessPass,
+    /// Last sun screen-space position for god rays (updated each frame).
+    sun_screen_pos: [f32; 2],
+
     // ── GPU-driven indirect rendering ─────────────────────────────────────
     gpu_driven:  bool,
     async_compute: bool,
@@ -211,9 +241,24 @@ pub struct Renderer {
     scratch_sorted_light_indices:    Vec<usize>,
 
     // ── Shadow draw list ──────────────────────────────────────────────────
-    /// Pointers to all registered-proxy DrawCalls, rebuilt O(N) each frame by
-    /// pointer-cloning.  ShadowPass culls this by light range on its own thread.
+    /// Batched DrawCalls for all enabled objects, rebuilt each frame by render()
+    /// Step 1.  ShadowPass culls this by light range / face frustum.
     shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
+
+    // ── Shared per-frame primitive ID buffer ──────────────────────────────
+    /// Single GPU buffer holding all per-instance `primitive_id` u32 values
+    /// for the current frame, laid out as: [camera_batch_0..N | shadow_batch_0..N].
+    /// Each DrawCall's `instance_buffer_offset` points into the right region.
+    /// 16× smaller than the old mat4 staging buffer (4 bytes vs 64 bytes per instance).
+    scene_instance_buf: Option<Arc<wgpu::Buffer>>,
+    /// Capacity in number of u32 primitive IDs.
+    scene_instance_buf_cap: u32,
+
+    // ── GPU Scene (persistent per-object data) ────────────────────────────
+    /// Persistent storage buffer holding one GpuPrimitive (144 bytes) per
+    /// registered object.  Dirty-tracked: only changed slots are re-uploaded
+    /// each frame, so a completely static scene pays zero upload cost.
+    gpu_scene: GpuScene,
 
     // ════════════════════════════════════════════════════════════════════════
     // PERSISTENT SCENE PROXY REGISTRY
@@ -265,7 +310,57 @@ pub struct Renderer {
     pending_layout_changed: bool,
     portal_scene_key: (usize, usize, usize),
     /// Pass names cached once after `graph.build()` to avoid a `Vec<String>` alloc every frame.
+    // ── Material / texture registry ───────────────────────────────────────
+    /// Content-addressed cache: same material bytes → same GPU bind group.
+    /// Prevents duplicate texture uploads and sampler allocations (Unreal: FMaterialRenderProxy).
+    material_registry: MaterialRegistry,
+
     cached_pass_names: Vec<String>,
+}
+
+// ── Frustum culling helpers ──────────────────────────────────────────────────
+
+/// Extract 6 world-space frustum planes from a view-projection matrix.
+///
+/// Uses the Gribb-Hartmann method.  Planes are normalised so the signed
+/// distance `dot(plane.xyz, p) + plane.w` is in world-space metres.
+/// Convention: **positive** = inside, **negative** = outside.
+///
+/// Matches wgpu / WebGPU NDC: x∈[-1,1], y∈[-1,1], z∈[0,1].
+fn extract_frustum_planes(vp: glam::Mat4) -> [glam::Vec4; 6] {
+    // Transpose so `t.x_axis` = row 0 of vp, etc. (glam is column-major).
+    let t  = vp.transpose();
+    let r0 = t.x_axis;
+    let r1 = t.y_axis;
+    let r2 = t.z_axis;
+    let r3 = t.w_axis;
+    let raw = [
+        r3 + r0,  // left
+        r3 - r0,  // right
+        r3 + r1,  // bottom
+        r3 - r1,  // top
+        r2,       // near  (z_ndc >= 0)
+        r3 - r2,  // far   (z_ndc <= 1)
+    ];
+    raw.map(|p| {
+        let len = (p.x * p.x + p.y * p.y + p.z * p.z).sqrt();
+        if len > 1e-8 { p / len } else { p }
+    })
+}
+
+/// Returns `true` if the bounding sphere is fully or partially inside *all*
+/// six frustum planes (i.e. not definitley outside any single plane).
+///
+/// `radius == f32::INFINITY` always returns `true` (culling disabled).
+#[inline]
+fn sphere_in_frustum(planes: &[glam::Vec4; 6], center: glam::Vec3, radius: f32) -> bool {
+    if radius == f32::INFINITY { return true; }
+    for plane in planes {
+        // Signed distance of centre from plane.
+        let dist = plane.x * center.x + plane.y * center.y + plane.z * center.z + plane.w;
+        if dist < -radius { return false; }  // sphere entirely outside this plane
+    }
+    true
 }
 
 impl Renderer {
@@ -390,43 +485,61 @@ impl Renderer {
         let mat: [f32; 16] = transform.to_cols_array();
         let transform_hash = fnv1a_mat(&mat);
 
-        // Allocate a dedicated 64-byte GPU buffer for this object's instance data.
-        // Single-instance, never resized — update via write_buffer only.
-        let instance_buf = Arc::new(self.device.create_buffer_init(
-            &wgpu::util::BufferInitDescriptor {
-                label:    Some("Proxy Instance"),
-                contents: bytemuck::cast_slice(&mat),
-                usage:    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            },
-        ));
-
         let (bind_group, transparent) = match material {
             Some(m) => (Arc::clone(&m.bind_group), m.transparent_blend),
             None    => (Arc::clone(&self.default_material_bind_group), false),
         };
 
-        let mut dc = DrawCall::new(mesh, bind_group, transparent);
-        dc.instance_buffer        = Some(Arc::clone(&instance_buf));
-        dc.instance_buffer_offset = 0;
-        dc.instance_count         = 1;
+        let dc = DrawCall::new(mesh, bind_group, transparent);
 
-        self.registered_objects.insert(id.0, RegisteredProxy { dc, transform_hash, instance_buf });
+        let bounding_center = transform.w_axis.truncate();
+        let flags = if transparent { PRIM_TRANSPARENT } else { 0 };
+        let prim  = GpuPrimitive::from_transform(
+            transform,
+            bounding_center.to_array(),
+            f32::MAX,   // culling disabled until set_object_bounds() is called
+            0,
+            flags,
+        );
+        let slot = self.gpu_scene.alloc(prim, &self.device);
 
-        // Any structural change bumps generation so TransparentPass invalidates cached sorts.
+        self.registered_objects.insert(id.0, RegisteredProxy {
+            dc,
+            slot,
+            transform_hash,
+            enabled: true,
+            bounding_center,
+            bounding_radius: f32::INFINITY,
+        });
+
         self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
 
         id
     }
 
+    /// Set the world-space bounding sphere radius for frustum culling.
+    ///
+    /// Call once after `add_object` for objects that should be culled when outside
+    /// the camera frustum (e.g. voxel chunk entities with known extents).
+    /// The bounding center is kept in sync automatically by `update_transform`.
+    ///
+    /// Set `radius = f32::INFINITY` to disable culling for this object (the default).
+    pub fn set_object_bounds(&mut self, id: ObjectId, radius: f32) {
+        if let Some(proxy) = self.registered_objects.get_mut(&id.0) {
+            proxy.bounding_radius = radius;
+        }
+    }
+
     /// Remove an object from the scene proxy registry.
     ///
     /// Equivalent to `UPrimitiveComponent::UnregisterComponent()` → `FScene::RemovePrimitive()`.
-    /// Drops the GPU instance buffer Arc immediately; the buffer is freed when all
-    /// in-flight GPU commands that reference it complete (wgpu tracks this automatically).
+    /// No per-object GPU buffer is held (transforms live in the shared `scene_instance_buf`),
+    /// so this is a pure CPU operation with no GPU resource lifetime concerns.
     ///
-    /// Cost: one `HashMap::remove` + Arc drop.
+    /// Cost: one `HashMap::remove`.
     pub fn remove_object(&mut self, id: ObjectId) {
-        if self.registered_objects.remove(&id.0).is_some() {
+        if let Some(proxy) = self.registered_objects.remove(&id.0) {
+            self.gpu_scene.free(proxy.slot, &self.device);
             self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
         }
     }
@@ -434,19 +547,29 @@ impl Renderer {
     /// Update the world transform of a registered object.
     ///
     /// Equivalent to `USceneComponent::SendRenderTransform()` → proxy `SetTransform()`.
-    /// Only issues a `write_buffer` when the FNV-1a hash of the new matrix differs from
-    /// the previously uploaded one — static geometry that never moves has zero GPU write cost.
+    /// Stores the new matrix in CPU memory only; the GPU upload happens once per frame
+    /// inside `render()` Step 1 as part of the batched `scene_instance_buf` write.
+    /// Static geometry that never moves incurs zero cost (hash check skips the copy).
     ///
-    /// Cost: ~1 µs hash + conditional 64-byte `write_buffer`.
+    /// Cost: ~1 µs hash check + conditional 64-byte CPU copy.
     pub fn update_transform(&mut self, id: ObjectId, transform: glam::Mat4) {
         if let Some(proxy) = self.registered_objects.get_mut(&id.0) {
             let mat  = transform.to_cols_array();
             let hash = fnv1a_mat(&mat);
             if hash != proxy.transform_hash {
-                self.queue.write_buffer(&proxy.instance_buf, 0, bytemuck::cast_slice(&mat));
-                proxy.transform_hash = hash;
-                // update_transform does NOT bump draw_list_generation — the DrawCall arc
-                // and draw-order position are unchanged; only the GPU buffer contents change.
+                proxy.transform_hash  = hash;
+                proxy.bounding_center = transform.w_axis.truncate();
+                // Build a new GpuPrimitive and mark the slot dirty.
+                // flush_dirty() at the top of render() will upload it.
+                let flags = if proxy.dc.transparent_blend { PRIM_TRANSPARENT } else { 0 };
+                let new_prim = GpuPrimitive::from_transform(
+                    transform,
+                    proxy.bounding_center.to_array(),
+                    proxy.bounding_radius,
+                    0,
+                    flags,
+                );
+                self.gpu_scene.update(proxy.slot, new_prim);
             }
         }
     }
@@ -459,9 +582,41 @@ impl Renderer {
         }
     }
 
-    /// Number of objects currently registered in the scene proxy registry.
+    /// Exclude a registered object from rendering without deallocating its GPU resources.
+    ///
+    /// Equivalent to hiding a component in Unreal without unregistering it.
+    /// Zero GPU cost — only flips a `bool`.  The instance buffer and draw call
+    /// remain allocated; re-enabling is instant.
+    ///
+    /// Use this for chunk streaming: call when a chunk deactivates instead of
+    /// `remove_object`, and `enable_object` when it reactivates.  This avoids
+    /// GPU buffer alloc/free churn on every streaming event.
+    pub fn disable_object(&mut self, id: ObjectId) {
+        if let Some(proxy) = self.registered_objects.get_mut(&id.0) {
+            proxy.enabled = false;
+        }
+    }
+
+    /// Re-include a previously disabled object in rendering.
+    pub fn enable_object(&mut self, id: ObjectId) {
+        if let Some(proxy) = self.registered_objects.get_mut(&id.0) {
+            proxy.enabled = true;
+        }
+    }
+
+    /// Returns `true` if the object is registered and currently enabled.
+    pub fn is_object_enabled(&self, id: ObjectId) -> bool {
+        self.registered_objects.get(&id.0).map_or(false, |p| p.enabled)
+    }
+
+    /// Number of objects currently registered (enabled + disabled).
     pub fn object_count(&self) -> usize {
         self.registered_objects.len()
+    }
+
+    /// Number of objects currently enabled (contributing to rendering).
+    pub fn enabled_object_count(&self) -> usize {
+        self.registered_objects.values().filter(|p| p.enabled).count()
     }
 
     // ══════════════════════════════════════════════════════════════════════════
@@ -496,26 +651,135 @@ impl Renderer {
             self.prepare_env(env, camera);
         }
 
-        // ── Step 1: populate draw_list from persistent proxy registry ─────────
+        // ── Step 1: CPU-driven instance batching ─────────────────────────────
         //
-        // O(N) pointer-clone of all registered proxy DrawCalls.  This is the only
-        // thing render() does to build the draw list; no per-frame batch diffing,
-        // no eviction, no scratch map construction.
+        // Groups enabled proxies by (vertex_buffer, index_buffer, material_bind_group,
+        // transparent_blend) — the "batch key".  Objects sharing the same key have
+        // identical GPU pipeline and resource state so they can be drawn with a
+        // single instanced draw_indexed call (one per batch, not one per object).
         //
-        // Additional draws from `draw_mesh()` / `draw_mesh_instanced()` calls that
-        // arrived BEFORE this render() call are already in the list and are preserved.
+        // This mirrors Unreal's draw policy grouping:
+        //   N objects × M passes  →  K batches × M passes   (K << N at steady state)
+        //
+        // All transforms for the current frame are packed into `scene_instance_buf`:
+        //   [camera_batch_0 | camera_batch_1 | ... | shadow_batch_0 | shadow_batch_1 | ...]
+        // Each batched DrawCall carries the byte offset into that buffer.
+        // One write_buffer uploads all transforms to the GPU in one call.
         {
             let mut dl  = self.draw_list.lock().unwrap();
             let mut sdl = self.shadow_draw_list.lock().unwrap();
+            dl.clear();
             sdl.clear();
-            // Reserve exact capacity; avoids mid-loop reallocs.
-            dl.reserve(self.registered_objects.len());
-            sdl.reserve(self.registered_objects.len());
+
+            // Camera frustum (Gribb-Hartmann, wgpu NDC z∈[0,1]).
+            let frustum = extract_frustum_planes(camera.view_proj);
+
+            // Collect (batch_key, proxy_ref) pairs for camera and shadow sets.
+            // batch_key encodes unique (mesh, material) state as raw pointer values.
+            type BatchKey = (usize, usize, usize, bool);
+            let mut camera_items: Vec<(BatchKey, &RegisteredProxy)> = Vec::new();
+            let mut shadow_items: Vec<(BatchKey, &RegisteredProxy)> = Vec::new();
+
             for proxy in self.registered_objects.values() {
-                dl.push(proxy.dc.clone());
-                sdl.push(proxy.dc.clone());
+                if !proxy.enabled { continue; }
+                let key: BatchKey = (
+                    Arc::as_ptr(&proxy.dc.vertex_buffer)       as usize,
+                    Arc::as_ptr(&proxy.dc.index_buffer)        as usize,
+                    Arc::as_ptr(&proxy.dc.material_bind_group) as usize,
+                    proxy.dc.transparent_blend,
+                );
+                // Shadow: all enabled (light sees geometry outside camera frustum).
+                shadow_items.push((key, proxy));
+                // Camera: frustum-culled.
+                if sphere_in_frustum(&frustum, proxy.bounding_center, proxy.bounding_radius) {
+                    camera_items.push((key, proxy));
+                }
+            }
+
+            camera_items.sort_unstable_by_key(|&(k, _)| k);
+            shadow_items.sort_unstable_by_key(|&(k, _)| k);
+
+            let camera_total = camera_items.len();
+            let shadow_total = shadow_items.len();
+            let buf_need     = camera_total + shadow_total;
+
+            // Grow the shared instance buffer when capacity is exceeded.
+            // Rounded up to the next power of two to amortise reallocation.
+            if buf_need > self.scene_instance_buf_cap as usize
+                || self.scene_instance_buf.is_none()
+            {
+                let new_cap = ((buf_need as u32).max(256)).next_power_of_two();
+                let buf = Arc::new(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label:              Some("Scene Instance Buffer"),
+                    size:               new_cap as u64 * INSTANCE_STRIDE,
+                    usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+                self.scene_instance_buf     = Some(buf);
+                self.scene_instance_buf_cap = new_cap;
+            }
+            let scene_buf = Arc::clone(self.scene_instance_buf.as_ref().unwrap());
+
+            // Pack all per-instance primitive_id u32 values + build batched DrawCalls.
+            // Each value is the GPU Scene slot index; the vertex shader reads the
+            // model transform from gpu_primitives[primitive_id].transform.
+            // 16× smaller than the old [f32;16] transform staging buffer.
+            let mut staging: Vec<u32> = Vec::with_capacity(buf_need);
+
+            // ── Camera-visible batches → main draw list ───────────────────────
+            {
+                let mut i = 0;
+                while i < camera_items.len() {
+                    let key = camera_items[i].0;
+                    let batch_offset = staging.len() as u64;
+                    let mut j = i;
+                    while j < camera_items.len() && camera_items[j].0 == key {
+                        staging.push(camera_items[j].1.slot.0);
+                        j += 1;
+                    }
+                    let mut dc = camera_items[i].1.dc.clone();
+                    dc.bounds_center          = camera_items[i].1.bounding_center.to_array();
+                    dc.instance_buffer        = Some(Arc::clone(&scene_buf));
+                    dc.instance_buffer_offset = batch_offset * INSTANCE_STRIDE;
+                    dc.instance_count         = (j - i) as u32;
+                    dl.push(dc);
+                    i = j;
+                }
+            }
+
+            // ── All-enabled batches → shadow draw list (no frustum cull) ─────
+            {
+                let mut i = 0;
+                while i < shadow_items.len() {
+                    let key = shadow_items[i].0;
+                    let batch_offset = staging.len() as u64;
+                    let mut j = i;
+                    while j < shadow_items.len() && shadow_items[j].0 == key {
+                        staging.push(shadow_items[j].1.slot.0);
+                        j += 1;
+                    }
+                    let mut dc = shadow_items[i].1.dc.clone();
+                    dc.bounds_center          = shadow_items[i].1.bounding_center.to_array();
+                    dc.instance_buffer        = Some(Arc::clone(&scene_buf));
+                    dc.instance_buffer_offset = batch_offset * INSTANCE_STRIDE;
+                    dc.instance_count         = (j - i) as u32;
+                    sdl.push(dc);
+                    i = j;
+                }
+            }
+
+            // Upload all transforms in a single GPU write.
+            if !staging.is_empty() {
+                self.queue.write_buffer(&scene_buf, 0, bytemuck::cast_slice(&staging));
             }
         }
+
+        // ── Step 0.5: Upload dirty GPU Scene primitives ───────────────────────
+        //
+        // Must happen before the render graph executes so the vertex shaders see
+        // up-to-date model transforms.  flush_dirty() coalesces contiguous dirty
+        // slots into the fewest possible write_buffer calls.
+        self.gpu_scene.flush_dirty(&self.queue);
 
         // ── Preparation: camera upload, feature prepare, globals, debug batch, GPU-driven ──
         let prep_start = std::time::Instant::now();
@@ -613,18 +877,16 @@ impl Renderer {
             label: Some("Render Encoder"),
         });
 
-        // Determine render target: if AA is enabled, write to pre_aa texture first
-        let graph_target = match self.aa_mode {
-            AntiAliasingMode::None | AntiAliasingMode::Msaa(_) => target,
-            _ => &self.pre_aa_view,
-        };
+        // Always render scene to HDR intermediate buffer.
+        // The post-process stack converts HDR → LDR (→ pre_aa_view when AA enabled, else swapchain).
+        let graph_target = &self.hdr_view;
 
-        // Clear pre_aa_texture at the start of each frame when AA is enabled
-        if !matches!(self.aa_mode, AntiAliasingMode::None | AntiAliasingMode::Msaa(_)) {
+        // Clear HDR buffer at the start of each frame
+        {
             let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Pre-AA Clear"),
+                label: Some("HDR Clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.pre_aa_view,
+                    view: &self.hdr_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -650,6 +912,7 @@ impl Renderer {
             frame: self.frame_count,
             global_bind_group: &self.global_bind_group,
             lighting_bind_group: &self.lighting_bind_group,
+            gpu_scene_bind_group: &self.gpu_scene.bind_group,
             sky_color: self.scene_sky_color,
             has_sky: self.scene_has_sky,
             sky_state_changed: self.sky_state_changed,
@@ -669,6 +932,30 @@ impl Renderer {
             self.graph.execute(&mut graph_ctx, None)?;
         }
         let graph_ms = graph_start.elapsed().as_secs_f32() * 1000.0;
+
+        // ── HDR post-process stack ────────────────────────────────────────────
+        // SSR → God Rays → Bloom → DoF → PostProcess (HDR → LDR)
+        let hdr_start = std::time::Instant::now();
+
+        // SSR, God Rays, Physical Bloom, and DoF are disabled — core BRDF improvements first.
+        // TODO: re-enable SSR, god_rays_pass, bloom_pass, dof_pass once core pipeline is solid.
+
+        // Final PostProcess: HDR → LDR (→ pre_aa_view when AA enabled, else direct to swapchain)
+        {
+            use crate::passes::PostProcessUniforms;
+            let uniforms = PostProcessUniforms {
+                frame: self.frame_count as u32,
+                ..Default::default()
+            };
+            self.queue.write_buffer(&self.post_process_pass.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+        }
+        let pp_target = match self.aa_mode {
+            AntiAliasingMode::None | AntiAliasingMode::Msaa(_) => target,
+            _ => &self.pre_aa_view,
+        };
+        self.post_process_pass.execute(&mut encoder, pp_target)?;
+
+        let _hdr_ms = hdr_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Anti-aliasing post-processing ─────────────────────────────────────
         let aa_start = std::time::Instant::now();
@@ -797,9 +1084,12 @@ impl Renderer {
                 (total, opaque, transparent)
             };
 
-            let (obj_count, light_count, bb_count) = if let Some(layout) = &current_layout {
-                (layout.objects.len(), layout.lights.len(), layout.billboards.len())
-            } else { (0, 0, 0) };
+            // object_count: registered persistent proxies (enabled + disabled).
+            // light/billboard counts come from the latest scene env layout when available.
+            let obj_count = self.registered_objects.len();
+            let (light_count, bb_count) = if let Some(layout) = &current_layout {
+                (layout.lights.len(), layout.billboards.len())
+            } else { (0, 0) };
 
             let prep = prep_ms;
             let graphm = graph_ms;
@@ -940,6 +1230,32 @@ impl Renderer {
         self.fxaa_bind_group = self.fxaa_pass.as_ref().map(|p| p.create_bind_group(&self.device, &self.pre_aa_view));
         self.smaa_bind_group = self.smaa_pass.as_ref().map(|p| p.create_bind_group(&self.device, &self.pre_aa_view));
         self.taa_bind_group = self.taa_pass.as_ref().map(|p| p.create_bind_group(&self.device, &self.pre_aa_view, &self.depth_view));
+
+        // Recreate HDR intermediate buffer and all bind groups that reference it.
+        let (hdr_texture, hdr_view) = helpers::create_hdr_texture(&self.device, width, height);
+        let (hdr_prev_texture, hdr_prev_view) = helpers::create_hdr_texture(&self.device, width, height);
+        self.hdr_texture      = hdr_texture;
+        self.hdr_view         = hdr_view;
+        self.hdr_prev_texture = hdr_prev_texture;
+        self.hdr_prev_view    = hdr_prev_view;
+
+        // Rebuild G-buffer views (normal + ORM + depth) for SSR
+        let gbuf_normal_view = self.gbuf_normal_texture.create_view(&Default::default());
+        let gbuf_orm_view    = self.gbuf_orm_texture.create_view(&Default::default());
+
+        self.post_process_pass.create_bind_group(&self.device, &self.hdr_view);
+        // Bloom mip textures must be resized; recreate the whole pass.
+        let bloom_config = self.bloom_pass.config;
+        if let Ok(new_bloom) = PhysicalBloomPass::new(&self.device, width, height, bloom_config) {
+            self.bloom_pass = new_bloom;
+        }
+        self.bloom_pass.create_bind_groups(&self.device, &self.hdr_view);
+        self.ssr_pass.create_bind_group(
+            &self.device, &gbuf_normal_view, &gbuf_orm_view,
+            &self.depth_sample_view, &self.hdr_prev_view,
+        );
+        self.god_rays_pass.create_bind_group(&self.device, &self.hdr_prev_view, &self.depth_view);
+        self.dof_pass.create_bind_groups_resized(&self.device, &self.hdr_view, &self.depth_sample_view, &self.camera_buffer, width, height);
     }
 
     pub fn frame_count(&self) -> u64 { self.frame_count }

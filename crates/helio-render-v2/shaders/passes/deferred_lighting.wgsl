@@ -141,94 +141,73 @@ fn sample_cascade_shadow(layer: u32, depth_bias: f32, cascade_scale: f32, world_
     return lit_sum * 0.25;
 }
 
-fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
+// World-space normal offset scale for directional shadow casters.
+// Pulls the shadow-lookup point away from the surface along the normal,
+// eliminating self-shadowing (acne) without the peter-panning that a
+// constant depth bias introduces (UE5 / TheRealMJP technique).
+const SHADOW_NORMAL_OFFSET: f32 = 0.03;  // metres; tune with scene scale
+
+fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>) -> f32 {
     if !ENABLE_SHADOWS { return 1.0; }
     if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
 
     let light = lights[light_idx];
     var layer: u32;
     if light.light_type > 0.5 && light.light_type < 1.5 {
+        // Point light — no normal offset; use a small residual depth bias.
         let to_frag = world_pos - light.position;
         layer = light_idx * 6u + point_light_face(to_frag);
-        let depth_bias   = 0.0002;
-        let cascade_scale = 1.0;
-        return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
+        return sample_cascade_shadow(layer, 0.0002, 1.0, world_pos);
     } else if light.light_type < 0.5 {
-        let dist = length(world_pos - camera.position);
+        // Directional light CSM with normal-offset bias.
+        // The offset is largest at grazing angles (NdotL ≈ 0), where acne is worst.
+        let L     = normalize(-light.direction);
+        let NdotL = clamp(dot(N, L), 0.0, 1.0);
+        // Normal-offset: proportional to sin(theta) = sqrt(1 - NdotL²).
+        // Larger offset for surfaces nearly perpendicular to the light.
+        let sin_theta    = sqrt(max(1.0 - NdotL * NdotL, 0.0));
+        let biased_pos   = world_pos + N * (SHADOW_NORMAL_OFFSET * sin_theta);
+
+        let dist   = length(world_pos - camera.position);
         let splits = globals.csm_splits;
-        
-        // Determine cascades and blend factor
+
         var cascade_a = 3u;
         var cascade_b = 3u;
-        var blend = 0.0;
-        
-        const BLEND_ZONE = 0.1;  // 10% blend zone around boundaries
-        
+        var blend     = 0.0;
+        const BLEND_ZONE = 0.1;
+
         if dist < splits.x * (1.0 - BLEND_ZONE / 2.0) {
             cascade_a = 0u;
         } else if dist < splits.x * (1.0 + BLEND_ZONE / 2.0) {
-            // Blend zone between cascade 0 and 1
-            cascade_a = 0u;
-            cascade_b = 1u;
-            blend = smoothstep(
-                splits.x * (1.0 - BLEND_ZONE / 2.0),
-                splits.x * (1.0 + BLEND_ZONE / 2.0),
-                dist
-            );
+            cascade_a = 0u; cascade_b = 1u;
+            blend = smoothstep(splits.x*(1.0-BLEND_ZONE/2.0), splits.x*(1.0+BLEND_ZONE/2.0), dist);
         } else if dist < splits.y * (1.0 - BLEND_ZONE / 2.0) {
             cascade_a = 1u;
         } else if dist < splits.y * (1.0 + BLEND_ZONE / 2.0) {
-            // Blend zone between cascade 1 and 2
-            cascade_a = 1u;
-            cascade_b = 2u;
-            blend = smoothstep(
-                splits.y * (1.0 - BLEND_ZONE / 2.0),
-                splits.y * (1.0 + BLEND_ZONE / 2.0),
-                dist
-            );
+            cascade_a = 1u; cascade_b = 2u;
+            blend = smoothstep(splits.y*(1.0-BLEND_ZONE/2.0), splits.y*(1.0+BLEND_ZONE/2.0), dist);
         } else if dist < splits.z * (1.0 - BLEND_ZONE / 2.0) {
             cascade_a = 2u;
         } else if dist < splits.z * (1.0 + BLEND_ZONE / 2.0) {
-            // Blend zone between cascade 2 and 3
-            cascade_a = 2u;
-            cascade_b = 3u;
-            blend = smoothstep(
-                splits.z * (1.0 - BLEND_ZONE / 2.0),
-                splits.z * (1.0 + BLEND_ZONE / 2.0),
-                dist
-            );
+            cascade_a = 2u; cascade_b = 3u;
+            blend = smoothstep(splits.z*(1.0-BLEND_ZONE/2.0), splits.z*(1.0+BLEND_ZONE/2.0), dist);
         } else {
             cascade_a = 3u;
         }
-        
-        let depth_bias = 0.00012;
-        let layer_a = light_idx * 6u + cascade_a;
-        let cascade_scale_a = 1.0 + f32(cascade_a) * 1.5;
-        let shadow_a = sample_cascade_shadow(layer_a, depth_bias, cascade_scale_a, world_pos);
-        
-        // If no blending needed, return immediately
+
+        // Tiny residual depth bias only — the normal offset handles most of the work.
+        let depth_bias = 0.00002 * (1.0 + f32(cascade_a) * 1.5);
+        let layer_a    = light_idx * 6u + cascade_a;
+
+        // PCSS for directional: soft penumbra varies with blocker distance.
+        let shadow_a = sample_cascade_shadow_pcss(layer_a, depth_bias, biased_pos);
         if blend <= 0.001 { return shadow_a; }
-        if blend >= 0.999 && cascade_b != cascade_a {
-            let layer_b = light_idx * 6u + cascade_b;
-            let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
-            let shadow_b = sample_cascade_shadow(layer_b, depth_bias, cascade_scale_b, world_pos);
-            return mix(shadow_a, shadow_b, blend);
-        }
-        
-        // Blend between cascades
-        if cascade_b != cascade_a {
-            let layer_b = light_idx * 6u + cascade_b;
-            let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
-            let shadow_b = sample_cascade_shadow(layer_b, depth_bias, cascade_scale_b, world_pos);
-            return mix(shadow_a, shadow_b, blend);
-        }
-        
-        return shadow_a;
+        let layer_b  = light_idx * 6u + cascade_b;
+        let shadow_b = sample_cascade_shadow_pcss(layer_b, depth_bias, biased_pos);
+        return mix(shadow_a, shadow_b, blend);
     } else {
         layer = light_idx * 6u;
-        let depth_bias   = 0.00015;
-        let cascade_scale = 1.0;
-        return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
+        return sample_cascade_shadow(layer, 0.00015, 1.0, world_pos);
     }
 }
 
@@ -406,20 +385,146 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return mix(c0, c1, frc.x) * volume_weight;
 }
 
-// ── Tonemapping & bloom ───────────────────────────────────────────────────────
+// ── Contact shadows ───────────────────────────────────────────────────────────
 
-fn luminance(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722)); }
+fn contact_shadow(world_pos: vec3<f32>, light_dir: vec3<f32>, screen_size: vec2<f32>) -> f32 {
+    // Short screen-space ray march from the surface toward the light.
+    // 12 steps, maximum 0.5m range.  Occludes ONLY when another surface is hit
+    // within that range — fills the small shadow gap at the base of casters that
+    // CSM cascade 0 misses due to limited resolution.
+    let step_count   = 12;
+    let max_distance = 0.5;
+    let step_size    = max_distance / f32(step_count);
+    var ray_pos      = world_pos + light_dir * 0.02;   // small bias away from surface
 
-fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
-    let a = 2.51; let b = 0.03; let c = 2.43; let d = 0.59; let e = 0.14;
-    return saturate((x * (a * x + b)) / (x * (c * x + d) + e));
+    for (var i = 0; i < step_count; i++) {
+        ray_pos += light_dir * step_size;
+
+        // Project ray sample into clip space.
+        let clip = camera.view_proj * vec4<f32>(ray_pos, 1.0);
+        if clip.w <= 0.0 { break; }
+        let ndc = clip.xyz / clip.w;
+        if abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 { break; }
+
+        // Convert to texture coords.
+        let uv  = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+        let pix = vec2<i32>(i32(uv.x * screen_size.x), i32(uv.y * screen_size.y));
+        let scene_depth = textureLoad(gbuf_depth, pix, 0);
+
+        // Reconstruct scene world-pos at this 2-D sample.
+        let ndc2 = vec2<f32>(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+        let h    = camera.view_proj_inv * vec4<f32>(ndc2, scene_depth, 1.0);
+        let p    = h.xyz / h.w;
+
+        // If the scene surface is between the original point and the ray sample
+        // (and behind it in the light direction), we're in shadow.
+        let dist_scene = dot(p - world_pos, light_dir);
+        let dist_ray   = dot(ray_pos - world_pos, light_dir);
+        if dist_scene > 0.01 && dist_scene < dist_ray + 0.1 {
+            return 0.0;   // occluded
+        }
+    }
+    return 1.0;
 }
 
-fn apply_bloom(color: vec3<f32>) -> vec3<f32> {
-    if !ENABLE_BLOOM { return color; }
-    let lum    = luminance(color);
-    let excess = max(lum - BLOOM_THRESHOLD, 0.0);
-    return color + color * (excess * BLOOM_INTENSITY);
+// ── PCSS helpers ──────────────────────────────────────────────────────────────
+
+const PCSS_LIGHT_SIZE:   f32 = 0.04;   // world-space half-width of the sun disc
+const PCSS_BLOCKER_SAMPLES: i32 = 16;
+const PCSS_PCF_SAMPLES:     i32 = 16;
+
+// Poisson samples (16-tap, used for both blocker search and PCF)
+var<private> POISSON16: array<vec2<f32>, 16> = array<vec2<f32>, 16>(
+    vec2(-0.94201624, -0.39906216),
+    vec2( 0.94558609, -0.76890725),
+    vec2(-0.09418410, -0.92938870),
+    vec2( 0.34495938,  0.29387760),
+    vec2(-0.91588581,  0.45771432),
+    vec2(-0.81544232, -0.87912464),
+    vec2(-0.38277543,  0.27676845),
+    vec2( 0.97484398,  0.75648379),
+    vec2( 0.44323325, -0.97511554),
+    vec2( 0.53742981, -0.47373420),
+    vec2(-0.26496911, -0.41893023),
+    vec2( 0.79197514,  0.19090188),
+    vec2(-0.24188840,  0.99706507),
+    vec2(-0.81409955,  0.91437590),
+    vec2( 0.19984126,  0.78641367),
+    vec2( 0.14383161, -0.14100790),
+);
+
+// Average blocker depth search within `search_radius` (UV space)
+// Uses textureLoad for raw depth values (needed for PCSS penumbra estimation)
+fn pcss_blocker_search(layer: u32, shadow_uv: vec2<f32>, receiver_depth: f32, search_radius: f32) -> vec2<f32> {
+    var blocker_sum   = 0.0;
+    var blocker_count = 0.0;
+    let atlas_sz = i32(ATLAS_SIZE);
+    for (var i = 0; i < PCSS_BLOCKER_SAMPLES; i++) {
+        let samp_uv = shadow_uv + POISSON16[i] * search_radius;
+        let pix     = vec2<i32>(
+            clamp(i32(samp_uv.x * ATLAS_SIZE), 0, atlas_sz - 1),
+            clamp(i32(samp_uv.y * ATLAS_SIZE), 0, atlas_sz - 1),
+        );
+        let sample_depth = textureLoad(shadow_atlas, pix, i32(layer), 0);
+        if sample_depth < receiver_depth - 0.0001 {
+            blocker_sum   += sample_depth;
+            blocker_count += 1.0;
+        }
+    }
+    return vec2<f32>(blocker_sum, blocker_count);
+}
+
+// PCSS soft-shadow with variable penumbra based on blocker distance
+fn sample_cascade_shadow_pcss(layer: u32, depth_bias: f32, world_pos: vec3<f32>) -> f32 {
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
+    if light_clip.w <= 0.0 { return 1.0; }
+    let ndc       = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+    if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0))
+       || ndc.z < 0.0 || ndc.z > 1.0 { return 1.0; }
+
+    let biased_depth  = ndc.z - depth_bias;
+    let search_radius = PCSS_LIGHT_SIZE / ATLAS_SIZE;
+
+    let blocker = pcss_blocker_search(layer, shadow_uv, biased_depth, search_radius);
+    if blocker.y == 0.0 { return 1.0; }   // no blockers → fully lit
+
+    let avg_blocker = blocker.x / blocker.y;
+    // Penumbra radius in UV space: larger when blocker is farther from receiver
+    let penumbra     = max((biased_depth - avg_blocker) / avg_blocker, 0.0) * PCSS_LIGHT_SIZE;
+    let filter_radius = clamp(penumbra / ATLAS_SIZE, 0.5 / ATLAS_SIZE, 8.0 / ATLAS_SIZE);
+
+    var lit_sum = 0.0;
+    for (var i = 0; i < PCSS_PCF_SAMPLES; i++) {
+        let offset = POISSON16[i] * filter_radius;
+        lit_sum += textureSampleCompareLevel(
+            shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            biased_depth,
+        );
+    }
+    return lit_sum / f32(PCSS_PCF_SAMPLES);
+}
+
+// ── UE5-quality IBL helpers ───────────────────────────────────────────────────
+
+// Lazarov 2013 analytic DFG split-sum approximation.
+// Returns vec2(AB.x, AB.y) where:  specular_ibl = F0 * AB.x + AB.y
+// Matches the precomputed GF LUT from UE4 paper (Karis 2013) to ≈1%.
+// Source: "Getting More Physical in Call of Duty: Black Ops II", Lazarov 2013.
+fn dfg_approx(roughness: f32, NdV: f32) -> vec2<f32> {
+    let c0   = vec4<f32>(-1.0, -0.0275, -0.572,  0.022);
+    let c1   = vec4<f32>( 1.0,  0.0425,  1.04,  -0.04);
+    let r    = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * NdV)) * r.x + r.y;
+    return max(vec2<f32>(-1.04, 1.04) * a004 + r.zw, vec2<f32>(0.0));
+}
+
+// Specular occlusion from AO (Lagarde & de Rousiers 2014, "Moving Frostbite to PBR").
+// Reduces indirect specular in occluded regions; rougher surfaces attenuate more.
+fn specular_occlusion(NdV: f32, ao: f32, roughness: f32) -> f32 {
+    return clamp(pow(NdV + ao, exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
 
 // ── Fragment entry ────────────────────────────────────────────────────────────
@@ -438,16 +543,22 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let orm_r     = textureLoad(gbuf_orm,      pix, 0);
     let emissive  = textureLoad(gbuf_emissive, pix, 0).rgb;
 
-    let albedo    = albedo_a.rgb;
-    let alpha     = albedo_a.a;
-    let N         = normalize(normal_r.xyz);
-    let ao        = orm_r.r;
-    let roughness = orm_r.g;
+    let albedo   = albedo_a.rgb;
+    let alpha    = albedo_a.a;
+    let N        = normalize(normal_r.xyz);
+    let ao       = orm_r.r;
+    // Clamp to [0.045, 1.0]: prevents NaN in GGX at roughness=0 (UE5 minimum).
+    let roughness = clamp(orm_r.g, 0.045, 1.0);
     let metallic  = orm_r.b;
 
-    // ── Reconstruct world position from depth + inv_view_proj ────────────────
-    // clip_pos.xy is in viewport space (0→width, 0→height, y↓).
-    // Convert to NDC: x ∈ [-1,1], y ∈ [1,-1] (wgpu NDC y+ = up, viewport y+ = down).
+    // ── Specular anti-aliasing: widen roughness from normal-map high-freq ──────
+    // Screen-space normal gradient → roughness variance ("LEAN mapping" approx).
+    // Prevents specular fireflies on curved/normal-mapped surfaces.
+    let nx = dpdx(N);
+    let ny = dpdy(N);
+    let roughness_aa = min(1.0, roughness + sqrt(dot(nx, nx) + dot(ny, ny)) * 0.45);
+
+    // ── Reconstruct world position from depth ─────────────────────────────────
     let screen_size = vec2<f32>(textureDimensions(gbuf_albedo));
     let uv_01       = in.clip_pos.xy / screen_size;
     let ndc_xy      = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
@@ -455,62 +566,67 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let world_pos   = world_h.xyz / world_h.w;
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
+    // F0: 4% reflectance for dielectrics, albedo for metals (UE4 convention).
     let F0  = mix(vec3<f32>(0.04), albedo, metallic);
     let V   = normalize(camera.position - world_pos);
-    let NdV = max(dot(N, V), 0.0);
+    let NdV = max(dot(N, V), 0.0001);
 
-    // ── Direct lighting ────────────────────────────────────────────────────────
-    // GPU-driven: iterate all visible lights (already culled on CPU by distance).
-    // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
-    // is handled separately — shadow maps do not occlude it (that is AO's job).
+    // Lazarov DFG split-sum (same table used for both IBL and multiscattering).
+    let dfg = dfg_approx(roughness_aa, NdV);
+
+    // ── Direct lighting ───────────────────────────────────────────────────────
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         for (var i = 0u; i < globals.light_count; i++) {
-            let sf = shadow_factor(i, world_pos);
-            let light_contrib = pbr_direct_light(lights[i], world_pos, N, V,
-                                   F0, albedo, roughness, metallic, sf);
-            Lo += light_contrib;
+            var sf = shadow_factor(i, world_pos, N);
+            // Fill CSM cascade 0 gap with screen-space contact shadows.
+            if lights[i].light_type < 0.5 && sf > 0.01 {
+                let sun_dir = normalize(-lights[i].direction);
+                sf *= contact_shadow(world_pos, sun_dir, screen_size);
+            }
+            Lo += pbr_direct_light(lights[i], world_pos, N, V, F0, albedo, roughness_aa, metallic, sf);
         }
     }
 
-    // ── RC indirect diffuse ───────────────────────────────────────────────────
-    let rc_irr   = sample_rc_irradiance(world_pos, N);
-    let F_ibl    = fresnel_schlick_roughness(NdV, F0, roughness);
+    // ── Indirect diffuse (RC radiance cascades) ───────────────────────────────
+    let rc_irr = sample_rc_irradiance(world_pos, N);
+    // Fresnel at grazing angle for IBL (roughness-aware Schlick).
+    let F_ibl  = fresnel_schlick_roughness(NdV, F0, roughness_aa);
+    // Energy-conserving kD: specular + diffuse can't exceed 1, metals have no diffuse.
     let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
     let diff_ind = kD_ibl * rc_irr * albedo;
 
-    // ── Indirect specular: environment cubemap ────────────────────────────────
-    let R            = reflect(-V, N);
-    let env_sample   = textureSample(env_cube, env_sampler, R).rgb;
-    let spec_scale   = 1.0 - roughness * roughness;
-    let spec_ind     = F_ibl * env_sample * spec_scale;
+    // ── Indirect specular: env cubemap + UE4 split-sum + multi-scatter ────────
+    let R       = reflect(-V, N);
+    // Map roughness to mip level: 0 = mirror, 8 = very rough.
+    let env_mip    = roughness_aa * 8.0;
+    let env_sample = textureSampleLevel(env_cube, env_sampler, R, env_mip).rgb;
 
-    // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
-    // Hemisphere ambient is shadow-INDEPENDENT.  Shadow maps only affect direct
-    // lighting (Lo above); ambient occlusion (ao from G-buffer ORM.r) handles
-    // indirect-light occlusion instead.  This ensures shadowed areas still
-    // receive fill light and are never pitch black.
-    //
-    // When RC GI is active it replaces the hemisphere fallback with physically-
-    // based global illumination.  When inactive the hemisphere ambient is used.
+    // Single-scatter specular from split-sum: F0 * AB.x + AB.y
+    let Fss = F0 * dfg.x + dfg.y;
 
-    let sky_color      = globals.ambient_color.rgb * globals.ambient_intensity;
-    let ground_color   = sky_color * 0.15;
-    let hemi_t         = N.y * 0.5 + 0.5;
-    let hemi           = mix(ground_color, sky_color, hemi_t) * albedo;
+    // Multi-scatter energy compensation (Turquin 2019 / Karis 2013):
+    // Standard single-scatter GGX loses energy at high roughness.
+    // Add back the missing energy as a tinted diffuse-like bounce.
+    let Ess  = dfg.x + dfg.y;                           // single-scatter albedo (F0=white approx)
+    let Ems  = max(1.0 - Ess, 0.0);                     // missing fraction
+    let Favg = F0 + (1.0 - F0) / 21.0;                  // hemisphere-average Fresnel (Turquin)
+    let Fms  = Favg * Ems / max(1.0 - Favg * Ems, vec3<f32>(0.001));  // multi-bounce tint
 
-    // RC weight: 0 = no RC data, 1 = full RC coverage
-    let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+    let spec_occ = specular_occlusion(NdV, ao, roughness_aa);
+    let spec_ind = (Fss + Fms) * env_sample * spec_occ;
 
-    // Blend between hemisphere fallback and RC-based GI
-    let ambient_fallback = mix(hemi, diff_ind, rc_weight);
+    // ── Hemisphere ambient fallback blended with RC irradiance ────────────────
+    let sky_color    = globals.ambient_color.rgb * globals.ambient_intensity;
+    let ground_color = sky_color * 0.15;
+    let hemi         = mix(ground_color, sky_color, N.y * 0.5 + 0.5) * albedo;
+    let rc_weight    = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
+    let amb_diffuse  = mix(hemi, diff_ind, rc_weight);
 
-    // ── Combine ───────────────────────────────────────────────────────────────
-    let indirect  = (ambient_fallback + spec_ind) * ao;
-    var color     = Lo + indirect;
-    color        += emissive;               // emissive from G-buffer
-    color         = apply_bloom(color);
-    color         = aces_tonemap(color);
+    // ── Final combine (pure HDR linear; tonemapping in post-process) ──────────
+    // AO occludes indirect diffuse; specular already occluded via spec_occ.
+    let indirect = amb_diffuse * ao + spec_ind;
+    let color    = Lo + indirect + emissive;
 
     return vec4<f32>(color, alpha);
 }

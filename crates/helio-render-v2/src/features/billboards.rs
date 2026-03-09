@@ -283,7 +283,7 @@ impl Feature for BillboardsFeature {
             index_buffer.clone(),
             instance_buffer.clone(),
             self.instance_count.clone(),
-            ctx.surface_format,
+            wgpu::TextureFormat::Rgba16Float, // graph renders into HDR buffer
             sprite_bg,
             sprite_layout,
         ));

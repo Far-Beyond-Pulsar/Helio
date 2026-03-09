@@ -23,6 +23,10 @@ pub struct PipelineCache {
     active_features: FeatureFlags,
     bind_group_layouts: Arc<BindGroupLayouts>,
     surface_format: wgpu::TextureFormat,
+    /// Intermediate HDR render target format.  All scene geometry, sky, deferred
+    /// lighting, and transparent passes render into this format.  Post-processing
+    /// converts it into `surface_format` as the final step.
+    pub hdr_format: wgpu::TextureFormat,
 }
 
 impl PipelineCache {
@@ -34,6 +38,7 @@ impl PipelineCache {
             active_features: FeatureFlags::empty(),
             bind_group_layouts: layouts,
             surface_format,
+            hdr_format: wgpu::TextureFormat::Rgba16Float,
         }
     }
 
@@ -74,13 +79,16 @@ impl PipelineCache {
         // Build pipeline layout — varies by variant
         let pipeline_layout = match variant {
             PipelineVariant::GBufferWrite => {
-                // G-buffer writer: group 0 camera/globals, group 1 material.
-                // No lighting bind group — this pass doesn't evaluate any lights.
+                // G-buffer writer: group 0 camera/globals, group 1 material,
+                // group 2 lighting (unused but required for group 3 to be contiguous),
+                // group 3 GPU Scene (vertex shader reads transforms from storage buf).
                 self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some(&format!("{}_layout", shader_id)),
                     bind_group_layouts: &[
-                        Some(&self.bind_group_layouts.global  as &wgpu::BindGroupLayout),
-                        Some(&self.bind_group_layouts.material as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.global    as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.material  as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.lighting  as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.gpu_scene as &wgpu::BindGroupLayout),
                     ],
                     immediate_size: 0,
                 })
@@ -99,13 +107,14 @@ impl PipelineCache {
                 })
             }
             _ => {
-                // Forward / DepthOnly / Deferred-alias: classic three-group layout
+                // Forward / DepthOnly / Deferred-alias: global + material + lighting + GPU Scene.
                 self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some(&format!("{}_layout", shader_id)),
                     bind_group_layouts: &[
-                        Some(&self.bind_group_layouts.global   as &wgpu::BindGroupLayout),
-                        Some(&self.bind_group_layouts.material as &wgpu::BindGroupLayout),
-                        Some(&self.bind_group_layouts.lighting as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.global    as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.material  as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.lighting  as &wgpu::BindGroupLayout),
+                        Some(&self.bind_group_layouts.gpu_scene as &wgpu::BindGroupLayout),
                     ],
                     immediate_size: 0,
                 })
@@ -190,15 +199,12 @@ impl PipelineCache {
                             },
                         ],
                     },
-                    // Per-instance model transform (locations 5-8).
+                    // Per-instance primitive_id: u32 — GPU Scene index (4 bytes, was 64).
                     wgpu::VertexBufferLayout {
-                        array_stride: 64,
+                        array_stride: 4,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 0, shader_location: 5 },
                         ],
                     },
                 ],
@@ -208,7 +214,7 @@ impl PipelineCache {
                 module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format,
+                    format: self.hdr_format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -263,15 +269,12 @@ impl PipelineCache {
                             wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 28, shader_location: 4 },
                         ],
                     },
-                    // Per-instance model transform (locations 5-8).
+                    // Per-instance primitive_id: u32 — GPU Scene index (4 bytes, was 64).
                     wgpu::VertexBufferLayout {
-                        array_stride: 64,
+                        array_stride: 4,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 0, shader_location: 5 },
                         ],
                     },
                 ],
@@ -281,7 +284,7 @@ impl PipelineCache {
                 module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format,
+                    format: self.hdr_format,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -313,7 +316,9 @@ impl PipelineCache {
     }
 
     /// Returns vertex buffer layouts for all geometry pipelines:
-    /// slot 0 = 32-byte packed vertex, slot 1 = 64-byte per-instance mat4 transform.
+    /// slot 0 = 32-byte packed vertex, slot 1 = 4-byte per-instance primitive_id (GPU Scene index).
+    /// This replaces the old 64-byte mat4 instance stream — transforms are now read from the
+    /// persistent GPU Scene storage buffer in the vertex shader.
     fn geometry_vertex_buffers() -> [wgpu::VertexBufferLayout<'static>; 2] {
         [
             wgpu::VertexBufferLayout {
@@ -327,15 +332,13 @@ impl PipelineCache {
                     wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 28, shader_location: 4 },
                 ],
             },
-            // Per-instance model transform: 4 × Float32x4 = mat4x4<f32> at shader locations 5-8.
+            // Per-instance primitive_id: u32 index into gpu_primitives[] storage buffer (group 3).
+            // 16× smaller than the old 64-byte mat4 stream (4 bytes vs 64 bytes per instance).
             wgpu::VertexBufferLayout {
-                array_stride: 64,
+                array_stride: 4,
                 step_mode: wgpu::VertexStepMode::Instance,
                 attributes: &[
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 0, shader_location: 5 },
                 ],
             },
         ]
@@ -431,7 +434,7 @@ impl PipelineCache {
                 module: shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: self.surface_format,
+                    format: self.hdr_format,
                     blend: None,        // opaque; sky pixels are discarded in shader
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -491,15 +494,12 @@ impl PipelineCache {
                             },
                         ],
                     },
-                    // Per-instance model transform (locations 5-8).
+                    // Per-instance primitive_id: u32 — GPU Scene index.
                     wgpu::VertexBufferLayout {
-                        array_stride: 64,
+                        array_stride: 4,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 0, shader_location: 5 },
                         ],
                     },
                 ],

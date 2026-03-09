@@ -32,6 +32,10 @@ pub struct PassContext<'a> {
     pub depth_view: &'a wgpu::TextureView,
     pub global_bind_group: &'a wgpu::BindGroup,
     pub lighting_bind_group: &'a wgpu::BindGroup,
+    /// Bind group 3 – GPU Scene persistent primitive buffer (transforms + bounds).
+    /// All geometry passes bind this so the vertex shader can look up model matrices
+    /// via the 4-byte per-instance `primitive_id` instead of a 64-byte mat4 stream.
+    pub gpu_scene_bind_group: &'a wgpu::BindGroup,
     /// Clear color used when `has_sky` is false
     pub sky_color: [f32; 3],
     /// True when SkyPass will render the background this frame

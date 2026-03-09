@@ -55,22 +55,29 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
-// Per-instance model transform — one mat4x4 per instance, split across four
-// vec4 vertex attributes at locations 5-8 (VertexStepMode::Instance).
-struct Instance {
-    @location(5) model_0: vec4<f32>,
-    @location(6) model_1: vec4<f32>,
-    @location(7) model_2: vec4<f32>,
-    @location(8) model_3: vec4<f32>,
+// GPU Scene: persistent per-object data (group 3, binding 0).
+// Each instance carries only a 4-byte primitive_id; transforms and bounds
+// come from the persistent storage buffer, uploaded once and dirty-tracked.
+struct GpuPrimitive {
+    transform:     mat4x4<f32>,   //  offset   0
+    inv_trans_c0:  vec4<f32>,     //  offset  64
+    inv_trans_c1:  vec4<f32>,     //  offset  80
+    inv_trans_c2:  vec4<f32>,     //  offset  96
+    bounds_center: vec3<f32>,     //  offset 112
+    bounds_radius: f32,           //  offset 124
+    material_id:   u32,           //  offset 128
+    flags:         u32,           //  offset 132
+    _pad:          vec2<u32>,     //  offset 136  →  total 144 bytes
 }
+@group(3) @binding(0) var<storage, read> gpu_primitives: array<GpuPrimitive>;
 
 @vertex
-fn vs_main(v: Vertex, inst: Instance) -> VertexOutput {
-    let model      = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
+fn vs_main(v: Vertex, @location(5) primitive_id: u32) -> VertexOutput {
+    let prim       = gpu_primitives[primitive_id];
+    let model      = prim.transform;
     let world_pos  = model * vec4<f32>(v.position, 1.0);
-    // Normal transform: upper-left 3×3 of model matrix.
-    // Correct for uniform scale + rotation; use inverse-transpose for non-uniform.
-    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+    // Correct normal transform via pre-computed inverse-transpose mat3x3.
+    let normal_mat = mat3x3<f32>(prim.inv_trans_c0.xyz, prim.inv_trans_c1.xyz, prim.inv_trans_c2.xyz);
     var out: VertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;

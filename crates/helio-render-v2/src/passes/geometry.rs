@@ -95,6 +95,7 @@ impl RenderPass for GeometryPass {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, global_bg, &[]);
         pass.set_bind_group(2, lighting_bg, &[]);
+        pass.set_bind_group(3, ctx.gpu_scene_bind_group, &[]);
 
         for dc in draw_calls.iter() {
             pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);

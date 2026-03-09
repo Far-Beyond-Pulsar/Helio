@@ -165,6 +165,10 @@ impl RenderPass for GBufferPass {
         // Direct-encode all opaque draws — no RenderBundle compilation step.
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, ctx.global_bind_group, &[]);
+        // Group 2 is the lighting BGL slot — GBuffer shader doesn't read it but
+        // the pipeline layout declares it, so wgpu requires it to be bound.
+        pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
+        pass.set_bind_group(3, ctx.gpu_scene_bind_group, &[]);
         let mut last_material: Option<usize> = None;
         for &idx in &self.sorted_opaque_indices {
             let dc = &draw_calls[idx];

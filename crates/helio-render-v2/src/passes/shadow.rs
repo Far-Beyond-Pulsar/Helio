@@ -128,6 +128,7 @@ impl ShadowPass {
         light_count: Arc<AtomicU32>,
         device: Arc<wgpu::Device>,
         material_layout: &wgpu::BindGroupLayout,
+        gpu_scene_layout: &wgpu::BindGroupLayout,
     ) -> Self {
         // BGL binding 0: shadow matrices storage; binding 1: per-face layer index uniform.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -165,7 +166,7 @@ impl ShadowPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow Pipeline Layout"),
-            bind_group_layouts: &[Some(&bgl), Some(material_layout)],
+            bind_group_layouts: &[Some(&bgl), Some(material_layout), Some(gpu_scene_layout)],
             immediate_size: 0,
         });
 
@@ -196,15 +197,12 @@ impl ShadowPass {
                             },
                         ],
                     },
-                    // Instance model matrix (four vec4 columns, locations 5-8)
+                    // Instance primitive_id: u32 at location 5
                     wgpu::VertexBufferLayout {
-                        array_stride: 64,
+                        array_stride: 4,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 0, shader_location: 5 },
                         ],
                     },
                 ],
@@ -234,8 +232,8 @@ impl ShadowPass {
                 // slope_scale adds bias based on surface angle relative to light
                 // constant offset adds fixed bias regardless of angle
                 bias: wgpu::DepthBiasState {
-                    constant: 0,
-                    slope_scale: 1.0,
+                    constant:    2,
+                    slope_scale: 2.0,
                     clamp: 0.0,
                 },
             }),
@@ -332,6 +330,9 @@ impl RenderPass for ShadowPass {
         // buffers, and (b) `bundle_kept_arcs` keeps those buffers alive until the face is
         // rebuilt, preventing use-after-free when a batch gains/loses instances.
         const MAX_FACE_REBUILDS: u32 = 2;
+
+        // Copy gpu_scene bind group reference before any mutable borrows of ctx.
+        let gpu_scene_bg: &wgpu::BindGroup = ctx.gpu_scene_bind_group;
 
         // ── Camera-distance filter (shared across all lights) ────────────────
         self.filtered_indices.clear();
@@ -470,6 +471,7 @@ impl RenderPass for ShadowPass {
                     );
                     enc.set_pipeline(&self.pipeline);
                     enc.set_bind_group(0, &self.slot_bind_groups[bundle_slot], &[]);
+                    enc.set_bind_group(2, gpu_scene_bg, &[]);
 
                     // Keep Arcs to every instance buffer encoded in this bundle so that
                     // replaying it while the next rebuild is still pending (amortisation

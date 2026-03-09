@@ -232,7 +232,9 @@ impl GpuMesh {
 /// `draw_indexed_instanced` when `instance_count > 1`.
 
 /// Byte stride of a single instance record: one `mat4x4<f32>` (4×4×4 bytes).
-pub const INSTANCE_STRIDE: u64 = std::mem::size_of::<[f32; 16]>() as u64;
+/// Per-instance data is now a single u32 primitive_id (GPU Scene index).
+/// The vertex shader reads the model transform from the GPU Scene storage buffer.
+pub const INSTANCE_STRIDE: u64 = std::mem::size_of::<u32>() as u64;
 
 #[derive(Clone)]
 pub struct DrawCall {

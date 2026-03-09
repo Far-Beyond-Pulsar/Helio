@@ -80,19 +80,28 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
-// Per-instance model transform (locations 5-8, VertexStepMode::Instance).
-struct Instance {
-    @location(5) model_0: vec4<f32>,
-    @location(6) model_1: vec4<f32>,
-    @location(7) model_2: vec4<f32>,
-    @location(8) model_3: vec4<f32>,
+// GPU Scene: persistent per-object data (group 3, binding 0).
+// Replaces the old 64-byte mat4 per-instance stream with a 4-byte primitive_id.
+struct GpuPrimitive {
+    transform:     mat4x4<f32>,   //  offset   0 — 64 bytes
+    inv_trans_c0:  vec4<f32>,     //  offset  64 — col 0 of inv-transpose 3×3
+    inv_trans_c1:  vec4<f32>,     //  offset  80 — col 1
+    inv_trans_c2:  vec4<f32>,     //  offset  96 — col 2
+    bounds_center: vec3<f32>,     //  offset 112 — world-space sphere centre
+    bounds_radius: f32,           //  offset 124 — world-space sphere radius
+    material_id:   u32,           //  offset 128
+    flags:         u32,           //  offset 132
+    _pad:          vec2<u32>,     //  offset 136  →  total 144 bytes
 }
+@group(3) @binding(0) var<storage, read> gpu_primitives: array<GpuPrimitive>;
 
 @vertex
-fn vs_main(vertex: Vertex, inst: Instance) -> VertexOutput {
-    let model      = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
+fn vs_main(vertex: Vertex, @location(5) primitive_id: u32) -> VertexOutput {
+    let prim       = gpu_primitives[primitive_id];
+    let model      = prim.transform;
     let world_pos  = model * vec4<f32>(vertex.position, 1.0);
-    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+    // Correct normal transform via pre-computed inverse-transpose mat3.
+    let normal_mat = mat3x3<f32>(prim.inv_trans_c0.xyz, prim.inv_trans_c1.xyz, prim.inv_trans_c2.xyz);
     var out: VertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;
@@ -205,7 +214,11 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, world_normal: vec3<f32>) 
     // position — zero panning risk — but eliminates self-shadow acne by making
     // the stored shadow depth "win" the comparison by a guaranteed margin.
     // Spot lights hit surfaces at oblique angles most often so get a bit more.
-    let depth_bias = select(0.0003, 0.0008, light.light_type > 1.5);
+    var depth_bias = select(0.0003, 0.0008, light.light_type > 1.5);
+    if light.light_type < 0.5 {
+        let cascade_idx = layer - light_idx * 6u;
+        depth_bias = 0.00015 * (1.0 + f32(cascade_idx) * 3.0);
+    }
     let biased_depth = depth - depth_bias;
 
     // Scale the PCF kernel by cascade index: near cascades stay sharp,

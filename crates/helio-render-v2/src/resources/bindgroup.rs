@@ -29,6 +29,10 @@ pub struct BindGroupLayouts {
     pub sky:          Arc<wgpu::BindGroupLayout>,
     /// Group 1 for DeferredLightingPass: reads albedo, normal, orm, emissive, depth.
     pub gbuffer_read: Arc<wgpu::BindGroupLayout>,
+    /// Group 3: GPU Scene primitive buffer (per-object transforms + bounds).
+    /// Bound in all geometry passes so the vertex shader can read model matrices
+    /// from the persistent storage buffer via `@builtin(instance_index)`.
+    pub gpu_scene:    Arc<wgpu::BindGroupLayout>,
 }
 
 impl BindGroupLayouts {
@@ -43,6 +47,7 @@ impl BindGroupLayouts {
             sky_uniform:  Arc::new(Self::create_sky_uniform_layout(device)),
             sky:          Arc::new(Self::create_sky_layout(device)),
             gbuffer_read: Arc::new(Self::create_gbuffer_read_layout(device)),
+            gpu_scene:    Arc::new(Self::create_gpu_scene_layout(device)),
         }
     }
 
@@ -398,6 +403,25 @@ impl BindGroupLayouts {
                     count: None,
                 },
             ],
+        })
+    }
+
+    /// Group 3: GPU Scene primitive buffer — persistent per-object transforms + bounds.
+    /// Bound in all geometry passes so the vertex shader can index model matrices
+    /// via `primitive_id` instead of reading a 64-byte mat4 from the instance stream.
+    fn create_gpu_scene_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("GPU Scene Bind Group Layout (group 3)"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
         })
     }
 

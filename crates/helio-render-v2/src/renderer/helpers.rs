@@ -2,6 +2,28 @@
 
 use crate::passes::GBufferTargets;
 
+/// Create an Rgba16Float HDR render target at the given resolution.
+/// Usage flags: RENDER_ATTACHMENT + TEXTURE_BINDING so post-process passes can read it.
+pub(super) fn create_hdr_texture(
+    device: &wgpu::Device,
+    width:  u32,
+    height: u32,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label:           Some("HDR Color Texture"),
+        size:            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count:    1,
+        dimension:       wgpu::TextureDimension::D2,
+        format:          wgpu::TextureFormat::Rgba16Float,
+        usage:           wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+                       | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+        view_formats:    &[],
+    });
+    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+    (tex, view)
+}
+
 /// Create a Depth32Float texture + two views (write + depth-only-sample) at the given resolution.
 /// Both RENDER_ATTACHMENT and TEXTURE_BINDING are set so the deferred lighting pass can read depth.
 pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {

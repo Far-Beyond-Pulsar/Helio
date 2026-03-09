@@ -1,8 +1,10 @@
 //! Renderer construction, material creation, and lighting bind group helpers.
 
 use super::*;
+use crate::gpu_scene::GpuScene;
+use crate::material_registry::MaterialRegistry;
 use super::uniforms::{GlobalsUniform, SkyUniform};
-use super::helpers::{create_depth_texture, create_gbuffer_textures, create_gbuffer_bind_group};
+use super::helpers::{create_depth_texture, create_gbuffer_textures, create_gbuffer_bind_group, create_hdr_texture};
 use super::shadow_math::CSM_SPLITS;
 
 impl Renderer {
@@ -157,7 +159,7 @@ impl Renderer {
                 module: &sky_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.surface_format,
+                    format: wgpu::TextureFormat::Rgba16Float,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -472,7 +474,7 @@ impl Renderer {
         let debug_draw_pass = DebugDrawPass::new(
             &device,
             &resources.bind_group_layouts.global,
-            config.surface_format,
+            wgpu::TextureFormat::Rgba16Float,
             debug_batch.clone(),
         );
         graph.add_pass(debug_draw_pass);
@@ -486,6 +488,45 @@ impl Renderer {
 
         // Create profiler if TIMESTAMP_QUERY was requested on this device
         let profiler = GpuProfiler::new(&device, &queue);
+
+        // ── HDR intermediate buffer ────────────────────────────────────────────
+        // All scene passes render here; post-process stack converts to LDR.
+        let (hdr_texture, hdr_view) =
+            create_hdr_texture(&device, config.width, config.height);
+        // SSR needs a snapshot of the HDR buffer as its scene_color input to
+        // avoid a read-write hazard.  We copy hdr → hdr_prev each frame.
+        let (hdr_prev_texture, hdr_prev_view) =
+            create_hdr_texture(&device, config.width, config.height);
+
+        // ── New post-process passes ────────────────────────────────────────────
+        // PostProcess reads hdr → outputs to pre_aa or swapchain.
+        // Output format is surface_format (LDR).
+        let mut post_process_pass = PostProcessPass::new(&device, config.surface_format);
+
+        // Physical bloom (dual-Kawase, 6 mip levels)
+        let mut bloom_pass = PhysicalBloomPass::new(
+            &device, config.width, config.height, BloomConfig::default(),
+        )?;
+
+        // SSR
+        let mut ssr_pass = SsrPass::new(&device);
+
+        // God rays
+        let mut god_rays_pass = GodRaysPass::new(&device);
+
+        // DoF
+        let mut dof_pass = DofPass::new(&device, config.width, config.height);
+
+        // Bind groups depend on hdr_view / depth textures which are now available.
+        // N.B. gbuf_normal_texture / gbuf_orm_texture views are created from the gbuf textures.
+        let gbuf_normal_view_for_ssr = gbuf_normal_texture.create_view(&Default::default());
+        let gbuf_orm_view_for_ssr    = gbuf_orm_texture.create_view(&Default::default());
+
+        post_process_pass.create_bind_group(&device, &hdr_view);
+        bloom_pass.create_bind_groups(&device, &hdr_view);
+        ssr_pass.create_bind_group(&device, &gbuf_normal_view_for_ssr, &gbuf_orm_view_for_ssr, &depth_sample_view, &hdr_prev_view);
+        god_rays_pass.create_bind_group(&device, &hdr_prev_view, &depth_view);
+        dof_pass.create_bind_groups(&device, &hdr_view, &depth_sample_view, &camera_buffer);
 
         // Create pre-AA texture for post-processing
         let pre_aa_texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -558,6 +599,9 @@ impl Renderer {
         // The unified instance buffer is no longer needed — each proxy has its own
         // 64-byte buffer.  Only legacy `draw_mesh_instanced` callers bring their own.
 
+        let gpu_scene = GpuScene::new(&device, 512);
+        let material_registry = MaterialRegistry::new();
+
         Ok(Self {
             device,
             queue,
@@ -623,6 +667,12 @@ impl Renderer {
             scratch_shadow_matrix_hashes: Vec::new(),
             scratch_sorted_light_indices: Vec::new(),
             shadow_draw_list,
+            // ── Shared per-frame instance buffer (batch rendering) ─────────────
+            // Lazily allocated in render() Step 1; grows power-of-two as needed.
+            gpu_scene,
+            material_registry,
+            scene_instance_buf:     None,
+            scene_instance_buf_cap: 0,
             // ── Persistent proxy registry ──────────────────────────────────────
             registered_objects: HashMap::new(),
             next_object_id: 1,       // 0 is INVALID
@@ -663,6 +713,17 @@ impl Renderer {
             cached_light_position_hash: 0,
             cached_camera_pos:         [0.0; 3],
             camera_move_threshold:     0.5,
+            // ── HDR pipeline + post-process passes ────────────────────────────
+            hdr_texture,
+            hdr_view,
+            hdr_prev_texture,
+            hdr_prev_view,
+            bloom_pass,
+            ssr_pass,
+            god_rays_pass,
+            dof_pass,
+            post_process_pass,
+            sun_screen_pos: [0.5, 0.3],
         })
     }
 
@@ -670,8 +731,11 @@ impl Renderer {
 
     /// Upload a [`Material`] to the GPU and return a [`GpuMaterial`] ready for use in
     /// [`Scene::add_object_with_material`] or [`Renderer::draw_mesh_with_material`].
-    pub fn create_material(&self, mat: &Material) -> GpuMaterial {
-        build_gpu_material(
+    ///
+    /// **Idempotent**: calling with identical material contents returns the cached
+    /// `GpuMaterial` with zero GPU work.  Safe to call every chunk load.
+    pub fn create_material(&mut self, mat: &Material) -> GpuMaterial {
+        self.material_registry.get_or_create(
             &self.device,
             &self.queue,
             &self.resources.bind_group_layouts.material,

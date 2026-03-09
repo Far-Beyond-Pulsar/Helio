@@ -249,6 +249,7 @@ impl RenderGraph {
                 depth_view: ctx.depth_view,
                 global_bind_group: ctx.global_bind_group,
                 lighting_bind_group: ctx.lighting_bind_group,
+                gpu_scene_bind_group: ctx.gpu_scene_bind_group,
                 sky_color: ctx.sky_color,
                 has_sky: ctx.has_sky,
                 sky_state_changed: ctx.sky_state_changed,
@@ -335,6 +336,8 @@ pub struct GraphContext<'a> {
     pub global_bind_group: &'a wgpu::BindGroup,
     /// Bind group 2 – lights, shadows, env
     pub lighting_bind_group: &'a wgpu::BindGroup,
+    /// Bind group 3 – GPU Scene persistent primitive buffer.
+    pub gpu_scene_bind_group: &'a wgpu::BindGroup,
     /// Sky / background clear color (linear RGB) – used when has_sky=false
     pub sky_color: [f32; 3],
     /// True when a SkyAtmosphere is present – SkyPass renders; GeometryPass uses LoadOp::Load
