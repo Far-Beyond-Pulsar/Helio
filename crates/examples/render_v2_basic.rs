@@ -13,7 +13,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -126,6 +126,12 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
+    // Scene state
+    light_p0_id: LightId,
+    light_p1_id: LightId,
+    light_p2_id: LightId,
+    billboard_ids: Vec<BillboardId>,
+
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
@@ -237,6 +243,19 @@ impl ApplicationHandler for App {
         renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
         renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
 
+        // p0 bobs up/down (animated), p1 and p2 are static
+        let p0_init = [0.0f32, 2.2, 0.0];
+        let p1 = [-3.5f32, 2.0, -1.5];
+        let p2 = [3.5f32, 1.5, 1.5];
+        let light_p0_id = renderer.add_light(SceneLight::point(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0));
+        let light_p1_id = renderer.add_light(SceneLight::point(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
+        let light_p2_id = renderer.add_light(SceneLight::point(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
+
+        let mut billboard_ids = Vec::new();
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p0_init, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
+
         self.state = Some(AppState {
             window,
             surface,
@@ -251,6 +270,10 @@ impl ApplicationHandler for App {
             keys:      HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            light_p0_id,
+            light_p1_id,
+            light_p2_id,
+            billboard_ids,
             probe_vis: false,
             sprite_w,
             sprite_h,
@@ -305,6 +328,20 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
+                if state.probe_vis {
+                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(b));
+                    }
+                } else {
+                    // Re-register light marker billboards (p0 position at init; will be updated per-frame)
+                    let p0 = [0.0f32, 2.2, 0.0];
+                    let p1 = [-3.5f32, 2.0, -1.5];
+                    let p2 = [3.5f32, 1.5, 1.5];
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
                 }
             }
             // ── Live profiler portal ──────────────────────────────────────────
@@ -437,31 +474,12 @@ impl AppState {
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // ── Build scene ────────────────────────────────────────────────────────
+        // p0 bobs up/down per-frame; update its light and billboard position
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        let p1 = [-3.5f32, 2.0, -1.5];
-        let p2 = [3.5f32, 1.5, 1.5];
-
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            vec![
-                BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]),
-                BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5,  1.0, 1.0]),
-                BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3,  0.5, 1.0]),
-            ]
-        };
-
-        let env = SceneEnv {
-            lights: vec![
-                SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
-                SceneLight::point(p1, [0.25, 0.5,  1.0], 5.0, 6.0),
-                SceneLight::point(p2, [1.0, 0.3,  0.5],  5.0, 6.0),
-            ],
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
+        self.renderer.update_light(self.light_p0_id, SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
+        if !self.probe_vis && !self.billboard_ids.is_empty() {
+            self.renderer.update_billboard(self.billboard_ids[0], BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]));
+        }
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }

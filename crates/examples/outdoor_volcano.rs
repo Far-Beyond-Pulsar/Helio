@@ -369,6 +369,17 @@ impl ApplicationHandler for App {
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
                 }
+                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
+                if state.probe_vis {
+                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(b));
+                    }
+                } else {
+                    for &(x, y, z, r, g, b, _intensity, _range) in LAVA_LIGHTS {
+                        let p = [x, y, z];
+                        state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p, [0.6, 0.6]).with_color([r, g, b, 0.9])));
+                    }
+                }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit4), ..
@@ -458,43 +469,19 @@ impl AppState {
         // Per-light flicker: each light gets a unique phase
         let f = |phase: f32, freq: f32, amp: f32| 1.0 + (time * freq + phase).sin() * amp;
 
-        // Ocean/sky directional fill — cool blue, very dim
-        let ocean_dir = glam::Vec3::new(-0.3, -0.6, 0.2).normalize();
-        let ocean_light = SceneLight::directional(
-            [ocean_dir.x, ocean_dir.y, ocean_dir.z], [0.3, 0.5, 1.0], 0.04,
-        );
-
         let output = match self.surface.get_current_texture() {
             Ok(t) => t, Err(e) => { log::warn!("Surface: {:?}", e); return; }
         };
         let view = output.texture.create_view(&Default::default());
 
-        let mut lights = vec![ocean_light];
-        for (i, &(x, y, z, r, g, b, intensity, range)) in LAVA_LIGHTS.iter().enumerate() {
+        // Update lava lights with per-light flicker
+        for (i, &id) in self.lava_light_ids.iter().enumerate() {
+            let (x, y, z, r, g, b, intensity, range) = LAVA_LIGHTS[i];
             let phase = i as f32 * 1.37;
             let fi = f(phase, 8.0 + i as f32 * 1.1, 0.06 + (i % 3) as f32 * 0.03);
             let p = [x, y, z];
-            lights.push(SceneLight::point(p, [r, g, b], intensity * fi, range));
+            self.renderer.update_light(id, SceneLight::point(p, [r, g, b], intensity * fi, range));
         }
-
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            LAVA_LIGHTS.iter().map(|&(x, y, z, r, g, b, _intensity, _range)| {
-                let p = [x, y, z];
-                BillboardInstance::new(p, [0.6, 0.6]).with_color([r, g, b, 0.9])
-            }).collect()
-        };
-
-        let env = SceneEnv {
-            lights,
-            ambient_color: [0.5, 0.1, 0.02],
-            ambient_intensity: 0.04,
-            sky_color: [0.06, 0.01, 0.01],
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);
         }

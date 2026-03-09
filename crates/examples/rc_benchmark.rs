@@ -17,7 +17,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -122,6 +122,11 @@ struct AppState {
     keys:           HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
+
+    // Scene state
+    light_ids: Vec<LightId>,
+    base_lights: Vec<SceneLight>,
+    billboard_ids: Vec<BillboardId>,
 
     // Debug
     probe_vis: bool,
@@ -240,6 +245,28 @@ impl ApplicationHandler for App {
         renderer.add_object(&wall_w,  None, glam::Mat4::IDENTITY);
         for c in &cubes { renderer.add_object(c, None, glam::Mat4::IDENTITY); }
 
+        // Three bright area lights to showcase multi-bounce GI
+        let base_lights = vec![
+            SceneLight::point([0.0, 4.8, 0.0], [1.0, 1.0, 1.0], 18.0, 6.0),
+            SceneLight::point([-3.5, 3.0, -2.0], [1.0, 0.7, 0.4], 12.0, 5.0),
+            SceneLight::point([3.5, 3.0, 2.0], [0.4, 0.7, 1.0], 12.0, 5.0),
+        ];
+        let mut light_ids = Vec::new();
+        for &ref l in &base_lights {
+            light_ids.push(renderer.add_light(l.clone()));
+        }
+        renderer.set_ambient([0.02, 0.02, 0.03], 1.0);
+
+        let mut billboard_ids = Vec::new();
+        for l in &base_lights {
+            let col = l.color;
+            billboard_ids.push(renderer.add_billboard(
+                BillboardInstance::new(l.position, [0.2, 0.2])
+                    .with_color([col[0], col[1], col[2], 0.9])
+                    .with_screen_scale(true)
+            ));
+        }
+
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,
             last_frame: std::time::Instant::now(),
@@ -250,6 +277,9 @@ impl ApplicationHandler for App {
             keys:           HashSet::new(),
             cursor_grabbed: false,
             mouse_delta:    (0.0, 0.0),
+            light_ids,
+            base_lights,
+            billboard_ids,
             probe_vis: false,
             light_intensity_multiplier: 1.0,
             sprite_w, sprite_h,
@@ -291,6 +321,21 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
+                if state.probe_vis {
+                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(b));
+                    }
+                } else {
+                    for l in &state.base_lights {
+                        let col = l.color;
+                        state.billboard_ids.push(state.renderer.add_billboard(
+                            BillboardInstance::new(l.position, [0.2, 0.2])
+                                .with_color([col[0], col[1], col[2], 0.9])
+                                .with_screen_scale(true)
+                        ));
+                    }
                 }
             }
 
@@ -429,40 +474,12 @@ impl AppState {
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Three bright area lights to showcase multi-bounce GI
-        let mut lights = vec![
-            // Ceiling spot (white) shining down
-            SceneLight::point([0.0, 4.8, 0.0], [1.0, 1.0, 1.0], 18.0, 6.0),
-            // Left-side warm light
-            SceneLight::point([-3.5, 3.0, -2.0], [1.0, 0.7, 0.4], 12.0, 5.0),
-            // Right-side cool light
-            SceneLight::point([3.5, 3.0, 2.0], [0.4, 0.7, 1.0], 12.0, 5.0),
-        ];
-
-        // Apply intensity multiplier
-        for light in &mut lights {
+        // Apply intensity multiplier to all lights per-frame
+        for (i, &id) in self.light_ids.iter().enumerate() {
+            let mut light = self.base_lights[i].clone();
             light.intensity *= self.light_intensity_multiplier;
+            self.renderer.update_light(id, light);
         }
-
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            lights.iter().map(|l| {
-                let col = l.color;
-                BillboardInstance::new(l.position, [0.2, 0.2])
-                    .with_color([col[0], col[1], col[2], 0.9])
-                    .with_screen_scale(true)
-            }).collect()
-        };
-
-        let env = SceneEnv {
-            lights,
-            ambient_color: [0.02, 0.02, 0.03],
-            ambient_intensity: 1.0,
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }

@@ -21,7 +21,7 @@
 mod demo_portal;
 
 use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv,
+    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId,
     SkyAtmosphere, VolumetricClouds, Skylight,
 };
 
@@ -140,6 +140,10 @@ struct AppState {
     // Time-of-day: sun_angle=0 → noon, PI → midnight
     sun_angle: f32,
 
+    // Scene state
+    sun_light_id: LightId,
+    billboard_ids: Vec<BillboardId>,
+
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
@@ -248,6 +252,35 @@ impl ApplicationHandler for App {
         renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
         renderer.add_object(&roof,   None, glam::Mat4::IDENTITY);
 
+        // Compute initial sun direction from starting sun_angle=1.0
+        let init_sun_dir = glam::Vec3::new(1.0_f32.cos() * 0.3, 1.0_f32.sin(), 0.5).normalize();
+        let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
+        let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
+        let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
+        let sun_light_id = renderer.add_light(SceneLight::directional(init_light_dir, [1.0, 0.85, 0.7], (init_lux * 0.35).max(0.01)));
+        renderer.add_light(SceneLight::point([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0));
+        renderer.add_light(SceneLight::point([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0));
+        renderer.add_light(SceneLight::point([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0));
+        renderer.set_sky_atmosphere(Some(
+            SkyAtmosphere::new()
+                .with_sun_intensity(22.0)
+                .with_exposure(4.0)
+                .with_mie_g(0.76)
+                .with_clouds(
+                    VolumetricClouds::new()
+                        .with_coverage(0.30)
+                        .with_density(0.7)
+                        .with_layer(800.0, 1800.0)
+                        .with_wind([1.0, 0.0], 0.08),
+                ),
+        ));
+        renderer.set_skylight(Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 1.0, 1.0])));
+
+        let mut billboard_ids = Vec::new();
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0])));
+
         self.state = Some(AppState {
             window, surface, device, surface_format, renderer,
             last_frame: std::time::Instant::now(),
@@ -260,6 +293,8 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             // Start at a nice afternoon angle (sun ~50° above horizon)
             sun_angle: 1.0,
+            sun_light_id,
+            billboard_ids,
             probe_vis: false,
             sprite_w,
             sprite_h,
@@ -307,6 +342,16 @@ impl ApplicationHandler for App {
                     .into_rgba8();
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
+                }
+                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
+                if state.probe_vis {
+                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
+                        state.billboard_ids.push(state.renderer.add_billboard(b));
+                    }
+                } else {
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0])));
                 }
             }
 
@@ -445,41 +490,8 @@ impl AppState {
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let billboards = if self.probe_vis {
-            probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX)
-        } else {
-            vec![
-                BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0]),
-                BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0]),
-                BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0]),
-            ]
-        };
-
-        let env = SceneEnv {
-            lights: vec![
-                SceneLight::directional(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
-                SceneLight::point([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0),
-                SceneLight::point([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0),
-                SceneLight::point([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0),
-            ],
-            sky_atmosphere: Some(
-                SkyAtmosphere::new()
-                    .with_sun_intensity(22.0)
-                    .with_exposure(4.0)
-                    .with_mie_g(0.76)
-                    .with_clouds(
-                        VolumetricClouds::new()
-                            .with_coverage(0.30)
-                            .with_density(0.7)
-                            .with_layer(800.0, 1800.0)
-                            .with_wind([1.0, 0.0], 0.08),
-                    ),
-            ),
-            skylight: Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 1.0, 1.0])),
-            billboards,
-            ..Default::default()
-        };
-        self.renderer.set_scene_env(env);
+        // Update dynamic sun light
+        self.renderer.update_light(self.sun_light_id, SceneLight::directional(light_dir, sun_color, (sun_lux * 0.35).max(0.01)));
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }

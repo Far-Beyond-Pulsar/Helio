@@ -34,7 +34,7 @@
 
 mod demo_portal;
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, SceneEnv};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -143,6 +143,15 @@ struct AppState {
     keys:           HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
+    // Scene state
+    hub_light_ids:     [LightId; 2],
+    hab_ring_light_ids: [LightId; 4],
+    ind_ring_light_ids: [LightId; 4],
+    engine_light_ids:  [LightId; 4],
+    docking_light_id:  LightId,
+    beacon_light_ids:  [LightId; 2],
+    billboard_ids:     Vec<BillboardId>,
+
     // probe vis
     probe_vis:      bool,
     sprite_w:       u32,
@@ -217,6 +226,52 @@ impl ApplicationHandler for App {
 
         for mesh in &meshes { renderer.add_object(mesh, None, glam::Mat4::IDENTITY); }
 
+        // Register all lights (animated ones stored for per-frame update)
+        renderer.add_light(SceneLight::directional([0.35, -0.65, 0.25], [0.72, 0.82, 1.0], 0.10));
+        let hub_light_ids = [
+            renderer.add_light(SceneLight::point([0.0,  14.0, 0.0], [0.82, 0.90, 1.0], 8.0, 28.0)),
+            renderer.add_light(SceneLight::point([0.0,  -9.0, 0.0], [0.70, 0.80, 1.0], 6.0, 22.0)),
+        ];
+        let hab_ring_light_ids = [
+            renderer.add_light(SceneLight::point([ 35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
+            renderer.add_light(SceneLight::point([-35.0, 6.0,  0.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
+            renderer.add_light(SceneLight::point([  0.0, 6.0,  35.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
+            renderer.add_light(SceneLight::point([  0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
+        ];
+        let ind_ring_light_ids = [
+            renderer.add_light(SceneLight::point([ 62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0)),
+            renderer.add_light(SceneLight::point([-62.0, -3.0,  0.0], [0.62, 0.76, 1.0], 7.0, 28.0)),
+            renderer.add_light(SceneLight::point([  0.0, -3.0,  62.0], [0.62, 0.76, 1.0], 7.0, 28.0)),
+            renderer.add_light(SceneLight::point([  0.0, -3.0, -62.0], [0.62, 0.76, 1.0], 7.0, 28.0)),
+        ];
+        let engine_light_ids = [
+            renderer.add_light(SceneLight::point([ 5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0)),
+            renderer.add_light(SceneLight::point([-5.0,  5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0)),
+            renderer.add_light(SceneLight::point([ 5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0)),
+            renderer.add_light(SceneLight::point([-5.0, -5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0)),
+        ];
+        let docking_light_id = renderer.add_light(SceneLight::point([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0));
+        let beacon_light_ids = [
+            renderer.add_light(SceneLight::point([0.0, 6.0,  65.0], [1.0, 0.04, 0.04], 0.0, 14.0)),
+            renderer.add_light(SceneLight::point([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 0.0, 14.0)),
+        ];
+        renderer.set_ambient([0.08, 0.10, 0.18], 0.035);
+        renderer.set_sky_color([0.003, 0.005, 0.015]);
+
+        let mut billboard_ids = Vec::new();
+        for &[ex, ey] in &[[5.0f32, 5.0], [-5.0, 5.0], [5.0, -5.0], [-5.0, -5.0]] {
+            billboard_ids.push(renderer.add_billboard(BillboardInstance::new([ex, ey, 60.5], [2.2, 2.2]).with_color([1.0, 0.52, 0.10, 1.0])));
+        }
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([0.0,  14.0, 0.0], [0.5, 0.5]).with_color([0.82, 0.90, 1.0, 0.9])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([0.0,  -9.0, 0.0], [0.4, 0.4]).with_color([0.70, 0.80, 1.0, 0.9])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([0.0, 0.0, -55.0], [0.7, 0.7]).with_color([1.0, 1.0, 0.92, 0.9])));
+        for &[bx, bz] in &[[35.0f32, 0.0], [-35.0, 0.0], [0.0, 35.0], [0.0, -35.0]] {
+            billboard_ids.push(renderer.add_billboard(BillboardInstance::new([bx, 7.0, bz], [0.4, 0.4]).with_color([0.78, 0.88, 1.0, 0.85])));
+        }
+        // Beacon billboards (index tracked for alpha update per-frame)
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([0.0, 7.5,  65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, 0.05])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([0.0, 7.5, -65.0], [0.55, 0.55]).with_color([1.0, 0.08, 0.08, 0.05])));
+
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,
             last_frame: std::time::Instant::now(),
@@ -227,6 +282,13 @@ impl ApplicationHandler for App {
             keys:           HashSet::new(),
             cursor_grabbed: false,
             mouse_delta:    (0.0, 0.0),
+            hub_light_ids,
+            hab_ring_light_ids,
+            ind_ring_light_ids,
+            engine_light_ids,
+            docking_light_id,
+            beacon_light_ids,
+            billboard_ids,
             probe_vis: false, sprite_w, sprite_h,
         });
     }
