@@ -254,6 +254,7 @@ impl Renderer {
         let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
             depth_pipeline,
             draw_list.clone(),
+            device.clone(),
         );
         graph.add_pass(depth_prepass);
 
@@ -287,6 +288,7 @@ impl Renderer {
             gbuf_pipeline,
             draw_list.clone(),
             shared_sorted_opaque,
+            device.clone(),
         );
         graph.add_pass(gbuffer_pass);
 
@@ -638,6 +640,7 @@ impl Renderer {
             pending_layout_changed: false,
             portal_scene_key: (0, 0, 0),
             cached_pass_names,
+            portal_worker_tx: None,
             // ── GPU-driven rendering ───────────────────────────────────────────
             gpu_driven: config.gpu_driven,
             async_compute: config.async_compute,

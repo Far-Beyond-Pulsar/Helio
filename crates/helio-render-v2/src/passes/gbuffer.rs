@@ -3,6 +3,20 @@
 //! Renders scene geometry into four Rgba G-buffer textures + the shared depth
 //! buffer.  No lighting is evaluated here — that happens in the subsequent
 //! DeferredLightingPass.
+//!
+//! ## Performance design
+//!
+//! Same RenderBundle caching strategy as DepthPrepassPass: the bundle is
+//! compiled once per scene change and replayed at ~0 µs CPU cost every other
+//! frame.  The sorted draw order is shared from DepthPrepassPass (already
+//! computed this frame when DepthPrepass runs first in the graph).
+//!
+//! G-buffer formats:
+//!   albedo   Rgba8Unorm
+//!   normals  Rgba16Float
+//!   ORM      Rgba8Unorm
+//!   emissive Rgba16Float
+//!   depth    Depth32Float (loaded from depth-prepass, not cleared)
 
 use std::sync::{Arc, Mutex};
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
@@ -21,29 +35,174 @@ pub struct GBufferTargets {
 pub struct GBufferPass {
     targets:   Arc<Mutex<GBufferTargets>>,
     pipeline:  Arc<wgpu::RenderPipeline>,
+    device:    Arc<wgpu::Device>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
-    sorted_opaque_indices: Vec<usize>,
-    /// Pre-computed material-order sort shared by DepthPrepassPass.
+    /// Pre-computed sort shared from DepthPrepassPass (same sort order).
     shared_sorted: Arc<Mutex<Vec<usize>>>,
-    /// Order-independent (XOR) hash of the opaque draw set — see DepthPrepassPass.
-    sort_geom_hash: u64,
+    /// draw_list_generation value at the time cached_bundle was compiled.
+    bundle_gen: u64,
+    /// Raw pointer of the global bind group embedded in the bundle.
+    bundle_global_bg_ptr: usize,
+    /// Pre-compiled RenderBundle replayed each frame when draw set is stable.
+    cached_bundle: Option<wgpu::RenderBundle>,
+    /// Keeps `Arc<wgpu::Buffer>` clones alive while the bundle may be in flight.
+    kept_arcs: Vec<Arc<wgpu::Buffer>>,
 }
 
 impl GBufferPass {
     pub fn new(
-        targets:   Arc<Mutex<GBufferTargets>>,
-        pipeline:  Arc<wgpu::RenderPipeline>,
-        draw_list: Arc<Mutex<Vec<DrawCall>>>,
+        targets:       Arc<Mutex<GBufferTargets>>,
+        pipeline:      Arc<wgpu::RenderPipeline>,
+        draw_list:     Arc<Mutex<Vec<DrawCall>>>,
         shared_sorted: Arc<Mutex<Vec<usize>>>,
+        device:        Arc<wgpu::Device>,
     ) -> Self {
         Self {
             targets,
             pipeline,
+            device,
             draw_list,
-            sorted_opaque_indices: Vec::new(),
             shared_sorted,
-            sort_geom_hash: u64::MAX,
+            bundle_gen: u64::MAX,
+            bundle_global_bg_ptr: 0,
+            cached_bundle: None,
+            kept_arcs: Vec::new(),
         }
+    }
+
+    /// (Re)compile the G-buffer RenderBundle using the draw order already
+    /// published by DepthPrepassPass into `shared_sorted`.  Falls back to a
+    /// self-built sort when shared_sorted is empty (first frame / graph race).
+    fn compile_bundle(
+        &mut self,
+        draw_calls: &[DrawCall],
+        global_bg: &wgpu::BindGroup,
+        generation: u64,
+    ) {
+        // ── Get sorted indices (from DepthPrepass or fall-back self-sort) ────
+        let sorted: Vec<usize> = {
+            let shared = self.shared_sorted.lock().unwrap();
+            if !shared.is_empty() {
+                shared.clone()
+            } else {
+                // Fallback: sort ourselves (same key as DepthPrepassPass).
+                let mut indices: Vec<usize> = (0..draw_calls.len())
+                    .filter(|&i| !draw_calls[i].transparent_blend && draw_calls[i].instance_buffer.is_some())
+                    .collect();
+                indices.sort_unstable_by(|&ia, &ib| {
+                    let a = &draw_calls[ia];
+                    let b = &draw_calls[ib];
+                    (Arc::as_ptr(&a.material_bind_group) as usize)
+                        .cmp(&(Arc::as_ptr(&b.material_bind_group) as usize))
+                        .then_with(|| (Arc::as_ptr(&a.vertex_buffer) as usize)
+                            .cmp(&(Arc::as_ptr(&b.vertex_buffer) as usize)))
+                        .then_with(|| (Arc::as_ptr(&a.index_buffer) as usize)
+                            .cmp(&(Arc::as_ptr(&b.index_buffer) as usize)))
+                        .then_with(|| a.instance_buffer_offset.cmp(&b.instance_buffer_offset))
+                });
+                indices
+            }
+        };
+
+        // ── Build bundle ──────────────────────────────────────────────────────
+        let mut enc = self.device.create_render_bundle_encoder(
+            &wgpu::RenderBundleEncoderDescriptor {
+                label: Some("gbuffer_bundle"),
+                color_formats: &[
+                    Some(wgpu::TextureFormat::Rgba8Unorm),   // albedo
+                    Some(wgpu::TextureFormat::Rgba16Float),  // normals
+                    Some(wgpu::TextureFormat::Rgba8Unorm),   // ORM
+                    Some(wgpu::TextureFormat::Rgba16Float),  // emissive
+                ],
+                depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_read_only: false,
+                    stencil_read_only: true,
+                }),
+                sample_count: 1,
+                multiview: None,
+            },
+        );
+        enc.set_pipeline(&self.pipeline);
+        enc.set_bind_group(0, global_bg, &[]);
+
+        let mut kept: Vec<Arc<wgpu::Buffer>> = Vec::with_capacity(sorted.len());
+        let mut last_mat:  Option<usize> = None;
+        let mut last_vbuf: Option<usize> = None;
+        let mut last_ibuf: Option<usize> = None;
+        let mut batch_start: u64  = 0;
+        let mut batch_count: u32  = 0;
+        let mut batch_idx:   usize = 0;
+
+        for &idx in &sorted {
+            let dc = &draw_calls[idx];
+            let mat_ptr  = Arc::as_ptr(&dc.material_bind_group) as usize;
+            let vbuf_ptr = Arc::as_ptr(&dc.vertex_buffer)        as usize;
+            let ibuf_ptr = Arc::as_ptr(&dc.index_buffer)         as usize;
+
+            // Extend current batch: same mesh + material + contiguous instance slot.
+            if batch_count > 0
+                && last_mat  == Some(mat_ptr)
+                && last_vbuf == Some(vbuf_ptr)
+                && last_ibuf == Some(ibuf_ptr)
+                && batch_start + batch_count as u64 * INSTANCE_STRIDE == dc.instance_buffer_offset
+            {
+                batch_count += 1;
+                continue;
+            }
+
+            // Flush accumulated batch.
+            if batch_count > 0 {
+                let bdc      = &draw_calls[batch_idx];
+                let inst_end = batch_start + batch_count as u64 * INSTANCE_STRIDE;
+                enc.set_vertex_buffer(
+                    1,
+                    bdc.instance_buffer.as_ref().unwrap().slice(batch_start..inst_end),
+                );
+                enc.draw_indexed(0..bdc.index_count, 0, 0..batch_count);
+            }
+
+            // State changes only when they differ.
+            if last_mat != Some(mat_ptr) {
+                enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+                last_mat = Some(mat_ptr);
+            }
+            if last_vbuf != Some(vbuf_ptr) {
+                enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+                last_vbuf = Some(vbuf_ptr);
+            }
+            if last_ibuf != Some(ibuf_ptr) {
+                enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                last_ibuf = Some(ibuf_ptr);
+            }
+
+            if let Some(buf) = &dc.instance_buffer { kept.push(Arc::clone(buf)); }
+            batch_start = dc.instance_buffer_offset;
+            batch_count = 1;
+            batch_idx   = idx;
+        }
+
+        // Flush final batch.
+        if batch_count > 0 {
+            let bdc      = &draw_calls[batch_idx];
+            let inst_end = batch_start + batch_count as u64 * INSTANCE_STRIDE;
+            enc.set_vertex_buffer(
+                1,
+                bdc.instance_buffer.as_ref().unwrap().slice(batch_start..inst_end),
+            );
+            enc.draw_indexed(0..bdc.index_count, 0, 0..batch_count);
+        }
+
+        let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: Some("gbuffer_bundle") });
+        eprintln!(
+            "⚠️ [GBuffer] Bundle compiled: {} opaque draws (gen {})",
+            sorted.len(), generation,
+        );
+
+        self.cached_bundle      = Some(bundle);
+        self.kept_arcs          = kept;
+        self.bundle_gen         = generation;
+        self.bundle_global_bg_ptr = global_bg as *const _ as usize;
     }
 }
 
@@ -58,47 +217,22 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let draw_calls = self.draw_list.lock().unwrap();
+        let global_bg_ptr = ctx.global_bind_group as *const _ as usize;
 
-        // Same commutative XOR hash as DepthPrepassPass for sort invalidation.
-        let new_sort_hash = {
-            let mut h: u64 = draw_calls.iter().filter(|dc| !dc.transparent_blend).count() as u64;
-            for dc in draw_calls.iter() {
-                if dc.transparent_blend || dc.instance_buffer.is_none() { continue; }
-                let entry = (Arc::as_ptr(&dc.vertex_buffer) as u64)
-                    .wrapping_mul(0x9e3779b97f4a7c15)
-                    ^ (Arc::as_ptr(dc.instance_buffer.as_ref().unwrap()) as u64)
-                        .wrapping_mul(0x517cc1b727220a95)
-                    ^ (dc.instance_count as u64).wrapping_mul(0x6c62272e07bb0142);
-                h ^= entry.wrapping_mul(0xbf58476d1ce4e5b9);
-            }
-            h
-        };
+        // Recompile if draw set or embedded bind group changed.
+        let need_rebuild = ctx.draw_list_generation != self.bundle_gen
+            || global_bg_ptr != self.bundle_global_bg_ptr;
 
-        // Sync sorted order from DepthPrepass (computed this frame); fall back to
-        // self-sort only when the shared list is empty (graph ordering race, rare).
-        if new_sort_hash != self.sort_geom_hash {
-            let shared = self.shared_sorted.lock().unwrap();
-            if !shared.is_empty() {
-                self.sorted_opaque_indices.clear();
-                self.sorted_opaque_indices.extend_from_slice(&shared);
-            } else {
-                self.sorted_opaque_indices.clear();
-                self.sorted_opaque_indices.reserve(draw_calls.len());
-                for (idx, dc) in draw_calls.iter().enumerate() {
-                    if !dc.transparent_blend { self.sorted_opaque_indices.push(idx); }
-                }
-                self.sorted_opaque_indices.sort_unstable_by_key(|&i| {
-                    Arc::as_ptr(&draw_calls[i].material_bind_group) as usize
-                });
-            }
-            self.sort_geom_hash = new_sort_hash;
+        if need_rebuild {
+            crate::profile_scope!("gbuffer/compile");
+            // Clone draw calls so the mutex is released before we mutate `self`.
+            let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+            self.compile_bundle(&draw_calls, ctx.global_bind_group, ctx.draw_list_generation);
         }
 
         let targets = self.targets.lock().unwrap();
 
         let color_attachments = [
-            // target 0: albedo
             Some(wgpu::RenderPassColorAttachment {
                 view: &targets.albedo_view,
                 resolve_target: None,
@@ -108,7 +242,6 @@ impl RenderPass for GBufferPass {
                     store: wgpu::StoreOp::Store,
                 },
             }),
-            // target 1: normals
             Some(wgpu::RenderPassColorAttachment {
                 view: &targets.normal_view,
                 resolve_target: None,
@@ -118,7 +251,6 @@ impl RenderPass for GBufferPass {
                     store: wgpu::StoreOp::Store,
                 },
             }),
-            // target 2: ORM
             Some(wgpu::RenderPassColorAttachment {
                 view: &targets.orm_view,
                 resolve_target: None,
@@ -128,7 +260,6 @@ impl RenderPass for GBufferPass {
                     store: wgpu::StoreOp::Store,
                 },
             }),
-            // target 3: emissive
             Some(wgpu::RenderPassColorAttachment {
                 view: &targets.emissive_view,
                 resolve_target: None,
@@ -140,47 +271,31 @@ impl RenderPass for GBufferPass {
             }),
         ];
 
-        let depth_attachment = Some(wgpu::RenderPassDepthStencilAttachment {
-            view: ctx.depth_view,
-            // Load depth written by DepthPrepassPass so the GPU can reject occluded
-            // GBuffer fragments before running the expensive material shader.
-            // Must NOT clear here — that discards the prepass work entirely.
-            depth_ops: Some(wgpu::Operations {
-                load:  wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            }),
-            stencil_ops: None,
-        });
-
-        // Need an explicit encoder::begin_render_pass here since we have 4 targets
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("G-Buffer Write Pass"),
             color_attachments: &color_attachments,
-            depth_stencil_attachment: depth_attachment,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: ctx.depth_view,
+                // Load depth written by DepthPrepassPass so the GPU can reject
+                // occluded GBuffer fragments before running the material shader.
+                depth_ops: Some(wgpu::Operations {
+                    load:  wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
         });
 
-        // Direct-encode all opaque draws — no RenderBundle compilation step.
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, ctx.global_bind_group, &[]);
-        let mut last_material: Option<usize> = None;
-        for &idx in &self.sorted_opaque_indices {
-            let dc = &draw_calls[idx];
-            if dc.instance_buffer.is_none() { continue; }
-            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-            if last_material != Some(mat_ptr) {
-                pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                last_material = Some(mat_ptr);
+        {
+            crate::profile_scope!("gbuffer/replay");
+            if let Some(bundle) = &self.cached_bundle {
+                pass.execute_bundles(std::iter::once(bundle));
             }
-            pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-            let inst_start = dc.instance_buffer_offset;
-            let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
-            pass.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
-            pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
         }
+
         Ok(())
     }
 }

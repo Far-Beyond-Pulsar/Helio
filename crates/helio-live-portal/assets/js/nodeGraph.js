@@ -46,7 +46,12 @@ function computeLayout(snapshot, filter) {
   const rawNodes  = [];
   const rawEdges  = [];
   const anomalies = detectAnomalies(snapshot);
-  const topSteps  = (snapshot.stage_timings || []).map(s => ({ id: s.id, label: s.name, val: s.ms }));
+  // Sub-scope entries (name contains '/') go into the pass-row as child nodes;
+  // keep them out of the flat top row so they don't clutter the timeline.
+  const topSteps  = (snapshot.stage_timings || [])
+    .filter(s => !s.name.includes('/'))
+    .map(s => ({ id: s.id, label: s.name, val: s.ms }));
+  const subScopes = (snapshot.stage_timings || []).filter(s => s.name.includes('/'));
   const match     = s => !filter || s.toLowerCase().includes(filter);
 
   for (let i = 0; i < topSteps.length; i++) {
@@ -102,6 +107,46 @@ function computeLayout(snapshot, filter) {
           source: prev, sourceHandle: 'right',
           target: name, targetHandle: 'left',
           type: 'gradient', style: { stroke: '#388bfd', strokeWidth: 2 },
+        });
+      }
+    }
+  }
+
+  // Sub-scope child nodes — grouped under their parent pass node.
+  // e.g. "depth_prepass/compile" and "depth_prepass/replay" go below "depth_prepass".
+  const groupedSubs = {};
+  for (const s of subScopes) {
+    const prefix = s.name.split('/')[0]; // e.g. "depth_prepass"
+    if (!groupedSubs[prefix]) groupedSubs[prefix] = [];
+    groupedSubs[prefix].push(s);
+  }
+  for (const [prefix, subs] of Object.entries(groupedSubs)) {
+    const parentNode = rawNodes.find(n => n.id === prefix);
+    if (!parentNode) continue; // parent pass not in the graph (filtered out)
+    for (let si = 0; si < subs.length; si++) {
+      const s    = subs[si];
+      const time = `CPU ${s.ms.toFixed(3)} ms`;
+      rawNodes.push({
+        id: s.id, type: 'pipeline',
+        position: {
+          x: parentNode.position.x + si * (NODE_W + H_GAP),
+          y: parentNode.position.y + NODE_H + V_GAP,
+        },
+        data: { title: s.name, time, kind: 'sub', warning: anomalies[s.id], connections: {} },
+      });
+      if (si === 0) {
+        rawEdges.push({
+          id: `esub_${prefix}_${si}`,
+          source: prefix, sourceHandle: 'bottom',
+          target: s.id, targetHandle: 'left',
+          type: 'gradient', style: { stroke: '#56d364', strokeWidth: 1.5 },
+        });
+      } else {
+        rawEdges.push({
+          id: `esub_${prefix}_${si}`,
+          source: subs[si - 1].id, sourceHandle: 'right',
+          target: s.id, targetHandle: 'left',
+          type: 'gradient', style: { stroke: '#56d364', strokeWidth: 1.5 },
         });
       }
     }

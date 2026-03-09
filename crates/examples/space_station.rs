@@ -16,7 +16,19 @@
 //!   WASD / Space / Shift  — fly  (speed 40 m/s)
 //!   Mouse drag            — look (click to grab cursor)
 //!   Escape                — release cursor / exit
-//!   3                     — toggle RC probe visualization
+//!
+//!   1  — toggle depth prepass
+//!   2  — toggle G-buffer
+//!   3  — toggle deferred lighting
+//!   4  — toggle shadows
+//!   5  — toggle geometry (opaque)
+//!   6  — toggle transparent
+//!   7  — toggle sky
+//!   8  — toggle radiance cascades (GI)
+//!   9  — toggle billboards
+//!   0  — toggle SSAO
+//!   P  — toggle RC probe visualization
+//!   L  — open live portal dashboard
 
 
 
@@ -144,7 +156,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title("Helio — Space Station  |  WASD fly  |  3: probes")
+                    .with_title("Helio — Space Station  |  WASD fly  |  1-0: toggle passes  |  P: probes  |  L: portal")
                     .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
             ).expect("window"),
         );
@@ -234,8 +246,30 @@ impl ApplicationHandler for App {
                 } else { event_loop.exit(); }
             }
 
+            // ── Pass toggle keys (1-9, 0) ─────────────────────────────────
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit3), .. }, ..
+                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(code @ (KeyCode::Digit1 | KeyCode::Digit2 | KeyCode::Digit3 | KeyCode::Digit4 | KeyCode::Digit5 | KeyCode::Digit6 | KeyCode::Digit7 | KeyCode::Digit8 | KeyCode::Digit9 | KeyCode::Digit0)), .. }, ..
+            } => {
+                let pass_name = match code {
+                    KeyCode::Digit1 => "depth_prepass",
+                    KeyCode::Digit2 => "gbuffer",
+                    KeyCode::Digit3 => "deferred_lighting",
+                    KeyCode::Digit4 => "shadow",
+                    KeyCode::Digit5 => "geometry",
+                    KeyCode::Digit6 => "transparent",
+                    KeyCode::Digit7 => "sky",
+                    KeyCode::Digit8 => "radiance_cascades",
+                    KeyCode::Digit9 => "billboards",
+                    KeyCode::Digit0 => "ssao",
+                    _ => unreachable!(),
+                };
+                let enabled = state.renderer.toggle_pass(pass_name);
+                eprintln!("[Toggle] {} → {}", pass_name, if enabled { "ON" } else { "OFF" });
+            }
+
+            // ── Probe visualization (P) ───────────────────────────────────
+            WindowEvent::KeyboardInput {
+                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::KeyP), .. }, ..
             } => {
                 state.probe_vis = !state.probe_vis;
                 let raw: &[u8] = if state.probe_vis {
@@ -252,8 +286,9 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // ── Live portal (L) ───────────────────────────────────────────
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit4), .. }, ..
+                event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::KeyL), .. }, ..
             } => { let _ = state.renderer.start_live_portal_default(); }
 
             WindowEvent::KeyboardInput {

@@ -50,6 +50,49 @@ fn fnv64_push(mut h: u64, v: u64) -> u64 {
     h.wrapping_mul(0x100000001b3)
 }
 
+// ── Per-face frustum culling for point-light cubemaps ────────────────────────
+
+/// Inward-pointing (unnormalized) plane normals for the 4 side planes of each
+/// cubemap face's 90° frustum.  Normals have length √2; the sphere-vs-plane
+/// test uses `dot(delta, normal) < -radius * √2` for the cull condition.
+///
+/// Face index mapping matches wgpu cubemap convention:
+///   0 = +X, 1 = -X, 2 = +Y, 3 = -Y, 4 = +Z, 5 = -Z
+const CUBE_FACE_PLANES: [[[f32; 3]; 4]; 6] = [
+    // +X face — looking down +X
+    [[ 1.0, 0.0,-1.0], [ 1.0, 0.0, 1.0], [ 1.0,-1.0, 0.0], [ 1.0, 1.0, 0.0]],
+    // -X face — looking down -X
+    [[-1.0, 0.0,-1.0], [-1.0, 0.0, 1.0], [-1.0,-1.0, 0.0], [-1.0, 1.0, 0.0]],
+    // +Y face — looking down +Y
+    [[ 0.0, 1.0,-1.0], [ 0.0, 1.0, 1.0], [-1.0, 1.0, 0.0], [ 1.0, 1.0, 0.0]],
+    // -Y face — looking down -Y
+    [[ 0.0,-1.0,-1.0], [ 0.0,-1.0, 1.0], [-1.0,-1.0, 0.0], [ 1.0,-1.0, 0.0]],
+    // +Z face — looking down +Z
+    [[-1.0, 0.0, 1.0], [ 1.0, 0.0, 1.0], [ 0.0,-1.0, 1.0], [ 0.0, 1.0, 1.0]],
+    // -Z face — looking down -Z
+    [[-1.0, 0.0,-1.0], [ 1.0, 0.0,-1.0], [ 0.0,-1.0,-1.0], [ 0.0, 1.0,-1.0]],
+];
+
+/// Test whether a bounding sphere (centre at `delta` from light, `radius`) is
+/// potentially visible to the given cubemap `face`.  Uses conservative
+/// sphere-vs-halfspace tests against the face's 4 frustum side planes.
+///
+/// Returns `true` if the sphere *may* contribute to shadows on this face.
+/// Never produces false negatives — objects right on the boundary pass both
+/// adjacent faces, avoiding cracks.
+#[inline]
+fn sphere_in_cube_face(delta: [f32; 3], radius: f32, face: u32) -> bool {
+    let planes = &CUBE_FACE_PLANES[face as usize];
+    let threshold = -radius * std::f32::consts::SQRT_2;
+    for plane in planes {
+        let d = delta[0] * plane[0] + delta[1] * plane[1] + delta[2] * plane[2];
+        if d < threshold {
+            return false;
+        }
+    }
+    true
+}
+
 /// Per-light shadow cache entry. Stores hashes of the light state and visible
 /// geometry; if both match the previous frame the shadow faces are skipped.
 #[derive(Clone, Copy, Default)]
@@ -298,6 +341,51 @@ impl ShadowPass {
     }
 }
 
+/// Standalone bundle encoder callable from any thread.  Produces a shadow
+/// RenderBundle for a single cubemap face, encoding only the draw calls
+/// specified by `face_indices`.
+fn encode_shadow_bundle(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    slot_bind_group: &wgpu::BindGroup,
+    draw_calls: &[DrawCall],
+    face_indices: &[usize],
+) -> (wgpu::RenderBundle, Vec<Arc<wgpu::Buffer>>) {
+    let mut enc = device.create_render_bundle_encoder(
+        &wgpu::RenderBundleEncoderDescriptor {
+            label: Some("shadow_bundle"),
+            color_formats: &[],
+            depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_read_only: false,
+                stencil_read_only: true,
+            }),
+            sample_count: 1,
+            multiview: None,
+        },
+    );
+    enc.set_pipeline(pipeline);
+    enc.set_bind_group(0, slot_bind_group, &[]);
+
+    let mut kept_arcs: Vec<Arc<wgpu::Buffer>> = Vec::with_capacity(face_indices.len());
+    for &idx in face_indices {
+        let dc = &draw_calls[idx];
+        enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+        enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+        let inst_start = dc.instance_buffer_offset;
+        let inst_end = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
+        enc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
+        enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        enc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
+        if let Some(buf) = &dc.instance_buffer {
+            kept_arcs.push(Arc::clone(buf));
+        }
+    }
+
+    let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: None });
+    (bundle, kept_arcs)
+}
+
 impl RenderPass for ShadowPass {
     fn name(&self) -> &str {
         "shadow"
@@ -326,12 +414,11 @@ impl RenderPass for ShadowPass {
         // Distance from camera at which shadows stop being rendered (in meters)
         const SHADOW_MAX_DISTANCE: f32 = 300.0;
 
-        // Maximum face bundles re-encoded per execute() call.  Amortises the CPU cost of
-        // bundle rebuilds across frames; stale faces replay their previous bundle, which is
-        // safe because (a) draw calls in the shadow list reference per-batch stable instance
-        // buffers, and (b) `bundle_kept_arcs` keeps those buffers alive until the face is
-        // rebuilt, preventing use-after-free when a batch gains/loses instances.
-        const MAX_FACE_REBUILDS: u32 = 2;
+        // Maximum face bundles re-encoded per execute() call.  With per-face frustum
+        // culling each face encodes only ~1/6th of the draws (point lights), so the per-face
+        // cost drops from ~26 ms to ~4 ms.  Budget of 6 lets all faces of a point light
+        // rebuild in a single frame at ~24 ms worst-case (vs ~52 ms before culling).
+        const MAX_FACE_REBUILDS: u32 = 6;
 
         // ── Camera-distance filter (shared across all lights) ────────────────
         self.filtered_indices.clear();
@@ -361,14 +448,21 @@ impl RenderPass for ShadowPass {
             h
         };
 
-        // Budget of face rebuilds shared across all lights this frame.
-        let mut faces_rebuilt_this_frame: u32 = 0;
+        // ═══ Phase 1: Collect dirty faces and lights needing replay ══════════
+        struct FaceJob {
+            light_idx: usize,
+            face: u32,
+            slot: usize,
+        }
+        let mut rebuild_jobs: Vec<FaceJob> = Vec::new();
+        // (light_idx, max_faces, light_hash)
+        let mut lights_needing_replay: Vec<(usize, u32, u64)> = Vec::new();
 
         for i in 0..actual_count {
             let max_faces = face_counts.get(i).copied().unwrap_or(6) as u32;
-            let light = cull_lights.get(i).copied().unwrap_or_default();
 
             // ── Light hash ───────────────────────────────────────────────────
+            let light = cull_lights.get(i).copied().unwrap_or_default();
             let light_hash = fnv64(&[
                 light.matrix_hash,
                 light.range.to_bits() as u64,
@@ -399,19 +493,12 @@ impl RenderPass for ShadowPass {
             let any_face_pending = (0..max_faces as usize)
                 .any(|f| self.bundle_slot_built[i * 6 + f] < self.bundle_dirty_gen[i]);
 
-            // Minimum frames between shadow dirty rounds per light.  During streaming
-            // new chunks enter shadow range every few frames; without this limit the
-            // shadow pass would start a new 4-face rebuild every ~2 frames, costing
-            // ~11 ms/frame on average.  With MIN_SHADOW_INTERVAL=8 the rebuild budget
-            // is amortised across 8 frames → ~2.75 ms/frame average.
-            // Shadow maps are at most (8 frames / 60fps) ≈ 133 ms stale during
-            // active streaming, which is imperceptible at normal movement speeds.
+            // Minimum frames between shadow dirty rounds per light.
             const MIN_SHADOW_INTERVAL: u64 = 8;
             if geom_hash != self.bundle_geom_hashes[i] {
                 let frames_since_last = self.frame_counter
                     .saturating_sub(self.bundle_dirty_gen_start_frame[i]);
                 if !any_face_pending && frames_since_last >= MIN_SHADOW_INTERVAL {
-                    // No backlog AND rate-limit elapsed: start a fresh dirty round.
                     self.bundle_dirty_gen[i] = self.bundle_dirty_gen[i].wrapping_add(1);
                     self.bundle_geom_hashes[i] = geom_hash;
                     self.bundle_dirty_gen_start_frame[i] = self.frame_counter;
@@ -420,11 +507,9 @@ impl RenderPass for ShadowPass {
                         i, self.filtered_indices.len(), max_faces,
                     );
                 }
-                // else: absorb — either in-flight rebuild already covers current
-                // filtered_indices, or the rate-limit hasn't elapsed yet.
             }
 
-            // ── Cache check ──────────────────────────────────────────────────
+            // ── Cache check (uses pre-invalidation any_face_pending) ─────────
             {
                 let cached = &self.shadow_cache[i];
                 if cached.valid && cached.light_hash == light_hash && !any_face_pending {
@@ -432,12 +517,98 @@ impl RenderPass for ShadowPass {
                 }
             }
 
+            lights_needing_replay.push((i, max_faces, light_hash));
+
+            // Collect pending faces for parallel encoding (up to budget).
+            for face in 0u32..max_faces {
+                let slot = i * 6 + face as usize;
+                if self.bundle_slot_built[slot] < self.bundle_dirty_gen[i]
+                    && rebuild_jobs.len() < MAX_FACE_REBUILDS as usize
+                {
+                    rebuild_jobs.push(FaceJob { light_idx: i, face, slot });
+                }
+            }
+        }
+
+        // ═══ Phase 2: Parallel bundle encoding ═══════════════════════════════
+        if !rebuild_jobs.is_empty() {
+            let _t = std::time::Instant::now();
+
+            // Pre-compute per-face filtered draw indices with frustum culling.
+            let per_face_indices: Vec<Vec<usize>> = rebuild_jobs.iter().map(|job| {
+                let light = cull_lights.get(job.light_idx).copied().unwrap_or_default();
+                self.filtered_indices.iter().copied().filter(|&idx| {
+                    let dc = &draw_calls[idx];
+                    if light.is_point {
+                        let delta = [
+                            dc.bounds_center[0] - light.position[0],
+                            dc.bounds_center[1] - light.position[1],
+                            dc.bounds_center[2] - light.position[2],
+                        ];
+                        sphere_in_cube_face(delta, dc.bounds_radius, job.face)
+                    } else {
+                        true
+                    }
+                }).collect()
+            }).collect();
+
+            // Encode bundles in parallel using scoped threads.
+            // Extract shared references inside a block so they are dropped before
+            // the mutable bundle_cache/kept_arcs writes that follow.
+            let encoded: Vec<(wgpu::RenderBundle, Vec<Arc<wgpu::Buffer>>)> = {
+                let device = &*self.device;
+                let pipeline = &*self.pipeline;
+                let slot_bgs = &self.slot_bind_groups;
+                let dc_slice: &[DrawCall] = &draw_calls;
+
+                std::thread::scope(|s| {
+                    let handles: Vec<_> = rebuild_jobs
+                        .iter()
+                        .enumerate()
+                        .map(|(j, job)| {
+                            let bg = &slot_bgs[job.slot];
+                            let fi = per_face_indices[j].as_slice();
+                            s.spawn(move || {
+                                encode_shadow_bundle(device, pipeline, bg, dc_slice, fi)
+                            })
+                        })
+                        .collect();
+                    handles
+                        .into_iter()
+                        .map(|h| h.join().unwrap())
+                        .collect()
+                })
+            };
+
+            // Apply encoded bundles to cache.
+            for (j, (bundle, kept)) in encoded.into_iter().enumerate() {
+                let job = &rebuild_jobs[j];
+                eprintln!(
+                    "⚠️ [Shadow]   light {}/face {}: {} casters (of {} filtered, {:.0}% culled)",
+                    job.light_idx, job.face, per_face_indices[j].len(),
+                    self.filtered_indices.len(),
+                    if !self.filtered_indices.is_empty() {
+                        (1.0 - per_face_indices[j].len() as f64
+                            / self.filtered_indices.len() as f64) * 100.0
+                    } else { 0.0 },
+                );
+                self.bundle_cache[job.slot] = Some(bundle);
+                self.bundle_kept_arcs[job.slot] = kept;
+                self.bundle_slot_built[job.slot] = self.bundle_dirty_gen[job.light_idx];
+            }
+
+            eprintln!(
+                "⚠️ [Shadow] Encoded {} face bundles in {:.2}ms (parallel)",
+                rebuild_jobs.len(), _t.elapsed().as_secs_f32() * 1000.0,
+            );
+        }
+
+        // ═══ Phase 3: Replay all active lights into render passes ════════════
+        for &(i, max_faces, light_hash) in &lights_needing_replay {
             let t_light = ctx.scope_begin(&format!("shadow/light_{i}"));
             for face in 0u32..max_faces {
-                let layer_idx  = i as u32 * 6 + face;
+                let layer_idx = i as u32 * 6 + face;
                 let bundle_slot = i * 6 + face as usize;
-                let face_pending =
-                    self.bundle_slot_built[bundle_slot] < self.bundle_dirty_gen[i];
 
                 let t_face = ctx.scope_begin(&format!("shadow/light_{i}/face_{face}"));
                 let mut pass = ctx.begin_render_pass(
@@ -453,59 +624,7 @@ impl RenderPass for ShadowPass {
                     }),
                 );
 
-                if face_pending && faces_rebuilt_this_frame < MAX_FACE_REBUILDS {
-                    let _tb = std::time::Instant::now();
-                    let mut enc = self.device.create_render_bundle_encoder(
-                        &wgpu::RenderBundleEncoderDescriptor {
-                            label: Some("shadow_bundle"),
-                            color_formats: &[],
-                            depth_stencil: Some(wgpu::RenderBundleDepthStencil {
-                                format: wgpu::TextureFormat::Depth32Float,
-                                depth_read_only: false,
-                                stencil_read_only: true,
-                            }),
-                            sample_count: 1,
-                            multiview: None,
-                        },
-                    );
-                    enc.set_pipeline(&self.pipeline);
-                    enc.set_bind_group(0, &self.slot_bind_groups[bundle_slot], &[]);
-
-                    // Keep Arcs to every instance buffer encoded in this bundle so that
-                    // replaying it while the next rebuild is still pending (amortisation
-                    // window) cannot reference a dropped buffer.
-                    let mut kept_arcs: Vec<Arc<wgpu::Buffer>> =
-                        Vec::with_capacity(self.filtered_indices.len());
-
-                    for &idx in &self.filtered_indices {
-                        let dc = &draw_calls[idx];
-                        enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                        enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                        let inst_start = dc.instance_buffer_offset;
-                        let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
-                        enc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
-                        enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        enc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
-                        if let Some(buf) = &dc.instance_buffer {
-                            kept_arcs.push(Arc::clone(buf));
-                        }
-                    }
-
-                    let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: None });
-                    pass.execute_bundles(std::iter::once(&bundle));
-                    self.bundle_cache[bundle_slot]     = Some(bundle);
-                    self.bundle_kept_arcs[bundle_slot] = kept_arcs;
-                    self.bundle_slot_built[bundle_slot] = self.bundle_dirty_gen[i];
-                    faces_rebuilt_this_frame += 1;
-                    eprintln!(
-                        "⚠️ [Shadow]   face {}/{}: {} casters — {:.2}ms",
-                        face, max_faces - 1, self.filtered_indices.len(),
-                        _tb.elapsed().as_secs_f32() * 1000.0,
-                    );
-                } else if let Some(bundle) = &self.bundle_cache[bundle_slot] {
-                    // Replay the cached bundle.  Shadow-matrix GPU buffer is already updated
-                    // this frame; per-batch instance data is current (or kept alive via
-                    // bundle_kept_arcs if this slot is still in the amortisation window).
+                if let Some(bundle) = &self.bundle_cache[bundle_slot] {
                     pass.execute_bundles(std::iter::once(bundle));
                 }
 

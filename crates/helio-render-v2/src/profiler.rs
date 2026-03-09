@@ -65,6 +65,19 @@ thread_local! {
     /// Stack of currently-open scope indices on this thread.
     /// Push on `ScopeGuard::new`, pop on `ScopeGuard::drop`.
     static SCOPE_STACK: RefCell<Vec<ScopeIdx>> = RefCell::new(Vec::with_capacity(32));
+    /// Flat ordered log of every CPU scope that completes on this thread.
+    /// Consumed once per frame by `take_frame_scope_log()`.
+    static FRAME_SCOPE_LOG: RefCell<Vec<(&'static str, f32)>> =
+        RefCell::new(Vec::with_capacity(64));
+}
+
+/// Drain and return all CPU scope timings recorded since the last call.
+///
+/// Call this once per frame after all render work has finished.  The returned
+/// vec is in completion order (innermost scopes appear before outer ones since
+/// they drop first).
+pub fn take_frame_scope_log() -> Vec<(&'static str, f32)> {
+    FRAME_SCOPE_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
 
 /// An event dispatched from the main thread to the collector.
@@ -143,6 +156,10 @@ impl Drop for ScopeGuard {
         let elapsed_ms = self.start.elapsed().as_secs_f32() * 1000.0;
         SCOPE_STACK.with(|s| {
             s.borrow_mut().pop();
+        });
+        // Write to thread-local log — zero allocation, no locking.
+        FRAME_SCOPE_LOG.with(|log| {
+            log.borrow_mut().push((self.name, elapsed_ms));
         });
         if let Some(tx) = PROFILE_TX.get() {
             let _ = tx.send(ProfileEvent::Scope {

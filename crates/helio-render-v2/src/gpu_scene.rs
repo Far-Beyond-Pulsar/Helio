@@ -426,19 +426,29 @@ impl GpuScene {
 
     /// Rebuild the cached draw lists from the current proxy registry.
     /// Only called when `generation` differs from `cached_generation`.
+    ///
+    /// After collecting one `DrawCall` per enabled proxy the opaque list is
+    /// sorted by `(vertex_buffer_ptr, index_buffer_ptr, material_ptr, instance_buffer_offset)`
+    /// and consecutive entries that share the same mesh + material **and** have
+    /// contiguous instance-buffer slots are merged into a single `DrawCall`
+    /// with `instance_count > 1`.  This turns N instanced draws of the same
+    /// repeated object into one GPU draw call, cutting both command-recording
+    /// time and `encoder.finish()` translation time proportionally.
+    ///
+    /// Transparent draws and shadow draws keep their original per-proxy form
+    /// (transparent ordering must be done per-frame; shadow pass already uses
+    /// its own culling + bundle compilation).
     fn rebuild_draw_lists(&mut self) {
-        self.cached_draw_list.clear();
         self.cached_shadow_draw_list.clear();
 
         let proxy_count = self.proxies.len();
-        self.cached_draw_list.reserve(proxy_count);
         self.cached_shadow_draw_list.reserve(proxy_count);
 
+        // ── Collect raw draw calls ─────────────────────────────────────────
         let xform_buf = Arc::clone(&self.transform_buffer);
+        let mut raw: Vec<DrawCall> = Vec::with_capacity(proxy_count);
         for proxy in self.proxies.values() {
-            if !proxy.enabled {
-                continue;
-            }
+            if !proxy.enabled { continue; }
             let dc = DrawCall {
                 vertex_buffer:          proxy.mesh.vertex_buffer.clone(),
                 index_buffer:           proxy.mesh.index_buffer.clone(),
@@ -454,8 +464,51 @@ impl GpuScene {
                 instance_buffer_offset: proxy.slot as u64 * INSTANCE_STRIDE,
             };
             self.cached_shadow_draw_list.push(dc.clone());
+            raw.push(dc);
+        }
+
+        // ── Sort opaque by (vbuf, ibuf, mat, offset) ──────────────────────
+        // Transparent draws keep their per-proxy form (back-to-front per frame).
+        let (mut opaque, transparent): (Vec<DrawCall>, Vec<DrawCall>) =
+            raw.into_iter().partition(|dc| !dc.transparent_blend);
+
+        opaque.sort_unstable_by(|a, b| {
+            (Arc::as_ptr(&a.vertex_buffer) as usize)
+                .cmp(&(Arc::as_ptr(&b.vertex_buffer) as usize))
+                .then_with(|| (Arc::as_ptr(&a.index_buffer) as usize)
+                    .cmp(&(Arc::as_ptr(&b.index_buffer) as usize)))
+                .then_with(|| (Arc::as_ptr(&a.material_bind_group) as usize)
+                    .cmp(&(Arc::as_ptr(&b.material_bind_group) as usize)))
+                .then_with(|| a.instance_buffer_offset.cmp(&b.instance_buffer_offset))
+        });
+
+        // ── Merge contiguous same-mesh+material runs ───────────────────────
+        // Two opaque draws can be merged when they share the same vertex buffer,
+        // index buffer, and material bind group, AND their instance-buffer offsets
+        // are consecutive (prev_offset + prev_count * INSTANCE_STRIDE == next_offset).
+        // The merged DrawCall uses the first draw's mesh data and an instance_count
+        // equal to the run length, so the GPU issues one draw_indexed_instanced(N).
+        self.cached_draw_list.clear();
+        self.cached_draw_list.reserve(opaque.len() + transparent.len());
+        for dc in opaque {
+            if let Some(last) = self.cached_draw_list.last_mut() {
+                let contiguous_offset =
+                    last.instance_buffer_offset + last.instance_count as u64 * INSTANCE_STRIDE
+                    == dc.instance_buffer_offset;
+                if contiguous_offset
+                    && Arc::ptr_eq(&last.vertex_buffer,       &dc.vertex_buffer)
+                    && Arc::ptr_eq(&last.index_buffer,        &dc.index_buffer)
+                    && Arc::ptr_eq(&last.material_bind_group, &dc.material_bind_group)
+                {
+                    last.instance_count += 1;
+                    continue;
+                }
+            }
             self.cached_draw_list.push(dc);
         }
+        // Append transparent draws after all opaque batches.
+        self.cached_draw_list.extend(transparent);
+
         self.cached_generation = self.generation;
     }
 

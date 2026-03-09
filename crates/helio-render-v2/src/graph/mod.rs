@@ -14,13 +14,15 @@ pub use builder::GraphBuilder;
 use crate::{Result, Error};
 use crate::resources::ResourceManager;
 use crate::profiler::GpuProfiler;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// Render graph for automatic pass ordering and resource management
 pub struct RenderGraph {
     passes: Vec<PassNode>,
     execution_order: Vec<usize>,
     transient_resources: HashMap<ResourceHandle, TransientResource>,
+    /// Pass names that should be skipped during execution.
+    disabled_passes: HashSet<String>,
 }
 
 struct PassNode {
@@ -57,6 +59,7 @@ impl RenderGraph {
             passes: Vec::new(),
             execution_order: Vec::new(),
             transient_resources: HashMap::new(),
+            disabled_passes: HashSet::new(),
         }
     }
 
@@ -236,6 +239,12 @@ impl RenderGraph {
                 None
             };
 
+            // Skip disabled passes
+            if self.disabled_passes.contains(pass_name) {
+                log::trace!("  Skipping disabled pass: {}", pass_name);
+                continue;
+            }
+
             let cpu_start = std::time::Instant::now();
 
             // Allocate transient resources for this pass
@@ -308,6 +317,31 @@ impl RenderGraph {
             .iter()
             .map(|&idx| self.passes[idx].pass.name().to_string())
             .collect()
+    }
+
+    /// Toggle a pass on/off by name. Returns the new enabled state.
+    pub fn toggle_pass(&mut self, name: &str) -> bool {
+        if self.disabled_passes.contains(name) {
+            self.disabled_passes.remove(name);
+            true
+        } else {
+            self.disabled_passes.insert(name.to_string());
+            false
+        }
+    }
+
+    /// Set whether a pass is enabled.
+    pub fn set_pass_enabled(&mut self, name: &str, enabled: bool) {
+        if enabled {
+            self.disabled_passes.remove(name);
+        } else {
+            self.disabled_passes.insert(name.to_string());
+        }
+    }
+
+    /// Returns true if the named pass is currently enabled.
+    pub fn is_pass_enabled(&self, name: &str) -> bool {
+        !self.disabled_passes.contains(name)
     }
 
     /// Declare a transient resource

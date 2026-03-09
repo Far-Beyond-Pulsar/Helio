@@ -42,6 +42,33 @@ use wgpu::util::DeviceExt;
 use self::uniforms::GlobalsUniform;
 use self::portal::{compute_scene_delta, open_url_in_browser};
 
+/// Lightweight per-frame message sent from the render loop to the portal
+/// worker thread.  Avoids per-frame `thread::spawn` and redundant cloning.
+struct PortalFrameMsg {
+    frame: u64,
+    timestamp_ms: u128,
+    frame_time_ms: f32,
+    frame_to_frame_ms: f32,
+    total_gpu_ms: f32,
+    total_cpu_ms: f32,
+    pass_timings: Vec<crate::profiler::PassTiming>,
+    current_layout: Option<PortalSceneLayout>,
+    layout_changed: bool,
+    draw_total: usize,
+    draw_opaque: usize,
+    draw_transparent: usize,
+    prep_ms: f32,
+    graph_ms: f32,
+    aa_ms: f32,
+    resolve_ms: f32,
+    finish_ms: f32,
+    submit_ms: f32,
+    poll_ms: f32,
+    untracked_ms: f32,
+    stage_ms: [f32; 5],
+    cpu_scope_log: Vec<(&'static str, f32)>,
+}
+
 /// Snapshot of per-frame environment data supplied by `set_scene_env`.
 /// Kept as a plain struct so `render()` can cheaply read it without locking.
 pub struct SceneEnv {
@@ -241,6 +268,12 @@ pub struct Renderer {
     portal_scene_key: (usize, usize, usize),
     /// Pass names cached once after `graph.build()` to avoid a `Vec<String>` alloc every frame.
     cached_pass_names: Vec<String>,
+
+    /// Channel to the persistent portal worker thread (spawned once in
+    /// `start_live_portal`).  `SyncSender` with a small bound means the
+    /// main thread never blocks — if the worker is behind we just drop the
+    /// frame via `try_send`.
+    portal_worker_tx: Option<std::sync::mpsc::SyncSender<PortalFrameMsg>>,
 }
 
 impl Renderer {
@@ -321,6 +354,19 @@ impl Renderer {
         let url = handle.url.clone();
         open_url_in_browser(&url);
         log::info!("Helio live portal started at {url}");
+
+        // Spawn persistent worker thread.  Bounded channel (4 frames) means
+        // try_send on the main thread is non-blocking; if the worker falls
+        // behind we simply drop the frame data.
+        let (wtx, wrx) = std::sync::mpsc::sync_channel::<PortalFrameMsg>(4);
+        let portal_tx = handle.sender();
+        let pipeline_order = self.cached_pass_names.clone();
+        std::thread::Builder::new()
+            .name("helio-portal-worker".into())
+            .spawn(move || portal_worker_loop(wrx, portal_tx, pipeline_order))
+            .expect("failed to spawn portal worker thread");
+        self.portal_worker_tx = Some(wtx);
+
         self.live_portal = Some(handle);
         Ok(url)
     }
@@ -332,6 +378,28 @@ impl Renderer {
 
     pub fn is_gpu_driven(&self) -> bool { self.gpu_driven }
     pub fn is_async_compute(&self) -> bool { self.async_compute }
+
+    // ── Render-pass toggle ────────────────────────────────────────────────────
+
+    /// Toggle a render pass on/off by name.  Returns the new enabled state.
+    pub fn toggle_pass(&mut self, name: &str) -> bool {
+        self.graph.toggle_pass(name)
+    }
+
+    /// Set whether a render pass is enabled.
+    pub fn set_pass_enabled(&mut self, name: &str, enabled: bool) {
+        self.graph.set_pass_enabled(name, enabled);
+    }
+
+    /// Returns true if the named pass is currently enabled.
+    pub fn is_pass_enabled(&self, name: &str) -> bool {
+        self.graph.is_pass_enabled(name)
+    }
+
+    /// Return all pass names in execution order.
+    pub fn pass_names(&self) -> Vec<String> {
+        self.graph.execution_pass_names()
+    }
 
     // ══════════════════════════════════════════════════════════════════════════
     // PERSISTENT SCENE PROXY API  (Unreal FScene::AddPrimitive / RemovePrimitive)
@@ -465,6 +533,7 @@ impl Renderer {
         // One-frame draws from `draw_mesh()` that were pushed between frames
         // sit after the persistent portion and are truncated here.
         {
+            crate::profile_scope!("dl_rebuild");
             let mut dl  = self.draw_list.lock().unwrap();
             let mut sdl = self.shadow_draw_list.lock().unwrap();
 
@@ -643,6 +712,8 @@ impl Renderer {
             self.graph.execute(&mut graph_ctx, None)?;
         }
         let graph_ms = graph_start.elapsed().as_secs_f32() * 1000.0;
+        // Collect CPU scope timings emitted by profile_scope! calls inside the passes.
+        let cpu_scope_log = crate::profiler::take_frame_scope_log();
 
         // ── Anti-aliasing post-processing ─────────────────────────────────────
         let aa_start = std::time::Instant::now();
@@ -722,124 +793,46 @@ impl Renderer {
         self.last_frame_end = Some(std::time::Instant::now());
 
         // ── Live portal snapshot ──────────────────────────────────────────────
-        if let (Some(portal), Some(p)) = (&self.live_portal, &self.profiler) {
-            let now_ms = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0);
-
-            let frame_num = self.frame_count;
-            let ft_time = frame_time_ms;
-            let ft_ff = frame_to_frame_ms;
-            let tot_gpu = p.last_total_gpu_ms;
-            let tot_cpu = p.last_total_cpu_ms;
-
-            let pass_clone = p.last_timings.clone();
-            let pipeline_clone = self.cached_pass_names.clone();
-
-            let current_layout = self.latest_scene_layout.clone();
-            let previous_layout = self.previous_scene_layout.clone();
-            let layout_changed = self.pending_layout_changed;
-            let layout_for_update = current_layout.clone();
-
+        // Pack cheap scalars + one `take`'d Vec into a message and hand it to
+        // the persistent worker thread.  No thread::spawn, no redundant clones.
+        if let (Some(wtx), Some(p)) = (&self.portal_worker_tx, &mut self.profiler) {
             let (draw_total, draw_opaque, draw_transparent) = {
                 let draws = self.draw_list.lock().unwrap();
                 let total = draws.len();
                 let opaque = draws.iter().filter(|dc| !dc.transparent_blend).count();
-                let transparent = total.saturating_sub(opaque);
-                (total, opaque, transparent)
+                (total, opaque, total.saturating_sub(opaque))
             };
 
-            let (obj_count, light_count, bb_count) = if let Some(layout) = &current_layout {
-                (layout.objects.len(), layout.lights.len(), layout.billboards.len())
-            } else { (0, 0, 0) };
-
-            let prep = prep_ms;
-            let graphm = graph_ms;
-            let aam = aa_ms;
-            let resolve = resolve_ms;
-            let finish = finish_ms;
-            let submitm = submit_ms;
-            let pollm = poll_ms;
-            let untracked_val = untracked_ms;
-            let stage_copy = self.pending_scene_stage_ms;
-
-            let tx = portal.sender();
-
-            std::thread::spawn(move || {
-                let scene_delta = current_layout.as_ref().map(|cur| {
-                    if layout_changed {
-                        compute_scene_delta(cur, previous_layout.as_ref())
-                    } else {
-                        let prev_cam = previous_layout.as_ref().and_then(|p| p.camera.clone());
-                        let mut d = PortalSceneLayoutDelta::default();
-                        if cur.camera != prev_cam {
-                            d.camera = Some(cur.camera.clone());
-                        }
-                        d
-                    }
-                });
-
-                let snapshot = PortalFrameSnapshot {
-                    frame: frame_num,
-                    frame_time_ms: ft_time,
-                    frame_to_frame_ms: ft_ff,
-                    total_gpu_ms: tot_gpu,
-                    total_cpu_ms: tot_cpu,
-                    pass_timings: pass_clone
-                        .iter()
-                        .map(|t| PortalPassTiming { name: t.name.clone(), gpu_ms: t.gpu_ms, cpu_ms: t.cpu_ms })
-                        .collect(),
-                    pipeline_order: pipeline_clone,
-                    scene_delta,
-                    timestamp_ms: now_ms,
-                    object_count: obj_count,
-                    light_count,
-                    billboard_count: bb_count,
-                    draw_calls: helio_live_portal::DrawCallMetrics { total: draw_total, opaque: draw_opaque, transparent: draw_transparent },
-                    prep_ms: prep,
-                    graph_ms: graphm,
-                    aa_ms: aam,
-                    resolve_ms: resolve,
-                    finish_ms: finish,
-                    submit_ms: submitm,
-                    poll_ms: pollm,
-                    untracked_ms: untracked_val,
-                    stage_timings: {
-                        let s = &stage_copy;
-                        let scene_prep_total: f32 = s.iter().sum();
-                        let app_ms = (untracked_val - scene_prep_total).max(0.0);
-                        vec![
-                            PortalStageTiming { id: "app".into(),          name: "App".into(),              ms: app_ms },
-                            PortalStageTiming { id: "scene_draws".into(),  name: "Scene: Draws".into(),     ms: s[0] },
-                            PortalStageTiming { id: "scene_lights".into(), name: "Scene: Lights".into(),    ms: s[1] },
-                            PortalStageTiming { id: "scene_shadow".into(), name: "Scene: Shadows".into(),   ms: s[2] },
-                            PortalStageTiming { id: "scene_bb".into(),     name: "Scene: Billboards".into(),ms: s[3] },
-                            PortalStageTiming { id: "scene_sky".into(),    name: "Scene: Sky".into(),       ms: s[4] },
-                            PortalStageTiming { id: "prep".into(),         name: "Prep".into(),             ms: prep },
-                            PortalStageTiming { id: "pipeline".into(),     name: "Render Pipeline".into(),  ms: graphm },
-                            PortalStageTiming { id: "aa".into(),           name: "AA".into(),               ms: aam },
-                            PortalStageTiming { id: "resolve".into(),      name: "Resolve".into(),          ms: resolve },
-                            PortalStageTiming { id: "finish".into(),       name: "Encode".into(),           ms: finish },
-                            PortalStageTiming { id: "submit".into(),       name: "Submit".into(),           ms: submitm },
-                            PortalStageTiming { id: "poll".into(),         name: "Poll".into(),             ms: pollm },
-                        ]
-                    },
-                    pipeline_stage_id: Some("pipeline".to_string()),
-                };
-
-                let _ = tx.send(snapshot);
-            });
-
-            if self.pending_layout_changed {
-                self.previous_scene_layout = layout_for_update.clone();
-            } else if let (Some(ref mut prev), Some(ref cur)) =
-                (&mut self.previous_scene_layout, &layout_for_update)
-            {
-                prev.camera = cur.camera.clone();
-            } else {
-                self.previous_scene_layout = layout_for_update.clone();
-            }
+            let msg = PortalFrameMsg {
+                frame: self.frame_count,
+                timestamp_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0),
+                frame_time_ms,
+                frame_to_frame_ms,
+                total_gpu_ms: p.last_total_gpu_ms,
+                total_cpu_ms: p.last_total_cpu_ms,
+                // take() is O(1) — profiler refills this next frame from readback.
+                pass_timings: std::mem::take(&mut p.last_timings),
+                current_layout: self.latest_scene_layout.take(),
+                layout_changed: self.pending_layout_changed,
+                draw_total,
+                draw_opaque,
+                draw_transparent,
+                prep_ms,
+                graph_ms,
+                aa_ms,
+                resolve_ms,
+                finish_ms,
+                submit_ms,
+                poll_ms,
+                untracked_ms,
+                stage_ms: self.pending_scene_stage_ms,
+                cpu_scope_log,
+            };
+            // Non-blocking: if the worker is behind, drop this frame's data.
+            let _ = wtx.try_send(msg);
         }
 
         // One-frame draws (from draw_mesh()) sit after `persistent_draw_count`
@@ -901,4 +894,119 @@ impl Renderer {
 
     pub fn device(&self) -> &wgpu::Device { &self.device }
     pub fn queue(&self) -> &wgpu::Queue { &self.queue }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PORTAL WORKER THREAD
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Persistent background thread that assembles `PortalFrameSnapshot` from the
+/// lightweight `PortalFrameMsg` and forwards it to the portal bridge.
+/// Owns the previous scene layout so the main thread never clones it.
+fn portal_worker_loop(
+    rx: std::sync::mpsc::Receiver<PortalFrameMsg>,
+    portal_tx: std::sync::mpsc::Sender<PortalFrameSnapshot>,
+    pipeline_order: Vec<String>,
+) {
+    let mut previous_layout: Option<PortalSceneLayout> = None;
+
+    while let Ok(m) = rx.recv() {
+        let scene_delta = m.current_layout.as_ref().map(|cur| {
+            if m.layout_changed {
+                compute_scene_delta(cur, previous_layout.as_ref())
+            } else {
+                let prev_cam = previous_layout.as_ref().and_then(|p| p.camera.clone());
+                let mut d = PortalSceneLayoutDelta::default();
+                if cur.camera != prev_cam {
+                    d.camera = Some(cur.camera.clone());
+                }
+                d
+            }
+        });
+
+        let (obj_count, light_count, bb_count) = if let Some(l) = &m.current_layout {
+            (l.objects.len(), l.lights.len(), l.billboards.len())
+        } else {
+            (0, 0, 0)
+        };
+
+        let s = &m.stage_ms;
+        let scene_prep_total: f32 = s.iter().sum();
+        let app_ms = (m.untracked_ms - scene_prep_total).max(0.0);
+        let scope_map: HashMap<&str, f32> =
+            m.cpu_scope_log.iter().map(|(n, ms)| (*n, *ms)).collect();
+        let mut stage_timings = vec![
+            PortalStageTiming { id: "app".into(),          name: "App".into(),              ms: app_ms },
+            PortalStageTiming { id: "scene_draws".into(),  name: "Scene: Draws".into(),     ms: s[0] },
+            PortalStageTiming { id: "scene_lights".into(), name: "Scene: Lights".into(),    ms: s[1] },
+            PortalStageTiming { id: "scene_shadow".into(), name: "Scene: Shadows".into(),   ms: s[2] },
+            PortalStageTiming { id: "scene_bb".into(),     name: "Scene: Billboards".into(),ms: s[3] },
+            PortalStageTiming { id: "scene_sky".into(),    name: "Scene: Sky".into(),       ms: s[4] },
+            PortalStageTiming { id: "prep".into(),         name: "Prep".into(),             ms: m.prep_ms },
+            PortalStageTiming { id: "pipeline".into(),     name: "Render Pipeline".into(),  ms: m.graph_ms },
+            PortalStageTiming { id: "aa".into(),           name: "AA".into(),               ms: m.aa_ms },
+            PortalStageTiming { id: "resolve".into(),      name: "Resolve".into(),          ms: m.resolve_ms },
+            PortalStageTiming { id: "finish".into(),       name: "Encode".into(),           ms: m.finish_ms },
+            PortalStageTiming { id: "submit".into(),       name: "Submit".into(),           ms: m.submit_ms },
+            PortalStageTiming { id: "poll".into(),         name: "Poll".into(),             ms: m.poll_ms },
+        ];
+        for &(name, id) in &[
+            ("dl_rebuild",            "dl_rebuild"),
+            ("depth_prepass/compile", "depth_prepass_compile"),
+            ("depth_prepass/replay",  "depth_prepass_replay"),
+            ("gbuffer/compile",       "gbuffer_compile"),
+            ("gbuffer/replay",        "gbuffer_replay"),
+        ] {
+            let ms = scope_map.get(name).copied().unwrap_or(0.0);
+            stage_timings.push(PortalStageTiming {
+                id: id.to_string(), name: name.to_string(), ms,
+            });
+        }
+
+        let snapshot = PortalFrameSnapshot {
+            frame: m.frame,
+            frame_time_ms: m.frame_time_ms,
+            frame_to_frame_ms: m.frame_to_frame_ms,
+            total_gpu_ms: m.total_gpu_ms,
+            total_cpu_ms: m.total_cpu_ms,
+            pass_timings: m.pass_timings
+                .iter()
+                .map(|t| PortalPassTiming { name: t.name.clone(), gpu_ms: t.gpu_ms, cpu_ms: t.cpu_ms })
+                .collect(),
+            pipeline_order: pipeline_order.clone(),
+            scene_delta,
+            timestamp_ms: m.timestamp_ms,
+            object_count: obj_count,
+            light_count,
+            billboard_count: bb_count,
+            draw_calls: helio_live_portal::DrawCallMetrics {
+                total: m.draw_total,
+                opaque: m.draw_opaque,
+                transparent: m.draw_transparent,
+            },
+            prep_ms: m.prep_ms,
+            graph_ms: m.graph_ms,
+            aa_ms: m.aa_ms,
+            resolve_ms: m.resolve_ms,
+            finish_ms: m.finish_ms,
+            submit_ms: m.submit_ms,
+            poll_ms: m.poll_ms,
+            untracked_ms: m.untracked_ms,
+            stage_timings,
+            pipeline_stage_id: Some("pipeline".to_string()),
+        };
+
+        // Update previous layout tracking.
+        if m.layout_changed {
+            previous_layout = m.current_layout;
+        } else if let (Some(ref mut prev), Some(ref cur)) =
+            (&mut previous_layout, &m.current_layout)
+        {
+            prev.camera = cur.camera.clone();
+        } else if previous_layout.is_none() {
+            previous_layout = m.current_layout;
+        }
+
+        let _ = portal_tx.send(snapshot);
+    }
 }
