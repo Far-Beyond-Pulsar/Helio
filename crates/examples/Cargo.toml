@@ -59,9 +59,13 @@ path = "light_benchmark.rs"
 name = "rc_benchmark"
 path = "rc_benchmark.rs"
 
+[[bin]]
+name = "ao_aa_demo"
+path = "ao_aa_demo.rs"
+
 
 [dependencies]
-helio-render-v2 = { path = "../helio-render-v2" }
+helio-render-v3 = { path = "../helio-render-v3" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
