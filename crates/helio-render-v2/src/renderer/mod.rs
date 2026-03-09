@@ -16,6 +16,8 @@ use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceC
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
+use crate::passes::depth_prepass::{BundleInbox, PrecompiledBundles, sort_opaque_indices, build_depth_bundle};
+use crate::passes::gbuffer::build_gbuffer_bundle;
 use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight};
@@ -217,6 +219,16 @@ pub struct Renderer {
     /// Pointers to all registered-proxy DrawCalls, rebuilt O(N) each frame by
     /// pointer-cloning.  ShadowPass culls this by light range on its own thread.
     shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
+
+    // ── Parallel bundle pre-compilation (Unreal FParallelCommandListSet) ──
+    /// Shared inbox through which the Renderer delivers pre-compiled bundles
+    /// to DepthPrepassPass and GBufferPass before graph execution.
+    bundle_inbox: Arc<BundleInbox>,
+    /// Pipeline copies kept on the Renderer for the pre-compile thread pool.
+    depth_pipeline: Arc<wgpu::RenderPipeline>,
+    gbuffer_pipeline: Arc<wgpu::RenderPipeline>,
+    /// draw_list_generation value at the time bundles were last parallel pre-compiled.
+    last_precompile_gen: u64,
 
     // ════════════════════════════════════════════════════════════════════════
     // GPU-RESIDENT SCENE (Unreal FGPUScene equivalent)
@@ -607,6 +619,112 @@ impl Renderer {
             *self.debug_batch.lock().unwrap() = None;
         } else {
             *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
+        }
+
+        // ── Parallel bundle pre-compilation (Unreal FParallelCommandListSet) ────
+        //
+        // When the draw list changes (add/remove/enable/disable object), split the
+        // sorted opaque draw list into N chunks and compile each chunk into its own
+        // RenderBundle on a worker thread.  This is equivalent to:
+        //   UE4: FParallelCommandListSet → RHICmdList[i].DrawIndexedPrimitive(…)
+        //   D3D12: N secondary command lists → ExecuteCommandLists(N, pLists)
+        //   wgpu:  N RenderBundles → pass.execute_bundles(&bundles)
+        //
+        // The pre-compiled bundles are deposited into the shared BundleInbox.
+        // DepthPrepassPass and GBufferPass pick them up in their execute() methods,
+        // avoiding any inline compilation.  At steady state (no scene changes),
+        // this block is skipped entirely.
+        if self.draw_list_generation != self.last_precompile_gen {
+            crate::profile_scope!("parallel_precompile");
+            let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+            let sorted = sort_opaque_indices(&draw_calls);
+
+            if sorted.len() >= 64 {
+                let num_chunks = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    .min(8)
+                    .max(1);
+                let chunk_size = (sorted.len() + num_chunks - 1) / num_chunks;
+
+                // Rebind Arc-wrapped fields to local shared refs so scoped threads
+                // can capture them without borrowing `self`.
+                let device: &wgpu::Device        = &self.device;
+                let depth_pl: &wgpu::RenderPipeline  = &self.depth_pipeline;
+                let gbuf_pl: &wgpu::RenderPipeline   = &self.gbuffer_pipeline;
+                let global_bg: &wgpu::BindGroup  = &self.global_bind_group;
+                let lighting_bg: &wgpu::BindGroup = &self.lighting_bind_group;
+                let generation     = self.draw_list_generation;
+                let global_bg_ptr  = global_bg as *const _ as usize;
+                let lighting_bg_ptr = lighting_bg as *const _ as usize;
+                let dc_ref: &[DrawCall] = &draw_calls;
+                let sorted_ref: &[usize] = &sorted;
+
+                // Pre-collect chunks so spawn closures capture simple slices.
+                let chunks: Vec<&[usize]> = sorted_ref.chunks(chunk_size).collect();
+
+                let (depth_bundles, depth_kept, gbuf_bundles, gbuf_kept) = std::thread::scope(|s| {
+                    // Spawn N depth-prepass chunk threads.
+                    let depth_handles: Vec<_> = chunks.iter()
+                        .map(|&chunk| {
+                            s.spawn(move || build_depth_bundle(device, depth_pl, dc_ref, chunk, global_bg, lighting_bg))
+                        })
+                        .collect();
+
+                    // Spawn N gbuffer chunk threads (in parallel with depth).
+                    let gbuf_handles: Vec<_> = chunks.iter()
+                        .map(|&chunk| {
+                            s.spawn(move || build_gbuffer_bundle(device, gbuf_pl, dc_ref, chunk, global_bg))
+                        })
+                        .collect();
+
+                    // Collect depth results.
+                    let mut d_bundles = Vec::with_capacity(depth_handles.len());
+                    let mut d_kept = Vec::new();
+                    for h in depth_handles {
+                        let (bundle, kept) = h.join().unwrap();
+                        d_bundles.push(bundle);
+                        d_kept.extend(kept);
+                    }
+
+                    // Collect gbuffer results.
+                    let mut g_bundles = Vec::with_capacity(gbuf_handles.len());
+                    let mut g_kept = Vec::new();
+                    for h in gbuf_handles {
+                        let (bundle, kept) = h.join().unwrap();
+                        g_bundles.push(bundle);
+                        g_kept.extend(kept);
+                    }
+
+                    (d_bundles, d_kept, g_bundles, g_kept)
+                });
+
+                eprintln!(
+                    "⚠️ [Parallel Precompile] {} depth + {} gbuffer bundles, {} chunks, {} draws (gen {})",
+                    depth_bundles.len(), gbuf_bundles.len(), num_chunks, sorted.len(), generation,
+                );
+
+                // Deposit into inbox — passes will .take() during graph execution.
+                let sorted_clone = sorted.clone();
+                *self.bundle_inbox.depth_prepass.lock().unwrap() = Some(PrecompiledBundles {
+                    bundles: depth_bundles,
+                    kept_arcs: depth_kept,
+                    sorted_indices: sorted_clone,
+                    generation,
+                    global_bg_ptr,
+                    lighting_bg_ptr,
+                });
+                *self.bundle_inbox.gbuffer.lock().unwrap() = Some(PrecompiledBundles {
+                    bundles: gbuf_bundles,
+                    kept_arcs: gbuf_kept,
+                    sorted_indices: sorted,
+                    generation,
+                    global_bg_ptr,
+                    lighting_bg_ptr,
+                });
+            }
+
+            self.last_precompile_gen = self.draw_list_generation;
         }
 
         // ── GPU-DRIVEN RENDERING: Assign material IDs and upload draw list ──────

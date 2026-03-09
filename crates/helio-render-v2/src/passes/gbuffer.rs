@@ -21,6 +21,7 @@
 use std::sync::{Arc, Mutex};
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::mesh::{DrawCall, INSTANCE_STRIDE};
+use crate::passes::depth_prepass::BundleInbox;
 use crate::Result;
 
 /// The four G-buffer render targets.  Wrapped in Arc<Mutex<…>> so the Renderer
@@ -32,6 +33,98 @@ pub struct GBufferTargets {
     pub emissive_view: wgpu::TextureView,   // Rgba16Float
 }
 
+/// Build a G-buffer RenderBundle from pre-sorted draw indices (chunk).
+/// Thread-safe: only needs shared references.
+/// Called from the parallel pre-compile step (Unreal-style FParallelCommandListSet).
+pub fn build_gbuffer_bundle(
+    device: &wgpu::Device,
+    pipeline: &wgpu::RenderPipeline,
+    draw_calls: &[DrawCall],
+    sorted: &[usize],
+    global_bg: &wgpu::BindGroup,
+) -> (wgpu::RenderBundle, Vec<Arc<wgpu::Buffer>>) {
+    let mut enc = device.create_render_bundle_encoder(
+        &wgpu::RenderBundleEncoderDescriptor {
+            label: Some("gbuffer_bundle"),
+            color_formats: &[
+                Some(wgpu::TextureFormat::Rgba8Unorm),   // albedo
+                Some(wgpu::TextureFormat::Rgba16Float),  // normals
+                Some(wgpu::TextureFormat::Rgba8Unorm),   // ORM
+                Some(wgpu::TextureFormat::Rgba16Float),  // emissive
+            ],
+            depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_read_only: false,
+                stencil_read_only: true,
+            }),
+            sample_count: 1,
+            multiview: None,
+        },
+    );
+    enc.set_pipeline(pipeline);
+    enc.set_bind_group(0, global_bg, &[]);
+
+    let mut kept: Vec<Arc<wgpu::Buffer>> = Vec::with_capacity(sorted.len());
+    let mut last_mat:  Option<usize> = None;
+    let mut last_vbuf: Option<usize> = None;
+    let mut last_ibuf: Option<usize> = None;
+    let mut batch_start: u64  = 0;
+    let mut batch_count: u32  = 0;
+    let mut batch_idx:   usize = 0;
+
+    for &idx in sorted {
+        let dc = &draw_calls[idx];
+        let mat_ptr  = Arc::as_ptr(&dc.material_bind_group) as usize;
+        let vbuf_ptr = Arc::as_ptr(&dc.vertex_buffer)        as usize;
+        let ibuf_ptr = Arc::as_ptr(&dc.index_buffer)         as usize;
+
+        if batch_count > 0
+            && last_mat  == Some(mat_ptr)
+            && last_vbuf == Some(vbuf_ptr)
+            && last_ibuf == Some(ibuf_ptr)
+            && batch_start + batch_count as u64 * INSTANCE_STRIDE == dc.instance_buffer_offset
+        {
+            batch_count += 1;
+            continue;
+        }
+
+        if batch_count > 0 {
+            let bdc      = &draw_calls[batch_idx];
+            let inst_end = batch_start + batch_count as u64 * INSTANCE_STRIDE;
+            enc.set_vertex_buffer(1, bdc.instance_buffer.as_ref().unwrap().slice(batch_start..inst_end));
+            enc.draw_indexed(0..bdc.index_count, 0, 0..batch_count);
+        }
+
+        if last_mat != Some(mat_ptr) {
+            enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+            last_mat = Some(mat_ptr);
+        }
+        if last_vbuf != Some(vbuf_ptr) {
+            enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+            last_vbuf = Some(vbuf_ptr);
+        }
+        if last_ibuf != Some(ibuf_ptr) {
+            enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            last_ibuf = Some(ibuf_ptr);
+        }
+
+        if let Some(buf) = &dc.instance_buffer { kept.push(Arc::clone(buf)); }
+        batch_start = dc.instance_buffer_offset;
+        batch_count = 1;
+        batch_idx   = idx;
+    }
+
+    if batch_count > 0 {
+        let bdc      = &draw_calls[batch_idx];
+        let inst_end = batch_start + batch_count as u64 * INSTANCE_STRIDE;
+        enc.set_vertex_buffer(1, bdc.instance_buffer.as_ref().unwrap().slice(batch_start..inst_end));
+        enc.draw_indexed(0..bdc.index_count, 0, 0..batch_count);
+    }
+
+    let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: Some("gbuffer_bundle") });
+    (bundle, kept)
+}
+
 pub struct GBufferPass {
     targets:   Arc<Mutex<GBufferTargets>>,
     pipeline:  Arc<wgpu::RenderPipeline>,
@@ -39,14 +132,16 @@ pub struct GBufferPass {
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     /// Pre-computed sort shared from DepthPrepassPass (same sort order).
     shared_sorted: Arc<Mutex<Vec<usize>>>,
-    /// draw_list_generation value at the time cached_bundle was compiled.
+    /// draw_list_generation value at the time cached_bundles were compiled.
     bundle_gen: u64,
     /// Raw pointer of the global bind group embedded in the bundle.
     bundle_global_bg_ptr: usize,
-    /// Pre-compiled RenderBundle replayed each frame when draw set is stable.
-    cached_bundle: Option<wgpu::RenderBundle>,
+    /// Pre-compiled RenderBundles (one per chunk) replayed each frame.
+    cached_bundles: Vec<wgpu::RenderBundle>,
     /// Keeps `Arc<wgpu::Buffer>` clones alive while the bundle may be in flight.
     kept_arcs: Vec<Arc<wgpu::Buffer>>,
+    /// Shared inbox for receiving pre-compiled bundles from parallel compilation.
+    inbox: Arc<BundleInbox>,
 }
 
 impl GBufferPass {
@@ -56,6 +151,7 @@ impl GBufferPass {
         draw_list:     Arc<Mutex<Vec<DrawCall>>>,
         shared_sorted: Arc<Mutex<Vec<usize>>>,
         device:        Arc<wgpu::Device>,
+        inbox:         Arc<BundleInbox>,
     ) -> Self {
         Self {
             targets,
@@ -65,8 +161,9 @@ impl GBufferPass {
             shared_sorted,
             bundle_gen: u64::MAX,
             bundle_global_bg_ptr: 0,
-            cached_bundle: None,
+            cached_bundles: Vec::new(),
             kept_arcs: Vec::new(),
+            inbox,
         }
     }
 
@@ -195,11 +292,11 @@ impl GBufferPass {
 
         let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: Some("gbuffer_bundle") });
         eprintln!(
-            "⚠️ [GBuffer] Bundle compiled: {} opaque draws (gen {})",
+            "⚠️ [GBuffer] Bundle compiled (inline fallback): {} opaque draws (gen {})",
             sorted.len(), generation,
         );
 
-        self.cached_bundle      = Some(bundle);
+        self.cached_bundles     = vec![bundle];
         self.kept_arcs          = kept;
         self.bundle_gen         = generation;
         self.bundle_global_bg_ptr = global_bg as *const _ as usize;
@@ -224,10 +321,24 @@ impl RenderPass for GBufferPass {
             || global_bg_ptr != self.bundle_global_bg_ptr;
 
         if need_rebuild {
-            crate::profile_scope!("gbuffer/compile");
-            // Clone draw calls so the mutex is released before we mutate `self`.
-            let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
-            self.compile_bundle(&draw_calls, ctx.global_bind_group, ctx.draw_list_generation);
+            // Check inbox first — the Renderer may have pre-compiled in parallel
+            // (Unreal-style FParallelCommandListSet).
+            let precompiled = self.inbox.gbuffer.lock().unwrap().take();
+            if let Some(pre) = precompiled {
+                self.cached_bundles     = pre.bundles;
+                self.kept_arcs          = pre.kept_arcs;
+                self.bundle_gen         = pre.generation;
+                self.bundle_global_bg_ptr = pre.global_bg_ptr;
+                eprintln!(
+                    "⚠️ [GBuffer] {} bundles from inbox (gen {})",
+                    self.cached_bundles.len(), pre.generation,
+                );
+            } else {
+                crate::profile_scope!("gbuffer/compile");
+                // Fallback: compile inline as a single bundle (no parallel pre-compile).
+                let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+                self.compile_bundle(&draw_calls, ctx.global_bind_group, ctx.draw_list_generation);
+            }
         }
 
         let targets = self.targets.lock().unwrap();
@@ -291,8 +402,8 @@ impl RenderPass for GBufferPass {
 
         {
             crate::profile_scope!("gbuffer/replay");
-            if let Some(bundle) = &self.cached_bundle {
-                pass.execute_bundles(std::iter::once(bundle));
+            if !self.cached_bundles.is_empty() {
+                pass.execute_bundles(&self.cached_bundles);
             }
         }
 

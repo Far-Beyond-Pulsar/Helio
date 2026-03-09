@@ -251,10 +251,18 @@ impl Renderer {
             &defines,
             PipelineVariant::DepthOnly,
         )?;
+
+        // Shared inbox for Unreal-style parallel bundle pre-compilation.
+        let bundle_inbox = Arc::new(crate::passes::depth_prepass::BundleInbox {
+            depth_prepass: std::sync::Mutex::new(None),
+            gbuffer:       std::sync::Mutex::new(None),
+        });
+
         let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
-            depth_pipeline,
+            depth_pipeline.clone(),
             draw_list.clone(),
             device.clone(),
+            bundle_inbox.clone(),
         );
         graph.add_pass(depth_prepass);
 
@@ -285,10 +293,11 @@ impl Renderer {
         )?;
         let gbuffer_pass = GBufferPass::new(
             gbuffer_targets.clone(),
-            gbuf_pipeline,
+            gbuf_pipeline.clone(),
             draw_list.clone(),
             shared_sorted_opaque,
             device.clone(),
+            bundle_inbox.clone(),
         );
         graph.add_pass(gbuffer_pass);
 
@@ -622,6 +631,11 @@ impl Renderer {
             smaa_bind_group,
             taa_bind_group,
             shadow_draw_list,
+            // ── Parallel bundle pre-compilation ───────────────────────────────
+            bundle_inbox,
+            depth_pipeline,
+            gbuffer_pipeline: gbuf_pipeline,
+            last_precompile_gen: u64::MAX, // force pre-compile on first frame
             // ── GPU-resident scene + lights ───────────────────────────────────────
             gpu_scene,
             gpu_light_scene,
