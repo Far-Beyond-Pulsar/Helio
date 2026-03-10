@@ -329,11 +329,17 @@ impl Renderer {
     // ── Pool mesh creation ────────────────────────────────────────────────────
 
     /// Upload raw geometry into the unified geometry pool.
-    /// Returns a pool-allocated `GpuMesh` (`pool_allocated = true`).
-    /// Panics if the pool is full — increase pool capacity in `GpuBufferPool::new`.
+    ///
+    /// Returns a pool-allocated `GpuMesh` when the pool has capacity.
+    /// When the pool has reached the VRAM cap, falls back transparently to a
+    /// standalone sys-mem buffer (`pool_allocated = false`); a throttled warning
+    /// is emitted by the pool.  Callers never need to change.
     pub fn create_mesh(&mut self, vertices: &[PackedVertex], indices: &[u32]) -> GpuMesh {
-        GpuMesh::upload_to_pool(&self.queue, &mut self.buffer_pool, vertices, indices)
-            .expect("GpuBufferPool full — increase pool capacity")
+        if let Some(mesh) = GpuMesh::upload_to_pool(&self.queue, &mut self.buffer_pool, vertices, indices) {
+            return mesh;
+        }
+        // Pool at VRAM cap — fall back to per-mesh sys-mem buffers.
+        GpuMesh::upload_standalone(&self.device, vertices, indices)
     }
 
     pub fn create_mesh_unit_cube(&mut self) -> GpuMesh {

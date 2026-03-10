@@ -4,14 +4,15 @@
 //! using the unified pool vertex/index buffers. O(1) CPU cost.
 
 use std::sync::{Arc, Mutex};
+use crate::buffer_pool::SharedPoolBuffer;
 use crate::gpu_scene::MaterialRange;
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::Result;
 
 pub struct DepthPrepassPass {
     pipeline: Arc<wgpu::RenderPipeline>,
-    pool_vertex_buffer: Arc<wgpu::Buffer>,
-    pool_index_buffer: Arc<wgpu::Buffer>,
+    pool_vertex_buffer: SharedPoolBuffer,
+    pool_index_buffer: SharedPoolBuffer,
     shared_indirect: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
     shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
     default_material_bg: Arc<wgpu::BindGroup>,
@@ -20,8 +21,8 @@ pub struct DepthPrepassPass {
 impl DepthPrepassPass {
     pub fn new(
         pipeline: Arc<wgpu::RenderPipeline>,
-        pool_vertex_buffer: Arc<wgpu::Buffer>,
-        pool_index_buffer: Arc<wgpu::Buffer>,
+        pool_vertex_buffer: SharedPoolBuffer,
+        pool_index_buffer: SharedPoolBuffer,
         shared_indirect: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
         shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
         default_material_bg: Arc<wgpu::BindGroup>,
@@ -68,8 +69,10 @@ impl RenderPass for DepthPrepassPass {
         pass.set_bind_group(0, ctx.global_bind_group, &[]);
         pass.set_bind_group(1, Some(self.default_material_bg.as_ref()), &[]);
         pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
-        pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
-        pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        let vb = self.pool_vertex_buffer.lock().unwrap().clone();
+        let ib = self.pool_index_buffer .lock().unwrap().clone();
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
         // Use per-call draw_indexed_indirect rather than multi_draw_indexed_indirect.
         // multi_draw_indexed_indirect requires the multiDrawIndirect Vulkan device feature
         // which must be explicitly requested at device creation.

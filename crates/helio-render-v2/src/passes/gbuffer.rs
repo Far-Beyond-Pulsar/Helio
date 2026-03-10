@@ -3,6 +3,7 @@
 //! One `multi_draw_indexed_indirect` per unique material range. O(unique_materials) CPU cost.
 
 use std::sync::{Arc, Mutex};
+use crate::buffer_pool::SharedPoolBuffer;
 use crate::gpu_scene::MaterialRange;
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::Result;
@@ -17,8 +18,8 @@ pub struct GBufferTargets {
 pub struct GBufferPass {
     targets:               Arc<Mutex<GBufferTargets>>,
     pipeline:              Arc<wgpu::RenderPipeline>,
-    pool_vertex_buffer:    Arc<wgpu::Buffer>,
-    pool_index_buffer:     Arc<wgpu::Buffer>,
+    pool_vertex_buffer:    SharedPoolBuffer,
+    pool_index_buffer:     SharedPoolBuffer,
     shared_indirect:       Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
     shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
 }
@@ -27,8 +28,8 @@ impl GBufferPass {
     pub fn new(
         targets:               Arc<Mutex<GBufferTargets>>,
         pipeline:              Arc<wgpu::RenderPipeline>,
-        pool_vertex_buffer:    Arc<wgpu::Buffer>,
-        pool_index_buffer:     Arc<wgpu::Buffer>,
+        pool_vertex_buffer:    SharedPoolBuffer,
+        pool_index_buffer:     SharedPoolBuffer,
         shared_indirect:       Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
         shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
     ) -> Self {
@@ -89,8 +90,10 @@ impl RenderPass for GBufferPass {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, ctx.global_bind_group, &[]);
-        pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
-        pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        let vb = self.pool_vertex_buffer.lock().unwrap().clone();
+        let ib = self.pool_index_buffer .lock().unwrap().clone();
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
 
         for range in ranges.iter() {
             let byte_offset = range.start as u64 * 20;

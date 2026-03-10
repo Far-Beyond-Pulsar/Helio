@@ -8,6 +8,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::buffer_pool::SharedPoolBuffer;
 use crate::graph::{PassContext, PassResourceBuilder, RenderPass, ResourceHandle};
 use crate::mesh::DrawCall;
 use crate::Result;
@@ -15,16 +16,16 @@ use crate::Result;
 pub struct TransparentPass {
     pipeline:          Arc<wgpu::RenderPipeline>,
     draw_list:         Arc<Mutex<Vec<DrawCall>>>,
-    pool_vertex_buffer: Arc<wgpu::Buffer>,
-    pool_index_buffer:  Arc<wgpu::Buffer>,
+    pool_vertex_buffer: SharedPoolBuffer,
+    pool_index_buffer:  SharedPoolBuffer,
 }
 
 impl TransparentPass {
     pub fn new(
         pipeline:           Arc<wgpu::RenderPipeline>,
         draw_list:          Arc<Mutex<Vec<DrawCall>>>,
-        pool_vertex_buffer: Arc<wgpu::Buffer>,
-        pool_index_buffer:  Arc<wgpu::Buffer>,
+        pool_vertex_buffer: SharedPoolBuffer,
+        pool_index_buffer:  SharedPoolBuffer,
     ) -> Self {
         Self { pipeline, draw_list, pool_vertex_buffer, pool_index_buffer }
     }
@@ -86,11 +87,15 @@ impl RenderPass for TransparentPass {
         pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
 
         // Pool-only: one VB/IB bind for all transparent draws.
-        pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
-        pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        let vb = self.pool_vertex_buffer.lock().unwrap().clone();
+        let ib = self.pool_index_buffer .lock().unwrap().clone();
+        pass.set_vertex_buffer(0, vb.slice(..));
+        pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
         let mut last_mat: Option<usize> = None;
         for &idx in &indices {
             let dc = &draw_calls[idx];
+            // Skip overflow (standalone) meshes — they don't live in the pool VB.
+            if !dc.pool_allocated { continue; }
             let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
             if last_mat != Some(mat_ptr) {
                 pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);

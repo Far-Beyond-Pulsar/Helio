@@ -57,9 +57,9 @@ impl Renderer {
 
         // ── GPU-driven infrastructure ─────────────────────────────────────────
         // Unified geometry pool — all pool-allocated meshes share these buffers.
-        let buffer_pool = GpuBufferPool::new(&device);
-        let pool_vb = buffer_pool.vertex_buffer.clone();
-        let pool_ib = buffer_pool.index_buffer.clone();
+        let buffer_pool = GpuBufferPool::new(device.clone());
+        let pool_vb = buffer_pool.shared_vertex_buffer.clone();
+        let pool_ib = buffer_pool.shared_index_buffer.clone();
 
         // IndirectDispatchPass is driven from renderer.render() — NOT added to graph.
         let indirect_dispatch = IndirectDispatchPass::new();

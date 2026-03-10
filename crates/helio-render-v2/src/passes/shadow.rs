@@ -1,5 +1,6 @@
 //! Shadow depth pass - renders depth into the shadow atlas
 
+use crate::buffer_pool::SharedPoolBuffer;
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::mesh::DrawCall;
 use crate::Result;
@@ -86,8 +87,8 @@ pub struct ShadowPass {
     shadow_cache: Vec<ShadowLightCache>,
     filtered_indices: Vec<usize>,
     // Pool VB/IB for unified geometry (used when meshes are pool-allocated).
-    pool_vertex_buffer: Arc<wgpu::Buffer>,
-    pool_index_buffer:  Arc<wgpu::Buffer>,
+    pool_vertex_buffer: SharedPoolBuffer,
+    pool_index_buffer:  SharedPoolBuffer,
 }
 
 impl ShadowPass {
@@ -101,8 +102,8 @@ impl ShadowPass {
         device: Arc<wgpu::Device>,
         material_layout: &wgpu::BindGroupLayout,
         instance_data_buffer: &wgpu::Buffer,
-        pool_vertex_buffer: Arc<wgpu::Buffer>,
-        pool_index_buffer: Arc<wgpu::Buffer>,
+        pool_vertex_buffer: SharedPoolBuffer,
+        pool_index_buffer: SharedPoolBuffer,
     ) -> Self {
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow Matrix BGL"),
@@ -360,11 +361,15 @@ impl RenderPass for ShadowPass {
                 if !face_indices.is_empty() {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, &self.slot_bind_groups[bundle_slot], &[]);
-                    pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
-                    pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    let vb = self.pool_vertex_buffer.lock().unwrap().clone();
+                    let ib = self.pool_index_buffer .lock().unwrap().clone();
+                    pass.set_vertex_buffer(0, vb.slice(..));
+                    pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
                     let mut last_mat: Option<usize> = None;
                     for &idx in &face_indices {
                         let dc = &draw_calls[idx];
+                        // Skip overflow (standalone) meshes — they don't live in the pool VB.
+                        if !dc.pool_allocated { continue; }
                         let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
                         if last_mat != Some(mat_ptr) {
                             pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);

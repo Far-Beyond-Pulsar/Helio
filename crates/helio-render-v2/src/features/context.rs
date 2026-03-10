@@ -1,5 +1,6 @@
 //! Context types for features
 
+use crate::buffer_pool::SharedPoolBuffer;
 use crate::resources::ResourceManager;
 use crate::graph::RenderGraph;
 use crate::camera::Camera;
@@ -37,9 +38,9 @@ pub struct FeatureContext<'a> {
     /// so the vertex shader can read transforms via `@builtin(instance_index)`.
     pub instance_data_buffer: &'a wgpu::Buffer,
     /// Unified pool vertex buffer — ShadowPass uses pool-allocated meshes.
-    pub pool_vertex_buffer: Arc<wgpu::Buffer>,
+    pub pool_vertex_buffer: SharedPoolBuffer,
     /// Unified pool index buffer — ShadowPass uses pool-allocated meshes.
-    pub pool_index_buffer: Arc<wgpu::Buffer>,
+    pub pool_index_buffer: SharedPoolBuffer,
 
     // ── Outputs set by features during register() ───────────────────────────
     /// Light storage buffer set by LightingFeature
@@ -69,8 +70,8 @@ impl<'a> FeatureContext<'a> {
         light_face_counts: Arc<Mutex<Vec<u8>>>,
         shadow_cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
         instance_data_buffer: &'a wgpu::Buffer,
-        pool_vertex_buffer: Arc<wgpu::Buffer>,
-        pool_index_buffer: Arc<wgpu::Buffer>,
+        pool_vertex_buffer: SharedPoolBuffer,
+        pool_index_buffer: SharedPoolBuffer,
     ) -> Self {
         Self {
             device,

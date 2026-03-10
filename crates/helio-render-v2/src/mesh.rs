@@ -222,6 +222,7 @@ impl GpuMesh {
 
     /// Upload vertices + indices into the unified `GpuBufferPool`.
     /// Returns a pool-allocated `GpuMesh` that participates in `multi_draw_indexed_indirect`.
+    /// Returns `None` when the pool is at its VRAM cap — use [`Self::upload_standalone`] as fallback.
     pub fn upload_to_pool(
         queue: &wgpu::Queue,
         pool: &mut crate::buffer_pool::GpuBufferPool,
@@ -229,34 +230,12 @@ impl GpuMesh {
         indices: &[u32],
     ) -> Option<Self> {
         let alloc = pool.alloc(queue, vertices, indices)?;
-
-        let (bounds_center, bounds_radius, aabb_min, aabb_max) = if vertices.is_empty() {
-            ([0.0f32; 3], 0.0f32, [0.0f32; 3], [0.0f32; 3])
-        } else {
-            let n = vertices.len() as f32;
-            let cx = vertices.iter().map(|v| v.position[0]).sum::<f32>() / n;
-            let cy = vertices.iter().map(|v| v.position[1]).sum::<f32>() / n;
-            let cz = vertices.iter().map(|v| v.position[2]).sum::<f32>() / n;
-            let r  = vertices.iter().map(|v| {
-                let dx = v.position[0] - cx;
-                let dy = v.position[1] - cy;
-                let dz = v.position[2] - cz;
-                (dx * dx + dy * dy + dz * dz).sqrt()
-            }).fold(0.0f32, f32::max);
-            let mut min = [f32::MAX; 3];
-            let mut max = [f32::MIN; 3];
-            for v in vertices {
-                for i in 0..3 {
-                    if v.position[i] < min[i] { min[i] = v.position[i]; }
-                    if v.position[i] > max[i] { max[i] = v.position[i]; }
-                }
-            }
-            ([cx, cy, cz], r, min, max)
-        };
+        let (bounds_center, bounds_radius, aabb_min, aabb_max) =
+            Self::compute_bounds(vertices);
 
         Some(Self {
-            vertex_buffer:    Arc::clone(&pool.vertex_buffer),
-            index_buffer:     Arc::clone(&pool.index_buffer),
+            vertex_buffer:    pool.current_vertex_buffer(),
+            index_buffer:     pool.current_index_buffer(),
             index_count:      alloc.index_count,
             vertex_count:     alloc.vertex_count,
             bounds_center,
@@ -267,6 +246,82 @@ impl GpuMesh {
             pool_first_index: alloc.first_index,
             pool_allocated:   true,
         })
+    }
+
+    /// Allocate standalone vertex + index buffers (system-memory fallback).
+    ///
+    /// Used when the `GpuBufferPool` has reached its VRAM cap.  The mesh is
+    /// **not** pool-allocated and will not participate in GPU-indirect draws,
+    /// but it will still be rendered via the CPU draw path (GeometryPass).
+    pub fn upload_standalone(
+        device:   &wgpu::Device,
+        vertices: &[PackedVertex],
+        indices:  &[u32],
+    ) -> Self {
+        use wgpu::util::DeviceExt;
+
+        let vb_bytes = (vertices.len() * std::mem::size_of::<PackedVertex>()) as u64;
+        let ib_bytes = (indices.len()  * std::mem::size_of::<u32>())          as u64;
+        gpu_transfer::track_alloc(vb_bytes + ib_bytes);
+
+        let vertex_buffer = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label:    Some("Standalone Mesh VB (pool overflow)"),
+                contents: bytemuck::cast_slice(vertices),
+                usage:    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::BLAS_INPUT,
+            },
+        ));
+        let index_buffer = Arc::new(device.create_buffer_init(
+            &wgpu::util::BufferInitDescriptor {
+                label:    Some("Standalone Mesh IB (pool overflow)"),
+                contents: bytemuck::cast_slice(indices),
+                usage:    wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT,
+            },
+        ));
+
+        let (bounds_center, bounds_radius, aabb_min, aabb_max) =
+            Self::compute_bounds(vertices);
+
+        Self {
+            vertex_buffer,
+            index_buffer,
+            index_count:      indices.len()  as u32,
+            vertex_count:     vertices.len() as u32,
+            bounds_center,
+            bounds_radius,
+            aabb_min,
+            aabb_max,
+            pool_base_vertex: 0,
+            pool_first_index: 0,
+            pool_allocated:   false,
+        }
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    fn compute_bounds(vertices: &[PackedVertex]) -> ([f32; 3], f32, [f32; 3], [f32; 3]) {
+        if vertices.is_empty() {
+            return ([0.0f32; 3], 0.0f32, [0.0f32; 3], [0.0f32; 3]);
+        }
+        let n  = vertices.len() as f32;
+        let cx = vertices.iter().map(|v| v.position[0]).sum::<f32>() / n;
+        let cy = vertices.iter().map(|v| v.position[1]).sum::<f32>() / n;
+        let cz = vertices.iter().map(|v| v.position[2]).sum::<f32>() / n;
+        let r  = vertices.iter().map(|v| {
+            let dx = v.position[0] - cx;
+            let dy = v.position[1] - cy;
+            let dz = v.position[2] - cz;
+            (dx * dx + dy * dy + dz * dz).sqrt()
+        }).fold(0.0f32, f32::max);
+        let mut min = [f32::MAX; 3];
+        let mut max = [f32::MIN; 3];
+        for v in vertices {
+            for i in 0..3 {
+                if v.position[i] < min[i] { min[i] = v.position[i]; }
+                if v.position[i] > max[i] { max[i] = v.position[i]; }
+            }
+        }
+        ([cx, cy, cz], r, min, max)
     }
 }
 
