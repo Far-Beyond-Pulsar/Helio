@@ -16,25 +16,25 @@ struct Material {
 
 /// Per-instance GPU data.  Must match `GpuInstanceData` in gpu_scene.rs.
 struct GpuInstanceData {
-    transform:    mat4x4<f32>,
-    normal_mat_0: vec4<f32>,
-    normal_mat_1: vec4<f32>,
-    normal_mat_2: vec4<f32>,
+    transform:     mat4x4<f32>,
+    normal_mat_0:  vec4<f32>,
+    normal_mat_1:  vec4<f32>,
+    normal_mat_2:  vec4<f32>,
     bounds_center: vec3<f32>,
     bounds_radius: f32,
 }
 
-@group(0) @binding(0) var<storage, read> light_matrices: array<LightMatrix>;
+@group(0) @binding(0) var<storage, read> light_matrices:   array<LightMatrix>;
 @group(0) @binding(1) var<uniform>       shadow_layer_idx: u32;
-@group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
+@group(0) @binding(2) var<storage, read> instance_data:    array<GpuInstanceData>;
 
-@group(1) @binding(0) var<uniform>          material:          Material;
-@group(1) @binding(1) var                   base_color_texture: texture_2d<f32>;
-@group(1) @binding(3) var                   material_sampler:   sampler;
+@group(1) @binding(0) var<uniform> material:           Material;
+@group(1) @binding(1) var          base_color_texture: texture_2d<f32>;
+@group(1) @binding(3) var          material_sampler:   sampler;
 
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
-    @location(0) tex_coords: vec2<f32>,
+    @location(0)       tex_coords:    vec2<f32>,
 }
 
 @vertex
@@ -58,4 +58,3 @@ fn fs_main(input: VertexOutput) {
     if alpha <= 0.001 { discard; }
     if alpha < material.alpha_cutoff { discard; }
 }
-
