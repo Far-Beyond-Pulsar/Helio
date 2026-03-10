@@ -3,16 +3,19 @@
 /// Parameters for the SDF evaluation grid (48 bytes, 16-byte aligned)
 ///
 /// Layout must match the WGSL `SdfGridParams` struct.
+/// NOTE: vec3 + pad pattern avoids the vec3 alignment trap where
+/// scalars packed into the vec3 tail read incorrectly on some drivers.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SdfGridParams {
     pub volume_min: [f32; 3],
-    pub grid_dim: u32,
+    pub _pad0: f32,           // explicit padding after vec3
     pub volume_max: [f32; 3],
+    pub _pad1: f32,           // explicit padding after vec3
+    pub grid_dim: u32,
     pub edit_count: u32,
     pub voxel_size: f32,
     pub max_march_dist: f32,
-    pub _pad: [f32; 2],
 }
 
 impl SdfGridParams {
@@ -31,12 +34,13 @@ impl SdfGridParams {
 
         Self {
             volume_min,
-            grid_dim,
+            _pad0: 0.0,
             volume_max,
+            _pad1: 0.0,
+            grid_dim,
             edit_count,
             voxel_size,
             max_march_dist,
-            _pad: [0.0; 2],
         }
     }
 }

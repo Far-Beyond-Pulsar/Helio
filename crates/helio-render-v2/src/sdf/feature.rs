@@ -379,13 +379,6 @@ impl Feature for SdfFeature {
         if needs_upload {
             // Upload edit list to GPU
             let gpu_edits = self.edit_list.flush_gpu_data();
-            eprintln!("[SDF] Uploading {} edits (generation {})", gpu_edits.len(), gen);
-            for (i, e) in gpu_edits.iter().enumerate() {
-                eprintln!("  edit[{}]: shape={} op={} blend={} params=[{},{},{},{}] translate=[{},{},{}]",
-                    i, e.shape_type, e.boolean_op, e.blend_radius,
-                    e.params.param0, e.params.param1, e.params.param2, e.params.param3,
-                    e.transform[12], e.transform[13], e.transform[14]);
-            }
             if !gpu_edits.is_empty() {
                 ctx.queue.write_buffer(
                     self.edit_buffer.as_ref().unwrap(),
@@ -401,8 +394,6 @@ impl Feature for SdfFeature {
                 self.grid_dim,
                 self.edit_list.len() as u32,
             );
-            eprintln!("[SDF] Grid params: dim={} edit_count={} voxel_size={} max_march={}",
-                params.grid_dim, params.edit_count, params.voxel_size, params.max_march_dist);
             ctx.queue.write_buffer(
                 self.params_buffer.as_ref().unwrap(),
                 0,

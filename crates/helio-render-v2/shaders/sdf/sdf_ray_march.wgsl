@@ -19,13 +19,13 @@ struct Globals {
 
 struct SdfGridParams {
     volume_min:     vec3<f32>,
-    grid_dim:       u32,
+    _pad0:          f32,
     volume_max:     vec3<f32>,
+    _pad1:          f32,
+    grid_dim:       u32,
     edit_count:     u32,
     voxel_size:     f32,
     max_march_dist: f32,
-    _pad0:          f32,
-    _pad1:          f32,
 }
 
 // Group 0: Global (camera + globals) — shared with all passes
