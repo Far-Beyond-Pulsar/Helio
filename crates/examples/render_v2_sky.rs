@@ -168,7 +168,7 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::VULKAN,
+            backends: wgpu::Backends::DX12,
             flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION | wgpu::InstanceFlags::DEBUG,
             ..Default::default()
         });
@@ -183,18 +183,27 @@ impl ApplicationHandler for App {
         }))
         .expect("Failed to find adapter");
 
+        // compute features based on what the adapter actually provides; ray
+        // query support is optional but enables radiance cascades, TLAS, etc.
+        let mut req_feats = wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+        let has_ray = adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        if has_ray {
+            req_feats |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("Main Device"),
-                required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits: wgpu::Limits::default()
-                    .using_minimum_supported_acceleration_structure_values(),
+                required_features: req_feats,
+                required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
+                experimental_features: wgpu::ExperimentalFeatures::default(),
                 trace: wgpu::Trace::Off,
             },
         ))
         .expect("Failed to create device");
+        // later we will only add radiance cascades if has_ray
+
 
         device.on_uncaptured_error(std::sync::Arc::new(|e| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
@@ -225,16 +234,18 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        let feature_registry = FeatureRegistry::builder()
+        let mut registry_builder = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
             .with_feature(BloomFeature::new().with_intensity(0.3).with_threshold(1.2))
             .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000))
-            .with_feature(
+            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000));
+        if has_ray {
+            registry_builder = registry_builder.with_feature(
                 RadianceCascadesFeature::new()
                     .with_world_bounds([-10.0, -0.3, -10.0], [10.0, 8.0, 10.0]),
-            )
-            .build();
+            );
+        }
+        let feature_registry = registry_builder.build();
 
         let mut renderer = Renderer::new(
             device.clone(),

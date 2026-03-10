@@ -113,22 +113,30 @@ impl GpuBufferPool {
         let vb_bytes = vert_cap as u64 * std::mem::size_of::<PackedVertex>() as u64;
         let ib_bytes = idx_cap  as u64 * std::mem::size_of::<u32>()          as u64;
 
+        // some devices (e.g. mobile or older GPUs) do not support
+        // ray-query/acceleration-structure features.  the pool only needs
+        // BLAS_INPUT for ray-related operations, so make it optional.
+        let mut vb_usage = wgpu::BufferUsages::VERTEX
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
+        let mut ib_usage = wgpu::BufferUsages::INDEX
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::COPY_SRC;
+        if device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            vb_usage |= wgpu::BufferUsages::BLAS_INPUT;
+            ib_usage |= wgpu::BufferUsages::BLAS_INPUT;
+        }
+
         let vb = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Geometry Pool Vertex Buffer"),
             size:  vb_bytes,
-            usage: wgpu::BufferUsages::VERTEX
-                 | wgpu::BufferUsages::COPY_DST
-                 | wgpu::BufferUsages::COPY_SRC
-                 | wgpu::BufferUsages::BLAS_INPUT,
+            usage: vb_usage,
             mapped_at_creation: false,
         });
         let ib = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Geometry Pool Index Buffer"),
             size:  ib_bytes,
-            usage: wgpu::BufferUsages::INDEX
-                 | wgpu::BufferUsages::COPY_DST
-                 | wgpu::BufferUsages::COPY_SRC
-                 | wgpu::BufferUsages::BLAS_INPUT,
+            usage: ib_usage,
             mapped_at_creation: false,
         });
         (vb, ib, vb_bytes, ib_bytes)
