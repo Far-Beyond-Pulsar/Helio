@@ -67,13 +67,12 @@ fn world_to_uvw(world_pos: vec3<f32>) -> vec3<f32> {
 }
 
 fn sample_distance(world_pos: vec3<f32>) -> f32 {
-    // DEBUG: analytic sphere at origin, radius 2 — bypasses 3D texture
-    return length(world_pos) - 2.0;
-    // let uvw = world_to_uvw(world_pos);
-    // if any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0)) {
-    //     return sdf_params.max_march_dist;
-    // }
-    // return textureSampleLevel(sdf_volume, sdf_sampler, uvw, 0.0).r;
+    let uvw = world_to_uvw(world_pos);
+    // Outside the volume, return a large positive distance
+    if any(uvw < vec3<f32>(0.0)) || any(uvw > vec3<f32>(1.0)) {
+        return sdf_params.max_march_dist;
+    }
+    return textureSampleLevel(sdf_volume, sdf_sampler, uvw, 0.0).r;
 }
 
 fn estimate_normal(p: vec3<f32>) -> vec3<f32> {
