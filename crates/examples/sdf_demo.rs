@@ -102,14 +102,20 @@ impl ApplicationHandler for App {
         }))
         .expect("Failed to find adapter");
 
+        // Request a device with experimental ray query enabled and the adjusted limits needed
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("SDF Demo Device"),
                 required_features: wgpu::Features::TIMESTAMP_QUERY
-                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits: wgpu::Limits::default(),
+                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+                    | wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+                // When using ray query / acceleration structures some adapters require elevated limits.
+                // Use the helper to set the minimum supported acceleration-structure-related limits.
+                required_limits: wgpu::Limits::default()
+                    .using_minimum_supported_acceleration_structure_values(),
                 memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: Default::default(),
+                // Enable experimental features (unsafe acknowledgement of potential implementation bugs).
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 trace: wgpu::Trace::Off,
             },
         ))
