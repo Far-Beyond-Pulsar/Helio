@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement"] }
+web-sys = { version = "0.3", features = ["Window", "Document", "HtmlCanvasElement", "KeyboardEvent", "MouseEvent", "HtmlElement", "Element", "EventTarget"] }
 log = "0.4"
 console_error_panic_hook = "0.1"
 wasm-logger = "0.2"
@@ -19,7 +19,10 @@ wasm-logger = "0.2"
 glam = "0.29"
 
 wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu"] }
+raw-window-handle = { version = "0.6", features = ["wasm-bindgen-0-2"] }
 helio-render-v2 = { path = "../helio-render-v2", default-features = false }
+# needed for decoding spotlight/probe sprites in the wasm app
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # server-only dependencies – only needed when compiling the host binary
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

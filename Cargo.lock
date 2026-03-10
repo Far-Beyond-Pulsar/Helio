@@ -1317,8 +1317,10 @@ dependencies = [
  "console_error_panic_hook",
  "glam",
  "helio-render-v2",
+ "image",
  "log",
  "mime_guess",
+ "raw-window-handle",
  "tiny_http 0.10.0",
  "wasm-bindgen",
  "wasm-bindgen-cli",
@@ -2745,6 +2747,9 @@ name = "raw-window-handle"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
+dependencies = [
+ "wasm-bindgen",
+]
 
 [[package]]
 name = "raw-window-metal"
