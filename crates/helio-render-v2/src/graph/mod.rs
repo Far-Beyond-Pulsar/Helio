@@ -245,7 +245,7 @@ impl RenderGraph {
                 continue;
             }
 
-            let cpu_start = std::time::Instant::now();
+            let cpu_start = crate::time::Instant::now();
 
             // Allocate transient resources for this pass
             self.allocate_transient_resources(exec_idx, ctx)?;

@@ -4,7 +4,6 @@ use web_sys::HtmlCanvasElement;
 use std::sync::Arc;
 
 // math types used by Camera
-use glam::{Mat4, Vec3};
 
 // re-export log macros for convenience
 use log::{info, error};
@@ -16,17 +15,39 @@ use log::{info, error};
 pub fn start() -> Result<(), JsValue> {
     // install panic hook for better error messages
     console_error_panic_hook::set_once();
+    // also write any panic message into the document body so that it is
+    // visible even if the browser console is hidden.
+    std::panic::set_hook(Box::new(|info| {
+        console_error_panic_hook::hook(info);
+        let _ = display_error(&format!("panic: {}", info));
+    }));
     wasm_logger::init(wasm_logger::Config::default());
 
     info!("starting helio wasm app");
 
-    // run the async renderer logic
+    // run the async renderer logic and surface errors to the page
     spawn_local(async move {
         if let Err(e) = run().await {
-            error!("wasm run failure: {:?}", e);
+            let msg = format!("wasm run failure: {:?}", e);
+            error!("{}", msg);
+            let _ = display_error(&msg);
         }
     });
 
+    Ok(())
+}
+
+// helper that appends a paragraph to the document body containing the
+// provided message.  Used for surfacing errors that the console log might not
+// be visible to end users.
+fn display_error(msg: &str) -> Result<(), JsValue> {
+    let window = web_sys::window().unwrap();
+    let document = window.document().unwrap();
+    let body = document.body().unwrap();
+
+    let error_el = document.create_element("p")?;
+    error_el.set_text_content(Some(msg));
+    body.append_child(&error_el)?;
     Ok(())
 }
 
@@ -48,9 +69,9 @@ async fn run() -> Result<(), JsValue> {
         ..Default::default()
     });
 
-    // request_adapter returns a `Result<Option<Adapter>, _>` on wasm targets
-    // so handle both the error and the missing adapter case.  annotate the
-    // type to help inference later.
+    // request_adapter returns an Adapter or fails with an error.  Earlier
+    // versions returned `Option`, but the current API yields an error when no
+    // adapter is available, so the `map_err` above will trigger in that case.
     let adapter: wgpu::Adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -58,7 +79,7 @@ async fn run() -> Result<(), JsValue> {
             force_fallback_adapter: false,
         })
         .await
-        .map_err(|e| JsValue::from_str("Failed to request adapter"))?;
+        .map_err(|_e| JsValue::from_str("No WebGPU adapter available – check your browser support or flags"))?;
 
     let device_queue = adapter
         .request_device(&wgpu::DeviceDescriptor::default())
@@ -71,8 +92,8 @@ async fn run() -> Result<(), JsValue> {
         Arc::<wgpu::Device>::new(device.clone()),
         Arc::<wgpu::Queue>::new(queue.clone()),
         helio_render_v2::RendererConfig::new(
-            0,
-            0,
+            width,
+            height,
             wgpu::TextureFormat::Bgra8UnormSrgb,
             helio_render_v2::features::FeatureRegistry::new(),
         ),

@@ -42,15 +42,6 @@ fn main() {
             path.push("index.html");
         }
 
-        // helper that attaches a couple common headers to each response
-        fn add_common_headers(r: Response<std::io::Cursor<Vec<u8>>>) -> Response<std::io::Cursor<Vec<u8>>> {
-            if let Ok(h) = tiny_http::Header::from_bytes(&b"Permissions-Policy"[..], b"browsing-topics=()") {
-                r.with_header(h)
-            } else {
-                r
-            }
-        }
-
         // build response using in-memory bytes so we always return the same
         // `Response<Cursor<Vec<u8>>>` type and avoid mismatched generics.
         let response = if path.exists() {
@@ -61,12 +52,12 @@ fn main() {
                     resp.add_header(
                         tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_ref()).unwrap(),
                     );
-                    add_common_headers(resp)
+                    resp
                 }
-                Err(_) => add_common_headers(Response::from_data(Vec::new()).with_status_code(500)),
+                Err(_) => Response::from_data(Vec::new()).with_status_code(500),
             }
         } else {
-            add_common_headers(Response::from_data(Vec::new()).with_status_code(404))
+            Response::from_data(Vec::new()).with_status_code(404)
         };
         let _ = request.respond(response);
     }

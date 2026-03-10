@@ -46,6 +46,7 @@ use helio_live_portal::{
 };
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::time::Instant;
 use wgpu::util::DeviceExt;
 
 use self::uniforms::GlobalsUniform;
@@ -267,8 +268,8 @@ pub struct Renderer {
     frame_count: u64,
     width: u32,
     height: u32,
-    last_frame_start: Option<std::time::Instant>,
-    last_frame_end: Option<std::time::Instant>,
+    last_frame_start: Option<Instant>,
+    last_frame_end: Option<Instant>,
 
     /// GPU + CPU pass-level profiler.  `None` when TIMESTAMP_QUERY is unavailable.
     profiler: Option<GpuProfiler>,
@@ -691,7 +692,7 @@ impl Renderer {
     /// Registered objects (added via `add_object`) are included automatically —
     /// no other per-frame object submission is required at steady state.
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
-        let frame_start = std::time::Instant::now();
+        let frame_start = Instant::now();
         // Profiling is tied to the live portal; if the feature is disabled
         // or unavailable simply treat profiling as inactive.
         let profiling_active = {
@@ -927,8 +928,21 @@ impl Renderer {
             }
             // Pop the validation error scope and block until the GPU has processed
             // the frame — gives us the exact shader/buffer error before TDR fires.
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(e) = pollster::block_on(error_scope.pop()) {
                 panic!("[GPU VALIDATION ERROR] {}", e);
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // cannot block on wasm; spawn a local task to panic later if there is
+                // an error (should be rare in release builds).
+                use wasm_bindgen_futures::spawn_local;
+                let fut = error_scope.pop();
+                spawn_local(async move {
+                    if let Some(e) = fut.await {
+                        panic!("[GPU VALIDATION ERROR] {}", e);
+                    }
+                });
             }
         } // profile_scope!("Encode") drops here
 
@@ -957,7 +971,7 @@ impl Renderer {
         let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
 
         self.last_frame_start = Some(frame_start);
-        self.last_frame_end = Some(std::time::Instant::now());
+        self.last_frame_end = Some(Instant::now());
 
         // ── Live portal snapshot ──────────────────────────────────────────────
         #[cfg(feature = "live-portal")]

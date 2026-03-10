@@ -44,10 +44,34 @@ fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-env-changed=TARGET");
 
-    // if the wasm artifact isn't present yet, try to build it in a separate
-    // target-dir so we can run wasm-bindgen in a single `cargo build`
-    if !wasm_path.exists() && env::var("HELIO_BUILD_WASM_INNER").is_err() {
-        eprintln!("[build.rs] wasm module not found; invoking cargo to compile wasm");
+    // Always attempt to copy any existing outputs into the pkg directory.
+    // This ensures running `cargo build` without rebuilding still updates the
+    // artifacts (useful for incremental development or CI scripts).
+    {
+        // copy wasm if available
+        if wasm_path.exists() {
+            let _ = std::fs::create_dir_all(wasm_path.parent().unwrap());
+            let _ = std::fs::copy(&wasm_path, &wasm_path); // no-op but ensures path exists
+        }
+        // copy host server binary from the regular target directory as well
+        let host_trip = env::var("HOST").unwrap_or_else(|_| "".into());
+        let mut server_src = PathBuf::from(&target_dir);
+        server_src.push(&host_trip);
+        server_src.push(&profile);
+        let server_name = if cfg!(windows) { "helio-wasm-server.exe" } else { "helio-wasm-server" };
+        server_src.push(server_name);
+        if server_src.exists() {
+            std::fs::create_dir_all(&out_dir).ok();
+            let _ = std::fs::copy(&server_src, out_dir.join(server_name));
+        }
+    }
+
+    // Always rebuild the wasm library in an inner cargo invocation unless
+    // we're already the inner build.  This ensures that changes to any Rust
+    // source are reflected in the output even if the old wasm file already
+    // exists from a previous run.
+    if env::var("HELIO_BUILD_WASM_INNER").is_err() {
+        eprintln!("[build.rs] invoking inner cargo to compile wasm");
         let status = Command::new("cargo") // cargo build --release -p helio-wasm-app --target wasm32-unknown-unknown --lib --target-dir target/wasm-build
             .arg("build")
             .arg("--release")
@@ -64,8 +88,7 @@ fn main() {
         if !status.success() {
             panic!("inner cargo build failed");
         }
-        // now also build the host binary in the same secondary target directory;
-        // the profile/target triple will default to the host architecture.
+        // make sure native server also gets rebuilt in the inner directory
         let _ = Command::new("cargo")
             .arg("build")
             .arg("--release")
@@ -75,8 +98,8 @@ fn main() {
             .arg("target/wasm-build")
             .env("HELIO_BUILD_WASM_INNER", "1")
             .status();
-        // after inner build the wasm artifact should exist in the other folder;
-        // copy it to the normal target so future accesses work as expected
+
+        // copy the freshly-built wasm to the normal target path
         let mut src = PathBuf::from("target/wasm-build");
         src.push(&target);
         src.push(&profile);
@@ -85,7 +108,7 @@ fn main() {
             std::fs::create_dir_all(wasm_path.parent().unwrap()).unwrap();
             std::fs::copy(&src, &wasm_path).unwrap();
         }
-        // also copy the host server EXE into pkg for convenience
+        // also copy the host server exe into pkg
         let host_trip = env::var("HOST").unwrap_or_else(|_| "".into());
         let mut server_src = PathBuf::from("target/wasm-build");
         server_src.push(&host_trip);
@@ -117,52 +140,49 @@ fn main() {
         .arg("--target")
         .arg("web");
 
-    let status = match cmd.status() {
-        Ok(s) if s.success() => s,
-        _ => {
-            eprintln!("[build.rs] `wasm-bindgen` binary not found, trying `cargo run`...");
-            // attempt to run the CLI via cargo run; this works only if the user has
-            // added wasm-bindgen-cli as a workspace member.  if that also fails we
-            // attempt to install the tool.
-            let s = Command::new("cargo")
-                .arg("run")
-                .arg("--package")
-                .arg("wasm-bindgen-cli")
-                .arg("--")
-                .arg(&wasm_path)
-                .arg("--out-dir")
-                .arg(&out_dir)
-                .arg("--target")
-                .arg("web")
-                .status();
-            match s {
-                Ok(s) if s.success() => s,
-                _ => {
-                    eprintln!("[build.rs] cargo run failed; installing wasm-bindgen-cli...");
-                    let install = Command::new("cargo")
-                        .arg("install")
-                        .arg("--locked")
-                        .arg("wasm-bindgen-cli")
-                        .status()
-                        .expect("failed to install wasm-bindgen-cli");
-                    if !install.success() {
-                        panic!("unable to install wasm-bindgen-cli");
-                    }
-                    // retry the binary now that it should be on PATH
-                    let s2 = Command::new("wasm-bindgen")
-                        .arg(&wasm_path)
-                        .arg("--out-dir").arg(&out_dir)
-                        .arg("--target").arg("web")
-                        .status()
-                        .expect("failed to run wasm-bindgen after install");
-                    if !s2.success() {
-                        panic!("wasm-bindgen returned error after install");
-                    }
-                    s2
+    if !cmd.status().map(|s| s.success()).unwrap_or(false) {
+        eprintln!("[build.rs] `wasm-bindgen` binary not found, trying `cargo run`...");
+        // attempt to run the CLI via cargo run; this works only if the user has
+        // added wasm-bindgen-cli as a workspace member.  if that also fails we
+        // attempt to install the tool.
+        let s = Command::new("cargo")
+            .arg("run")
+            .arg("--package")
+            .arg("wasm-bindgen-cli")
+            .arg("--")
+            .arg(&wasm_path)
+            .arg("--out-dir")
+            .arg(&out_dir)
+            .arg("--target")
+            .arg("web")
+            .status();
+
+        match s {
+            Ok(s) if s.success() => (),
+            _ => {
+                eprintln!("[build.rs] cargo run failed; installing wasm-bindgen-cli...");
+                let install = Command::new("cargo")
+                    .arg("install")
+                    .arg("--locked")
+                    .arg("wasm-bindgen-cli")
+                    .status()
+                    .expect("failed to install wasm-bindgen-cli");
+                if !install.success() {
+                    panic!("unable to install wasm-bindgen-cli");
+                }
+                // retry the binary now that it should be on PATH
+                let s2 = Command::new("wasm-bindgen")
+                    .arg(&wasm_path)
+                    .arg("--out-dir").arg(&out_dir)
+                    .arg("--target").arg("web")
+                    .status()
+                    .expect("failed to run wasm-bindgen after install");
+                if !s2.success() {
+                    panic!("wasm-bindgen returned error after install");
                 }
             }
         }
-    };
+    }
 
     // generate a minimal index.html if one doesn't exist
     let mut index = out_dir.clone();

@@ -19,6 +19,8 @@ bitflags = "2.4"
 log = "0.4"
 thiserror = "1.0"
 petgraph = "0.6"
+# pollster is used for synchronous GPU error scope pop on native targets
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.3"
 
 # The live portal is a heavy networking dependency used only by the native
@@ -41,6 +43,8 @@ live-portal = ["helio-live-portal"]
 # feature for this so we pull getrandom directly.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
+js-sys = "0.3"
+wasm-bindgen-futures = "0.4"
 
 [build-dependencies]
 walkdir = "2.4"

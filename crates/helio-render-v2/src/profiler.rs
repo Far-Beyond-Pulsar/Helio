@@ -126,7 +126,7 @@ pub struct ScopeGuard {
     name: &'static str,
     idx: ScopeIdx,
     parent: Option<ScopeIdx>,
-    start: std::time::Instant,
+    start: crate::time::Instant,
 }
 
 impl ScopeGuard {
@@ -143,7 +143,7 @@ impl ScopeGuard {
             name,
             idx,
             parent,
-            start: std::time::Instant::now(),
+            start: crate::time::Instant::now(),
         }
     }
 }
