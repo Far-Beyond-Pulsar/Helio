@@ -3,6 +3,9 @@ use wasm_bindgen_futures::spawn_local;
 use web_sys::HtmlCanvasElement;
 use std::sync::Arc;
 
+// math types used by Camera
+use glam::{Mat4, Vec3};
+
 // re-export log macros for convenience
 use log::{info, error};
 
@@ -45,29 +48,39 @@ async fn run() -> Result<(), JsValue> {
         ..Default::default()
     });
 
-    let adapter = instance
+    // request_adapter returns a `Result<Option<Adapter>, _>` on wasm targets
+    // so handle both the error and the missing adapter case.  annotate the
+    // type to help inference later.
+    let adapter: wgpu::Adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
         })
         .await
-        .ok_or_else(|| JsValue::from_str("Failed to request adapter"))?;
+        .map_err(|e| JsValue::from_str("Failed to request adapter"))?;
 
-    let (device, queue) = adapter
-        .request_device(&wgpu::DeviceDescriptor::default(), None)
+    let device_queue = adapter
+        .request_device(&wgpu::DeviceDescriptor::default())
         .await
         .map_err(|e| JsValue::from_str(&format!("device error: {:?}", e)))?;
+    let (device, queue): (wgpu::Device, wgpu::Queue) = device_queue;
 
-    // construct a renderer with default config (no surface required)
+    // construct a renderer with minimal config (surface is unused)
     let mut renderer = helio_render_v2::Renderer::new(
-        Arc::new(device.clone()),
-        Arc::new(queue.clone()),
-        helio_render_v2::RendererConfig::default(),
+        Arc::<wgpu::Device>::new(device.clone()),
+        Arc::<wgpu::Queue>::new(queue.clone()),
+        helio_render_v2::RendererConfig::new(
+            0,
+            0,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+            helio_render_v2::features::FeatureRegistry::new(),
+        ),
     ).map_err(|e| JsValue::from_str(&format!("renderer init failed: {:?}", e)))?;
 
     // set up a trivial camera for rendering
-    let camera = helio_render_v2::Camera::default();
+    // create a trivial camera (identity view_proj)
+    let camera = helio_render_v2::Camera::new(glam::Mat4::IDENTITY, glam::Vec3::ZERO, 0.0);
 
     // create a tiny dummy texture target so we can call render
     let tex = device.create_texture(&wgpu::TextureDescriptor {

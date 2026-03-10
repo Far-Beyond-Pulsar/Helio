@@ -97,6 +97,11 @@ cargo run --example render_v2_sky --release
 cargo run --example render_v2_basic --release
 ```
 
+#### WASM example
+```bash
+cargo clean ; cargo build -p helio-wasm-app --target wasm32-unknown-unknown --release
+```
+
 ### Controls (sky example)
 | Key | Action |
 |---|---|

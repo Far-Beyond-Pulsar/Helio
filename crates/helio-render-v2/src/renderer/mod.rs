@@ -692,7 +692,18 @@ impl Renderer {
     /// no other per-frame object submission is required at steady state.
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         let frame_start = std::time::Instant::now();
-        let profiling_active = self.live_portal.is_some();
+        // Profiling is tied to the live portal; if the feature is disabled
+        // or unavailable simply treat profiling as inactive.
+        let profiling_active = {
+            #[cfg(feature = "live-portal")]
+            {
+                self.live_portal.is_some()
+            }
+            #[cfg(not(feature = "live-portal"))]
+            {
+                false
+            }
+        };
         crate::profiler::set_profiling_active(profiling_active);
         log::trace!("Rendering frame {}", self.frame_count);
 

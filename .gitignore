@@ -17,3 +17,4 @@ target/
 #.idea/
 .vscode/fastsearch/index-meta.json
 .vscode/fastsearch/index-terms.json
+/crates/helio-wasm-app/pkg
