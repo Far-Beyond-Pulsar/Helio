@@ -1,21 +1,19 @@
-//! Feature showcase example using helio-render-v2
+//! Common support code for a family of simple SDF demos.
 //!
-//! All scene content is driven by a `Scene` struct — no hardcoded lights
-//! or geometry in the renderer.
+//! The demos are all almost identical to `sdf_demo.rs` except for the
+//! way the `SdfFeature` is initialized and updated each frame.  This module
+//! exposes a generic `App` driven by a user-provided `SdfUpdater` object
+//! which handles those per-demo details.
 //!
-//! Controls:
-//!   WASD        — move forward/left/back/right
-//!   Space/Shift — move up/down
-//!   Mouse drag  — look around (click to grab cursor)
-//!   3           — toggle RC probe visualisation
-//!   4           — toggle GPU timing printout (stderr)
-//!   Escape      — release cursor / exit
-
-mod demo_portal;
+//! Individual binaries in `crates/examples` can then be a handful of lines:
+//!
+//! ```rust
+//! struct MyUpdater;
+//! impl SdfUpdater for MyUpdater { ... }
+//! fn main() { run_demo("my demo", MyUpdater::default()); }
+//! ```
 
 use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
-
-
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
@@ -25,8 +23,6 @@ use helio_render_v2::features::{
     SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
     TerrainConfig,
 };
-
-
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -34,81 +30,39 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
-
-
 use std::collections::HashSet;
-
-
 use std::sync::Arc;
-
-fn load_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-#[allow(dead_code)]
-fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../probe.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
 
 const RC_WORLD_MIN: [f32; 3] = [-3.5, -0.3, -3.5];
 const RC_WORLD_MAX: [f32; 3] = [3.5, 5.0, 3.5];
 
-fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
-    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
-    const COLORS: [[f32; 4]; 4] = [
-        [0.0, 1.0, 1.0, 0.85],
-        [0.0, 1.0, 0.0, 0.80],
-        [1.0, 1.0, 0.0, 0.75],
-        [1.0, 0.35, 0.0, 0.70],
-    ];
-    // screen_scale=true: sizes are angular (multiplied by distance), giving constant apparent size
-    const SIZES: [[f32; 2]; 4] = [
-        [0.035, 0.035],  // cascade 0 — finest (4096 probes) — tiny dots
-        [0.075, 0.075],  // cascade 1
-        [0.140, 0.140],  // cascade 2
-        [0.260, 0.260],  // cascade 3 — coarsest (8 probes) — large markers
-    ];
-    let mut out = Vec::new();
-    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
-        for i in 0..dim {
-            for j in 0..dim {
-                for k in 0..dim {
-                    let x = world_min[0] + (i as f32 + 0.5) / dim as f32 * (world_max[0] - world_min[0]);
-                    let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
-                    let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
-                    out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c])
-                        .with_screen_scale(true));
-                }
-            }
-        }
-    }
-    out
+pub trait SdfUpdater {
+    /// Called once during startup so the demo can add whatever edits it wants.
+    fn init(&mut self, sdf: &mut SdfFeature);
+
+    /// Called every frame with the current frame time (approx. seconds).
+    /// The updater may modify existing edits (via `set_edit`) or adjust
+    /// terrain parameters, boolean ops, etc.
+    fn update(&mut self, sdf: &mut SdfFeature, time: f32);
 }
 
-fn main() {
+/// Run a demo given a title string and an updater value.
+pub fn run_demo<U: SdfUpdater + 'static>(title: &str, updater: U) {
     env_logger::init();
-    log::info!("Starting Helio Render V2 Basic Example");
+    log::info!("Starting Helio Render V2 {}", title);
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
-    let mut app = App::new();
-
+    let mut app = DemoApp::new(title.to_string(), updater);
     event_loop.run_app(&mut app).expect("Event loop error");
 }
 
-struct App {
-    state: Option<AppState>,
+struct DemoApp<U: SdfUpdater> {
+    state: Option<DemoState<U>>,
+    updater: Option<U>, // stored until resumed() when moved into state
+    title: String,
 }
 
-struct AppState {
+struct DemoState<U: SdfUpdater> {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
@@ -120,15 +74,13 @@ struct AppState {
     cube3: GpuMesh,
     ground: GpuMesh,
 
-    // Free-camera state
     cam_pos:   glam::Vec3,
-    cam_yaw:   f32,   // radians, horizontal rotation
-    cam_pitch: f32,   // radians, vertical rotation (clamped)
+    cam_yaw:   f32,
+    cam_pitch: f32,
     keys:      HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    // Scene state
     light_p0_id: LightId,
     light_p1_id: LightId,
     light_p2_id: LightId,
@@ -137,15 +89,17 @@ struct AppState {
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
+
+    updater: U,
 }
 
-impl App {
-    fn new() -> Self {
-        Self { state: None }
+impl<U: SdfUpdater> DemoApp<U> {
+    fn new(title: String, updater: U) -> Self {
+        Self { state: None, updater: Some(updater), title }
     }
 }
 
-impl ApplicationHandler for App {
+impl<U: SdfUpdater + 'static> ApplicationHandler for DemoApp<U> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() {
             return;
@@ -155,7 +109,7 @@ impl ApplicationHandler for App {
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Helio Render V2 – Scene-Driven")
+                        .with_title(self.title.clone())
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("Failed to create window"),
@@ -184,7 +138,6 @@ impl ApplicationHandler for App {
                 required_limits: wgpu::Limits::default()
                     .using_minimum_supported_acceleration_structure_values(),
                 memory_hints: wgpu::MemoryHints::default(),
-                // SAFETY: We acknowledge EXPERIMENTAL_RAY_QUERY may have implementation bugs.
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 trace: wgpu::Trace::Off,
             },
@@ -220,91 +173,86 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
-        // Features — data-free: all content comes from the Scene
         let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        // build registry later with SDF included
 
-        // insert an SDF feature alongside the other registry features
+        // build registry later with SDF included
+        // create feature and let updater initialize it
         let mut sdf_feature = SdfFeature::new()
             .with_mode(SdfMode::ClipMap)
             .with_grid_dim(128)
-            .with_volume_bounds([-3.0, -1.0, -3.0], [3.0, 3.0, 3.0])
-            .with_terrain(TerrainConfig::rolling());
-        // simple SDF edit sphere
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Sphere,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.0, 0.0)),
-            params: SdfShapeParams::sphere(1.0),
-            blend_radius: 0.0,
-        });
+            .with_volume_bounds([-3.0, -1.0, -3.0], [3.0, 3.0, 3.0]);
 
-        // build registry including sdf
-        let feature_registry = FeatureRegistry::builder()
-            .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.2))
-            .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba.clone(), sprite_w, sprite_h).with_max_instances(5000))
-            .with_feature(
-                RadianceCascadesFeature::new()
-                    .with_world_bounds(RC_WORLD_MIN, RC_WORLD_MAX),
+        if let Some(mut u) = self.updater.take() {
+            u.init(&mut sdf_feature);
+            // move updater into state
+            let updater = u;
+
+            let feature_registry = FeatureRegistry::builder()
+                .with_feature(LightingFeature::new())
+                .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.2))
+                .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
+                .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba.clone(), sprite_w, sprite_h).with_max_instances(5000))
+                .with_feature(
+                    RadianceCascadesFeature::new()
+                        .with_world_bounds(RC_WORLD_MIN, RC_WORLD_MAX),
+                )
+                .with_feature(sdf_feature)
+                .build();
+
+            let mut renderer = Renderer::new(
+                device.clone(),
+                queue.clone(),
+                RendererConfig::new(size.width, size.height, surface_format, feature_registry),
             )
-            .with_feature(sdf_feature)
-            .build();
+            .expect("Failed to create renderer");
 
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            RendererConfig::new(size.width, size.height, surface_format, feature_registry),
-        )
-        .expect("Failed to create renderer");
+            let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
+            let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
+            let cube3  = renderer.create_mesh_cube([ 2.0, 0.3,  0.5], 0.3);
+            let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 5.0);
+            crate::demo_portal::enable_live_dashboard(&mut renderer);
 
-        let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
-        let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
-        let cube3  = renderer.create_mesh_cube([ 2.0, 0.3,  0.5], 0.3);
-        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 5.0);
-        demo_portal::enable_live_dashboard(&mut renderer);
+            renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);
+            renderer.add_object(&cube2,  None, glam::Mat4::IDENTITY);
+            renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
+            renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
 
-        renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&cube2,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
+            let p0_init = [0.0f32, 2.2, 0.0];
+            let p1 = [-3.5f32, 2.0, -1.5];
+            let p2 = [3.5f32, 1.5, 1.5];
+            let light_p0_id = renderer.add_light(SceneLight::point(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0));
+            let light_p1_id = renderer.add_light(SceneLight::point(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
+            let light_p2_id = renderer.add_light(SceneLight::point(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
 
-        // p0 bobs up/down (animated), p1 and p2 are static
-        let p0_init = [0.0f32, 2.2, 0.0];
-        let p1 = [-3.5f32, 2.0, -1.5];
-        let p2 = [3.5f32, 1.5, 1.5];
-        let light_p0_id = renderer.add_light(SceneLight::point(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0));
-        let light_p1_id = renderer.add_light(SceneLight::point(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
-        let light_p2_id = renderer.add_light(SceneLight::point(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
+            let mut billboard_ids = Vec::new();
+            billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p0_init, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
+            billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
+            billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
 
-        let mut billboard_ids = Vec::new();
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p0_init, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
-
-        self.state = Some(AppState {
-            window,
-            surface,
-            device,
-            surface_format,
-            renderer,
-            last_frame: std::time::Instant::now(),
-            cube1, cube2, cube3, ground,
-            cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
-            cam_yaw:   0.0,         // yaw=0 looks down -Z toward the scene
-            cam_pitch: -0.2,
-            keys:      HashSet::new(),
-            cursor_grabbed: false,
-            mouse_delta: (0.0, 0.0),
-            light_p0_id,
-            light_p1_id,
-            light_p2_id,
-            billboard_ids,
-            probe_vis: false,
-            sprite_w,
-            sprite_h,
-        });
+            self.state = Some(DemoState {
+                window,
+                surface,
+                device,
+                surface_format,
+                renderer,
+                last_frame: std::time::Instant::now(),
+                cube1, cube2, cube3, ground,
+                cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
+                cam_yaw:   0.0,
+                cam_pitch: -0.2,
+                keys:      HashSet::new(),
+                cursor_grabbed: false,
+                mouse_delta: (0.0, 0.0),
+                light_p0_id,
+                light_p1_id,
+                light_p2_id,
+                billboard_ids,
+                probe_vis: false,
+                sprite_w,
+                sprite_h,
+                updater,
+            });
+        }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -325,7 +273,6 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if state.cursor_grabbed {
-                    // First Escape releases the cursor
                     state.cursor_grabbed = false;
                     let _ = state.window.set_cursor_grab(CursorGrabMode::None);
                     state.window.set_cursor_visible(true);
@@ -334,7 +281,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── Probe visualization toggle ────────────────────────────────────
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
@@ -362,7 +308,6 @@ impl ApplicationHandler for App {
                         state.billboard_ids.push(state.renderer.add_billboard(b));
                     }
                 } else {
-                    // Re-register light marker billboards (p0 position at init; will be updated per-frame)
                     let p0 = [0.0f32, 2.2, 0.0];
                     let p1 = [-3.5f32, 2.0, -1.5];
                     let p2 = [3.5f32, 1.5, 1.5];
@@ -371,17 +316,6 @@ impl ApplicationHandler for App {
                     state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
                 }
             }
-            // ── Live profiler portal ──────────────────────────────────────────
-            WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Digit4),
-                    ..
-                },
-                ..
-            } => { let _ = state.renderer.start_live_portal_default(); }
-
-            // ── Keyboard held state ───────────────────────────────────────────
             WindowEvent::KeyboardInput {
                 event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. },
                 ..
@@ -392,14 +326,12 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── Mouse button — grab cursor on click ───────────────────────────
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    // Try confined first, fall back to locked
                     let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
@@ -410,7 +342,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // ── Window resize ─────────────────────────────────────────────────
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 let config = wgpu::SurfaceConfiguration {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -454,18 +385,15 @@ impl ApplicationHandler for App {
     }
 }
 
-impl AppState {
+impl<U: SdfUpdater> DemoState<U> {
     fn render(&mut self, dt: f32) {
-        // ── Camera movement ────────────────────────────────────────────────────
         const SPEED: f32 = 5.0;
         const LOOK_SENS: f32 = 0.002;
 
-        // Apply mouse look — yaw left/right, pitch up/down (non-inverted)
         self.cam_yaw   += self.mouse_delta.0 * LOOK_SENS;
         self.cam_pitch  = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
 
-        // Standard FPS basis: yaw=0 looks down -Z
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
@@ -483,6 +411,11 @@ impl AppState {
         let aspect = size.width as f32 / size.height.max(1) as f32;
         let time = self.renderer.frame_count() as f32 * 0.016;
 
+        // allow updater to adjust edits
+        if let Some(sdf) = self.renderer.get_feature_mut::<SdfFeature>("sdf") {
+            self.updater.update(sdf, time);
+        }
+
         let camera = Camera::perspective(
             self.cam_pos,
             self.cam_pos + forward,
@@ -494,14 +427,12 @@ impl AppState {
             time,
         );
 
-        // ── Acquire surface ────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => { log::warn!("Surface error: {:?}", e); return; }
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // p0 bobs up/down per-frame; update its light and billboard position
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
         self.renderer.update_light(self.light_p0_id, SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
         if !self.probe_vis && !self.billboard_ids.is_empty() {
@@ -515,3 +446,53 @@ impl AppState {
     }
 }
 
+// convenience helpers copied from sdf_move earlier
+
+fn load_sprite() -> (Vec<u8>, u32, u32) {
+    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
+
+#[allow(dead_code)]
+fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
+    let img = image::load_from_memory(include_bytes!("../../probe.png"))
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
+
+fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
+    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
+    const COLORS: [[f32; 4]; 4] = [
+        [0.0, 1.0, 1.0, 0.85],
+        [0.0, 1.0, 0.0, 0.80],
+        [1.0, 1.0, 0.0, 0.75],
+        [1.0, 0.35, 0.0, 0.70],
+    ];
+    const SIZES: [[f32; 2]; 4] = [
+        [0.035, 0.035],
+        [0.075, 0.075],
+        [0.140, 0.140],
+        [0.260, 0.260],
+    ];
+    let mut out = Vec::new();
+    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
+        for i in 0..dim {
+            for j in 0..dim {
+                for k in 0..dim {
+                    let x = world_min[0] + (i as f32 + 0.5) / dim as f32 * (world_max[0] - world_min[0]);
+                    let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
+                    let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
+                    out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
+                        .with_color(COLORS[c])
+                        .with_screen_scale(true));
+                }
+            }
+        }
+    }
+    out
+}
