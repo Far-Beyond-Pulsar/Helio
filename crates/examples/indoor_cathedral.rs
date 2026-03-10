@@ -224,6 +224,11 @@ impl ApplicationHandler for App {
             experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
             trace: wgpu::Trace::Off,
         })).expect("device");
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
+        }));
+        let info = adapter.get_info();
+        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
 
@@ -253,14 +258,14 @@ impl ApplicationHandler for App {
         ).expect("renderer");
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
-        let floor         = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 11.0);
-        let nave_ceiling  = GpuMesh::rect3d(&device, [0.0, 21.0,  0.0], [6.0, 0.18, 28.0]);
-        let aisle_ceil_l  = GpuMesh::rect3d(&device, [-8.5, 11.0, 0.0], [2.5, 0.15, 28.0]);
-        let aisle_ceil_r  = GpuMesh::rect3d(&device, [ 8.5, 11.0, 0.0], [2.5, 0.15, 28.0]);
-        let wall_left_outer  = GpuMesh::rect3d(&device, [-11.0, 7.0,  0.0], [0.25, 7.0, 28.0]);
-        let wall_right_outer = GpuMesh::rect3d(&device, [ 11.0, 7.0,  0.0], [0.25, 7.0, 28.0]);
-        let wall_front  = GpuMesh::rect3d(&device, [0.0, 10.5, 28.0],  [11.0, 10.5, 0.25]);
-        let wall_back   = GpuMesh::rect3d(&device, [0.0, 10.5, -28.0], [11.0, 10.5, 0.25]);
+        let floor         = renderer.create_mesh_plane([0.0, 0.0, 0.0], 11.0);
+        let nave_ceiling  = renderer.create_mesh_rect3d([0.0, 21.0,  0.0], [6.0, 0.18, 28.0]);
+        let aisle_ceil_l  = renderer.create_mesh_rect3d([-8.5, 11.0, 0.0], [2.5, 0.15, 28.0]);
+        let aisle_ceil_r  = renderer.create_mesh_rect3d([ 8.5, 11.0, 0.0], [2.5, 0.15, 28.0]);
+        let wall_left_outer  = renderer.create_mesh_rect3d([-11.0, 7.0,  0.0], [0.25, 7.0, 28.0]);
+        let wall_right_outer = renderer.create_mesh_rect3d([ 11.0, 7.0,  0.0], [0.25, 7.0, 28.0]);
+        let wall_front  = renderer.create_mesh_rect3d([0.0, 10.5, 28.0],  [11.0, 10.5, 0.25]);
+        let wall_back   = renderer.create_mesh_rect3d([0.0, 10.5, -28.0], [11.0, 10.5, 0.25]);
 
         // Colonnade: short wall segments between columns (between column z-positions)
         // 7 segments per side: before first col, between each pair, after last col
@@ -273,44 +278,44 @@ impl ApplicationHandler for App {
         let colonnade_l: Vec<GpuMesh> = col_z_all.windows(2).map(|w| {
             let mid_z = (w[0] + w[1]) * 0.5;
             let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
-            GpuMesh::rect3d(&device, [-5.5, 5.5, mid_z], [0.25, 5.5, half_len.max(0.1)])
+            renderer.create_mesh_rect3d([-5.5, 5.5, mid_z], [0.25, 5.5, half_len.max(0.1)])
         }).collect();
         let colonnade_r: Vec<GpuMesh> = col_z_all.windows(2).map(|w| {
             let mid_z = (w[0] + w[1]) * 0.5;
             let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-            GpuMesh::rect3d(&device, [ 5.5, 5.5, mid_z], [0.25, 5.5, half_len.max(0.1)])
+            renderer.create_mesh_rect3d([ 5.5, 5.5, mid_z], [0.25, 5.5, half_len.max(0.1)])
         }).collect();
 
         // Columns: 0.65 m square, 20 m tall, at x = ±5.5
         let columns: Vec<GpuMesh> = COLUMN_Z.iter().flat_map(|&z| {
             [
-                GpuMesh::rect3d(&device, [-5.5, 10.0, z], [0.65, 10.0, 0.65]),
-                GpuMesh::rect3d(&device, [ 5.5, 10.0, z], [0.65, 10.0, 0.65]),
+                renderer.create_mesh_rect3d([-5.5, 10.0, z], [0.65, 10.0, 0.65]),
+                renderer.create_mesh_rect3d([ 5.5, 10.0, z], [0.65, 10.0, 0.65]),
             ]
         }).collect();
 
         // Altar: at far end (z = -26)
-        let altar_step   = GpuMesh::rect3d(&device, [0.0, 0.2,  -24.5], [5.5, 0.20, 3.0]);
-        let altar_plinth = GpuMesh::rect3d(&device, [0.0, 0.65, -25.5], [3.0, 0.45, 1.5]);
-        let cross_vert   = GpuMesh::rect3d(&device, [0.0, 3.2,  -25.8], [0.18, 2.2, 0.18]);
-        let cross_horiz  = GpuMesh::rect3d(&device, [0.0, 4.5,  -25.8], [1.0,  0.18, 0.18]);
+        let altar_step   = renderer.create_mesh_rect3d([0.0, 0.2,  -24.5], [5.5, 0.20, 3.0]);
+        let altar_plinth = renderer.create_mesh_rect3d([0.0, 0.65, -25.5], [3.0, 0.45, 1.5]);
+        let cross_vert   = renderer.create_mesh_rect3d([0.0, 3.2,  -25.8], [0.18, 2.2, 0.18]);
+        let cross_horiz  = renderer.create_mesh_rect3d([0.0, 4.5,  -25.8], [1.0,  0.18, 0.18]);
 
         // Pews: long narrow rect3d per row, 6 rows each side
         let pews_left: Vec<GpuMesh> = (0..PEW_COUNT).map(|i| {
             let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-            GpuMesh::rect3d(&device, [-3.2, 0.45, z], [1.5, 0.45, 0.5])
+            renderer.create_mesh_rect3d([-3.2, 0.45, z], [1.5, 0.45, 0.5])
         }).collect();
         let pews_right: Vec<GpuMesh> = (0..PEW_COUNT).map(|i| {
             let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-            GpuMesh::rect3d(&device, [ 3.2, 0.45, z], [1.5, 0.45, 0.5])
+            renderer.create_mesh_rect3d([ 3.2, 0.45, z], [1.5, 0.45, 0.5])
         }).collect();
 
         // Chandeliers: vertical chain + horizontal ring at each Z
         let chandelier_chains: Vec<GpuMesh> = CHANDELIER_Z.iter().map(|&z| {
-            GpuMesh::rect3d(&device, [0.0, 17.5, z], [0.06, 2.0, 0.06])
+            renderer.create_mesh_rect3d([0.0, 17.5, z], [0.06, 2.0, 0.06])
         }).collect();
         let chandelier_rings: Vec<GpuMesh> = CHANDELIER_Z.iter().map(|&z| {
-            GpuMesh::rect3d(&device, [0.0, 15.2, z], [1.2, 0.12, 1.2])
+            renderer.create_mesh_rect3d([0.0, 15.2, z], [1.2, 0.12, 1.2])
         }).collect();
         demo_portal::enable_live_dashboard(&mut renderer);
 

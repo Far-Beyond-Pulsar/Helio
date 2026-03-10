@@ -1048,6 +1048,7 @@ dependencies = [
  "helio-live-portal",
  "log",
  "petgraph",
+ "pollster",
  "rand 0.8.5",
  "regex",
  "thiserror 1.0.69",

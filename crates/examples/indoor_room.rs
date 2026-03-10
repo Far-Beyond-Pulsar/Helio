@@ -175,6 +175,11 @@ impl ApplicationHandler for App {
             trace: wgpu::Trace::Off,
         })).expect("device");
 
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
+        }));
+        let info = adapter.get_info();
+        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
 
@@ -207,17 +212,17 @@ impl ApplicationHandler for App {
         ).expect("renderer");
 
         // Room: 8×8 footprint, 3 m tall
-        let floor    = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 4.0);
-        let ceiling  = GpuMesh::plane(&device, [0.0, 3.0, 0.0], 4.0);
+        let floor    = renderer.create_mesh_plane([0.0, 0.0, 0.0], 4.0);
+        let ceiling  = renderer.create_mesh_plane([0.0, 3.0, 0.0], 4.0);
         // Walls as thin rect3d slabs
-        let wall_n   = GpuMesh::rect3d(&device, [ 0.0, 1.5, -4.0], [4.0, 1.5, 0.05]);
-        let wall_s   = GpuMesh::rect3d(&device, [ 0.0, 1.5,  4.0], [4.0, 1.5, 0.05]);
-        let wall_e   = GpuMesh::rect3d(&device, [ 4.0, 1.5,  0.0], [0.05, 1.5, 4.0]);
-        let wall_w   = GpuMesh::rect3d(&device, [-4.0, 1.5,  0.0], [0.05, 1.5, 4.0]);
+        let wall_n   = renderer.create_mesh_rect3d([ 0.0, 1.5, -4.0], [4.0, 1.5, 0.05]);
+        let wall_s   = renderer.create_mesh_rect3d([ 0.0, 1.5,  4.0], [4.0, 1.5, 0.05]);
+        let wall_e   = renderer.create_mesh_rect3d([ 4.0, 1.5,  0.0], [0.05, 1.5, 4.0]);
+        let wall_w   = renderer.create_mesh_rect3d([-4.0, 1.5,  0.0], [0.05, 1.5, 4.0]);
         // Simple furniture: table, bookcase, sofa
-        let table    = GpuMesh::rect3d(&device, [ 1.5, 0.4,  1.5], [0.8, 0.4, 0.5]);
-        let bookcase = GpuMesh::rect3d(&device, [-3.4, 1.0, -2.5], [0.3, 1.0, 1.2]);
-        let sofa     = GpuMesh::rect3d(&device, [-1.5, 0.35,  2.5], [1.2, 0.35, 0.5]);
+        let table    = renderer.create_mesh_rect3d([ 1.5, 0.4,  1.5], [0.8, 0.4, 0.5]);
+        let bookcase = renderer.create_mesh_rect3d([-3.4, 1.0, -2.5], [0.3, 1.0, 1.2]);
+        let sofa     = renderer.create_mesh_rect3d([-1.5, 0.35,  2.5], [1.2, 0.35, 0.5]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&floor,    None, glam::Mat4::IDENTITY);

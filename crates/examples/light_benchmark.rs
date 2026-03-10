@@ -228,6 +228,11 @@ impl ApplicationHandler for App {
             },
         )).expect("device");
 
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
+        }));
+        let info = adapter.get_info();
+        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
         let caps   = surface.get_capabilities(&adapter);
@@ -266,14 +271,13 @@ impl ApplicationHandler for App {
         )).expect("renderer");
 
         // ── Geometry ──────────────────────────────────────────────────────────
-        let floor = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 20.0);
+        let floor = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
 
         // 6 × 6 = 36 pillars, spaced 4 m apart (–10 … +10 m on each axis)
         let mut pillars = Vec::new();
         for ix in -2..=3i32 {
             for iz in -2..=3i32 {
-                pillars.push(GpuMesh::cube(
-                    &device,
+                pillars.push(renderer.create_mesh_cube(
                     [ix as f32 * 4.0, 0.5, iz as f32 * 4.0],
                     0.4,
                 ));
@@ -292,7 +296,7 @@ impl ApplicationHandler for App {
             ([  6.0, 0.3,  17.0], 0.25), ([ -6.0, 0.3, -17.0], 0.25),
         ];
         let crates = crate_defs.iter()
-            .map(|&(pos, hs)| GpuMesh::cube(&device, pos, hs))
+            .map(|&(pos, hs)| renderer.create_mesh_cube(pos, hs))
             .collect();
         demo_portal::enable_live_dashboard(&mut renderer);
 

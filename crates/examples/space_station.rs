@@ -190,6 +190,11 @@ impl ApplicationHandler for App {
                 trace: wgpu::Trace::Off,
             },
         )).expect("device");
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
+        }));
+        let info = adapter.get_info();
+        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
 
@@ -220,7 +225,7 @@ impl ApplicationHandler for App {
             size.width, size.height, fmt, features
         )).expect("renderer");
 
-        let meshes = build_station(&device);
+        let meshes = build_station(&mut renderer);
         log::info!("Space station: {} meshes", meshes.len());
         demo_portal::enable_live_dashboard(&mut renderer);
 
@@ -499,13 +504,13 @@ impl AppState {
 
 // ── Station geometry builder ──────────────────────────────────────────────────
 
-fn build_station(dev: &Arc<wgpu::Device>) -> Vec<GpuMesh> {
+fn build_station(renderer: &mut Renderer) -> Vec<GpuMesh> {
     let mut m = Vec::<GpuMesh>::new();
 
     // helper: push a rect3d
     macro_rules! box3 {
         ($cx:expr, $cy:expr, $cz:expr, $hx:expr, $hy:expr, $hz:expr) => {
-            m.push(GpuMesh::rect3d(dev, [$cx, $cy, $cz], [$hx, $hy, $hz]))
+            m.push(renderer.create_mesh_rect3d([$cx, $cy, $cz], [$hx, $hy, $hz]))
         };
     }
 

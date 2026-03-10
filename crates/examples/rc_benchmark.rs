@@ -154,7 +154,8 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
+            backends: wgpu::Backends::VULKAN,
+            flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION | wgpu::InstanceFlags::DEBUG,
             ..Default::default()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
@@ -178,6 +179,11 @@ impl ApplicationHandler for App {
                 trace: wgpu::Trace::Off,
             },
         )).expect("device");
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
+        }));
+        let info = adapter.get_info();
+        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
 
@@ -218,22 +224,22 @@ impl ApplicationHandler for App {
         )).expect("renderer");
 
         // ── Cornell-box geometry (12 m room) ──────────────────────────────────
-        let floor   = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 5.0);
-        let ceiling = GpuMesh::rect3d(&device, [0.0, 5.0, 0.0], [5.0, 0.0, 5.0]);
+        let floor   = renderer.create_mesh_plane([0.0, 0.0, 0.0], 5.0);
+        let ceiling = renderer.create_mesh_rect3d([0.0, 5.0, 0.0], [5.0, 0.0, 5.0]);
 
         // Walls: 5×5 m quads using rect3d with rotations
-        let wall_n = GpuMesh::rect3d(&device, [0.0, 2.5, -5.0], [5.0, 2.5, 0.0]);  // back
-        let wall_s = GpuMesh::rect3d(&device, [0.0, 2.5,  5.0], [5.0, 2.5, 0.0]);  // front
-        let wall_e = GpuMesh::rect3d(&device, [ 5.0, 2.5, 0.0], [0.0, 2.5, 5.0]);  // right
-        let wall_w = GpuMesh::rect3d(&device, [-5.0, 2.5, 0.0], [0.0, 2.5, 5.0]);  // left
+        let wall_n = renderer.create_mesh_rect3d([0.0, 2.5, -5.0], [5.0, 2.5, 0.0]);  // back
+        let wall_s = renderer.create_mesh_rect3d([0.0, 2.5,  5.0], [5.0, 2.5, 0.0]);  // front
+        let wall_e = renderer.create_mesh_rect3d([ 5.0, 2.5, 0.0], [0.0, 2.5, 5.0]);  // right
+        let wall_w = renderer.create_mesh_rect3d([-5.0, 2.5, 0.0], [0.0, 2.5, 5.0]);  // left
 
         // A few cubes scattered in the room to show off light bounces
         let cubes = vec![
-            GpuMesh::cube(&device, [-2.0, 0.5, -2.0], 0.5),
-            GpuMesh::cube(&device, [ 2.0, 0.5,  2.0], 0.5),
-            GpuMesh::cube(&device, [ 0.0, 0.7,  0.0], 0.7),
-            GpuMesh::cube(&device, [-3.0, 1.0,  1.5], 1.0),
-            GpuMesh::cube(&device, [ 3.0, 0.6, -1.5], 0.6),
+            renderer.create_mesh_cube([-2.0, 0.5, -2.0], 0.5),
+            renderer.create_mesh_cube([ 2.0, 0.5,  2.0], 0.5),
+            renderer.create_mesh_cube([ 0.0, 0.7,  0.0], 0.7),
+            renderer.create_mesh_cube([-3.0, 1.0,  1.5], 1.0),
+            renderer.create_mesh_cube([ 3.0, 0.6, -1.5], 0.6),
         ];
         demo_portal::enable_live_dashboard(&mut renderer);
 

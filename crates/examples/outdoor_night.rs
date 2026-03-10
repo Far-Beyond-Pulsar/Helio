@@ -176,6 +176,11 @@ impl ApplicationHandler for App {
             trace: wgpu::Trace::Off,
         })).expect("device");
 
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
+        }));
+        let info = adapter.get_info();
+        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
 
@@ -207,20 +212,20 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
-        let ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 20.0);
+        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
 
         // Buildings placed asymmetrically around the plaza
-        let bld_a = GpuMesh::rect3d(&device, [ 8.0, 7.0, -6.0],  [2.5, 7.0, 2.5]); // tall
-        let bld_b = GpuMesh::rect3d(&device, [-7.0, 4.5, -5.0],  [3.0, 4.5, 2.0]); // medium-left
-        let bld_c = GpuMesh::rect3d(&device, [ 6.0, 3.0,  6.0],  [2.0, 3.0, 3.0]); // medium-right
-        let bld_d = GpuMesh::rect3d(&device, [-5.0, 1.5,  5.0],  [3.5, 1.5, 2.5]); // short squat
-        let bld_e = GpuMesh::rect3d(&device, [ 0.0, 9.5, -14.0], [4.0, 9.5, 3.0]); // bg tower
+        let bld_a = renderer.create_mesh_rect3d([ 8.0, 7.0, -6.0],  [2.5, 7.0, 2.5]); // tall
+        let bld_b = renderer.create_mesh_rect3d([-7.0, 4.5, -5.0],  [3.0, 4.5, 2.0]); // medium-left
+        let bld_c = renderer.create_mesh_rect3d([ 6.0, 3.0,  6.0],  [2.0, 3.0, 3.0]); // medium-right
+        let bld_d = renderer.create_mesh_rect3d([-5.0, 1.5,  5.0],  [3.5, 1.5, 2.5]); // short squat
+        let bld_e = renderer.create_mesh_rect3d([ 0.0, 9.5, -14.0], [4.0, 9.5, 3.0]); // bg tower
 
         // Thin poles + small cap for each streetlamp
-        let lamp_pole_a = GpuMesh::rect3d(&device, [-5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]);
-        let lamp_pole_b = GpuMesh::rect3d(&device, [ 5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]);
-        let lamp_pole_c = GpuMesh::rect3d(&device, [-5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
-        let lamp_pole_d = GpuMesh::rect3d(&device, [ 5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
+        let lamp_pole_a = renderer.create_mesh_rect3d([-5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]);
+        let lamp_pole_b = renderer.create_mesh_rect3d([ 5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]);
+        let lamp_pole_c = renderer.create_mesh_rect3d([-5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
+        let lamp_pole_d = renderer.create_mesh_rect3d([ 5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&ground,      None, glam::Mat4::IDENTITY);

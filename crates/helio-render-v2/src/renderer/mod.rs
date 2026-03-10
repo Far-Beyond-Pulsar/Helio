@@ -16,7 +16,7 @@ use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceC
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
-use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
+use crate::mesh::{GpuMesh, DrawCall, PackedVertex};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight, LightId, BillboardId};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
@@ -24,7 +24,8 @@ use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
 use crate::profiler::GpuProfiler;
 use crate::gpu_transfer;
-use crate::gpu_scene::GpuScene;
+use crate::gpu_scene::{GpuScene, MaterialRange};
+use crate::buffer_pool::GpuBufferPool;
 use crate::{Result, Error};
 use helio_live_portal::{
     LivePortalHandle,
@@ -38,7 +39,6 @@ use helio_live_portal::{
     PortalSceneBillboard,
     PortalSceneCamera,
 };
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
 use wgpu::util::DeviceExt;
@@ -247,6 +247,16 @@ pub struct Renderer {
     /// GPU-resident light + shadow matrix buffers (dirty-bit delta uploads).
     gpu_light_scene: gpu_light_scene::GpuLightScene,
 
+    // ── GPU-driven indirect rendering ─────────────────────────────────────
+    /// Unified geometry pool (128 MB VB + 64 MB IB). All pool-allocated meshes share these buffers.
+    buffer_pool: GpuBufferPool,
+    /// Indirect dispatch pass (held here, NOT in graph — called manually before graph).
+    indirect_dispatch: IndirectDispatchPass,
+    /// Indirect draw command buffer written by IndirectDispatchPass each frame. Shared with geometry passes.
+    shared_indirect_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
+    /// Per-material draw ranges in the indirect buffer (opaque). Shared with geometry passes.
+    shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+
     // Frame state
     frame_count: u64,
     width: u32,
@@ -314,6 +324,47 @@ impl Renderer {
 
     pub fn clear_debug_shapes(&self) {
         self.debug_shapes.lock().unwrap().clear();
+    }
+
+    // ── Pool mesh creation ────────────────────────────────────────────────────
+
+    /// Upload raw geometry into the unified geometry pool.
+    ///
+    /// Returns a pool-allocated `GpuMesh` when the pool has capacity.
+    /// When the pool has reached the VRAM cap, falls back transparently to a
+    /// standalone sys-mem buffer (`pool_allocated = false`); a throttled warning
+    /// is emitted by the pool.  Callers never need to change.
+    pub fn create_mesh(&mut self, vertices: &[PackedVertex], indices: &[u32]) -> GpuMesh {
+        if let Some(mesh) = GpuMesh::upload_to_pool(&self.queue, &mut self.buffer_pool, vertices, indices) {
+            return mesh;
+        }
+        // Pool at VRAM cap — fall back to per-mesh sys-mem buffers.
+        GpuMesh::upload_standalone(&self.device, vertices, indices)
+    }
+
+    pub fn create_mesh_unit_cube(&mut self) -> GpuMesh {
+        let (v, i) = GpuMesh::cube_data([0.0, 0.0, 0.0], 0.5);
+        self.create_mesh(&v, &i)
+    }
+
+    pub fn create_mesh_cube(&mut self, center: [f32; 3], half_size: f32) -> GpuMesh {
+        let (v, i) = GpuMesh::cube_data(center, half_size);
+        self.create_mesh(&v, &i)
+    }
+
+    pub fn create_mesh_plane(&mut self, center: [f32; 3], half_extent: f32) -> GpuMesh {
+        let (v, i) = GpuMesh::plane_data(center, half_extent);
+        self.create_mesh(&v, &i)
+    }
+
+    pub fn create_mesh_rect3d(&mut self, center: [f32; 3], half_extents: [f32; 3]) -> GpuMesh {
+        let (v, i) = GpuMesh::rect3d_data(center, half_extents);
+        self.create_mesh(&v, &i)
+    }
+
+    pub fn create_mesh_sphere(&mut self, center: [f32; 3], radius: f32, subdivisions: u32) -> GpuMesh {
+        let (v, i) = GpuMesh::sphere_data(center, radius, subdivisions);
+        self.create_mesh(&v, &i)
     }
 
     // ── Feature enable/disable ────────────────────────────────────────────────
@@ -659,6 +710,36 @@ impl Renderer {
             }
         }
 
+        // ── Step 2b: flush GPU draw calls + run indirect dispatch ────────────
+        {
+            // Ensure draw lists are rebuilt (so material_ranges is current).
+            self.gpu_scene.draw_lists();
+
+            // Upload GPU draw call buffer (sorted by material_slot).
+            self.gpu_scene.flush_draw_calls(&self.device, &self.queue);
+            let draw_count = self.gpu_scene.draw_call_count;
+
+            // Update shared material ranges (for geometry passes).
+            {
+                let mut ranges = self.shared_material_ranges.lock().unwrap();
+                ranges.clear();
+                ranges.extend_from_slice(&self.gpu_scene.material_ranges);
+            }
+
+            // Run IndirectDispatchPass: GPU culls + writes indirect commands.
+            if draw_count > 0 {
+                let new_buf = self.indirect_dispatch.update(
+                    &self.device,
+                    self.gpu_scene.draw_call_buffer(),
+                    &self.camera_buffer,
+                    draw_count,
+                )?;
+                *self.shared_indirect_buf.lock().unwrap() = new_buf;
+            } else {
+                *self.shared_indirect_buf.lock().unwrap() = None;
+            }
+        }
+
         // ── Preparation: camera upload, feature prepare, globals, debug batch ──
         {
             crate::profile_scope!("Prep");
@@ -702,10 +783,12 @@ impl Renderer {
             }
         } // profile_scope!("Prep") drops here
 
-        // ── Encoder + pre-AA clear ────────────────────────────────────────────
+        // ── Indirect compute dispatch + render passes ─────────────────────────
+        let error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
+        self.indirect_dispatch.dispatch(&self.queue, &mut encoder);
 
         let graph_target = match self.aa_mode {
             AntiAliasingMode::None | AntiAliasingMode::Msaa(_) => target,
@@ -812,6 +895,11 @@ impl Renderer {
             {
                 crate::profile_scope!("Encode::Submit");
                 self.queue.submit(Some(cmd_buf));
+            }
+            // Pop the validation error scope and block until the GPU has processed
+            // the frame — gives us the exact shader/buffer error before TDR fires.
+            if let Some(e) = pollster::block_on(error_scope.pop()) {
+                panic!("[GPU VALIDATION ERROR] {}", e);
             }
         } // profile_scope!("Encode") drops here
 

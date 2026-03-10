@@ -98,6 +98,11 @@ impl ApplicationHandler for App {
             },
         )).expect("device");
 
+        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
+        }));
+        let info = adapter.get_info();
+        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
@@ -135,19 +140,19 @@ impl ApplicationHandler for App {
             .expect("Failed to create renderer");
 
         // Create geometry - a Cornell box-like scene with various objects
-        let floor = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 10.0);
+        let floor = renderer.create_mesh_plane([0.0, 0.0, 0.0], 10.0);
         
         // Create spheres at different heights to showcase AO
         let spheres = vec![
-            GpuMesh::sphere(&device, [0.0, 0.5, 0.0], 0.5, 32),
-            GpuMesh::sphere(&device, [-2.0, 0.3, 1.0], 0.3, 24),
-            GpuMesh::sphere(&device, [2.0, 0.4, -1.0], 0.4, 24),
+            renderer.create_mesh_sphere([0.0, 0.5, 0.0], 0.5, 32),
+            renderer.create_mesh_sphere([-2.0, 0.3, 1.0], 0.3, 24),
+            renderer.create_mesh_sphere([2.0, 0.4, -1.0], 0.4, 24),
         ];
         
         // Create cubes
         let cubes = vec![
-            GpuMesh::cube(&device, [-1.5, 0.25, -1.5], 0.5),
-            GpuMesh::cube(&device, [1.5, 0.5, 1.5], 1.0),
+            renderer.create_mesh_cube([-1.5, 0.25, -1.5], 0.5),
+            renderer.create_mesh_cube([1.5, 0.5, 1.5], 1.0),
         ];
         demo_portal::enable_live_dashboard(&mut renderer);
 
