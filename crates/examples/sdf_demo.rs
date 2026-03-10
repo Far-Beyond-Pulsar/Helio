@@ -6,6 +6,7 @@
 //!   WASD        — move forward/left/back/right
 //!   Space/Shift — move up/down
 //!   Mouse drag  — look around (click to grab cursor)
+//!   F3          — toggle debug visualization (brick/clip level overlay)
 //!   1           — add/remove sphere edits
 //!   2           — toggle smooth blending
 //!   Escape      — release cursor / exit
@@ -15,7 +16,7 @@ use helio_render_v2::{Renderer, RendererConfig, Camera};
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
-    SdfFeature, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
+    SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
 };
 
 use winit::{
@@ -135,6 +136,7 @@ impl ApplicationHandler for App {
 
         // ── SDF Feature Setup ──────────────────────────────────────────────────
         let mut sdf_feature = SdfFeature::new()
+            .with_mode(SdfMode::ClipMap)
             .with_grid_dim(128)
             .with_volume_bounds([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0]);
 
@@ -259,7 +261,15 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Pressed  => {
+                        state.keys.insert(key);
+                        // F3: toggle SDF debug visualization
+                        if key == KeyCode::F3 {
+                            if let Some(sdf) = state.renderer.get_feature_mut::<SdfFeature>("sdf") {
+                                sdf.toggle_debug();
+                            }
+                        }
+                    }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }
