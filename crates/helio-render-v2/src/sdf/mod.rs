@@ -13,9 +13,12 @@ pub mod uniforms;
 pub mod feature;
 pub mod brick;
 pub mod clip_map;
+pub mod terrain;
+pub mod noise;
 pub mod passes;
 
 pub use primitives::{SdfShapeType, SdfShapeParams};
 pub use edit_list::{SdfEdit, SdfEditList, BooleanOp, GpuSdfEdit};
 pub use uniforms::SdfGridParams;
 pub use feature::{SdfFeature, SdfMode};
+pub use terrain::{TerrainStyle, TerrainConfig};

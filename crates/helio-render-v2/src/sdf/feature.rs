@@ -12,6 +12,7 @@ use crate::features::{Feature, FeatureContext, PrepareContext, ShaderDefine};
 use crate::Result;
 use super::edit_list::{SdfEditList, SdfEdit, GpuSdfEdit, MAX_EDITS};
 use super::uniforms::SdfGridParams;
+use super::terrain::{TerrainConfig, GpuTerrainParams};
 use super::clip_map::{SdfClipMap, DEFAULT_CLIP_LEVELS};
 use super::passes::evaluate_dense::SdfEvaluateDensePass;
 use super::passes::evaluate_sparse::SdfEvaluateSparsePass;
@@ -89,6 +90,10 @@ pub struct SdfFeature {
     clip_march_pipeline: Option<Arc<wgpu::RenderPipeline>>,
     clip_march_bind_group: Option<Arc<wgpu::BindGroup>>,
     all_brick_indices_buffer: Option<Arc<wgpu::Buffer>>,
+
+    // Terrain (Phase 6)
+    terrain_config: Option<TerrainConfig>,
+    terrain_params_buffer: Option<Arc<wgpu::Buffer>>,
 }
 
 impl SdfFeature {
@@ -124,6 +129,8 @@ impl SdfFeature {
             clip_march_pipeline: None,
             clip_march_bind_group: None,
             all_brick_indices_buffer: None,
+            terrain_config: None,
+            terrain_params_buffer: None,
         }
     }
 
@@ -141,6 +148,24 @@ impl SdfFeature {
         self.volume_min = min;
         self.volume_max = max;
         self
+    }
+
+    /// Enable procedural terrain generation with the given configuration.
+    pub fn with_terrain(mut self, config: TerrainConfig) -> Self {
+        self.terrain_config = Some(config);
+        self
+    }
+
+    /// Set or replace the terrain configuration at runtime.
+    pub fn set_terrain(&mut self, config: Option<TerrainConfig>) {
+        self.terrain_config = config;
+        // Force re-upload so terrain params reach the GPU
+        self.last_uploaded_gen = u64::MAX;
+    }
+
+    /// Access the current terrain configuration.
+    pub fn terrain_config(&self) -> Option<&TerrainConfig> {
+        self.terrain_config.as_ref()
     }
 
     /// Toggle debug visualization mode.
@@ -239,6 +264,7 @@ impl SdfFeature {
 
         let params_buffer = self.params_buffer.as_ref().unwrap();
         let edit_buffer = self.edit_buffer.as_ref().unwrap();
+        let terrain_buffer = self.terrain_params_buffer.as_ref().unwrap();
 
         let eval_bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SDF Evaluate Bind Group"),
@@ -255,6 +281,10 @@ impl SdfFeature {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::TextureView(&volume_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: terrain_buffer.as_entire_binding(),
                 },
             ],
         }));
@@ -396,6 +426,7 @@ impl SdfFeature {
         let dim = self.grid_dim;
         let params_buffer = self.params_buffer.as_ref().unwrap();
         let edit_buffer = self.edit_buffer.as_ref().unwrap();
+        let terrain_buffer = self.terrain_params_buffer.as_ref().unwrap();
 
         // Create BrickMap and its GPU resources
         let mut brick_map = BrickMap::new(dim, DEFAULT_BRICK_SIZE, DEFAULT_ATLAS_BRICKS_PER_AXIS);
@@ -450,6 +481,10 @@ impl SdfFeature {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: brick_index_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: terrain_buffer.as_entire_binding(),
                 },
             ],
         }));
@@ -597,6 +632,7 @@ impl SdfFeature {
         let device = ctx.device;
         let dim = self.grid_dim;
         let edit_buffer = self.edit_buffer.as_ref().unwrap();
+        let terrain_buffer = self.terrain_params_buffer.as_ref().unwrap();
 
         // Compute base voxel size from volume bounds and grid dim
         let range_x = self.volume_max[0] - self.volume_min[0];
@@ -659,6 +695,10 @@ impl SdfFeature {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: brick_index_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: terrain_buffer.as_entire_binding(),
                     },
                 ],
             }));
@@ -895,6 +935,15 @@ impl Feature for SdfFeature {
         self.edit_buffer = Some(edit_buffer);
         self.params_buffer = Some(params_buffer);
 
+        // Terrain params buffer (always created; uploaded as disabled if no terrain config)
+        let terrain_params_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SDF Terrain Params"),
+            size: std::mem::size_of::<GpuTerrainParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+        self.terrain_params_buffer = Some(terrain_params_buffer);
+
         // ── Mode-specific registration ───────────────────────────────────────
         match self.mode {
             SdfMode::Dense => self.register_dense(ctx)?,
@@ -923,6 +972,17 @@ impl Feature for SdfFeature {
                 );
             }
 
+            // Upload terrain params
+            let terrain_gpu = match &self.terrain_config {
+                Some(cfg) => cfg.build_gpu_params(),
+                None => GpuTerrainParams::disabled(),
+            };
+            ctx.queue.write_buffer(
+                self.terrain_params_buffer.as_ref().unwrap(),
+                0,
+                bytemuck::bytes_of(&terrain_gpu),
+            );
+
             match self.mode {
                 SdfMode::Dense => {
                     let params = SdfGridParams::new(
@@ -940,11 +1000,12 @@ impl Feature for SdfFeature {
                 SdfMode::Sparse => {
                     let brick_map = self.brick_map.as_mut().unwrap();
 
-                    // CPU brick classification
+                    // CPU brick classification (edits + terrain)
                     brick_map.classify(
                         self.edit_list.edits(),
                         self.volume_min,
                         self.volume_max,
+                        self.terrain_config.as_ref(),
                     );
 
                     // Upload brick_index and active_bricks to GPU
@@ -988,15 +1049,19 @@ impl Feature for SdfFeature {
         if self.mode == SdfMode::ClipMap {
             let clip_map = self.clip_map.as_mut().unwrap();
 
-            // Center clip map on volume midpoint (not camera) so edits stay in the
-            // finest level regardless of camera position. Camera-following will be
-            // re-enabled when terrain streaming (Phase 6) is implemented.
-            let volume_center = glam::Vec3::new(
-                (self.volume_min[0] + self.volume_max[0]) * 0.5,
-                (self.volume_min[1] + self.volume_max[1]) * 0.5,
-                (self.volume_min[2] + self.volume_max[2]) * 0.5,
-            );
-            let mut dirty_mask = clip_map.update_center(volume_center);
+            // When terrain is enabled, center on camera so terrain streams as
+            // the player moves. Otherwise center on volume midpoint to keep
+            // static edits in the finest level.
+            let center = if self.terrain_config.is_some() {
+                ctx.camera.position
+            } else {
+                glam::Vec3::new(
+                    (self.volume_min[0] + self.volume_max[0]) * 0.5,
+                    (self.volume_min[1] + self.volume_max[1]) * 0.5,
+                    (self.volume_min[2] + self.volume_max[2]) * 0.5,
+                )
+            };
+            let mut dirty_mask = clip_map.update_center(center);
 
             // If edits changed this frame, force all levels dirty
             if needs_upload {
@@ -1005,7 +1070,7 @@ impl Feature for SdfFeature {
 
             if dirty_mask != 0 {
                 // Classify active bricks on dirty levels
-                clip_map.classify_dirty_levels(dirty_mask, self.edit_list.edits());
+                clip_map.classify_dirty_levels(dirty_mask, self.edit_list.edits(), self.terrain_config.as_ref());
 
                 // Upload per-level brick data + params (with correct edit count)
                 let edit_count = self.edit_list.len() as u32;
@@ -1086,5 +1151,7 @@ impl Feature for SdfFeature {
         self.clip_march_pipeline = None;
         self.clip_march_bind_group = None;
         self.all_brick_indices_buffer = None;
+        // Terrain
+        self.terrain_params_buffer = None;
     }
 }

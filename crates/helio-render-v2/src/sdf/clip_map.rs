@@ -5,6 +5,7 @@
 
 use super::brick::BrickMap;
 use super::edit_list::SdfEdit;
+use super::terrain::TerrainConfig;
 use super::uniforms::SdfGridParams;
 use super::brick::DEFAULT_BRICK_SIZE;
 use std::sync::Arc;
@@ -160,6 +161,7 @@ impl SdfClipMap {
         &mut self,
         dirty_mask: u32,
         edits: &[SdfEdit],
+        terrain: Option<&TerrainConfig>,
     ) {
         for level in self.levels.iter_mut() {
             if dirty_mask & (1 << level.level_index) != 0 {
@@ -167,6 +169,7 @@ impl SdfClipMap {
                     edits,
                     level.volume_min,
                     level.volume_max,
+                    terrain,
                 );
             }
         }

@@ -6,6 +6,7 @@
 
 use super::edit_list::SdfEdit;
 use super::primitives::SdfShapeType;
+use super::terrain::TerrainConfig;
 use std::sync::Arc;
 
 /// Voxels per brick edge
@@ -102,13 +103,14 @@ impl BrickMap {
         self.atlas_view = Some(atlas_view);
     }
 
-    /// Classify which bricks are active based on edit bounding spheres.
+    /// Classify which bricks are active based on edit bounding spheres and terrain.
     /// Returns `true` if the active set changed.
     pub fn classify(
         &mut self,
         edits: &[SdfEdit],
         volume_min: [f32; 3],
         volume_max: [f32; 3],
+        terrain: Option<&TerrainConfig>,
     ) -> bool {
         // Compute bounding spheres for all edits
         let bounds: Vec<(glam::Vec3, f32)> = edits
@@ -141,11 +143,17 @@ impl BrickMap {
                         brick_min.z + brick_world_size[2],
                     );
 
-                    let is_active = bounds.iter().any(|&(center, radius)| {
+                    // Check edit bounding spheres
+                    let edit_active = bounds.iter().any(|&(center, radius)| {
                         Self::sphere_aabb_intersect(center, radius, brick_min, brick_max)
                     });
 
-                    if is_active {
+                    // Check terrain intersection
+                    let terrain_active = terrain.map_or(false, |cfg| {
+                        Self::brick_intersects_terrain(brick_min, brick_max, cfg)
+                    });
+
+                    if edit_active || terrain_active {
                         // Allocate atlas slot if needed
                         if self.brick_index[linear as usize] == EMPTY_BRICK {
                             let slot = self.alloc_atlas_slot();
@@ -268,5 +276,37 @@ impl BrickMap {
         let closest = center.clamp(aabb_min, aabb_max);
         let dist_sq = (closest - center).length_squared();
         dist_sq <= radius * radius
+    }
+
+    /// Check if a brick's volume intersects the terrain surface.
+    ///
+    /// Uses a conservative height band based on terrain config parameters
+    /// (no CPU noise sampling) to guarantee no bricks are incorrectly skipped.
+    fn brick_intersects_terrain(
+        brick_min: glam::Vec3,
+        brick_max: glam::Vec3,
+        config: &TerrainConfig,
+    ) -> bool {
+        use super::terrain::TerrainStyle;
+
+        // Half-diagonal as extra margin to account for brick size
+        let margin = (brick_max - brick_min).length() * 0.5;
+
+        match config.style {
+            TerrainStyle::Caves => {
+                // Caves: 3D density field, surface can exist anywhere near the
+                // height plane within ±amplitude. Use generous band.
+                let band_min = config.height - config.amplitude * 1.5 - margin;
+                let band_max = config.height + config.amplitude * 1.5 + margin;
+                brick_max.y >= band_min && brick_min.y <= band_max
+            }
+            _ => {
+                // Heightfield styles (Flat, Rolling, Mountains, Islands):
+                // Terrain height ranges from (height - amplitude) to (height + amplitude).
+                let band_min = config.height - config.amplitude - margin;
+                let band_max = config.height + config.amplitude + margin;
+                brick_max.y >= band_min && brick_min.y <= band_max
+            }
+        }
     }
 }

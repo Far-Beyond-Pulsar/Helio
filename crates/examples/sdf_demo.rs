@@ -7,6 +7,7 @@
 //!   Space/Shift — move up/down
 //!   Mouse drag  — look around (click to grab cursor)
 //!   F3          — toggle debug visualization (brick/clip level overlay)
+//!   F4          — cycle terrain style (Rolling → Mountains → Caves → Islands → Off → …)
 //!   1           — add/remove sphere edits
 //!   2           — toggle smooth blending
 //!   Escape      — release cursor / exit
@@ -17,6 +18,7 @@ use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
     SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
+    TerrainConfig,
 };
 
 use winit::{
@@ -58,6 +60,9 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
+
+    // Terrain style cycling (0=Rolling, 1=Mountains, 2=Caves, 3=Islands, 4=Off)
+    terrain_style_index: u32,
 }
 
 impl App {
@@ -138,14 +143,15 @@ impl ApplicationHandler for App {
         let mut sdf_feature = SdfFeature::new()
             .with_mode(SdfMode::ClipMap)
             .with_grid_dim(128)
-            .with_volume_bounds([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0]);
+            .with_volume_bounds([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0])
+            .with_terrain(TerrainConfig::rolling());
 
-        // Build an interesting scene from SDF primitives
+        // Build scene: some SDF primitives on top of the terrain
         // Central sphere
         sdf_feature.add_edit(SdfEdit {
             shape: SdfShapeType::Sphere,
             op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.0)),
+            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, 0.0)),
             params: SdfShapeParams::sphere(2.0),
             blend_radius: 0.0,
         });
@@ -154,7 +160,7 @@ impl ApplicationHandler for App {
         sdf_feature.add_edit(SdfEdit {
             shape: SdfShapeType::Sphere,
             op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(2.5, 0.0, 0.0)),
+            transform: glam::Mat4::from_translation(glam::Vec3::new(2.5, 2.0, 0.0)),
             params: SdfShapeParams::sphere(1.5),
             blend_radius: 0.5,
         });
@@ -163,25 +169,16 @@ impl ApplicationHandler for App {
         sdf_feature.add_edit(SdfEdit {
             shape: SdfShapeType::Cube,
             op: BooleanOp::Subtraction,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, 0.0)),
+            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.5, 0.0)),
             params: SdfShapeParams::cube(1.0, 1.0, 1.0),
             blend_radius: 0.3,
-        });
-
-        // Ground plane (large flat cube)
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Cube,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, -3.0, 0.0)),
-            params: SdfShapeParams::cube(9.0, 0.5, 9.0),
-            blend_radius: 0.0,
         });
 
         // Torus
         sdf_feature.add_edit(SdfEdit {
             shape: SdfShapeType::Torus,
             op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(-4.0, 0.0, 0.0)),
+            transform: glam::Mat4::from_translation(glam::Vec3::new(-4.0, 2.0, 0.0)),
             params: SdfShapeParams::torus(1.5, 0.4),
             blend_radius: 0.0,
         });
@@ -190,7 +187,7 @@ impl ApplicationHandler for App {
         sdf_feature.add_edit(SdfEdit {
             shape: SdfShapeType::Capsule,
             op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, -4.0)),
+            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, -4.0)),
             params: SdfShapeParams::capsule(0.5, 1.5),
             blend_radius: 0.0,
         });
@@ -199,7 +196,7 @@ impl ApplicationHandler for App {
         sdf_feature.add_edit(SdfEdit {
             shape: SdfShapeType::Cylinder,
             op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(4.0, -1.0, -3.0)),
+            transform: glam::Mat4::from_translation(glam::Vec3::new(4.0, 1.0, -3.0)),
             params: SdfShapeParams::cylinder(0.8, 1.5),
             blend_radius: 0.0,
         });
@@ -223,12 +220,13 @@ impl ApplicationHandler for App {
             surface_format,
             renderer,
             last_frame: std::time::Instant::now(),
-            cam_pos: glam::Vec3::new(0.0, 3.0, 12.0),
+            cam_pos: glam::Vec3::new(0.0, 8.0, 20.0),
             cam_yaw: 0.0,
-            cam_pitch: -0.15,
+            cam_pitch: -0.2,
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            terrain_style_index: 0,
         });
     }
 
@@ -267,6 +265,20 @@ impl ApplicationHandler for App {
                         if key == KeyCode::F3 {
                             if let Some(sdf) = state.renderer.get_feature_mut::<SdfFeature>("sdf") {
                                 sdf.toggle_debug();
+                            }
+                        }
+                        // F4: cycle terrain style
+                        if key == KeyCode::F4 {
+                            state.terrain_style_index = (state.terrain_style_index + 1) % 5;
+                            let terrain = match state.terrain_style_index {
+                                0 => { log::info!("Terrain: Rolling"); Some(TerrainConfig::rolling()) }
+                                1 => { log::info!("Terrain: Mountains"); Some(TerrainConfig::mountains()) }
+                                2 => { log::info!("Terrain: Caves"); Some(TerrainConfig::caves()) }
+                                3 => { log::info!("Terrain: Islands"); Some(TerrainConfig::islands()) }
+                                _ => { log::info!("Terrain: Off"); None }
+                            };
+                            if let Some(sdf) = state.renderer.get_feature_mut::<SdfFeature>("sdf") {
+                                sdf.set_terrain(terrain);
                             }
                         }
                     }
