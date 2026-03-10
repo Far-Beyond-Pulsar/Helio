@@ -1,14 +1,10 @@
-//! G-buffer write pass.
+//! G-buffer write pass (GPU-driven).
 //!
 //! Rasterises scene geometry into four screen-sized textures:
-//!   target 0 – albedo   (Rgba8Unorm)   : linear albedo.rgb + alpha
-//!   target 1 – normal   (Rgba16Float)  : world-space normal XYZ  (W = 0)
-//!   target 2 – orm      (Rgba8Unorm)   : AO, roughness, metallic (W = 0)
-//!   target 3 – emissive (Rgba16Float)  : pre-multiplied emissive.rgb (W = 0)
-//!
-//! No lighting is performed here at all.  The deferred_lighting pass reads
-//! these textures one full-screen draw later, running PBR × all lights once
-//! per screen pixel rather than once per mesh fragment × light.
+//!   target 0 – albedo   (Rgba8Unorm)
+//!   target 1 – normal   (Rgba16Float)
+//!   target 2 – orm      (Rgba8Unorm)
+//!   target 3 – emissive (Rgba16Float)
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -26,15 +22,25 @@ struct Material {
     alpha_cutoff:    f32,
 }
 
-@group(0) @binding(0) var <uniform> camera:   Camera;
-@group(1) @binding(0) var <uniform> material: Material;
-@group(1) @binding(1) var base_color_texture: texture_2d<f32>;
-@group(1) @binding(2) var normal_map:         texture_2d<f32>;
-@group(1) @binding(3) var material_sampler:   sampler;
-@group(1) @binding(4) var orm_texture:        texture_2d<f32>;
-@group(1) @binding(5) var emissive_texture:   texture_2d<f32>;
+/// Per-instance data (128 bytes).  Must match `GpuInstanceData` in gpu_scene.rs.
+struct GpuInstanceData {
+    transform:    mat4x4<f32>,  // offset   0  (64 bytes)
+    normal_mat_0: vec4<f32>,    // offset  64  — row 0 of inv-transpose 3×3
+    normal_mat_1: vec4<f32>,    // offset  80
+    normal_mat_2: vec4<f32>,    // offset  96
+    bounds_center: vec3<f32>,   // offset 112
+    bounds_radius: f32,         // offset 124
+}
 
-// ── Vertex ────────────────────────────────────────────────────────────────────
+@group(0) @binding(0) var<uniform>          camera:        Camera;
+@group(0) @binding(2) var<storage, read>    instance_data: array<GpuInstanceData>;
+
+@group(1) @binding(0) var<uniform>          material:          Material;
+@group(1) @binding(1) var                   base_color_texture: texture_2d<f32>;
+@group(1) @binding(2) var                   normal_map:         texture_2d<f32>;
+@group(1) @binding(3) var                   material_sampler:   sampler;
+@group(1) @binding(4) var                   orm_texture:        texture_2d<f32>;
+@group(1) @binding(5) var                   emissive_texture:   texture_2d<f32>;
 
 struct Vertex {
     @location(0) position:       vec3<f32>,
@@ -55,22 +61,15 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
-// Per-instance model transform — one mat4x4 per instance, split across four
-// vec4 vertex attributes at locations 5-8 (VertexStepMode::Instance).
-struct Instance {
-    @location(5) model_0: vec4<f32>,
-    @location(6) model_1: vec4<f32>,
-    @location(7) model_2: vec4<f32>,
-    @location(8) model_3: vec4<f32>,
-}
-
 @vertex
-fn vs_main(v: Vertex, inst: Instance) -> VertexOutput {
-    let model      = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
-    let world_pos  = model * vec4<f32>(v.position, 1.0);
-    // Normal transform: upper-left 3×3 of model matrix.
-    // Correct for uniform scale + rotation; use inverse-transpose for non-uniform.
-    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
+    let inst       = instance_data[slot];
+    let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
+    let normal_mat = mat3x3<f32>(
+        inst.normal_mat_0.xyz,
+        inst.normal_mat_1.xyz,
+        inst.normal_mat_2.xyz,
+    );
     var out: VertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;
@@ -82,32 +81,23 @@ fn vs_main(v: Vertex, inst: Instance) -> VertexOutput {
 // ── Fragment ─────────────────────────────────────────────────────────────────
 
 struct GBufferOutput {
-    @location(0) albedo:   vec4<f32>,   // Rgba8Unorm
-    @location(1) normal:   vec4<f32>,   // Rgba16Float
-    @location(2) orm:      vec4<f32>,   // Rgba8Unorm
-    @location(3) emissive: vec4<f32>,   // Rgba16Float
+    @location(0) albedo:   vec4<f32>,
+    @location(1) normal:   vec4<f32>,
+    @location(2) orm:      vec4<f32>,
+    @location(3) emissive: vec4<f32>,
 }
 
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
     let uv = input.tex_coords;
 
-    // ── Base color ────────────────────────────────────────────────────────────
     let tex_sample = textureSample(base_color_texture, material_sampler, uv);
     let albedo     = material.base_color.rgb * tex_sample.rgb;
     let alpha      = material.base_color.a  * tex_sample.a;
 
-    // Always drop fully transparent texels from PNGs even when alpha_cutoff is 0.
-    if alpha <= 0.001 {
-        discard;
-    }
+    if alpha <= 0.001 { discard; }
+    if alpha < material.alpha_cutoff { discard; }
 
-    // Deferred path transparency support: alpha cutout / masked materials.
-    if alpha < material.alpha_cutoff {
-        discard;
-    }
-
-    // ── Normal mapping – derivative-based TBN ────────────────────────────────
     let N_geom  = normalize(input.world_normal);
     let q0      = dpdx(input.world_position);
     let q1      = dpdy(input.world_position);
@@ -126,13 +116,11 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         N_geom  *  norm_ts.z
     );
 
-    // ── ORM ───────────────────────────────────────────────────────────────────
     let orm       = textureSample(orm_texture, material_sampler, uv).rgb;
     let ao        = material.ao       * orm.r;
     let roughness = clamp(material.roughness * orm.g, 0.04, 1.0);
     let metallic  = clamp(material.metallic  * orm.b, 0.0,  1.0);
 
-    // ── Emissive (pre-multiplied into linear colour) ──────────────────────────
     let emissive_tex = textureSample(emissive_texture, material_sampler, uv).rgb;
     let emissive     = material.emissive_color * emissive_tex * material.emissive_factor;
 

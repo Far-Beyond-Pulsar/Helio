@@ -17,6 +17,8 @@ pub mod fxaa;
 pub mod smaa;
 pub mod taa;
 pub mod indirect_dispatch;
+pub mod hiz_build;
+pub mod occlusion_cull;
 
 pub use geometry::GeometryPass;
 pub use shadow::{ShadowPass, ShadowCullLight};
@@ -35,3 +37,5 @@ pub use fxaa::FxaaPass;
 pub use smaa::SmaaPass;
 pub use taa::{TaaPass, TaaConfig};
 pub use indirect_dispatch::IndirectDispatchPass;
+pub use hiz_build::{HiZBuildPass, HiZResources};
+pub use occlusion_cull::OcclusionCullPass;

@@ -20,14 +20,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use bytemuck::Zeroable;
 
+use crate::culling::Aabb;
 use crate::material::GpuMaterial;
-use crate::mesh::{DrawCall, GpuMesh, INSTANCE_STRIDE};
+use crate::mesh::{DrawCall, GpuDrawCall, GpuMesh};
 use crate::scene::ObjectId;
 use crate::gpu_transfer;
-
-/// Per-slot transform stride in the vertex buffer (mat4x4<f32> = 64 bytes).
-/// Must match `INSTANCE_STRIDE` in mesh.rs and the pipeline vertex layout.
-const TRANSFORM_STRIDE: u64 = INSTANCE_STRIDE;
 
 // ── GPU-side per-instance data (must match WGSL `GpuInstance`) ───────────────
 
@@ -48,8 +45,7 @@ pub struct GpuInstanceData {
 }
 
 impl GpuInstanceData {
-    pub fn from_transform(transform: glam::Mat4, bounds_center: [f32; 3], bounds_radius: f32) -> Self {
-        let cols = transform.to_cols_array();
+    pub fn from_transform(transform: glam::Mat4, bounds_center: [f32; 3], bounds_radius: f32) -> Self {        let cols = transform.to_cols_array();
         // Compute inverse-transpose of upper-3×3 for correct normal transformation.
         let inv_t = transform.inverse().transpose();
         let it = inv_t.to_cols_array();
@@ -77,9 +73,34 @@ impl GpuInstanceData {
 }
 
 const INSTANCE_SIZE: usize = std::mem::size_of::<GpuInstanceData>(); // 128 bytes
-const INITIAL_CAPACITY: u32 = 4096; // Start with room for 4K objects
+const INITIAL_CAPACITY: u32 = 16 * 1024; // 16K objects by default
 
-// ── Slot Allocator ───────────────────────────────────────────────────────────
+/// Per-material draw range used by GBufferPass for multi_draw_indexed_indirect batching.
+/// `start` and `count` index into the GPU draw-call buffer (opaque draws only).
+#[derive(Clone)]
+pub struct MaterialRange {
+    pub bind_group: Arc<wgpu::BindGroup>,
+    pub start: u32,
+    pub count: u32,
+}
+
+// ── Per-instance AABB for Hi-Z occlusion culling ─────────────────────────────
+
+/// World-space AABB per instance, stored in a dedicated GPU buffer for
+/// the occlusion culling compute pass.  Updated whenever the instance
+/// transform changes.  32 bytes per slot (vec4 min + vec4 max with padding).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuInstanceAabb {
+    /// World-space AABB minimum corner.
+    pub aabb_min: [f32; 3],
+    pub _pad0: f32,
+    /// World-space AABB maximum corner.
+    pub aabb_max: [f32; 3],
+    pub _pad1: f32,
+}
+
+const AABB_SIZE: usize = std::mem::size_of::<GpuInstanceAabb>(); // 32 bytes
 
 /// Free-list slot allocator.  O(1) alloc and free.
 struct SlotAllocator {
@@ -147,6 +168,10 @@ pub(crate) struct SceneProxy {
     pub local_bounds_center: [f32; 3],
     /// Local-space bounding sphere radius (from mesh).
     pub local_bounds_radius: f32,
+    /// Local-space AABB minimum corner (from mesh).
+    pub local_aabb_min: [f32; 3],
+    /// Local-space AABB maximum corner (from mesh).
+    pub local_aabb_max: [f32; 3],
     /// When false the object is excluded from all draw lists.
     pub enabled: bool,
 }
@@ -166,18 +191,40 @@ pub struct GpuScene {
     /// Bind group layout (needed for pipeline creation).
     pub(crate) bind_group_layout: wgpu::BindGroupLayout,
 
-    /// Vertex-usable buffer holding only `mat4x4<f32>` (64 bytes) per slot.
-    /// Passes bind this at vertex slot 1 — identical interface to the old
-    /// per-object instance buffers, so no pipeline or shader changes needed.
-    /// Arc reference for cheap sharing into DrawCalls.
-    pub(crate) transform_buffer: Arc<wgpu::Buffer>,
+    /// Per-slot world-space AABB buffer used by the Hi-Z occlusion culling pass.
+    /// Updated alongside `instance_buffer` whenever a transform changes.
+    /// 32 bytes per slot (`GpuInstanceAabb`).
+    pub(crate) aabb_buffer: Arc<wgpu::Buffer>,
+
+    /// Visibility bitmask written by the occlusion culling compute pass.
+    /// 1 bit per slot; bit N = 1 means slot N passed occlusion test.
+    /// Sized for `ceil(capacity / 32)` u32 words.
+    pub(crate) visibility_buffer: Arc<wgpu::Buffer>,
+
+    // ── GPU draw call buffer (non-compacting indirect) ────────────────────
+    /// One `GpuDrawCall` per enabled proxy (opaque sorted by material, transparent last).
+    /// Uploaded to `draw_call_buffer` when `draw_call_dirty` is set.
+    draw_call_cpu: Vec<GpuDrawCall>,
+    /// GPU buffer holding `draw_call_cpu` data.
+    pub(crate) draw_call_buffer: Arc<wgpu::Buffer>,
+    /// Capacity of `draw_call_buffer` in draw calls.
+    draw_call_buffer_capacity: u32,
+    /// Number of draw calls currently in `draw_call_cpu`.
+    pub(crate) draw_call_count: u32,
+    /// Set when `draw_call_cpu` needs flushing to `draw_call_buffer`.
+    draw_call_dirty: bool,
+    /// Per-material ranges into `draw_call_cpu` (opaque only).
+    /// Index of first transparent draw = `transparent_start` (same as cached list).
+    pub(crate) material_ranges: Vec<MaterialRange>,
 
     // ── CPU mirror + dirty tracking ──────────────────────────────────────
     /// CPU-side copy of the instance data (indexed by slot).
     cpu_data: Vec<GpuInstanceData>,
     /// CPU-side copy of just the mat4 transforms (indexed by slot).
-    /// Kept in sync with `cpu_data` — duplicated for efficient vertex-buffer upload.
+    /// Kept in sync with `cpu_data` — used for hash computation and bounds.
     cpu_transforms: Vec<[f32; 16]>,
+    /// CPU-side copy of world-space AABBs (indexed by slot).
+    cpu_aabbs: Vec<GpuInstanceAabb>,
     /// Bitset: one bit per slot.  Set when slot data changes, cleared after upload.
     dirty_bits: Vec<u64>,
     /// Lowest and highest dirty slot indices (inclusive).  Avoids scanning the
@@ -203,6 +250,10 @@ pub struct GpuScene {
     /// Generation at which the caches were last rebuilt.
     cached_generation: u64,
 
+    // ── Cached draw list partition ────────────────────────────────────────
+    /// Index of the first transparent draw in `cached_draw_list`.
+    pub(crate) transparent_start: usize,
+
     // ── Stats ────────────────────────────────────────────────────────────
     /// Number of slots written to GPU this frame (for profiler).
     pub(crate) last_upload_slot_count: u32,
@@ -214,20 +265,37 @@ impl GpuScene {
     pub fn new(device: &wgpu::Device) -> Self {
         let capacity = INITIAL_CAPACITY;
         let buffer_size = (capacity as usize * INSTANCE_SIZE) as u64;
-        let transform_buffer_size = capacity as u64 * TRANSFORM_STRIDE;
+        let aabb_buffer_size = capacity as u64 * AABB_SIZE as u64;
+        let visibility_words = ((capacity as usize) + 31) / 32;
+        let visibility_buffer_size = (visibility_words * 4) as u64;
+        let draw_call_capacity = capacity;
+        let draw_call_buffer_size = draw_call_capacity as u64 * std::mem::size_of::<GpuDrawCall>() as u64;
 
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("GPU Scene Instance Buffer"),
             size: buffer_size,
-            usage: wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let transform_buffer_arc = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("GPU Scene Transform Vertex Buffer"),
-            size: transform_buffer_size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        let aabb_buffer_arc = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU Scene AABB Buffer"),
+            size: aabb_buffer_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        let visibility_buffer_arc = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU Scene Visibility Buffer"),
+            size: visibility_buffer_size.max(4),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        let draw_call_buffer_arc = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU Scene Draw Call Buffer"),
+            size: draw_call_buffer_size.max(64),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
@@ -260,9 +328,17 @@ impl GpuScene {
             instance_buffer,
             bind_group,
             bind_group_layout,
-            transform_buffer: transform_buffer_arc,
+            aabb_buffer: aabb_buffer_arc,
+            visibility_buffer: visibility_buffer_arc,
+            draw_call_cpu: Vec::new(),
+            draw_call_buffer: draw_call_buffer_arc,
+            draw_call_buffer_capacity: draw_call_capacity,
+            draw_call_count: 0,
+            draw_call_dirty: false,
+            material_ranges: Vec::new(),
             cpu_data: vec![GpuInstanceData::zeroed(); capacity as usize],
             cpu_transforms: vec![[0.0; 16]; capacity as usize],
+            cpu_aabbs: vec![GpuInstanceAabb::zeroed(); capacity as usize],
             dirty_bits: vec![0u64; words],
             dirty_range: None,
             allocator: SlotAllocator::new(capacity),
@@ -271,12 +347,13 @@ impl GpuScene {
             generation: 0,
             cached_draw_list: Vec::new(),
             cached_shadow_draw_list: Vec::new(),
-            cached_generation: u64::MAX, // force rebuild on first frame
+            cached_generation: u64::MAX,
+            transparent_start: 0,
             last_upload_slot_count: 0,
             last_upload_bytes: 0,
         };
 
-        gpu_transfer::track_alloc(buffer_size + transform_buffer_size);
+        gpu_transfer::track_alloc(buffer_size + aabb_buffer_size + visibility_buffer_size + draw_call_buffer_size);
         s
     }
 
@@ -309,10 +386,20 @@ impl GpuScene {
             mesh.bounds_radius,
         );
 
+        // World-space AABB via Arvo transform of local AABB.
+        let local_aabb = Aabb::new(mesh.aabb_min.into(), mesh.aabb_max.into());
+        let world_aabb = local_aabb.transform(&transform);
+
         // Write to CPU mirrors
         let mat = transform.to_cols_array();
         self.cpu_data[slot as usize] = instance;
         self.cpu_transforms[slot as usize] = mat;
+        self.cpu_aabbs[slot as usize] = GpuInstanceAabb {
+            aabb_min: world_aabb.min.into(),
+            _pad0: 0.0,
+            aabb_max: world_aabb.max.into(),
+            _pad1: 0.0,
+        };
         self.mark_dirty(slot);
 
         let transform_hash = fnv1a_mat(&mat);
@@ -330,6 +417,8 @@ impl GpuScene {
             transparent,
             local_bounds_center: mesh.bounds_center,
             local_bounds_radius: mesh.bounds_radius,
+            local_aabb_min: mesh.aabb_min,
+            local_aabb_max: mesh.aabb_max,
             enabled: true,
         });
 
@@ -345,6 +434,7 @@ impl GpuScene {
             // Zero out the slot so shaders don't read stale data
             self.cpu_data[proxy.slot as usize] = GpuInstanceData::zeroed();
             self.cpu_transforms[proxy.slot as usize] = [0.0; 16];
+            self.cpu_aabbs[proxy.slot as usize] = GpuInstanceAabb::zeroed();
             self.mark_dirty(proxy.slot);
             self.allocator.free(proxy.slot);
             self.generation = self.generation.wrapping_add(1);
@@ -366,8 +456,16 @@ impl GpuScene {
                     proxy.local_bounds_center,
                     proxy.local_bounds_radius,
                 );
+                let local_aabb = Aabb::new(proxy.local_aabb_min.into(), proxy.local_aabb_max.into());
+                let world_aabb = local_aabb.transform(&transform);
                 self.cpu_data[slot as usize] = instance;
                 self.cpu_transforms[slot as usize] = mat;
+                self.cpu_aabbs[slot as usize] = GpuInstanceAabb {
+                    aabb_min: world_aabb.min.into(),
+                    _pad0: 0.0,
+                    aabb_max: world_aabb.max.into(),
+                    _pad1: 0.0,
+                };
                 proxy.transform_hash = hash;
                 self.mark_dirty(slot);
             }
@@ -440,75 +538,93 @@ impl GpuScene {
     /// its own culling + bundle compilation).
     fn rebuild_draw_lists(&mut self) {
         self.cached_shadow_draw_list.clear();
+        self.draw_call_cpu.clear();
+        self.material_ranges.clear();
 
         let proxy_count = self.proxies.len();
         self.cached_shadow_draw_list.reserve(proxy_count);
 
-        // ── Collect raw draw calls ─────────────────────────────────────────
-        let xform_buf = Arc::clone(&self.transform_buffer);
+        // ── Collect per-proxy draw calls ───────────────────────────────────
         let mut raw: Vec<DrawCall> = Vec::with_capacity(proxy_count);
         for proxy in self.proxies.values() {
             if !proxy.enabled { continue; }
+            let inst = &self.cpu_data[proxy.slot as usize];
             let dc = DrawCall {
-                vertex_buffer:          proxy.mesh.vertex_buffer.clone(),
-                index_buffer:           proxy.mesh.index_buffer.clone(),
-                index_count:            proxy.mesh.index_count,
-                vertex_count:           proxy.mesh.vertex_count,
-                material_bind_group:    Arc::clone(&proxy.material_bind_group),
-                transparent_blend:      proxy.transparent,
-                bounds_center:          proxy.mesh.bounds_center,
-                bounds_radius:          proxy.mesh.bounds_radius,
-                material_id:            0,
-                instance_buffer:        Some(Arc::clone(&xform_buf)),
-                instance_count:         1,
-                instance_buffer_offset: proxy.slot as u64 * INSTANCE_STRIDE,
+                vertex_buffer:    proxy.mesh.vertex_buffer.clone(),
+                index_buffer:     proxy.mesh.index_buffer.clone(),
+                index_count:      proxy.mesh.index_count,
+                vertex_count:     proxy.mesh.vertex_count,
+                material_bind_group: Arc::clone(&proxy.material_bind_group),
+                transparent_blend:   proxy.transparent,
+                bounds_center:    inst.bounds_center,
+                bounds_radius:    inst.bounds_radius,
+                slot:             proxy.slot,
+                pool_base_vertex: proxy.mesh.pool_base_vertex as i32,
+                pool_first_index: proxy.mesh.pool_first_index,
             };
             self.cached_shadow_draw_list.push(dc.clone());
             raw.push(dc);
         }
 
-        // ── Sort opaque by (vbuf, ibuf, mat, offset) ──────────────────────
-        // Transparent draws keep their per-proxy form (back-to-front per frame).
+        // ── Sort opaque by material, then slot ────────────────────────────
         let (mut opaque, transparent): (Vec<DrawCall>, Vec<DrawCall>) =
             raw.into_iter().partition(|dc| !dc.transparent_blend);
 
         opaque.sort_unstable_by(|a, b| {
-            (Arc::as_ptr(&a.vertex_buffer) as usize)
-                .cmp(&(Arc::as_ptr(&b.vertex_buffer) as usize))
-                .then_with(|| (Arc::as_ptr(&a.index_buffer) as usize)
-                    .cmp(&(Arc::as_ptr(&b.index_buffer) as usize)))
-                .then_with(|| (Arc::as_ptr(&a.material_bind_group) as usize)
-                    .cmp(&(Arc::as_ptr(&b.material_bind_group) as usize)))
-                .then_with(|| a.instance_buffer_offset.cmp(&b.instance_buffer_offset))
+            (Arc::as_ptr(&a.material_bind_group) as usize)
+                .cmp(&(Arc::as_ptr(&b.material_bind_group) as usize))
+                .then_with(|| a.slot.cmp(&b.slot))
         });
 
-        // ── Merge contiguous same-mesh+material runs ───────────────────────
-        // Two opaque draws can be merged when they share the same vertex buffer,
-        // index buffer, and material bind group, AND their instance-buffer offsets
-        // are consecutive (prev_offset + prev_count * INSTANCE_STRIDE == next_offset).
-        // The merged DrawCall uses the first draw's mesh data and an instance_count
-        // equal to the run length, so the GPU issues one draw_indexed_instanced(N).
+        // ── Build cached_draw_list (CPU, transparent + shadow passes) ─────
         self.cached_draw_list.clear();
         self.cached_draw_list.reserve(opaque.len() + transparent.len());
-        for dc in opaque {
-            if let Some(last) = self.cached_draw_list.last_mut() {
-                let contiguous_offset =
-                    last.instance_buffer_offset + last.instance_count as u64 * INSTANCE_STRIDE
-                    == dc.instance_buffer_offset;
-                if contiguous_offset
-                    && Arc::ptr_eq(&last.vertex_buffer,       &dc.vertex_buffer)
-                    && Arc::ptr_eq(&last.index_buffer,        &dc.index_buffer)
-                    && Arc::ptr_eq(&last.material_bind_group, &dc.material_bind_group)
-                {
-                    last.instance_count += 1;
-                    continue;
-                }
-            }
-            self.cached_draw_list.push(dc);
-        }
-        // Append transparent draws after all opaque batches.
+        self.cached_draw_list.extend_from_slice(&opaque);
+        self.transparent_start = self.cached_draw_list.len();
         self.cached_draw_list.extend(transparent);
 
+        // ── Build draw_call_cpu (GPU indirect, opaque only for now) ───────
+        // One GpuDrawCall per opaque proxy in the sorted order.
+        let mut current_mat_ptr: usize = 0;
+        let mut range_start: u32 = 0;
+
+        for (i, dc) in opaque.iter().enumerate() {
+            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+            let gpu_dc = GpuDrawCall {
+                slot:          dc.slot,
+                first_index:   dc.pool_first_index,
+                base_vertex:   dc.pool_base_vertex,
+                index_count:   dc.index_count,
+                bounds_center: dc.bounds_center,
+                bounds_radius: dc.bounds_radius,
+            };
+            self.draw_call_cpu.push(gpu_dc);
+
+            // Track material ranges
+            if i == 0 {
+                current_mat_ptr = mat_ptr;
+                range_start = 0;
+            } else if mat_ptr != current_mat_ptr {
+                self.material_ranges.push(MaterialRange {
+                    bind_group: Arc::clone(&opaque[range_start as usize].material_bind_group),
+                    start: range_start,
+                    count: i as u32 - range_start,
+                });
+                current_mat_ptr = mat_ptr;
+                range_start = i as u32;
+            }
+        }
+        // Flush last material range
+        if !opaque.is_empty() {
+            self.material_ranges.push(MaterialRange {
+                bind_group: Arc::clone(&opaque[range_start as usize].material_bind_group),
+                start: range_start,
+                count: self.draw_call_cpu.len() as u32 - range_start,
+            });
+        }
+
+        self.draw_call_count = self.draw_call_cpu.len() as u32;
+        self.draw_call_dirty = true;
         self.cached_generation = self.generation;
     }
 
@@ -544,35 +660,54 @@ impl GpuScene {
         // ── Storage buffer upload (128 bytes per slot) ───────────────────
         let byte_offset = lo as u64 * INSTANCE_SIZE as u64;
         let data_slice = &self.cpu_data[lo as usize..=(hi as usize)];
-        queue.write_buffer(
-            &self.instance_buffer,
-            byte_offset,
-            bytemuck::cast_slice(data_slice),
-        );
+        queue.write_buffer(&self.instance_buffer, byte_offset, bytemuck::cast_slice(data_slice));
 
-        // ── Transform vertex buffer upload (64 bytes per slot) ───────────
-        let xform_offset = lo as u64 * TRANSFORM_STRIDE;
-        let xform_slice = &self.cpu_transforms[lo as usize..=(hi as usize)];
-        queue.write_buffer(
-            &self.transform_buffer,
-            xform_offset,
-            bytemuck::cast_slice(xform_slice),
-        );
+        // ── AABB buffer upload (32 bytes per slot) ────────────────────────
+        let aabb_offset = lo as u64 * AABB_SIZE as u64;
+        let aabb_slice = &self.cpu_aabbs[lo as usize..=(hi as usize)];
+        queue.write_buffer(&self.aabb_buffer, aabb_offset, bytemuck::cast_slice(aabb_slice));
 
-        // Count actual dirty slots (not just the range) for stats
+        // Count actual dirty slots for stats
         let mut dirty_count = 0u32;
         for word_idx in (lo as usize / 64)..=((hi as usize) / 64).min(self.dirty_bits.len() - 1) {
             dirty_count += self.dirty_bits[word_idx].count_ones();
         }
 
         self.last_upload_slot_count = dirty_count;
-        self.last_upload_bytes = slot_count as u64 * (INSTANCE_SIZE as u64 + TRANSFORM_STRIDE);
+        self.last_upload_bytes = slot_count as u64 * INSTANCE_SIZE as u64;
         gpu_transfer::track_upload(self.last_upload_bytes);
 
-        // Clear dirty bits
-        for word in &mut self.dirty_bits {
-            *word = 0;
+        for word in &mut self.dirty_bits { *word = 0; }
+    }
+
+    /// Flush the GPU draw-call buffer when the draw list was rebuilt.
+    /// Call once per frame after `draw_lists()`.
+    pub fn flush_draw_calls(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if !self.draw_call_dirty { return; }
+        self.draw_call_dirty = false;
+
+        if self.draw_call_cpu.is_empty() { return; }
+
+        // Grow draw_call_buffer if needed
+        let needed = self.draw_call_cpu.len() as u32;
+        if needed > self.draw_call_buffer_capacity {
+            let new_cap = needed.next_power_of_two();
+            let new_size = new_cap as u64 * std::mem::size_of::<GpuDrawCall>() as u64;
+            self.draw_call_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("GPU Scene Draw Call Buffer"),
+                size: new_size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.draw_call_buffer_capacity = new_cap;
         }
+
+        queue.write_buffer(
+            &self.draw_call_buffer,
+            0,
+            bytemuck::cast_slice(&self.draw_call_cpu),
+        );
+        gpu_transfer::track_upload(self.draw_call_cpu.len() as u64 * std::mem::size_of::<GpuDrawCall>() as u64);
     }
 
     // ── Queries ──────────────────────────────────────────────────────────────
@@ -593,16 +728,28 @@ impl GpuScene {
         &self.instance_buffer
     }
 
-    /// The shared vertex buffer that all proxy DrawCalls reference.
-    /// Each slot occupies `INSTANCE_STRIDE` (64) bytes at offset `slot * 64`.
-    pub fn transform_buffer(&self) -> &Arc<wgpu::Buffer> {
-        &self.transform_buffer
+    /// The GPU draw-call buffer (one `GpuDrawCall` per enabled opaque proxy).
+    pub fn draw_call_buffer(&self) -> &Arc<wgpu::Buffer> {
+        &self.draw_call_buffer
     }
 
-    /// Total GPU memory used by both scene buffers.
+    /// The AABB buffer (world-space, 32 bytes per slot) used by the occlusion culling pass.
+    pub fn aabb_buffer(&self) -> &Arc<wgpu::Buffer> {
+        &self.aabb_buffer
+    }
+
+    /// The visibility bitmask buffer written by the occlusion culling pass.
+    pub fn visibility_buffer(&self) -> &Arc<wgpu::Buffer> {
+        &self.visibility_buffer
+    }
+
+    /// Total GPU memory used by all scene buffers.
     pub fn gpu_memory_bytes(&self) -> u64 {
         let cap = self.allocator.capacity as u64;
-        cap * INSTANCE_SIZE as u64 + cap * TRANSFORM_STRIDE
+        cap * INSTANCE_SIZE as u64
+            + cap * AABB_SIZE as u64
+            + ((cap + 31) / 32) * 4
+            + self.draw_call_buffer_capacity as u64 * std::mem::size_of::<GpuDrawCall>() as u64
     }
 
     /// Get GPU instance data for a slot (for CPU-side culling if needed).
@@ -628,19 +775,18 @@ impl GpuScene {
         }
     }
 
-    /// Double the buffer capacity and recreate GPU resources.
     fn grow(&mut self, device: &wgpu::Device) {
         let old_storage = self.allocator.capacity as u64 * INSTANCE_SIZE as u64;
-        let old_xform = self.allocator.capacity as u64 * TRANSFORM_STRIDE;
-        gpu_transfer::track_dealloc(old_storage + old_xform);
+        let old_aabb = self.allocator.capacity as u64 * AABB_SIZE as u64;
+        gpu_transfer::track_dealloc(old_storage + old_aabb);
 
         let new_capacity = (self.allocator.capacity * 2).max(INITIAL_CAPACITY);
         log::info!(
-            "GpuScene: growing {} → {} slots ({:.1} MB storage + {:.1} MB vertex)",
+            "GpuScene: growing {} → {} slots ({:.1} MB storage + {:.1} MB aabb)",
             self.allocator.capacity,
             new_capacity,
             (new_capacity as f64 * INSTANCE_SIZE as f64) / (1024.0 * 1024.0),
-            (new_capacity as f64 * TRANSFORM_STRIDE as f64) / (1024.0 * 1024.0),
+            (new_capacity as f64 * AABB_SIZE as f64) / (1024.0 * 1024.0),
         );
 
         let buffer_size = new_capacity as u64 * INSTANCE_SIZE as u64;
@@ -660,30 +806,33 @@ impl GpuScene {
             }],
         });
 
-        // Recreate vertex buffer for the new capacity
-        let xform_size = new_capacity as u64 * TRANSFORM_STRIDE;
-        self.transform_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("GPU Scene Transform Vertex Buffer"),
-            size: xform_size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        let aabb_size = new_capacity as u64 * AABB_SIZE as u64;
+        self.aabb_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU Scene AABB Buffer"),
+            size: aabb_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
-        gpu_transfer::track_alloc(buffer_size + xform_size);
+        let vis_words = ((new_capacity as usize) + 31) / 32;
+        self.visibility_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("GPU Scene Visibility Buffer"),
+            size: (vis_words * 4) as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
 
-        // Extend CPU mirrors
+        gpu_transfer::track_alloc(buffer_size + aabb_size);
+
         self.cpu_data.resize(new_capacity as usize, GpuInstanceData::zeroed());
         self.cpu_transforms.resize(new_capacity as usize, [0.0; 16]);
+        self.cpu_aabbs.resize(new_capacity as usize, GpuInstanceAabb::zeroed());
 
-        // Extend dirty bits
         let words = (new_capacity as usize + 63) / 64;
         self.dirty_bits.resize(words, 0u64);
 
-        // Mark ALL active slots dirty so they get re-uploaded to the new buffers
         let slots: Vec<u32> = self.proxies.values().map(|p| p.slot).collect();
-        for slot in slots {
-            self.mark_dirty(slot);
-        }
+        for slot in slots { self.mark_dirty(slot); }
 
         self.allocator.grow(new_capacity);
     }

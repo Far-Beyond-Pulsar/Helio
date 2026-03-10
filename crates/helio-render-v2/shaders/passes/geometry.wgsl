@@ -43,26 +43,37 @@ struct Material {
     alpha_cutoff:    f32,         // offset 44
 }
 
-@group(0) @binding(0) var<uniform> camera:  Camera;
-@group(0) @binding(1) var<uniform> globals: Globals;
+@group(0) @binding(0) var<uniform>       camera:        Camera;
+@group(0) @binding(1) var<uniform>       globals:       Globals;
+@group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
 
 @group(1) @binding(0) var<uniform> material:          Material;
 @group(1) @binding(1) var base_color_texture: texture_2d<f32>;
 @group(1) @binding(2) var normal_map:         texture_2d<f32>;
 @group(1) @binding(3) var material_sampler:   sampler;
-@group(1) @binding(4) var orm_texture:        texture_2d<f32>; // R=AO, G=roughness, B=metallic
+@group(1) @binding(4) var orm_texture:        texture_2d<f32>;
 @group(1) @binding(5) var emissive_texture:   texture_2d<f32>;
 
 // ============================================================================
 // Vertex Input/Output
 // ============================================================================
 
+/// Per-instance GPU data.  Must match `GpuInstanceData` in gpu_scene.rs.
+struct GpuInstanceData {
+    transform:    mat4x4<f32>,
+    normal_mat_0: vec4<f32>,
+    normal_mat_1: vec4<f32>,
+    normal_mat_2: vec4<f32>,
+    bounds_center: vec3<f32>,
+    bounds_radius: f32,
+}
+
 struct Vertex {
     @location(0) position:       vec3<f32>,
     @location(1) bitangent_sign: f32,
     @location(2) tex_coords:     vec2<f32>,
-    @location(3) normal:         u32,   // Packed SNORM8x4
-    @location(4) tangent:        u32,   // Packed SNORM8x4 (kept for buffer compat, TBN computed via derivatives)
+    @location(3) normal:         u32,
+    @location(4) tangent:        u32,
 }
 
 struct VertexOutput {
@@ -80,19 +91,15 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
     return unpack4x8snorm(packed).xyz;
 }
 
-// Per-instance model transform (locations 5-8, VertexStepMode::Instance).
-struct Instance {
-    @location(5) model_0: vec4<f32>,
-    @location(6) model_1: vec4<f32>,
-    @location(7) model_2: vec4<f32>,
-    @location(8) model_3: vec4<f32>,
-}
-
 @vertex
-fn vs_main(vertex: Vertex, inst: Instance) -> VertexOutput {
-    let model      = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
-    let world_pos  = model * vec4<f32>(vertex.position, 1.0);
-    let normal_mat = mat3x3<f32>(model[0].xyz, model[1].xyz, model[2].xyz);
+fn vs_main(vertex: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
+    let inst       = instance_data[slot];
+    let world_pos  = inst.transform * vec4<f32>(vertex.position, 1.0);
+    let normal_mat = mat3x3<f32>(
+        inst.normal_mat_0.xyz,
+        inst.normal_mat_1.xyz,
+        inst.normal_mat_2.xyz,
+    );
     var out: VertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;

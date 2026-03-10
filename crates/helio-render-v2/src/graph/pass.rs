@@ -53,6 +53,9 @@ pub struct PassContext<'a> {
     /// Monotonically increasing counter.  Compare against a cached value to
     /// decide whether to rebuild a `wgpu::RenderBundle` for this pass.
     pub draw_list_generation: u64,
+    /// Index of the first transparent entry in the draw list.
+    /// `draw_list[0..transparent_start]` = opaque; `[transparent_start..]` = transparent.
+    pub transparent_start: usize,
 }
 
 impl<'a> PassContext<'a> {

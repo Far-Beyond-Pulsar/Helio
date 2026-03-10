@@ -266,6 +266,7 @@ impl RenderGraph {
                 camera_position: ctx.camera_position,
                 camera_forward: ctx.camera_forward,
                 draw_list_generation: ctx.draw_list_generation,
+                transparent_start: ctx.transparent_start,
             };
 
             self.passes[pass_idx].pass.execute(&mut pass_ctx)?;
@@ -384,6 +385,11 @@ pub struct GraphContext<'a> {
     /// Monotonically increasing counter from the Renderer.  Passes compare this
     /// against their cached generation to decide whether to rebuild RenderBundles.
     pub draw_list_generation: u64,
+    /// Index of the first transparent entry in the draw list.
+    /// `draw_list[0..transparent_start]` = opaque; `[transparent_start..]` = transparent.
+    /// Transparent draws are already appended after opaque by the GPU scene;
+    /// passes use this to skip the O(N_total) scan when looking for transparent items.
+    pub transparent_start: usize,
 }
 
 /// Builder for declaring pass resource dependencies

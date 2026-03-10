@@ -1,6 +1,7 @@
 //! Camera utilities
 
 use glam::{Mat4, Vec3};
+use crate::culling::Frustum;
 
 /// Camera data for rendering
 #[repr(C)]
@@ -58,6 +59,14 @@ impl Camera {
         Self { view_proj, position, time, view_proj_inv: view_proj.inverse() }
     }
     
+    /// Extract the six frustum planes from the current view-projection matrix.
+    ///
+    /// Use this to perform CPU-side frustum culling or to populate the GPU
+    /// `frustum_planes` field in compute shader uniforms.
+    pub fn frustum(&self) -> Frustum {
+        Frustum::from_view_proj(&self.view_proj)
+    }
+
     /// Get camera forward direction (normalized)
     pub fn forward(&self) -> Vec3 {
         // Reconstruct the center view ray by unprojecting NDC center at near/far.
