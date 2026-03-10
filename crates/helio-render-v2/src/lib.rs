@@ -23,6 +23,7 @@ pub mod profiler;
 pub mod debug_draw;
 pub mod gpu_scene;
 pub mod gpu_transfer;
+pub mod sdf;
 pub mod buffer_pool;
 
 mod renderer;

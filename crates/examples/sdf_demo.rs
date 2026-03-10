@@ -1,29 +1,19 @@
-//! Sky atmosphere example using helio-render-v2
+//! Feature showcase example using helio-render-v2
 //!
-//! Demonstrates the volumetric sky system working together with colored scene
-//! lights: a sun directional light drives the sky's sun direction and casts
-//! shadows; a sky-based ambient (Skylight) fills shadowed areas with the sky
-//! colour; and three point lights with distinct hues (warm amber, cool blue,
-//! deep red) show how colored scene lights interact with the sky-lit scene.
-//! Optional volumetric clouds drift overhead.
+//! All scene content is driven by a `Scene` struct — no hardcoded lights
+//! or geometry in the renderer.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
 //!   Space/Shift — move up/down
-//!   Q/E         — rotate sun left/right (changes time of day)
 //!   Mouse drag  — look around (click to grab cursor)
 //!   3           — toggle RC probe visualisation
 //!   4           — toggle GPU timing printout (stderr)
 //!   Escape      — release cursor / exit
 
-
-
 mod demo_portal;
 
-use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId,
-    SkyAtmosphere, VolumetricClouds, Skylight,
-};
+use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
 
 
 use helio_render_v2::features::{
@@ -32,6 +22,8 @@ use helio_render_v2::features::{
     BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
+    SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
+    TerrainConfig,
 };
 
 
@@ -66,8 +58,8 @@ fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
     (img.into_raw(), w, h)
 }
 
-const RC_WORLD_MIN: [f32; 3] = [-10.0, -0.3, -10.0];
-const RC_WORLD_MAX: [f32; 3] = [10.0, 8.0, 10.0];
+const RC_WORLD_MIN: [f32; 3] = [-3.5, -0.3, -3.5];
+const RC_WORLD_MAX: [f32; 3] = [3.5, 5.0, 3.5];
 
 fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
     use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
@@ -104,10 +96,11 @@ fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_rende
 
 fn main() {
     env_logger::init();
-    log::info!("Starting Helio Sky Example");
+    log::info!("Starting Helio Render V2 Basic Example");
 
     let event_loop = EventLoop::new().expect("Failed to create event loop");
     let mut app = App::new();
+
     event_loop.run_app(&mut app).expect("Event loop error");
 }
 
@@ -122,26 +115,23 @@ struct AppState {
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
     last_frame: std::time::Instant,
-
     cube1: GpuMesh,
     cube2: GpuMesh,
     cube3: GpuMesh,
     ground: GpuMesh,
-    roof: GpuMesh,
 
     // Free-camera state
     cam_pos:   glam::Vec3,
-    cam_yaw:   f32,
-    cam_pitch: f32,
+    cam_yaw:   f32,   // radians, horizontal rotation
+    cam_pitch: f32,   // radians, vertical rotation (clamped)
     keys:      HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    // Time-of-day: sun_angle=0 → noon, PI → midnight
-    sun_angle: f32,
-
     // Scene state
-    sun_light_id: LightId,
+    light_p0_id: LightId,
+    light_p1_id: LightId,
+    light_p2_id: LightId,
     billboard_ids: Vec<BillboardId>,
 
     probe_vis: bool,
@@ -150,25 +140,29 @@ struct AppState {
 }
 
 impl App {
-    fn new() -> Self { Self { state: None } }
+    fn new() -> Self {
+        Self { state: None }
+    }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.state.is_some() {
+            return;
+        }
 
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Helio – Volumetric Sky")
+                        .with_title("Helio Render V2 – Scene-Driven")
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("Failed to create window"),
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
+            backends: wgpu::Backends::VULKAN,
             flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION | wgpu::InstanceFlags::DEBUG,
             ..Default::default()
         });
@@ -183,27 +177,19 @@ impl ApplicationHandler for App {
         }))
         .expect("Failed to find adapter");
 
-        // compute features based on what the adapter actually provides; ray
-        // query support is optional but enables radiance cascades, TLAS, etc.
-        let mut req_feats = wgpu::Features::TIMESTAMP_QUERY
-            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-        let has_ray = adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-        if has_ray {
-            req_feats |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-        }
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("Main Device"),
-                required_features: req_feats,
-                required_limits: wgpu::Limits::default(),
+                required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
+                required_limits: wgpu::Limits::default()
+                    .using_minimum_supported_acceleration_structure_values(),
                 memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
+                // SAFETY: We acknowledge EXPERIMENTAL_RAY_QUERY may have implementation bugs.
+                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
                 trace: wgpu::Trace::Off,
             },
         ))
-        .expect("Failed to create device");
-        // later we will only add radiance cascades if has_ray
-
+        .expect("Failed to create device (ray tracing required)");
 
         device.on_uncaptured_error(std::sync::Arc::new(|e| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
@@ -211,11 +197,12 @@ impl ApplicationHandler for App {
         let info = adapter.get_info();
         println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
-        let queue  = Arc::new(queue);
+        let queue = Arc::new(queue);
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
-            .formats.iter()
+            .formats
+            .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
@@ -233,19 +220,37 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
+        // Features — data-free: all content comes from the Scene
         let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        let mut registry_builder = FeatureRegistry::builder()
+        // build registry later with SDF included
+
+        // insert an SDF feature alongside the other registry features
+        let mut sdf_feature = SdfFeature::new()
+            .with_mode(SdfMode::ClipMap)
+            .with_grid_dim(128)
+            .with_volume_bounds([-3.0, -1.0, -3.0], [3.0, 3.0, 3.0])
+            .with_terrain(TerrainConfig::rolling());
+        // simple SDF edit sphere
+        sdf_feature.add_edit(SdfEdit {
+            shape: SdfShapeType::Sphere,
+            op: BooleanOp::Union,
+            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.0, 0.0)),
+            params: SdfShapeParams::sphere(1.0),
+            blend_radius: 0.0,
+        });
+
+        // build registry including sdf
+        let feature_registry = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.3).with_threshold(1.2))
+            .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.2))
             .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000));
-        if has_ray {
-            registry_builder = registry_builder.with_feature(
+            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba.clone(), sprite_w, sprite_h).with_max_instances(5000))
+            .with_feature(
                 RadianceCascadesFeature::new()
-                    .with_world_bounds([-10.0, -0.3, -10.0], [10.0, 8.0, 10.0]),
-            );
-        }
-        let feature_registry = registry_builder.build();
+                    .with_world_bounds(RC_WORLD_MIN, RC_WORLD_MAX),
+            )
+            .with_feature(sdf_feature)
+            .build();
 
         let mut renderer = Renderer::new(
             device.clone(),
@@ -257,60 +262,44 @@ impl ApplicationHandler for App {
         let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
         let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
         let cube3  = renderer.create_mesh_cube([ 2.0, 0.3,  0.5], 0.3);
-        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
-        // Thin slab roof sitting just above the colored lights (y=2.7..3.0).
-        // rect3d gives independent extents: wide/deep but only 0.15 thick.
-        let roof   = renderer.create_mesh_rect3d([0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
+        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 5.0);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);
         renderer.add_object(&cube2,  None, glam::Mat4::IDENTITY);
         renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
         renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
-        renderer.add_object(&roof,   None, glam::Mat4::IDENTITY);
 
-        // Compute initial sun direction from starting sun_angle=1.0
-        let init_sun_dir = glam::Vec3::new(1.0_f32.cos() * 0.3, 1.0_f32.sin(), 0.5).normalize();
-        let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
-        let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
-        let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
-        let sun_light_id = renderer.add_light(SceneLight::directional(init_light_dir, [1.0, 0.85, 0.7], (init_lux * 0.35).max(0.01)));
-        renderer.add_light(SceneLight::point([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0));
-        renderer.add_light(SceneLight::point([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0));
-        renderer.add_light(SceneLight::point([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0));
-        renderer.set_sky_atmosphere(Some(
-            SkyAtmosphere::new()
-                .with_sun_intensity(22.0)
-                .with_exposure(4.0)
-                .with_mie_g(0.76)
-                .with_clouds(
-                    VolumetricClouds::new()
-                        .with_coverage(0.30)
-                        .with_density(0.7)
-                        .with_layer(800.0, 1800.0)
-                        .with_wind([1.0, 0.0], 0.08),
-                ),
-        ));
-        renderer.set_skylight(Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 1.0, 1.0])));
+        // p0 bobs up/down (animated), p1 and p2 are static
+        let p0_init = [0.0f32, 2.2, 0.0];
+        let p1 = [-3.5f32, 2.0, -1.5];
+        let p2 = [3.5f32, 1.5, 1.5];
+        let light_p0_id = renderer.add_light(SceneLight::point(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0));
+        let light_p1_id = renderer.add_light(SceneLight::point(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
+        let light_p2_id = renderer.add_light(SceneLight::point(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
 
         let mut billboard_ids = Vec::new();
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p0_init, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
+        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
 
         self.state = Some(AppState {
-            window, surface, device, surface_format, renderer,
+            window,
+            surface,
+            device,
+            surface_format,
+            renderer,
             last_frame: std::time::Instant::now(),
-            cube1, cube2, cube3, ground, roof,
+            cube1, cube2, cube3, ground,
             cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
-            cam_yaw:   0.0,
+            cam_yaw:   0.0,         // yaw=0 looks down -Z toward the scene
             cam_pitch: -0.2,
             keys:      HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            // Start at a nice afternoon angle (sun ~50° above horizon)
-            sun_angle: 1.0,
-            sun_light_id,
+            light_p0_id,
+            light_p1_id,
+            light_p2_id,
             billboard_ids,
             probe_vis: false,
             sprite_w,
@@ -322,15 +311,21 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
 
         match event {
-            WindowEvent::CloseRequested => { event_loop.exit(); }
-
+            // ── Exit ──────────────────────────────────────────────────────────
+            WindowEvent::CloseRequested => {
+                log::info!("Shutting down");
+                event_loop.exit();
+            }
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape), ..
-                }, ..
+                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                    ..
+                },
+                ..
             } => {
                 if state.cursor_grabbed {
+                    // First Escape releases the cursor
                     state.cursor_grabbed = false;
                     let _ = state.window.set_cursor_grab(CursorGrabMode::None);
                     state.window.set_cursor_visible(true);
@@ -339,6 +334,7 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // ── Probe visualization toggle ────────────────────────────────────
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
@@ -366,12 +362,16 @@ impl ApplicationHandler for App {
                         state.billboard_ids.push(state.renderer.add_billboard(b));
                     }
                 } else {
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0])));
+                    // Re-register light marker billboards (p0 position at init; will be updated per-frame)
+                    let p0 = [0.0f32, 2.2, 0.0];
+                    let p1 = [-3.5f32, 2.0, -1.5];
+                    let p2 = [3.5f32, 1.5, 1.5];
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
+                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
                 }
             }
-
+            // ── Live profiler portal ──────────────────────────────────────────
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
@@ -381,8 +381,10 @@ impl ApplicationHandler for App {
                 ..
             } => { let _ = state.renderer.start_live_portal_default(); }
 
+            // ── Keyboard held state ───────────────────────────────────────────
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, ..
+                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. },
+                ..
             } => {
                 match ks {
                     ElementState::Pressed  => { state.keys.insert(key); }
@@ -390,10 +392,14 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // ── Mouse button — grab cursor on click ───────────────────────────
             WindowEvent::MouseInput {
-                state: ElementState::Pressed, button: MouseButton::Left, ..
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
             } => {
                 if !state.cursor_grabbed {
+                    // Try confined first, fall back to locked
                     let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
@@ -404,17 +410,19 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // ── Window resize ─────────────────────────────────────────────────
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
-                let cfg = wgpu::SurfaceConfiguration {
+                let config = wgpu::SurfaceConfiguration {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                     format: state.surface_format,
-                    width: size.width, height: size.height,
+                    width: size.width,
+                    height: size.height,
                     present_mode: wgpu::PresentMode::Fifo,
                     alpha_mode: wgpu::CompositeAlphaMode::Auto,
                     view_formats: vec![],
                     desired_maximum_frame_latency: 2,
                 };
-                state.surface.configure(&state.device, &cfg);
+                state.surface.configure(&state.device, &config);
                 state.renderer.resize(size.width, size.height);
             }
 
@@ -429,7 +437,7 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, event: DeviceEvent) {
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: winit::event::DeviceId, event: DeviceEvent) {
         let Some(state) = &mut self.state else { return };
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             if state.cursor_grabbed {
@@ -440,75 +448,65 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(s) = &self.state { s.window.request_redraw(); }
+        if let Some(state) = &self.state {
+            state.window.request_redraw();
+        }
     }
 }
 
 impl AppState {
     fn render(&mut self, dt: f32) {
+        // ── Camera movement ────────────────────────────────────────────────────
         const SPEED: f32 = 5.0;
         const LOOK_SENS: f32 = 0.002;
-        const SUN_SPEED: f32 = 0.5; // radians/sec
 
-        // Sun rotation (Q/E keys)
-        if self.keys.contains(&KeyCode::KeyQ) { self.sun_angle -= SUN_SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyE) { self.sun_angle += SUN_SPEED * dt; }
-
-        // Camera look
+        // Apply mouse look — yaw left/right, pitch up/down (non-inverted)
         self.cam_yaw   += self.mouse_delta.0 * LOOK_SENS;
         self.cam_pitch  = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
 
+        // Standard FPS basis: yaw=0 looks down -Z
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let right   = glam::Vec3::new(cy, 0.0, sy);
+        let up      = glam::Vec3::Y;
 
         if self.keys.contains(&KeyCode::KeyW)      { self.cam_pos += forward * SPEED * dt; }
         if self.keys.contains(&KeyCode::KeyS)      { self.cam_pos -= forward * SPEED * dt; }
         if self.keys.contains(&KeyCode::KeyA)      { self.cam_pos -= right   * SPEED * dt; }
         if self.keys.contains(&KeyCode::KeyD)      { self.cam_pos += right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space)     { self.cam_pos += glam::Vec3::Y * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= glam::Vec3::Y * SPEED * dt; }
+        if self.keys.contains(&KeyCode::Space)     { self.cam_pos += up * SPEED * dt; }
+        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= up * SPEED * dt; }
 
-        let size   = self.window.inner_size();
+        let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let time   = self.renderer.frame_count() as f32 * 0.016;
+        let time = self.renderer.frame_count() as f32 * 0.016;
 
         let camera = Camera::perspective(
             self.cam_pos,
             self.cam_pos + forward,
             glam::Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            aspect, 0.1, 1000.0, time,
+            aspect,
+            0.1,
+            200.0,
+            time,
         );
 
-        // Sun direction: orbits in the XY plane (rotate sun_angle around Z axis)
-        let sun_dir = glam::Vec3::new(
-            self.sun_angle.cos() * 0.3,
-            self.sun_angle.sin(),
-            0.5,
-        ).normalize();
-        // SceneLight direction = "ray direction" (toward scene), so negate the toward-sun vector
-        let light_dir = [-sun_dir.x, -sun_dir.y, -sun_dir.z];
-
-        // Sun intensity dims at horizon/night
-        let sun_elev = sun_dir.y.clamp(-1.0, 1.0);
-        let sun_lux  = (sun_elev * 3.0).clamp(0.0, 1.0);
-        let sun_color = [
-            1.0_f32.min(1.0 + (1.0 - sun_elev) * 0.3),  // warmer at horizon
-            (0.85 + sun_elev * 0.15).clamp(0.0, 1.0),
-            (0.7  + sun_elev * 0.3 ).clamp(0.0, 1.0),
-        ];
-
+        // ── Acquire surface ────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => { log::warn!("Surface error: {:?}", e); return; }
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Update dynamic sun light
-        self.renderer.update_light(self.sun_light_id, SceneLight::directional(light_dir, sun_color, (sun_lux * 0.35).max(0.01)));
+        // p0 bobs up/down per-frame; update its light and billboard position
+        let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
+        self.renderer.update_light(self.light_p0_id, SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
+        if !self.probe_vis && !self.billboard_ids.is_empty() {
+            self.renderer.update_billboard(self.billboard_ids[0], BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]));
+        }
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }
@@ -516,3 +514,4 @@ impl AppState {
         output.present();
     }
 }
+
