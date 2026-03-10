@@ -36,10 +36,7 @@ use winit::{
     window::{Window, WindowId, CursorGrabMode},
 };
 
-
 use std::collections::HashSet;
-
-
 use std::sync::Arc;
 
 fn load_sprite() -> (Vec<u8>, u32, u32) {
@@ -222,14 +219,79 @@ impl ApplicationHandler for App {
         let sconce_r  = renderer.create_mesh_rect3d([ 1.85, 1.8, 0.0], [0.12, 0.08, 0.25]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
-        renderer.add_object(&floor,     None, glam::Mat4::IDENTITY);
-        renderer.add_object(&ceiling,   None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_l,    None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_r,    None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_far,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_near, None, glam::Mat4::IDENTITY);
-        renderer.add_object(&sconce_l,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&sconce_r,  None, glam::Mat4::IDENTITY);
+        // DEBUG: Temporarily disable complex passes that might occlude or drop geometry
+        // This will force the renderer into a simpler forward-only mode for diagnosis.
+        let pass_names = renderer.pass_names();
+        log::info!("Renderer passes (pre-disable): {:?}", pass_names);
+        for name in pass_names.iter() {
+            // Disable likely culprits: depth prepass, G-buffer, deferred lighting, shadows, and SSAO
+            if name.contains("Depth") || name.contains("GBuffer") || name.contains("Deferred") || name.contains("Shadow") || name.to_lowercase().contains("ssao") {
+                renderer.set_pass_enabled(name, false);
+                log::info!("Disabled pass for debug: {}", name);
+            }
+        }
+
+        // Debug: log created meshes and their bounds so we can inspect culling info.
+        println!(
+            "Mesh 'floor'    bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+            floor.bounds_center, floor.bounds_radius, floor.aabb_min, floor.aabb_max
+        );
+        println!(
+            "Mesh 'ceiling'  bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+            ceiling.bounds_center, ceiling.bounds_radius, ceiling.aabb_min, ceiling.aabb_max
+        );
+            println!(
+                "Mesh 'wall_l'   bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+                wall_l.bounds_center, wall_l.bounds_radius, wall_l.aabb_min, wall_l.aabb_max
+            );
+            println!(
+                "Mesh 'wall_r'   bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+                wall_r.bounds_center, wall_r.bounds_radius, wall_r.aabb_min, wall_r.aabb_max
+            );
+            println!(
+                "Mesh 'wall_far' bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+                wall_far.bounds_center, wall_far.bounds_radius, wall_far.aabb_min, wall_far.aabb_max
+            );
+            println!(
+                "Mesh 'wall_near' bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+                wall_near.bounds_center, wall_near.bounds_radius, wall_near.aabb_min, wall_near.aabb_max
+            );
+            println!(
+                "Mesh 'sconce_l' bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+                sconce_l.bounds_center, sconce_l.bounds_radius, sconce_l.aabb_min, sconce_l.aabb_max
+            );
+            println!(
+                "Mesh 'sconce_r' bounds_center={:?} radius={} aabb_min={:?} aabb_max={:?}",
+                sconce_r.bounds_center, sconce_r.bounds_radius, sconce_r.aabb_min, sconce_r.aabb_max
+            );
+
+            // Capture object IDs so we can inspect their enabled state and the scene count.
+            let floor_id   = renderer.add_object(&floor,     None, glam::Mat4::IDENTITY);
+            let ceiling_id = renderer.add_object(&ceiling,   None, glam::Mat4::IDENTITY);
+            let wall_l_id  = renderer.add_object(&wall_l,    None, glam::Mat4::IDENTITY);
+            let wall_r_id  = renderer.add_object(&wall_r,    None, glam::Mat4::IDENTITY);
+            let wall_far_id= renderer.add_object(&wall_far,  None, glam::Mat4::IDENTITY);
+            let wall_near_id=renderer.add_object(&wall_near, None, glam::Mat4::IDENTITY);
+            let sconce_l_id= renderer.add_object(&sconce_l,  None, glam::Mat4::IDENTITY);
+            let sconce_r_id= renderer.add_object(&sconce_r,  None, glam::Mat4::IDENTITY);
+
+            // Log the returned object ids and some scene state to aid debugging.
+            println!(
+                "Added objects: floor={:?}, ceiling={:?}, wall_l={:?}, wall_r={:?}, wall_far={:?}, wall_near={:?}, sconce_l={:?}, sconce_r={:?}",
+                floor_id, ceiling_id, wall_l_id, wall_r_id, wall_far_id, wall_near_id, sconce_l_id, sconce_r_id
+            );
+            println!(
+                "Scene object_count={} | enabled: floor={} ceiling={} wall_l={} wall_r={} wall_far={} wall_near={} sconce_l={} sconce_r={}",
+                renderer.object_count(),
+                renderer.is_object_enabled(floor_id),
+                renderer.is_object_enabled(ceiling_id),
+                renderer.is_object_enabled(wall_l_id),
+                renderer.is_object_enabled(wall_r_id),
+                renderer.is_object_enabled(wall_far_id),
+                renderer.is_object_enabled(wall_near_id),
+                renderer.is_object_enabled(sconce_l_id),
+                renderer.is_object_enabled(sconce_r_id),
+            );
 
         let overhead_z: &[f32] = &[-14.0, -7.0, 0.0, 7.0, 14.0];
         let exit_near = [0.0f32, 2.4,  17.5];
@@ -427,6 +489,18 @@ impl AppState {
             Err(e) => { log::warn!("Surface: {:?}", e); return; }
         };
         let view = output.texture.create_view(&Default::default());
+
+        // Debug: issue one-frame draws for the meshes to check GPU-scene vs one-frame path.
+        // If these appear but the persistent scene objects do not, the problem is
+        // likely in the GPU-driven scene / draw-list path rather than mesh creation.
+        self.renderer.draw_mesh(&self.floor);
+        self.renderer.draw_mesh(&self.ceiling);
+        self.renderer.draw_mesh(&self.wall_l);
+        self.renderer.draw_mesh(&self.wall_r);
+        self.renderer.draw_mesh(&self.wall_far);
+        self.renderer.draw_mesh(&self.wall_near);
+        self.renderer.draw_mesh(&self.sconce_l);
+        self.renderer.draw_mesh(&self.sconce_r);
 
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render: {:?}", e);

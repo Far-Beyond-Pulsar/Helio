@@ -33,10 +33,7 @@ use winit::{
     window::{Window, WindowId, CursorGrabMode},
 };
 
-
 use std::collections::HashSet;
-
-
 use std::sync::Arc;
 
 fn load_sprite() -> (Vec<u8>, u32, u32) {
@@ -493,4 +490,3 @@ impl AppState {
         output.present();
     }
 }
-

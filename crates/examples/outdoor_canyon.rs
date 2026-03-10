@@ -326,7 +326,7 @@ impl ApplicationHandler for App {
             mesa,
             tent_a, tent_b, tent_c, firepit,
             cam_pos: glam::Vec3::new(0.0, 4.0, 25.0),
-            cam_yaw: std::f32::consts::PI, cam_pitch: -0.15,
+            cam_yaw: 0.0, cam_pitch: -0.15,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
             sun_angle: 0.45, // golden-hour low sun
             sun_light_id,
