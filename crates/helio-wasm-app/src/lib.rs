@@ -64,6 +64,10 @@ async fn run() -> Result<(), JsValue> {
     canvas.set_height(600);
     body.append_child(&canvas)?;
 
+    // record the canvas dimensions for renderer configuration
+    let width: u32 = canvas.width();
+    let height: u32 = canvas.height();
+
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..Default::default()
