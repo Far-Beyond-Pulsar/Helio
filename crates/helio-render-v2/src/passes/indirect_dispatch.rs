@@ -37,18 +37,20 @@ impl IndirectDispatchPass {
     ///
     /// * `draw_call_buffer` — read-only storage, contains `GpuDrawCall[draw_count]`
     /// * `camera_buffer`    — uniform containing camera view_proj for frustum culling
+    /// Update GPU resources for `draw_count` draw calls.
+    /// Returns the (possibly newly allocated) indirect buffer, or `None` if draw_count == 0.
     pub fn update(
         &mut self,
         device: &wgpu::Device,
         draw_call_buffer: &wgpu::Buffer,
         camera_buffer: &wgpu::Buffer,
         draw_count: u32,
-    ) -> Result<()> {
+    ) -> Result<Option<Arc<wgpu::Buffer>>> {
         if draw_count == 0 {
             self.bind_group      = None;
             self.indirect_buffer = None;
             self.capacity        = 0;
-            return Ok(());
+            return Ok(None);
         }
 
         // (Re)allocate indirect buffer sized for draw_count 5-word indirect commands.
@@ -155,7 +157,7 @@ impl IndirectDispatchPass {
 
         self.indirect_buffer = Some(indirect_buf);
         self.capacity        = draw_count;
-        Ok(())
+        Ok(self.indirect_buffer.clone())
     }
 
     /// Returns the indirect buffer produced by the last `update()`.

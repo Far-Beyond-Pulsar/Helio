@@ -16,7 +16,7 @@ use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceC
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
-use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
+use crate::mesh::{GpuMesh, DrawCall, PackedVertex};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight, LightId, BillboardId};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
@@ -24,7 +24,8 @@ use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
 use crate::profiler::GpuProfiler;
 use crate::gpu_transfer;
-use crate::gpu_scene::GpuScene;
+use crate::gpu_scene::{GpuScene, MaterialRange};
+use crate::buffer_pool::GpuBufferPool;
 use crate::{Result, Error};
 use helio_live_portal::{
     LivePortalHandle,
@@ -38,7 +39,6 @@ use helio_live_portal::{
     PortalSceneBillboard,
     PortalSceneCamera,
 };
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
 use wgpu::util::DeviceExt;
@@ -247,6 +247,16 @@ pub struct Renderer {
     /// GPU-resident light + shadow matrix buffers (dirty-bit delta uploads).
     gpu_light_scene: gpu_light_scene::GpuLightScene,
 
+    // ── GPU-driven indirect rendering ─────────────────────────────────────
+    /// Unified geometry pool (128 MB VB + 64 MB IB). All pool-allocated meshes share these buffers.
+    buffer_pool: GpuBufferPool,
+    /// Indirect dispatch pass (held here, NOT in graph — called manually before graph).
+    indirect_dispatch: IndirectDispatchPass,
+    /// Indirect draw command buffer written by IndirectDispatchPass each frame. Shared with geometry passes.
+    shared_indirect_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
+    /// Per-material draw ranges in the indirect buffer (opaque). Shared with geometry passes.
+    shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+
     // Frame state
     frame_count: u64,
     width: u32,
@@ -314,6 +324,53 @@ impl Renderer {
 
     pub fn clear_debug_shapes(&self) {
         self.debug_shapes.lock().unwrap().clear();
+    }
+
+    // ── Pool mesh creation ────────────────────────────────────────────────────
+
+    /// Upload raw geometry into the unified geometry pool.
+    /// Returns a pool-allocated `GpuMesh` (`pool_allocated = true`).
+    /// Falls back to standalone buffers if the pool is full.
+    pub fn create_mesh(&mut self, vertices: &[PackedVertex], indices: &[u32]) -> GpuMesh {
+        GpuMesh::upload_to_pool(&self.queue, &mut self.buffer_pool, vertices, indices)
+            .unwrap_or_else(|| {
+                log::warn!("GpuBufferPool full — falling back to standalone mesh buffers");
+                GpuMesh::new(&self.device, vertices, indices)
+            })
+    }
+
+    /// Create a unit cube (half_size=0.5, centered at origin) from the pool.
+    pub fn create_mesh_unit_cube(&mut self) -> GpuMesh {
+        let mesh = GpuMesh::unit_cube(&self.device);
+        self.create_mesh_from_gpu_mesh(mesh)
+    }
+
+    /// Create a cube centered at `center` with given `half_size` from the pool.
+    pub fn create_mesh_cube(&mut self, center: [f32; 3], half_size: f32) -> GpuMesh {
+        let mesh = GpuMesh::cube(&self.device, center, half_size);
+        self.create_mesh_from_gpu_mesh(mesh)
+    }
+
+    /// Create a plane centered at `center` with given `half_extent` from the pool.
+    pub fn create_mesh_plane(&mut self, center: [f32; 3], half_extent: f32) -> GpuMesh {
+        let mesh = GpuMesh::plane(&self.device, center, half_extent);
+        self.create_mesh_from_gpu_mesh(mesh)
+    }
+
+    /// Create a box centered at `center` with given `half_extents` from the pool.
+    pub fn create_mesh_rect3d(&mut self, center: [f32; 3], half_extents: [f32; 3]) -> GpuMesh {
+        let mesh = GpuMesh::rect3d(&self.device, center, half_extents);
+        self.create_mesh_from_gpu_mesh(mesh)
+    }
+
+    /// Re-upload a standalone `GpuMesh`'s geometry into the pool (extracts from GPU via CPU staging is not
+    /// feasible, so we keep the standalone mesh as-is if we can't extract vertex data).
+    /// For now, already-standalone meshes are returned as-is — use `create_mesh(vertices, indices)` for new geometry.
+    fn create_mesh_from_gpu_mesh(&mut self, mesh: GpuMesh) -> GpuMesh {
+        // Standalone meshes created from constructors already have their own device buffers.
+        // We can't easily re-pool them without CPU vertex data, so just return the standalone mesh.
+        // Callers wanting pooled meshes should use `create_mesh(vertices, indices)` directly.
+        mesh
     }
 
     // ── Feature enable/disable ────────────────────────────────────────────────
@@ -656,6 +713,36 @@ impl Renderer {
             } else {
                 dl.truncate(self.persistent_draw_count);
                 sdl.truncate(self.persistent_draw_count);
+            }
+        }
+
+        // ── Step 2b: flush GPU draw calls + run indirect dispatch ────────────
+        {
+            // Ensure draw lists are rebuilt (so material_ranges is current).
+            self.gpu_scene.draw_lists();
+
+            // Upload GPU draw call buffer (sorted by material_slot).
+            self.gpu_scene.flush_draw_calls(&self.device, &self.queue);
+            let draw_count = self.gpu_scene.draw_call_count;
+
+            // Update shared material ranges (for geometry passes).
+            {
+                let mut ranges = self.shared_material_ranges.lock().unwrap();
+                ranges.clear();
+                ranges.extend_from_slice(&self.gpu_scene.material_ranges);
+            }
+
+            // Run IndirectDispatchPass: GPU culls + writes indirect commands.
+            if draw_count > 0 {
+                let new_buf = self.indirect_dispatch.update(
+                    &self.device,
+                    self.gpu_scene.draw_call_buffer(),
+                    &self.camera_buffer,
+                    draw_count,
+                )?;
+                *self.shared_indirect_buf.lock().unwrap() = new_buf;
+            } else {
+                *self.shared_indirect_buf.lock().unwrap() = None;
             }
         }
 

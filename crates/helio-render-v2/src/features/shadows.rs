@@ -74,8 +74,6 @@ impl Feature for ShadowsFeature {
     }
 
     fn register(&mut self, ctx: &mut FeatureContext) -> Result<()> {
-        use crate::features::lighting::MAX_LIGHTS;
-        
         // Cap shadow atlas layers to GPU limits: most support 256-2048 array layers.
         // Each light needs 6 layers (cube faces), so max ~42 lights on conservative GPUs.
         const MAX_ATLAS_LAYERS: u32 = 256;
@@ -153,6 +151,8 @@ impl Feature for ShadowsFeature {
             ctx.device_arc.clone(),
             &ctx.resources.bind_group_layouts.material,
             &ctx.instance_data_buffer,
+            ctx.pool_vertex_buffer.clone(),
+            ctx.pool_index_buffer.clone(),
         ));
 
         log::info!(

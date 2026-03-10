@@ -326,6 +326,8 @@ pub struct DrawCall {
     pub pool_base_vertex: i32,
     /// First index offset in the pool IB (0 for standalone meshes).
     pub pool_first_index: u32,
+    /// True when this draw call uses the unified geometry pool VB/IB.
+    pub pool_allocated: bool,
 }
 
 impl DrawCall {
@@ -342,6 +344,7 @@ impl DrawCall {
             slot,
             pool_base_vertex: mesh.pool_base_vertex as i32,
             pool_first_index: mesh.pool_first_index,
+            pool_allocated:   mesh.pool_allocated,
         }
     }
 }

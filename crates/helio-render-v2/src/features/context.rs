@@ -36,6 +36,10 @@ pub struct FeatureContext<'a> {
     /// GpuScene instance data storage buffer — ShadowPass uses this at binding 2
     /// so the vertex shader can read transforms via `@builtin(instance_index)`.
     pub instance_data_buffer: &'a wgpu::Buffer,
+    /// Unified pool vertex buffer — ShadowPass uses pool-allocated meshes.
+    pub pool_vertex_buffer: Arc<wgpu::Buffer>,
+    /// Unified pool index buffer — ShadowPass uses pool-allocated meshes.
+    pub pool_index_buffer: Arc<wgpu::Buffer>,
 
     // ── Outputs set by features during register() ───────────────────────────
     /// Light storage buffer set by LightingFeature
@@ -65,6 +69,8 @@ impl<'a> FeatureContext<'a> {
         light_face_counts: Arc<Mutex<Vec<u8>>>,
         shadow_cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
         instance_data_buffer: &'a wgpu::Buffer,
+        pool_vertex_buffer: Arc<wgpu::Buffer>,
+        pool_index_buffer: Arc<wgpu::Buffer>,
     ) -> Self {
         Self {
             device,
@@ -80,6 +86,8 @@ impl<'a> FeatureContext<'a> {
             light_face_counts,
             shadow_cull_lights,
             instance_data_buffer,
+            pool_vertex_buffer,
+            pool_index_buffer,
             light_buffer: None,
             shadow_atlas_view: None,
             shadow_sampler: None,

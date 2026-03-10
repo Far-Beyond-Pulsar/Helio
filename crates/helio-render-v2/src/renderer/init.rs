@@ -5,6 +5,8 @@ use super::uniforms::{GlobalsUniform, SkyUniform};
 use super::helpers::{create_depth_texture, create_gbuffer_textures, create_gbuffer_bind_group};
 use super::shadow_math::CSM_SPLITS;
 use crate::features::lighting::MAX_LIGHTS;
+use crate::buffer_pool::GpuBufferPool;
+use crate::gpu_scene::MaterialRange;
 
 impl Renderer {
     /// Create a new renderer
@@ -52,6 +54,21 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 2, resource: gpu_scene.instance_buffer().as_entire_binding() },
             ],
         });
+
+        // ── GPU-driven infrastructure ─────────────────────────────────────────
+        // Unified geometry pool — all pool-allocated meshes share these buffers.
+        let buffer_pool = GpuBufferPool::new(&device);
+        let pool_vb = buffer_pool.vertex_buffer.clone();
+        let pool_ib = buffer_pool.index_buffer.clone();
+
+        // IndirectDispatchPass is driven from renderer.render() — NOT added to graph.
+        let indirect_dispatch = IndirectDispatchPass::new();
+
+        // Shared Arcs: written from render() after dispatch, read by geometry passes.
+        let shared_indirect_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>> =
+            Arc::new(Mutex::new(None));
+        let shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>> =
+            Arc::new(Mutex::new(Vec::new()));
 
         // ── Geometry pass — must be added to graph BEFORE features so it ────────
         // ── executes first (billboard/post passes render on top).           ────────
@@ -195,57 +212,11 @@ impl Renderer {
         let gbuffer_targets = Arc::new(Mutex::new(gbuf_targets));
 
         // ── GPU-driven indirect dispatch pass ──────────────────────────────────
-        // `update()` is called each frame from mod.rs once draw_call_buffer is ready.
-        let indirect_dispatch_pass = IndirectDispatchPass::new();
-        graph.add_pass(indirect_dispatch_pass);
+        // NOTE: IndirectDispatchPass is NOT added to the graph — it is driven
+        // manually from render() before graph.execute() so the indirect buffer
+        // is ready when geometry passes run.
 
-        // Depth prepass (early-Z rejection before GBuffer)
-        let depth_pipeline = pipelines.get_or_create(
-            include_str!("../../shaders/passes/gbuffer.wgsl"),
-            "depth_prepass".to_string(),
-            &defines,
-            PipelineVariant::DepthOnly,
-        )?;
-        let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
-            depth_pipeline.clone(),
-            draw_list.clone(),
-        );
-        graph.add_pass(depth_prepass);
-
-        // G-buffer write pass (replaces forward GeometryPass)
-        let gbuf_pipeline = pipelines.get_or_create(
-            include_str!("../../shaders/passes/gbuffer.wgsl"),
-            "gbuffer".to_string(),
-            &defines,
-            PipelineVariant::GBufferWrite,
-        )?;
-        let gbuffer_pass = GBufferPass::new(
-            gbuffer_targets.clone(),
-            gbuf_pipeline.clone(),
-            draw_list.clone(),
-            shared_sorted_opaque,
-        );
-        graph.add_pass(gbuffer_pass);
-
-        // ── Register features (adds BillboardPass etc. after GeometryPass) ───────
-        let (feat_light_buf, feat_shadow_view, feat_shadow_sampler, feat_rc_view, feat_rc_bounds) = {
-            let mut ctx = FeatureContext::new(
-                &device, &queue, &mut graph, &mut resources, config.surface_format,
-                device.clone(),
-                draw_list.clone(),
-                shadow_draw_list.clone(),
-                shadow_matrix_buffer.clone(),
-                light_count_arc.clone(),
-                light_face_counts.clone(),
-                shadow_cull_lights.clone(),
-                gpu_scene.instance_buffer(),
-            );
-            features.register_all(&mut ctx)?;
-            (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler,
-             ctx.rc_cascade0_view, ctx.rc_world_bounds)
-        };
-
-        // ── Default material views (shared by create_material + default material) ──
+        // ── Default material views + bind group (needed before pass construction) ──
         let default_material_views = DefaultMaterialViews::new(&device, &queue);
 
         let mat_uniform = MaterialUniform {
@@ -271,6 +242,63 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&default_material_views.black_emissive) },
             ],
         }));
+
+        // Depth prepass (early-Z rejection before GBuffer)
+        let depth_pipeline = pipelines.get_or_create(
+            include_str!("../../shaders/passes/gbuffer.wgsl"),
+            "depth_prepass".to_string(),
+            &defines,
+            PipelineVariant::DepthOnly,
+        )?;
+        let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
+            depth_pipeline.clone(),
+            draw_list.clone(),
+            pool_vb.clone(),
+            pool_ib.clone(),
+            shared_indirect_buf.clone(),
+            shared_material_ranges.clone(),
+            default_material_bind_group.clone(),
+        );
+        graph.add_pass(depth_prepass);
+
+        // G-buffer write pass (replaces forward GeometryPass)
+        let gbuf_pipeline = pipelines.get_or_create(
+            include_str!("../../shaders/passes/gbuffer.wgsl"),
+            "gbuffer".to_string(),
+            &defines,
+            PipelineVariant::GBufferWrite,
+        )?;
+        let gbuffer_pass = GBufferPass::new(
+            gbuffer_targets.clone(),
+            gbuf_pipeline.clone(),
+            draw_list.clone(),
+            shared_sorted_opaque,
+            pool_vb.clone(),
+            pool_ib.clone(),
+            shared_indirect_buf.clone(),
+            shared_material_ranges.clone(),
+        );
+        graph.add_pass(gbuffer_pass);
+
+        // ── Register features (adds BillboardPass etc. after GeometryPass) ───────
+        let (feat_light_buf, feat_shadow_view, feat_shadow_sampler, feat_rc_view, feat_rc_bounds) = {
+            let mut ctx = FeatureContext::new(
+                &device, &queue, &mut graph, &mut resources, config.surface_format,
+                device.clone(),
+                draw_list.clone(),
+                shadow_draw_list.clone(),
+                shadow_matrix_buffer.clone(),
+                light_count_arc.clone(),
+                light_face_counts.clone(),
+                shadow_cull_lights.clone(),
+                gpu_scene.instance_buffer(),
+                pool_vb.clone(),
+                pool_ib.clone(),
+            );
+            features.register_all(&mut ctx)?;
+            (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler,
+             ctx.rc_cascade0_view, ctx.rc_world_bounds)
+        };
 
         // ── Lighting bind group (group 2) ────────────────────────────────────
         // Fallback null light buffer when LightingFeature is not registered
@@ -403,7 +431,7 @@ impl Renderer {
             &defines,
             PipelineVariant::TransparentForward,
         )?;
-        let transparent_pass = TransparentPass::new(transparent_pipeline, draw_list.clone(), device.clone());
+        let transparent_pass = TransparentPass::new(transparent_pipeline, draw_list.clone(), pool_vb.clone(), pool_ib.clone());
         graph.add_pass(transparent_pass);
 
         // ── Debug draw pass (overlay after deferred + feature passes) ──────────
@@ -547,6 +575,11 @@ impl Renderer {
             // ── GPU-resident scene + lights ───────────────────────────────────────
             gpu_scene,
             gpu_light_scene,
+            // ── GPU-driven indirect rendering ────────────────────────────────────
+            buffer_pool,
+            indirect_dispatch,
+            shared_indirect_buf,
+            shared_material_ranges,
             // ── Frame state ────────────────────────────────────────────────────
             frame_count: 0,
             width: config.width,

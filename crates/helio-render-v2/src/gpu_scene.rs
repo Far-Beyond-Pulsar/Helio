@@ -561,6 +561,7 @@ impl GpuScene {
                 slot:             proxy.slot,
                 pool_base_vertex: proxy.mesh.pool_base_vertex as i32,
                 pool_first_index: proxy.mesh.pool_first_index,
+                pool_allocated:   proxy.mesh.pool_allocated,
             };
             self.cached_shadow_draw_list.push(dc.clone());
             raw.push(dc);

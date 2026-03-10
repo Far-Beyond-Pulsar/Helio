@@ -1,11 +1,14 @@
 //! G-buffer write pass.
 //!
-//! Renders scene geometry into four Rgba G-buffer textures + the shared depth
-//! buffer.  No lighting is evaluated here — that happens in the subsequent
-//! `DeferredLightingPass`.
+//! Renders scene geometry into four Rgba G-buffer textures + the shared depth buffer.
+//! No lighting is evaluated here — that happens in the subsequent `DeferredLightingPass`.
 //!
-//! Records directly into the primary `CommandEncoder` using the sort order
-//! computed by `DepthPrepassPass` (shared via `shared_sorted`).  No bundles.
+//! **GPU-driven path**: when the indirect buffer is available (populated by
+//! `IndirectDispatchPass`) issues one `multi_draw_indexed_indirect` per unique material
+//! range from the sorted input order. O(unique_materials) CPU cost.
+//!
+//! **Legacy fallback**: when pool meshes are not available, falls back to per-draw
+//! `draw_indexed` using the sort order shared from `DepthPrepassPass`.
 //!
 //! G-buffer formats:
 //!   albedo   Rgba8Unorm
@@ -15,6 +18,7 @@
 //!   depth    Depth32Float (loaded from depth-prepass, not cleared)
 
 use std::sync::{Arc, Mutex};
+use crate::gpu_scene::MaterialRange;
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::mesh::DrawCall;
 use crate::passes::depth_prepass::record_opaque_draws;
@@ -30,21 +34,34 @@ pub struct GBufferTargets {
 }
 
 pub struct GBufferPass {
-    targets:       Arc<Mutex<GBufferTargets>>,
-    pipeline:      Arc<wgpu::RenderPipeline>,
-    draw_list:     Arc<Mutex<Vec<DrawCall>>>,
+    targets:        Arc<Mutex<GBufferTargets>>,
+    pipeline:       Arc<wgpu::RenderPipeline>,
+    draw_list:      Arc<Mutex<Vec<DrawCall>>>,
     /// Pre-computed sort shared from `DepthPrepassPass` (same material order).
-    shared_sorted: Arc<Mutex<Vec<usize>>>,
+    shared_sorted:  Arc<Mutex<Vec<usize>>>,
+    // ── GPU-driven path ────────────────────────────────────────────────────────
+    pool_vertex_buffer:    Arc<wgpu::Buffer>,
+    pool_index_buffer:     Arc<wgpu::Buffer>,
+    shared_indirect:       Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
+    shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
 }
 
 impl GBufferPass {
     pub fn new(
-        targets:       Arc<Mutex<GBufferTargets>>,
-        pipeline:      Arc<wgpu::RenderPipeline>,
-        draw_list:     Arc<Mutex<Vec<DrawCall>>>,
-        shared_sorted: Arc<Mutex<Vec<usize>>>,
+        targets:               Arc<Mutex<GBufferTargets>>,
+        pipeline:              Arc<wgpu::RenderPipeline>,
+        draw_list:             Arc<Mutex<Vec<DrawCall>>>,
+        shared_sorted:         Arc<Mutex<Vec<usize>>>,
+        pool_vertex_buffer:    Arc<wgpu::Buffer>,
+        pool_index_buffer:     Arc<wgpu::Buffer>,
+        shared_indirect:       Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
+        shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
     ) -> Self {
-        Self { targets, pipeline, draw_list, shared_sorted }
+        Self {
+            targets, pipeline, draw_list, shared_sorted,
+            pool_vertex_buffer, pool_index_buffer,
+            shared_indirect, shared_material_ranges,
+        }
     }
 }
 
@@ -59,9 +76,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let draw_calls = self.draw_list.lock().unwrap();
-        let sorted     = self.shared_sorted.lock().unwrap();
-        let targets    = self.targets.lock().unwrap();
+        let targets = self.targets.lock().unwrap();
 
         let color_attachments = [
             Some(wgpu::RenderPassColorAttachment {
@@ -91,8 +106,6 @@ impl RenderPass for GBufferPass {
             color_attachments: &color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: ctx.depth_view,
-                // Load depth written by DepthPrepassPass — GPU rejects occluded GBuffer
-                // fragments before running the material shader.
                 depth_ops: Some(wgpu::Operations {
                     load:  wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -106,12 +119,30 @@ impl RenderPass for GBufferPass {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, ctx.global_bind_group, &[]);
-        pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
 
-        {
-            record_opaque_draws(&mut pass, &draw_calls, &sorted);
+        // ── GPU-driven path ────────────────────────────────────────────────
+        let indirect_buf = self.shared_indirect.lock().unwrap().clone();
+        if let Some(indirect_buf) = indirect_buf {
+            let ranges = self.shared_material_ranges.lock().unwrap();
+            if ranges.is_empty() { return Ok(()); }
+
+            pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
+            pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+
+            // One multi_draw_indexed_indirect per unique material range.
+            // The indirect buffer is already sorted by material_slot from GpuScene.
+            for range in ranges.iter() {
+                pass.set_bind_group(1, Some(range.bind_group.as_ref()), &[]);
+                let byte_offset = range.start as u64 * std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
+                pass.multi_draw_indexed_indirect(&indirect_buf, byte_offset, range.count);
+            }
+            return Ok(());
         }
 
+        // ── Legacy fallback ────────────────────────────────────────────────
+        let draw_calls = self.draw_list.lock().unwrap();
+        let sorted     = self.shared_sorted.lock().unwrap();
+        record_opaque_draws(&mut pass, &draw_calls, &sorted);
         Ok(())
     }
 }
