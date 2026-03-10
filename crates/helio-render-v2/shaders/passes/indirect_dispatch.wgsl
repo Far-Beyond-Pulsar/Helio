@@ -54,7 +54,7 @@ fn extract_frustum_planes(m: mat4x4f) -> array<vec4f, 6> {
     planes[1] = r3 - r0;  // right
     planes[2] = r3 + r1;  // bottom
     planes[3] = r3 - r1;  // top
-    planes[4] = r2;        // near (z >= 0 in Vulkan NDC)
+    planes[4] = r2;       // near (z >= 0 in Vulkan NDC)
     planes[5] = r3 - r2;  // far
     return planes;
 }
