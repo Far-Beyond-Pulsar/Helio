@@ -206,17 +206,6 @@ pub struct Renderer {
     smaa_bind_group: Option<wgpu::BindGroup>,
     taa_bind_group:  Option<wgpu::BindGroup>,
 
-    // ── GPU-driven indirect rendering ─────────────────────────────────────
-    gpu_driven:  bool,
-    async_compute: bool,
-    indirect_opaque_buffer:      Option<Arc<wgpu::Buffer>>,
-    indirect_transparent_buffer: Option<Arc<wgpu::Buffer>>,
-    opaque_draw_count:      Arc<AtomicU32>,
-    transparent_draw_count: Arc<AtomicU32>,
-    draw_list_gpu_buffer: Option<Arc<wgpu::Buffer>>,
-    material_id_map:  HashMap<usize, u32>,
-    next_material_id: u32,
-
     // ── Sky LUT change flag (forwarded to GraphContext each frame) ────────
     sky_state_changed: bool,
 
@@ -258,10 +247,6 @@ pub struct Renderer {
     /// GPU-resident light + shadow matrix buffers (dirty-bit delta uploads).
     gpu_light_scene: gpu_light_scene::GpuLightScene,
 
-    // ── Pre-allocated GPU draw staging buffer ─────────────────────────────
-    /// Reused every frame for the GPU-driven path; avoids per-frame allocation.
-    gpu_draws_staging: Vec<GpuDrawCall>,
-
     // Frame state
     frame_count: u64,
     width: u32,
@@ -290,17 +275,17 @@ impl Renderer {
 
     /// Queue a mesh to be drawn this frame using the default white material
     pub fn draw_mesh(&self, mesh: &GpuMesh) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, self.default_material_bind_group.clone(), false));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, 0, self.default_material_bind_group.clone(), false));
     }
 
     /// Queue a mesh with a custom GPU material (preserves transparency mode)
     pub fn draw_mesh_with_gpu_material(&self, mesh: &GpuMesh, material: &GpuMaterial) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material.bind_group.clone(), material.transparent_blend));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, 0, material.bind_group.clone(), material.transparent_blend));
     }
 
     /// Queue a mesh with a custom material bind group (legacy opaque path)
     pub fn draw_mesh_with_material(&self, mesh: &GpuMesh, material: Arc<wgpu::BindGroup>) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material, false));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, 0, material, false));
     }
 
     pub fn debug_shape(&self, shape: DebugShape) {
@@ -371,9 +356,6 @@ impl Renderer {
     pub fn start_live_portal_default(&mut self) -> Result<String> {
         self.start_live_portal("0.0.0.0:7878")
     }
-
-    pub fn is_gpu_driven(&self) -> bool { self.gpu_driven }
-    pub fn is_async_compute(&self) -> bool { self.async_compute }
 
     // ── Render-pass toggle ────────────────────────────────────────────────────
 
@@ -717,46 +699,6 @@ impl Renderer {
                 *self.debug_batch.lock().unwrap() = None;
             } else {
                 *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
-            }
-
-            if self.gpu_driven {
-                if let Some(ref draw_list_buf) = self.draw_list_gpu_buffer {
-                    {
-                        let mut draw_calls = self.draw_list.lock().unwrap();
-                        self.gpu_draws_staging.clear();
-                        for dc in draw_calls.iter_mut() {
-                            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-                            if !self.material_id_map.contains_key(&mat_ptr) {
-                                self.material_id_map.insert(mat_ptr, self.next_material_id);
-                                self.next_material_id += 1;
-                            }
-                            dc.material_id = *self.material_id_map.get(&mat_ptr).unwrap();
-                            self.gpu_draws_staging.push(GpuDrawCall {
-                                vertex_offset: 0,
-                                index_offset: 0,
-                                index_count: dc.index_count,
-                                vertex_count: dc.vertex_count,
-                                material_id: dc.material_id,
-                                transparent_blend: if dc.transparent_blend { 1 } else { 0 },
-                                _pad0: 0,
-                                _pad1: 0,
-                                bounds_center: dc.bounds_center,
-                                bounds_radius: dc.bounds_radius,
-                            });
-                        }
-                    }
-                    if !self.gpu_draws_staging.is_empty() {
-                        let draw_bytes = (self.gpu_draws_staging.len() * std::mem::size_of::<GpuDrawCall>()) as u64;
-                        self.queue.write_buffer(draw_list_buf, 0, bytemuck::cast_slice(&self.gpu_draws_staging));
-                        gpu_transfer::track_upload(draw_bytes);
-                    }
-                    if let (Some(ref _opaque_buf), Some(ref _transparent_buf)) =
-                        (&self.indirect_opaque_buffer, &self.indirect_transparent_buffer)
-                    {
-                        self.opaque_draw_count.store(0, Ordering::Release);
-                        self.transparent_draw_count.store(0, Ordering::Release);
-                    }
-                }
             }
         } // profile_scope!("Prep") drops here
 

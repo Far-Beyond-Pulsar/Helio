@@ -21,15 +21,14 @@
 
 use std::sync::{Arc, Mutex};
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
-use crate::mesh::{DrawCall, INSTANCE_STRIDE};
+use crate::mesh::DrawCall;
 use crate::Result;
 
-/// Sort opaque draw call indices by (material, vertex_buffer, index_buffer, offset).
-/// Used by the parallel pre-compilation step.
+/// Sort opaque draw call indices by (material, slot).
 pub fn sort_opaque_indices(draw_calls: &[DrawCall]) -> Vec<usize> {
     let mut indices: Vec<usize> = Vec::with_capacity(draw_calls.len());
     for (idx, dc) in draw_calls.iter().enumerate() {
-        if !dc.transparent_blend && dc.instance_buffer.is_some() {
+        if !dc.transparent_blend {
             indices.push(idx);
         }
     }
@@ -38,11 +37,7 @@ pub fn sort_opaque_indices(draw_calls: &[DrawCall]) -> Vec<usize> {
         let b = &draw_calls[ib];
         (Arc::as_ptr(&a.material_bind_group) as usize)
             .cmp(&(Arc::as_ptr(&b.material_bind_group) as usize))
-            .then_with(|| (Arc::as_ptr(&a.vertex_buffer) as usize)
-                .cmp(&(Arc::as_ptr(&b.vertex_buffer) as usize)))
-            .then_with(|| (Arc::as_ptr(&a.index_buffer) as usize)
-                .cmp(&(Arc::as_ptr(&b.index_buffer) as usize)))
-            .then_with(|| a.instance_buffer_offset.cmp(&b.instance_buffer_offset))
+            .then_with(|| a.slot.cmp(&b.slot))
     });
     indices
 }
@@ -139,12 +134,12 @@ impl RenderPass for DepthPrepassPass {
     }
 }
 
-/// Record opaque draw calls directly into an active render pass.
+/// Record opaque draw calls into an active render pass.
 ///
-/// Minimises state changes: bind groups / vertex & index buffers are only
-/// re-set when they actually change.  Consecutive draws with the same mesh
-/// + material and contiguous instance-buffer slots are merged into a single
-/// instanced `draw_indexed` call.
+/// Minimises state changes: bind groups and VB/IB are only re-set when they
+/// actually change between draws.  Each draw uses `first_instance = dc.slot`
+/// so the vertex shader fetches its transform from the instance_data storage
+/// buffer — no per-draw vertex-attribute instance buffers.
 pub(crate) fn record_opaque_draws(
     pass: &mut wgpu::RenderPass<'_>,
     draw_calls: &[DrawCall],
@@ -153,9 +148,6 @@ pub(crate) fn record_opaque_draws(
     let mut last_mat:  Option<usize> = None;
     let mut last_vbuf: Option<usize> = None;
     let mut last_ibuf: Option<usize> = None;
-    let mut batch_start: u64  = 0;
-    let mut batch_count: u32  = 0;
-    let mut batch_idx:   usize = 0;
 
     for &idx in sorted {
         let dc = &draw_calls[idx];
@@ -163,26 +155,6 @@ pub(crate) fn record_opaque_draws(
         let vbuf_ptr = Arc::as_ptr(&dc.vertex_buffer)        as usize;
         let ibuf_ptr = Arc::as_ptr(&dc.index_buffer)         as usize;
 
-        // Extend current batch: same mesh + material + contiguous instance slot.
-        if batch_count > 0
-            && last_mat  == Some(mat_ptr)
-            && last_vbuf == Some(vbuf_ptr)
-            && last_ibuf == Some(ibuf_ptr)
-            && batch_start + batch_count as u64 * INSTANCE_STRIDE == dc.instance_buffer_offset
-        {
-            batch_count += 1;
-            continue;
-        }
-
-        // Flush accumulated batch.
-        if batch_count > 0 {
-            let bdc      = &draw_calls[batch_idx];
-            let inst_end = batch_start + batch_count as u64 * INSTANCE_STRIDE;
-            pass.set_vertex_buffer(1, bdc.instance_buffer.as_ref().unwrap().slice(batch_start..inst_end));
-            pass.draw_indexed(0..bdc.index_count, 0, 0..batch_count);
-        }
-
-        // State changes only when they actually differ.
         if last_mat != Some(mat_ptr) {
             pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
             last_mat = Some(mat_ptr);
@@ -196,16 +168,10 @@ pub(crate) fn record_opaque_draws(
             last_ibuf = Some(ibuf_ptr);
         }
 
-        batch_start = dc.instance_buffer_offset;
-        batch_count = 1;
-        batch_idx   = idx;
-    }
-
-    // Flush final batch.
-    if batch_count > 0 {
-        let bdc      = &draw_calls[batch_idx];
-        let inst_end = batch_start + batch_count as u64 * INSTANCE_STRIDE;
-        pass.set_vertex_buffer(1, bdc.instance_buffer.as_ref().unwrap().slice(batch_start..inst_end));
-        pass.draw_indexed(0..bdc.index_count, 0, 0..batch_count);
+        pass.draw_indexed(
+            dc.pool_first_index..dc.pool_first_index + dc.index_count,
+            dc.pool_base_vertex,
+            dc.slot..dc.slot + 1,
+        );
     }
 }

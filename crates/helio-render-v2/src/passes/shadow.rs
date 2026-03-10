@@ -1,7 +1,7 @@
 //! Shadow depth pass - renders depth into the shadow atlas
 
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
-use crate::mesh::{DrawCall, INSTANCE_STRIDE};
+use crate::mesh::DrawCall;
 use crate::Result;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use wgpu::util::DeviceExt;
@@ -171,8 +171,10 @@ impl ShadowPass {
         light_count: Arc<AtomicU32>,
         device: Arc<wgpu::Device>,
         material_layout: &wgpu::BindGroupLayout,
+        instance_data_buffer: &wgpu::Buffer,
     ) -> Self {
-        // BGL binding 0: shadow matrices storage; binding 1: per-face layer index uniform.
+        // BGL: binding 0 = shadow matrices, binding 1 = per-face layer index,
+        //      binding 2 = instance_data storage (transform read by @builtin(instance_index)).
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Shadow Matrix BGL"),
             entries: &[
@@ -191,6 +193,17 @@ impl ShadowPass {
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 2: instance_data storage — vertex shader uses @builtin(instance_index)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
@@ -237,17 +250,6 @@ impl ShadowPass {
                                 offset: 16,
                                 shader_location: 2,
                             },
-                        ],
-                    },
-                    // Instance model matrix (four vec4 columns, locations 5-8)
-                    wgpu::VertexBufferLayout {
-                        array_stride: 64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
                         ],
                     },
                 ],
@@ -311,6 +313,10 @@ impl ShadowPass {
                         binding: 1,
                         resource: idx_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: instance_data_buffer.as_entire_binding(),
+                    },
                 ],
             });
             slot_idx_buffers.push(idx_buf);
@@ -372,14 +378,13 @@ fn encode_shadow_bundle(
         let dc = &draw_calls[idx];
         enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
         enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-        let inst_start = dc.instance_buffer_offset;
-        let inst_end = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
-        enc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
         enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        enc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
-        if let Some(buf) = &dc.instance_buffer {
-            kept_arcs.push(Arc::clone(buf));
-        }
+        enc.draw_indexed(
+            dc.pool_first_index..dc.pool_first_index + dc.index_count,
+            dc.pool_base_vertex,
+            dc.slot..dc.slot + 1,
+        );
+        kept_arcs.push(Arc::clone(&dc.vertex_buffer));
     }
 
     let bundle = enc.finish(&wgpu::RenderBundleDescriptor { label: None });
@@ -442,8 +447,7 @@ impl RenderPass for ShadowPass {
             h = fnv64_push(h, self.filtered_indices.len() as u64);
             for &idx in &self.filtered_indices {
                 let dc = &draw_calls[idx];
-                h = fnv64_push(h, Arc::as_ptr(&dc.vertex_buffer) as u64);
-                h = fnv64_push(h, dc.instance_count as u64);
+                h = fnv64_push(h, dc.slot as u64);
             }
             h
         };

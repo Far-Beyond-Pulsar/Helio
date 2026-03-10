@@ -23,6 +23,7 @@ pub mod profiler;
 pub mod debug_draw;
 pub mod gpu_scene;
 pub mod gpu_transfer;
+pub mod buffer_pool;
 
 mod renderer;
 mod camera;
@@ -32,6 +33,7 @@ pub use renderer::{Renderer, RendererConfig};
 pub use camera::Camera;
 pub use profiler::{GpuProfiler, PassTiming, ScopeGuard, CompletedScope};
 pub use mesh::{GpuMesh, PackedVertex, DrawCall, GpuDrawCall};
+pub use buffer_pool::GpuBufferPool;
 pub use scene::{SceneLight, SkyAtmosphere, VolumetricClouds, Skylight, ObjectId, LightId, BillboardId};
 pub use material::{Material, GpuMaterial, TextureData};
 pub use debug_draw::DebugShape;

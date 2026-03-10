@@ -39,12 +39,17 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // GpuScene must be created BEFORE global_bind_group because binding 2
+        // needs the instance buffer.
+        let gpu_scene = GpuScene::new(&device);
+
         let global_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Global Bind Group"),
             layout: &resources.bind_group_layouts.global,
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: globals_buffer.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: gpu_scene.instance_buffer().as_entire_binding() },
             ],
         });
 
@@ -189,60 +194,10 @@ impl Renderer {
             create_gbuffer_textures(&device, config.width, config.height);
         let gbuffer_targets = Arc::new(Mutex::new(gbuf_targets));
 
-        // ── GPU-driven indirect rendering buffers (opt-in feature) ──────────────
-        let (indirect_opaque_buffer, indirect_transparent_buffer, draw_list_gpu_buffer,
-             opaque_count_buffer, transparent_count_buffer) = if config.gpu_driven {
-            // Create draw list upload buffer (CPU->GPU each frame)
-            let draw_list_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Draw List GPU Buffer"),
-                size: (2048 * std::mem::size_of::<GpuDrawCall>()) as u64,  // 2048 draws max
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-
-            // Create indirect command buffers
-            // Each can hold up to 512 DrawIndexedIndirect commands (20 bytes each = 10KB)
-            let opaque_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Indirect Opaque Draw Buffer"),
-                size: (512 * std::mem::size_of::<u32>() * 5) as u64,  // 512 commands × 5 u32s × 4 bytes
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-            let transparent_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Indirect Transparent Draw Buffer"),
-                size: (256 * std::mem::size_of::<u32>() * 5) as u64,  // 256 commands × 5 u32s × 4 bytes
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            }));
-
-            // Atomic counters (one u32 for opaque count, one for transparent count)
-            let opaque_count_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Opaque Draw Count Buffer"),
-                size: 4,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: true,
-            });
-            opaque_count_buf.unmap();
-
-            let transparent_count_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Transparent Draw Count Buffer"),
-                size: 4,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: true,
-            });
-            transparent_count_buf.unmap();
-
-            (Some(opaque_buf), Some(transparent_buf), Some(draw_list_buf), opaque_count_buf, transparent_count_buf)
-        } else {
-            // Create dummy buffers for pass compatibility
-            let dummy = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Dummy Indirect Buffer"),
-                size: 4,
-                usage: wgpu::BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            });
-            (None, None, None, dummy.clone(), dummy)
-        };
+        // ── GPU-driven indirect dispatch pass ──────────────────────────────────
+        // `update()` is called each frame from mod.rs once draw_call_buffer is ready.
+        let indirect_dispatch_pass = IndirectDispatchPass::new();
+        graph.add_pass(indirect_dispatch_pass);
 
         // Depth prepass (early-Z rejection before GBuffer)
         let depth_pipeline = pipelines.get_or_create(
@@ -251,30 +206,11 @@ impl Renderer {
             &defines,
             PipelineVariant::DepthOnly,
         )?;
-
         let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
             depth_pipeline.clone(),
             draw_list.clone(),
         );
         graph.add_pass(depth_prepass);
-
-        // ── GPU-driven indirect dispatch pass (builds indirect buffers via compute) ──
-        let mut indirect_dispatch_pass = IndirectDispatchPass::new();
-        if config.gpu_driven {
-            if let (Some(ref opaque_buf), Some(ref transparent_buf), Some(ref draw_list_buf)) =
-                (&indirect_opaque_buffer, &indirect_transparent_buffer, &draw_list_gpu_buffer) {
-                indirect_dispatch_pass.initialize(
-                    &device,
-                    &resources.bind_group_layouts.global,
-                    draw_list_buf,
-                    opaque_buf,
-                    transparent_buf,
-                    &opaque_count_buffer,
-                    &transparent_count_buffer,
-                )?;
-            }
-            graph.add_pass(indirect_dispatch_pass);
-        }
 
         // G-buffer write pass (replaces forward GeometryPass)
         let gbuf_pipeline = pipelines.get_or_create(
@@ -302,6 +238,7 @@ impl Renderer {
                 light_count_arc.clone(),
                 light_face_counts.clone(),
                 shadow_cull_lights.clone(),
+                gpu_scene.instance_buffer(),
             );
             features.register_all(&mut ctx)?;
             (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler,
@@ -543,22 +480,8 @@ impl Renderer {
             .map(|p| p.create_bind_group(&device, &pre_aa_view, &depth_view));
 
         log::trace!("Helio Render V2 initialized successfully");
-        if config.gpu_driven || config.async_compute {
-            log::info!("GPU acceleration enabled: gpu_driven={}, async_compute={}",
-                config.gpu_driven, config.async_compute);
-            if config.gpu_driven {
-                log::info!("GPU-driven rendering infrastructure active:");
-                log::info!("  ✓ Material ID tracking system");
-                log::info!("  ✓ Draw list GPU upload");
-                log::info!("  ✓ Indirect buffer compute shader");
-                log::info!("  ⚠ Pending for full GPU-driven: unified buffer pools + bindless resources");
-                log::info!("  Current: Traditional per-draw path (indirect buffers built but not yet consumed)");
-            }
-        }
+        log::info!("GPU-driven rendering active: frustum culling via compute, indirect draws, storage buffer transforms");
 
-        // The unified instance buffer is no longer needed — each proxy has its own
-        // 64-byte buffer.  Only legacy `draw_mesh_instanced` callers bring their own.
-        let gpu_scene = GpuScene::new(&device);
         let gpu_light_scene = gpu_light_scene::GpuLightScene::new(
             light_buf.clone(),
             shadow_matrix_buffer.clone(),
@@ -624,7 +547,6 @@ impl Renderer {
             // ── GPU-resident scene + lights ───────────────────────────────────────
             gpu_scene,
             gpu_light_scene,
-            gpu_draws_staging: Vec::new(),
             // ── Frame state ────────────────────────────────────────────────────
             frame_count: 0,
             width: config.width,
@@ -638,16 +560,6 @@ impl Renderer {
             pending_layout_changed: false,
             portal_scene_key: (0, 0, 0),
             cached_pass_names,
-            // ── GPU-driven rendering ───────────────────────────────────────────
-            gpu_driven: config.gpu_driven,
-            async_compute: config.async_compute,
-            indirect_opaque_buffer,
-            indirect_transparent_buffer,
-            opaque_draw_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            transparent_draw_count: Arc::new(std::sync::atomic::AtomicU32::new(0)),
-            draw_list_gpu_buffer,
-            material_id_map: HashMap::new(),
-            next_material_id: 1,
             // ── Persistent scene environment state ────────────────────────────
             scene_state: SceneState::default(),
             sky_state_changed: true, // first frame always renders the sky LUT

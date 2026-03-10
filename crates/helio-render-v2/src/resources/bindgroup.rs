@@ -46,14 +46,15 @@ impl BindGroupLayouts {
         }
     }
 
-    /// Group 0: Global uniforms (camera, time, etc.)
+    /// Group 0: Global uniforms (camera, time) + instance data storage buffer.
     ///
-    /// Updated every frame, shared by all draw calls
+    /// Binding 0: Camera uniform (VERTEX | FRAGMENT)
+    /// Binding 1: Globals uniform (VERTEX | FRAGMENT)
+    /// Binding 2: Instance data storage buffer (VERTEX | FRAGMENT | COMPUTE)
     fn create_global_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Global Bind Group Layout"),
             entries: &[
-                // Binding 0: Camera uniform
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
@@ -64,12 +65,26 @@ impl BindGroupLayouts {
                     },
                     count: None,
                 },
-                // Binding 1: Globals uniform (frame, delta_time, etc.)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Binding 2: Per-instance GPU data (model matrix, bounds).
+                // The vertex shader reads instance_data[@builtin(instance_index)]
+                // instead of vertex-attribute instance buffers.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX
+                        | wgpu::ShaderStages::FRAGMENT
+                        | wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },

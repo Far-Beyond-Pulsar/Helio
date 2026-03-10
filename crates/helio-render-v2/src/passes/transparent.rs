@@ -25,7 +25,7 @@
 use std::sync::{Arc, Mutex};
 
 use crate::graph::{PassContext, PassResourceBuilder, RenderPass, ResourceHandle};
-use crate::mesh::{DrawCall, INSTANCE_STRIDE};
+use crate::mesh::DrawCall;
 use crate::Result;
 
 pub struct TransparentPass {
@@ -135,11 +135,12 @@ impl TransparentPass {
                 last_material = Some(mat_ptr);
             }
             enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-            let inst_start = dc.instance_buffer_offset;
-            let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
-            enc.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
             enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            enc.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
+            enc.draw_indexed(
+                dc.pool_first_index..dc.pool_first_index + dc.index_count,
+                dc.pool_base_vertex,
+                dc.slot..dc.slot + 1,
+            );
         }
 
         self.cached_bundle = Some(enc.finish(&wgpu::RenderBundleDescriptor {
