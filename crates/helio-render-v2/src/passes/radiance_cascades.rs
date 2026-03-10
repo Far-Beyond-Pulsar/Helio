@@ -16,7 +16,11 @@ struct BlasEntry {
     size_desc: wgpu::BlasTriangleGeometrySizeDescriptor,
     vertex_buffer: Arc<wgpu::Buffer>,
     index_buffer: Arc<wgpu::Buffer>,
-    built: bool,  // Track whether this BLAS has been built
+    /// Pool VB offset (first_vertex for the build call).
+    first_vertex: u32,
+    /// Pool IB offset (first_index for the build call).
+    first_index: u32,
+    built: bool,
 }
 
 /// Row-major identity transform for TlasInstance  ([f32; 12] = 3×4 matrix)
@@ -103,12 +107,17 @@ impl RenderPass for RadianceCascadesPass {
         // light count was set in the last prepare() call.
 
         // ── 1. Cache mesh BLASes and gather active scene signature ───────────
+        // Key = (vb_ptr, pool_first_index) — unique per mesh slice in the pool.
+        // Using vb_ptr alone fails when all pool meshes share the same VB Arc.
         let active = draw_calls.len().min(TLAS_MAX);
         self.active_mesh_keys_scratch.clear();
         self.active_mesh_keys_scratch.reserve(active);
 
         for dc in draw_calls[..active].iter() {
-            let key = Arc::as_ptr(&dc.vertex_buffer) as usize;
+            // Combine VB pointer with IB offset to uniquely identify each mesh.
+            let key = (Arc::as_ptr(&dc.vertex_buffer) as usize)
+                ^ ((dc.pool_first_index as usize) << 16)
+                ^ (dc.pool_base_vertex as usize);
             self.active_mesh_keys_scratch.push(key);
             if !self.blas_cache.contains_key(&key) {
                 let size_desc = wgpu::BlasTriangleGeometrySizeDescriptor {
@@ -133,7 +142,9 @@ impl RenderPass for RadianceCascadesPass {
                     size_desc,
                     vertex_buffer: dc.vertex_buffer.clone(),
                     index_buffer: dc.index_buffer.clone(),
-                    built: false,  // Mark as not yet built
+                    first_vertex: dc.pool_base_vertex.max(0) as u32,
+                    first_index: dc.pool_first_index,
+                    built: false,
                 });
             }
         }
@@ -158,10 +169,15 @@ impl RenderPass for RadianceCascadesPass {
         // ── 3. Build only unbuilt BLASes and rebuild TLAS only on scene change ─
         // Collect build entries only for BLASes that haven't been built yet.
         // Static geometry BLASes are built once and reused every frame.
+        // De-duplicate by key: multiple draw calls may share the same VB (pool meshes),
+        // which produces the same cache key. Passing the same BLAS twice to
+        // build_acceleration_structures is undefined behaviour in Vulkan (GPU hang/TDR).
         let mut blas_entries: Vec<wgpu::BlasBuildEntry> = Vec::new();
         let mut keys_to_mark_built: Vec<usize> = Vec::new();
+        let mut seen_build_keys = std::collections::HashSet::new();
 
         for key in self.last_active_mesh_keys.iter().copied() {
+            if !seen_build_keys.insert(key) { continue; } // each BLAS must appear once
             let entry = &self.blas_cache[&key];
 
             // Only build if not already built
@@ -172,10 +188,10 @@ impl RenderPass for RadianceCascadesPass {
                         wgpu::BlasTriangleGeometry {
                             size: &entry.size_desc,
                             vertex_buffer: &entry.vertex_buffer,
-                            first_vertex: 0,
+                            first_vertex: entry.first_vertex,
                             vertex_stride: 32, // PackedVertex is 32 bytes
                             index_buffer: Some(&entry.index_buffer),
-                            first_index: Some(0),
+                            first_index: Some(entry.first_index),
                             transform_buffer: None,
                             transform_buffer_offset: None,
                         },
