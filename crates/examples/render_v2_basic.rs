@@ -232,10 +232,10 @@ impl ApplicationHandler for App {
         )
         .expect("Failed to create renderer");
 
-        let cube1  = GpuMesh::cube(&device, [ 0.0, 0.5,  0.0], 0.5);
-        let cube2  = GpuMesh::cube(&device, [-2.0, 0.4, -1.0], 0.4);
-        let cube3  = GpuMesh::cube(&device, [ 2.0, 0.3,  0.5], 0.3);
-        let ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 5.0);
+        let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
+        let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
+        let cube3  = renderer.create_mesh_cube([ 2.0, 0.3,  0.5], 0.3);
+        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 5.0);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);

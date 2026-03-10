@@ -206,15 +206,15 @@ impl ApplicationHandler for App {
         ).expect("renderer");
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18)
-        let floor     = GpuMesh::rect3d(&device, [0.0, 0.0,  0.0], [2.0, 0.02, 18.0]);
-        let ceiling   = GpuMesh::rect3d(&device, [0.0, 3.0,  0.0], [2.0, 0.02, 18.0]);
-        let wall_l    = GpuMesh::rect3d(&device, [-2.0, 1.5, 0.0], [0.02, 1.5, 18.0]);
-        let wall_r    = GpuMesh::rect3d(&device, [ 2.0, 1.5, 0.0], [0.02, 1.5, 18.0]);
-        let wall_far  = GpuMesh::rect3d(&device, [0.0, 1.5, -18.0], [2.0, 1.5, 0.02]);
-        let wall_near = GpuMesh::rect3d(&device, [0.0, 1.5,  18.0], [2.0, 1.5, 0.02]);
+        let floor     = renderer.create_mesh_rect3d([0.0, 0.0,  0.0], [2.0, 0.02, 18.0]);
+        let ceiling   = renderer.create_mesh_rect3d([0.0, 3.0,  0.0], [2.0, 0.02, 18.0]);
+        let wall_l    = renderer.create_mesh_rect3d([-2.0, 1.5, 0.0], [0.02, 1.5, 18.0]);
+        let wall_r    = renderer.create_mesh_rect3d([ 2.0, 1.5, 0.0], [0.02, 1.5, 18.0]);
+        let wall_far  = renderer.create_mesh_rect3d([0.0, 1.5, -18.0], [2.0, 1.5, 0.02]);
+        let wall_near = renderer.create_mesh_rect3d([0.0, 1.5,  18.0], [2.0, 1.5, 0.02]);
         // Sconce brackets midway along the corridor, mounted on each side wall
-        let sconce_l  = GpuMesh::rect3d(&device, [-1.85, 1.8, 0.0], [0.12, 0.08, 0.25]);
-        let sconce_r  = GpuMesh::rect3d(&device, [ 1.85, 1.8, 0.0], [0.12, 0.08, 0.25]);
+        let sconce_l  = renderer.create_mesh_rect3d([-1.85, 1.8, 0.0], [0.12, 0.08, 0.25]);
+        let sconce_r  = renderer.create_mesh_rect3d([ 1.85, 1.8, 0.0], [0.12, 0.08, 0.25]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&floor,     None, glam::Mat4::IDENTITY);

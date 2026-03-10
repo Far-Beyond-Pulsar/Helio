@@ -95,72 +95,11 @@ pub struct GpuMesh {
 }
 
 impl GpuMesh {
-    pub fn new(device: &wgpu::Device, vertices: &[PackedVertex], indices: &[u32]) -> Self {
-        use wgpu::util::DeviceExt;
-        // Only add BLAS_INPUT when the device actually has ray-tracing enabled;
-        // requesting it without the feature causes a validation error.
-        let has_rt = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-        let blas_flag = if has_rt { wgpu::BufferUsages::BLAS_INPUT } else { wgpu::BufferUsages::empty() };
-        let vertex_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Mesh Vertex Buffer"),
-            contents: bytemuck::cast_slice(vertices),
-            usage: wgpu::BufferUsages::VERTEX | blas_flag,
-        }));
-        let index_buffer = Arc::new(device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Mesh Index Buffer"),
-            contents: bytemuck::cast_slice(indices),
-            usage: wgpu::BufferUsages::INDEX | blas_flag,
-        }));
-        let vb_bytes = (vertices.len() * std::mem::size_of::<PackedVertex>()) as u64;
-        let ib_bytes = (indices.len() * std::mem::size_of::<u32>()) as u64;
-        gpu_transfer::track_alloc(vb_bytes + ib_bytes);
-        // Bounding sphere: centroid + max-distance radius.
-        // Also compute the exact AABB for tighter Hi-Z occlusion culling.
-        let (bounds_center, bounds_radius, aabb_min, aabb_max) = if vertices.is_empty() {
-            ([0.0f32; 3], 0.0f32, [0.0f32; 3], [0.0f32; 3])
-        } else {
-            let n = vertices.len() as f32;
-            let cx = vertices.iter().map(|v| v.position[0]).sum::<f32>() / n;
-            let cy = vertices.iter().map(|v| v.position[1]).sum::<f32>() / n;
-            let cz = vertices.iter().map(|v| v.position[2]).sum::<f32>() / n;
-            let r  = vertices.iter().map(|v| {
-                let dx = v.position[0] - cx;
-                let dy = v.position[1] - cy;
-                let dz = v.position[2] - cz;
-                (dx * dx + dy * dy + dz * dz).sqrt()
-            }).fold(0.0f32, f32::max);
-
-            let mut min = [f32::MAX; 3];
-            let mut max = [f32::MIN; 3];
-            for v in vertices {
-                for i in 0..3 {
-                    if v.position[i] < min[i] { min[i] = v.position[i]; }
-                    if v.position[i] > max[i] { max[i] = v.position[i]; }
-                }
-            }
-            ([cx, cy, cz], r, min, max)
-        };
-        Self {
-            vertex_buffer,
-            index_buffer,
-            index_count: indices.len() as u32,
-            vertex_count: vertices.len() as u32,
-            bounds_center,
-            bounds_radius,
-            aabb_min,
-            aabb_max,
-            pool_base_vertex: 0,
-            pool_first_index: 0,
-            pool_allocated: false,
-        }
-    }
-
-    /// Build a unit cube mesh centered at `center` with half-extent `half_size`
-    pub fn cube(device: &wgpu::Device, center: [f32; 3], half_size: f32) -> Self {
+    /// Returns the raw CPU geometry for a cube — use with `upload_to_pool`.
+    pub fn cube_data(center: [f32; 3], half_size: f32) -> (Vec<PackedVertex>, Vec<u32>) {
         let [cx, cy, cz] = center;
         let h = half_size;
 
-        // 6 faces: (normal, [4 corners in CCW winding viewed from outside])
         let faces: &[([f32; 3], [[f32; 3]; 4])] = &[
             ([0.0, 0.0, 1.0], [[cx-h,cy-h,cz+h],[cx+h,cy-h,cz+h],[cx+h,cy+h,cz+h],[cx-h,cy+h,cz+h]]),
             ([0.0, 0.0,-1.0], [[cx+h,cy-h,cz-h],[cx-h,cy-h,cz-h],[cx-h,cy+h,cz-h],[cx+h,cy+h,cz-h]]),
@@ -176,37 +115,19 @@ impl GpuMesh {
 
         for (face_idx, (normal, corners)) in faces.iter().enumerate() {
             let base = (face_idx * 4) as u32;
-            // Tangent = UV u-direction = direction from corner[0] to corner[1]
             let tangent = face_tangent(corners[0], corners[1]);
             for (i, &pos) in corners.iter().enumerate() {
                 vertices.push(PackedVertex::new_with_tangent(pos, *normal, uvs[i], tangent));
             }
             indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
         }
-
-        Self::new(device, &vertices, &indices)
+        (vertices, indices)
     }
 
     /// Unit cube in local space, centered at the origin with half-size 0.5.
     ///
-    /// Unlike [`Self::cube`] which bakes world-space positions into vertices,
-    /// this mesh is designed for GPU instancing: place and scale it with
-    /// `SceneObject::with_transform()` and the vertex shader applies the model matrix.
-    pub fn unit_cube(device: &wgpu::Device) -> Self {
-        Self::cube(device, [0.0, 0.0, 0.0], 0.5)
-    }
-
-    /// Local-space box with independent half-extents, centered at the origin.
-    ///
-    /// Designed for GPU instancing; use [`Self::rect3d`] when you want world-space
-    /// positions baked into vertices.
-    pub fn unit_rect3d(device: &wgpu::Device, half_extents: [f32; 3]) -> Self {
-        Self::rect3d(device, [0.0, 0.0, 0.0], half_extents)
-    }
-
-    /// Build an axis-aligned box with independent half-extents on each axis.
-    /// Useful for thin slabs, beams, or any non-uniform rectangular volume.
-    pub fn rect3d(device: &wgpu::Device, center: [f32; 3], half_extents: [f32; 3]) -> Self {
+    /// Returns the raw CPU geometry for a box — use with `upload_to_pool`.
+    pub fn rect3d_data(center: [f32; 3], half_extents: [f32; 3]) -> (Vec<PackedVertex>, Vec<u32>) {
         let [cx, cy, cz] = center;
         let [hx, hy, hz] = half_extents;
 
@@ -231,24 +152,72 @@ impl GpuMesh {
             }
             indices.extend_from_slice(&[base, base+1, base+2, base, base+2, base+3]);
         }
-
-        Self::new(device, &vertices, &indices)
+        (vertices, indices)
     }
 
 
-    pub fn plane(device: &wgpu::Device, center: [f32; 3], half_extent: f32) -> Self {
+    /// Returns the raw CPU geometry for a horizontal plane — use with `upload_to_pool`.
+    pub fn plane_data(center: [f32; 3], half_extent: f32) -> (Vec<PackedVertex>, Vec<u32>) {
         let [cx, cy, cz] = center;
         let h = half_extent;
         let n = [0.0f32, 1.0, 0.0];
         let t = [1.0f32, 0.0, 0.0];
-        let vertices = [
+        let vertices = vec![
             PackedVertex::new_with_tangent([cx-h,cy,cz+h], n, [0.0,0.0], t),
             PackedVertex::new_with_tangent([cx+h,cy,cz+h], n, [1.0,0.0], t),
             PackedVertex::new_with_tangent([cx+h,cy,cz-h], n, [1.0,1.0], t),
             PackedVertex::new_with_tangent([cx-h,cy,cz-h], n, [0.0,1.0], t),
         ];
-        let indices = [0u32, 1, 2, 0, 2, 3];
-        Self::new(device, &vertices, &indices)
+        let indices = vec![0u32, 1, 2, 0, 2, 3];
+        (vertices, indices)
+    }
+
+    /// Returns the raw CPU geometry for a UV sphere — use with `upload_to_pool`.
+    pub fn sphere_data(center: [f32; 3], radius: f32, subdivisions: u32) -> (Vec<PackedVertex>, Vec<u32>) {
+        let stacks = subdivisions.max(2);
+        let slices = (subdivisions * 2).max(4);
+        let [cx, cy, cz] = center;
+
+        let mut vertices: Vec<PackedVertex> = Vec::new();
+        let mut indices:  Vec<u32>          = Vec::new();
+
+        for stack in 0..=stacks {
+            let phi = std::f32::consts::PI * stack as f32 / stacks as f32;
+            let sin_phi = phi.sin();
+            let cos_phi = phi.cos();
+
+            for slice in 0..=slices {
+                let theta = 2.0 * std::f32::consts::PI * slice as f32 / slices as f32;
+                let sin_theta = theta.sin();
+                let cos_theta = theta.cos();
+
+                let nx = sin_phi * cos_theta;
+                let ny = cos_phi;
+                let nz = sin_phi * sin_theta;
+
+                let px = cx + radius * nx;
+                let py = cy + radius * ny;
+                let pz = cz + radius * nz;
+
+                let u = slice as f32 / slices as f32;
+                let v = stack as f32 / stacks as f32;
+
+                let tx = [-sin_theta, 0.0, cos_theta];
+                vertices.push(PackedVertex::new_with_tangent(
+                    [px, py, pz], [nx, ny, nz], [u, v], tx,
+                ));
+            }
+        }
+
+        let row = slices + 1;
+        for stack in 0..stacks {
+            for slice in 0..slices {
+                let a = stack * row + slice;
+                let b = a + row;
+                indices.extend_from_slice(&[a, b, a+1, b, b+1, a+1]);
+            }
+        }
+        (vertices, indices)
     }
 
     /// Upload vertices + indices into the unified `GpuBufferPool`.

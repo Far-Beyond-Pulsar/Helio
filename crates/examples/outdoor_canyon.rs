@@ -236,28 +236,28 @@ impl ApplicationHandler for App {
         ).expect("renderer");
 
         // Valley floor
-        let valley_floor = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 35.0);
+        let valley_floor = renderer.create_mesh_plane([0.0, 0.0, 0.0], 35.0);
 
         // Canyon walls – left side, stairstepping upward away from center
-        let wall_l1 = GpuMesh::rect3d(&device, [-12.0,  4.0, 0.0], [3.0,  4.0, 30.0]);
-        let wall_l2 = GpuMesh::rect3d(&device, [-18.0,  8.0, 0.0], [3.0,  8.0, 25.0]);
-        let wall_l3 = GpuMesh::rect3d(&device, [-24.0, 14.0, 0.0], [3.0, 14.0, 20.0]);
+        let wall_l1 = renderer.create_mesh_rect3d([-12.0,  4.0, 0.0], [3.0,  4.0, 30.0]);
+        let wall_l2 = renderer.create_mesh_rect3d([-18.0,  8.0, 0.0], [3.0,  8.0, 25.0]);
+        let wall_l3 = renderer.create_mesh_rect3d([-24.0, 14.0, 0.0], [3.0, 14.0, 20.0]);
         // Canyon walls – right side
-        let wall_r1 = GpuMesh::rect3d(&device, [ 12.0,  4.0, 0.0], [3.0,  4.0, 30.0]);
-        let wall_r2 = GpuMesh::rect3d(&device, [ 18.0,  8.0, 0.0], [3.0,  8.0, 25.0]);
-        let wall_r3 = GpuMesh::rect3d(&device, [ 24.0, 14.0, 0.0], [3.0, 14.0, 20.0]);
+        let wall_r1 = renderer.create_mesh_rect3d([ 12.0,  4.0, 0.0], [3.0,  4.0, 30.0]);
+        let wall_r2 = renderer.create_mesh_rect3d([ 18.0,  8.0, 0.0], [3.0,  8.0, 25.0]);
+        let wall_r3 = renderer.create_mesh_rect3d([ 24.0, 14.0, 0.0], [3.0, 14.0, 20.0]);
         // Terraces (horizontal slabs on top of wall tiers)
-        let terrace_l1 = GpuMesh::rect3d(&device, [-13.5, 8.1, -2.0],  [1.5, 0.2, 12.0]);
-        let terrace_l2 = GpuMesh::rect3d(&device, [-19.5, 16.1, -4.0], [1.5, 0.2,  8.0]);
-        let terrace_r1 = GpuMesh::rect3d(&device, [ 13.5, 8.1, -2.0],  [1.5, 0.2, 12.0]);
-        let terrace_r2 = GpuMesh::rect3d(&device, [ 19.5, 16.1, -4.0], [1.5, 0.2,  8.0]);
+        let terrace_l1 = renderer.create_mesh_rect3d([-13.5, 8.1, -2.0],  [1.5, 0.2, 12.0]);
+        let terrace_l2 = renderer.create_mesh_rect3d([-19.5, 16.1, -4.0], [1.5, 0.2,  8.0]);
+        let terrace_r1 = renderer.create_mesh_rect3d([ 13.5, 8.1, -2.0],  [1.5, 0.2, 12.0]);
+        let terrace_r2 = renderer.create_mesh_rect3d([ 19.5, 16.1, -4.0], [1.5, 0.2,  8.0]);
         // Background mesa
-        let mesa = GpuMesh::rect3d(&device, [3.0, 12.0, -38.0], [10.0, 12.0, 8.0]);
+        let mesa = renderer.create_mesh_rect3d([3.0, 12.0, -38.0], [10.0, 12.0, 8.0]);
         // Camp tents
-        let tent_a = GpuMesh::rect3d(&device, [-2.5, 0.6, 8.0],  [0.8, 0.6, 1.2]);
-        let tent_b = GpuMesh::rect3d(&device, [ 0.0, 0.7, 7.5],  [0.9, 0.7, 1.3]);
-        let tent_c = GpuMesh::rect3d(&device, [ 2.8, 0.55, 8.5], [0.7, 0.55, 1.1]);
-        let firepit = GpuMesh::cube(&device,  [0.0, 0.15, 9.5], 0.2);
+        let tent_a = renderer.create_mesh_rect3d([-2.5, 0.6, 8.0],  [0.8, 0.6, 1.2]);
+        let tent_b = renderer.create_mesh_rect3d([ 0.0, 0.7, 7.5],  [0.9, 0.7, 1.3]);
+        let tent_c = renderer.create_mesh_rect3d([ 2.8, 0.55, 8.5], [0.7, 0.55, 1.1]);
+        let firepit = renderer.create_mesh_cube( [0.0, 0.15, 9.5], 0.2);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&valley_floor, None, glam::Mat4::IDENTITY);

@@ -248,23 +248,23 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
-        let ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 40.0);
+        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 40.0);
         // Buildings: Y-center = half_h so base sits on ground
         let buildings = BUILDINGS.iter().map(|&(cx, cz, hw, hd, hh)| {
-            GpuMesh::rect3d(&device, [cx, hh, cz], [hw, hh, hd])
+            renderer.create_mesh_rect3d([cx, hh, cz], [hw, hh, hd])
         }).collect();
         // Lamp poles: 5 m tall pole (half_h = 2.75)
         let lamp_poles = LAMPS.iter().map(|&(x, z)| {
-            GpuMesh::rect3d(&device, [x, 2.75, z], [0.08, 2.75, 0.08])
+            renderer.create_mesh_rect3d([x, 2.75, z], [0.08, 2.75, 0.08])
         }).collect();
         // Sidewalk strips flanking the avenue (slightly raised)
         let sidewalks = vec![
-            GpuMesh::rect3d(&device, [-4.2, 0.04, 0.0], [0.35, 0.04, 32.0]),
-            GpuMesh::rect3d(&device, [ 4.2, 0.04, 0.0], [0.35, 0.04, 32.0]),
-            GpuMesh::rect3d(&device, [0.0, 0.04, -32.0], [32.0, 0.04, 0.35]),
-            GpuMesh::rect3d(&device, [0.0, 0.04,  32.0], [32.0, 0.04, 0.35]),
+            renderer.create_mesh_rect3d([-4.2, 0.04, 0.0], [0.35, 0.04, 32.0]),
+            renderer.create_mesh_rect3d([ 4.2, 0.04, 0.0], [0.35, 0.04, 32.0]),
+            renderer.create_mesh_rect3d([0.0, 0.04, -32.0], [32.0, 0.04, 0.35]),
+            renderer.create_mesh_rect3d([0.0, 0.04,  32.0], [32.0, 0.04, 0.35]),
         ];
-        let road_center = GpuMesh::rect3d(&device, [0.0, 0.01, 0.0], [4.0, 0.01, 32.0]);
+        let road_center = renderer.create_mesh_rect3d([0.0, 0.01, 0.0], [4.0, 0.01, 32.0]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&ground,      None, glam::Mat4::IDENTITY);

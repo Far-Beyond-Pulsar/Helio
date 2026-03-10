@@ -239,53 +239,53 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
 
-        let island_ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 55.0);
+        let island_ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 55.0);
 
         // Volcano cone: offset back (-10 on Z) so the erupting face is visible
         // Layers are stepped: each shrinks by ~30% and rises by 6-8m
-        let cone_l1 = GpuMesh::rect3d(&device, [0.0,  5.0, -10.0], [22.0,  5.0, 20.0]);
-        let cone_l2 = GpuMesh::rect3d(&device, [0.0, 11.5, -10.0], [15.5, 6.5, 14.0]);
-        let cone_l3 = GpuMesh::rect3d(&device, [0.0, 18.0, -10.0], [10.0, 6.5,  9.5]);
-        let cone_l4 = GpuMesh::rect3d(&device, [0.0, 24.0, -10.0], [ 5.5, 6.0,  5.5]);
-        let cone_l5 = GpuMesh::rect3d(&device, [0.0, 28.5, -10.0], [ 2.8, 4.5,  2.8]); // near summit
-        let crater_rim = GpuMesh::rect3d(&device, [0.0, 30.5, -10.0], [3.2, 0.4, 3.2]);
+        let cone_l1 = renderer.create_mesh_rect3d([0.0,  5.0, -10.0], [22.0,  5.0, 20.0]);
+        let cone_l2 = renderer.create_mesh_rect3d([0.0, 11.5, -10.0], [15.5, 6.5, 14.0]);
+        let cone_l3 = renderer.create_mesh_rect3d([0.0, 18.0, -10.0], [10.0, 6.5,  9.5]);
+        let cone_l4 = renderer.create_mesh_rect3d([0.0, 24.0, -10.0], [ 5.5, 6.0,  5.5]);
+        let cone_l5 = renderer.create_mesh_rect3d([0.0, 28.5, -10.0], [ 2.8, 4.5,  2.8]); // near summit
+        let crater_rim = renderer.create_mesh_rect3d([0.0, 30.5, -10.0], [3.2, 0.4, 3.2]);
         // Lava lake: glowing plane inside crater
-        let lava_lake = GpuMesh::rect3d(&device, [0.0, 30.1, -10.0], [2.2, 0.05, 2.2]);
+        let lava_lake = renderer.create_mesh_rect3d([0.0, 30.1, -10.0], [2.2, 0.05, 2.2]);
 
         // Left lava flow: 3 rect3d segments snaking down the slope
         let flow_left = vec![
-            GpuMesh::rect3d(&device, [ -5.5, 23.0, -6.0], [1.0, 0.12, 2.5]),
-            GpuMesh::rect3d(&device, [ -9.0, 16.0, -2.0], [1.2, 0.12, 3.5]),
-            GpuMesh::rect3d(&device, [-13.0,  6.5,  3.0], [1.4, 0.12, 5.0]),
-            GpuMesh::rect3d(&device, [-17.0,  1.5, 10.0], [1.5, 0.1,  6.0]),
+            renderer.create_mesh_rect3d([ -5.5, 23.0, -6.0], [1.0, 0.12, 2.5]),
+            renderer.create_mesh_rect3d([ -9.0, 16.0, -2.0], [1.2, 0.12, 3.5]),
+            renderer.create_mesh_rect3d([-13.0,  6.5,  3.0], [1.4, 0.12, 5.0]),
+            renderer.create_mesh_rect3d([-17.0,  1.5, 10.0], [1.5, 0.1,  6.0]),
         ];
         // Right lava flow
         let flow_right = vec![
-            GpuMesh::rect3d(&device, [  5.0, 22.0, -7.0], [1.0, 0.12, 2.5]),
-            GpuMesh::rect3d(&device, [  9.0, 15.5, -3.0], [1.2, 0.12, 3.5]),
-            GpuMesh::rect3d(&device, [ 13.5,  6.0,  2.0], [1.4, 0.12, 4.5]),
-            GpuMesh::rect3d(&device, [ 19.0,  1.5,  8.0], [1.5, 0.1,  5.5]),
+            renderer.create_mesh_rect3d([  5.0, 22.0, -7.0], [1.0, 0.12, 2.5]),
+            renderer.create_mesh_rect3d([  9.0, 15.5, -3.0], [1.2, 0.12, 3.5]),
+            renderer.create_mesh_rect3d([ 13.5,  6.0,  2.0], [1.4, 0.12, 4.5]),
+            renderer.create_mesh_rect3d([ 19.0,  1.5,  8.0], [1.5, 0.1,  5.5]),
         ];
 
         // Lava pools at base
         let lava_pools = vec![
-            GpuMesh::rect3d(&device, [-18.0, 0.06, 16.0], [4.0, 0.06, 3.0]),
-            GpuMesh::rect3d(&device, [ 22.0, 0.06, 12.0], [3.5, 0.06, 2.5]),
-            GpuMesh::rect3d(&device, [  0.0, 0.06, 22.0], [2.5, 0.06, 2.0]),
+            renderer.create_mesh_rect3d([-18.0, 0.06, 16.0], [4.0, 0.06, 3.0]),
+            renderer.create_mesh_rect3d([ 22.0, 0.06, 12.0], [3.5, 0.06, 2.5]),
+            renderer.create_mesh_rect3d([  0.0, 0.06, 22.0], [2.5, 0.06, 2.0]),
         ];
 
         // Boulders
         let boulders: Vec<GpuMesh> = BOULDERS.iter().map(|&(x, yh, z, hs)| {
-            GpuMesh::cube(&device, [x, yh, z], hs)
+            renderer.create_mesh_cube([x, yh, z], hs)
         }).collect();
 
         // Scorch/ash patches (dark flat planes)
         let scorch_patches = vec![
-            GpuMesh::rect3d(&device, [-10.0, 0.02,  8.0], [4.5, 0.02, 3.5]),
-            GpuMesh::rect3d(&device, [ 12.0, 0.02,  6.0], [3.5, 0.02, 3.0]),
-            GpuMesh::rect3d(&device, [  2.0, 0.02, 16.0], [3.0, 0.02, 4.0]),
-            GpuMesh::rect3d(&device, [-20.0, 0.02, -2.0], [3.0, 0.02, 2.5]),
-            GpuMesh::rect3d(&device, [ 22.0, 0.02, -8.0], [3.5, 0.02, 2.5]),
+            renderer.create_mesh_rect3d([-10.0, 0.02,  8.0], [4.5, 0.02, 3.5]),
+            renderer.create_mesh_rect3d([ 12.0, 0.02,  6.0], [3.5, 0.02, 3.0]),
+            renderer.create_mesh_rect3d([  2.0, 0.02, 16.0], [3.0, 0.02, 4.0]),
+            renderer.create_mesh_rect3d([-20.0, 0.02, -2.0], [3.0, 0.02, 2.5]),
+            renderer.create_mesh_rect3d([ 22.0, 0.02, -8.0], [3.5, 0.02, 2.5]),
         ];
         demo_portal::enable_live_dashboard(&mut renderer);
 

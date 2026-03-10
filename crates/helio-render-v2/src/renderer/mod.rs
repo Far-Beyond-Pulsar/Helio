@@ -330,47 +330,35 @@ impl Renderer {
 
     /// Upload raw geometry into the unified geometry pool.
     /// Returns a pool-allocated `GpuMesh` (`pool_allocated = true`).
-    /// Falls back to standalone buffers if the pool is full.
+    /// Panics if the pool is full — increase pool capacity in `GpuBufferPool::new`.
     pub fn create_mesh(&mut self, vertices: &[PackedVertex], indices: &[u32]) -> GpuMesh {
         GpuMesh::upload_to_pool(&self.queue, &mut self.buffer_pool, vertices, indices)
-            .unwrap_or_else(|| {
-                log::warn!("GpuBufferPool full — falling back to standalone mesh buffers");
-                GpuMesh::new(&self.device, vertices, indices)
-            })
+            .expect("GpuBufferPool full — increase pool capacity")
     }
 
-    /// Create a unit cube (half_size=0.5, centered at origin) from the pool.
     pub fn create_mesh_unit_cube(&mut self) -> GpuMesh {
-        let mesh = GpuMesh::unit_cube(&self.device);
-        self.create_mesh_from_gpu_mesh(mesh)
+        let (v, i) = GpuMesh::cube_data([0.0, 0.0, 0.0], 0.5);
+        self.create_mesh(&v, &i)
     }
 
-    /// Create a cube centered at `center` with given `half_size` from the pool.
     pub fn create_mesh_cube(&mut self, center: [f32; 3], half_size: f32) -> GpuMesh {
-        let mesh = GpuMesh::cube(&self.device, center, half_size);
-        self.create_mesh_from_gpu_mesh(mesh)
+        let (v, i) = GpuMesh::cube_data(center, half_size);
+        self.create_mesh(&v, &i)
     }
 
-    /// Create a plane centered at `center` with given `half_extent` from the pool.
     pub fn create_mesh_plane(&mut self, center: [f32; 3], half_extent: f32) -> GpuMesh {
-        let mesh = GpuMesh::plane(&self.device, center, half_extent);
-        self.create_mesh_from_gpu_mesh(mesh)
+        let (v, i) = GpuMesh::plane_data(center, half_extent);
+        self.create_mesh(&v, &i)
     }
 
-    /// Create a box centered at `center` with given `half_extents` from the pool.
     pub fn create_mesh_rect3d(&mut self, center: [f32; 3], half_extents: [f32; 3]) -> GpuMesh {
-        let mesh = GpuMesh::rect3d(&self.device, center, half_extents);
-        self.create_mesh_from_gpu_mesh(mesh)
+        let (v, i) = GpuMesh::rect3d_data(center, half_extents);
+        self.create_mesh(&v, &i)
     }
 
-    /// Re-upload a standalone `GpuMesh`'s geometry into the pool (extracts from GPU via CPU staging is not
-    /// feasible, so we keep the standalone mesh as-is if we can't extract vertex data).
-    /// For now, already-standalone meshes are returned as-is — use `create_mesh(vertices, indices)` for new geometry.
-    fn create_mesh_from_gpu_mesh(&mut self, mesh: GpuMesh) -> GpuMesh {
-        // Standalone meshes created from constructors already have their own device buffers.
-        // We can't easily re-pool them without CPU vertex data, so just return the standalone mesh.
-        // Callers wanting pooled meshes should use `create_mesh(vertices, indices)` directly.
-        mesh
+    pub fn create_mesh_sphere(&mut self, center: [f32; 3], radius: f32, subdivisions: u32) -> GpuMesh {
+        let (v, i) = GpuMesh::sphere_data(center, radius, subdivisions);
+        self.create_mesh(&v, &i)
     }
 
     // ── Feature enable/disable ────────────────────────────────────────────────

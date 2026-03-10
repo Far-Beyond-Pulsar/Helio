@@ -248,18 +248,18 @@ impl ApplicationHandler for App {
         }
 
         // Room: 24 m wide (X: -12..+12), 12 m deep (Z: -6..+6), 4 m tall
-        let floor   = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 12.0);
-        let ceiling = GpuMesh::rect3d(&device, [0.0, 4.0, 0.0], [12.0, 0.05, 6.0]);
-        let wall_n  = GpuMesh::rect3d(&device, [ 0.0, 2.0, -6.0], [12.0, 2.0, 0.05]);
-        let wall_s  = GpuMesh::rect3d(&device, [ 0.0, 2.0,  6.0], [12.0, 2.0, 0.05]);
-        let wall_e  = GpuMesh::rect3d(&device, [ 12.0, 2.0, 0.0], [0.05, 2.0, 6.0]);
-        let wall_w  = GpuMesh::rect3d(&device, [-12.0, 2.0, 0.0], [0.05, 2.0, 6.0]);
+        let floor   = renderer.create_mesh_plane([0.0, 0.0, 0.0], 12.0);
+        let ceiling = renderer.create_mesh_rect3d([0.0, 4.0, 0.0], [12.0, 0.05, 6.0]);
+        let wall_n  = renderer.create_mesh_rect3d([ 0.0, 2.0, -6.0], [12.0, 2.0, 0.05]);
+        let wall_s  = renderer.create_mesh_rect3d([ 0.0, 2.0,  6.0], [12.0, 2.0, 0.05]);
+        let wall_e  = renderer.create_mesh_rect3d([ 12.0, 2.0, 0.0], [0.05, 2.0, 6.0]);
+        let wall_w  = renderer.create_mesh_rect3d([-12.0, 2.0, 0.0], [0.05, 2.0, 6.0]);
 
         // Raised floor tiles (cable trench access): thin slabs arranged in a grid
         let mut floor_tiles: Vec<GpuMesh> = Vec::new();
         for xi in -2_i32..=2 {
             for zi in -1_i32..=1 {
-                floor_tiles.push(GpuMesh::rect3d(&device,
+                floor_tiles.push(renderer.create_mesh_rect3d(
                     [xi as f32 * 4.0, 0.03, zi as f32 * 3.5],
                     [1.9, 0.03, 1.7]));
             }
@@ -269,35 +269,35 @@ impl ApplicationHandler for App {
         let mut racks: Vec<GpuMesh> = Vec::new();
         for &(rx, _) in RACK_ROWS {
             for &rz in RACK_Z_OFFSETS {
-                racks.push(GpuMesh::rect3d(&device, [rx, 1.0, rz], [0.3, 1.0, 0.45]));
+                racks.push(renderer.create_mesh_rect3d([rx, 1.0, rz], [0.3, 1.0, 0.45]));
             }
         }
 
         // Hot-aisle containment walls: thin vertical slabs between row pairs
         // Between rows 0-1 (-5.0 x) and rows 2-3 (+5.0 x)
         let hot_aisle_walls = vec![
-            GpuMesh::rect3d(&device, [-5.0, 1.5, 0.0], [0.05, 1.5, 5.0]),
-            GpuMesh::rect3d(&device, [ 5.0, 1.5, 0.0], [0.05, 1.5, 5.0]),
+            renderer.create_mesh_rect3d([-5.0, 1.5, 0.0], [0.05, 1.5, 5.0]),
+            renderer.create_mesh_rect3d([ 5.0, 1.5, 0.0], [0.05, 1.5, 5.0]),
         ];
 
         // Cable trays: one per row, running full depth overhead
         let cable_trays: Vec<GpuMesh> = RACK_ROWS.iter().map(|&(rx, _)| {
-            GpuMesh::rect3d(&device, [rx, 3.55, 0.0], [0.25, 0.08, 5.5])
+            renderer.create_mesh_rect3d([rx, 3.55, 0.0], [0.25, 0.08, 5.5])
         }).collect();
 
         // Ceiling fluorescent panel bodies
         let ceiling_panels: Vec<GpuMesh> = CEILING_PANEL_XZ.iter().map(|&(px, pz)| {
-            GpuMesh::rect3d(&device, [px, 3.92, pz], [0.3, 0.04, 0.8])
+            renderer.create_mesh_rect3d([px, 3.92, pz], [0.3, 0.04, 0.8])
         }).collect();
 
         // Rear cooling units: 4 units on north wall (z = -5.8), tall and wide
         let cooling_units: Vec<GpuMesh> = [-9.0_f32, -3.0, 3.0, 9.0].iter().map(|&cx| {
-            GpuMesh::rect3d(&device, [cx, 1.5, -5.75], [1.1, 1.5, 0.25])
+            renderer.create_mesh_rect3d([cx, 1.5, -5.75], [1.1, 1.5, 0.25])
         }).collect();
 
         // Entry door on south wall (z = +6): frame + recessed panel
-        let door_frame = GpuMesh::rect3d(&device, [0.0, 1.2, 5.9], [0.7, 1.2, 0.08]);
-        let door_panel = GpuMesh::rect3d(&device, [0.0, 1.0, 5.95], [0.55, 1.0, 0.04]);
+        let door_frame = renderer.create_mesh_rect3d([0.0, 1.2, 5.9], [0.7, 1.2, 0.08]);
+        let door_panel = renderer.create_mesh_rect3d([0.0, 1.0, 5.95], [0.55, 1.0, 0.04]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&floor,      None, glam::Mat4::IDENTITY);

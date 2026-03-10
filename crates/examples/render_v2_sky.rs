@@ -237,13 +237,13 @@ impl ApplicationHandler for App {
         )
         .expect("Failed to create renderer");
 
-        let cube1  = GpuMesh::cube(&device, [ 0.0, 0.5,  0.0], 0.5);
-        let cube2  = GpuMesh::cube(&device, [-2.0, 0.4, -1.0], 0.4);
-        let cube3  = GpuMesh::cube(&device, [ 2.0, 0.3,  0.5], 0.3);
-        let ground = GpuMesh::plane(&device, [0.0, 0.0, 0.0], 20.0);
+        let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
+        let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
+        let cube3  = renderer.create_mesh_cube([ 2.0, 0.3,  0.5], 0.3);
+        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
         // Thin slab roof sitting just above the colored lights (y=2.7..3.0).
         // rect3d gives independent extents: wide/deep but only 0.15 thick.
-        let roof   = GpuMesh::rect3d(&device, [0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
+        let roof   = renderer.create_mesh_rect3d([0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);

@@ -297,10 +297,6 @@ impl RenderPass for ShadowPass {
             h
         };
 
-        // Detect whether any draw is pool-allocated (fast path: single VB/IB bind).
-        let use_pool = self.filtered_indices.first()
-            .map_or(false, |&i| draw_calls[i].pool_allocated);
-
         // ═══ Per-light render ════════════════════════════════════════════════
         for i in 0..actual_count {
             let max_faces = face_counts.get(i).copied().unwrap_or(6) as u32;
@@ -364,51 +360,21 @@ impl RenderPass for ShadowPass {
                 if !face_indices.is_empty() {
                     pass.set_pipeline(&self.pipeline);
                     pass.set_bind_group(0, &self.slot_bind_groups[bundle_slot], &[]);
-
-                    if use_pool {
-                        pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
-                        pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                        let mut last_mat: Option<usize> = None;
-                        for &idx in &face_indices {
-                            let dc = &draw_calls[idx];
-                            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-                            if last_mat != Some(mat_ptr) {
-                                pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                                last_mat = Some(mat_ptr);
-                            }
-                            pass.draw_indexed(
-                                dc.pool_first_index..dc.pool_first_index + dc.index_count,
-                                dc.pool_base_vertex,
-                                dc.slot..dc.slot + 1,
-                            );
+                    pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
+                    pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    let mut last_mat: Option<usize> = None;
+                    for &idx in &face_indices {
+                        let dc = &draw_calls[idx];
+                        let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+                        if last_mat != Some(mat_ptr) {
+                            pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+                            last_mat = Some(mat_ptr);
                         }
-                    } else {
-                        let mut last_mat:  Option<usize> = None;
-                        let mut last_vbuf: Option<usize> = None;
-                        let mut last_ibuf: Option<usize> = None;
-                        for &idx in &face_indices {
-                            let dc = &draw_calls[idx];
-                            let mat_ptr  = Arc::as_ptr(&dc.material_bind_group) as usize;
-                            let vbuf_ptr = Arc::as_ptr(&dc.vertex_buffer)        as usize;
-                            let ibuf_ptr = Arc::as_ptr(&dc.index_buffer)         as usize;
-                            if last_mat != Some(mat_ptr) {
-                                pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                                last_mat = Some(mat_ptr);
-                            }
-                            if last_vbuf != Some(vbuf_ptr) {
-                                pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-                                last_vbuf = Some(vbuf_ptr);
-                            }
-                            if last_ibuf != Some(ibuf_ptr) {
-                                pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                                last_ibuf = Some(ibuf_ptr);
-                            }
-                            pass.draw_indexed(
-                                dc.pool_first_index..dc.pool_first_index + dc.index_count,
-                                dc.pool_base_vertex,
-                                dc.slot..dc.slot + 1,
-                            );
-                        }
+                        pass.draw_indexed(
+                            dc.pool_first_index..dc.pool_first_index + dc.index_count,
+                            dc.pool_base_vertex,
+                            dc.slot..dc.slot + 1,
+                        );
                     }
                 }
 

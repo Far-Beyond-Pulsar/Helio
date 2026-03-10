@@ -250,9 +250,8 @@ impl Renderer {
             &defines,
             PipelineVariant::DepthOnly,
         )?;
-        let (depth_prepass, shared_sorted_opaque) = DepthPrepassPass::new(
+        let depth_prepass = DepthPrepassPass::new(
             depth_pipeline.clone(),
-            draw_list.clone(),
             pool_vb.clone(),
             pool_ib.clone(),
             shared_indirect_buf.clone(),
@@ -271,8 +270,6 @@ impl Renderer {
         let gbuffer_pass = GBufferPass::new(
             gbuffer_targets.clone(),
             gbuf_pipeline.clone(),
-            draw_list.clone(),
-            shared_sorted_opaque,
             pool_vb.clone(),
             pool_ib.clone(),
             shared_indirect_buf.clone(),

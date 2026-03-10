@@ -585,40 +585,49 @@ impl GpuScene {
         self.cached_draw_list.extend(transparent);
 
         // ── Build draw_call_cpu (GPU indirect, opaque only for now) ───────
-        // One GpuDrawCall per opaque proxy in the sorted order.
+        // One GpuDrawCall per pool-allocated opaque proxy in the sorted order.
+        let mut current_range_bg: Option<Arc<wgpu::BindGroup>> = None;
         let mut current_mat_ptr: usize = 0;
         let mut range_start: u32 = 0;
 
-        for (i, dc) in opaque.iter().enumerate() {
-            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-            let gpu_dc = GpuDrawCall {
+        for dc in opaque.iter() {
+            if !dc.pool_allocated {
+                log::warn!("GpuScene: non-pool mesh in slot {} skipped — use renderer.create_mesh_* to upload geometry to the pool", dc.slot);
+                continue;
+            }
+            let mat_ptr  = Arc::as_ptr(&dc.material_bind_group) as usize;
+            let pool_idx = self.draw_call_cpu.len() as u32;
+
+            self.draw_call_cpu.push(GpuDrawCall {
                 slot:          dc.slot,
                 first_index:   dc.pool_first_index,
                 base_vertex:   dc.pool_base_vertex,
                 index_count:   dc.index_count,
                 bounds_center: dc.bounds_center,
                 bounds_radius: dc.bounds_radius,
-            };
-            self.draw_call_cpu.push(gpu_dc);
+            });
 
-            // Track material ranges
-            if i == 0 {
-                current_mat_ptr = mat_ptr;
-                range_start = 0;
+            if pool_idx == 0 {
+                // First pool draw: open the first material range.
+                current_mat_ptr  = mat_ptr;
+                range_start      = 0;
+                current_range_bg = Some(Arc::clone(&dc.material_bind_group));
             } else if mat_ptr != current_mat_ptr {
+                // Material changed: close previous range and open a new one.
                 self.material_ranges.push(MaterialRange {
-                    bind_group: Arc::clone(&opaque[range_start as usize].material_bind_group),
+                    bind_group: current_range_bg.take().unwrap(),
                     start: range_start,
-                    count: i as u32 - range_start,
+                    count: pool_idx - range_start,
                 });
-                current_mat_ptr = mat_ptr;
-                range_start = i as u32;
+                current_mat_ptr  = mat_ptr;
+                range_start      = pool_idx;
+                current_range_bg = Some(Arc::clone(&dc.material_bind_group));
             }
         }
-        // Flush last material range
-        if !opaque.is_empty() {
+        // Flush the last open material range.
+        if !self.draw_call_cpu.is_empty() {
             self.material_ranges.push(MaterialRange {
-                bind_group: Arc::clone(&opaque[range_start as usize].material_bind_group),
+                bind_group: current_range_bg.unwrap(),
                 start: range_start,
                 count: self.draw_call_cpu.len() as u32 - range_start,
             });

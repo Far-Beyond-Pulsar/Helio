@@ -48,13 +48,13 @@ impl GpuBufferPool {
         let vertex_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Geometry Pool Vertex Buffer"),
             size: vb_bytes,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::BLAS_INPUT,
             mapped_at_creation: false,
         }));
         let index_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Geometry Pool Index Buffer"),
             size: ib_bytes,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::BLAS_INPUT,
             mapped_at_creation: false,
         }));
 
