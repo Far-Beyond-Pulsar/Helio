@@ -22,7 +22,13 @@ pub const SKY_LUT_W: u32 = 192;
 /// Height of the sky-view LUT in texels.
 pub const SKY_LUT_H: u32 = 108;
 /// Texture format: Rgba16Float gives enough HDR range for the sky radiance.
-pub const SKY_LUT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+// Half‑float LUT is nice for precision but not universally supported on
+// webgpu targets; fall back to 8‑bit unorm for wasm builds.
+pub const SKY_LUT_FORMAT: wgpu::TextureFormat = if cfg!(target_arch = "wasm32") {
+    wgpu::TextureFormat::Rgba8Unorm
+} else {
+    wgpu::TextureFormat::Rgba16Float
+};
 
 pub struct SkyLutPass {
     pipeline:       Arc<wgpu::RenderPipeline>,

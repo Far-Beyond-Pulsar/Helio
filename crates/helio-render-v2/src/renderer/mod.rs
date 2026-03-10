@@ -6,6 +6,7 @@ mod scene_prep;
 mod uniforms;
 mod shadow_math;
 mod helpers;
+#[cfg(feature = "live-portal")]
 mod portal;
 mod gpu_light_scene;
 
@@ -27,6 +28,10 @@ use crate::gpu_transfer;
 use crate::gpu_scene::{GpuScene, MaterialRange};
 use crate::buffer_pool::GpuBufferPool;
 use crate::{Result, Error};
+
+// Portal/dashboard support is optional.  it brings in a large async
+// networking stack which doesn't compile for wasm, so gate it with a feature.
+#[cfg(feature = "live-portal")]
 use helio_live_portal::{
     LivePortalHandle,
     PortalFrameSnapshot,
@@ -41,9 +46,11 @@ use helio_live_portal::{
 };
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
 use std::time::{SystemTime, UNIX_EPOCH};
+use crate::time::Instant;
 use wgpu::util::DeviceExt;
 
 use self::uniforms::GlobalsUniform;
+#[cfg(feature = "live-portal")]
 use self::portal::{compute_scene_delta, open_url_in_browser};
 
 /// Persistent scene environment — ambient, sky, and their dirty flags.
@@ -261,20 +268,25 @@ pub struct Renderer {
     frame_count: u64,
     width: u32,
     height: u32,
-    last_frame_start: Option<std::time::Instant>,
-    last_frame_end: Option<std::time::Instant>,
+    last_frame_start: Option<Instant>,
+    last_frame_end: Option<Instant>,
 
     /// GPU + CPU pass-level profiler.  `None` when TIMESTAMP_QUERY is unavailable.
     profiler: Option<GpuProfiler>,
 
+    #[cfg(feature = "live-portal")]
     /// Optional live web dashboard handle for real-time pipeline/perf telemetry.
     live_portal: Option<LivePortalHandle>,
+    #[cfg(feature = "live-portal")]
     /// Last captured scene layout snapshot forwarded to the portal thread.
     latest_scene_layout: Option<PortalSceneLayout>,
+    #[cfg(feature = "live-portal")]
     /// Previous scene layout for delta computation (reduces bandwidth).
     previous_scene_layout: Option<PortalSceneLayout>,
+    #[cfg(feature = "live-portal")]
     /// True when object/light/billboard count changed this frame.
     pending_layout_changed: bool,
+    #[cfg(feature = "live-portal")]
     portal_scene_key: (usize, usize, usize),
     /// Pass names cached once after `graph.build()` to avoid a `Vec<String>` alloc every frame.
     cached_pass_names: Vec<String>,
@@ -391,16 +403,23 @@ impl Renderer {
 
     /// Start the live performance dashboard and open it in the user's browser.
     pub fn start_live_portal(&mut self, bind_addr: &str) -> Result<String> {
-        if let Some(portal) = &self.live_portal {
-            return Ok(portal.url.clone());
+        #[cfg(feature = "live-portal")]
+        {
+            if let Some(portal) = &self.live_portal {
+                return Ok(portal.url.clone());
+            }
+            let handle = helio_live_portal::start_live_portal(bind_addr)
+                .map_err(|e| Error::Resource(format!("Failed to start live portal on {bind_addr}: {e}")))?;
+            let url = handle.url.clone();
+            open_url_in_browser(&url);
+            log::info!("Helio live portal started at {url}");
+            self.live_portal = Some(handle);
+            Ok(url)
         }
-        let handle = helio_live_portal::start_live_portal(bind_addr)
-            .map_err(|e| Error::Resource(format!("Failed to start live portal on {bind_addr}: {e}")))?;
-        let url = handle.url.clone();
-        open_url_in_browser(&url);
-        log::info!("Helio live portal started at {url}");
-        self.live_portal = Some(handle);
-        Ok(url)
+        #[cfg(not(feature = "live-portal"))]
+        {
+            Err(Error::Resource("live portal feature not enabled".into()))
+        }
     }
 
     /// Convenience: start live portal on the default port.
@@ -673,8 +692,19 @@ impl Renderer {
     /// Registered objects (added via `add_object`) are included automatically —
     /// no other per-frame object submission is required at steady state.
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
-        let frame_start = std::time::Instant::now();
-        let profiling_active = self.live_portal.is_some();
+        let frame_start = Instant::now();
+        // Profiling is tied to the live portal; if the feature is disabled
+        // or unavailable simply treat profiling as inactive.
+        let profiling_active = {
+            #[cfg(feature = "live-portal")]
+            {
+                self.live_portal.is_some()
+            }
+            #[cfg(not(feature = "live-portal"))]
+            {
+                false
+            }
+        };
         crate::profiler::set_profiling_active(profiling_active);
         log::trace!("Rendering frame {}", self.frame_count);
 
@@ -898,8 +928,21 @@ impl Renderer {
             }
             // Pop the validation error scope and block until the GPU has processed
             // the frame — gives us the exact shader/buffer error before TDR fires.
+            #[cfg(not(target_arch = "wasm32"))]
             if let Some(e) = pollster::block_on(error_scope.pop()) {
                 panic!("[GPU VALIDATION ERROR] {}", e);
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                // cannot block on wasm; spawn a local task to panic later if there is
+                // an error (should be rare in release builds).
+                use wasm_bindgen_futures::spawn_local;
+                let fut = error_scope.pop();
+                spawn_local(async move {
+                    if let Some(e) = fut.await {
+                        panic!("[GPU VALIDATION ERROR] {}", e);
+                    }
+                });
             }
         } // profile_scope!("Encode") drops here
 
@@ -928,9 +971,10 @@ impl Renderer {
         let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
 
         self.last_frame_start = Some(frame_start);
-        self.last_frame_end = Some(std::time::Instant::now());
+        self.last_frame_end = Some(Instant::now());
 
         // ── Live portal snapshot ──────────────────────────────────────────────
+        #[cfg(feature = "live-portal")]
         if let Some(portal) = &self.live_portal {
             let draw_total = { self.draw_list.lock().unwrap().len() };
             let draw_transparent = draw_total.saturating_sub(self.gpu_scene.transparent_start);
@@ -1024,6 +1068,7 @@ impl Renderer {
     // ── Resize ────────────────────────────────────────────────────────────────
     // ── Portal helpers ────────────────────────────────────────────────────────
 
+    #[cfg(feature = "live-portal")]
     /// Build a `PortalSceneLayout` from the renderer's live state.
     ///
     /// Objects come from the persistent draw_list (bounds data already cached).
@@ -1137,6 +1182,7 @@ impl Renderer {
 // PORTAL WORKER THREAD
 // ═══════════════════════════════════════════════════════════════════════════════
 
+#[cfg(feature = "live-portal")]
 /// Convert a flat `Vec<CompletedScope>` — ordered by drop (innermost first) —
 /// into a `PortalStageTiming` tree that the portal can render.
 ///

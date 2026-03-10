@@ -311,9 +311,13 @@ impl PipelineCache {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    // target 1: normals (Rgba16Float)
+                    // target 1: normals (half float or 8‑bit on wasm)
                     Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
+                        format: if cfg!(target_arch = "wasm32") {
+                            wgpu::TextureFormat::Rgba8Unorm
+                        } else {
+                            wgpu::TextureFormat::Rgba16Float
+                        },
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -323,9 +327,13 @@ impl PipelineCache {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    // target 3: emissive (Rgba16Float)
+                    // target 3: emissive (half float or 8‑bit on wasm)
                     Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
+                        format: if cfg!(target_arch = "wasm32") {
+                            wgpu::TextureFormat::Rgba8Unorm
+                        } else {
+                            wgpu::TextureFormat::Rgba16Float
+                        },
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),

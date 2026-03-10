@@ -360,13 +360,19 @@ impl Renderer {
         let shadow_view   = feat_shadow_view.unwrap_or_else(|| Arc::new(default_shadow_atlas_view));
         let shadow_samp   = feat_shadow_sampler.unwrap_or_else(|| Arc::new(default_comparison_sampler));
 
-        // Fallback 1×1 black Rgba16Float texture for RC when feature not registered
+        // Fallback 1×1 black texture for RC when feature not registered.  Use
+        // 8‑bit on wasm where 16‑bit float support can be flaky.
+        let rc_format = if cfg!(target_arch = "wasm32") {
+            wgpu::TextureFormat::Rgba8Unorm
+        } else {
+            wgpu::TextureFormat::Rgba16Float
+        };
         let default_rc_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Default RC Cascade 0"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             mip_level_count: 1, sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
+            format: rc_format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -584,10 +590,15 @@ impl Renderer {
             last_frame_start: None,
             last_frame_end: None,
             profiler,
+            #[cfg(feature = "live-portal")]
             live_portal: None,
+            #[cfg(feature = "live-portal")]
             latest_scene_layout: None,
+            #[cfg(feature = "live-portal")]
             previous_scene_layout: None,
+            #[cfg(feature = "live-portal")]
             pending_layout_changed: false,
+            #[cfg(feature = "live-portal")]
             portal_scene_key: (0, 0, 0),
             cached_pass_names,
             // ── Persistent scene environment state ────────────────────────────

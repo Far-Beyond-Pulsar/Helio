@@ -2,6 +2,15 @@
 
 use crate::passes::GBufferTargets;
 
+// On wasm/webgpu some half‑float formats are not supported for sampling.  fall
+// back to 8‑bit UNORM variants when compiling to wasm to avoid validation
+// errors.  The shader side just reads them as `vec4<f32>` so the difference is
+// transparent.
+#[cfg(target_arch = "wasm32")]
+const GBUF_FLOAT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+#[cfg(not(target_arch = "wasm32"))]
+const GBUF_FLOAT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 /// Create a Depth32Float texture + two views (write + depth-only-sample) at the given resolution.
 /// Both RENDER_ATTACHMENT and TEXTURE_BINDING are set so the deferred lighting pass can read depth.
 pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView, wgpu::TextureView) {
@@ -44,9 +53,9 @@ pub(super) fn create_gbuffer_textures(
         })
     };
     let albedo_tex  = make("GBuf Albedo",   wgpu::TextureFormat::Rgba8Unorm);
-    let normal_tex  = make("GBuf Normal",   wgpu::TextureFormat::Rgba16Float);
+    let normal_tex  = make("GBuf Normal",   GBUF_FLOAT_FORMAT);
     let orm_tex     = make("GBuf ORM",      wgpu::TextureFormat::Rgba8Unorm);
-    let emissive_tex = make("GBuf Emissive", wgpu::TextureFormat::Rgba16Float);
+    let emissive_tex = make("GBuf Emissive", GBUF_FLOAT_FORMAT);
     let albedo_view   = albedo_tex.create_view(&Default::default());
     let normal_view   = normal_tex.create_view(&Default::default());
     let orm_view      = orm_tex.create_view(&Default::default());

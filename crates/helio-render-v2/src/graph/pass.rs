@@ -6,7 +6,27 @@ use crate::profiler::GpuProfiler;
 use super::PassResourceBuilder;
 
 /// Render pass trait - implemented by all rendering passes
+#[cfg(not(target_arch = "wasm32"))]
 pub trait RenderPass: Send + Sync {
+    /// Unique name for this pass
+    fn name(&self) -> &str;
+
+    /// Declare resource dependencies
+    ///
+    /// Called once during graph building to determine pass ordering.
+    /// Passes should declare which resources they read, write, or create.
+    fn declare_resources(&self, _builder: &mut PassResourceBuilder) {
+        // Default: no resource dependencies
+    }
+
+    /// Execute the pass
+    ///
+    /// Called every frame during graph execution.
+    fn execute(&mut self, ctx: &mut PassContext) -> Result<()>;
+}
+
+#[cfg(target_arch = "wasm32")]
+pub trait RenderPass {
     /// Unique name for this pass
     fn name(&self) -> &str;
 

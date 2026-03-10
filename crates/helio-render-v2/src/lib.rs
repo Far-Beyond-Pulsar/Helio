@@ -26,6 +26,11 @@ pub mod gpu_transfer;
 pub mod sdf;
 pub mod buffer_pool;
 
+// cross-platform time utilities (Instant wrapper for wasm)
+pub mod time;
+
+pub use time::Instant;
+
 mod renderer;
 mod camera;
 pub mod culling;

@@ -1,3 +1,5 @@
+#![cfg(feature = "live-portal")]
+
 //! Live portal scene layout building and delta computation.
 
 use crate::camera::Camera;
