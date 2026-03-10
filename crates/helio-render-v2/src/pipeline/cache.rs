@@ -155,50 +155,14 @@ impl PipelineCache {
                 buffers: &[
                     // Vertex buffer layout matching PackedVertex from helio-core
                     wgpu::VertexBufferLayout {
-                        array_stride: 32, // 3*4 + 4 + 2*4 + 4 + 4 = 32 bytes
+                        array_stride: 32,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
-                            // position: vec3<f32>
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x3,
-                                offset: 0,
-                                shader_location: 0,
-                            },
-                            // bitangent_sign: f32
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32,
-                                offset: 12,
-                                shader_location: 1,
-                            },
-                            // tex_coords: vec2<f32>
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Float32x2,
-                                offset: 16,
-                                shader_location: 2,
-                            },
-                            // normal: u32 (packed)
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 24,
-                                shader_location: 3,
-                            },
-                            // tangent: u32 (packed)
-                            wgpu::VertexAttribute {
-                                format: wgpu::VertexFormat::Uint32,
-                                offset: 28,
-                                shader_location: 4,
-                            },
-                        ],
-                    },
-                    // Per-instance model transform (locations 5-8).
-                    wgpu::VertexBufferLayout {
-                        array_stride: 64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset:  0, shader_location: 0 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32,   offset: 12, shader_location: 1 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 24, shader_location: 3 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 28, shader_location: 4 },
                         ],
                     },
                 ],
@@ -256,22 +220,11 @@ impl PipelineCache {
                         array_stride: 32,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32, offset: 12, shader_location: 1 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset:  0, shader_location: 0 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32,   offset: 12, shader_location: 1 },
                             wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 24, shader_location: 3 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32, offset: 28, shader_location: 4 },
-                        ],
-                    },
-                    // Per-instance model transform (locations 5-8).
-                    wgpu::VertexBufferLayout {
-                        array_stride: 64,
-                        step_mode: wgpu::VertexStepMode::Instance,
-                        attributes: &[
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset:  0, shader_location: 5 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 6 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 32, shader_location: 7 },
-                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 48, shader_location: 8 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 24, shader_location: 3 },
+                            wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 28, shader_location: 4 },
                         ],
                     },
                 ],
