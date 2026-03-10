@@ -584,10 +584,15 @@ impl Renderer {
             last_frame_start: None,
             last_frame_end: None,
             profiler,
+            #[cfg(feature = "live-portal")]
             live_portal: None,
+            #[cfg(feature = "live-portal")]
             latest_scene_layout: None,
+            #[cfg(feature = "live-portal")]
             previous_scene_layout: None,
+            #[cfg(feature = "live-portal")]
             pending_layout_changed: false,
+            #[cfg(feature = "live-portal")]
             portal_scene_key: (0, 0, 0),
             cached_pass_names,
             // ── Persistent scene environment state ────────────────────────────

@@ -15,7 +15,7 @@ console_error_panic_hook = "0.1"
 wasm-logger = "0.2"
 
 wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu"] }
-helio-render-v2 = { path = "../helio-render-v2" }
+helio-render-v2 = { path = "../helio-render-v2", default-features = false }
 
 
 
