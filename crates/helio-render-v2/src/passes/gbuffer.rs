@@ -109,7 +109,6 @@ impl RenderPass for GBufferPass {
         pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
 
         {
-            crate::profile_scope!("gbuffer/record");
             record_opaque_draws(&mut pass, &draw_calls, &sorted);
         }
 

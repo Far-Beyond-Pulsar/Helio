@@ -94,7 +94,6 @@ impl RenderPass for DepthPrepassPass {
         // Re-sort only when the scene composition changes (add/remove object).
         // Camera movement does NOT trigger this — zero re-sort cost while flying.
         if ctx.draw_list_generation != self.sort_generation {
-            crate::profile_scope!("depth_prepass/sort");
             let t = std::time::Instant::now();
             self.sorted_opaque_indices = sort_opaque_indices(&draw_calls);
             {
@@ -133,7 +132,6 @@ impl RenderPass for DepthPrepassPass {
         pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
 
         {
-            crate::profile_scope!("depth_prepass/record");
             record_opaque_draws(&mut pass, &draw_calls, &self.sorted_opaque_indices);
         }
 

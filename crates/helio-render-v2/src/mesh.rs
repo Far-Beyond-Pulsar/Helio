@@ -77,10 +77,14 @@ pub struct GpuMesh {
     pub index_buffer: Arc<wgpu::Buffer>,
     pub index_count: u32,
     pub vertex_count: u32,
-    /// World-space centroid of all vertices (used for shadow culling).
+    /// Local-space bounding sphere center (centroid of all vertices).
     pub bounds_center: [f32; 3],
-    /// Radius of the bounding sphere around `bounds_center`.
+    /// Bounding sphere radius around `bounds_center`.
     pub bounds_radius: f32,
+    /// Local-space AABB minimum corner.
+    pub aabb_min: [f32; 3],
+    /// Local-space AABB maximum corner.
+    pub aabb_max: [f32; 3],
 }
 
 impl GpuMesh {
@@ -104,10 +108,9 @@ impl GpuMesh {
         let ib_bytes = (indices.len() * std::mem::size_of::<u32>()) as u64;
         gpu_transfer::track_alloc(vb_bytes + ib_bytes);
         // Bounding sphere: centroid + max-distance radius.
-        // Centroid approximation is conservative and fast; the tiny extra radius
-        // vs a min-bounding-sphere algorithm only means slightly fewer culled draws.
-        let (bounds_center, bounds_radius) = if vertices.is_empty() {
-            ([0.0f32; 3], 0.0f32)
+        // Also compute the exact AABB for tighter Hi-Z occlusion culling.
+        let (bounds_center, bounds_radius, aabb_min, aabb_max) = if vertices.is_empty() {
+            ([0.0f32; 3], 0.0f32, [0.0f32; 3], [0.0f32; 3])
         } else {
             let n = vertices.len() as f32;
             let cx = vertices.iter().map(|v| v.position[0]).sum::<f32>() / n;
@@ -119,7 +122,16 @@ impl GpuMesh {
                 let dz = v.position[2] - cz;
                 (dx * dx + dy * dy + dz * dz).sqrt()
             }).fold(0.0f32, f32::max);
-            ([cx, cy, cz], r)
+
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for v in vertices {
+                for i in 0..3 {
+                    if v.position[i] < min[i] { min[i] = v.position[i]; }
+                    if v.position[i] > max[i] { max[i] = v.position[i]; }
+                }
+            }
+            ([cx, cy, cz], r, min, max)
         };
         Self {
             vertex_buffer,
@@ -128,6 +140,8 @@ impl GpuMesh {
             vertex_count: vertices.len() as u32,
             bounds_center,
             bounds_radius,
+            aabb_min,
+            aabb_max,
         }
     }
 

@@ -182,8 +182,6 @@ impl RenderPass for TransparentPass {
             || lighting_bg_ptr != self.bundle_lighting_bg_ptr;
 
         if need_rebuild {
-            crate::profile_scope!("transparent/compile");
-            // Clone the draw list so compile_bundle can take &mut self.
             let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
             self.compile_bundle(
                 &draw_calls,
@@ -222,7 +220,6 @@ impl RenderPass for TransparentPass {
             multiview_mask: None,
         });
 
-        crate::profile_scope!("transparent/replay");
         pass.execute_bundles(std::slice::from_ref(bundle));
 
         Ok(())

@@ -26,10 +26,11 @@ pub mod gpu_transfer;
 
 mod renderer;
 mod camera;
+pub mod culling;
 
 pub use renderer::{Renderer, RendererConfig};
 pub use camera::Camera;
-pub use profiler::{GpuProfiler, PassTiming, ScopeGuard};
+pub use profiler::{GpuProfiler, PassTiming, ScopeGuard, CompletedScope};
 pub use mesh::{GpuMesh, PackedVertex, DrawCall, GpuDrawCall};
 pub use scene::{SceneLight, SkyAtmosphere, VolumetricClouds, Skylight, ObjectId, LightId, BillboardId};
 pub use material::{Material, GpuMaterial, TextureData};

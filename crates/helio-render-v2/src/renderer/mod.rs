@@ -46,33 +46,6 @@ use wgpu::util::DeviceExt;
 use self::uniforms::GlobalsUniform;
 use self::portal::{compute_scene_delta, open_url_in_browser};
 
-/// Lightweight per-frame message sent from the render loop to the portal
-/// worker thread.  Avoids per-frame `thread::spawn` and redundant cloning.
-struct PortalFrameMsg {
-    frame: u64,
-    timestamp_ms: u128,
-    frame_time_ms: f32,
-    frame_to_frame_ms: f32,
-    total_gpu_ms: f32,
-    total_cpu_ms: f32,
-    pass_timings: Vec<crate::profiler::PassTiming>,
-    current_layout: Option<PortalSceneLayout>,
-    layout_changed: bool,
-    draw_total: usize,
-    draw_opaque: usize,
-    draw_transparent: usize,
-    prep_ms: f32,
-    graph_ms: f32,
-    aa_ms: f32,
-    resolve_ms: f32,
-    finish_ms: f32,
-    submit_ms: f32,
-    poll_ms: f32,
-    untracked_ms: f32,
-    stage_ms: [f32; 5],
-    cpu_scope_log: Vec<(&'static str, f32)>,
-}
-
 /// Persistent scene environment — ambient, sky, and their dirty flags.
 ///
 /// Written by `set_ambient` / `set_sky_atmosphere` / `set_skylight` / `set_sky_color`.
@@ -305,19 +278,11 @@ pub struct Renderer {
     latest_scene_layout: Option<PortalSceneLayout>,
     /// Previous scene layout for delta computation (reduces bandwidth).
     previous_scene_layout: Option<PortalSceneLayout>,
-    /// Per-stage CPU timings (ms) from the most recent env-prepare call.
-    pending_scene_stage_ms: [f32; 5],
     /// True when object/light/billboard count changed this frame.
     pending_layout_changed: bool,
     portal_scene_key: (usize, usize, usize),
     /// Pass names cached once after `graph.build()` to avoid a `Vec<String>` alloc every frame.
     cached_pass_names: Vec<String>,
-
-    /// Channel to the persistent portal worker thread (spawned once in
-    /// `start_live_portal`).  `SyncSender` with a small bound means the
-    /// main thread never blocks — if the worker is behind we just drop the
-    /// frame via `try_send`.
-    portal_worker_tx: Option<std::sync::mpsc::SyncSender<PortalFrameMsg>>,
 }
 
 impl Renderer {
@@ -398,19 +363,6 @@ impl Renderer {
         let url = handle.url.clone();
         open_url_in_browser(&url);
         log::info!("Helio live portal started at {url}");
-
-        // Spawn persistent worker thread.  Bounded channel (4 frames) means
-        // try_send on the main thread is non-blocking; if the worker falls
-        // behind we simply drop the frame data.
-        let (wtx, wrx) = std::sync::mpsc::sync_channel::<PortalFrameMsg>(4);
-        let portal_tx = handle.sender();
-        let pipeline_order = self.cached_pass_names.clone();
-        std::thread::Builder::new()
-            .name("helio-portal-worker".into())
-            .spawn(move || portal_worker_loop(wrx, portal_tx, pipeline_order))
-            .expect("failed to spawn portal worker thread");
-        self.portal_worker_tx = Some(wtx);
-
         self.live_portal = Some(handle);
         Ok(url)
     }
@@ -689,39 +641,26 @@ impl Renderer {
     /// no other per-frame object submission is required at steady state.
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         let frame_start = std::time::Instant::now();
+        let profiling_active = self.live_portal.is_some();
+        crate::profiler::set_profiling_active(profiling_active);
         log::trace!("Rendering frame {}", self.frame_count);
 
         // ── Step 0: flush scene state (lights/sky/ambient) ───────────────────
-        //
-        // Processes only what changed since last frame:
-        //   • shadow matrices for dirty lights / camera movement
-        //   • GPU light buffer delta upload (zero-cost if nothing moved)
-        //   • sky uniform upload (zero-cost if sky unchanged)
-        //   • ambient/RC update (zero-cost if ambient unchanged)
-        self.flush_scene_state(camera);
+        {
+            crate::profile_scope!("Scene");
+            self.flush_scene_state(camera);
+        }
 
         // ── Step 1: flush GPU scene (single delta write_buffer) ───────────────
-        //
-        // Uploads only the dirty slot range to both the storage buffer (for future
-        // compute culling) and the vertex buffer (for draw-call instance binding).
-        // At steady state with no moved objects, this is a complete no-op.
         self.gpu_scene.flush(&self.queue);
 
         // ── Step 2: populate draw_list from GPU scene (persistent cache) ────
-        //
-        // The draw list is rebuilt ONLY when gpu_scene.generation changes
-        // (add_object / remove_object / update_material).  At steady state
-        // this block does NOTHING — zero Arc clones, zero iteration.
-        //
-        // One-frame draws from `draw_mesh()` that were pushed between frames
-        // sit after the persistent portion and are truncated here.
         {
-            crate::profile_scope!("dl_rebuild");
+            crate::profile_scope!("DrawList");
             let mut dl  = self.draw_list.lock().unwrap();
             let mut sdl = self.shadow_draw_list.lock().unwrap();
 
             if self.gpu_scene.generation != self.cached_draw_list_gen {
-                // Structural change — full rebuild from gpu_scene cache.
                 let (scene_dl, scene_sdl) = self.gpu_scene.draw_lists();
 
                 dl.clear();
@@ -733,119 +672,104 @@ impl Renderer {
                 self.persistent_draw_count = dl.len();
                 self.cached_draw_list_gen = self.gpu_scene.generation;
             } else {
-                // Steady state — trim any one-frame draws from previous frame.
                 dl.truncate(self.persistent_draw_count);
                 sdl.truncate(self.persistent_draw_count);
             }
         }
 
-        // ── Preparation: camera upload, feature prepare, globals, debug batch, GPU-driven ──
-        let prep_start = std::time::Instant::now();
+        // ── Preparation: camera upload, feature prepare, globals, debug batch ──
+        {
+            crate::profile_scope!("Prep");
 
-        // Upload camera uniform (features may use camera-dependent logic in prepare).
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
-        gpu_transfer::track_upload(std::mem::size_of::<Camera>() as u64);
+            self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
+            gpu_transfer::track_upload(std::mem::size_of::<Camera>() as u64);
 
-        // Prepare features (upload lights etc.)
-        let prep_ctx = PrepareContext::new(
-            &self.device, &self.queue, &self.resources,
-            self.frame_count, delta_time, camera,
-        );
-        self.features.prepare_all(&prep_ctx)?;
+            let prep_ctx = PrepareContext::new(
+                &self.device, &self.queue, &self.resources,
+                self.frame_count, delta_time, camera,
+            );
+            self.features.prepare_all(&prep_ctx)?;
 
-        // Pull live RC bounds after feature prepare so GI volume can follow camera.
-        log::trace!("Attempting to pull RC bounds from feature registry");
-        if let Some(rc) = self.features.get_typed_mut::<RadianceCascadesFeature>("radiance_cascades") {
-            let (mn, mx) = rc.world_bounds();
-            self.rc_world_min = mn;
-            self.rc_world_max = mx;
-            log::trace!("✓ RC bounds pulled from feature: [{:?} .. {:?}]", mn, mx);
-        } else {
-            log::warn!("✗ FAILED to pull RC bounds - feature not found in registry!");
-        }
+            if let Some(rc) = self.features.get_typed_mut::<RadianceCascadesFeature>("radiance_cascades") {
+                let (mn, mx) = rc.world_bounds();
+                self.rc_world_min = mn;
+                self.rc_world_max = mx;
+            }
 
-        // Update globals after feature prepare so all per-frame feature outputs are current.
-        let globals = GlobalsUniform {
-            frame: self.frame_count as u32,
-            delta_time,
-            light_count: self.scene_light_count,
-            ambient_intensity: self.scene_ambient_intensity,
-            ambient_color: [self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2], 0.0],
-            rc_world_min: [self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2], 0.0],
-            rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
-            csm_splits: self.scene_csm_splits,
-        };
-        log::trace!("Uploading globals: RC bounds min=[{:.1} {:.1} {:.1}] max=[{:.1} {:.1} {:.1}]",
-                   self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2],
-                   self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2]);
-        self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
-        gpu_transfer::track_upload(std::mem::size_of::<GlobalsUniform>() as u64);
+            let globals = GlobalsUniform {
+                frame: self.frame_count as u32,
+                delta_time,
+                light_count: self.scene_light_count,
+                ambient_intensity: self.scene_ambient_intensity,
+                ambient_color: [self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2], 0.0],
+                rc_world_min: [self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2], 0.0],
+                rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
+                csm_splits: self.scene_csm_splits,
+            };
+            self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
+            gpu_transfer::track_upload(std::mem::size_of::<GlobalsUniform>() as u64);
 
-        // Build GPU debug batch from shapes submitted since the previous frame.
-        let debug_shapes = {
-            let mut shapes = self.debug_shapes.lock().unwrap();
-            std::mem::take(&mut *shapes)
-        };
-        if debug_shapes.is_empty() {
-            *self.debug_batch.lock().unwrap() = None;
-        } else {
-            *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
-        }
+            let debug_shapes = {
+                let mut shapes = self.debug_shapes.lock().unwrap();
+                std::mem::take(&mut *shapes)
+            };
+            if debug_shapes.is_empty() {
+                *self.debug_batch.lock().unwrap() = None;
+            } else {
+                *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
+            }
 
-        // ── GPU-DRIVEN RENDERING: Assign material IDs and upload draw list ──────
-        if self.gpu_driven {
-            if let Some(ref draw_list_buf) = self.draw_list_gpu_buffer {
-                {
-                    let mut draw_calls = self.draw_list.lock().unwrap();
-                    // Reuse pre-allocated staging buffer — zero heap alloc.
-                    self.gpu_draws_staging.clear();
-                    for dc in draw_calls.iter_mut() {
-                        let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-                        if !self.material_id_map.contains_key(&mat_ptr) {
-                            self.material_id_map.insert(mat_ptr, self.next_material_id);
-                            self.next_material_id += 1;
+            if self.gpu_driven {
+                if let Some(ref draw_list_buf) = self.draw_list_gpu_buffer {
+                    {
+                        let mut draw_calls = self.draw_list.lock().unwrap();
+                        self.gpu_draws_staging.clear();
+                        for dc in draw_calls.iter_mut() {
+                            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+                            if !self.material_id_map.contains_key(&mat_ptr) {
+                                self.material_id_map.insert(mat_ptr, self.next_material_id);
+                                self.next_material_id += 1;
+                            }
+                            dc.material_id = *self.material_id_map.get(&mat_ptr).unwrap();
+                            self.gpu_draws_staging.push(GpuDrawCall {
+                                vertex_offset: 0,
+                                index_offset: 0,
+                                index_count: dc.index_count,
+                                vertex_count: dc.vertex_count,
+                                material_id: dc.material_id,
+                                transparent_blend: if dc.transparent_blend { 1 } else { 0 },
+                                _pad0: 0,
+                                _pad1: 0,
+                                bounds_center: dc.bounds_center,
+                                bounds_radius: dc.bounds_radius,
+                            });
                         }
-                        dc.material_id = *self.material_id_map.get(&mat_ptr).unwrap();
-                        self.gpu_draws_staging.push(GpuDrawCall {
-                            vertex_offset: 0,
-                            index_offset: 0,
-                            index_count: dc.index_count,
-                            vertex_count: dc.vertex_count,
-                            material_id: dc.material_id,
-                            transparent_blend: if dc.transparent_blend { 1 } else { 0 },
-                            _pad0: 0,
-                            _pad1: 0,
-                            bounds_center: dc.bounds_center,
-                            bounds_radius: dc.bounds_radius,
-                        });
+                    }
+                    if !self.gpu_draws_staging.is_empty() {
+                        let draw_bytes = (self.gpu_draws_staging.len() * std::mem::size_of::<GpuDrawCall>()) as u64;
+                        self.queue.write_buffer(draw_list_buf, 0, bytemuck::cast_slice(&self.gpu_draws_staging));
+                        gpu_transfer::track_upload(draw_bytes);
+                    }
+                    if let (Some(ref _opaque_buf), Some(ref _transparent_buf)) =
+                        (&self.indirect_opaque_buffer, &self.indirect_transparent_buffer)
+                    {
+                        self.opaque_draw_count.store(0, Ordering::Release);
+                        self.transparent_draw_count.store(0, Ordering::Release);
                     }
                 }
-                if !self.gpu_draws_staging.is_empty() {
-                    let draw_bytes = (self.gpu_draws_staging.len() * std::mem::size_of::<GpuDrawCall>()) as u64;
-                    self.queue.write_buffer(draw_list_buf, 0, bytemuck::cast_slice(&self.gpu_draws_staging));
-                    gpu_transfer::track_upload(draw_bytes);
-                    log::trace!("GPU-driven: Uploaded {} draw calls for indirect rendering", self.gpu_draws_staging.len());
-                }
-                if let (Some(ref _opaque_buf), Some(ref _transparent_buf)) =
-                    (&self.indirect_opaque_buffer, &self.indirect_transparent_buffer) {
-                    self.opaque_draw_count.store(0, Ordering::Release);
-                    self.transparent_draw_count.store(0, Ordering::Release);
-                }
             }
-        }
+        } // profile_scope!("Prep") drops here
 
-        // ── Encoder + pre-AA clear (still part of prep) ──────────────────────
+        // ── Encoder + pre-AA clear ────────────────────────────────────────────
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
 
-        // Determine render target: if AA is enabled, write to pre_aa texture first
         let graph_target = match self.aa_mode {
             AntiAliasingMode::None | AntiAliasingMode::Msaa(_) => target,
             _ => &self.pre_aa_view,
         };
 
-        // Clear pre_aa_texture at the start of each frame when AA is enabled
         if !matches!(self.aa_mode, AntiAliasingMode::None | AntiAliasingMode::Msaa(_)) {
             let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Pre-AA Clear"),
@@ -865,45 +789,38 @@ impl Renderer {
             });
         }
 
-        let prep_ms = prep_start.elapsed().as_secs_f32() * 1000.0;
-
         // ── Execute render graph ──────────────────────────────────────────────
-        let mut graph_ctx = GraphContext {
-            encoder: &mut encoder,
-            resources: &self.resources,
-            target: graph_target,
-            depth_view: &self.depth_view,
-            frame: self.frame_count,
-            global_bind_group: &self.global_bind_group,
-            lighting_bind_group: &self.lighting_bind_group,
-            sky_color: self.scene_sky_color,
-            has_sky: self.scene_has_sky,
-            sky_state_changed: self.sky_state_changed,
-            sky_bind_group: None,
-            camera_position: camera.position,
-            camera_forward: camera.forward(),
-            draw_list_generation: self.draw_list_generation,
-            transparent_start: self.gpu_scene.transparent_start,
-        };
+        {
+            crate::profile_scope!("Graph");
+            let mut graph_ctx = GraphContext {
+                encoder: &mut encoder,
+                resources: &self.resources,
+                target: graph_target,
+                depth_view: &self.depth_view,
+                frame: self.frame_count,
+                global_bind_group: &self.global_bind_group,
+                lighting_bind_group: &self.lighting_bind_group,
+                sky_color: self.scene_sky_color,
+                has_sky: self.scene_has_sky,
+                sky_state_changed: self.sky_state_changed,
+                sky_bind_group: None,
+                camera_position: camera.position,
+                camera_forward: camera.forward(),
+                draw_list_generation: self.draw_list_generation,
+                transparent_start: self.gpu_scene.transparent_start,
+            };
 
-        let profiling_active = self.live_portal.is_some();
-        // Keep the global atomic in sync so profile_scope! is a true no-op
-        // when no portal client is connected.
-        crate::profiler::set_profiling_active(profiling_active);
-
-        let graph_start = std::time::Instant::now();
-        if profiling_active {
-            if let Some(p) = &mut self.profiler { p.begin_frame(); }
-            self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
-        } else {
-            self.graph.execute(&mut graph_ctx, None)?;
-        }
-        let graph_ms = graph_start.elapsed().as_secs_f32() * 1000.0;
+            if profiling_active {
+                if let Some(p) = &mut self.profiler { p.begin_frame(); }
+                self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
+            } else {
+                self.graph.execute(&mut graph_ctx, None)?;
+            }
+        } // profile_scope!("Graph") drops here
 
         // ── Anti-aliasing post-processing ─────────────────────────────────────
-        let aa_start = std::time::Instant::now();
         {
-            crate::profile_scope!("encode/aa");
+            crate::profile_scope!("AA");
             if let Some(fxaa) = &self.fxaa_pass {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("FXAA Pass"),
@@ -935,53 +852,42 @@ impl Renderer {
                 });
                 if let Some(bind_group) = &self.taa_bind_group { taa.execute_draw(&mut pass, bind_group); }
             }
-        } // profile_scope!("encode/aa") drops here
-        let aa_ms = aa_start.elapsed().as_secs_f32() * 1000.0;
+        } // profile_scope!("AA") drops here
 
-        // ── Resolve GPU timestamp queries ─────────────────────────────────────
-        let resolve_start = std::time::Instant::now();
+        // ── Encode: resolve timestamps, finish, submit ────────────────────────
         {
-            crate::profile_scope!("encode/resolve_timestamps");
-            if profiling_active {
-                if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
+            crate::profile_scope!("Encode");
+            {
+                crate::profile_scope!("Encode::Resolve");
+                if profiling_active {
+                    if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
+                }
             }
-        }
-        let resolve_ms = resolve_start.elapsed().as_secs_f32() * 1000.0;
+            let cmd_buf = {
+                crate::profile_scope!("Encode::Finish");
+                encoder.finish()
+            };
+            {
+                crate::profile_scope!("Encode::Submit");
+                self.queue.submit(Some(cmd_buf));
+            }
+        } // profile_scope!("Encode") drops here
 
-        // ── Finalize command buffer ───────────────────────────────────────────
-        // finish() serialises all recorded commands into a CommandBuffer.
-        // On wgpu-dx12 this is the DX12 Close() call — it can be expensive when
-        // the command list is large (many draw calls, many passes).
-        let finish_start = std::time::Instant::now();
-        let cmd_buf = {
-            crate::profile_scope!("encode/finish");
-            encoder.finish()
-        };
-        let finish_ms = finish_start.elapsed().as_secs_f32() * 1000.0;
-
-        // ── Submit to GPU ─────────────────────────────────────────────────────
-        let submit_start = std::time::Instant::now();
+        // ── GPU readback (non-blocking) ───────────────────────────────────────
         {
-            crate::profile_scope!("encode/submit");
-            self.queue.submit(Some(cmd_buf));
-        }
-        let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+            crate::profile_scope!("Poll");
+            if profiling_active {
+                if let Some(p) = &mut self.profiler {
+                    p.begin_readback();
+                    p.poll_results(&self.device);
+                }
+            }
+        } // profile_scope!("Poll") drops here
 
-        // Collect CPU scope timings — must happen AFTER all profile_scope! guards
-        // above have dropped (encode/aa, encode/finish, encode/submit).
+        // Collect scope log AFTER all profile_scope! guards above have dropped.
         let cpu_scope_log = crate::profiler::take_frame_scope_log();
 
         *self.debug_batch.lock().unwrap() = None;
-
-        // ── Profiler readback ─────────────────────────────────────────────────
-        let poll_start = std::time::Instant::now();
-        if profiling_active {
-            if let Some(p) = &mut self.profiler {
-                p.begin_readback();
-                p.poll_results(&self.device);
-            }
-        }
-        let poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Frame timing bookkeeping ──────────────────────────────────────────
         let frame_to_frame_ms = if let Some(last_start) = self.last_frame_start {
@@ -989,29 +895,17 @@ impl Renderer {
         } else {
             0.0
         };
-
         let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-        let untracked_ms = frame_to_frame_ms - frame_time_ms;
 
         self.last_frame_start = Some(frame_start);
         self.last_frame_end = Some(std::time::Instant::now());
 
         // ── Live portal snapshot ──────────────────────────────────────────────
-        // Pack cheap scalars + one `take`'d Vec into a message and hand it to
-        // the persistent worker thread.  No thread::spawn, no redundant clones.
-        if self.portal_worker_tx.is_some() {
-            // Use transparent_start to derive opaque/transparent counts in O(1)
-            // instead of the previous O(N) filter scan over all draw calls.
-            let draw_total = {
-                let dl = self.draw_list.lock().unwrap();
-                dl.len()
-            };
+        if let Some(portal) = &self.live_portal {
+            let draw_total = { self.draw_list.lock().unwrap().len() };
             let draw_transparent = draw_total.saturating_sub(self.gpu_scene.transparent_start);
             let draw_opaque      = draw_total - draw_transparent;
 
-            // Build portal scene layout from live renderer state.
-            // Layout is rebuilt only when scene composition changes (portal_scene_key diff).
-            // Do this BEFORE borrowing self.profiler to satisfy the borrow checker.
             let new_key = (
                 self.gpu_scene.object_count() as usize,
                 self.gpu_light_scene.active_count as usize,
@@ -1019,7 +913,7 @@ impl Renderer {
                     .map(|bb| bb.proxy_count()).unwrap_or(0),
             );
             let layout_changed = new_key != self.portal_scene_key;
-            let layout = if layout_changed || self.latest_scene_layout.is_none() {
+            let layout: Option<PortalSceneLayout> = if layout_changed || self.latest_scene_layout.is_none() {
                 self.portal_scene_key = new_key;
                 Some(self.build_portal_layout(camera))
             } else {
@@ -1027,38 +921,65 @@ impl Renderer {
             };
             self.pending_layout_changed = layout_changed;
 
-            if let (Some(wtx), Some(p)) = (&self.portal_worker_tx, &mut self.profiler) {
-                let msg = PortalFrameMsg {
-                    frame: self.frame_count,
-                    timestamp_ms: SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0),
-                    frame_time_ms,
-                    frame_to_frame_ms,
-                    total_gpu_ms: p.last_total_gpu_ms,
-                    total_cpu_ms: p.last_total_cpu_ms,
-                    // take() is O(1) — profiler refills this next frame from readback.
-                    pass_timings: std::mem::take(&mut p.last_timings),
-                    current_layout: layout,
-                    layout_changed,
-                    draw_total,
-                    draw_opaque,
-                    draw_transparent,
-                    prep_ms,
-                    graph_ms,
-                    aa_ms,
-                    resolve_ms,
-                    finish_ms,
-                    submit_ms,
-                    poll_ms,
-                    untracked_ms,
-                    stage_ms: self.pending_scene_stage_ms,
-                    cpu_scope_log,
-                };
-                // Non-blocking: if the worker is behind, drop this frame's data.
-                let _ = wtx.try_send(msg);
+            // Compute delta against previous layout.
+            let scene_delta = layout.as_ref().map(|cur| {
+                if layout_changed {
+                    compute_scene_delta(cur, self.previous_scene_layout.as_ref())
+                } else {
+                    let prev_cam = self.previous_scene_layout.as_ref().and_then(|p| p.camera.clone());
+                    let mut d = PortalSceneLayoutDelta::default();
+                    if cur.camera != prev_cam { d.camera = Some(cur.camera.clone()); }
+                    d
+                }
+            });
+
+            let (obj_count, light_count, bb_count) = layout.as_ref()
+                .map(|l| (l.objects.len(), l.lights.len(), l.billboards.len()))
+                .unwrap_or((0, 0, 0));
+
+            // Advance previous layout tracking.
+            if layout_changed {
+                self.previous_scene_layout = layout;
+            } else if let Some(cur) = layout {
+                match &mut self.previous_scene_layout {
+                    Some(prev) => prev.camera = cur.camera,
+                    None       => self.previous_scene_layout = Some(cur),
+                }
             }
+
+            let stage_timings = build_scope_tree(&cpu_scope_log);
+
+            let (total_gpu_ms, total_cpu_ms, pass_timings) = self.profiler.as_mut()
+                .map(|p| (p.last_total_gpu_ms, p.last_total_cpu_ms, std::mem::take(&mut p.last_timings)))
+                .unwrap_or((0.0, 0.0, vec![]));
+
+            let snapshot = PortalFrameSnapshot {
+                frame: self.frame_count,
+                timestamp_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0),
+                frame_time_ms,
+                frame_to_frame_ms,
+                total_gpu_ms,
+                total_cpu_ms,
+                pass_timings: pass_timings.iter()
+                    .map(|t| PortalPassTiming { name: t.name.clone(), gpu_ms: t.gpu_ms, cpu_ms: t.cpu_ms })
+                    .collect(),
+                pipeline_order: self.cached_pass_names.clone(),
+                pipeline_stage_id: Some("graph_passes".to_string()),
+                scene_delta,
+                object_count: obj_count,
+                light_count,
+                billboard_count: bb_count,
+                draw_calls: helio_live_portal::DrawCallMetrics {
+                    total: draw_total,
+                    opaque: draw_opaque,
+                    transparent: draw_transparent,
+                },
+                stage_timings,
+            };
+            portal.publish(snapshot);
         }
 
         // One-frame draws (from draw_mesh()) sit after `persistent_draw_count`
@@ -1186,117 +1107,65 @@ impl Renderer {
 // PORTAL WORKER THREAD
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Persistent background thread that assembles `PortalFrameSnapshot` from the
-/// lightweight `PortalFrameMsg` and forwards it to the portal bridge.
-/// Owns the previous scene layout so the main thread never clones it.
-fn portal_worker_loop(
-    rx: std::sync::mpsc::Receiver<PortalFrameMsg>,
-    portal_tx: std::sync::mpsc::Sender<PortalFrameSnapshot>,
-    pipeline_order: Vec<String>,
-) {
-    let mut previous_layout: Option<PortalSceneLayout> = None;
+/// Convert a flat `Vec<CompletedScope>` — ordered by drop (innermost first) —
+/// into a `PortalStageTiming` tree that the portal can render.
+///
+/// The scope log is in *completion* order: inner scopes complete (drop) before
+/// their parent.  We reconstruct the tree from the `parent` index field, which
+/// is set by the thread-local `SCOPE_STACK` at the moment the scope opened.
+fn build_scope_tree(
+    scopes: &[crate::profiler::CompletedScope],
+) -> Vec<PortalStageTiming> {
+    use std::collections::HashMap;
 
-    while let Ok(m) = rx.recv() {
-        let scene_delta = m.current_layout.as_ref().map(|cur| {
-            if m.layout_changed {
-                compute_scene_delta(cur, previous_layout.as_ref())
-            } else {
-                let prev_cam = previous_layout.as_ref().and_then(|p| p.camera.clone());
-                let mut d = PortalSceneLayoutDelta::default();
-                if cur.camera != prev_cam {
-                    d.camera = Some(cur.camera.clone());
-                }
-                d
-            }
-        });
+    // Map scope idx → position in the slice.
+    let idx_map: HashMap<u32, usize> = scopes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.idx, i))
+        .collect();
 
-        let (obj_count, light_count, bb_count) = if let Some(l) = &m.current_layout {
-            (l.objects.len(), l.lights.len(), l.billboards.len())
-        } else {
-            (0, 0, 0)
-        };
+    // Build parent → [child indices] adjacency list.
+    let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut roots: Vec<u32> = Vec::new();
 
-        let s = &m.stage_ms;
-        let scene_prep_total: f32 = s.iter().sum();
-        let app_ms = (m.untracked_ms - scene_prep_total).max(0.0);
-        let scope_map: HashMap<&str, f32> =
-            m.cpu_scope_log.iter().map(|(n, ms)| (*n, *ms)).collect();
-        // ── Stage timings: clean 2-level tree ────────────────────────────────
-        // Top-level entries have no '/' in name.
-        // Sub-scope entries have a '/' — prefix before '/' must match a top-level id.
-        // JS slots each top-level node wide enough to fit its children, so
-        // there is zero overlap by construction.
-        let sm = |key: &str| scope_map.get(key).copied().unwrap_or(0.0);
-
-        let stage_timings = vec![
-            // ── Top level (9 nodes) ──────────────────────────────────────────
-            PortalStageTiming { id: "app".into(),          name: "App".into(),          ms: app_ms },
-            PortalStageTiming { id: "scene".into(),        name: "Scene".into(),        ms: s[0]+s[1]+s[2]+s[3]+s[4] },
-            PortalStageTiming { id: "prep".into(),         name: "Prep".into(),         ms: m.prep_ms },
-            PortalStageTiming { id: "depth_prepass".into(),name: "Depth Prepass".into(),ms: sm("depth_prepass/sort") + sm("depth_prepass/record") },
-            PortalStageTiming { id: "gbuffer".into(),      name: "G-Buffer".into(),     ms: sm("gbuffer/record") },
-            PortalStageTiming { id: "shadow".into(),       name: "Shadow".into(),       ms: sm("shadow/compile") + sm("shadow/encode_bundles") },
-            PortalStageTiming { id: "transparent".into(),  name: "Transparent".into(),  ms: sm("transparent/compile") + sm("transparent/replay") },
-            PortalStageTiming { id: "encode".into(),       name: "Encode".into(),       ms: m.aa_ms + m.resolve_ms + m.finish_ms + m.submit_ms },
-            PortalStageTiming { id: "poll".into(),         name: "Poll".into(),         ms: m.poll_ms },
-            // ── Sub-scopes (prefix before '/' must match a top-level id) ────
-            PortalStageTiming { id: "depth_prepass_sort".into(),    name: "depth_prepass/sort".into(),    ms: sm("depth_prepass/sort") },
-            PortalStageTiming { id: "depth_prepass_record".into(),  name: "depth_prepass/record".into(),  ms: sm("depth_prepass/record") },
-            PortalStageTiming { id: "gbuffer_record".into(),        name: "gbuffer/record".into(),        ms: sm("gbuffer/record") },
-            PortalStageTiming { id: "shadow_compile".into(),        name: "shadow/compile".into(),        ms: sm("shadow/compile") },
-            PortalStageTiming { id: "shadow_bundles".into(),        name: "shadow/encode_bundles".into(), ms: sm("shadow/encode_bundles") },
-            PortalStageTiming { id: "transparent_compile".into(),   name: "transparent/compile".into(),   ms: sm("transparent/compile") },
-            PortalStageTiming { id: "transparent_replay".into(),    name: "transparent/replay".into(),    ms: sm("transparent/replay") },
-            PortalStageTiming { id: "encode_aa".into(),             name: "encode/aa".into(),             ms: m.aa_ms },
-            PortalStageTiming { id: "encode_resolve".into(),        name: "encode/resolve".into(),        ms: m.resolve_ms },
-            PortalStageTiming { id: "encode_finish".into(),         name: "encode/finish".into(),         ms: m.finish_ms },
-            PortalStageTiming { id: "encode_submit".into(),         name: "encode/submit".into(),         ms: m.submit_ms },
-        ];
-
-        let snapshot = PortalFrameSnapshot {
-            frame: m.frame,
-            frame_time_ms: m.frame_time_ms,
-            frame_to_frame_ms: m.frame_to_frame_ms,
-            total_gpu_ms: m.total_gpu_ms,
-            total_cpu_ms: m.total_cpu_ms,
-            pass_timings: m.pass_timings
-                .iter()
-                .map(|t| PortalPassTiming { name: t.name.clone(), gpu_ms: t.gpu_ms, cpu_ms: t.cpu_ms })
-                .collect(),
-            pipeline_order: pipeline_order.clone(),
-            scene_delta,
-            timestamp_ms: m.timestamp_ms,
-            object_count: obj_count,
-            light_count,
-            billboard_count: bb_count,
-            draw_calls: helio_live_portal::DrawCallMetrics {
-                total: m.draw_total,
-                opaque: m.draw_opaque,
-                transparent: m.draw_transparent,
-            },
-            prep_ms: m.prep_ms,
-            graph_ms: m.graph_ms,
-            aa_ms: m.aa_ms,
-            resolve_ms: m.resolve_ms,
-            finish_ms: m.finish_ms,
-            submit_ms: m.submit_ms,
-            poll_ms: m.poll_ms,
-            untracked_ms: m.untracked_ms,
-            stage_timings,
-            pipeline_stage_id: Some("depth_prepass".to_string()),
-        };
-
-        // Update previous layout tracking.
-        if m.layout_changed {
-            previous_layout = m.current_layout;
-        } else if let (Some(ref mut prev), Some(ref cur)) =
-            (&mut previous_layout, &m.current_layout)
-        {
-            prev.camera = cur.camera.clone();
-        } else if previous_layout.is_none() {
-            previous_layout = m.current_layout;
+    for scope in scopes {
+        match scope.parent {
+            Some(p) => children_of.entry(p).or_default().push(scope.idx),
+            None    => roots.push(scope.idx),
         }
-
-        let _ = portal_tx.send(snapshot);
     }
+
+    // Sort children by their own idx (open-order = declaration order in code).
+    for kids in children_of.values_mut() {
+        kids.sort_unstable();
+    }
+    roots.sort_unstable();
+
+    fn to_node(
+        idx:         u32,
+        scopes:      &[crate::profiler::CompletedScope],
+        idx_map:     &HashMap<u32, usize>,
+        children_of: &HashMap<u32, Vec<u32>>,
+    ) -> PortalStageTiming {
+        let scope = &scopes[idx_map[&idx]];
+        let id = scope.name
+            .replace([' ', ':', '/', '!'], "_")
+            .to_ascii_lowercase();
+        let kids = children_of
+            .get(&idx)
+            .map(|v| v.iter().map(|&c| to_node(c, scopes, idx_map, children_of)).collect())
+            .unwrap_or_default();
+        PortalStageTiming {
+            id,
+            name:     scope.name.to_string(),
+            ms:       scope.elapsed_ms,
+            children: kids,
+        }
+    }
+
+    roots
+        .iter()
+        .map(|&r| to_node(r, scopes, &idx_map, &children_of))
+        .collect()
 }

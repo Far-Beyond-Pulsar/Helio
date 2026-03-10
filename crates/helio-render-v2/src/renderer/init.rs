@@ -635,11 +635,9 @@ impl Renderer {
             live_portal: None,
             latest_scene_layout: None,
             previous_scene_layout: None,
-            pending_scene_stage_ms: [0.0; 5],
             pending_layout_changed: false,
             portal_scene_key: (0, 0, 0),
             cached_pass_names,
-            portal_worker_tx: None,
             // ── GPU-driven rendering ───────────────────────────────────────────
             gpu_driven: config.gpu_driven,
             async_compute: config.async_compute,

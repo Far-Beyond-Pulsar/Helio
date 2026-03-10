@@ -24,9 +24,9 @@ pub struct GpuPreprocessLight {
     pub intensity: f32,
     pub cos_inner: f32,
     pub cos_outer: f32,
-    pub_pad: u32,
+    pub _pad: u32,
     pub color: [f32; 3],
-    pub_pad2: u32,
+    pub _pad2: u32,
 }
 
 /// Input to the preprocessing compute: scene state this frame
@@ -41,12 +41,14 @@ pub struct PreprocessInput {
     pub _pad2: u32,
     pub camera_up: [f32; 3],
     pub camera_fov_y: f32,
-    pub scene_aabb_min: [f32; 3],
-    pub scene_aabb_max: [f32; 3],
     pub total_lights: u32,
     pub viewport_width: u32,
     pub viewport_height: u32,
     pub frame: u32,
+    /// Six frustum planes extracted from view_proj (Gribb-Hartmann).
+    /// Each plane is (nx, ny, nz, d) where the inside satisfies dot(n,p)+d >= 0.
+    /// Planes are NOT normalized; sphere test divides by length(n).
+    pub frustum_planes: [[f32; 4]; 6],
 }
 
 /// Output from preprocessing compute
@@ -152,5 +154,42 @@ impl GpuPreprocessingFeature {
 
     pub fn indirect_transparent_buffer(&self) -> Option<Arc<wgpu::Buffer>> {
         self.indirect_transparent_buffer.clone()
+    }
+
+    /// Upload per-frame camera + frustum data to the `input_buffer`.
+    ///
+    /// Call this once per frame BEFORE dispatching the preprocessing compute.
+    /// `frustum_planes` comes from `camera.frustum().as_raw()`.
+    pub fn prepare_input(
+        &self,
+        queue:          &wgpu::Queue,
+        camera_pos:     [f32; 3],
+        camera_forward: [f32; 3],
+        camera_right:   [f32; 3],
+        camera_up:      [f32; 3],
+        camera_fov_y:   f32,
+        total_lights:   u32,
+        viewport_width: u32,
+        viewport_height: u32,
+        frame:          u32,
+        frustum_planes: [[f32; 4]; 6],
+    ) {
+        let Some(buf) = &self.input_buffer else { return; };
+        let input = PreprocessInput {
+            camera_pos,
+            _pad0: 0,
+            camera_forward,
+            _pad1: 0,
+            camera_right,
+            _pad2: 0,
+            camera_up,
+            camera_fov_y,
+            total_lights,
+            viewport_width,
+            viewport_height,
+            frame,
+            frustum_planes,
+        };
+        queue.write_buffer(buf, 0, bytemuck::bytes_of(&input));
     }
 }
