@@ -20,7 +20,7 @@
 //! live portal (WebSocket) as delta-compressed snapshots.
 
 use std::cell::RefCell;
-use std::sync::{Arc, OnceLock, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 /// Maximum pass-level scopes per frame.
 /// Each scope uses 2 query slots (begin + end).
@@ -52,8 +52,28 @@ const SLOT_BYTES: u64 = SLOT_COUNT as u64 * 8; // each timestamp is a u64
 #[macro_export]
 macro_rules! profile_scope {
     ($name:expr) => {
-        let _prof_guard = $crate::profiler::ScopeGuard::new($name);
+        // Single relaxed atomic load — branch-predictor-friendly on steady state.
+        // When the portal is disconnected this is a complete no-op: no allocation,
+        // no thread-local access, no timestamp.
+        let _prof_guard = $crate::profiler::profiling_active()
+            .then(|| $crate::profiler::ScopeGuard::new($name));
     };
+}
+
+/// A CPU scope timing entry recorded by `profile_scope!`.
+///
+/// Entries are ordered by completion (innermost scopes drop first).
+/// Use `parent` to reconstruct the call tree: entries with the same
+/// `parent` index are siblings; entries whose `idx` matches another
+/// entry's `parent` are its children.
+#[derive(Clone, Debug)]
+pub struct CompletedScope {
+    pub name:       &'static str,
+    /// Monotonically increasing index assigned when the scope was *opened*.
+    pub idx:        u32,
+    /// Index of the enclosing scope, or `None` for top-level scopes.
+    pub parent:     Option<u32>,
+    pub elapsed_ms: f32,
 }
 
 // ── Thread-local scope stack ─────────────────────────────────────────────────
@@ -67,61 +87,39 @@ thread_local! {
     static SCOPE_STACK: RefCell<Vec<ScopeIdx>> = RefCell::new(Vec::with_capacity(32));
     /// Flat ordered log of every CPU scope that completes on this thread.
     /// Consumed once per frame by `take_frame_scope_log()`.
-    static FRAME_SCOPE_LOG: RefCell<Vec<(&'static str, f32)>> =
+    static FRAME_SCOPE_LOG: RefCell<Vec<CompletedScope>> =
         RefCell::new(Vec::with_capacity(64));
 }
 
 /// Drain and return all CPU scope timings recorded since the last call.
 ///
-/// Call this once per frame after all render work has finished.  The returned
-/// vec is in completion order (innermost scopes appear before outer ones since
-/// they drop first).
-pub fn take_frame_scope_log() -> Vec<(&'static str, f32)> {
+/// Call this once per frame after all render work has finished.  Entries are
+/// in completion order (innermost scopes appear before outer ones because they
+/// drop first).  Use `CompletedScope::parent` to reconstruct the call tree.
+pub fn take_frame_scope_log() -> Vec<CompletedScope> {
     FRAME_SCOPE_LOG.with(|log| std::mem::take(&mut *log.borrow_mut()))
 }
 
-/// An event dispatched from the main thread to the collector.
-pub(crate) enum ProfileEvent {
-    /// A CPU-timed scope completed.
-    Scope {
-        name: &'static str,
-        parent: Option<ScopeIdx>,
-        idx: ScopeIdx,
-        elapsed_ms: f32,
-    },
-    /// GPU pass timings for the current frame (from GpuProfiler readback).
-    GpuTimings(Vec<PassTiming>),
-    /// Marks the end of a logical frame — collector finalises the tree.
-    FrameEnd {
-        frame: u64,
-        frame_time_ms: f32,
-        frame_to_frame_ms: f32,
-        total_gpu_ms: f32,
-        total_cpu_ms: f32,
-    },
+/// Set to `true` when a live portal is connected, `false` otherwise.
+/// `profile_scope!` checks this atomically and becomes a complete no-op
+/// when inactive — zero cost on the hot render path.
+static PROFILING_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Activate or deactivate CPU scope recording.
+/// Call with `true` when a portal client connects, `false` on disconnect.
+pub fn set_profiling_active(active: bool) {
+    PROFILING_ACTIVE.store(active, Ordering::Relaxed);
 }
 
-/// Global channel sender, initialised on first use.
-static PROFILE_TX: OnceLock<std::sync::mpsc::Sender<ProfileEvent>> = OnceLock::new();
+/// Returns `true` if scope recording is currently active.
+#[inline(always)]
+pub fn profiling_active() -> bool {
+    PROFILING_ACTIVE.load(Ordering::Relaxed)
+}
 
-/// Counter for scope indices within a frame.  Reset each frame by FrameEnd.
+/// Monotonically increasing counter; each scope open increments it.
+/// Provides unique `idx` values within a session for parent-child linkage.
 static SCOPE_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-/// Initialise the profiling background thread and channel.
-/// Safe to call multiple times — only the first call starts the thread.
-/// Returns a clone of the sender.
-pub(crate) fn init_profile_thread() -> std::sync::mpsc::Sender<ProfileEvent> {
-    PROFILE_TX.get_or_init(|| {
-        let (tx, rx) = std::sync::mpsc::channel::<ProfileEvent>();
-        std::thread::Builder::new()
-            .name("helio-profiler".to_string())
-            .spawn(move || {
-                collector_loop(rx);
-            })
-            .expect("failed to spawn profiler collector thread");
-        tx
-    }).clone()
-}
 
 /// RAII guard created by [`profile_scope!`].
 pub struct ScopeGuard {
@@ -157,62 +155,19 @@ impl Drop for ScopeGuard {
         SCOPE_STACK.with(|s| {
             s.borrow_mut().pop();
         });
-        // Write to thread-local log — zero allocation, no locking.
         FRAME_SCOPE_LOG.with(|log| {
-            log.borrow_mut().push((self.name, elapsed_ms));
-        });
-        if let Some(tx) = PROFILE_TX.get() {
-            let _ = tx.send(ProfileEvent::Scope {
-                name: self.name,
-                parent: self.parent,
-                idx: self.idx,
+            log.borrow_mut().push(CompletedScope {
+                name:       self.name,
+                idx:        self.idx,
+                parent:     self.parent,
                 elapsed_ms,
             });
-        }
+        });
     }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// COLLECTOR THREAD
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// A completed scope node in the per-frame tree.
-struct ScopeNode {
-    name: &'static str,
-    parent: Option<ScopeIdx>,
-    elapsed_ms: f32,
-}
-
-fn collector_loop(rx: std::sync::mpsc::Receiver<ProfileEvent>) {
-    let mut frame_scopes: Vec<ScopeNode> = Vec::with_capacity(64);
-    let mut frame_gpu_timings: Vec<PassTiming> = Vec::new();
-
-    loop {
-        let event = match rx.recv() {
-            Ok(e) => e,
-            Err(_) => break, // channel closed
-        };
-
-        match event {
-            ProfileEvent::Scope { name, parent, idx: _, elapsed_ms } => {
-                frame_scopes.push(ScopeNode { name, parent, elapsed_ms });
-            }
-            ProfileEvent::GpuTimings(timings) => {
-                frame_gpu_timings = timings;
-            }
-            ProfileEvent::FrameEnd { .. } => {
-                // TODO: Build tree, compute deltas, forward to portal.
-                // For now just clear per-frame state.
-                frame_scopes.clear();
-                frame_gpu_timings.clear();
-                SCOPE_COUNTER.store(0, Ordering::Relaxed);
-            }
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// GPU TIMESTAMP PROFILER (kept for per-pass GPU timing)
+// GPU TIMESTAMP PROFILER (per-pass GPU execution timing)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Timing result for one render/compute pass.
@@ -247,8 +202,8 @@ struct PendingFrame {
 
 /// GPU timestamp profiler.  Created once; held by the `Renderer`.
 ///
-/// CPU-side timing is now handled entirely by [`profile_scope!`] and the
-/// collector thread.  This struct only manages GPU query sets and readback.
+/// CPU-side timing is handled entirely by [`profile_scope!`] macros and
+/// `take_frame_scope_log()`.  This struct only manages GPU query sets and readback.
 pub struct GpuProfiler {
     query_set:         wgpu::QuerySet,
     resolve_buf:       wgpu::Buffer, // QUERY_RESOLVE | COPY_SRC

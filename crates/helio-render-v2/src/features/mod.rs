@@ -15,6 +15,7 @@ pub mod bloom;
 pub mod shadows;
 pub mod billboards;
 pub mod radiance_cascades;
+pub mod gpu_preprocessing;
 
 pub use traits::{Feature, ShaderDefine, ShaderModulePath};
 pub use context::{FeatureContext, PrepareContext};
@@ -25,3 +26,6 @@ pub use shadows::ShadowsFeature;
 pub use billboards::{BillboardsFeature, BillboardInstance};
 pub use radiance_cascades::RadianceCascadesFeature;
 pub use crate::sdf::{SdfFeature, SdfMode, SdfEdit, SdfEditList, SdfShapeType, SdfShapeParams, BooleanOp};
+pub use gpu_preprocessing::{GpuPreprocessingFeature, PreprocessInput};
+
+

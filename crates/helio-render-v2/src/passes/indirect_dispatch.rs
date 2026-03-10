@@ -1,224 +1,170 @@
-//! GPU-driven indirect rendering: build indirect draw buffers via compute
+//! GPU-driven indirect rendering: frustum-cull all draw calls in a single
+//! compute dispatch and write `DrawIndexedIndirect` commands to the indirect
+//! buffer.
 //!
-//! This pass runs a compute shader that:
-//! 1. Iterates over visible draw calls
-//! 2. Builds `DrawIndexedIndirect` commands in GPU buffers
-//! 3. Separates opaque and transparent draws
-//! 4. Writes draw counts to atomic counters
-//!
-//! The resulting indirect buffers are then used by GBufferPass and
-//! TransparentPass to submit draws via `draw_indexed_indirect()` instead
-//! of looping over draw calls on the CPU.
-//!
-//! This is the GPU-driven rendering pattern: move draw submission to GPU
-//! (similar to Unreal's GPU Scene or Nanite scene).
+//! Non-compacting design:
+//!   - One DrawIndexedIndirect slot per input draw call (fixed index).
+//!   - Culled draws get `instance_count = 0` — the GPU skips them for free.
+//!   - `first_instance = dc.slot` so the vertex shader can index into
+//!     `instance_data[slot]` for the per-object transform.
+//!   - No atomics, no prefix sum, no CPU readback.  O(1) CPU cost.
 
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder};
 use std::sync::Arc;
 use crate::Result;
 
-/// Indirect draw buffer (array of DrawIndexedIndirect commands)
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct DrawIndexedIndirectCommand {
-    pub index_count: u32,
-    pub instance_count: u32,
-    pub first_index: u32,
-    pub base_vertex: i32,
-    pub first_instance: u32,
-}
-
-/// Pass that builds indirect draw buffers via compute shader
+/// Non-compacting GPU culling and indirect-buffer-fill pass.
 pub struct IndirectDispatchPass {
-    /// Pipeline for building indirect buffers
-    pipeline: Option<Arc<wgpu::ComputePipeline>>,
-    
-    /// Bind group for compute shader (camera, lights, input draw list)
-    bind_group: Option<wgpu::BindGroup>,
-    
-    /// Max draws per category (opaque/transparent)
-    max_draws_opaque: u32,
-    max_draws_transparent: u32,
-    
-    /// Workgroup size (must match shader)
-    workgroup_size: u32,
+    pipeline:    Option<Arc<wgpu::ComputePipeline>>,
+    bind_group:  Option<wgpu::BindGroup>,
+    /// The output buffer: one `DrawIndexedIndirect` (20 bytes) per input draw.
+    indirect_buffer: Option<Arc<wgpu::Buffer>>,
+    /// Number of draw calls the buffers were sized for.
+    capacity: u32,
 }
 
 impl IndirectDispatchPass {
     pub fn new() -> Self {
         Self {
-            pipeline: None,
-            bind_group: None,
-            max_draws_opaque: 512,      // Typically 50-200 real opaque draws per frame
-            max_draws_transparent: 256,  // Typically 10-50 transparent draws per frame
-            workgroup_size: 256,
+            pipeline:        None,
+            bind_group:      None,
+            indirect_buffer: None,
+            capacity:        0,
         }
     }
 
-    pub fn with_max_draws(mut self, max_opaque: u32, max_transparent: u32) -> Self {
-        self.max_draws_opaque = max_opaque;
-        self.max_draws_transparent = max_transparent;
-        self
-    }
-
-    /// Initialize GPU pipeline and bind group
-    pub fn initialize(
+    /// (Re-)create GPU resources for `draw_count` draw calls.
+    ///
+    /// * `draw_call_buffer` — read-only storage, contains `GpuDrawCall[draw_count]`
+    /// * `camera_buffer`    — uniform containing camera view_proj for frustum culling
+    pub fn update(
         &mut self,
         device: &wgpu::Device,
-        global_bgl: &wgpu::BindGroupLayout,
-        draw_list_buffer: &wgpu::Buffer,
-        indirect_opaque_buffer: &wgpu::Buffer,
-        indirect_transparent_buffer: &wgpu::Buffer,
-        opaque_draw_count_buffer: &wgpu::Buffer,
-        transparent_draw_count_buffer: &wgpu::Buffer,
+        draw_call_buffer: &wgpu::Buffer,
+        camera_buffer: &wgpu::Buffer,
+        draw_count: u32,
     ) -> Result<()> {
-        // Create compute pipeline
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Indirect Dispatch Compute Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../../shaders/passes/indirect_dispatch.wgsl").into(),
-            ),
-        });
+        if draw_count == 0 {
+            self.bind_group      = None;
+            self.indirect_buffer = None;
+            self.capacity        = 0;
+            return Ok(());
+        }
 
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Indirect Dispatch Layout"),
-            bind_group_layouts: &[
-                Some(global_bgl),
-            ],
-            immediate_size: 0,
-        });
-
-        self.pipeline = Some(Arc::new(device.create_compute_pipeline(
-            &wgpu::ComputePipelineDescriptor {
-                label: Some("Indirect Dispatch Pipeline"),
-                layout: Some(&layout),
-                module: &shader,
-                entry_point: Some("build_indirect_buffers"),
-                compilation_options: Default::default(),
-                cache: None,
-            },
-        )));
-
-        // Create bind group layout with all buffers: draw list input + indirect outputs + counters
-        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Indirect Dispatch BGL"),
-            entries: &[
-                // Binding 0: Input draw list (read-only storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage {
-                            read_only: true,
-                        },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Binding 1: Opaque indirect buffer (read-write storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage {
-                            read_only: false,
-                        },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Binding 2: Transparent indirect buffer (read-write storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage {
-                            read_only: false,
-                        },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Binding 3: Opaque count (atomic storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage {
-                            read_only: false,
-                        },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                // Binding 4: Transparent count (atomic storage)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage {
-                            read_only: false,
-                        },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Indirect Dispatch BG"),
-            layout: &bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: draw_list_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: indirect_opaque_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: indirect_transparent_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: opaque_draw_count_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: transparent_draw_count_buffer.as_entire_binding(),
-                },
-            ],
+        // (Re)allocate indirect buffer sized for draw_count 5-word indirect commands.
+        let indirect_size = draw_count as u64 * 20; // 5 × u32 each
+        let indirect_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Indirect Draw Buffer"),
+            size: indirect_size,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         }));
 
+        // Build pipeline on first call.
+        if self.pipeline.is_none() {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Indirect Dispatch Shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    include_str!("../../shaders/passes/indirect_dispatch.wgsl").into(),
+                ),
+            });
+
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Indirect Dispatch BGL"),
+                entries: &[
+                    // binding 0: GpuDrawCall array (read-only)
+                    wgpu::BindGroupLayoutEntry {
+                        binding:    0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 1: indirect output (read-write)
+                    wgpu::BindGroupLayoutEntry {
+                        binding:    1,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 2: camera uniform (for frustum planes)
+                    wgpu::BindGroupLayoutEntry {
+                        binding:    2,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                ],
+            });
+
+            let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Indirect Dispatch Pipeline Layout"),
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
+            });
+
+            self.pipeline = Some(Arc::new(device.create_compute_pipeline(
+                &wgpu::ComputePipelineDescriptor {
+                    label:    Some("Indirect Dispatch Pipeline"),
+                    layout:   Some(&pl),
+                    module:   &shader,
+                    entry_point: Some("build_indirect_buffers"),
+                    compilation_options: Default::default(),
+                    cache:    None,
+                },
+            )));
+
+            let pipeline = self.pipeline.as_ref().unwrap();
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:  Some("Indirect Dispatch BG"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: draw_call_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: indirect_buf.as_entire_binding()    },
+                    wgpu::BindGroupEntry { binding: 2, resource: camera_buffer.as_entire_binding()   },
+                ],
+            });
+            self.bind_group = Some(bg);
+        } else {
+            // Pipeline already exists — only recreate the bind group (buffers may have grown).
+            let pipeline = self.pipeline.as_ref().unwrap();
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:  Some("Indirect Dispatch BG"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: draw_call_buffer.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: indirect_buf.as_entire_binding()    },
+                    wgpu::BindGroupEntry { binding: 2, resource: camera_buffer.as_entire_binding()   },
+                ],
+            });
+            self.bind_group = Some(bg);
+        }
+
+        self.indirect_buffer = Some(indirect_buf);
+        self.capacity        = draw_count;
         Ok(())
     }
 
-    pub fn pipeline(&self) -> Option<&Arc<wgpu::ComputePipeline>> {
-        self.pipeline.as_ref()
+    /// Returns the indirect buffer produced by the last `update()`.
+    pub fn indirect_buffer(&self) -> Option<&Arc<wgpu::Buffer>> {
+        self.indirect_buffer.as_ref()
     }
 
-    pub fn bind_group(&self) -> Option<&wgpu::BindGroup> {
-        self.bind_group.as_ref()
-    }
-
-    pub fn max_draws_opaque(&self) -> u32 {
-        self.max_draws_opaque
-    }
-
-    pub fn max_draws_transparent(&self) -> u32 {
-        self.max_draws_transparent
-    }
-
-    pub fn workgroup_size(&self) -> u32 {
-        self.workgroup_size
+    pub fn capacity(&self) -> u32 {
+        self.capacity
     }
 }
 
@@ -227,46 +173,34 @@ impl RenderPass for IndirectDispatchPass {
         "indirect_dispatch"
     }
 
-    fn declare_resources(&self, _builder: &mut PassResourceBuilder) {
-        // This pass doesn't read/write traditional render graph resources
-        // It writes to GPU buffers directly via compute
-    }
+    fn declare_resources(&self, _builder: &mut PassResourceBuilder) {}
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        //Skip if not initialized
-        let Some(pipeline) = &self.pipeline else {
-            return Ok(());
-        };
-        let Some(bind_group) = &self.bind_group else {
-            return Ok(());
-        };
+        let Some(pipeline)    = &self.pipeline    else { return Ok(()); };
+        let Some(bind_group)  = &self.bind_group  else { return Ok(()); };
+        let Some(indirect_buf)= &self.indirect_buffer else { return Ok(()); };
+        if self.capacity == 0 { return Ok(()); }
 
-        // Run compute shader to build indirect buffers from draw list
-        // Each workgroup processes 256 draws in parallel
-        let max_draws_total = self.max_draws_opaque + self.max_draws_transparent;
-        let workgroups_needed = (max_draws_total + self.workgroup_size - 1) / self.workgroup_size;
+        // Zero the indirect buffer so culled draws have instance_count = 0.
+        // (The compute shader only writes instance_count = 1 for visible draws.)
+        ctx.encoder.clear_buffer(indirect_buf, 0, None);
 
+        let workgroups = (self.capacity + 63) / 64;
         {
-            let mut compute_pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Build Indirect Buffers"),
+            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Indirect Dispatch"),
                 timestamp_writes: None,
             });
-
-            compute_pass.set_pipeline(pipeline);
-            compute_pass.set_bind_group(0, ctx.global_bind_group, &[]);
-            compute_pass.set_bind_group(1, bind_group, &[]);
-            compute_pass.dispatch_workgroups(workgroups_needed, 1, 1);
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
         }
 
-        // Barrier: ensure indirect buffers are written before GBuffer/Transparent passes read them
-        ctx.encoder.insert_debug_marker("Indirect buffer ready");
-
+        ctx.encoder.insert_debug_marker("indirect buffer ready");
         Ok(())
     }
 }
 
 impl Default for IndirectDispatchPass {
-    fn default() -> Self {
-        Self::new()
-    }
+    fn default() -> Self { Self::new() }
 }

@@ -134,6 +134,12 @@ impl FeatureRegistry {
             .and_then(|f| f.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Get an immutable reference to a specific feature by type
+    pub fn get_typed<T: Feature + 'static>(&self, name: &str) -> Option<&T> {
+        self.features.get(name)
+            .and_then(|f| f.as_any().downcast_ref::<T>())
+    }
+
     // TODO: Fix lifetime issues with these methods
     // /// Get a mutable feature by name
     // pub fn get_mut<'a>(&'a mut self, name: &str) -> Option<&'a mut (dyn Feature + 'a)> {

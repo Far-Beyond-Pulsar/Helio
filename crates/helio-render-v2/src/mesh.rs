@@ -77,10 +77,21 @@ pub struct GpuMesh {
     pub index_buffer: Arc<wgpu::Buffer>,
     pub index_count: u32,
     pub vertex_count: u32,
-    /// World-space centroid of all vertices (used for shadow culling).
+    /// Local-space bounding sphere center (centroid of all vertices).
     pub bounds_center: [f32; 3],
-    /// Radius of the bounding sphere around `bounds_center`.
+    /// Bounding sphere radius around `bounds_center`.
     pub bounds_radius: f32,
+    /// Local-space AABB minimum corner.
+    pub aabb_min: [f32; 3],
+    /// Local-space AABB maximum corner.
+    pub aabb_max: [f32; 3],
+    /// Base vertex offset inside the unified geometry pool (0 for standalone meshes).
+    pub pool_base_vertex: u32,
+    /// First index offset inside the unified geometry pool (0 for standalone meshes).
+    pub pool_first_index: u32,
+    /// True when this mesh was allocated from `GpuBufferPool` and participates in
+    /// GPU-driven indirect rendering.
+    pub pool_allocated: bool,
 }
 
 impl GpuMesh {
@@ -104,10 +115,9 @@ impl GpuMesh {
         let ib_bytes = (indices.len() * std::mem::size_of::<u32>()) as u64;
         gpu_transfer::track_alloc(vb_bytes + ib_bytes);
         // Bounding sphere: centroid + max-distance radius.
-        // Centroid approximation is conservative and fast; the tiny extra radius
-        // vs a min-bounding-sphere algorithm only means slightly fewer culled draws.
-        let (bounds_center, bounds_radius) = if vertices.is_empty() {
-            ([0.0f32; 3], 0.0f32)
+        // Also compute the exact AABB for tighter Hi-Z occlusion culling.
+        let (bounds_center, bounds_radius, aabb_min, aabb_max) = if vertices.is_empty() {
+            ([0.0f32; 3], 0.0f32, [0.0f32; 3], [0.0f32; 3])
         } else {
             let n = vertices.len() as f32;
             let cx = vertices.iter().map(|v| v.position[0]).sum::<f32>() / n;
@@ -119,7 +129,16 @@ impl GpuMesh {
                 let dz = v.position[2] - cz;
                 (dx * dx + dy * dy + dz * dz).sqrt()
             }).fold(0.0f32, f32::max);
-            ([cx, cy, cz], r)
+
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for v in vertices {
+                for i in 0..3 {
+                    if v.position[i] < min[i] { min[i] = v.position[i]; }
+                    if v.position[i] > max[i] { max[i] = v.position[i]; }
+                }
+            }
+            ([cx, cy, cz], r, min, max)
         };
         Self {
             vertex_buffer,
@@ -128,6 +147,11 @@ impl GpuMesh {
             vertex_count: vertices.len() as u32,
             bounds_center,
             bounds_radius,
+            aabb_min,
+            aabb_max,
+            pool_base_vertex: 0,
+            pool_first_index: 0,
+            pool_allocated: false,
         }
     }
 
@@ -216,7 +240,7 @@ impl GpuMesh {
         let [cx, cy, cz] = center;
         let h = half_extent;
         let n = [0.0f32, 1.0, 0.0];
-        let t = [1.0f32, 0.0, 0.0]; // UV u-direction on XZ plane = +X
+        let t = [1.0f32, 0.0, 0.0];
         let vertices = [
             PackedVertex::new_with_tangent([cx-h,cy,cz+h], n, [0.0,0.0], t),
             PackedVertex::new_with_tangent([cx+h,cy,cz+h], n, [1.0,0.0], t),
@@ -226,82 +250,118 @@ impl GpuMesh {
         let indices = [0u32, 1, 2, 0, 2, 3];
         Self::new(device, &vertices, &indices)
     }
+
+    /// Upload vertices + indices into the unified `GpuBufferPool`.
+    /// Returns a pool-allocated `GpuMesh` that participates in `multi_draw_indexed_indirect`.
+    pub fn upload_to_pool(
+        queue: &wgpu::Queue,
+        pool: &mut crate::buffer_pool::GpuBufferPool,
+        vertices: &[PackedVertex],
+        indices: &[u32],
+    ) -> Option<Self> {
+        let alloc = pool.alloc(queue, vertices, indices)?;
+
+        let (bounds_center, bounds_radius, aabb_min, aabb_max) = if vertices.is_empty() {
+            ([0.0f32; 3], 0.0f32, [0.0f32; 3], [0.0f32; 3])
+        } else {
+            let n = vertices.len() as f32;
+            let cx = vertices.iter().map(|v| v.position[0]).sum::<f32>() / n;
+            let cy = vertices.iter().map(|v| v.position[1]).sum::<f32>() / n;
+            let cz = vertices.iter().map(|v| v.position[2]).sum::<f32>() / n;
+            let r  = vertices.iter().map(|v| {
+                let dx = v.position[0] - cx;
+                let dy = v.position[1] - cy;
+                let dz = v.position[2] - cz;
+                (dx * dx + dy * dy + dz * dz).sqrt()
+            }).fold(0.0f32, f32::max);
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for v in vertices {
+                for i in 0..3 {
+                    if v.position[i] < min[i] { min[i] = v.position[i]; }
+                    if v.position[i] > max[i] { max[i] = v.position[i]; }
+                }
+            }
+            ([cx, cy, cz], r, min, max)
+        };
+
+        Some(Self {
+            vertex_buffer:    Arc::clone(&pool.vertex_buffer),
+            index_buffer:     Arc::clone(&pool.index_buffer),
+            index_count:      alloc.index_count,
+            vertex_count:     alloc.vertex_count,
+            bounds_center,
+            bounds_radius,
+            aabb_min,
+            aabb_max,
+            pool_base_vertex: alloc.base_vertex,
+            pool_first_index: alloc.first_index,
+            pool_allocated:   true,
+        })
+    }
 }
 
-/// A single queued geometry draw call
+/// A single queued geometry draw call.
 ///
-/// The renderer fills a `DrawCall` for every mesh submitted.  To support
-/// hardware instancing we optionally carry an instance buffer and count.  The
-/// geometry pass will bind the buffer as a second vertex stream and issue
-/// `draw_indexed_instanced` when `instance_count > 1`.
-
-/// Byte stride of a single instance record: one `mat4x4<f32>` (4×4×4 bytes).
-pub const INSTANCE_STRIDE: u64 = std::mem::size_of::<[f32; 16]>() as u64;
-
+/// GPU-driven path: `slot` is the instance-data index used as `first_instance`.
+/// `pool_base_vertex` / `pool_first_index` are pool offsets for the draw command.
 #[derive(Clone)]
 pub struct DrawCall {
+    /// Points to the pool vertex buffer (or standalone VB for legacy meshes).
     pub vertex_buffer: Arc<wgpu::Buffer>,
+    /// Points to the pool index buffer (or standalone IB for legacy meshes).
     pub index_buffer: Arc<wgpu::Buffer>,
     pub index_count: u32,
     pub vertex_count: u32,
     pub material_bind_group: Arc<wgpu::BindGroup>,
     pub transparent_blend: bool,
-    /// World-space bounding sphere centre, copied from the source `GpuMesh`.
+    /// World-space bounding sphere centre.
     pub bounds_center: [f32; 3],
-    /// Bounding sphere radius, copied from the source `GpuMesh`.
+    /// Bounding sphere radius.
     pub bounds_radius: f32,
-    /// Material ID for GPU-driven indirect rendering (0 if not assigned)
-    pub material_id: u32,
-    /// Optional per-instance transform buffer (mat4x4<f32> per instance)
-    pub instance_buffer: Option<Arc<wgpu::Buffer>>,
-    /// Number of instances encoded in `instance_buffer` (defaults to 1).
-    pub instance_count: u32,
-    /// Byte offset into `instance_buffer` where this draw's instances begin.
-    /// For the unified shared instance buffer this is `batch_start_instance * INSTANCE_STRIDE`.
-    pub instance_buffer_offset: u64,
+    /// GPU scene slot index — `first_instance` in draw commands so vertex shader
+    /// reads `instance_data[slot]` for the model transform.
+    pub slot: u32,
+    /// Base vertex offset in the pool VB (0 for standalone meshes).
+    pub pool_base_vertex: i32,
+    /// First index offset in the pool IB (0 for standalone meshes).
+    pub pool_first_index: u32,
 }
 
 impl DrawCall {
-    pub fn new(mesh: &GpuMesh, material: Arc<wgpu::BindGroup>, transparent_blend: bool) -> Self {
+    pub fn new(mesh: &GpuMesh, slot: u32, material: Arc<wgpu::BindGroup>, transparent_blend: bool) -> Self {
         Self {
-            vertex_buffer: mesh.vertex_buffer.clone(),
-            index_buffer: mesh.index_buffer.clone(),
-            index_count: mesh.index_count,
-            vertex_count: mesh.vertex_count,
+            vertex_buffer:    mesh.vertex_buffer.clone(),
+            index_buffer:     mesh.index_buffer.clone(),
+            index_count:      mesh.index_count,
+            vertex_count:     mesh.vertex_count,
             material_bind_group: material,
             transparent_blend,
-            bounds_center: mesh.bounds_center,
-            bounds_radius: mesh.bounds_radius,
-            material_id: 0,  // Will be assigned by renderer if GPU-driven is enabled
-            instance_buffer: None,
-            instance_count: 1,
-            instance_buffer_offset: 0,
+            bounds_center:    mesh.bounds_center,
+            bounds_radius:    mesh.bounds_radius,
+            slot,
+            pool_base_vertex: mesh.pool_base_vertex as i32,
+            pool_first_index: mesh.pool_first_index,
         }
     }
 }
 
-/// GPU representation of DrawCall for indirect rendering
-/// Matches the WGSL struct in indirect_dispatch.wgsl
+/// GPU representation of a draw call for the indirect dispatch compute shader.
+///
+/// Must exactly match `struct GpuDrawCall` in `indirect_dispatch.wgsl`.
+/// 32 bytes, 16-byte struct alignment.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuDrawCall {
-    // Mesh buffer offsets
-    pub vertex_offset: u32,
-    pub index_offset: u32,
-    pub index_count: u32,
-    pub vertex_count: u32,
-    
-    // Material ID
-    pub material_id: u32,
-    
-    // Flags
-    pub transparent_blend: u32,
-    
-    // Padding to align to vec3f
-    pub _pad0: u32,
-    pub _pad1: u32,
-    
-    // Bounding volume (vec3f + f32 in WGSL)
-    pub bounds_center: [f32; 3],
-    pub bounds_radius: f32,
+    pub slot:          u32,        // offset  0 — → first_instance in indirect cmd
+    pub first_index:   u32,        // offset  4 — pool IB offset
+    pub base_vertex:   i32,        // offset  8 — pool VB offset
+    pub index_count:   u32,        // offset 12
+    pub bounds_center: [f32; 3],   // offset 16 — world-space bounding sphere (vec3f @ 16)
+    pub bounds_radius: f32,        // offset 28
+    // total: 32 bytes
 }
+
+// Keep for any code that hasn't been updated yet.
+#[allow(dead_code)]
+pub const INSTANCE_STRIDE: u64 = std::mem::size_of::<[f32; 16]>() as u64;

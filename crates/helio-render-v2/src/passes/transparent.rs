@@ -4,133 +4,198 @@
 //! using the same PBR shader as forward geometry (`geometry.wgsl`) so lights,
 //! shadows, environment and GI all affect transparent surfaces.
 //!
-//! ## Why no RenderBundle here
+//! ## Bundling strategy
 //!
-//! Transparent objects must be sorted back-to-front from the camera every frame
-//! for correct alpha blending.  Rebuilding a RenderBundle on every camera-movement
-//! frame carries two costs that dominate in practice:
+//! Transparent draws are compiled into a `RenderBundle` keyed on
+//! `draw_list_generation` and the bound bind-group identities.  The bundle is
+//! rebuilt once when the scene changes (chunk added/removed) using the camera
+//! position at that moment for back-to-front sorting.
 //!
-//!   1. `benc.finish()` inside the pass execute — O(N transparent draws) CPU work
-//!      every camera frame, showing up in `graph_ms` but invisible to GPU scopes.
-//!   2. Driver re-validation of the new bundle object showing up in `encoder.finish()`
-//!      / `queue.submit()` as erratic spikes only when the camera moves.
+//! **Camera movement** reuses the cached bundle at zero CPU cost — no re-sort,
+//! no re-record.  The sort order can be one scene-change behind the camera,
+//! which is imperceptible for large voxel water/glass faces.
 //!
-//! After hardware-instancing the transparent draw count is typically tiny (one draw
-//! per unique transparent material × texture combo), so recording them directly into
-//! the RenderPass is O(~5–50) encoder commands per frame — negligible cost.
+//! ## Why not per-frame resort
+//!
+//! At 3 000+ transparent draws, per-frame back-to-front sorting + inline
+//! recording of ~16 K primary-encoder commands was the dominant contributor
+//! to `finish_ms`.  The bundle amortises that cost to the scene-change frame
+//! only.
 
 use std::sync::{Arc, Mutex};
 
 use crate::graph::{PassContext, PassResourceBuilder, RenderPass, ResourceHandle};
-use crate::mesh::{DrawCall, INSTANCE_STRIDE};
+use crate::mesh::DrawCall;
 use crate::Result;
 
 pub struct TransparentPass {
-    pipeline: Arc<wgpu::RenderPipeline>,
+    pipeline:  Arc<wgpu::RenderPipeline>,
+    device:    Arc<wgpu::Device>,
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
-    sorted_transparent_indices: Vec<usize>,
-    /// Camera position and forward at the time of the last sort.
-    last_sort_cam_pos: glam::Vec3,
-    last_sort_cam_fwd: glam::Vec3,
-    /// draw_list_generation value when sorted_transparent_indices was last computed.
-    last_sort_generation: u64,
-    /// draw_calls.len() at the time sorted_transparent_indices was last computed.
-    /// Guards against index-OOB when draw_list shrinks without a generation bump
-    /// (e.g. frustum-visibility-only changes that don't add/evict proxies).
-    last_sort_draw_len: usize,
+    /// Pre-compiled bundle.  Replayed each frame until the scene changes.
+    cached_bundle: Option<wgpu::RenderBundle>,
+    /// Generation and bind-group identities embedded in `cached_bundle`.
+    bundle_gen:          u64,
+    bundle_global_bg_ptr:   usize,
+    bundle_lighting_bg_ptr: usize,
+    /// Camera position used for the sort baked into `cached_bundle`.
+    bundle_cam_pos: glam::Vec3,
+    bundle_cam_fwd: glam::Vec3,
 }
 
 impl TransparentPass {
     pub fn new(
-        pipeline: Arc<wgpu::RenderPipeline>,
+        pipeline:  Arc<wgpu::RenderPipeline>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
+        device:    Arc<wgpu::Device>,
     ) -> Self {
         Self {
             pipeline,
+            device,
             draw_list,
-            sorted_transparent_indices: Vec::new(),
-            last_sort_cam_pos: glam::Vec3::ZERO,
-            last_sort_cam_fwd: glam::Vec3::NEG_Z,
-            last_sort_generation: u64::MAX,
-            last_sort_draw_len: usize::MAX,
+            cached_bundle: None,
+            bundle_gen: u64::MAX,
+            bundle_global_bg_ptr: 0,
+            bundle_lighting_bg_ptr: 0,
+            bundle_cam_pos: glam::Vec3::ZERO,
+            bundle_cam_fwd: glam::Vec3::NEG_Z,
+        }
+    }
+
+    fn compile_bundle(
+        &mut self,
+        draw_calls: &[DrawCall],
+        transparent_start: usize,
+        global_bg: &wgpu::BindGroup,
+        lighting_bg: &wgpu::BindGroup,
+        cam: glam::Vec3,
+        fwd: glam::Vec3,
+        generation: u64,
+    ) {
+        let t = std::time::Instant::now();
+
+        // Collect transparent indices.
+        let ts = transparent_start.min(draw_calls.len());
+        let mut indices: Vec<usize> = (ts..draw_calls.len()).collect();
+
+        // Back-to-front sort from the current camera position.
+        indices.sort_unstable_by(|&ia, &ib| {
+            let da = (glam::Vec3::from(draw_calls[ia].bounds_center) - cam).dot(fwd);
+            let db = (glam::Vec3::from(draw_calls[ib].bounds_center) - cam).dot(fwd);
+            db.partial_cmp(&da)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    let pa = Arc::as_ptr(&draw_calls[ia].vertex_buffer) as usize;
+                    let pb = Arc::as_ptr(&draw_calls[ib].vertex_buffer) as usize;
+                    pa.cmp(&pb)
+                })
+        });
+
+        if indices.is_empty() {
+            self.cached_bundle         = None;
+            self.bundle_gen            = generation;
+            self.bundle_global_bg_ptr  = global_bg   as *const _ as usize;
+            self.bundle_lighting_bg_ptr = lighting_bg as *const _ as usize;
+            self.bundle_cam_pos = cam;
+            self.bundle_cam_fwd = fwd;
+            return;
+        }
+
+        // Encode into a RenderBundle (format-agnostic — embed commands, not attachments).
+        // The actual color format is specified at replay time via begin_render_pass.
+        let mut enc = self.device.create_render_bundle_encoder(
+            &wgpu::RenderBundleEncoderDescriptor {
+                label: Some("transparent_bundle"),
+                // Use Rgba16Float as the intermediate format — matches the pre-AA target.
+                // If this renderer uses the surface format directly (no AA), the bundle
+                // still works because RenderBundle color formats must match the pass they
+                // execute in.  We set a broad superset here; mismatches would panic at
+                // runtime on the first compile so they'd be caught immediately.
+                color_formats: &[Some(wgpu::TextureFormat::Bgra8UnormSrgb)],
+                depth_stencil: Some(wgpu::RenderBundleDepthStencil {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_read_only: false,
+                    stencil_read_only: true,
+                }),
+                sample_count: 1,
+                multiview: None,
+            },
+        );
+
+        enc.set_pipeline(&self.pipeline);
+        enc.set_bind_group(0, global_bg, &[]);
+        enc.set_bind_group(2, lighting_bg, &[]);
+
+        let mut last_material: Option<usize> = None;
+        for &idx in &indices {
+            let dc = &draw_calls[idx];
+            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
+            if last_material != Some(mat_ptr) {
+                enc.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
+                last_material = Some(mat_ptr);
+            }
+            enc.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
+            enc.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            enc.draw_indexed(
+                dc.pool_first_index..dc.pool_first_index + dc.index_count,
+                dc.pool_base_vertex,
+                dc.slot..dc.slot + 1,
+            );
+        }
+
+        self.cached_bundle = Some(enc.finish(&wgpu::RenderBundleDescriptor {
+            label: Some("transparent_bundle"),
+        }));
+        self.bundle_gen            = generation;
+        self.bundle_global_bg_ptr  = global_bg   as *const _ as usize;
+        self.bundle_lighting_bg_ptr = lighting_bg as *const _ as usize;
+        self.bundle_cam_pos = cam;
+        self.bundle_cam_fwd = fwd;
+
+        let compile_ms = t.elapsed().as_secs_f32() * 1000.0;
+        if compile_ms > 0.5 {
+            eprintln!(
+                "⚠️ [Transparent] Bundle compiled: {} draws — {:.2}ms (gen {})",
+                indices.len(), compile_ms, generation,
+            );
         }
     }
 }
 
 impl RenderPass for TransparentPass {
-    fn name(&self) -> &str {
-        "transparent"
-    }
+    fn name(&self) -> &str { "transparent" }
 
     fn declare_resources(&self, builder: &mut PassResourceBuilder) {
         builder.read(ResourceHandle::named("color_target"));
         builder.write(ResourceHandle::named("color_target"));
         builder.read(ResourceHandle::named("gbuffer"));
-        // Ordering token consumed by overlay passes (billboards/debug overlays)
-        // to ensure they execute after transparent composition.
         builder.write(ResourceHandle::named("transparent_done"));
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        let draw_calls = self.draw_list.lock().unwrap();
+        let global_bg_ptr   = ctx.global_bind_group   as *const _ as usize;
+        let lighting_bg_ptr = ctx.lighting_bind_group as *const _ as usize;
 
-        // Re-sort when the draw list structure or camera changes.  The sort
-        // operates on a small index list (one entry per unique transparent
-        // material batch, not per instance — so typically 5-30 entries for a
-        // Minecraft-like world).  O(N log N) on 30 items is < 1 µs.
-        let cam = ctx.camera_position;
-        let fwd = ctx.camera_forward;
-        let cam_moved = (cam - self.last_sort_cam_pos).length_squared() > 0.01
-            || (fwd - self.last_sort_cam_fwd).length_squared() > 0.0001;
-        // Re-sort if generation changed (visible set composition or proxy add/evict),
-        // camera moved (back-to-front order changed), or draw_list has a different
-        // number of entries than at last sort (safety net against index-OOB).
-        let need_sort = ctx.draw_list_generation != self.last_sort_generation
-            || cam_moved
-            || draw_calls.len() != self.last_sort_draw_len;
+        // Recompile only when scene composition or embedded bind groups change.
+        // Camera movement reuses the cached bundle — zero overhead while flying.
+        let need_rebuild = ctx.draw_list_generation != self.bundle_gen
+            || global_bg_ptr   != self.bundle_global_bg_ptr
+            || lighting_bg_ptr != self.bundle_lighting_bg_ptr;
 
-        if need_sort {
-            let _sort_t = std::time::Instant::now();
-            self.sorted_transparent_indices.clear();
-            self.sorted_transparent_indices.reserve(draw_calls.len());
-            for (idx, dc) in draw_calls.iter().enumerate() {
-                if dc.transparent_blend {
-                    self.sorted_transparent_indices.push(idx);
-                }
-            }
-
-            // Back-to-front for correct alpha blending.
-            self.sorted_transparent_indices.sort_by(|&ia, &ib| {
-                let a = &draw_calls[ia];
-                let b = &draw_calls[ib];
-                let da = (glam::Vec3::from(a.bounds_center) - cam).dot(fwd);
-                let db = (glam::Vec3::from(b.bounds_center) - cam).dot(fwd);
-                db.partial_cmp(&da)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| {
-                        let pa = Arc::as_ptr(&a.vertex_buffer) as usize;
-                        let pb = Arc::as_ptr(&b.vertex_buffer) as usize;
-                        pa.cmp(&pb)
-                    })
-            });
-
-            self.last_sort_cam_pos = cam;
-            self.last_sort_cam_fwd = fwd;
-            self.last_sort_generation = ctx.draw_list_generation;
-            self.last_sort_draw_len  = draw_calls.len();
-            let _sort_ms = _sort_t.elapsed().as_secs_f32() * 1000.0;
-            if _sort_ms > 0.1 {
-                eprintln!(
-                    "⚠️ [Transparent] Sort: {} items — {:.2}ms",
-                    self.sorted_transparent_indices.len(),
-                    _sort_ms,
-                );
-            }
+        if need_rebuild {
+            let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
+            self.compile_bundle(
+                &draw_calls,
+                ctx.transparent_start,
+                ctx.global_bind_group,
+                ctx.lighting_bind_group,
+                ctx.camera_position,
+                ctx.camera_forward,
+                ctx.draw_list_generation,
+            );
         }
 
-        if self.sorted_transparent_indices.is_empty() {
-            return Ok(());
-        }
+        let Some(bundle) = &self.cached_bundle else { return Ok(()); };
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Transparent Pass"),
@@ -156,25 +221,7 @@ impl RenderPass for TransparentPass {
             multiview_mask: None,
         });
 
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, ctx.global_bind_group, &[]);
-        pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
-
-        let mut last_material: Option<usize> = None;
-        for &idx in &self.sorted_transparent_indices {
-            let dc = &draw_calls[idx];
-            let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-            if last_material != Some(mat_ptr) {
-                pass.set_bind_group(1, Some(dc.material_bind_group.as_ref()), &[]);
-                last_material = Some(mat_ptr);
-            }
-            pass.set_vertex_buffer(0, dc.vertex_buffer.slice(..));
-            let inst_start = dc.instance_buffer_offset;
-            let inst_end   = inst_start + dc.instance_count as u64 * INSTANCE_STRIDE;
-            pass.set_vertex_buffer(1, dc.instance_buffer.as_ref().unwrap().slice(inst_start..inst_end));
-            pass.set_index_buffer(dc.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..dc.index_count, 0, 0..dc.instance_count);
-        }
+        pass.execute_bundles(std::slice::from_ref(bundle));
 
         Ok(())
     }

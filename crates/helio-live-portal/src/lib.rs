@@ -15,7 +15,10 @@ async fn serve_js(axum::extract::Path(file): axum::extract::Path<String>) -> imp
     let path = base.join(&file);
     match tokio::fs::read(&path).await {
         Ok(data) => (
-            [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+            [
+                (axum::http::header::CONTENT_TYPE,  "application/javascript"),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
             data
         ).into_response(),
         Err(_) => {
@@ -35,7 +38,10 @@ async fn serve_vendor(axum::extract::Path(file): axum::extract::Path<String>) ->
     };
     match tokio::fs::read(&path).await {
         Ok(data) => (
-            [(axum::http::header::CONTENT_TYPE, mime)],
+            [
+                (axum::http::header::CONTENT_TYPE,  mime),
+                (axum::http::header::CACHE_CONTROL, "no-store"),
+            ],
             data
         ).into_response(),
         Err(_) => {
@@ -69,14 +75,15 @@ pub struct PortalPassTiming {
 
 /// A single top-level CPU timing stage sent to the portal.
 /// The bridge auto-populates this from the individual *_ms fields so the JS
-/// frontend never has to hardcode struct field names.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A node in the frame-timing tree sent to the portal frontend.
+/// `children` are rendered as a second row below this node.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct PortalStageTiming {
-    /// Stable machine-friendly identifier used as the React node ID.
     pub id: String,
-    /// Human-readable display label.
     pub name: String,
     pub ms: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<PortalStageTiming>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -151,45 +158,32 @@ pub struct DrawCallMetrics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortalFrameSnapshot {
     pub frame: u64,
+    pub timestamp_ms: u128,
     pub frame_time_ms: f32,
     pub frame_to_frame_ms: f32,
     pub total_gpu_ms: f32,
     pub total_cpu_ms: f32,
+
+    /// Per-pass GPU/CPU timing from hardware timestamp queries.
     pub pass_timings: Vec<PortalPassTiming>,
+    /// Render-graph pass execution order (names only).
     pub pipeline_order: Vec<String>,
-    /// Delta updates for scene data (only changes sent, except first frame which is full)
+    /// ID of the `stage_timings` node that owns the pass sub-graph.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipeline_stage_id: Option<String>,
+
+    /// Delta updates for scene data (only changes sent; first frame is full).
     pub scene_delta: Option<PortalSceneLayoutDelta>,
-    pub timestamp_ms: u128,
-    
-    // scene counts
+
+    // Scene object/light/billboard counts.
     pub object_count: usize,
     pub light_count: usize,
     pub billboard_count: usize,
 
-    // draw call summary
     pub draw_calls: DrawCallMetrics,
-    
-    // CPU/GPU timing breakdown
-    pub prep_ms: f32,
-    pub graph_ms: f32,
-    pub aa_ms: f32,
-    pub resolve_ms: f32,
-    pub finish_ms: f32,
-    pub submit_ms: f32,
-    pub poll_ms: f32,
-    pub untracked_ms: f32,
 
-    /// Top-level CPU timing stages as an ordered dynamic list.
-    /// Auto-populated by the portal bridge from the individual *_ms fields
-    /// when left empty, so callers do not need to fill this themselves.
-    #[serde(default)]
+    /// CPU timing tree built from `profile_scope!` macros — always populated.
     pub stage_timings: Vec<PortalStageTiming>,
-
-    /// ID of the stage node that owns the pass sub-graph
-    /// (pipeline_order / pass_timings). Auto-set to "pipeline" by the bridge
-    /// when pipeline_order is non-empty and this field is None.
-    #[serde(default)]
-    pub pipeline_stage_id: Option<String>,
 }
 
 pub struct LivePortalHandle {
@@ -245,23 +239,7 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                         let mut buffer = Vec::new();
                         loop {
                             match rx.recv_timeout(Duration::from_millis(100)) {
-                                Ok(mut snapshot) => {
-                                    // populate each snapshot before buffering
-                                    if snapshot.stage_timings.is_empty() {
-                                        snapshot.stage_timings = vec![
-                                            PortalStageTiming { id: "untracked".into(), name: "Untracked".into(),       ms: snapshot.untracked_ms },
-                                            PortalStageTiming { id: "prep".into(),      name: "Prep".into(),            ms: snapshot.prep_ms },
-                                            PortalStageTiming { id: "pipeline".into(),  name: "Render Pipeline".into(), ms: snapshot.graph_ms },
-                                            PortalStageTiming { id: "aa".into(),        name: "AA".into(),              ms: snapshot.aa_ms },
-                                            PortalStageTiming { id: "resolve".into(),   name: "Resolve".into(),         ms: snapshot.resolve_ms },
-                                            PortalStageTiming { id: "finish".into(),    name: "Encode".into(),          ms: snapshot.finish_ms },
-                                            PortalStageTiming { id: "submit".into(),    name: "Submit".into(),          ms: snapshot.submit_ms },
-                                            PortalStageTiming { id: "poll".into(),      name: "Poll".into(),            ms: snapshot.poll_ms },
-                                        ];
-                                    }
-                                    if snapshot.pipeline_stage_id.is_none() && !snapshot.pipeline_order.is_empty() {
-                                        snapshot.pipeline_stage_id = Some("pipeline".to_string());
-                                    }
+                                Ok(snapshot) => {
                                     buffer.push(snapshot);
                                 }
                                 Err(RecvTimeoutError::Timeout) => {

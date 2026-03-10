@@ -16,8 +16,6 @@ use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceC
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
 use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
-use crate::passes::depth_prepass::{BundleInbox, PrecompiledBundles, sort_opaque_indices, build_depth_bundle};
-use crate::passes::gbuffer::build_gbuffer_bundle;
 use crate::mesh::{GpuMesh, DrawCall, GpuDrawCall};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight, LightId, BillboardId};
@@ -35,6 +33,10 @@ use helio_live_portal::{
     PortalStageTiming,
     PortalSceneLayout,
     PortalSceneLayoutDelta,
+    PortalSceneObject,
+    PortalSceneLight,
+    PortalSceneBillboard,
+    PortalSceneCamera,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, atomic::{AtomicU32, Ordering}};
@@ -43,33 +45,6 @@ use wgpu::util::DeviceExt;
 
 use self::uniforms::GlobalsUniform;
 use self::portal::{compute_scene_delta, open_url_in_browser};
-
-/// Lightweight per-frame message sent from the render loop to the portal
-/// worker thread.  Avoids per-frame `thread::spawn` and redundant cloning.
-struct PortalFrameMsg {
-    frame: u64,
-    timestamp_ms: u128,
-    frame_time_ms: f32,
-    frame_to_frame_ms: f32,
-    total_gpu_ms: f32,
-    total_cpu_ms: f32,
-    pass_timings: Vec<crate::profiler::PassTiming>,
-    current_layout: Option<PortalSceneLayout>,
-    layout_changed: bool,
-    draw_total: usize,
-    draw_opaque: usize,
-    draw_transparent: usize,
-    prep_ms: f32,
-    graph_ms: f32,
-    aa_ms: f32,
-    resolve_ms: f32,
-    finish_ms: f32,
-    submit_ms: f32,
-    poll_ms: f32,
-    untracked_ms: f32,
-    stage_ms: [f32; 5],
-    cpu_scope_log: Vec<(&'static str, f32)>,
-}
 
 /// Persistent scene environment — ambient, sky, and their dirty flags.
 ///
@@ -231,17 +206,6 @@ pub struct Renderer {
     smaa_bind_group: Option<wgpu::BindGroup>,
     taa_bind_group:  Option<wgpu::BindGroup>,
 
-    // ── GPU-driven indirect rendering ─────────────────────────────────────
-    gpu_driven:  bool,
-    async_compute: bool,
-    indirect_opaque_buffer:      Option<Arc<wgpu::Buffer>>,
-    indirect_transparent_buffer: Option<Arc<wgpu::Buffer>>,
-    opaque_draw_count:      Arc<AtomicU32>,
-    transparent_draw_count: Arc<AtomicU32>,
-    draw_list_gpu_buffer: Option<Arc<wgpu::Buffer>>,
-    material_id_map:  HashMap<usize, u32>,
-    next_material_id: u32,
-
     // ── Sky LUT change flag (forwarded to GraphContext each frame) ────────
     sky_state_changed: bool,
 
@@ -260,16 +224,6 @@ pub struct Renderer {
     /// Pointers to all registered-proxy DrawCalls, rebuilt O(N) each frame by
     /// pointer-cloning.  ShadowPass culls this by light range on its own thread.
     shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
-
-    // ── Parallel bundle pre-compilation (Unreal FParallelCommandListSet) ──
-    /// Shared inbox through which the Renderer delivers pre-compiled bundles
-    /// to DepthPrepassPass and GBufferPass before graph execution.
-    bundle_inbox: Arc<BundleInbox>,
-    /// Pipeline copies kept on the Renderer for the pre-compile thread pool.
-    depth_pipeline: Arc<wgpu::RenderPipeline>,
-    gbuffer_pipeline: Arc<wgpu::RenderPipeline>,
-    /// draw_list_generation value at the time bundles were last parallel pre-compiled.
-    last_precompile_gen: u64,
 
     // ════════════════════════════════════════════════════════════════════════
     // GPU-RESIDENT SCENE (Unreal FGPUScene equivalent)
@@ -293,10 +247,6 @@ pub struct Renderer {
     /// GPU-resident light + shadow matrix buffers (dirty-bit delta uploads).
     gpu_light_scene: gpu_light_scene::GpuLightScene,
 
-    // ── Pre-allocated GPU draw staging buffer ─────────────────────────────
-    /// Reused every frame for the GPU-driven path; avoids per-frame allocation.
-    gpu_draws_staging: Vec<GpuDrawCall>,
-
     // Frame state
     frame_count: u64,
     width: u32,
@@ -313,19 +263,11 @@ pub struct Renderer {
     latest_scene_layout: Option<PortalSceneLayout>,
     /// Previous scene layout for delta computation (reduces bandwidth).
     previous_scene_layout: Option<PortalSceneLayout>,
-    /// Per-stage CPU timings (ms) from the most recent env-prepare call.
-    pending_scene_stage_ms: [f32; 5],
     /// True when object/light/billboard count changed this frame.
     pending_layout_changed: bool,
     portal_scene_key: (usize, usize, usize),
     /// Pass names cached once after `graph.build()` to avoid a `Vec<String>` alloc every frame.
     cached_pass_names: Vec<String>,
-
-    /// Channel to the persistent portal worker thread (spawned once in
-    /// `start_live_portal`).  `SyncSender` with a small bound means the
-    /// main thread never blocks — if the worker is behind we just drop the
-    /// frame via `try_send`.
-    portal_worker_tx: Option<std::sync::mpsc::SyncSender<PortalFrameMsg>>,
 }
 
 impl Renderer {
@@ -333,17 +275,17 @@ impl Renderer {
 
     /// Queue a mesh to be drawn this frame using the default white material
     pub fn draw_mesh(&self, mesh: &GpuMesh) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, self.default_material_bind_group.clone(), false));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, 0, self.default_material_bind_group.clone(), false));
     }
 
     /// Queue a mesh with a custom GPU material (preserves transparency mode)
     pub fn draw_mesh_with_gpu_material(&self, mesh: &GpuMesh, material: &GpuMaterial) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material.bind_group.clone(), material.transparent_blend));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, 0, material.bind_group.clone(), material.transparent_blend));
     }
 
     /// Queue a mesh with a custom material bind group (legacy opaque path)
     pub fn draw_mesh_with_material(&self, mesh: &GpuMesh, material: Arc<wgpu::BindGroup>) {
-        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, material, false));
+        self.draw_list.lock().unwrap().push(DrawCall::new(mesh, 0, material, false));
     }
 
     pub fn debug_shape(&self, shape: DebugShape) {
@@ -406,19 +348,6 @@ impl Renderer {
         let url = handle.url.clone();
         open_url_in_browser(&url);
         log::info!("Helio live portal started at {url}");
-
-        // Spawn persistent worker thread.  Bounded channel (4 frames) means
-        // try_send on the main thread is non-blocking; if the worker falls
-        // behind we simply drop the frame data.
-        let (wtx, wrx) = std::sync::mpsc::sync_channel::<PortalFrameMsg>(4);
-        let portal_tx = handle.sender();
-        let pipeline_order = self.cached_pass_names.clone();
-        std::thread::Builder::new()
-            .name("helio-portal-worker".into())
-            .spawn(move || portal_worker_loop(wrx, portal_tx, pipeline_order))
-            .expect("failed to spawn portal worker thread");
-        self.portal_worker_tx = Some(wtx);
-
         self.live_portal = Some(handle);
         Ok(url)
     }
@@ -427,9 +356,6 @@ impl Renderer {
     pub fn start_live_portal_default(&mut self) -> Result<String> {
         self.start_live_portal("0.0.0.0:7878")
     }
-
-    pub fn is_gpu_driven(&self) -> bool { self.gpu_driven }
-    pub fn is_async_compute(&self) -> bool { self.async_compute }
 
     // ── Render-pass toggle ────────────────────────────────────────────────────
 
@@ -697,39 +623,26 @@ impl Renderer {
     /// no other per-frame object submission is required at steady state.
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView, delta_time: f32) -> Result<()> {
         let frame_start = std::time::Instant::now();
+        let profiling_active = self.live_portal.is_some();
+        crate::profiler::set_profiling_active(profiling_active);
         log::trace!("Rendering frame {}", self.frame_count);
 
         // ── Step 0: flush scene state (lights/sky/ambient) ───────────────────
-        //
-        // Processes only what changed since last frame:
-        //   • shadow matrices for dirty lights / camera movement
-        //   • GPU light buffer delta upload (zero-cost if nothing moved)
-        //   • sky uniform upload (zero-cost if sky unchanged)
-        //   • ambient/RC update (zero-cost if ambient unchanged)
-        self.flush_scene_state(camera);
+        {
+            crate::profile_scope!("Scene");
+            self.flush_scene_state(camera);
+        }
 
         // ── Step 1: flush GPU scene (single delta write_buffer) ───────────────
-        //
-        // Uploads only the dirty slot range to both the storage buffer (for future
-        // compute culling) and the vertex buffer (for draw-call instance binding).
-        // At steady state with no moved objects, this is a complete no-op.
         self.gpu_scene.flush(&self.queue);
 
         // ── Step 2: populate draw_list from GPU scene (persistent cache) ────
-        //
-        // The draw list is rebuilt ONLY when gpu_scene.generation changes
-        // (add_object / remove_object / update_material).  At steady state
-        // this block does NOTHING — zero Arc clones, zero iteration.
-        //
-        // One-frame draws from `draw_mesh()` that were pushed between frames
-        // sit after the persistent portion and are truncated here.
         {
-            crate::profile_scope!("dl_rebuild");
+            crate::profile_scope!("DrawList");
             let mut dl  = self.draw_list.lock().unwrap();
             let mut sdl = self.shadow_draw_list.lock().unwrap();
 
             if self.gpu_scene.generation != self.cached_draw_list_gen {
-                // Structural change — full rebuild from gpu_scene cache.
                 let (scene_dl, scene_sdl) = self.gpu_scene.draw_lists();
 
                 dl.clear();
@@ -741,225 +654,64 @@ impl Renderer {
                 self.persistent_draw_count = dl.len();
                 self.cached_draw_list_gen = self.gpu_scene.generation;
             } else {
-                // Steady state — trim any one-frame draws from previous frame.
                 dl.truncate(self.persistent_draw_count);
                 sdl.truncate(self.persistent_draw_count);
             }
         }
 
-        // ── Preparation: camera upload, feature prepare, globals, debug batch, GPU-driven ──
-        let prep_start = std::time::Instant::now();
+        // ── Preparation: camera upload, feature prepare, globals, debug batch ──
+        {
+            crate::profile_scope!("Prep");
 
-        // Upload camera uniform (features may use camera-dependent logic in prepare).
-        self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
-        gpu_transfer::track_upload(std::mem::size_of::<Camera>() as u64);
+            self.queue.write_buffer(&self.camera_buffer, 0, bytemuck::bytes_of(camera));
+            gpu_transfer::track_upload(std::mem::size_of::<Camera>() as u64);
 
-        // Prepare features (upload lights etc.)
-        let prep_ctx = PrepareContext::new(
-            &self.device, &self.queue, &self.resources,
-            self.frame_count, delta_time, camera,
-        );
-        self.features.prepare_all(&prep_ctx)?;
+            let prep_ctx = PrepareContext::new(
+                &self.device, &self.queue, &self.resources,
+                self.frame_count, delta_time, camera,
+            );
+            self.features.prepare_all(&prep_ctx)?;
 
-        // Pull live RC bounds after feature prepare so GI volume can follow camera.
-        log::trace!("Attempting to pull RC bounds from feature registry");
-        if let Some(rc) = self.features.get_typed_mut::<RadianceCascadesFeature>("radiance_cascades") {
-            let (mn, mx) = rc.world_bounds();
-            self.rc_world_min = mn;
-            self.rc_world_max = mx;
-            log::trace!("✓ RC bounds pulled from feature: [{:?} .. {:?}]", mn, mx);
-        } else {
-            log::warn!("✗ FAILED to pull RC bounds - feature not found in registry!");
-        }
-
-        // Update globals after feature prepare so all per-frame feature outputs are current.
-        let globals = GlobalsUniform {
-            frame: self.frame_count as u32,
-            delta_time,
-            light_count: self.scene_light_count,
-            ambient_intensity: self.scene_ambient_intensity,
-            ambient_color: [self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2], 0.0],
-            rc_world_min: [self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2], 0.0],
-            rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
-            csm_splits: self.scene_csm_splits,
-        };
-        log::trace!("Uploading globals: RC bounds min=[{:.1} {:.1} {:.1}] max=[{:.1} {:.1} {:.1}]",
-                   self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2],
-                   self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2]);
-        self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
-        gpu_transfer::track_upload(std::mem::size_of::<GlobalsUniform>() as u64);
-
-        // Build GPU debug batch from shapes submitted since the previous frame.
-        let debug_shapes = {
-            let mut shapes = self.debug_shapes.lock().unwrap();
-            std::mem::take(&mut *shapes)
-        };
-        if debug_shapes.is_empty() {
-            *self.debug_batch.lock().unwrap() = None;
-        } else {
-            *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
-        }
-
-        // ── Parallel bundle pre-compilation (Unreal FParallelCommandListSet) ────
-        //
-        // When the draw list changes (add/remove/enable/disable object), split the
-        // sorted opaque draw list into N chunks and compile each chunk into its own
-        // RenderBundle on a worker thread.  This is equivalent to:
-        //   UE4: FParallelCommandListSet → RHICmdList[i].DrawIndexedPrimitive(…)
-        //   D3D12: N secondary command lists → ExecuteCommandLists(N, pLists)
-        //   wgpu:  N RenderBundles → pass.execute_bundles(&bundles)
-        //
-        // The pre-compiled bundles are deposited into the shared BundleInbox.
-        // DepthPrepassPass and GBufferPass pick them up in their execute() methods,
-        // avoiding any inline compilation.  At steady state (no scene changes),
-        // this block is skipped entirely.
-        if self.draw_list_generation != self.last_precompile_gen {
-            crate::profile_scope!("parallel_precompile");
-            let draw_calls: Vec<DrawCall> = self.draw_list.lock().unwrap().clone();
-            let sorted = sort_opaque_indices(&draw_calls);
-
-            if sorted.len() >= 64 {
-                let num_chunks = std::thread::available_parallelism()
-                    .map(|n| n.get())
-                    .unwrap_or(4)
-                    .min(8)
-                    .max(1);
-                let chunk_size = (sorted.len() + num_chunks - 1) / num_chunks;
-
-                // Rebind Arc-wrapped fields to local shared refs so scoped threads
-                // can capture them without borrowing `self`.
-                let device: &wgpu::Device        = &self.device;
-                let depth_pl: &wgpu::RenderPipeline  = &self.depth_pipeline;
-                let gbuf_pl: &wgpu::RenderPipeline   = &self.gbuffer_pipeline;
-                let global_bg: &wgpu::BindGroup  = &self.global_bind_group;
-                let lighting_bg: &wgpu::BindGroup = &self.lighting_bind_group;
-                let generation     = self.draw_list_generation;
-                let global_bg_ptr  = global_bg as *const _ as usize;
-                let lighting_bg_ptr = lighting_bg as *const _ as usize;
-                let dc_ref: &[DrawCall] = &draw_calls;
-                let sorted_ref: &[usize] = &sorted;
-
-                // Pre-collect chunks so spawn closures capture simple slices.
-                let chunks: Vec<&[usize]> = sorted_ref.chunks(chunk_size).collect();
-
-                let (depth_bundles, depth_kept, gbuf_bundles, gbuf_kept) = std::thread::scope(|s| {
-                    // Spawn N depth-prepass chunk threads.
-                    let depth_handles: Vec<_> = chunks.iter()
-                        .map(|&chunk| {
-                            s.spawn(move || build_depth_bundle(device, depth_pl, dc_ref, chunk, global_bg, lighting_bg))
-                        })
-                        .collect();
-
-                    // Spawn N gbuffer chunk threads (in parallel with depth).
-                    let gbuf_handles: Vec<_> = chunks.iter()
-                        .map(|&chunk| {
-                            s.spawn(move || build_gbuffer_bundle(device, gbuf_pl, dc_ref, chunk, global_bg))
-                        })
-                        .collect();
-
-                    // Collect depth results.
-                    let mut d_bundles = Vec::with_capacity(depth_handles.len());
-                    let mut d_kept = Vec::new();
-                    for h in depth_handles {
-                        let (bundle, kept) = h.join().unwrap();
-                        d_bundles.push(bundle);
-                        d_kept.extend(kept);
-                    }
-
-                    // Collect gbuffer results.
-                    let mut g_bundles = Vec::with_capacity(gbuf_handles.len());
-                    let mut g_kept = Vec::new();
-                    for h in gbuf_handles {
-                        let (bundle, kept) = h.join().unwrap();
-                        g_bundles.push(bundle);
-                        g_kept.extend(kept);
-                    }
-
-                    (d_bundles, d_kept, g_bundles, g_kept)
-                });
-
-                eprintln!(
-                    "⚠️ [Parallel Precompile] {} depth + {} gbuffer bundles, {} chunks, {} draws (gen {})",
-                    depth_bundles.len(), gbuf_bundles.len(), num_chunks, sorted.len(), generation,
-                );
-
-                // Deposit into inbox — passes will .take() during graph execution.
-                let sorted_clone = sorted.clone();
-                *self.bundle_inbox.depth_prepass.lock().unwrap() = Some(PrecompiledBundles {
-                    bundles: depth_bundles,
-                    kept_arcs: depth_kept,
-                    sorted_indices: sorted_clone,
-                    generation,
-                    global_bg_ptr,
-                    lighting_bg_ptr,
-                });
-                *self.bundle_inbox.gbuffer.lock().unwrap() = Some(PrecompiledBundles {
-                    bundles: gbuf_bundles,
-                    kept_arcs: gbuf_kept,
-                    sorted_indices: sorted,
-                    generation,
-                    global_bg_ptr,
-                    lighting_bg_ptr,
-                });
+            if let Some(rc) = self.features.get_typed_mut::<RadianceCascadesFeature>("radiance_cascades") {
+                let (mn, mx) = rc.world_bounds();
+                self.rc_world_min = mn;
+                self.rc_world_max = mx;
             }
 
-            self.last_precompile_gen = self.draw_list_generation;
-        }
+            let globals = GlobalsUniform {
+                frame: self.frame_count as u32,
+                delta_time,
+                light_count: self.scene_light_count,
+                ambient_intensity: self.scene_ambient_intensity,
+                ambient_color: [self.scene_ambient_color[0], self.scene_ambient_color[1], self.scene_ambient_color[2], 0.0],
+                rc_world_min: [self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2], 0.0],
+                rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
+                csm_splits: self.scene_csm_splits,
+            };
+            self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
+            gpu_transfer::track_upload(std::mem::size_of::<GlobalsUniform>() as u64);
 
-        // ── GPU-DRIVEN RENDERING: Assign material IDs and upload draw list ──────
-        if self.gpu_driven {
-            if let Some(ref draw_list_buf) = self.draw_list_gpu_buffer {
-                {
-                    let mut draw_calls = self.draw_list.lock().unwrap();
-                    // Reuse pre-allocated staging buffer — zero heap alloc.
-                    self.gpu_draws_staging.clear();
-                    for dc in draw_calls.iter_mut() {
-                        let mat_ptr = Arc::as_ptr(&dc.material_bind_group) as usize;
-                        if !self.material_id_map.contains_key(&mat_ptr) {
-                            self.material_id_map.insert(mat_ptr, self.next_material_id);
-                            self.next_material_id += 1;
-                        }
-                        dc.material_id = *self.material_id_map.get(&mat_ptr).unwrap();
-                        self.gpu_draws_staging.push(GpuDrawCall {
-                            vertex_offset: 0,
-                            index_offset: 0,
-                            index_count: dc.index_count,
-                            vertex_count: dc.vertex_count,
-                            material_id: dc.material_id,
-                            transparent_blend: if dc.transparent_blend { 1 } else { 0 },
-                            _pad0: 0,
-                            _pad1: 0,
-                            bounds_center: dc.bounds_center,
-                            bounds_radius: dc.bounds_radius,
-                        });
-                    }
-                }
-                if !self.gpu_draws_staging.is_empty() {
-                    let draw_bytes = (self.gpu_draws_staging.len() * std::mem::size_of::<GpuDrawCall>()) as u64;
-                    self.queue.write_buffer(draw_list_buf, 0, bytemuck::cast_slice(&self.gpu_draws_staging));
-                    gpu_transfer::track_upload(draw_bytes);
-                    log::trace!("GPU-driven: Uploaded {} draw calls for indirect rendering", self.gpu_draws_staging.len());
-                }
-                if let (Some(ref _opaque_buf), Some(ref _transparent_buf)) =
-                    (&self.indirect_opaque_buffer, &self.indirect_transparent_buffer) {
-                    self.opaque_draw_count.store(0, Ordering::Release);
-                    self.transparent_draw_count.store(0, Ordering::Release);
-                }
+            let debug_shapes = {
+                let mut shapes = self.debug_shapes.lock().unwrap();
+                std::mem::take(&mut *shapes)
+            };
+            if debug_shapes.is_empty() {
+                *self.debug_batch.lock().unwrap() = None;
+            } else {
+                *self.debug_batch.lock().unwrap() = debug_draw::build_batch(&self.device, &debug_shapes);
             }
-        }
+        } // profile_scope!("Prep") drops here
 
-        // ── Encoder + pre-AA clear (still part of prep) ──────────────────────
+        // ── Encoder + pre-AA clear ────────────────────────────────────────────
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
 
-        // Determine render target: if AA is enabled, write to pre_aa texture first
         let graph_target = match self.aa_mode {
             AntiAliasingMode::None | AntiAliasingMode::Msaa(_) => target,
             _ => &self.pre_aa_view,
         };
 
-        // Clear pre_aa_texture at the start of each frame when AA is enabled
         if !matches!(self.aa_mode, AntiAliasingMode::None | AntiAliasingMode::Msaa(_)) {
             let _ = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Pre-AA Clear"),
@@ -979,102 +731,105 @@ impl Renderer {
             });
         }
 
-        let prep_ms = prep_start.elapsed().as_secs_f32() * 1000.0;
-
         // ── Execute render graph ──────────────────────────────────────────────
-        let mut graph_ctx = GraphContext {
-            encoder: &mut encoder,
-            resources: &self.resources,
-            target: graph_target,
-            depth_view: &self.depth_view,
-            frame: self.frame_count,
-            global_bind_group: &self.global_bind_group,
-            lighting_bind_group: &self.lighting_bind_group,
-            sky_color: self.scene_sky_color,
-            has_sky: self.scene_has_sky,
-            sky_state_changed: self.sky_state_changed,
-            sky_bind_group: None,
-            camera_position: camera.position,
-            camera_forward: camera.forward(),
-            draw_list_generation: self.draw_list_generation,
-        };
+        {
+            crate::profile_scope!("Graph");
+            let mut graph_ctx = GraphContext {
+                encoder: &mut encoder,
+                resources: &self.resources,
+                target: graph_target,
+                depth_view: &self.depth_view,
+                frame: self.frame_count,
+                global_bind_group: &self.global_bind_group,
+                lighting_bind_group: &self.lighting_bind_group,
+                sky_color: self.scene_sky_color,
+                has_sky: self.scene_has_sky,
+                sky_state_changed: self.sky_state_changed,
+                sky_bind_group: None,
+                camera_position: camera.position,
+                camera_forward: camera.forward(),
+                draw_list_generation: self.draw_list_generation,
+                transparent_start: self.gpu_scene.transparent_start,
+            };
 
-        let profiling_active = self.live_portal.is_some();
-
-        let graph_start = std::time::Instant::now();
-        if profiling_active {
-            if let Some(p) = &mut self.profiler { p.begin_frame(); }
-            self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
-        } else {
-            self.graph.execute(&mut graph_ctx, None)?;
-        }
-        let graph_ms = graph_start.elapsed().as_secs_f32() * 1000.0;
-        // Collect CPU scope timings emitted by profile_scope! calls inside the passes.
-        let cpu_scope_log = crate::profiler::take_frame_scope_log();
+            if profiling_active {
+                if let Some(p) = &mut self.profiler { p.begin_frame(); }
+                self.graph.execute(&mut graph_ctx, self.profiler.as_mut())?;
+            } else {
+                self.graph.execute(&mut graph_ctx, None)?;
+            }
+        } // profile_scope!("Graph") drops here
 
         // ── Anti-aliasing post-processing ─────────────────────────────────────
-        let aa_start = std::time::Instant::now();
-        if let Some(fxaa) = &self.fxaa_pass {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("FXAA Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target, resolve_target: None, depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
-            });
-            if let Some(bind_group) = &self.fxaa_bind_group { fxaa.execute_draw(&mut pass, bind_group); }
-        } else if let Some(smaa) = &self.smaa_pass {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("SMAA Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target, resolve_target: None, depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
-            });
-            if let Some(bind_group) = &self.smaa_bind_group { smaa.execute_draw(&mut pass, bind_group); }
-        } else if let Some(taa) = &self.taa_pass {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TAA Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target, resolve_target: None, depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
-                })],
-                depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
-            });
-            if let Some(bind_group) = &self.taa_bind_group { taa.execute_draw(&mut pass, bind_group); }
-        }
-        let aa_ms = aa_start.elapsed().as_secs_f32() * 1000.0;
+        {
+            crate::profile_scope!("AA");
+            if let Some(fxaa) = &self.fxaa_pass {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("FXAA Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                });
+                if let Some(bind_group) = &self.fxaa_bind_group { fxaa.execute_draw(&mut pass, bind_group); }
+            } else if let Some(smaa) = &self.smaa_pass {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("SMAA Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                });
+                if let Some(bind_group) = &self.smaa_bind_group { smaa.execute_draw(&mut pass, bind_group); }
+            } else if let Some(taa) = &self.taa_pass {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("TAA Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None, timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                });
+                if let Some(bind_group) = &self.taa_bind_group { taa.execute_draw(&mut pass, bind_group); }
+            }
+        } // profile_scope!("AA") drops here
 
-        // ── Resolve GPU timestamp queries ─────────────────────────────────────
-        let resolve_start = std::time::Instant::now();
-        if profiling_active {
-            if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
-        }
-        let resolve_ms = resolve_start.elapsed().as_secs_f32() * 1000.0;
+        // ── Encode: resolve timestamps, finish, submit ────────────────────────
+        {
+            crate::profile_scope!("Encode");
+            {
+                crate::profile_scope!("Encode::Resolve");
+                if profiling_active {
+                    if let Some(p) = &mut self.profiler { p.resolve(&mut encoder); }
+                }
+            }
+            let cmd_buf = {
+                crate::profile_scope!("Encode::Finish");
+                encoder.finish()
+            };
+            {
+                crate::profile_scope!("Encode::Submit");
+                self.queue.submit(Some(cmd_buf));
+            }
+        } // profile_scope!("Encode") drops here
 
-        // ── Finalize command buffer ───────────────────────────────────────────
-        let finish_start = std::time::Instant::now();
-        let cmd_buf = encoder.finish();
-        let finish_ms = finish_start.elapsed().as_secs_f32() * 1000.0;
+        // ── GPU readback (non-blocking) ───────────────────────────────────────
+        {
+            crate::profile_scope!("Poll");
+            if profiling_active {
+                if let Some(p) = &mut self.profiler {
+                    p.begin_readback();
+                    p.poll_results(&self.device);
+                }
+            }
+        } // profile_scope!("Poll") drops here
 
-        // ── Submit to GPU ─────────────────────────────────────────────────────
-        let submit_start = std::time::Instant::now();
-        self.queue.submit(Some(cmd_buf));
-        let submit_ms = submit_start.elapsed().as_secs_f32() * 1000.0;
+        // Collect scope log AFTER all profile_scope! guards above have dropped.
+        let cpu_scope_log = crate::profiler::take_frame_scope_log();
 
         *self.debug_batch.lock().unwrap() = None;
-
-        // ── Profiler readback ─────────────────────────────────────────────────
-        let poll_start = std::time::Instant::now();
-        if profiling_active {
-            if let Some(p) = &mut self.profiler {
-                p.begin_readback();
-                p.poll_results(&self.device);
-            }
-        }
-        let poll_ms = poll_start.elapsed().as_secs_f32() * 1000.0;
 
         // ── Frame timing bookkeeping ──────────────────────────────────────────
         let frame_to_frame_ms = if let Some(last_start) = self.last_frame_start {
@@ -1082,25 +837,65 @@ impl Renderer {
         } else {
             0.0
         };
-
         let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-        let untracked_ms = frame_to_frame_ms - frame_time_ms;
 
         self.last_frame_start = Some(frame_start);
         self.last_frame_end = Some(std::time::Instant::now());
 
         // ── Live portal snapshot ──────────────────────────────────────────────
-        // Pack cheap scalars + one `take`'d Vec into a message and hand it to
-        // the persistent worker thread.  No thread::spawn, no redundant clones.
-        if let (Some(wtx), Some(p)) = (&self.portal_worker_tx, &mut self.profiler) {
-            let (draw_total, draw_opaque, draw_transparent) = {
-                let draws = self.draw_list.lock().unwrap();
-                let total = draws.len();
-                let opaque = draws.iter().filter(|dc| !dc.transparent_blend).count();
-                (total, opaque, total.saturating_sub(opaque))
-            };
+        if let Some(portal) = &self.live_portal {
+            let draw_total = { self.draw_list.lock().unwrap().len() };
+            let draw_transparent = draw_total.saturating_sub(self.gpu_scene.transparent_start);
+            let draw_opaque      = draw_total - draw_transparent;
 
-            let msg = PortalFrameMsg {
+            let new_key = (
+                self.gpu_scene.object_count() as usize,
+                self.gpu_light_scene.active_count as usize,
+                self.features.get_typed::<BillboardsFeature>("billboards")
+                    .map(|bb| bb.proxy_count()).unwrap_or(0),
+            );
+            let layout_changed = new_key != self.portal_scene_key;
+            let layout: Option<PortalSceneLayout> = if layout_changed || self.latest_scene_layout.is_none() {
+                self.portal_scene_key = new_key;
+                Some(self.build_portal_layout(camera))
+            } else {
+                self.latest_scene_layout.take()
+            };
+            self.pending_layout_changed = layout_changed;
+
+            // Compute delta against previous layout.
+            let scene_delta = layout.as_ref().map(|cur| {
+                if layout_changed {
+                    compute_scene_delta(cur, self.previous_scene_layout.as_ref())
+                } else {
+                    let prev_cam = self.previous_scene_layout.as_ref().and_then(|p| p.camera.clone());
+                    let mut d = PortalSceneLayoutDelta::default();
+                    if cur.camera != prev_cam { d.camera = Some(cur.camera.clone()); }
+                    d
+                }
+            });
+
+            let (obj_count, light_count, bb_count) = layout.as_ref()
+                .map(|l| (l.objects.len(), l.lights.len(), l.billboards.len()))
+                .unwrap_or((0, 0, 0));
+
+            // Advance previous layout tracking.
+            if layout_changed {
+                self.previous_scene_layout = layout;
+            } else if let Some(cur) = layout {
+                match &mut self.previous_scene_layout {
+                    Some(prev) => prev.camera = cur.camera,
+                    None       => self.previous_scene_layout = Some(cur),
+                }
+            }
+
+            let stage_timings = build_scope_tree(&cpu_scope_log);
+
+            let (total_gpu_ms, total_cpu_ms, pass_timings) = self.profiler.as_mut()
+                .map(|p| (p.last_total_gpu_ms, p.last_total_cpu_ms, std::mem::take(&mut p.last_timings)))
+                .unwrap_or((0.0, 0.0, vec![]));
+
+            let snapshot = PortalFrameSnapshot {
                 frame: self.frame_count,
                 timestamp_ms: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
@@ -1108,28 +903,25 @@ impl Renderer {
                     .unwrap_or(0),
                 frame_time_ms,
                 frame_to_frame_ms,
-                total_gpu_ms: p.last_total_gpu_ms,
-                total_cpu_ms: p.last_total_cpu_ms,
-                // take() is O(1) — profiler refills this next frame from readback.
-                pass_timings: std::mem::take(&mut p.last_timings),
-                current_layout: self.latest_scene_layout.take(),
-                layout_changed: self.pending_layout_changed,
-                draw_total,
-                draw_opaque,
-                draw_transparent,
-                prep_ms,
-                graph_ms,
-                aa_ms,
-                resolve_ms,
-                finish_ms,
-                submit_ms,
-                poll_ms,
-                untracked_ms,
-                stage_ms: self.pending_scene_stage_ms,
-                cpu_scope_log,
+                total_gpu_ms,
+                total_cpu_ms,
+                pass_timings: pass_timings.iter()
+                    .map(|t| PortalPassTiming { name: t.name.clone(), gpu_ms: t.gpu_ms, cpu_ms: t.cpu_ms })
+                    .collect(),
+                pipeline_order: self.cached_pass_names.clone(),
+                pipeline_stage_id: Some("graph_passes".to_string()),
+                scene_delta,
+                object_count: obj_count,
+                light_count,
+                billboard_count: bb_count,
+                draw_calls: helio_live_portal::DrawCallMetrics {
+                    total: draw_total,
+                    opaque: draw_opaque,
+                    transparent: draw_transparent,
+                },
+                stage_timings,
             };
-            // Non-blocking: if the worker is behind, drop this frame's data.
-            let _ = wtx.try_send(msg);
+            portal.publish(snapshot);
         }
 
         // One-frame draws (from draw_mesh()) sit after `persistent_draw_count`
@@ -1142,6 +934,66 @@ impl Renderer {
     }
 
     // ── Resize ────────────────────────────────────────────────────────────────
+    // ── Portal helpers ────────────────────────────────────────────────────────
+
+    /// Build a `PortalSceneLayout` from the renderer's live state.
+    ///
+    /// Objects come from the persistent draw_list (bounds data already cached).
+    /// Lights come from the GPU light scene's CPU mirror.
+    /// Billboards come from the billboard feature's proxy count.
+    /// This is called only when the portal is active and the scene has changed.
+    fn build_portal_layout(&self, camera: &Camera) -> PortalSceneLayout {
+        // Objects: use the persistent draw_list (opaque + transparent).
+        let objects = {
+            let dl = self.draw_list.lock().unwrap();
+            dl[..self.persistent_draw_count.min(dl.len())]
+                .iter()
+                .enumerate()
+                .map(|(id, dc)| PortalSceneObject {
+                    id:           id as u32,
+                    bounds_center: dc.bounds_center,
+                    bounds_radius: dc.bounds_radius,
+                    has_material: true,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Lights: CPU mirror in GpuLightScene (pub(super) from this module).
+        let lights = self.gpu_light_scene.cached_scene_lights
+            [..self.gpu_light_scene.active_count as usize]
+            .iter()
+            .enumerate()
+            .map(|(id, l)| PortalSceneLight {
+                id:        id as u32,
+                position:  l.position,
+                color:     l.color,
+                intensity: l.intensity,
+                range:     l.range,
+            })
+            .collect::<Vec<_>>();
+
+        // Billboards: proxy count from feature.
+        let billboards = self.features
+            .get_typed::<BillboardsFeature>("billboards")
+            .map(|bb| {
+                (0..bb.proxy_count() as u32)
+                    .map(|id| PortalSceneBillboard { id, position: [0.0; 3], scale: [1.0; 2] })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        let fwd = camera.forward();
+        PortalSceneLayout {
+            objects,
+            lights,
+            billboards,
+            camera: Some(PortalSceneCamera {
+                position: [camera.position.x, camera.position.y, camera.position.z],
+                forward:  [fwd.x, fwd.y, fwd.z],
+            }),
+        }
+    }
+
 
     pub fn resize(&mut self, width: u32, height: u32) {
         log::trace!("Resizing renderer to {}x{}", width, height);
@@ -1197,113 +1049,65 @@ impl Renderer {
 // PORTAL WORKER THREAD
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Persistent background thread that assembles `PortalFrameSnapshot` from the
-/// lightweight `PortalFrameMsg` and forwards it to the portal bridge.
-/// Owns the previous scene layout so the main thread never clones it.
-fn portal_worker_loop(
-    rx: std::sync::mpsc::Receiver<PortalFrameMsg>,
-    portal_tx: std::sync::mpsc::Sender<PortalFrameSnapshot>,
-    pipeline_order: Vec<String>,
-) {
-    let mut previous_layout: Option<PortalSceneLayout> = None;
+/// Convert a flat `Vec<CompletedScope>` — ordered by drop (innermost first) —
+/// into a `PortalStageTiming` tree that the portal can render.
+///
+/// The scope log is in *completion* order: inner scopes complete (drop) before
+/// their parent.  We reconstruct the tree from the `parent` index field, which
+/// is set by the thread-local `SCOPE_STACK` at the moment the scope opened.
+fn build_scope_tree(
+    scopes: &[crate::profiler::CompletedScope],
+) -> Vec<PortalStageTiming> {
+    use std::collections::HashMap;
 
-    while let Ok(m) = rx.recv() {
-        let scene_delta = m.current_layout.as_ref().map(|cur| {
-            if m.layout_changed {
-                compute_scene_delta(cur, previous_layout.as_ref())
-            } else {
-                let prev_cam = previous_layout.as_ref().and_then(|p| p.camera.clone());
-                let mut d = PortalSceneLayoutDelta::default();
-                if cur.camera != prev_cam {
-                    d.camera = Some(cur.camera.clone());
-                }
-                d
-            }
-        });
+    // Map scope idx → position in the slice.
+    let idx_map: HashMap<u32, usize> = scopes
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.idx, i))
+        .collect();
 
-        let (obj_count, light_count, bb_count) = if let Some(l) = &m.current_layout {
-            (l.objects.len(), l.lights.len(), l.billboards.len())
-        } else {
-            (0, 0, 0)
-        };
+    // Build parent → [child indices] adjacency list.
+    let mut children_of: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut roots: Vec<u32> = Vec::new();
 
-        let s = &m.stage_ms;
-        let scene_prep_total: f32 = s.iter().sum();
-        let app_ms = (m.untracked_ms - scene_prep_total).max(0.0);
-        let scope_map: HashMap<&str, f32> =
-            m.cpu_scope_log.iter().map(|(n, ms)| (*n, *ms)).collect();
-        let mut stage_timings = vec![
-            PortalStageTiming { id: "app".into(),          name: "App".into(),              ms: app_ms },
-            PortalStageTiming { id: "scene_draws".into(),  name: "Scene: Draws".into(),     ms: s[0] },
-            PortalStageTiming { id: "scene_lights".into(), name: "Scene: Lights".into(),    ms: s[1] },
-            PortalStageTiming { id: "scene_shadow".into(), name: "Scene: Shadows".into(),   ms: s[2] },
-            PortalStageTiming { id: "scene_bb".into(),     name: "Scene: Billboards".into(),ms: s[3] },
-            PortalStageTiming { id: "scene_sky".into(),    name: "Scene: Sky".into(),       ms: s[4] },
-            PortalStageTiming { id: "prep".into(),         name: "Prep".into(),             ms: m.prep_ms },
-            PortalStageTiming { id: "pipeline".into(),     name: "Render Pipeline".into(),  ms: m.graph_ms },
-            PortalStageTiming { id: "aa".into(),           name: "AA".into(),               ms: m.aa_ms },
-            PortalStageTiming { id: "resolve".into(),      name: "Resolve".into(),          ms: m.resolve_ms },
-            PortalStageTiming { id: "finish".into(),       name: "Encode".into(),           ms: m.finish_ms },
-            PortalStageTiming { id: "submit".into(),       name: "Submit".into(),           ms: m.submit_ms },
-            PortalStageTiming { id: "poll".into(),         name: "Poll".into(),             ms: m.poll_ms },
-        ];
-        for &(name, id) in &[
-            ("dl_rebuild",            "dl_rebuild"),
-            ("depth_prepass/compile", "depth_prepass_compile"),
-            ("depth_prepass/replay",  "depth_prepass_replay"),
-            ("gbuffer/compile",       "gbuffer_compile"),
-            ("gbuffer/replay",        "gbuffer_replay"),
-        ] {
-            let ms = scope_map.get(name).copied().unwrap_or(0.0);
-            stage_timings.push(PortalStageTiming {
-                id: id.to_string(), name: name.to_string(), ms,
-            });
+    for scope in scopes {
+        match scope.parent {
+            Some(p) => children_of.entry(p).or_default().push(scope.idx),
+            None    => roots.push(scope.idx),
         }
-
-        let snapshot = PortalFrameSnapshot {
-            frame: m.frame,
-            frame_time_ms: m.frame_time_ms,
-            frame_to_frame_ms: m.frame_to_frame_ms,
-            total_gpu_ms: m.total_gpu_ms,
-            total_cpu_ms: m.total_cpu_ms,
-            pass_timings: m.pass_timings
-                .iter()
-                .map(|t| PortalPassTiming { name: t.name.clone(), gpu_ms: t.gpu_ms, cpu_ms: t.cpu_ms })
-                .collect(),
-            pipeline_order: pipeline_order.clone(),
-            scene_delta,
-            timestamp_ms: m.timestamp_ms,
-            object_count: obj_count,
-            light_count,
-            billboard_count: bb_count,
-            draw_calls: helio_live_portal::DrawCallMetrics {
-                total: m.draw_total,
-                opaque: m.draw_opaque,
-                transparent: m.draw_transparent,
-            },
-            prep_ms: m.prep_ms,
-            graph_ms: m.graph_ms,
-            aa_ms: m.aa_ms,
-            resolve_ms: m.resolve_ms,
-            finish_ms: m.finish_ms,
-            submit_ms: m.submit_ms,
-            poll_ms: m.poll_ms,
-            untracked_ms: m.untracked_ms,
-            stage_timings,
-            pipeline_stage_id: Some("pipeline".to_string()),
-        };
-
-        // Update previous layout tracking.
-        if m.layout_changed {
-            previous_layout = m.current_layout;
-        } else if let (Some(ref mut prev), Some(ref cur)) =
-            (&mut previous_layout, &m.current_layout)
-        {
-            prev.camera = cur.camera.clone();
-        } else if previous_layout.is_none() {
-            previous_layout = m.current_layout;
-        }
-
-        let _ = portal_tx.send(snapshot);
     }
+
+    // Sort children by their own idx (open-order = declaration order in code).
+    for kids in children_of.values_mut() {
+        kids.sort_unstable();
+    }
+    roots.sort_unstable();
+
+    fn to_node(
+        idx:         u32,
+        scopes:      &[crate::profiler::CompletedScope],
+        idx_map:     &HashMap<u32, usize>,
+        children_of: &HashMap<u32, Vec<u32>>,
+    ) -> PortalStageTiming {
+        let scope = &scopes[idx_map[&idx]];
+        let id = scope.name
+            .replace([' ', ':', '/', '!'], "_")
+            .to_ascii_lowercase();
+        let kids = children_of
+            .get(&idx)
+            .map(|v| v.iter().map(|&c| to_node(c, scopes, idx_map, children_of)).collect())
+            .unwrap_or_default();
+        PortalStageTiming {
+            id,
+            name:     scope.name.to_string(),
+            ms:       scope.elapsed_ms,
+            children: kids,
+        }
+    }
+
+    roots
+        .iter()
+        .map(|&r| to_node(r, scopes, &idx_map, &children_of))
+        .collect()
 }

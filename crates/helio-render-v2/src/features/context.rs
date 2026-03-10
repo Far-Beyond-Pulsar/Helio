@@ -33,6 +33,9 @@ pub struct FeatureContext<'a> {
     pub light_face_counts: Arc<Mutex<Vec<u8>>>,
     /// Per-light culling data (position, range, type) for `ShadowPass::execute`.
     pub shadow_cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
+    /// GpuScene instance data storage buffer — ShadowPass uses this at binding 2
+    /// so the vertex shader can read transforms via `@builtin(instance_index)`.
+    pub instance_data_buffer: &'a wgpu::Buffer,
 
     // ── Outputs set by features during register() ───────────────────────────
     /// Light storage buffer set by LightingFeature
@@ -61,6 +64,7 @@ impl<'a> FeatureContext<'a> {
         light_count_arc: Arc<AtomicU32>,
         light_face_counts: Arc<Mutex<Vec<u8>>>,
         shadow_cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
+        instance_data_buffer: &'a wgpu::Buffer,
     ) -> Self {
         Self {
             device,
@@ -75,6 +79,7 @@ impl<'a> FeatureContext<'a> {
             light_count_arc,
             light_face_counts,
             shadow_cull_lights,
+            instance_data_buffer,
             light_buffer: None,
             shadow_atlas_view: None,
             shadow_sampler: None,

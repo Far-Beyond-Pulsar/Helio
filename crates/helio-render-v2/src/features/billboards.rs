@@ -151,6 +151,11 @@ impl BillboardsFeature {
         }
     }
 
+    /// Returns the number of currently registered billboard proxies.
+    pub(crate) fn proxy_count(&self) -> usize {
+        self.proxies.len()
+    }
+
     // ── Persistent API (preferred) ─────────────────────────────────────────
 
     /// Register a billboard and return a stable [`BillboardId`].  O(1).
