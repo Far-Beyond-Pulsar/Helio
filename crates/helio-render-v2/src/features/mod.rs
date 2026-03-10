@@ -24,5 +24,4 @@ pub use bloom::BloomFeature;
 pub use shadows::ShadowsFeature;
 pub use billboards::{BillboardsFeature, BillboardInstance};
 pub use radiance_cascades::RadianceCascadesFeature;
-
-
+pub use crate::sdf::{SdfFeature, SdfEdit, SdfEditList, SdfShapeType, SdfShapeParams, BooleanOp};
