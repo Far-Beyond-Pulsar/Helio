@@ -3,9 +3,27 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    // Only run the post-processing when compiling for wasm32-unknown-unknown
+    // Different logic depending on the target.  When compiling for the
+    // host we simply copy the finished server binary into `pkg/` so that the
+    // folder produced by a release build contains both wasm assets and the
+    // helper exe.  The rest of the script (wasm-bindgen, index.html) only
+    // runs when building the wasm target.
     let target = env::var("TARGET").unwrap_or_default();
     if target != "wasm32-unknown-unknown" {
+        // copy native server binary if it exists
+        let profile = env::var("PROFILE").unwrap();
+        let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+        let mut server_path = PathBuf::from(env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".into()));
+        server_path.push(&target);
+        server_path.push(&profile);
+        let server_name = if cfg!(windows) { "helio-wasm-server.exe" } else { "helio-wasm-server" };
+        server_path.push(server_name);
+        let mut out_dir = manifest_dir.clone();
+        out_dir.push("pkg");
+        if server_path.exists() {
+            std::fs::create_dir_all(&out_dir).ok();
+            let _ = std::fs::copy(&server_path, out_dir.join(server_name));
+        }
         return;
     }
 
@@ -30,9 +48,10 @@ fn main() {
     // target-dir so we can run wasm-bindgen in a single `cargo build`
     if !wasm_path.exists() && env::var("HELIO_BUILD_WASM_INNER").is_err() {
         eprintln!("[build.rs] wasm module not found; invoking cargo to compile wasm");
-        let status = Command::new("cargo") // cargo build --release -p helio-wasm-app --target wasm32-unknown-unknown --target-dir target/wasm-build
+        let status = Command::new("cargo") // cargo build --release -p helio-wasm-app --target wasm32-unknown-unknown --lib --target-dir target/wasm-build
             .arg("build")
             .arg("--release")
+            .arg("--lib")
             .arg("-p")
             .arg("helio-wasm-app")
             .arg("--target")
@@ -45,8 +64,19 @@ fn main() {
         if !status.success() {
             panic!("inner cargo build failed");
         }
-        // after inner build the artifact should exist in the other folder; copy
-        // it to the normal target so future accesses work as expected
+        // now also build the host binary in the same secondary target directory;
+        // the profile/target triple will default to the host architecture.
+        let _ = Command::new("cargo")
+            .arg("build")
+            .arg("--release")
+            .arg("-p")
+            .arg("helio-wasm-app")
+            .arg("--target-dir")
+            .arg("target/wasm-build")
+            .env("HELIO_BUILD_WASM_INNER", "1")
+            .status();
+        // after inner build the wasm artifact should exist in the other folder;
+        // copy it to the normal target so future accesses work as expected
         let mut src = PathBuf::from("target/wasm-build");
         src.push(&target);
         src.push(&profile);
@@ -54,6 +84,17 @@ fn main() {
         if src.exists() {
             std::fs::create_dir_all(wasm_path.parent().unwrap()).unwrap();
             std::fs::copy(&src, &wasm_path).unwrap();
+        }
+        // also copy the host server EXE into pkg for convenience
+        let host_trip = env::var("HOST").unwrap_or_else(|_| "".into());
+        let mut server_src = PathBuf::from("target/wasm-build");
+        server_src.push(&host_trip);
+        server_src.push(&profile);
+        let server_name = if cfg!(windows) { "helio-wasm-server.exe" } else { "helio-wasm-server" };
+        server_src.push(server_name);
+        if server_src.exists() {
+            std::fs::create_dir_all(&out_dir).unwrap();
+            let _ = std::fs::copy(&server_src, out_dir.join(server_name));
         }
     }
 

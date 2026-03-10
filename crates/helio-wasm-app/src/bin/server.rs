@@ -1,13 +1,19 @@
 // simple static file server for the generated `pkg/` directory.
 // this binary is only built for the host (non-wasm) target.
 
-#![cfg(not(target_arch = "wasm32"))]
+// When compiling for wasm the file is still parsed, so provide a nop `main`
+// to satisfy the compiler.  the real server code is gated below.
+#[cfg(target_arch = "wasm32")]
+fn main() {
+    // nothing
+}
 
-use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
+#[cfg(not(target_arch = "wasm32"))]
 use tiny_http::{Server, Response};
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() {
     let port = 8000;
     let addr = format!("0.0.0.0:{}", port);
@@ -36,19 +42,31 @@ fn main() {
             path.push("index.html");
         }
 
+        // helper that attaches a couple common headers to each response
+        fn add_common_headers(r: Response<std::io::Cursor<Vec<u8>>>) -> Response<std::io::Cursor<Vec<u8>>> {
+            if let Ok(h) = tiny_http::Header::from_bytes(&b"Permissions-Policy"[..], b"browsing-topics=()") {
+                r.with_header(h)
+            } else {
+                r
+            }
+        }
+
+        // build response using in-memory bytes so we always return the same
+        // `Response<Cursor<Vec<u8>>>` type and avoid mismatched generics.
         let response = if path.exists() {
-            match std::fs::File::open(&path) {
-                Ok(file) => {
+            match std::fs::read(&path) {
+                Ok(data) => {
                     let mime = mime_guess::from_path(&path).first_or_octet_stream();
-                    Response::from_file(file)
-                        .with_header(
-                            tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_ref()).unwrap(),
-                        )
+                    let mut resp = Response::from_data(data);
+                    resp.add_header(
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], mime.as_ref()).unwrap(),
+                    );
+                    add_common_headers(resp)
                 }
-                Err(_) => Response::empty(500),
+                Err(_) => add_common_headers(Response::from_data(Vec::new()).with_status_code(500)),
             }
         } else {
-            Response::empty(404)
+            add_common_headers(Response::from_data(Vec::new()).with_status_code(404))
         };
         let _ = request.respond(response);
     }
