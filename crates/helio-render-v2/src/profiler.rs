@@ -422,7 +422,20 @@ impl GpuProfiler {
         if let Some(pending) = &self.pending[read_idx] {
             if pending.ready.load(Ordering::Acquire) {
                 let used_bytes = pending.used_slots as u64 * 8;
-                let raw = self.staging_bufs[read_idx].slice(..used_bytes).get_mapped_range();
+                // Guard against device-lost: get_mapped_range panics if the buffer
+                // was destroyed by a TDR/device-lost event.
+                let mapped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.staging_bufs[read_idx].slice(..used_bytes).get_mapped_range()
+                }));
+                let raw = match mapped {
+                    Ok(r) => r,
+                    Err(_) => {
+                        // Buffer destroyed — device was likely lost (TDR). Clear state.
+                        self.pending[read_idx] = None;
+                        self.write_idx = 1 - self.write_idx;
+                        return;
+                    }
+                };
                 let timestamps: &[u64] = bytemuck::cast_slice(&*raw);
 
                 let new_timings: Vec<PassTiming> = pending.scopes.iter().filter_map(|s| {

@@ -48,7 +48,15 @@ impl RenderPass for GBufferPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
         let indirect_buf = self.shared_indirect.lock().unwrap().clone();
-        let Some(indirect_buf) = indirect_buf else { return Ok(()); };
+        let Some(indirect_buf) = indirect_buf else {
+            println!("[GBuffer] shared_indirect_buf is None — skipping gbuffer draws (no indirect dispatch ran?)");
+            return Ok(());
+        };
+
+        let ranges = self.shared_material_ranges.lock().unwrap();
+        let total_draws: u32 = ranges.iter().map(|r| r.count).sum();
+        println!("[GBuffer] indirect_buf ptr={:p}, {} material ranges, {} total draw slots",
+            Arc::as_ptr(&indirect_buf), ranges.len(), total_draws);
 
         let targets = self.targets.lock().unwrap();
         let color_attachments = [
@@ -88,11 +96,17 @@ impl RenderPass for GBufferPass {
         pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
         pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
 
-        let ranges = self.shared_material_ranges.lock().unwrap();
-        for range in ranges.iter() {
+        for (i, range) in ranges.iter().enumerate() {
+            let byte_offset = range.start as u64 * 20;
+            println!("[GBuffer] range[{}]: start={}, count={}, byte_offset={}",
+                i, range.start, range.count, byte_offset);
             pass.set_bind_group(1, Some(range.bind_group.as_ref()), &[]);
-            let byte_offset = range.start as u64 * std::mem::size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
-            pass.multi_draw_indexed_indirect(&indirect_buf, byte_offset, range.count);
+            // Use per-call draw_indexed_indirect rather than multi_draw_indexed_indirect.
+            // multi_draw_indexed_indirect requires the multiDrawIndirect Vulkan device feature
+            // which must be explicitly requested at device creation.
+            for j in 0..range.count {
+                pass.draw_indexed_indirect(&indirect_buf, byte_offset + j as u64 * 20);
+            }
         }
         Ok(())
     }

@@ -722,14 +722,17 @@ impl Renderer {
 
             // Run IndirectDispatchPass: GPU culls + writes indirect commands.
             if draw_count > 0 {
+                println!("[Renderer] calling indirect_dispatch.update with draw_count={}", draw_count);
                 let new_buf = self.indirect_dispatch.update(
                     &self.device,
                     self.gpu_scene.draw_call_buffer(),
                     &self.camera_buffer,
                     draw_count,
                 )?;
+                println!("[Renderer] indirect_dispatch.update returned buf={}", new_buf.is_some());
                 *self.shared_indirect_buf.lock().unwrap() = new_buf;
             } else {
+                println!("[Renderer] draw_count=0, skipping indirect dispatch update");
                 *self.shared_indirect_buf.lock().unwrap() = None;
             }
         }
@@ -777,7 +780,29 @@ impl Renderer {
             }
         } // profile_scope!("Prep") drops here
 
-        // ── Encoder + pre-AA clear ────────────────────────────────────────────
+        // ── Encoder 1: indirect compute dispatch only ─────────────────────────
+        // Submitted and GPU-synced BEFORE encoding the render passes.
+        // If TDR fires during the poll, the compute shader is the culprit;
+        // if it fires later, a render pass is hanging.
+        {
+            let mut compute_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Indirect Dispatch Encoder"),
+            });
+            println!("[Renderer] calling indirect_dispatch.dispatch (draw_count={}, capacity={})",
+                self.indirect_dispatch.draw_count(),
+                self.indirect_dispatch.capacity(),
+            );
+            self.indirect_dispatch.dispatch(&self.queue, &mut compute_encoder);
+            let compute_cmd = compute_encoder.finish();
+            println!("[Renderer] submitting compute encoder");
+            self.queue.submit(Some(compute_cmd));
+            println!("[Renderer] polling GPU after compute (blocking)...");
+            self.device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None }).ok();
+            println!("[Renderer] compute GPU poll complete — TDR not from compute pass");
+        }
+
+        // ── Encoder 2: render passes ──────────────────────────────────────────
+        let error_scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -887,6 +912,11 @@ impl Renderer {
             {
                 crate::profile_scope!("Encode::Submit");
                 self.queue.submit(Some(cmd_buf));
+            }
+            // Pop the validation error scope and block until the GPU has processed
+            // the frame — gives us the exact shader/buffer error before TDR fires.
+            if let Some(e) = pollster::block_on(error_scope.pop()) {
+                panic!("[GPU VALIDATION ERROR] {}", e);
             }
         } // profile_scope!("Encode") drops here
 

@@ -33,10 +33,15 @@ struct CameraUniforms {
     view_proj_inv: mat4x4f,
 }
 
+struct DrawCallParams {
+    draw_count: u32,
+}
+
 // Group 0: per-pass resources (draw calls, indirect output, camera for culling)
 @group(0) @binding(0) var<storage, read>       draw_calls: array<GpuDrawCall>;
 @group(0) @binding(1) var<storage, read_write> indirect:   array<DrawIndexedIndirect>;
 @group(0) @binding(2) var<uniform>             camera:     CameraUniforms;
+@group(0) @binding(3) var<uniform>             params:     DrawCallParams;
 
 // ── Frustum plane extraction (Gribb-Hartmann, wgpu/Vulkan NDC z∈[0,1]) ───────
 fn extract_frustum_planes(m: mat4x4f) -> array<vec4f, 6> {
@@ -68,7 +73,9 @@ fn frustum_cull_sphere(planes: array<vec4f, 6>, centre: vec3f, radius: f32) -> b
 @compute @workgroup_size(64)
 fn build_indirect_buffers(@builtin(global_invocation_id) gid: vec3u) {
     let draw_idx = gid.x;
-    if draw_idx >= arrayLength(&draw_calls) { return; }
+    // Bound against the ACTIVE draw count, not the full buffer capacity.
+    // draw_call_buffer is pre-allocated to 16K but only draw_count entries are valid.
+    if draw_idx >= params.draw_count { return; }
 
     let dc = draw_calls[draw_idx];
     let planes  = extract_frustum_planes(camera.view_proj);

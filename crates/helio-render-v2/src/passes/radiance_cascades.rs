@@ -96,7 +96,7 @@ impl RenderPass for RadianceCascadesPass {
             log::warn!("RC: No draw calls! RC will output zeros");
             return Ok(());
         }
-        log::trace!("RC: Executing with {} draw calls", draw_calls.len());
+        println!("[RC] execute: {} draw calls", draw_calls.len());
         
         // Note: light_count is uploaded via rc_dyn buffer in feature prepare,
         // so we can't easily log it here. The compute shader will use whatever
@@ -190,6 +190,7 @@ impl RenderPass for RadianceCascadesPass {
 
         if !blas_entries.is_empty() || need_tlas_rebuild {
             let t_accel = ctx.scope_begin("rc/accel_build");
+            println!("[RC] building acceleration structures: {} new BLASes, TLAS rebuild={}", blas_entries.len(), need_tlas_rebuild);
             if need_tlas_rebuild {
                 ctx.encoder.build_acceleration_structures(
                     blas_entries.iter(),
@@ -201,6 +202,7 @@ impl RenderPass for RadianceCascadesPass {
                     std::iter::empty(),
                 );
             }
+            println!("[RC] acceleration structure build encoded (not yet submitted)");
             ctx.scope_end(t_accel);
         }
 
@@ -212,9 +214,6 @@ impl RenderPass for RadianceCascadesPass {
         }
 
         // ── 4. Dispatch cascades coarse → fine (4 → 0) ───────────────────────
-        // Select ping-pong bind group set: even frames use A (read hist_a, write hist_b),
-        // odd frames use B (read hist_b, write hist_a). The shader writes history
-        // directly via binding 7, so no copy_texture_to_texture is ever needed.
         let bind_groups = if self.frame_idx % 2 == 0 {
             &self.bind_groups_a
         } else {
@@ -229,6 +228,7 @@ impl RenderPass for RadianceCascadesPass {
             let dispatch_x = (atlas_w + 7) / 8;
             let dispatch_y = (atlas_h + 7) / 8;
 
+            println!("[RC] dispatching cascade {} [{},{}]", c, dispatch_x, dispatch_y);
             let t_cas = ctx.scope_begin(&format!("rc/cascade_{c}"));
             let mut cpass = ctx.begin_compute_pass(&format!("RC Cascade {c}"));
             cpass.set_pipeline(&self.pipeline);
@@ -236,7 +236,9 @@ impl RenderPass for RadianceCascadesPass {
             cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
             drop(cpass);
             ctx.scope_end(t_cas);
+            println!("[RC] cascade {} encoded", c);
         }
+        println!("[RC] all cascades encoded");
 
         Ok(())
     }

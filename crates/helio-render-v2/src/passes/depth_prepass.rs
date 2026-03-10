@@ -47,6 +47,7 @@ impl RenderPass for DepthPrepassPass {
             ranges.iter().map(|r| r.count).sum::<u32>()
         };
         if draw_count == 0 { return Ok(()); }
+        println!("[DepthPrepass] encoding {} draw_indexed_indirect calls", draw_count);
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Depth Prepass"),
@@ -70,7 +71,12 @@ impl RenderPass for DepthPrepassPass {
         pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
         pass.set_vertex_buffer(0, self.pool_vertex_buffer.slice(..));
         pass.set_index_buffer(self.pool_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        pass.multi_draw_indexed_indirect(&indirect_buf, 0, draw_count);
+        // Use per-call draw_indexed_indirect rather than multi_draw_indexed_indirect.
+        // multi_draw_indexed_indirect requires the multiDrawIndirect Vulkan device feature
+        // which must be explicitly requested at device creation.
+        for j in 0..draw_count {
+            pass.draw_indexed_indirect(&indirect_buf, j as u64 * 20);
+        }
         Ok(())
     }
 }
