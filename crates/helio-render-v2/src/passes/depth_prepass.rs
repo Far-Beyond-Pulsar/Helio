@@ -47,7 +47,6 @@ impl RenderPass for DepthPrepassPass {
             ranges.iter().map(|r| r.count).sum::<u32>()
         };
         if draw_count == 0 { return Ok(()); }
-        println!("[DepthPrepass] encoding {} draw_indexed_indirect calls", draw_count);
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Depth Prepass"),

@@ -69,12 +69,8 @@ impl IndirectDispatchPass {
         draw_count: u32,
     ) -> Result<Option<Arc<wgpu::Buffer>>> {
         self.draw_count = draw_count;
-        println!("[IndirectDispatch] update: draw_count={}, buf_capacity={}, pipeline={}, bg={}",
-            draw_count, self.buf_capacity,
-            self.pipeline.is_some(), self.bind_group.is_some());
 
         if draw_count == 0 {
-            println!("[IndirectDispatch] update called with draw_count == 0, nothing to dispatch");
             return Ok(self.indirect_buffer.clone());
         }
 
@@ -199,32 +195,11 @@ impl IndirectDispatchPass {
     /// Run the compute shader on the provided encoder.
     /// Must be called after `update()` and before any render pass reads the indirect buffer.
     pub fn dispatch(&self, queue: &wgpu::Queue, encoder: &mut wgpu::CommandEncoder) {
-        if self.pipeline.is_none() {
-            println!("[IndirectDispatch] dispatch() called but pipeline is None — update() was not called this frame");
-            return;
-        }
-        if self.bind_group.is_none() {
-            println!("[IndirectDispatch] dispatch() called but bind_group is None — update() failed to build bind group");
-            return;
-        }
-        if self.indirect_buffer.is_none() {
-            println!("[IndirectDispatch] dispatch() called but indirect_buffer is None — update() was not called");
-            return;
-        }
-        if self.params_buffer.is_none() {
-            println!("[IndirectDispatch] dispatch() called but params_buffer is None");
-            return;
-        }
-        if self.draw_count == 0 {
-            println!("[IndirectDispatch] dispatch() called with draw_count == 0, skipping");
-            return;
-        }
-
-        println!("[IndirectDispatch] dispatching {} draw calls, {} workgroups, indirect buf size {} bytes",
-            self.draw_count,
-            (self.draw_count + 63) / 64,
-            self.draw_count as u64 * 20
-        );
+        if self.pipeline.is_none() { return; }
+        if self.bind_group.is_none() { return; }
+        if self.indirect_buffer.is_none() { return; }
+        if self.params_buffer.is_none() { return; }
+        if self.draw_count == 0 { return; }
 
         // Upload draw_count to the params uniform so the shader knows the valid range.
         // The draw_call_buffer is 16K pre-allocated; only [0..draw_count) is valid.
@@ -249,7 +224,6 @@ impl IndirectDispatchPass {
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.dispatch_workgroups(workgroups, 1, 1);
-        println!("[IndirectDispatch] dispatch complete");
     }
 
     pub fn draw_count(&self) -> u32 { self.draw_count }

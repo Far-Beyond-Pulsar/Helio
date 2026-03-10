@@ -698,14 +698,6 @@ impl GpuScene {
 
         if self.draw_call_cpu.is_empty() { return; }
 
-        println!("[GpuScene] flush_draw_calls: {} draw calls", self.draw_call_cpu.len());
-        for (i, dc) in self.draw_call_cpu.iter().enumerate() {
-            println!("  [{}] slot={} first_index={} base_vertex={} index_count={} bounds_center=({:.1},{:.1},{:.1}) bounds_radius={:.2}",
-                i, dc.slot, dc.first_index, dc.base_vertex, dc.index_count,
-                dc.bounds_center[0], dc.bounds_center[1], dc.bounds_center[2],
-                dc.bounds_radius);
-        }
-
         // Grow draw_call_buffer if needed
         let needed = self.draw_call_cpu.len() as u32;
         if needed > self.draw_call_buffer_capacity {
