@@ -143,7 +143,7 @@ pub struct Renderer {
     // Default 1×1 texture views + sampler shared by all materials
     default_material_views: DefaultMaterialViews,
 
-    // Draw list (shared with GeometryPass / TransparentPass)
+    // Opaque+transparent draw list — used by TransparentPass and RadianceCascadesPass.
     draw_list: Arc<Mutex<Vec<DrawCall>>>,
     // Debug draw primitives queued by user each frame.
     debug_shapes: Arc<Mutex<Vec<DebugShape>>>,
@@ -226,11 +226,6 @@ pub struct Renderer {
     persistent_draw_count: usize,
     /// Generation value when persistent draw_list was last rebuilt.
     cached_draw_list_gen: u64,
-
-    // ── Shadow draw list ──────────────────────────────────────────────────
-    /// Pointers to all registered-proxy DrawCalls, rebuilt O(N) each frame by
-    /// pointer-cloning.  ShadowPass culls this by light range on its own thread.
-    shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
 
     // ════════════════════════════════════════════════════════════════════════
     // GPU-RESIDENT SCENE (Unreal FGPUScene equivalent)
@@ -725,23 +720,16 @@ impl Renderer {
         // ── Step 2: populate draw_list from GPU scene (persistent cache) ────
         {
             crate::profile_scope!("DrawList");
-            let mut dl  = self.draw_list.lock().unwrap();
-            let mut sdl = self.shadow_draw_list.lock().unwrap();
+            let mut dl = self.draw_list.lock().unwrap();
 
             if self.gpu_scene.generation != self.cached_draw_list_gen {
-                let (scene_dl, scene_sdl) = self.gpu_scene.draw_lists();
-
+                let scene_dl = self.gpu_scene.draw_lists();
                 dl.clear();
                 dl.extend_from_slice(scene_dl);
-
-                sdl.clear();
-                sdl.extend_from_slice(scene_sdl);
-
                 self.persistent_draw_count = dl.len();
                 self.cached_draw_list_gen = self.gpu_scene.generation;
             } else {
                 dl.truncate(self.persistent_draw_count);
-                sdl.truncate(self.persistent_draw_count);
             }
         }
 

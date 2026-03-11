@@ -1,6 +1,5 @@
 //! Built-in render passes
 
-pub mod geometry;
 pub mod shadow;
 pub mod billboard;
 pub mod radiance_cascades;
@@ -21,7 +20,6 @@ pub mod hiz_build;
 pub mod occlusion_cull;
 pub mod shadow_matrix;
 
-pub use geometry::GeometryPass;
 pub use shadow::{ShadowPass, ShadowCullLight};
 pub use billboard::BillboardPass;
 pub use radiance_cascades::RadianceCascadesPass;

@@ -23,11 +23,8 @@ pub struct FeatureContext<'a> {
     pub queue_arc: Arc<wgpu::Queue>,
 
     // ── Inputs from Renderer (always set) ──────────────────────────────────
-    /// Shared draw list — ShadowsFeature passes this to ShadowPass
+    /// Shared draw list — used by TransparentPass / RadianceCascadesPass
     pub draw_list: Arc<Mutex<Vec<DrawCall>>>,
-    /// Shadow draw list backed by per-batch stable instance buffers.  ShadowsFeature passes
-    /// this to ShadowPass so bundle amortisation is safe during chunk streaming.
-    pub shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
     /// Shadow light-space matrix buffer — ShadowsFeature passes this to ShadowPass
     pub shadow_matrix_buffer: Arc<wgpu::Buffer>,
     /// Shared light count — updated by Renderer each frame; ShadowPass reads it
@@ -75,7 +72,6 @@ impl<'a> FeatureContext<'a> {
         device_arc: Arc<wgpu::Device>,
         queue_arc: Arc<wgpu::Queue>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
-        shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
         light_count_arc: Arc<AtomicU32>,
         light_face_counts: Arc<Mutex<Vec<u8>>>,
@@ -96,7 +92,6 @@ impl<'a> FeatureContext<'a> {
             device_arc,
             queue_arc,
             draw_list,
-            shadow_draw_list,
             shadow_matrix_buffer,
             light_count_arc,
             light_face_counts,

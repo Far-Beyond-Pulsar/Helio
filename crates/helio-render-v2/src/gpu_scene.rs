@@ -242,8 +242,6 @@ pub struct GpuScene {
     // ── Cached draw lists (rebuilt only on generation change) ─────────
     /// Cached opaque+transparent draw calls, rebuilt when `generation` changes.
     cached_draw_list: Vec<DrawCall>,
-    /// Cached shadow draw calls (same content, separate vec for independent locking).
-    cached_shadow_draw_list: Vec<DrawCall>,
     /// Generation at which the caches were last rebuilt.
     cached_generation: u64,
 
@@ -342,7 +340,6 @@ impl GpuScene {
             next_object_id: 1,
             generation: 0,
             cached_draw_list: Vec::new(),
-            cached_shadow_draw_list: Vec::new(),
             cached_generation: u64::MAX,
             transparent_start: 0,
             last_upload_slot_count: 0,
@@ -530,19 +527,17 @@ impl GpuScene {
     /// (transparent ordering must be done per-frame; shadow pass already uses
     /// its own culling + bundle compilation).
     fn rebuild_draw_lists(&mut self) {
-        self.cached_shadow_draw_list.clear();
         self.draw_call_cpu.clear();
         self.material_ranges.clear();
 
         let proxy_count = self.proxies.len();
-        self.cached_shadow_draw_list.reserve(proxy_count);
 
         // ── Collect per-proxy draw calls ───────────────────────────────────
         let mut raw: Vec<DrawCall> = Vec::with_capacity(proxy_count);
         for proxy in self.proxies.values() {
             if !proxy.enabled { continue; }
             let inst = &self.cpu_data[proxy.slot as usize];
-            let dc = DrawCall {
+            raw.push(DrawCall {
                 vertex_buffer:    proxy.mesh.vertex_buffer.clone(),
                 index_buffer:     proxy.mesh.index_buffer.clone(),
                 index_count:      proxy.mesh.index_count,
@@ -555,9 +550,7 @@ impl GpuScene {
                 pool_base_vertex: proxy.mesh.pool_base_vertex as i32,
                 pool_first_index: proxy.mesh.pool_first_index,
                 pool_allocated:   proxy.mesh.pool_allocated,
-            };
-            self.cached_shadow_draw_list.push(dc.clone());
-            raw.push(dc);
+            });
         }
 
         // ── Sort opaque by material, then slot ────────────────────────────
@@ -570,7 +563,7 @@ impl GpuScene {
                 .then_with(|| a.slot.cmp(&b.slot))
         });
 
-        // ── Build cached_draw_list (CPU, transparent + shadow passes) ─────
+        // ── Build cached_draw_list (CPU, transparent pass) ───────────────
         self.cached_draw_list.clear();
         self.cached_draw_list.reserve(opaque.len() + transparent.len());
         self.cached_draw_list.extend_from_slice(&opaque);
@@ -633,11 +626,11 @@ impl GpuScene {
 
     /// Ensure cached draw lists are up-to-date and return references to them.
     /// At steady state (no add/remove) this is a no-op — zero cost.
-    pub fn draw_lists(&mut self) -> (&[DrawCall], &[DrawCall]) {
+    pub fn draw_lists(&mut self) -> &[DrawCall] {
         if self.cached_generation != self.generation {
             self.rebuild_draw_lists();
         }
-        (&self.cached_draw_list, &self.cached_shadow_draw_list)
+        &self.cached_draw_list
     }
 
     /// Number of persistent draw calls in the cached lists.
