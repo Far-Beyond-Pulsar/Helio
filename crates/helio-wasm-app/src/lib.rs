@@ -161,9 +161,26 @@ async fn run() -> Result<(), JsValue> {
     let canvas: HtmlCanvasElement = document
         .create_element("canvas")?
         .dyn_into::<HtmlCanvasElement>()?;
-    canvas.set_width(800);
-    canvas.set_height(600);
-    canvas.set_attribute("style", "border:1px solid red;")?;
+
+    // start with the full window dimensions (in physical pixels) so content
+    // fills the browser at native resolution even on high-DPI / scaled displays.
+    let dpr = window.device_pixel_ratio();
+    let initial_width = (window
+        .inner_width()?
+        .as_f64()
+        .unwrap_or(800.0) * dpr) as u32;
+    let initial_height = (window
+        .inner_height()?
+        .as_f64()
+        .unwrap_or(600.0) * dpr) as u32;
+    canvas.set_width(initial_width);
+    canvas.set_height(initial_height);
+
+    // make the canvas fill the viewport and remove default page margins
+    canvas.set_attribute("style", "border:1px solid red; position:absolute; top:0; left:0; width:100%; height:100%;")?;
+    // avoid calling `.style()` directly; modifying the body attribute is enough
+    body.set_attribute("style", "margin:0")?;
+
     // make the canvas focusable and give it focus so keyboard events fire
     canvas.set_attribute("tabindex", "0")?;
     body.append_child(&canvas)?;
@@ -263,7 +280,9 @@ async fn run() -> Result<(), JsValue> {
 
     // wrap the canvas in our newtype so it satisfies the trait bounds for
     // surface creation.  the `unsafe` is required by wgpu but there's nothing
-    // unsafe about passing our wrapper.
+    // unsafe about passing our wrapper.  referencing the original canvas is
+    // sufficient and avoids temporary lifetime issues.
+    // create surface; keep canvas_handle alive for the duration of `run`
     let canvas_handle = CanvasHandle(&canvas);
     let surface = unsafe { instance.create_surface(&canvas_handle) }
         .map_err(|e| JsValue::from_str(&format!("create_surface failed: {:?}", e)))?;
@@ -309,7 +328,9 @@ async fn run() -> Result<(), JsValue> {
     }
     let feature_registry = registry_builder.build();
 
-    let config = wgpu::SurfaceConfiguration {
+    // wrap configuration in a shared container so the resize handler can
+    // update it later without needing to recreate every field manually.
+    let config = std::rc::Rc::new(std::cell::RefCell::new(wgpu::SurfaceConfiguration {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         format: surface_format,
         width,
@@ -318,9 +339,9 @@ async fn run() -> Result<(), JsValue> {
         alpha_mode: surface_caps.alpha_modes[0],
         view_formats: vec![],
         desired_maximum_frame_latency: 2,
-    };
-    info!("surface config: {:?}", config);
-    surface.configure(&device, &config);
+    }));
+    info!("surface config: {:?}", config.borrow());
+    surface.configure(&device, &config.borrow());
 
 
     let mut renderer = helio_render_v2::Renderer::new(
@@ -423,11 +444,55 @@ async fn run() -> Result<(), JsValue> {
     frame.present();
     info!("first frame rendered to canvas");
 
+    // install a resize listener so the canvas (and wgpu surface) always
+    // match the browser window.  We capture the objects we need and update
+    // both the canvas element and the renderer configuration.
+    {
+        let canvas = canvas.clone();
+        let surface = surface.clone();
+        let device = device.clone();
+        let renderer = renderer.clone();
+        let config = config.clone();
+        // `window` will still be needed when registering the listener, so
+        // clone it for the closure rather than moving the original.
+        let window = web_sys::window().unwrap();
+        let window_cloned = window.clone();
+        let resize_closure = Closure::wrap(Box::new(move |_e: web_sys::UiEvent| {
+            let dpr = window_cloned.device_pixel_ratio();
+            let new_w = (window_cloned
+                .inner_width()
+                .unwrap()
+                .as_f64()
+                .unwrap_or(canvas.width() as f64) * dpr) as u32;
+            let new_h = (window_cloned
+                .inner_height()
+                .unwrap()
+                .as_f64()
+                .unwrap_or(canvas.height() as f64) * dpr) as u32;
+            canvas.set_width(new_w);
+            canvas.set_height(new_h);
+
+            {
+                let mut cfg = config.borrow_mut();
+                cfg.width = new_w;
+                cfg.height = new_h;
+                surface.configure(&device, &cfg);
+            }
+
+            renderer.borrow_mut().set_render_size(new_w, new_h);
+        }) as Box<dyn FnMut(_)>);
+        window
+            .add_event_listener_with_callback("resize", resize_closure.as_ref().unchecked_ref())
+            .unwrap();
+        resize_closure.forget();
+    }
+
     // begin animation loop -------------------------------------------------
     let input = input.clone();            // already declared earlier
     let surface = surface.clone();        // Rc<Surface> cloned for the closure
-    let width = width;
-    let height = height;
+    let canvas = canvas.clone();          // capture a clone for the animation callback
+    let device = device.clone();          // needed for per-frame resize check
+    let config = config.clone();
     let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let g = f.clone();
     *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
@@ -444,7 +509,7 @@ async fn run() -> Result<(), JsValue> {
 
             // look around with mouse (after or during auto phase)
             yaw += i.mouse_dx * 0.002;
-            pitch += i.mouse_dy * 0.002;
+            pitch -= i.mouse_dy * 0.002;
             i.mouse_dx = 0.0;
             i.mouse_dy = 0.0;
             pitch = pitch.clamp(-1.5, 1.5);
@@ -503,7 +568,32 @@ async fn run() -> Result<(), JsValue> {
             i.last_keys = i.keys.clone();
         }
 
-        let proj = glam::Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_2, width as f32 / height as f32, 0.1, 100.0);
+        // Sync canvas backing-store with CSS layout size every frame.
+        let dpr = web_sys::window().unwrap().device_pixel_ratio();
+        let target_w = (canvas.client_width() as f64 * dpr).max(1.0) as u32;
+        let target_h = (canvas.client_height() as f64 * dpr).max(1.0) as u32;
+        if target_w != canvas.width() || target_h != canvas.height() {
+            canvas.set_width(target_w);
+            canvas.set_height(target_h);
+            {
+                let mut cfg = config.borrow_mut();
+                cfg.width = target_w;
+                cfg.height = target_h;
+                surface.configure(&device, &cfg);
+            }
+            renderer.borrow_mut().set_render_size(target_w, target_h);
+        }
+
+        // recalc projection using current canvas size so it stays correct when
+        // the window is resized
+        let cur_w = canvas.width();
+        let cur_h = canvas.height();
+        let proj = glam::Mat4::perspective_rh_gl(
+            std::f32::consts::FRAC_PI_2,
+            cur_w as f32 / cur_h as f32,
+            0.1,
+            100.0,
+        );
         // build view using forward vector derived from yaw/pitch
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();

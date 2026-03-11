@@ -1172,6 +1172,24 @@ impl Renderer {
         self.taa_bind_group = self.taa_pass.as_ref().map(|p| p.create_bind_group(&self.device, &self.pre_aa_view, &self.depth_view));
     }
 
+    /// Hard-set the render resolution.  Unlike `resize()` (which only
+    /// recreates textures), this also forces the sky LUT to regenerate and
+    /// bumps the draw-list generation so every pass picks up the change.
+    pub fn set_render_size(&mut self, width: u32, height: u32) {
+        let width  = width.max(1);
+        let height = height.max(1);
+        log::info!("set_render_size: {}x{} (was {}x{})", width, height, self.width, self.height);
+        if width == self.width && height == self.height {
+            return;
+        }
+        self.resize(width, height);
+        // Force every dirty flag so the next frame fully regenerates.
+        self.scene_state.sky_lut_dirty = true;
+        self.sky_state_changed = true;
+        self.draw_list_generation = self.draw_list_generation.wrapping_add(1);
+        self.cached_draw_list_gen = u64::MAX; // force draw-list rebuild
+    }
+
     pub fn frame_count(&self) -> u64 { self.frame_count }
 
     pub fn device(&self) -> &wgpu::Device { &self.device }

@@ -1,0 +1,123 @@
+name: WASM Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'crates/helio-wasm-app/Cargo.toml'
+
+jobs:
+  # ── 1. Detect version bump ──────────────────────────────────────────────────
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.check.outputs.changed }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check version bump
+        id: check
+        run: |
+          CURRENT=$(grep -m1 '^version' crates/helio-wasm-app/Cargo.toml | cut -d'"' -f2)
+          git checkout HEAD^1 -- crates/helio-wasm-app/Cargo.toml
+          PREVIOUS=$(grep -m1 '^version' crates/helio-wasm-app/Cargo.toml | cut -d'"' -f2)
+          git checkout HEAD   -- crates/helio-wasm-app/Cargo.toml
+          echo "current=$CURRENT  previous=$PREVIOUS"
+          if [ "$CURRENT" != "$PREVIOUS" ]; then
+            echo "changed=true"  >> $GITHUB_OUTPUT
+            echo "version=$CURRENT" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Version unchanged ($CURRENT), skipping deploy."
+          fi
+
+  # ── 2. Build WASM + run wasm-bindgen ───────────────────────────────────────
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-
+
+      - name: Install wasm-bindgen-cli (matching wasm-bindgen dep)
+        run: |
+          VERSION=$(cargo metadata --no-deps --manifest-path crates/helio-wasm-app/Cargo.toml --format-version 1 \
+            | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
+              print(next(p['version'] for p in pkgs if p['name']=='wasm-bindgen'))" 2>/dev/null \
+            || echo "")
+          if [ -n "$VERSION" ]; then
+            cargo install --locked wasm-bindgen-cli --version "$VERSION"
+          else
+            cargo install --locked wasm-bindgen-cli
+          fi
+
+      - name: Build WASM library
+        run: |
+          cargo build --release --lib \
+            -p helio-wasm-app \
+            --target wasm32-unknown-unknown
+
+      - name: Run wasm-bindgen
+        run: |
+          mkdir -p crates/helio-wasm-app/pkg
+          wasm-bindgen \
+            target/wasm32-unknown-unknown/release/helio_wasm_app.wasm \
+            --out-dir crates/helio-wasm-app/pkg \
+            --target web
+
+      - name: Copy index.html into pkg
+        run: |
+          if [ -f crates/helio-wasm-app/assets/index.html ]; then
+            cp crates/helio-wasm-app/assets/index.html crates/helio-wasm-app/pkg/index.html
+          elif [ ! -f crates/helio-wasm-app/pkg/index.html ]; then
+            cat > crates/helio-wasm-app/pkg/index.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+          <head><meta charset="utf-8"/><title>Helio</title></head>
+          <body>
+          <script type="module">
+            import init from './helio_wasm_app.js';
+            init();
+          </script>
+          </body>
+          </html>
+          HTML
+          fi
+
+      - name: Upload pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: crates/helio-wasm-app/pkg
+
+  # ── 3. Deploy to GitHub Pages ───────────────────────────────────────────────
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

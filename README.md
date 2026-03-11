@@ -97,10 +97,10 @@ cargo run --example render_v2_sky --release
 cargo run --example render_v2_basic --release
 ```
 
-#### WASM example
+#### WASM example server (Ensure your browser ships with WASM and WebGPU (latest Chrome is a good bet))
 ```bash
-cargo clean ; cargo build -p helio-wasm-app --target wasm32-unknown-unknown --release
-```
+ cargo run --release --bin helio-wasm-server
+ ```
 
 ### Controls (sky example)
 | Key | Action |

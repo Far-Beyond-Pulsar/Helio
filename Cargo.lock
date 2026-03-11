@@ -1319,7 +1319,6 @@ dependencies = [
  "helio-render-v2",
  "image",
  "log",
- "mime_guess",
  "raw-window-handle",
  "tiny_http 0.10.0",
  "wasm-bindgen",
