@@ -1,8 +1,8 @@
 // SDF Sparse Brick Evaluation Compute Shader
 //
 // Evaluates the SDF edit list for active bricks only.
-// One workgroup per active brick, @workgroup_size(8, 8, 1).
-// Each thread loops over 8 z-values, producing one full 8^3 brick.
+// One workgroup per active brick, @workgroup_size(256, 1, 1).
+// 256 threads share 729 (9^3) voxels via strided iteration.
 
 struct SdfGridParams {
     volume_min:           vec3<f32>,
@@ -17,6 +17,8 @@ struct SdfGridParams {
     brick_grid_dim:       u32,
     active_brick_count:   u32,
     atlas_bricks_per_axis: u32,
+    grid_origin:          vec3<f32>,
+    debug_flags:          u32,
 }
 
 struct SdfEdit {
@@ -41,10 +43,12 @@ struct TerrainParams {
 
 @group(0) @binding(0) var<uniform> grid_params: SdfGridParams;
 @group(0) @binding(1) var<storage, read> edits: array<SdfEdit>;
-@group(0) @binding(2) var atlas: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(2) var<storage, read_write> atlas: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read> active_bricks: array<u32>;
 @group(0) @binding(4) var<storage, read> brick_index: array<u32>;
 @group(0) @binding(5) var<uniform> terrain_params: TerrainParams;
+@group(0) @binding(6) var<storage, read> edit_list_offsets: array<u32>;
+@group(0) @binding(7) var<storage, read> edit_list_data: array<u32>;
 
 // ─── 3D Value Noise (IQ-style) ───────────────────────────────────────────
 // Reference: Inigo Quilez, https://iquilezles.org/articles/
@@ -85,24 +89,48 @@ fn noise3(p: vec3<f32>) -> f32 {
 
 // ─── FBM (Fractional Brownian Motion) ─────────────────────────────────────
 
-fn terrain_fbm3(p: vec3<f32>) -> f32 {
-    var value = 0.0;
-    var amplitude = 1.0;
-    var freq = 1.0;
-    var max_amp = 0.0;
+// Domain rotation matrix: breaks axis-aligned artifacts between octaves.
+// Base rotation (unit scale). We multiply by lacunarity/2.0 to support
+// arbitrary lacunarity values while keeping the rotation.
+// Uses IQ's rational-entry matrix divided by 2 (pure rotation component).
+const FBM_ROT_0: vec3<f32> = vec3<f32>( 0.00, -0.80, -0.60);
+const FBM_ROT_1: vec3<f32> = vec3<f32>( 0.80,  0.36, -0.48);
+const FBM_ROT_2: vec3<f32> = vec3<f32>( 0.60, -0.48,  0.64);
 
-    for (var i = 0u; i < terrain_params.octaves; i++) {
-        value += amplitude * noise3(p * freq);
-        max_amp += amplitude;
-        freq *= terrain_params.lacunarity;
-        amplitude *= terrain_params.persistence;
-    }
-
-    return value / max_amp;
+fn fbm_rotate(p: vec3<f32>, lac: f32) -> vec3<f32> {
+    return lac * vec3<f32>(
+        dot(p, vec3<f32>(FBM_ROT_0.x, FBM_ROT_1.x, FBM_ROT_2.x)),
+        dot(p, vec3<f32>(FBM_ROT_0.y, FBM_ROT_1.y, FBM_ROT_2.y)),
+        dot(p, vec3<f32>(FBM_ROT_0.z, FBM_ROT_1.z, FBM_ROT_2.z)),
+    );
 }
 
 fn terrain_fbm2(x: f32, z: f32) -> f32 {
-    return terrain_fbm3(vec3(x, 0.0, z));
+    var value = 0.0;
+    var amplitude = 1.0;
+    var max_amp = 0.0;
+    let oct = terrain_params.octaves;
+    // LOD-based octave reduction: skip octaves whose feature size is below voxel resolution.
+    // At each octave, the feature wavelength halves. When it drops below ~2 voxels the detail
+    // is lost in quantization anyway, so we save GPU cycles on coarser clip levels.
+    let base_wavelength = 1.0 / terrain_params.frequency;
+    let min_wavelength = grid_params.voxel_size * 2.0;
+    var sample_pos = vec3(x, 0.0, z);
+    var current_wavelength = base_wavelength;
+
+    for (var i = 0u; i < oct; i++) {
+        if current_wavelength < min_wavelength { break; }
+        value += amplitude * noise3(sample_pos);
+        max_amp += amplitude;
+        amplitude *= terrain_params.persistence;
+        current_wavelength /= terrain_params.lacunarity;
+        sample_pos = fbm_rotate(sample_pos, terrain_params.lacunarity);
+    }
+
+    if max_amp > 0.0 {
+        return value / max_amp;
+    }
+    return 0.0;
 }
 
 // ─── Terrain SDF ──────────────────────────────────────────────────────────
@@ -114,38 +142,8 @@ fn terrain_sdf(world_pos: vec3<f32>) -> f32 {
     let amp = terrain_params.amplitude;
     let h = terrain_params.height;
 
-    switch terrain_params.style {
-        // Flat: subtle noise ripples
-        case 0u: {
-            let n = terrain_fbm2(world_pos.x * freq, world_pos.z * freq);
-            return world_pos.y - (h + n * amp);
-        }
-        // Rolling: gentle hills
-        case 1u: {
-            let n = terrain_fbm2(world_pos.x * freq, world_pos.z * freq);
-            return world_pos.y - (h + n * amp);
-        }
-        // Mountains: ridge noise for sharper peaks
-        case 2u: {
-            let n = terrain_fbm2(world_pos.x * freq, world_pos.z * freq);
-            let ridge = 1.0 - abs(n);
-            return world_pos.y - (h + ridge * amp);
-        }
-        // Caves: full 3D density field with vertical gradient
-        case 3u: {
-            let density = terrain_fbm3(world_pos * freq);
-            let height_bias = (world_pos.y - h) / amp;
-            return height_bias - density;
-        }
-        // Islands: 2D heightfield with radial falloff
-        case 4u: {
-            let n = terrain_fbm2(world_pos.x * freq, world_pos.z * freq);
-            let dist_xz = length(world_pos.xz);
-            let falloff = max(1.0 - min(dist_xz * 0.02, 1.0), 0.0);
-            return world_pos.y - (h + n * amp * falloff);
-        }
-        default: { return 1e10; }
-    }
+    let n = terrain_fbm2(world_pos.x * freq, world_pos.z * freq);
+    return world_pos.y - (h + n * amp);
 }
 
 // ─── SDF Primitives ────────────────────────────────────────────────────────
@@ -228,12 +226,15 @@ fn apply_boolean(accumulated: f32, shape_dist: f32, op: u32, k: f32) -> f32 {
     }
 }
 
-fn evaluate_sdf(world_pos: vec3<f32>) -> f32 {
+fn evaluate_sdf(world_pos: vec3<f32>, brick_idx: u32) -> f32 {
     // Start from terrain surface (or empty space if terrain is disabled)
     var dist = terrain_sdf(world_pos);
 
-    // Apply edits on top of terrain via boolean operations
-    for (var i = 0u; i < grid_params.edit_count; i++) {
+    // Apply only the edits that overlap this brick (per-brick edit list culling)
+    let offset = edit_list_offsets[brick_idx];
+    let count = edit_list_data[offset];
+    for (var j = 0u; j < count; j++) {
+        let i = edit_list_data[offset + 1u + j];
         let edit = edits[i];
         let local_pos = (edit.transform * vec4<f32>(world_pos, 1.0)).xyz;
         let d = evaluate_edit(local_pos, edit);
@@ -242,11 +243,34 @@ fn evaluate_sdf(world_pos: vec3<f32>) -> f32 {
     return dist;
 }
 
+// ─── Atlas quantization helpers ─────────────────────────────────────────
+// Quantize SDF distance to u8 [0..255]. Range is [-half_diag, +half_diag]
+// where half_diag = voxel_size * brick_size * sqrt(3) / 2.
+// stored = clamp((d / half_diag) * 0.5 + 0.5, 0, 1) * 255
+
+fn atlas_half_diag() -> f32 {
+    return grid_params.voxel_size * f32(grid_params.brick_size) * 0.866025403; // sqrt(3)/2
+}
+
+fn quantize_distance(d: f32) -> u32 {
+    let hd = atlas_half_diag();
+    let normalized = clamp(d / hd * 0.5 + 0.5, 0.0, 1.0);
+    return u32(normalized * 255.0 + 0.5);
+}
+
+fn atlas_linear_index(coord: vec3<u32>) -> u32 {
+    let dim = grid_params.atlas_bricks_per_axis * PADDED_SIZE;
+    return coord.x + coord.y * dim + coord.z * dim * dim;
+}
+
 // ─── Compute Entry Point ───────────────────────────────────────────────────
 
-@compute @workgroup_size(8, 8, 1)
+const PADDED_SIZE: u32 = 9u;
+const VOXELS_PER_BRICK: u32 = 729u; // 9 * 9 * 9
+
+@compute @workgroup_size(256, 1, 1)
 fn cs_evaluate_sparse(
-    @builtin(local_invocation_id) lid: vec3<u32>,
+    @builtin(local_invocation_index) lid: u32,
     @builtin(workgroup_id) wid: vec3<u32>,
 ) {
     // wid.x = index into active_bricks array
@@ -263,27 +287,57 @@ fn cs_evaluate_sparse(
         brick_linear / (bgd * bgd),
     );
 
-    // Compute atlas write origin from atlas_slot
+    // Compute atlas write origin from atlas_slot (using padded stride)
     let bpa = grid_params.atlas_bricks_per_axis;
     let atlas_brick = vec3<u32>(
         atlas_slot % bpa,
         (atlas_slot / bpa) % bpa,
         atlas_slot / (bpa * bpa),
     );
-    let bs = grid_params.brick_size;
-    let atlas_origin = atlas_brick * bs;
+    let bs = grid_params.brick_size; // 8 (logical)
+    let atlas_origin = atlas_brick * PADDED_SIZE;
 
-    // Each thread covers (lid.x, lid.y); loop over z [0..brick_size)
-    for (var z = 0u; z < bs; z++) {
-        let local = vec3<u32>(lid.x, lid.y, z);
-        let global_voxel = brick_coord * bs + local;
+    // Toroidal unwrapping constants.
+    // grid_origin holds floor(volume_min / voxel_size) — the absolute
+    // world-voxel coordinate of the volume's min corner.
+    let dim = i32(grid_params.grid_dim);
+    let world_voxel_origin = vec3<i32>(grid_params.grid_origin);
+    let wrapped_origin = ((world_voxel_origin % dim) + dim) % dim;
 
-        // Compute world position (same formula as dense shader)
-        let uvw = (vec3<f32>(global_voxel) + 0.5) / f32(grid_params.grid_dim);
-        let world_pos = mix(grid_params.volume_min, grid_params.volume_max, uvw);
-        let dist = evaluate_sdf(world_pos);
+    // Compute this brick's world-space voxel offset once.
+    let brick_gv = vec3<i32>(brick_coord * bs);
+    let brick_offset = ((brick_gv - wrapped_origin + dim) % dim);
+    let brick_world_base = world_voxel_origin + brick_offset;
+
+    // 256 threads share 729 voxels. Each thread processes ~3 voxels
+    // via a strided loop for better occupancy and memory access patterns.
+    for (var v = lid; v < VOXELS_PER_BRICK; v += 256u) {
+        let local = vec3<u32>(
+            v % PADDED_SIZE,
+            (v / PADDED_SIZE) % PADDED_SIZE,
+            v / (PADDED_SIZE * PADDED_SIZE),
+        );
+        let world_voxel_abs = brick_world_base + vec3<i32>(local);
+        let world_pos = vec3<f32>(world_voxel_abs) * grid_params.voxel_size;
+        let dist = evaluate_sdf(world_pos, wid.x);
 
         let atlas_coord = atlas_origin + local;
-        textureStore(atlas, atlas_coord, vec4<f32>(dist, 0.0, 0.0, 0.0));
+        let linear = atlas_linear_index(atlas_coord);
+        let word_idx = linear / 4u;
+        let byte_idx = linear % 4u;
+        let q = quantize_distance(dist);
+        // Pack u8 into the correct byte of the u32 word via atomic CAS loop.
+        // A two-step atomicAnd+atomicOr would race if two workgroups write
+        // different bytes of the same u32 simultaneously.  CAS retries on
+        // contention so every byte is written correctly.
+        let mask = 0xFFu << (byte_idx * 8u);
+        let shifted = q << (byte_idx * 8u);
+        var old = atomicLoad(&atlas[word_idx]);
+        loop {
+            let desired = (old & ~mask) | shifted;
+            let result = atomicCompareExchangeWeak(&atlas[word_idx], old, desired);
+            if result.exchanged { break; }
+            old = result.old_value;
+        }
     }
 }

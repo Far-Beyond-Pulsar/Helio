@@ -4,12 +4,18 @@
 //! or geometry in the renderer.
 //!
 //! Controls:
-//!   WASD        — move forward/left/back/right
-//!   Space/Shift — move up/down
-//!   Mouse drag  — look around (click to grab cursor)
-//!   3           — toggle RC probe visualisation
-//!   4           — toggle GPU timing printout (stderr)
-//!   Escape      — release cursor / exit
+//!   WASD          — move forward/left/back/right
+//!   Space/Shift   — move up/down
+//!   Mouse drag    — look around (click to grab cursor)
+//!   Left click    — use active tool (dig/build) at surface
+//!   Scroll wheel  — adjust tool radius
+//!   1             — Dig tool (subtract spheres)
+//!   2             — Build tool (add spheres)
+//!   3             — No tool (camera only)
+//!   F3            — toggle debug visualization (brick/clip level overlay)
+//!   Ctrl+Z        — undo last edit
+//!   Ctrl+Y        — redo
+//!   Escape        — release cursor / exit
 
 mod demo_portal;
 
@@ -19,10 +25,7 @@ use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, Lig
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
-    BloomFeature, ShadowsFeature,
-    BillboardsFeature, BillboardInstance,
-    RadianceCascadesFeature,
-    SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
+    SdfFeature, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
     TerrainConfig,
 };
 
@@ -41,57 +44,11 @@ use std::collections::HashSet;
 
 use std::sync::Arc;
 
-fn load_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-#[allow(dead_code)]
-fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../probe.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-const RC_WORLD_MIN: [f32; 3] = [-3.5, -0.3, -3.5];
-const RC_WORLD_MAX: [f32; 3] = [3.5, 5.0, 3.5];
-
-fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
-    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
-    const COLORS: [[f32; 4]; 4] = [
-        [0.0, 1.0, 1.0, 0.85],
-        [0.0, 1.0, 0.0, 0.80],
-        [1.0, 1.0, 0.0, 0.75],
-        [1.0, 0.35, 0.0, 0.70],
-    ];
-    // screen_scale=true: sizes are angular (multiplied by distance), giving constant apparent size
-    const SIZES: [[f32; 2]; 4] = [
-        [0.035, 0.035],  // cascade 0 — finest (4096 probes) — tiny dots
-        [0.075, 0.075],  // cascade 1
-        [0.140, 0.140],  // cascade 2
-        [0.260, 0.260],  // cascade 3 — coarsest (8 probes) — large markers
-    ];
-    let mut out = Vec::new();
-    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
-        for i in 0..dim {
-            for j in 0..dim {
-                for k in 0..dim {
-                    let x = world_min[0] + (i as f32 + 0.5) / dim as f32 * (world_max[0] - world_min[0]);
-                    let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
-                    let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
-                    out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c])
-                        .with_screen_scale(true));
-                }
-            }
-        }
-    }
-    out
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tool {
+    None,
+    Dig,
+    Build,
 }
 
 fn main() {
@@ -128,15 +85,14 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    // Scene state
-    light_p0_id: LightId,
-    light_p1_id: LightId,
-    light_p2_id: LightId,
-    billboard_ids: Vec<BillboardId>,
+    // Tool state
+    active_tool: Tool,
+    tool_radius: f32,
+    ctrl_held: bool,
 
-    probe_vis: bool,
-    sprite_w: u32,
-    sprite_h: u32,
+    // Undo/Redo
+    edit_history: Vec<SdfEdit>,
+    edit_history_cursor: usize,
 }
 
 impl App {
@@ -179,10 +135,12 @@ impl ApplicationHandler for App {
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("Main Device"),
-                required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits: wgpu::Limits::default()
-                    .using_minimum_supported_acceleration_structure_values(),
+                label: Some("SDF Demo Device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits {
+                    max_storage_buffers_per_shader_stage: 10,
+                    ..wgpu::Limits::default()
+                },
                 memory_hints: wgpu::MemoryHints::default(),
                 // SAFETY: We acknowledge EXPERIMENTAL_RAY_QUERY may have implementation bugs.
                 experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
@@ -220,26 +178,12 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
-        // Features — data-free: all content comes from the Scene
-        let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        // build registry later with SDF included
-
-        // insert an SDF feature alongside the other registry features
-        let mut sdf_feature = SdfFeature::new()
-            .with_mode(SdfMode::ClipMap)
+        // ── SDF Feature Setup ──────────────────────────────────────────────────
+        let sdf_feature = SdfFeature::new()
             .with_grid_dim(128)
             .with_volume_bounds([-3.0, -1.0, -3.0], [3.0, 3.0, 3.0])
             .with_terrain(TerrainConfig::rolling());
-        // simple SDF edit sphere
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Sphere,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.0, 0.0)),
-            params: SdfShapeParams::sphere(1.0),
-            blend_radius: 0.0,
-        });
 
-        // build registry including sdf
         let feature_registry = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
             .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.2))
@@ -297,13 +241,11 @@ impl ApplicationHandler for App {
             keys:      HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            light_p0_id,
-            light_p1_id,
-            light_p2_id,
-            billboard_ids,
-            probe_vis: false,
-            sprite_w,
-            sprite_h,
+            active_tool: Tool::Dig,
+            tool_radius: 1.0,
+            ctrl_held: false,
+            edit_history: Vec::new(),
+            edit_history_cursor: 0,
         });
     }
 
@@ -387,8 +329,45 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
-                    ElementState::Released => { state.keys.remove(&key); }
+                    ElementState::Pressed  => {
+                        state.keys.insert(key);
+                        if key == KeyCode::ControlLeft || key == KeyCode::ControlRight {
+                            state.ctrl_held = true;
+                        }
+                        // F3: toggle SDF debug visualization
+                        if key == KeyCode::F3 {
+                            if let Some(sdf) = state.renderer.get_feature_mut::<SdfFeature>("sdf") {
+                                sdf.toggle_debug();
+                            }
+                        }
+                        // 1/2/3: tool switching
+                        if key == KeyCode::Digit1 {
+                            state.active_tool = Tool::Dig;
+                            log::info!("Tool: Dig (radius={:.1})", state.tool_radius);
+                        }
+                        if key == KeyCode::Digit2 {
+                            state.active_tool = Tool::Build;
+                            log::info!("Tool: Build (radius={:.1})", state.tool_radius);
+                        }
+                        if key == KeyCode::Digit3 {
+                            state.active_tool = Tool::None;
+                            log::info!("Tool: None (camera only)");
+                        }
+                        // Ctrl+Z: undo
+                        if key == KeyCode::KeyZ && state.ctrl_held {
+                            state.undo();
+                        }
+                        // Ctrl+Y: redo
+                        if key == KeyCode::KeyY && state.ctrl_held {
+                            state.redo();
+                        }
+                    }
+                    ElementState::Released => {
+                        state.keys.remove(&key);
+                        if key == KeyCode::ControlLeft || key == KeyCode::ControlRight {
+                            state.ctrl_held = false;
+                        }
+                    }
                 }
             }
 
@@ -407,10 +386,22 @@ impl ApplicationHandler for App {
                         state.window.set_cursor_visible(false);
                         state.cursor_grabbed = true;
                     }
+                } else {
+                    state.use_tool();
                 }
             }
 
-            // ── Window resize ─────────────────────────────────────────────────
+            WindowEvent::MouseWheel { delta, .. } => {
+                if state.cursor_grabbed {
+                    let scroll = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.01,
+                    };
+                    state.tool_radius = (state.tool_radius + scroll * 0.2).clamp(0.2, 5.0);
+                    log::info!("Tool radius: {:.1}", state.tool_radius);
+                }
+            }
+
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
                 let config = wgpu::SurfaceConfiguration {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -455,9 +446,108 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
+    /// Perform a center-screen pick and apply the active tool.
+    fn use_tool(&mut self) {
+        if self.active_tool == Tool::None {
+            return;
+        }
+
+        let (sy, cy) = self.cam_yaw.sin_cos();
+        let (sp, cp) = self.cam_pitch.sin_cos();
+        let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
+
+        let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
+            Some(s) => s as *mut SdfFeature,
+            None => return,
+        };
+
+        // Safety: we hold exclusive access to renderer/sdf for this scope.
+        let sdf = unsafe { &mut *sdf };
+
+        let pick = match sdf.pick_surface(self.cam_pos, forward, 100.0) {
+            Some(p) => p,
+            None => {
+                log::debug!("Pick miss");
+                return;
+            }
+        };
+
+        let edit = match self.active_tool {
+            Tool::Dig => {
+                log::info!("Dig at ({:.1}, {:.1}, {:.1}) r={:.1}",
+                    pick.position.x, pick.position.y, pick.position.z, self.tool_radius);
+                SdfEdit {
+                    shape: SdfShapeType::Sphere,
+                    op: BooleanOp::Subtraction,
+                    transform: glam::Mat4::from_translation(pick.position),
+                    params: SdfShapeParams::sphere(self.tool_radius),
+                    blend_radius: self.tool_radius * 0.3,
+                }
+            }
+            Tool::Build => {
+                let place_pos = pick.position + pick.normal * self.tool_radius * 0.5;
+                log::info!("Build at ({:.1}, {:.1}, {:.1}) r={:.1}",
+                    place_pos.x, place_pos.y, place_pos.z, self.tool_radius);
+                SdfEdit {
+                    shape: SdfShapeType::Sphere,
+                    op: BooleanOp::Union,
+                    transform: glam::Mat4::from_translation(place_pos),
+                    params: SdfShapeParams::sphere(self.tool_radius),
+                    blend_radius: self.tool_radius * 0.3,
+                }
+            }
+            Tool::None => unreachable!(),
+        };
+
+        // Record in undo history (truncate any future redo entries)
+        self.edit_history.truncate(self.edit_history_cursor);
+        self.edit_history.push(edit.clone());
+        self.edit_history_cursor += 1;
+
+        sdf.add_edit(edit);
+        log::info!("Edit count: {}", sdf.edit_list().len());
+    }
+
+    fn undo(&mut self) {
+        if self.edit_history_cursor == 0 {
+            log::info!("Nothing to undo");
+            return;
+        }
+
+        let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
+            Some(s) => s,
+            None => return,
+        };
+
+        self.edit_history_cursor -= 1;
+
+        // Differential undo: remove just the last edit instead of
+        // clear+replay, which avoids a full reclassify of all bricks.
+        let last_idx = sdf.edit_list().len().saturating_sub(1);
+        sdf.remove_edit(last_idx);
+        log::info!("Undo (edit count: {})", sdf.edit_list().len());
+    }
+
+    fn redo(&mut self) {
+        if self.edit_history_cursor >= self.edit_history.len() {
+            log::info!("Nothing to redo");
+            return;
+        }
+
+        let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Differential redo: add back just the one edit.
+        let edit = self.edit_history[self.edit_history_cursor].clone();
+        self.edit_history_cursor += 1;
+        sdf.add_edit(edit);
+        log::info!("Redo (edit count: {})", sdf.edit_list().len());
+    }
+
     fn render(&mut self, dt: f32) {
-        // ── Camera movement ────────────────────────────────────────────────────
-        const SPEED: f32 = 5.0;
+        const SPEED: f32 = 20.0;
         const LOOK_SENS: f32 = 0.002;
 
         // Apply mouse look — yaw left/right, pitch up/down (non-inverted)
@@ -490,11 +580,10 @@ impl AppState {
             std::f32::consts::FRAC_PI_4,
             aspect,
             0.1,
-            200.0,
+            5000.0,
             time,
         );
 
-        // ── Acquire surface ────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => { log::warn!("Surface error: {:?}", e); return; }

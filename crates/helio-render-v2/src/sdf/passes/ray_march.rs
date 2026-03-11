@@ -38,9 +38,6 @@ impl RenderPass for SdfRayMarchPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        // eprintln!("[SDF] ray_march execute() called");
-        // Create the render pass directly on ctx.encoder (following DeferredLightingPass pattern)
-        // to avoid borrow conflicts between ctx fields.
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("SDF Ray March"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
