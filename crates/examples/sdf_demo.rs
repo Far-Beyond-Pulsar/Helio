@@ -174,8 +174,7 @@ impl ApplicationHandler for App {
             queue.clone(),
             RendererConfig::new(size.width, size.height, surface_format, feature_registry),
         )
-        .expect("Failed to create renderer");
-
+        .expect("Failed to create renderer");        renderer.set_editor_mode(true);
         self.state = Some(AppState {
             window,
             surface,
@@ -236,6 +235,7 @@ impl ApplicationHandler for App {
                             if let Some(sdf) = state.renderer.get_feature_mut::<SdfFeature>("sdf") {
                                 sdf.toggle_debug();
                             }
+                            state.renderer.debug_viz_mut().enabled ^= true;
                         }
                         // 1/2/3: tool switching
                         if key == KeyCode::Digit1 {

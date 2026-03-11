@@ -252,6 +252,7 @@ impl ApplicationHandler for App {
         let mut renderer = Renderer::new(device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
+        renderer.set_editor_mode(true);
 
         let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 40.0);
         // Buildings: Y-center = half_h so base sits on ground
@@ -402,7 +403,12 @@ impl ApplicationHandler for App {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
                 match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Pressed  => {
+                        if key == KeyCode::F3 {
+                            state.renderer.debug_viz_mut().enabled ^= true;
+                        }
+                        state.keys.insert(key);
+                    }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }

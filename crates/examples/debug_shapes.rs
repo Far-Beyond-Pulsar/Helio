@@ -159,6 +159,7 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, surface_format, feature_registry),
         )
         .expect("Failed to create renderer");
+        renderer.set_editor_mode(true);
         demo_portal::enable_live_dashboard(&mut renderer);
 
         self.state = Some(AppState {
@@ -211,7 +212,10 @@ impl ApplicationHandler for App {
             } => {
                 match key_state {
                     ElementState::Pressed => {
-                        state.keys.insert(code);
+                        if code == KeyCode::F3 {
+                        state.renderer.debug_viz_mut().enabled ^= true;
+                    }
+                    state.keys.insert(code);
                         if code == KeyCode::Escape {
                             if state.cursor_grabbed {
                                 let _ = state.window.set_cursor_grab(CursorGrabMode::None);

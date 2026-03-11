@@ -224,6 +224,7 @@ impl ApplicationHandler for App {
         let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
             size.width, size.height, fmt, features
         )).expect("renderer");
+        renderer.set_editor_mode(true);
 
         let meshes = build_station(&mut renderer);
         log::info!("Space station: {} meshes", meshes.len());
@@ -378,10 +379,15 @@ impl ApplicationHandler for App {
 
             WindowEvent::KeyboardInput {
                 event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, ..
-            } => { match ks {
-                ElementState::Pressed  => { state.keys.insert(key); }
-                ElementState::Released => { state.keys.remove(&key); }
-            }}
+            } => {
+                if ks == ElementState::Pressed && key == KeyCode::F3 {
+                    state.renderer.debug_viz_mut().enabled ^= true;
+                }
+                match ks {
+                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Released => { state.keys.remove(&key); }
+                }
+            }
 
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if !state.cursor_grabbed {

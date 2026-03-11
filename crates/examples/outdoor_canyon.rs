@@ -394,7 +394,12 @@ impl ApplicationHandler for App {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
                 match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Pressed  => {
+                        if key == KeyCode::F3 {
+                            state.renderer.debug_viz_mut().enabled ^= true;
+                        }
+                        state.keys.insert(key);
+                    }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }

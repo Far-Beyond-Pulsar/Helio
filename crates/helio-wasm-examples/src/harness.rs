@@ -340,6 +340,11 @@ async fn run<S: WasmScene>(mut scene: S) -> Result<(), JsValue> {
             if i.keys.contains("ShiftLeft"){ dir -= up; }
             if dir.length_squared() > 0.0 { eye += dir.normalize() * 0.05; }
 
+            // detect F3 press (edges) to toggle debug overlay
+            if i.keys.contains("F3") && !i.last_keys.contains("F3") {
+                renderer.borrow_mut().debug_viz_mut().enabled ^= true;
+            }
+
             i.last_keys = i.keys.clone();
         }
 

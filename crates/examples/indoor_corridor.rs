@@ -206,6 +206,7 @@ impl ApplicationHandler for App {
             device.clone(), queue.clone(),
             RendererConfig::new(size.width, size.height, format, features),
         ).expect("renderer");
+        renderer.set_editor_mode(true);
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18)
         let floor     = renderer.create_mesh_rect3d([0.0, 0.0,  0.0], [2.0, 0.02, 18.0]);
@@ -404,7 +405,12 @@ impl ApplicationHandler for App {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
                 match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Pressed  => {
+                        if key == KeyCode::F3 {
+                            state.renderer.debug_viz_mut().enabled ^= true;
+                        }
+                        state.keys.insert(key);
+                    }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }

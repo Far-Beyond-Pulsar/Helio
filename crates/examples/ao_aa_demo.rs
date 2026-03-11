@@ -138,6 +138,7 @@ impl ApplicationHandler for App {
 
         let mut renderer = Renderer::new(device.clone(), queue.clone(), config)
             .expect("Failed to create renderer");
+        renderer.set_editor_mode(true);
 
         // Create geometry - a Cornell box-like scene with various objects
         let floor = renderer.create_mesh_plane([0.0, 0.0, 0.0], 10.0);
@@ -281,6 +282,10 @@ impl ApplicationHandler for App {
                                 KeyCode::Digit5 => {
                                     state.aa_mode = AntiAliasingMode::Msaa(MsaaSamples::X4);
                                     println!("AA: MSAA 4x");
+                                }
+                                KeyCode::F3 => {
+                                    state.renderer.debug_viz_mut().enabled ^= true;
+                                    println!("Debug overlay: {}", if state.renderer.debug_viz().enabled { "ON" } else { "OFF" });
                                 }
                                 _ => {}
                             }

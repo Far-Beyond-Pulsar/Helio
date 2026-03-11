@@ -222,6 +222,7 @@ impl ApplicationHandler for App {
         let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
             size.width, size.height, fmt, features
         )).expect("renderer");
+        renderer.set_editor_mode(true);
 
         // ── Cornell-box geometry (12 m room) ──────────────────────────────────
         let floor   = renderer.create_mesh_plane([0.0, 0.0, 0.0], 5.0);
@@ -372,6 +373,9 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
+                if ks == ElementState::Pressed && key == KeyCode::F3 {
+                    state.renderer.debug_viz_mut().enabled ^= true;
+                }
                 match ks {
                     ElementState::Pressed  => { state.keys.insert(key); }
                     ElementState::Released => { state.keys.remove(&key); }

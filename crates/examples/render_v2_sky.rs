@@ -253,6 +253,7 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, surface_format, feature_registry),
         )
         .expect("Failed to create renderer");
+        renderer.set_editor_mode(true);
 
         let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
         let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
@@ -385,7 +386,12 @@ impl ApplicationHandler for App {
                 event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, ..
             } => {
                 match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Pressed  => {
+                        if key == KeyCode::F3 {
+                            state.renderer.debug_viz_mut().enabled ^= true;
+                        }
+                        state.keys.insert(key);
+                    }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }
