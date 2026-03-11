@@ -41,8 +41,6 @@ use crate::scene::{LightId, SceneLight};
 
 // Shadow math functions now on GPU (shadow_matrices.wgsl)
 
-const FACES_PER_LIGHT: usize = 6;
-
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Internal record for one persistent light slot.
@@ -436,6 +434,16 @@ impl GpuLightScene {
         for i in 0..count {
             self.shadow_dirty[i] = false;
         }
+    }
+
+    /// Enumerate all active light IDs together with their [`SceneLight`] data.
+    ///
+    /// Used by the editor-mode billboard management in [`Renderer::set_editor_mode`].
+    pub(super) fn iter_lights(&self) -> impl Iterator<Item = (LightId, &SceneLight)> {
+        self.proxies.iter().map(|(&raw_id, proxy)| {
+            let light = &self.cached_scene_lights[proxy.index as usize];
+            (LightId(raw_id), light)
+        })
     }
 
     /// Write dirty light slots to the GPU.

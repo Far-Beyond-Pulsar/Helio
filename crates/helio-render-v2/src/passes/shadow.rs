@@ -48,28 +48,6 @@ struct ShadowCullParams {
     _pad:                u32,
 }
 
-// ── Per-face frustum culling for point-light cubemaps ────────────────────────
-
-const CUBE_FACE_PLANES: [[[f32; 3]; 4]; 6] = [
-    [[ 1.0, 0.0,-1.0], [ 1.0, 0.0, 1.0], [ 1.0,-1.0, 0.0], [ 1.0, 1.0, 0.0]],
-    [[-1.0, 0.0,-1.0], [-1.0, 0.0, 1.0], [-1.0,-1.0, 0.0], [-1.0, 1.0, 0.0]],
-    [[ 0.0, 1.0,-1.0], [ 0.0, 1.0, 1.0], [-1.0, 1.0, 0.0], [ 1.0, 1.0, 0.0]],
-    [[ 0.0,-1.0,-1.0], [ 0.0,-1.0, 1.0], [-1.0,-1.0, 0.0], [ 1.0,-1.0, 0.0]],
-    [[-1.0, 0.0, 1.0], [ 1.0, 0.0, 1.0], [ 0.0,-1.0, 1.0], [ 0.0, 1.0, 1.0]],
-    [[-1.0, 0.0,-1.0], [ 1.0, 0.0,-1.0], [ 0.0,-1.0,-1.0], [ 0.0, 1.0,-1.0]],
-];
-
-#[inline]
-fn sphere_in_cube_face(delta: [f32; 3], radius: f32, face: u32) -> bool {
-    let planes = &CUBE_FACE_PLANES[face as usize];
-    let threshold = -radius * std::f32::consts::SQRT_2;
-    for plane in planes {
-        let d = delta[0] * plane[0] + delta[1] * plane[1] + delta[2] * plane[2];
-        if d < threshold { return false; }
-    }
-    true
-}
-
 /// Per-light shadow cache entry.
 #[derive(Clone, Copy, Default)]
 struct ShadowLightCache {
@@ -82,14 +60,16 @@ pub struct ShadowPass {
     device: Arc<wgpu::Device>,
     queue:  Arc<wgpu::Queue>,
     layer_views: Vec<Arc<wgpu::TextureView>>,
-    shadow_matrix_buffer: Arc<wgpu::Buffer>,
+    /// Kept alive so bind groups referencing it are never invalidated.
+    _shadow_matrix_buffer: Arc<wgpu::Buffer>,
     light_count: Arc<AtomicU32>,
     light_face_counts: Arc<Mutex<Vec<u8>>>,
     cull_lights: Arc<Mutex<Vec<ShadowCullLight>>>,
     pipeline: Arc<wgpu::RenderPipeline>,
     /// Per-face (light_idx*6+face) bind group.
     slot_bind_groups: Vec<wgpu::BindGroup>,
-    slot_idx_buffers: Vec<wgpu::Buffer>,
+    /// Kept alive so slot_bind_groups referencing them are never invalidated.
+    _slot_idx_buffers: Vec<wgpu::Buffer>,
     /// Pool VB/IB for unified geometry.
     pool_vertex_buffer: SharedPoolBuffer,
     pool_index_buffer:  SharedPoolBuffer,
@@ -278,13 +258,13 @@ impl ShadowPass {
             device,
             queue,
             layer_views,
-            shadow_matrix_buffer,
+            _shadow_matrix_buffer: shadow_matrix_buffer,
             light_count,
             light_face_counts,
             cull_lights,
             pipeline: Arc::new(pipeline),
             slot_bind_groups,
-            slot_idx_buffers,
+            _slot_idx_buffers: slot_idx_buffers,
             pool_vertex_buffer,
             pool_index_buffer,
             shared_draw_call_buf,

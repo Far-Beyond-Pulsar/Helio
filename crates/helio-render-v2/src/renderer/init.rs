@@ -77,7 +77,6 @@ impl Renderer {
         // ── Geometry pass — must be added to graph BEFORE features so it ────────
         // ── executes first (billboard/post passes render on top).           ────────
         let draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
-        let shadow_draw_list: Arc<Mutex<Vec<DrawCall>>> = Arc::new(Mutex::new(Vec::new()));
         let debug_shapes: Arc<Mutex<Vec<DebugShape>>> = Arc::new(Mutex::new(Vec::new()));
         let debug_batch: Arc<Mutex<Option<DebugDrawBatch>>> = Arc::new(Mutex::new(None));
 
@@ -310,7 +309,6 @@ impl Renderer {
                 device.clone(),
                 queue.clone(),
                 draw_list.clone(),
-                shadow_draw_list.clone(),
                 shadow_matrix_buffer.clone(),
                 light_count_arc.clone(),
                 light_face_counts.clone(),
@@ -561,16 +559,16 @@ impl Renderer {
             globals_buffer,
             global_bind_group,
             lighting_bind_group,
-            lighting_layout,
+            _lighting_layout: lighting_layout,
             default_material_bind_group,
             draw_list,
             debug_shapes,
             debug_batch,
-            lighting_shadow_view: shadow_view,
-            lighting_shadow_sampler: shadow_samp,
-            lighting_env_cube_view: Arc::new(cube_view),
-            lighting_rc_view: rc_view,
-            lighting_env_sampler: Arc::new(env_linear_sampler),
+            _lighting_shadow_view: shadow_view,
+            _lighting_shadow_sampler: shadow_samp,
+            _lighting_env_cube_view: Arc::new(cube_view),
+            _lighting_rc_view: rc_view,
+            _lighting_env_sampler: Arc::new(env_linear_sampler),
             light_count_arc,
             light_face_counts,
             shadow_cull_lights,
@@ -583,7 +581,7 @@ impl Renderer {
             rc_world_min,
             rc_world_max,
             sky_uniform_buffer,
-            sky_bind_group,
+            _sky_bind_group: sky_bind_group,
             depth_texture,
             depth_view,
             depth_sample_view,
@@ -594,9 +592,9 @@ impl Renderer {
             gbuffer_targets,
             deferred_bg,
             default_material_views,
-            enable_ssao: config.enable_ssao,
-            ssao_texture: None,
-            ssao_view: None,
+            _enable_ssao: config.enable_ssao,
+            _ssao_texture: None,
+            _ssao_view: None,
             aa_mode: config.aa_mode,
             pre_aa_texture,
             pre_aa_view,
@@ -606,7 +604,6 @@ impl Renderer {
             fxaa_bind_group,
             smaa_bind_group,
             taa_bind_group,
-            shadow_draw_list,
             // ── GPU-resident scene + lights ───────────────────────────────────────
             gpu_scene,
             gpu_light_scene,
@@ -641,6 +638,11 @@ impl Renderer {
             draw_list_generation:     0,
             persistent_draw_count:   0,
             cached_draw_list_gen:    u64::MAX, // force rebuild on first frame
+
+            // ── Debug Visualization System ────────────────────────────────────
+            debug_viz: crate::debug_viz::DebugVizSystem::default(),
+            editor_mode: false,
+            editor_billboard_ids: std::collections::HashMap::new(),
         })
     }
 
@@ -656,21 +658,5 @@ impl Renderer {
             mat,
             &self.default_material_views,
         )
-    }
-
-    pub(super) fn rebuild_lighting_bind_group(&mut self) {
-        self.lighting_bind_group = Arc::new(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Lighting Bind Group"),
-            layout: &self.lighting_layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.gpu_light_scene.light_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.lighting_shadow_view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.lighting_shadow_sampler) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.lighting_env_cube_view) },
-                wgpu::BindGroupEntry { binding: 4, resource: self.gpu_light_scene.shadow_matrix_buffer.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.lighting_rc_view) },
-                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::Sampler(&self.lighting_env_sampler) },
-            ],
-        }));
     }
 }

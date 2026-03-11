@@ -33,6 +33,8 @@ struct PassNode {
 }
 
 struct TransientResource {
+    // TODO: desc used for future automatic graph-driven resource aliasing/reuse.
+    #[allow(dead_code)]
     desc: ResourceDesc,
     first_use: usize,  // First pass that uses this resource
     last_use: usize,   // Last pass that uses this resource
