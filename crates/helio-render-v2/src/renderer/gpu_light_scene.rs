@@ -391,14 +391,29 @@ impl GpuLightScene {
         // Build shadow_cull_lights for ShadowPass
         self.shadow_cull_lights.clear();
         self.shadow_cull_lights.reserve(count);
-        for (i, light) in self.cached_scene_lights[..count].iter().enumerate() {
+        for (_i, light) in self.cached_scene_lights[..count].iter().enumerate() {
+            // Compute a hash from the light's CPU-side data so the shadow pass
+            // cache is invalidated whenever the light moves or changes.
+            // We cannot use self.shadow_hashes[i] (the GPU-computed matrix hash)
+            // because those values live only on the GPU and are never read back;
+            // using the stale CPU mirror (always u32::MAX) caused the shadow atlas
+            // to never be re-rendered after the first frame, making moving lights
+            // appear to go dark.
+            let data_hash = {
+                let mut h: u64 = 0xcbf29ce484222325u64;
+                for &f in &light.position  { h = h.wrapping_mul(0x100000001b3) ^ f.to_bits() as u64; }
+                for &f in &light.direction { h = h.wrapping_mul(0x100000001b3) ^ f.to_bits() as u64; }
+                h = h.wrapping_mul(0x100000001b3) ^ light.range.to_bits() as u64;
+                h = h.wrapping_mul(0x100000001b3) ^ light.intensity.to_bits() as u64;
+                h
+            };
             self.shadow_cull_lights.push(ShadowCullLight {
                 position:       light.position,
                 direction:      light.direction,
                 range:          shadow_cull_range(light),
                 is_directional: matches!(light.light_type, LightType::Directional),
                 is_point:       matches!(light.light_type, LightType::Point),
-                matrix_hash:    self.shadow_hashes[i] as u64,  // Cast u32 GPU hash to u64 for CPU struct
+                matrix_hash:    data_hash,
             });
         }
 
