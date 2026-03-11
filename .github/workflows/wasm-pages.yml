@@ -61,7 +61,7 @@ jobs:
 
       - name: Install wasm-bindgen-cli (matching wasm-bindgen dep)
         run: |
-          VERSION=$(cargo metadata --no-deps --manifest-path crates/helio-wasm-examples/Cargo.toml --format-version 1 \
+          VERSION=$(cargo metadata --no-deps --manifest-path Cargo.toml --format-version 1 \
             | python3 -c "import sys,json; pkgs=json.load(sys.stdin)['packages']; \
               print(next(p['version'] for p in pkgs if p['name']=='wasm-bindgen'))" 2>/dev/null \
             || echo "")
@@ -71,9 +71,14 @@ jobs:
             cargo install --locked wasm-bindgen-cli
           fi
 
-      - name: Build every example WASM binary
+      - name: Build all WASM examples
         run: |
-          set -e
+          chmod +x build-wasm.sh
+          ./build-wasm.sh
+
+      - name: Assemble site directory
+        run: |
+          set -euo pipefail
           EXAMPLES=(
             render_v2_basic
             render_v2_sky
@@ -87,26 +92,15 @@ jobs:
             sdf_pulse
             sdf_terrain
           )
-          for EXAMPLE in "${EXAMPLES[@]}"; do
-            echo "=== building $EXAMPLE ==="
-            cargo build --release --lib \
-              -p helio-wasm-examples \
-              --target wasm32-unknown-unknown \
-              --no-default-features --features "$EXAMPLE"
-
-            mkdir -p site/$EXAMPLE
-            wasm-bindgen \
-              target/wasm32-unknown-unknown/release/helio_wasm_examples.wasm \
-              --out-dir site/$EXAMPLE \
-              --target web
-
-            # Generate a minimal per-example index.html
-            cat > site/$EXAMPLE/index.html <<HTML
+          for name in "${EXAMPLES[@]}"; do
+            mkdir -p "site/$name"
+            cp target/wasm-prebuilt/"$name"/* "site/$name/"
+            cat > "site/$name/index.html" <<HTML
           <!DOCTYPE html>
           <html lang="en">
           <head>
             <meta charset="utf-8"/>
-            <title>Helio – $EXAMPLE</title>
+            <title>Helio – $name</title>
             <style>body{margin:0;background:#111;}</style>
           </head>
           <body>
