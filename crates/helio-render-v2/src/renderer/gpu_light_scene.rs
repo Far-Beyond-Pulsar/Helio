@@ -31,7 +31,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
-use glam::{Mat4, Vec3};
 
 use crate::camera::Camera;
 use crate::features::LightType;
@@ -40,10 +39,7 @@ use crate::gpu_transfer;
 use crate::passes::ShadowCullLight;
 use crate::scene::{LightId, SceneLight};
 
-use super::shadow_math::{
-    compute_directional_cascades, compute_point_light_matrices, compute_spot_matrix,
-};
-use super::uniforms::GpuShadowMatrix;
+// Shadow math functions now on GPU (shadow_matrices.wgsl)
 
 const FACES_PER_LIGHT: usize = 6;
 
@@ -72,13 +68,19 @@ pub(super) struct GpuLightScene {
 
     // ── Shadow matrix GPU buffer (binding 4 of the lighting bind group) ──
     pub shadow_matrix_buffer: Arc<wgpu::Buffer>,
-    /// CPU mirror: FACES_PER_LIGHT consecutive entries per light slot.
-    cpu_shadow_mats: Vec<GpuShadowMatrix>,
-    /// True iff slot[i]'s shadow matrices need GPU upload this frame.
+
+    // ── GPU-driven shadow matrix computation buffers ──────────────────────
+    /// GPU storage buffer: per-light dirty flags (u32 bitmask, 0 or 1)
+    pub shadow_dirty_buffer: Arc<wgpu::Buffer>,
+    /// CPU mirror: True iff slot[i]'s shadow matrices need recompute.
     shadow_dirty: Vec<bool>,
-    /// FNV hash of the 6 shadow matrices per slot; used to skip
-    /// uploads when a recomputed matrix is numerically identical.
-    shadow_hashes: Vec<u64>,
+
+    /// GPU storage buffer: per-light FNV hashes written by shadow_matrices.wgsl (never read back)
+    pub shadow_hash_buffer: Arc<wgpu::Buffer>,
+    /// Monotonic generation counter per light slot.
+    /// Incremented on every `shadow_dirty[i] = true` transition so the shadow
+    /// pass cache key changes without any CPU hash computation or GPU readback.
+    shadow_generation: Vec<u64>,
 
     // ── Persistent proxy map ──────────────────────────────────────────────
     /// LightId → proxy (index into dense arrays + CPU data mirror).
@@ -116,6 +118,8 @@ impl GpuLightScene {
     pub fn new(
         light_buffer: Arc<wgpu::Buffer>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
+        shadow_dirty_buffer: Arc<wgpu::Buffer>,
+        shadow_hash_buffer: Arc<wgpu::Buffer>,
     ) -> Self {
         let cap = MAX_LIGHTS as usize;
         Self {
@@ -124,9 +128,12 @@ impl GpuLightScene {
             light_dirty: vec![false; cap],
 
             shadow_matrix_buffer,
-            cpu_shadow_mats: vec![GpuShadowMatrix::zeroed(); cap * FACES_PER_LIGHT],
+
+            shadow_dirty_buffer,
             shadow_dirty:    vec![false; cap],
-            shadow_hashes:   vec![u64::MAX; cap],
+
+            shadow_hash_buffer,
+            shadow_generation: vec![0u64; cap],
 
             proxies: HashMap::new(),
             next_light_id: 1, // 0 reserved for INVALID
@@ -171,7 +178,7 @@ impl GpuLightScene {
         self.cpu_lights[index] = scene_light_to_gpu(&light);
         self.light_dirty[index] = true;
         self.shadow_dirty[index] = true;
-        self.shadow_hashes[index] = u64::MAX;
+        self.shadow_generation[index] += 1;
 
         // Rebuild face_counts (structural change).
         self.face_counts.push(light_face_count(&light));
@@ -200,13 +207,9 @@ impl GpuLightScene {
             self.cpu_lights[slot] = scene_light_to_gpu(&last_light);
             self.light_dirty[slot] = true;
 
-            // Copy shadow matrices from last slot into freed slot.
-            let src_base = last * FACES_PER_LIGHT;
-            let dst_base = slot * FACES_PER_LIGHT;
-            for j in 0..FACES_PER_LIGHT {
-                self.cpu_shadow_mats[dst_base + j] = self.cpu_shadow_mats[src_base + j];
-            }
-            self.shadow_hashes[slot] = self.shadow_hashes[last];
+            // Carry forward the moved light's generation and increment so the
+            // shadow cache sees a change for both the vacated and filled slot.
+            self.shadow_generation[slot] = self.shadow_generation[last].wrapping_add(1);
             self.shadow_dirty[slot] = true;
 
             self.face_counts[slot] = self.face_counts[last];
@@ -223,12 +226,8 @@ impl GpuLightScene {
         // Zero out the now-unused last slot on the GPU.
         self.cpu_lights[last] = GpuLight::zeroed();
         self.light_dirty[last] = true;
-        let base = last * FACES_PER_LIGHT;
-        for j in 0..FACES_PER_LIGHT {
-            self.cpu_shadow_mats[base + j] = GpuShadowMatrix::zeroed();
-        }
         self.shadow_dirty[last] = true;
-        self.shadow_hashes[last] = u64::MAX;
+        self.shadow_generation[last] = self.shadow_generation[last].wrapping_add(1);
 
         self.cached_scene_lights.truncate(last);
         self.face_counts.truncate(last);
@@ -248,6 +247,7 @@ impl GpuLightScene {
         self.cpu_lights[slot] = scene_light_to_gpu(&light);
         self.light_dirty[slot] = true;
         self.shadow_dirty[slot] = true;
+        self.shadow_generation[slot] += 1;
     }
 
     /// Update only the world-space position of a light (e.g. moving point
@@ -263,6 +263,7 @@ impl GpuLightScene {
         self.cpu_lights[slot].position = position;
         self.light_dirty[slot] = true;
         self.shadow_dirty[slot] = true;
+        self.shadow_generation[slot] += 1;
     }
 
     /// Update color + intensity of a light without touching its transform.
@@ -300,6 +301,7 @@ impl GpuLightScene {
                 self.cpu_lights[i] = scene_light_to_gpu(&new_lights[i]);
                 self.light_dirty[i] = true;
                 self.shadow_dirty[i] = true;
+                self.shadow_generation[i] += 1;
             }
         }
 
@@ -309,19 +311,15 @@ impl GpuLightScene {
             self.cpu_lights[i] = scene_light_to_gpu(&new_lights[i]);
             self.light_dirty[i] = true;
             self.shadow_dirty[i] = true;
-            self.shadow_hashes[i] = u64::MAX;
+            self.shadow_generation[i] += 1;
         }
 
         // Removed lights: zero out their GPU slots.
         for i in new_count..old_count {
             self.cpu_lights[i] = GpuLight::zeroed();
             self.light_dirty[i] = true;
-            let base = i * FACES_PER_LIGHT;
-            for j in 0..FACES_PER_LIGHT {
-                self.cpu_shadow_mats[base + j] = GpuShadowMatrix::zeroed();
-            }
             self.shadow_dirty[i] = true;
-            self.shadow_hashes[i] = u64::MAX;
+            self.shadow_generation[i] += 1;
         }
         self.cached_scene_lights.truncate(new_count);
 
@@ -338,11 +336,17 @@ impl GpuLightScene {
         }
     }
 
-    // ── Shadow matrices ───────────────────────────────────────────────────
+    // ── Shadow matrices (GPU-driven) ──────────────────────────────────────
 
-    /// Recompute shadow matrices for dirty light slots and for directional
-    /// lights when the camera moves past the configured threshold.
-    pub fn update_shadow_matrices(&mut self, camera: &Camera) {
+    /// Mark shadow matrices dirty for lights that need updates.
+    /// - Always dirty: lights with shadow_dirty[i] = true (position/direction changed)
+    /// - Conditional dirty: directional lights when camera moves (CSM depends on camera frustum)
+    ///
+    /// Also builds shadow_cull_lights list for ShadowPass culling.
+    ///
+    /// NOTE: Shadow matrices are now computed on GPU by ShadowMatrixPass.
+    /// This method no longer performs CPU matrix computation.
+    pub fn update_shadow_matrices(&mut self, camera: &Camera) -> bool {
         let camera_pos: [f32; 3] = camera.position.into();
         let camera_moved = {
             let lp = self.last_camera_pos;
@@ -359,78 +363,86 @@ impl GpuLightScene {
             self.last_camera_pos = camera_pos;
         }
 
-        let identity = Mat4::IDENTITY;
         let count = self.active_count as usize;
 
+        // Mark directional lights dirty when camera moves (CSM depends on camera frustum)
+        if camera_moved {
+            for (i, light) in self.cached_scene_lights[..count].iter().enumerate() {
+                if matches!(light.light_type, LightType::Directional) {
+                    self.shadow_dirty[i] = true;
+                    self.shadow_generation[i] += 1;
+                }
+            }
+        }
+
+        // Build shadow_cull_lights for ShadowPass.
+        // shadow_generation[i] is incremented every time shadow_dirty[i] is set,
+        // so it serves as a cheap GPU-state-driven cache key — no hash, no readback.
         self.shadow_cull_lights.clear();
         self.shadow_cull_lights.reserve(count);
-
         for (i, light) in self.cached_scene_lights[..count].iter().enumerate() {
-            let is_directional = matches!(light.light_type, LightType::Directional);
-            let needs_update = self.shadow_dirty[i] || (camera_moved && is_directional);
-
-            if !needs_update {
-                self.shadow_cull_lights.push(ShadowCullLight {
-                    position:    light.position,
-                    direction:   light.direction,
-                    range:       shadow_cull_range(light),
-                    is_directional,
-                    is_point:    matches!(light.light_type, LightType::Point),
-                    matrix_hash: self.shadow_hashes[i],
-                });
-                continue;
-            }
-
-            let six: [Mat4; 6] = match light.light_type {
-                LightType::Point => {
-                    compute_point_light_matrices(light.position, light.range)
-                }
-                LightType::Directional => {
-                    let [c0, c1, c2, c3] = compute_directional_cascades(
-                        Vec3::from(camera.position),
-                        camera.view_proj_inv,
-                        light.direction,
-                    );
-                    [c0, c1, c2, c3, identity, identity]
-                }
-                LightType::Spot { outer_angle, .. } => {
-                    let m = compute_spot_matrix(
-                        light.position,
-                        light.direction,
-                        light.range,
-                        outer_angle,
-                    );
-                    [m, identity, identity, identity, identity, identity]
-                }
-            };
-
-            let new_hash = fnv_hash_mats(&six);
-            let base = i * FACES_PER_LIGHT;
-
-            if new_hash != self.shadow_hashes[i] {
-                for (j, m) in six.iter().enumerate() {
-                    self.cpu_shadow_mats[base + j] =
-                        GpuShadowMatrix { mat: m.to_cols_array() };
-                }
-                self.shadow_hashes[i] = new_hash;
-                self.shadow_dirty[i] = true;
-            } else {
-                self.shadow_dirty[i] = false;
-            }
-
             self.shadow_cull_lights.push(ShadowCullLight {
-                position:    light.position,
-                direction:   light.direction,
-                range:       shadow_cull_range(light),
-                is_directional,
-                is_point:    matches!(light.light_type, LightType::Point),
-                matrix_hash: self.shadow_hashes[i],
+                position:       light.position,
+                direction:      light.direction,
+                range:          shadow_cull_range(light),
+                is_directional: matches!(light.light_type, LightType::Directional),
+                is_point:       matches!(light.light_type, LightType::Point),
+                matrix_hash:    self.shadow_generation[i],
             });
+        }
+
+        camera_moved
+    }
+
+    /// Upload shadow dirty flags to GPU buffer for ShadowMatrixPass compute shader.
+    /// Zero cost when no lights are dirty.
+    pub fn upload_shadow_dirty_flags(&self, queue: &wgpu::Queue) {
+        let count = self.active_count as usize;
+        if count == 0 { return; }
+
+        // Check if any light is dirty
+        if !self.shadow_dirty[..count].iter().any(|&d| d) {
+            return;
+        }
+
+        // Convert bool to u32 (0 or 1) for GPU
+        let dirty_u32: Vec<u32> = self.shadow_dirty[..count]
+            .iter()
+            .map(|&d| if d { 1u32 } else { 0u32 })
+            .collect();
+
+        queue.write_buffer(
+            &self.shadow_dirty_buffer,
+            0,
+            bytemuck::cast_slice(&dirty_u32),
+        );
+        gpu_transfer::track_upload((count * 4) as u64);
+    }
+
+    /// Accessor for shadow dirty buffer (used by ShadowMatrixPass)
+    pub fn shadow_dirty_buffer(&self) -> &wgpu::Buffer {
+        &self.shadow_dirty_buffer
+    }
+
+    /// Accessor for shadow hash buffer (used by ShadowMatrixPass)
+    pub fn shadow_hash_buffer(&self) -> &wgpu::Buffer {
+        &self.shadow_hash_buffer
+    }
+
+    /// Clear shadow dirty flags after GPU compute has processed them.
+    /// Call after ShadowMatrixPass executes.
+    pub fn clear_shadow_dirty_flags(&mut self) {
+        let count = self.active_count as usize;
+        for i in 0..count {
+            self.shadow_dirty[i] = false;
         }
     }
 
-    /// Write all dirty light slots and dirty shadow matrix slots to the GPU.
+    /// Write dirty light slots to the GPU.
     /// Zero cost when nothing changed.
+    ///
+    /// NOTE: Shadow matrices are now computed on GPU by ShadowMatrixPass.
+    /// This method no longer uploads shadow matrix data.
     pub fn flush(&mut self, queue: &wgpu::Queue) {
         let count = self.active_count as usize;
         if count == 0 {
@@ -452,24 +464,8 @@ impl GpuLightScene {
             }
         }
 
-        // ── Shadow matrices: per dirty-slot write (384 bytes each) ────────
-        let mat_stride = std::mem::size_of::<GpuShadowMatrix>() as u64;
-        for i in 0..count {
-            if !self.shadow_dirty[i] {
-                continue;
-            }
-            let base = i * FACES_PER_LIGHT;
-            let slice = &self.cpu_shadow_mats[base..base + FACES_PER_LIGHT];
-            let offset = base as u64 * mat_stride;
-            queue.write_buffer(
-                &self.shadow_matrix_buffer,
-                offset,
-                bytemuck::cast_slice(slice),
-            );
-            let written = (FACES_PER_LIGHT as u64) * mat_stride;
-            gpu_transfer::track_upload(written);
-            self.shadow_dirty[i] = false;
-        }
+        // Shadow matrices are now computed and uploaded by GPU compute shader (ShadowMatrixPass).
+        // No CPU → GPU upload needed here.
     }
 }
 
@@ -541,12 +537,22 @@ fn shadow_cull_range(light: &SceneLight) -> f32 {
     }
 }
 
-fn fnv_hash_mats(mats: &[Mat4; 6]) -> u64 {
-    let mut h: u64 = 0xcbf29ce484222325;
+// Legacy hash function — no longer used (shadow matrices computed on GPU).
+// Kept for potential legacy sync_lights compatibility.
+#[allow(dead_code)]
+fn fnv_hash_mats(mats: &[glam::Mat4; 6]) -> u32 {
+    let mut h: u32 = 0x811c9dc5;  // FNV-1a 32-bit offset
     for m in mats {
         for f in m.to_cols_array() {
-            h ^= f.to_bits() as u64;
-            h = h.wrapping_mul(0x100000001b3);
+            let bits = f.to_bits();
+            h ^= (bits & 0xFF) as u32;
+            h = h.wrapping_mul(0x01000193);  // FNV-1a 32-bit prime
+            h ^= ((bits >> 8) & 0xFF) as u32;
+            h = h.wrapping_mul(0x01000193);
+            h ^= ((bits >> 16) & 0xFF) as u32;
+            h = h.wrapping_mul(0x01000193);
+            h ^= ((bits >> 24) & 0xFF) as u32;
+            h = h.wrapping_mul(0x01000193);
         }
     }
     h

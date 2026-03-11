@@ -9,7 +9,10 @@ pub(crate) const CSM_SPLITS: [f32; 4] = [16.0, 80.0, 300.0, 1400.0];
 /// Compute 6 cube-face view-proj matrices for a point light (±X, ±Y, ±Z).
 pub(crate) fn compute_point_light_matrices(position: [f32; 3], range: f32) -> [Mat4; 6] {
     let pos = Vec3::from(position);
-    let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.05, range.max(0.1));
+    // Extend far plane to ensure full spherical coverage
+    // With 90° FOV, worst case is corners at sqrt(3) * range from light center
+    let far_plane = range.max(0.1) * 2.5;  // 2.5x provides full coverage with margin
+    let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.05, far_plane);
     let views = [
         Mat4::look_at_rh(pos, pos + Vec3::X,  -Vec3::Y), // +X
         Mat4::look_at_rh(pos, pos - Vec3::X,  -Vec3::Y), // -X

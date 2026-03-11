@@ -170,6 +170,14 @@ impl Feature for RadianceCascadesFeature {
     fn name(&self) -> &str { "radiance_cascades" }
 
     fn register(&mut self, ctx: &mut FeatureContext) -> Result<()> {
+        // Hardware ray queries (TLAS + `enable wgpu_ray_query`) are not available
+        // on WebGPU. Skip registration entirely on web — the renderer falls back
+        // to a dummy 1×1 black RC texture and no GI.
+        if !ctx.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            log::warn!("RadianceCascades: EXPERIMENTAL_RAY_QUERY not supported on this device/backend — skipping RC registration (no GI)");
+            return Ok(());
+        }
+
         use wgpu::util::DeviceExt;
         let device = ctx.device;
 

@@ -19,7 +19,7 @@ pub mod gpu_preprocessing;
 
 pub use traits::{Feature, ShaderDefine, ShaderModulePath};
 pub use context::{FeatureContext, PrepareContext};
-pub use registry::{FeatureRegistry, FeatureFlags};
+pub use registry::{FeatureRegistry, FeatureRegistryBuilder, FeatureFlags};
 pub use lighting::{LightingFeature, LightConfig, LightType};
 pub use bloom::BloomFeature;
 pub use shadows::ShadowsFeature;

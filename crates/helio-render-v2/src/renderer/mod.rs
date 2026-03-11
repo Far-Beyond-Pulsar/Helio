@@ -16,7 +16,7 @@ use crate::resources::ResourceManager;
 use crate::features::{FeatureRegistry, FeatureContext, PrepareContext, RadianceCascadesFeature};
 use crate::pipeline::{PipelineCache, PipelineVariant};
 use crate::graph::{RenderGraph, GraphContext};
-use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass};
+use crate::passes::{DebugDrawPass, SkyPass, SkyLutPass, SKY_LUT_W, SKY_LUT_H, SKY_LUT_FORMAT, ShadowCullLight, DepthPrepassPass, GBufferPass, GBufferTargets, DeferredLightingPass, TransparentPass, AntiAliasingMode, FxaaPass, SmaaPass, TaaPass, IndirectDispatchPass, ShadowMatrixPass};
 use crate::mesh::{GpuMesh, DrawCall, PackedVertex};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight, LightId, BillboardId};
@@ -259,10 +259,14 @@ pub struct Renderer {
     buffer_pool: GpuBufferPool,
     /// Indirect dispatch pass (held here, NOT in graph — called manually before graph).
     indirect_dispatch: IndirectDispatchPass,
+    /// Shadow matrix computation pass (GPU-driven, called before shadow pass).
+    shadow_matrix_pass: ShadowMatrixPass,
     /// Indirect draw command buffer written by IndirectDispatchPass each frame. Shared with geometry passes.
     shared_indirect_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
     /// Per-material draw ranges in the indirect buffer (opaque). Shared with geometry passes.
     shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+    /// Raw GpuScene draw-call buffer, refreshed each frame. Used by ShadowPass for GPU indirect shadow cull.
+    shared_shadow_draw_call_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
 
     // Frame state
     frame_count: u64,
@@ -709,10 +713,11 @@ impl Renderer {
         log::trace!("Rendering frame {}", self.frame_count);
 
         // ── Step 0: flush scene state (lights/sky/ambient) ───────────────────
-        {
+        let camera_moved = {
             crate::profile_scope!("Scene");
-            self.flush_scene_state(camera);
-        }
+            self.flush_scene_state(camera)
+        };
+        // `flush_scene_state` now returns `camera_moved` from update_shadow_matrices
 
         // ── Step 1: flush GPU scene (single delta write_buffer) ───────────────
         self.gpu_scene.flush(&self.queue);
@@ -755,6 +760,10 @@ impl Renderer {
                 ranges.clear();
                 ranges.extend_from_slice(&self.gpu_scene.material_ranges);
             }
+
+            // Update raw draw-call buffer ref for ShadowPass GPU indirect cull.
+            *self.shared_shadow_draw_call_buf.lock().unwrap() =
+                if draw_count > 0 { Some(self.gpu_scene.draw_call_buffer().clone()) } else { None };
 
             // Run IndirectDispatchPass: GPU culls + writes indirect commands.
             if draw_count > 0 {
@@ -819,6 +828,38 @@ impl Renderer {
             label: Some("Render Encoder"),
         });
         self.indirect_dispatch.dispatch(&self.queue, &mut encoder);
+
+        // ── GPU shadow matrix computation (runs before shadow pass) ──────────
+        {
+            crate::profile_scope!("ShadowMatrices");
+            let light_count = self.gpu_light_scene.active_count;
+
+            if light_count > 0 {
+                // Upload dirty flags to GPU
+                self.gpu_light_scene.upload_shadow_dirty_flags(&self.queue);
+
+                // Bind resources (light buffer, shadow matrix buffer, camera, dirty flags, hashes)
+                self.shadow_matrix_pass.bind_resources(
+                    &self.device,
+                    &self.gpu_light_scene.light_buffer,
+                    &self.gpu_light_scene.shadow_matrix_buffer,
+                    &self.camera_buffer,
+                    self.gpu_light_scene.shadow_dirty_buffer(),
+                    self.gpu_light_scene.shadow_hash_buffer(),
+                );
+
+                // Execute compute shader (GPU computes shadow matrices)
+                self.shadow_matrix_pass.execute(
+                    &mut encoder,
+                    &self.queue,
+                    camera_moved,
+                    light_count,
+                );
+
+                // Clear dirty flags after uploading (GPU will process them asynchronously)
+                self.gpu_light_scene.clear_shadow_dirty_flags();
+            }
+        }
 
         let graph_target = match self.aa_mode {
             AntiAliasingMode::None | AntiAliasingMode::Msaa(_) => target,

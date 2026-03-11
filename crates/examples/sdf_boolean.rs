@@ -3,7 +3,6 @@
 //! Two primitives are present; the second switchs between union and
 
 mod demo_portal;
-//! difference with the first so you can see the boolean result change.
 
 mod sdf_demos_common;
 use sdf_demos_common::{run_demo, SdfUpdater};

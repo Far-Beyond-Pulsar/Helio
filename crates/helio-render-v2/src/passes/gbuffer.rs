@@ -22,6 +22,7 @@ pub struct GBufferPass {
     pool_index_buffer:     SharedPoolBuffer,
     shared_indirect:       Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
     shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+    has_multi_draw:        bool,
 }
 
 impl GBufferPass {
@@ -32,8 +33,9 @@ impl GBufferPass {
         pool_index_buffer:     SharedPoolBuffer,
         shared_indirect:       Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
         shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+        has_multi_draw:        bool,
     ) -> Self {
-        Self { targets, pipeline, pool_vertex_buffer, pool_index_buffer, shared_indirect, shared_material_ranges }
+        Self { targets, pipeline, pool_vertex_buffer, pool_index_buffer, shared_indirect, shared_material_ranges, has_multi_draw }
     }
 }
 
@@ -98,11 +100,12 @@ impl RenderPass for GBufferPass {
         for range in ranges.iter() {
             let byte_offset = range.start as u64 * 20;
             pass.set_bind_group(1, Some(range.bind_group.as_ref()), &[]);
-            // Use per-call draw_indexed_indirect rather than multi_draw_indexed_indirect.
-            // multi_draw_indexed_indirect requires the multiDrawIndirect Vulkan device feature
-            // which must be explicitly requested at device creation.
-            for j in 0..range.count {
-                pass.draw_indexed_indirect(&indirect_buf, byte_offset + j as u64 * 20);
+            if self.has_multi_draw {
+                pass.multi_draw_indexed_indirect(&indirect_buf, byte_offset, range.count);
+            } else {
+                for j in 0..range.count {
+                    pass.draw_indexed_indirect(&indirect_buf, byte_offset + j as u64 * 20);
+                }
             }
         }
         Ok(())

@@ -33,29 +33,31 @@ impl Renderer {
     ///   when range is empty.
     /// * Sky uniform: skipped when `sky_lut_dirty` is false.
     /// * Ambient: skipped when `ambient_dirty` is false.
-    pub(crate) fn flush_scene_state(&mut self, camera: &Camera) {
+    pub(crate) fn flush_scene_state(&mut self, camera: &Camera) -> bool {
         // ── Shadow matrices + GPU light flush ──────────────────────────────
-        {
+        let camera_moved = {
             crate::profile_scope!("Scene::Lights");
-            self.gpu_light_scene.update_shadow_matrices(camera);
+            let moved = self.gpu_light_scene.update_shadow_matrices(camera);
             self.gpu_light_scene.flush(&self.queue);
-        }
+            moved
+        };
 
         let count = self.gpu_light_scene.active_count;
         self.scene_light_count = count;
         self.light_count_arc.store(count, Ordering::Relaxed);
 
-        if self.gpu_light_scene.structure_changed {
-            {
-                let mut fc = self.light_face_counts.lock().unwrap();
-                fc.clear();
-                fc.extend_from_slice(&self.gpu_light_scene.face_counts);
-            }
-            self.gpu_light_scene.structure_changed = false;
-        }
+        // Update shadow cull data every frame (contains position/direction that changes when lights move)
         {
             let mut cull = self.shadow_cull_lights.lock().unwrap();
             *cull = self.gpu_light_scene.shadow_cull_lights.clone();
+        }
+
+        // Only update face counts when structure changes (zero-cost at steady state)
+        if self.gpu_light_scene.structure_changed {
+            let mut fc = self.light_face_counts.lock().unwrap();
+            fc.clear();
+            fc.extend_from_slice(&self.gpu_light_scene.face_counts);
+            self.gpu_light_scene.structure_changed = false;
         }
 
         // ── Sky / ambient state ────────────────────────────────────────────
@@ -152,5 +154,7 @@ impl Renderer {
                 ss.ambient_dirty = false;
             }
         } // profile_scope!("Scene::Sky") drops here
+
+        camera_moved
     }
 }

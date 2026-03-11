@@ -1312,7 +1312,7 @@ dependencies = [
 
 [[package]]
 name = "helio-wasm-app"
-version = "0.1.0"
+version = "0.1.2"
 dependencies = [
  "console_error_panic_hook",
  "glam",
@@ -1327,6 +1327,24 @@ dependencies = [
  "wasm-logger",
  "web-sys",
  "webbrowser",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-wasm-examples"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "glam",
+ "helio-render-v2",
+ "image",
+ "js-sys",
+ "log",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-logger",
+ "web-sys",
  "wgpu",
 ]
 
