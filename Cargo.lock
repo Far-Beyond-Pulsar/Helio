@@ -1331,6 +1331,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-wasm-examples"
+version = "0.1.0"
+dependencies = [
+ "console_error_panic_hook",
+ "glam",
+ "helio-render-v2",
+ "image",
+ "js-sys",
+ "log",
+ "raw-window-handle",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-logger",
+ "web-sys",
+ "wgpu",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

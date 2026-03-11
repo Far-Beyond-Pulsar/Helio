@@ -6,6 +6,7 @@ members = [
 
     "crates/examples",
     "crates/helio-wasm-app",
+    "crates/helio-wasm-examples",
 ]
 resolver = "2"
 
