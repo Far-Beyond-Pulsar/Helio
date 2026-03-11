@@ -16,21 +16,25 @@
 //!   Ctrl+Y        — redo
 //!   Escape        — release cursor / exit
 
-use helio_render_v2::{Renderer, RendererConfig, Camera};
+use helio_render_v2::{ Renderer, RendererConfig, Camera };
 
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
-    SdfFeature, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
+    SdfFeature,
+    SdfEdit,
+    SdfShapeType,
+    SdfShapeParams,
+    BooleanOp,
     TerrainConfig,
 };
 
 use winit::{
     application::ApplicationHandler,
     event::*,
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId, CursorGrabMode},
+    event_loop::{ ActiveEventLoop, EventLoop },
+    keyboard::{ KeyCode, PhysicalKey },
+    window::{ Window, WindowId, CursorGrabMode },
 };
 
 use std::collections::HashSet;
@@ -99,47 +103,52 @@ impl ApplicationHandler for App {
                 .create_window(
                     Window::default_attributes()
                         .with_title("Helio SDF Demo")
-                        .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
+                        .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32))
                 )
-                .expect("Failed to create window"),
+                .expect("Failed to create window")
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("Failed to create surface");
+        let surface = instance.create_surface(window.clone()).expect("Failed to create surface");
 
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("Failed to find adapter");
+        let adapter = pollster
+            ::block_on(
+                instance.request_adapter(
+                    &(wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        compatible_surface: Some(&surface),
+                        force_fallback_adapter: false,
+                    })
+                )
+            )
+            .expect("Failed to find adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("SDF Demo Device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits {
-                    max_storage_buffers_per_shader_stage: 10,
-                    ..wgpu::Limits::default()
-                },
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: Default::default(),
-                trace: wgpu::Trace::Off,
-            },
-        ))
-        .expect("Failed to create device");
+        let (device, queue) = pollster
+            ::block_on(
+                adapter.request_device(
+                    &(wgpu::DeviceDescriptor {
+                        label: Some("SDF Demo Device"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits: wgpu::Limits {
+                            max_storage_buffers_per_shader_stage: 10,
+                            ..wgpu::Limits::default()
+                        },
+                        memory_hints: wgpu::MemoryHints::default(),
+                        experimental_features: Default::default(),
+                        trace: wgpu::Trace::Off,
+                    })
+                )
+            )
+            .expect("Failed to create device");
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
+        let surface_format = surface_caps.formats
             .iter()
             .find(|f| f.is_srgb())
             .copied()
@@ -169,12 +178,12 @@ impl ApplicationHandler for App {
             .with_feature(sdf_feature)
             .build();
 
-        let renderer = Renderer::new(
+        let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
-            RendererConfig::new(size.width, size.height, surface_format, feature_registry),
-        )
-        .expect("Failed to create renderer");        renderer.set_editor_mode(true);
+            RendererConfig::new(size.width, size.height, surface_format, feature_registry)
+        ).expect("Failed to create renderer");
+        renderer.set_editor_mode(true);
         self.state = Some(AppState {
             window,
             surface,
@@ -197,7 +206,9 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
-        let Some(state) = &mut self.state else { return };
+        let Some(state) = &mut self.state else {
+            return;
+        };
 
         match event {
             WindowEvent::CloseRequested => {
@@ -225,7 +236,7 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 match ks {
-                    ElementState::Pressed  => {
+                    ElementState::Pressed => {
                         state.keys.insert(key);
                         if key == KeyCode::ControlLeft || key == KeyCode::ControlRight {
                             state.ctrl_held = true;
@@ -274,7 +285,8 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let grabbed = state.window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if grabbed {
@@ -290,7 +302,7 @@ impl ApplicationHandler for App {
                 if state.cursor_grabbed {
                     let scroll = match delta {
                         winit::event::MouseScrollDelta::LineDelta(_, y) => y,
-                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.01,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => (p.y as f32) * 0.01,
                     };
                     state.tool_radius = (state.tool_radius + scroll * 0.2).clamp(0.2, 5.0);
                     log::info!("Tool radius: {:.1}", state.tool_radius);
@@ -323,8 +335,15 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: winit::event::DeviceId, event: DeviceEvent) {
-        let Some(state) = &mut self.state else { return };
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _id: winit::event::DeviceId,
+        event: DeviceEvent
+    ) {
+        let Some(state) = &mut self.state else {
+            return;
+        };
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             if state.cursor_grabbed {
                 state.mouse_delta.0 += dx as f32;
@@ -353,7 +372,9 @@ impl AppState {
 
         let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
             Some(s) => s as *mut SdfFeature,
-            None => return,
+            None => {
+                return;
+            }
         };
 
         // Safety: we hold exclusive access to renderer/sdf for this scope.
@@ -369,8 +390,13 @@ impl AppState {
 
         let edit = match self.active_tool {
             Tool::Dig => {
-                log::info!("Dig at ({:.1}, {:.1}, {:.1}) r={:.1}",
-                    pick.position.x, pick.position.y, pick.position.z, self.tool_radius);
+                log::info!(
+                    "Dig at ({:.1}, {:.1}, {:.1}) r={:.1}",
+                    pick.position.x,
+                    pick.position.y,
+                    pick.position.z,
+                    self.tool_radius
+                );
                 SdfEdit {
                     shape: SdfShapeType::Sphere,
                     op: BooleanOp::Subtraction,
@@ -381,8 +407,13 @@ impl AppState {
             }
             Tool::Build => {
                 let place_pos = pick.position + pick.normal * self.tool_radius * 0.5;
-                log::info!("Build at ({:.1}, {:.1}, {:.1}) r={:.1}",
-                    place_pos.x, place_pos.y, place_pos.z, self.tool_radius);
+                log::info!(
+                    "Build at ({:.1}, {:.1}, {:.1}) r={:.1}",
+                    place_pos.x,
+                    place_pos.y,
+                    place_pos.z,
+                    self.tool_radius
+                );
                 SdfEdit {
                     shape: SdfShapeType::Sphere,
                     op: BooleanOp::Union,
@@ -411,7 +442,9 @@ impl AppState {
 
         let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
             Some(s) => s,
-            None => return,
+            None => {
+                return;
+            }
         };
 
         self.edit_history_cursor -= 1;
@@ -431,7 +464,9 @@ impl AppState {
 
         let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
             Some(s) => s,
-            None => return,
+            None => {
+                return;
+            }
         };
 
         // Differential redo: add back just the one edit.
@@ -455,16 +490,28 @@ impl AppState {
         let right = glam::Vec3::new(cy, 0.0, sy);
         let up = glam::Vec3::Y;
 
-        if self.keys.contains(&KeyCode::KeyW)      { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS)      { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA)      { self.cam_pos -= right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD)      { self.cam_pos += right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space)     { self.cam_pos += up * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= up * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += up * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= up * SPEED * dt;
+        }
 
         let size = self.window.inner_size();
-        let aspect = size.width as f32 / size.height.max(1) as f32;
-        let time = self.renderer.frame_count() as f32 * 0.016;
+        let aspect = (size.width as f32) / (size.height.max(1) as f32);
+        let time = (self.renderer.frame_count() as f32) * 0.016;
 
         let camera = Camera::perspective(
             self.cam_pos,
@@ -474,12 +521,15 @@ impl AppState {
             aspect,
             0.1,
             5000.0,
-            time,
+            time
         );
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => { log::warn!("Surface error: {:?}", e); return; }
+            Err(e) => {
+                log::warn!("Surface error: {:?}", e);
+                return;
+            }
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
