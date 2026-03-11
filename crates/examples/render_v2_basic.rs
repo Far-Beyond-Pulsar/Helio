@@ -9,6 +9,7 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   3           — toggle RC probe visualisation
 //!   4           — toggle GPU timing printout (stderr)
+//!   5           — toggle light attenuation debug visualization
 //!   Escape      — release cursor / exit
 
 mod demo_portal;
@@ -132,6 +133,7 @@ struct AppState {
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
+    debug_lights: bool,  // Toggle light attenuation visualization (press 5)
 }
 
 impl App {
@@ -280,6 +282,7 @@ impl ApplicationHandler for App {
             probe_vis: false,
             sprite_w,
             sprite_h,
+            debug_lights: false,
         });
     }
 
@@ -356,6 +359,19 @@ impl ApplicationHandler for App {
                 },
                 ..
             } => { let _ = state.renderer.start_live_portal_default(); }
+
+            // ── Light debug visualization toggle ──────────────────────────────
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Digit5),
+                    ..
+                },
+                ..
+            } => {
+                state.debug_lights = !state.debug_lights;
+                log::info!("Light debug visualization: {}", if state.debug_lights { "ON" } else { "OFF" });
+            }
 
             // ── Keyboard held state ───────────────────────────────────────────
             WindowEvent::KeyboardInput {
@@ -479,10 +495,60 @@ impl AppState {
 
         // p0 bobs up/down per-frame; update its light and billboard position
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
+        let p1 = [-3.5f32, 2.0, -1.5];
+        let p2 = [3.5f32, 1.5, 1.5];
+
         self.renderer.update_light(self.light_p0_id, SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
         if !self.probe_vis && !self.billboard_ids.is_empty() {
             self.renderer.update_billboard(self.billboard_ids[0], BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]));
         }
+
+        // Draw light attenuation debug visualization (press 5 to toggle)
+        if self.debug_lights {
+            // Point light 0 (orange, animated, range=5.0)
+            self.renderer.debug_sphere(
+                glam::Vec3::from_array(p0),
+                5.0,  // attenuation range
+                [1.0, 0.55, 0.15, 0.3],  // semi-transparent orange
+                0.3,  // thin wireframe
+            );
+            // Draw vertical line to ground to show elevation
+            self.renderer.debug_line(
+                glam::Vec3::from_array(p0),
+                glam::Vec3::new(p0[0], 0.0, p0[2]),
+                [1.0, 0.55, 0.15, 0.5],
+                0.5,
+            );
+
+            // Point light 1 (blue, range=6.0)
+            self.renderer.debug_sphere(
+                glam::Vec3::from_array(p1),
+                6.0,  // attenuation range
+                [0.25, 0.5, 1.0, 0.3],  // semi-transparent blue
+                0.3,
+            );
+            self.renderer.debug_line(
+                glam::Vec3::from_array(p1),
+                glam::Vec3::new(p1[0], 0.0, p1[2]),
+                [0.25, 0.5, 1.0, 0.5],
+                0.5,
+            );
+
+            // Point light 2 (pink, range=6.0)
+            self.renderer.debug_sphere(
+                glam::Vec3::from_array(p2),
+                6.0,  // attenuation range
+                [1.0, 0.3, 0.5, 0.3],  // semi-transparent pink
+                0.3,
+            );
+            self.renderer.debug_line(
+                glam::Vec3::from_array(p2),
+                glam::Vec3::new(p2[0], 0.0, p2[2]),
+                [1.0, 0.3, 0.5, 0.5],
+                0.5,
+            );
+        }
+
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);
         }

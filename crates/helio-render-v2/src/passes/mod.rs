@@ -19,6 +19,7 @@ pub mod taa;
 pub mod indirect_dispatch;
 pub mod hiz_build;
 pub mod occlusion_cull;
+pub mod shadow_matrix;
 
 pub use geometry::GeometryPass;
 pub use shadow::{ShadowPass, ShadowCullLight};
@@ -39,3 +40,4 @@ pub use taa::{TaaPass, TaaConfig};
 pub use indirect_dispatch::IndirectDispatchPass;
 pub use hiz_build::{HiZBuildPass, HiZResources};
 pub use occlusion_cull::OcclusionCullPass;
+pub use shadow_matrix::ShadowMatrixPass;

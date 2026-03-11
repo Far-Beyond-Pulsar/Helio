@@ -7,6 +7,7 @@ use super::shadow_math::CSM_SPLITS;
 use crate::features::lighting::MAX_LIGHTS;
 use crate::buffer_pool::GpuBufferPool;
 use crate::gpu_scene::MaterialRange;
+use crate::passes::ShadowMatrixPass;
 
 impl Renderer {
     /// Create a new renderer
@@ -64,6 +65,9 @@ impl Renderer {
         // IndirectDispatchPass is driven from renderer.render() — NOT added to graph.
         let indirect_dispatch = IndirectDispatchPass::new();
 
+        // ShadowMatrixPass: GPU-driven shadow matrix computation (runs before shadow pass).
+        let shadow_matrix_pass = ShadowMatrixPass::new(&device)?;
+
         // Shared Arcs: written from render() after dispatch, read by geometry passes.
         let shared_indirect_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>> =
             Arc::new(Mutex::new(None));
@@ -77,10 +81,26 @@ impl Renderer {
         let debug_shapes: Arc<Mutex<Vec<DebugShape>>> = Arc::new(Mutex::new(Vec::new()));
         let debug_batch: Arc<Mutex<Option<DebugDrawBatch>>> = Arc::new(Mutex::new(None));
 
-        // Shadow matrix buffer: 16 lights × 6 faces × mat4x4<f32> = 6144 bytes
+        // Shadow matrix buffer: MAX_LIGHTS × 6 faces × mat4x4<f32>
         let shadow_matrix_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow Matrix Buffer"),
-            size: (MAX_LIGHTS as u64) * 6 * 64, // 16 × 6 × 64 bytes
+            size: (MAX_LIGHTS as u64) * 6 * 64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        // GPU-driven shadow matrix computation: per-light dirty flags (u32)
+        let shadow_dirty_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Dirty Flags Buffer"),
+            size: (MAX_LIGHTS as u64) * 4, // u32 per light
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+
+        // GPU-driven shadow matrix computation: per-light FNV hashes (u32)
+        let shadow_hash_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Hash Buffer"),
+            size: (MAX_LIGHTS as u64) * 4, // u32 per light
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
@@ -516,6 +536,8 @@ impl Renderer {
         let gpu_light_scene = gpu_light_scene::GpuLightScene::new(
             light_buf.clone(),
             shadow_matrix_buffer.clone(),
+            shadow_dirty_buffer.clone(),
+            shadow_hash_buffer.clone(),
         );
 
         Ok(Self {
@@ -581,6 +603,7 @@ impl Renderer {
             // ── GPU-driven indirect rendering ────────────────────────────────────
             buffer_pool,
             indirect_dispatch,
+            shadow_matrix_pass,
             shared_indirect_buf,
             shared_material_ranges,
             // ── Frame state ────────────────────────────────────────────────────
