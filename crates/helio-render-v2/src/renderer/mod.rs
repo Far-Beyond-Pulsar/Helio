@@ -265,6 +265,8 @@ pub struct Renderer {
     shared_indirect_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
     /// Per-material draw ranges in the indirect buffer (opaque). Shared with geometry passes.
     shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+    /// Raw GpuScene draw-call buffer, refreshed each frame. Used by ShadowPass for GPU indirect shadow cull.
+    shared_shadow_draw_call_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
 
     // Frame state
     frame_count: u64,
@@ -758,6 +760,10 @@ impl Renderer {
                 ranges.clear();
                 ranges.extend_from_slice(&self.gpu_scene.material_ranges);
             }
+
+            // Update raw draw-call buffer ref for ShadowPass GPU indirect cull.
+            *self.shared_shadow_draw_call_buf.lock().unwrap() =
+                if draw_count > 0 { Some(self.gpu_scene.draw_call_buffer().clone()) } else { None };
 
             // Run IndirectDispatchPass: GPU culls + writes indirect commands.
             if draw_count > 0 {

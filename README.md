@@ -98,9 +98,21 @@ cargo run --example render_v2_basic --release
 ```
 
 #### WASM example server (Ensure your browser ships with WASM and WebGPU (latest Chrome is a good bet))
+
+##### Univrsal (https://github.com/powershell/powershell/releases/latest)
+
 ```bash
+ ./build-wasm.ps1
  cargo run --release --bin helio-wasm-server
- ```
+```
+
+##### Unix
+
+```bash
+ ./build-wasm.sh
+ cargo run --release --bin helio-wasm-server
+```
+
 
 ### Controls (sky example)
 | Key | Action |

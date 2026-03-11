@@ -1,6 +1,7 @@
 //! Context types for features
 
 use crate::buffer_pool::SharedPoolBuffer;
+use crate::gpu_scene::MaterialRange;
 use crate::resources::ResourceManager;
 use crate::graph::RenderGraph;
 use crate::camera::Camera;
@@ -18,6 +19,8 @@ pub struct FeatureContext<'a> {
     pub surface_format: wgpu::TextureFormat,
     /// Arc clone of the device (needed by passes that create GPU resources at execution time)
     pub device_arc: Arc<wgpu::Device>,
+    /// Arc clone of the queue (needed by passes that write to GPU buffers at execution time)
+    pub queue_arc: Arc<wgpu::Queue>,
 
     // ── Inputs from Renderer (always set) ──────────────────────────────────
     /// Shared draw list — ShadowsFeature passes this to ShadowPass
@@ -41,6 +44,13 @@ pub struct FeatureContext<'a> {
     pub pool_vertex_buffer: SharedPoolBuffer,
     /// Unified pool index buffer — ShadowPass uses pool-allocated meshes.
     pub pool_index_buffer: SharedPoolBuffer,
+    /// Shared opaque draw-call buffer from GpuScene (Arc refreshed by Renderer each frame).
+    /// ShadowsFeature passes this to ShadowPass for GPU indirect shadow culling.
+    pub shared_draw_call_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
+    /// Per-material draw ranges — shared with GBufferPass and ShadowPass.
+    pub shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+    /// Whether MULTI_DRAW_INDIRECT is available on this device.
+    pub has_multi_draw: bool,
 
     // ── Outputs set by features during register() ───────────────────────────
     /// Light storage buffer set by LightingFeature
@@ -63,6 +73,7 @@ impl<'a> FeatureContext<'a> {
         resources: &'a mut ResourceManager,
         surface_format: wgpu::TextureFormat,
         device_arc: Arc<wgpu::Device>,
+        queue_arc: Arc<wgpu::Queue>,
         draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shadow_draw_list: Arc<Mutex<Vec<DrawCall>>>,
         shadow_matrix_buffer: Arc<wgpu::Buffer>,
@@ -72,6 +83,9 @@ impl<'a> FeatureContext<'a> {
         instance_data_buffer: &'a wgpu::Buffer,
         pool_vertex_buffer: SharedPoolBuffer,
         pool_index_buffer: SharedPoolBuffer,
+        shared_draw_call_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
+        shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
+        has_multi_draw: bool,
     ) -> Self {
         Self {
             device,
@@ -80,6 +94,7 @@ impl<'a> FeatureContext<'a> {
             resources,
             surface_format,
             device_arc,
+            queue_arc,
             draw_list,
             shadow_draw_list,
             shadow_matrix_buffer,
@@ -89,6 +104,9 @@ impl<'a> FeatureContext<'a> {
             instance_data_buffer,
             pool_vertex_buffer,
             pool_index_buffer,
+            shared_draw_call_buf,
+            shared_material_ranges,
+            has_multi_draw,
             light_buffer: None,
             shadow_atlas_view: None,
             shadow_sampler: None,

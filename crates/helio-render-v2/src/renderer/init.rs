@@ -270,6 +270,8 @@ impl Renderer {
             &defines,
             PipelineVariant::DepthOnly,
         )?;
+        let has_multi_draw = device.features().contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
+
         let depth_prepass = DepthPrepassPass::new(
             depth_pipeline.clone(),
             pool_vb.clone(),
@@ -277,6 +279,7 @@ impl Renderer {
             shared_indirect_buf.clone(),
             shared_material_ranges.clone(),
             default_material_bind_group.clone(),
+            has_multi_draw,
         );
         graph.add_pass(depth_prepass);
 
@@ -294,14 +297,18 @@ impl Renderer {
             pool_ib.clone(),
             shared_indirect_buf.clone(),
             shared_material_ranges.clone(),
+            has_multi_draw,
         );
         graph.add_pass(gbuffer_pass);
 
         // ── Register features (adds BillboardPass etc. after GeometryPass) ───────
+        let shared_shadow_draw_call_buf: Arc<Mutex<Option<Arc<wgpu::Buffer>>>> =
+            Arc::new(Mutex::new(None));
         let (feat_light_buf, feat_shadow_view, feat_shadow_sampler, feat_rc_view, feat_rc_bounds) = {
             let mut ctx = FeatureContext::new(
                 &device, &queue, &mut graph, &mut resources, config.surface_format,
                 device.clone(),
+                queue.clone(),
                 draw_list.clone(),
                 shadow_draw_list.clone(),
                 shadow_matrix_buffer.clone(),
@@ -311,6 +318,9 @@ impl Renderer {
                 gpu_scene.instance_buffer(),
                 pool_vb.clone(),
                 pool_ib.clone(),
+                shared_shadow_draw_call_buf.clone(),
+                shared_material_ranges.clone(),
+                has_multi_draw,
             );
             features.register_all(&mut ctx)?;
             (ctx.light_buffer, ctx.shadow_atlas_view, ctx.shadow_sampler,
@@ -606,6 +616,7 @@ impl Renderer {
             shadow_matrix_pass,
             shared_indirect_buf,
             shared_material_ranges,
+            shared_shadow_draw_call_buf,
             // ── Frame state ────────────────────────────────────────────────────
             frame_count: 0,
             width: config.width,

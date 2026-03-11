@@ -16,6 +16,7 @@ pub struct DepthPrepassPass {
     shared_indirect: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
     shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
     default_material_bg: Arc<wgpu::BindGroup>,
+    has_multi_draw: bool,
 }
 
 impl DepthPrepassPass {
@@ -26,8 +27,9 @@ impl DepthPrepassPass {
         shared_indirect: Arc<Mutex<Option<Arc<wgpu::Buffer>>>>,
         shared_material_ranges: Arc<Mutex<Vec<MaterialRange>>>,
         default_material_bg: Arc<wgpu::BindGroup>,
+        has_multi_draw: bool,
     ) -> Self {
-        Self { pipeline, pool_vertex_buffer, pool_index_buffer, shared_indirect, shared_material_ranges, default_material_bg }
+        Self { pipeline, pool_vertex_buffer, pool_index_buffer, shared_indirect, shared_material_ranges, default_material_bg, has_multi_draw }
     }
 }
 
@@ -73,11 +75,12 @@ impl RenderPass for DepthPrepassPass {
         let ib = self.pool_index_buffer .lock().unwrap().clone();
         pass.set_vertex_buffer(0, vb.slice(..));
         pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-        // Use per-call draw_indexed_indirect rather than multi_draw_indexed_indirect.
-        // multi_draw_indexed_indirect requires the multiDrawIndirect Vulkan device feature
-        // which must be explicitly requested at device creation.
-        for j in 0..draw_count {
-            pass.draw_indexed_indirect(&indirect_buf, j as u64 * 20);
+        if self.has_multi_draw {
+            pass.multi_draw_indexed_indirect(&indirect_buf, 0, draw_count);
+        } else {
+            for j in 0..draw_count {
+                pass.draw_indexed_indirect(&indirect_buf, j as u64 * 20);
+            }
         }
         Ok(())
     }

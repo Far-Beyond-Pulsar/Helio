@@ -145,14 +145,17 @@ impl Feature for ShadowsFeature {
             ctx.light_face_counts.clone(),
             ctx.shadow_cull_lights.clone(),
             layer_views,
-            ctx.shadow_draw_list.clone(),
             ctx.shadow_matrix_buffer.clone(),
             ctx.light_count_arc.clone(),
             ctx.device_arc.clone(),
+            ctx.queue_arc.clone(),
             &ctx.resources.bind_group_layouts.material,
             &ctx.instance_data_buffer,
             ctx.pool_vertex_buffer.clone(),
             ctx.pool_index_buffer.clone(),
+            ctx.shared_draw_call_buf.clone(),
+            ctx.shared_material_ranges.clone(),
+            ctx.has_multi_draw,
         ));
 
         log::info!(

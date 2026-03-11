@@ -220,9 +220,6 @@ pub struct GpuScene {
     // ── CPU mirror + dirty tracking ──────────────────────────────────────
     /// CPU-side copy of the instance data (indexed by slot).
     cpu_data: Vec<GpuInstanceData>,
-    /// CPU-side copy of just the mat4 transforms (indexed by slot).
-    /// Kept in sync with `cpu_data` — used for hash computation and bounds.
-    cpu_transforms: Vec<[f32; 16]>,
     /// CPU-side copy of world-space AABBs (indexed by slot).
     cpu_aabbs: Vec<GpuInstanceAabb>,
     /// Bitset: one bit per slot.  Set when slot data changes, cleared after upload.
@@ -337,7 +334,6 @@ impl GpuScene {
             draw_call_dirty: false,
             material_ranges: Vec::new(),
             cpu_data: vec![GpuInstanceData::zeroed(); capacity as usize],
-            cpu_transforms: vec![[0.0; 16]; capacity as usize],
             cpu_aabbs: vec![GpuInstanceAabb::zeroed(); capacity as usize],
             dirty_bits: vec![0u64; words],
             dirty_range: None,
@@ -393,7 +389,6 @@ impl GpuScene {
         // Write to CPU mirrors
         let mat = transform.to_cols_array();
         self.cpu_data[slot as usize] = instance;
-        self.cpu_transforms[slot as usize] = mat;
         self.cpu_aabbs[slot as usize] = GpuInstanceAabb {
             aabb_min: world_aabb.min.into(),
             _pad0: 0.0,
@@ -433,7 +428,6 @@ impl GpuScene {
         if let Some(proxy) = self.proxies.remove(&id.0) {
             // Zero out the slot so shaders don't read stale data
             self.cpu_data[proxy.slot as usize] = GpuInstanceData::zeroed();
-            self.cpu_transforms[proxy.slot as usize] = [0.0; 16];
             self.cpu_aabbs[proxy.slot as usize] = GpuInstanceAabb::zeroed();
             self.mark_dirty(proxy.slot);
             self.allocator.free(proxy.slot);
@@ -459,7 +453,6 @@ impl GpuScene {
                 let local_aabb = Aabb::new(proxy.local_aabb_min.into(), proxy.local_aabb_max.into());
                 let world_aabb = local_aabb.transform(&transform);
                 self.cpu_data[slot as usize] = instance;
-                self.cpu_transforms[slot as usize] = mat;
                 self.cpu_aabbs[slot as usize] = GpuInstanceAabb {
                     aabb_min: world_aabb.min.into(),
                     _pad0: 0.0,
@@ -502,7 +495,7 @@ impl GpuScene {
             proxy.local_bounds_radius = radius;
             let slot = proxy.slot;
             let center = proxy.local_bounds_center;
-            let mat = glam::Mat4::from_cols_array(&self.cpu_transforms[slot as usize]);
+            let mat = glam::Mat4::from_cols_array(&self.cpu_data[slot as usize].transform);
             let instance = GpuInstanceData::from_transform(mat, center, radius);
             self.cpu_data[slot as usize] = instance;
             self.mark_dirty(slot);
@@ -835,7 +828,6 @@ impl GpuScene {
         gpu_transfer::track_alloc(buffer_size + aabb_size);
 
         self.cpu_data.resize(new_capacity as usize, GpuInstanceData::zeroed());
-        self.cpu_transforms.resize(new_capacity as usize, [0.0; 16]);
         self.cpu_aabbs.resize(new_capacity as usize, GpuInstanceAabb::zeroed());
 
         let words = (new_capacity as usize + 63) / 64;
