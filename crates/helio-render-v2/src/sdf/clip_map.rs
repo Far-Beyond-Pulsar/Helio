@@ -61,6 +61,8 @@ pub struct ClipLevel {
 pub struct SdfClipMap {
     levels: Vec<ClipLevel>,
     grid_dim: u32,
+    // TODO: base_voxel_size used for clip map level scaling once SDF GI is active.
+    #[allow(dead_code)]
     base_voxel_size: f32,
     level_count: u32,
     pub clip_params_buffer: Option<Arc<wgpu::Buffer>>,

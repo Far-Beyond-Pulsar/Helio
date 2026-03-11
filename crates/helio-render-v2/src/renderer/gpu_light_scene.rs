@@ -41,8 +41,6 @@ use crate::scene::{LightId, SceneLight};
 
 // Shadow math functions now on GPU (shadow_matrices.wgsl)
 
-const FACES_PER_LIGHT: usize = 6;
-
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Internal record for one persistent light slot.

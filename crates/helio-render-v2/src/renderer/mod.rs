@@ -137,7 +137,8 @@ pub struct Renderer {
     // Bind groups
     global_bind_group: wgpu::BindGroup,
     lighting_bind_group: Arc<wgpu::BindGroup>,
-    lighting_layout: Arc<wgpu::BindGroupLayout>,
+    /// Kept alive so lighting_bind_group resources are valid; not read after init.
+    _lighting_layout: Arc<wgpu::BindGroupLayout>,
     default_material_bind_group: Arc<wgpu::BindGroup>,
 
     // Default 1×1 texture views + sampler shared by all materials
@@ -150,12 +151,12 @@ pub struct Renderer {
     // GPU batch built from debug_shapes before graph execution.
     debug_batch: Arc<Mutex<Option<DebugDrawBatch>>>,
 
-    // Light buffer for scene writes
-    lighting_shadow_view: Arc<wgpu::TextureView>,
-    lighting_shadow_sampler: Arc<wgpu::Sampler>,
-    lighting_env_cube_view: Arc<wgpu::TextureView>,
-    lighting_rc_view: Arc<wgpu::TextureView>,
-    lighting_env_sampler: Arc<wgpu::Sampler>,
+    // Light buffer for scene writes — views/samplers kept alive for lighting bind group.
+    _lighting_shadow_view: Arc<wgpu::TextureView>,
+    _lighting_shadow_sampler: Arc<wgpu::Sampler>,
+    _lighting_env_cube_view: Arc<wgpu::TextureView>,
+    _lighting_rc_view: Arc<wgpu::TextureView>,
+    _lighting_env_sampler: Arc<wgpu::Sampler>,
     // Shared light count for ShadowPass (updated each frame before graph exec)
     light_count_arc: Arc<AtomicU32>,
     // Per-light active face counts: 6=point, 4=directional, 1=spot
@@ -180,7 +181,8 @@ pub struct Renderer {
 
     // Sky pass resources
     sky_uniform_buffer: wgpu::Buffer,
-    sky_bind_group: Arc<wgpu::BindGroup>,
+    /// Held here to keep sky bind group alive; SkyPass holds its own Arc.
+    _sky_bind_group: Arc<wgpu::BindGroup>,
 
     // Depth buffer (Depth32Float, recreated on resize)
     depth_texture:      wgpu::Texture,
@@ -199,9 +201,10 @@ pub struct Renderer {
     deferred_bg: Arc<Mutex<Arc<wgpu::BindGroup>>>,
 
     // ── Post-processing ────────────────────────────────────────────────────
-    enable_ssao: bool,
-    ssao_texture: Option<wgpu::Texture>,
-    ssao_view:    Option<wgpu::TextureView>,
+    // TODO: SSAO pass is not yet wired into the render graph; kept as placeholder.
+    _enable_ssao: bool,
+    _ssao_texture: Option<wgpu::Texture>,
+    _ssao_view:    Option<wgpu::TextureView>,
 
     aa_mode: AntiAliasingMode,
     pre_aa_texture: wgpu::Texture,

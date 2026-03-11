@@ -37,7 +37,8 @@ pub struct ResourceManager {
     persistent_textures: HashMap<ResourceId, wgpu::Texture>,
     persistent_buffers: HashMap<ResourceId, wgpu::Buffer>,
 
-    // Bind group cache
+    // TODO: Bind group caching — dedup bind group allocations per frame.
+    #[allow(dead_code)]
     bind_group_cache: HashMap<BindGroupKey, Arc<wgpu::BindGroup>>,
 }
 

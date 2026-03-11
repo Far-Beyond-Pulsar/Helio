@@ -14,6 +14,9 @@ use helio_live_portal::{
 };
 use std::collections::HashMap;
 
+// TODO: build_portal_scene_layout is called when pushing a frame to the live portal.
+// Wire into the render loop once helio-live-portal streaming is active.
+#[allow(dead_code)]
 pub(super) fn build_portal_scene_layout(scene: &Scene, camera: &Camera) -> PortalSceneLayout {
     let objects = scene.objects.iter().enumerate().map(|(id, obj)| PortalSceneObject {
         id: id as u32,

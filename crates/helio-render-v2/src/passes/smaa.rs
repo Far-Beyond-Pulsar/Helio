@@ -9,6 +9,8 @@ use std::sync::Arc;
 use crate::graph::{RenderPass, PassContext, PassResourceBuilder, ResourceHandle};
 use crate::Result;
 
+// TODO: SMAA implementation is incomplete — execute() not yet wired into the frame graph.
+#[allow(dead_code)]
 pub struct SmaaPass {
     edge_detection_pipeline: Arc<wgpu::RenderPipeline>,
     blending_weight_pipeline: Arc<wgpu::RenderPipeline>,

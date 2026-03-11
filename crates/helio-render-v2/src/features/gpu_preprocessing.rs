@@ -61,7 +61,10 @@ pub struct PreprocessOutput {
     pub _pad: u32,
 }
 
-/// GPU preprocessing feature: compute-side light culling and sorting
+/// GPU preprocessing feature: compute-side light culling and sorting.
+/// TODO: Wire into the frame graph — pipeline/bind_group/enabled are placeholders
+/// for GPU skinning, morphing, and indirect draw list generation.
+#[allow(dead_code)]
 pub struct GpuPreprocessingFeature {
     enabled: bool,
     pipeline: Option<Arc<wgpu::ComputePipeline>>,
