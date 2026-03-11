@@ -27,7 +27,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # server-only dependencies – only needed when compiling the host binary
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tiny_http = "0.10"
-mime_guess = "2.0"
 webbrowser = "0.6"
 
 

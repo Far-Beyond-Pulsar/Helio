@@ -479,7 +479,7 @@ async fn run() -> Result<(), JsValue> {
                 surface.configure(&device, &cfg);
             }
 
-            renderer.borrow_mut().resize(new_w, new_h);
+            renderer.borrow_mut().set_render_size(new_w, new_h);
         }) as Box<dyn FnMut(_)>);
         window
             .add_event_listener_with_callback("resize", resize_closure.as_ref().unchecked_ref())
@@ -509,7 +509,7 @@ async fn run() -> Result<(), JsValue> {
 
             // look around with mouse (after or during auto phase)
             yaw += i.mouse_dx * 0.002;
-            pitch += i.mouse_dy * 0.002;
+            pitch -= i.mouse_dy * 0.002;
             i.mouse_dx = 0.0;
             i.mouse_dy = 0.0;
             pitch = pitch.clamp(-1.5, 1.5);
@@ -568,23 +568,20 @@ async fn run() -> Result<(), JsValue> {
             i.last_keys = i.keys.clone();
         }
 
-        // check if the canvas display size changed (handles fullscreen, browser
-        // resize, DPI changes, etc.) and reconfigure the surface + renderer.
-        // clientWidth/Height are CSS pixels; multiply by devicePixelRatio to get
-        // physical pixels matching what winit provides on native.
+        // Sync canvas backing-store with CSS layout size every frame.
         let dpr = web_sys::window().unwrap().device_pixel_ratio();
-        let display_w = (canvas.client_width() as f64 * dpr).max(1.0) as u32;
-        let display_h = (canvas.client_height() as f64 * dpr).max(1.0) as u32;
-        if display_w != canvas.width() || display_h != canvas.height() {
-            canvas.set_width(display_w);
-            canvas.set_height(display_h);
+        let target_w = (canvas.client_width() as f64 * dpr).max(1.0) as u32;
+        let target_h = (canvas.client_height() as f64 * dpr).max(1.0) as u32;
+        if target_w != canvas.width() || target_h != canvas.height() {
+            canvas.set_width(target_w);
+            canvas.set_height(target_h);
             {
                 let mut cfg = config.borrow_mut();
-                cfg.width = display_w;
-                cfg.height = display_h;
+                cfg.width = target_w;
+                cfg.height = target_h;
                 surface.configure(&device, &cfg);
             }
-            renderer.borrow_mut().resize(display_w, display_h);
+            renderer.borrow_mut().set_render_size(target_w, target_h);
         }
 
         // recalc projection using current canvas size so it stays correct when

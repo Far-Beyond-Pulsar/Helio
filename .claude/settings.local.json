@@ -22,7 +22,8 @@
       "Bash(dir:*)",
       "Bash(copy:*)",
       "Bash(cargo check:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(del:*)"
     ]
   }
 }
