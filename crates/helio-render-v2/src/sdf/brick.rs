@@ -428,6 +428,7 @@ impl BrickMap {
 
     /// Toroidal scroll: given old/new volume bounds, only process newly-exposed
     /// edge bricks (L-shaped shell). Interior bricks keep their atlas data.
+    /// Maintains active_bricks/edit_lists incrementally (no full scan).
     /// Returns the number of dirty (newly-entered) bricks.
     pub fn scroll_toroidal(
         &mut self,
@@ -467,7 +468,9 @@ impl BrickMap {
         self.dirty_bricks.clear();
         self.dirty_edit_lists.clear();
 
-        // Phase 1: Free bricks that left the volume
+        // Phase 1: Free bricks that left the volume and remove from active list
+        // Build set of grid indices to remove for O(1) lookup
+        let mut removed_grid_indices = std::collections::HashSet::new();
         for wz in old_wb_min[2]..=old_wb_max[2] {
             for wy in old_wb_min[1]..=old_wb_max[1] {
                 for wx in old_wb_min[0]..=old_wb_max[0] {
@@ -485,12 +488,29 @@ impl BrickMap {
                         self.brick_index[grid_idx] = EMPTY_BRICK;
                         self.brick_world_coords[grid_idx] = [i32::MAX; 3];
                         self.stored_edit_lists[grid_idx].clear();
+                        removed_grid_indices.insert(grid_idx as u32);
                     }
                 }
             }
         }
 
-        // Phase 2: Process ONLY newly-exposed shell bricks
+        // Remove freed bricks from active_bricks/edit_lists incrementally
+        if !removed_grid_indices.is_empty() {
+            let mut write = 0;
+            for read in 0..self.active_bricks.len() {
+                if !removed_grid_indices.contains(&self.active_bricks[read]) {
+                    if write != read {
+                        self.active_bricks[write] = self.active_bricks[read];
+                        self.edit_lists[write] = std::mem::take(&mut self.edit_lists[read]);
+                    }
+                    write += 1;
+                }
+            }
+            self.active_bricks.truncate(write);
+            self.edit_lists.truncate(write);
+        }
+
+        // Phase 2: Process ONLY newly-exposed shell bricks and append to active list
         let bounds = cached_bounds;
         let mut hit_buf = Vec::new();
 
@@ -534,7 +554,10 @@ impl BrickMap {
                         }
                         self.stored_edit_lists[grid_idx] = elist.clone();
                         self.dirty_bricks.push(grid_idx as u32);
-                        self.dirty_edit_lists.push(elist);
+                        self.dirty_edit_lists.push(elist.clone());
+                        // Append to active list directly
+                        self.active_bricks.push(grid_idx as u32);
+                        self.edit_lists.push(elist);
                     } else {
                         if self.brick_index[grid_idx] != EMPTY_BRICK
                             && self.brick_world_coords[grid_idx] == [wx, wy, wz]
@@ -546,16 +569,6 @@ impl BrickMap {
                         }
                     }
                 }
-            }
-        }
-
-        // Phase 3: Rebuild active_bricks/edit_lists from stored state
-        self.active_bricks.clear();
-        self.edit_lists.clear();
-        for i in 0..(bgd * bgd * bgd) as usize {
-            if self.brick_index[i] != EMPTY_BRICK {
-                self.active_bricks.push(i as u32);
-                self.edit_lists.push(self.stored_edit_lists[i].clone());
             }
         }
 
@@ -751,12 +764,19 @@ impl BrickMap {
         } else {
             let slot = self.atlas_next_slot;
             let max_slots = self.atlas_bricks_per_axis.pow(3);
-            assert!(
-                slot < max_slots,
-                "Brick atlas overflow: tried to allocate slot {} but max is {}",
-                slot,
-                max_slots
-            );
+            if slot >= max_slots {
+                // Atlas overflow: gracefully degrade by recycling the last slot.
+                // The brick that previously owned this slot will have stale data,
+                // but this prevents a panic and allows the engine to continue.
+                // In practice this will show as visual glitches in the oldest brick
+                // rather than a crash.
+                log::warn!(
+                    "Brick atlas overflow: {} slots exhausted, recycling last slot. \
+                     Consider increasing atlas_bricks_per_axis.",
+                    max_slots
+                );
+                return max_slots - 1;
+            }
             self.atlas_next_slot += 1;
             slot
         }

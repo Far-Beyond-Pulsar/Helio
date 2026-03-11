@@ -148,45 +148,50 @@ fn level_uvw(level: u32, world_pos: vec3<f32>) -> vec3<f32> {
 }
 
 // ─── Intra-brick trilinear sampling with ghost voxels ───────────────────────
+// Returns the sampled distance, or `brick_skip` for EMPTY bricks.
+// When `ray_dir` is provided (non-zero), an EMPTY brick returns the distance
+// to the exit of its AABB so the ray can jump past it in one step.
 
-fn sample_level(level: u32, world_pos: vec3<f32>) -> f32 {
+fn sample_level_ray(level: u32, world_pos: vec3<f32>, ray_dir: vec3<f32>) -> f32 {
     let lvl = get_level(level);
     let vs = lvl.voxel_size;
     let bs = lvl.brick_size;
     let bgd = lvl.brick_grid_dim;
     let bpa = lvl.atlas_bricks_per_axis;
-    let brick_skip = vs * f32(bs);
+    let brick_world_size = vs * f32(bs);
+    let brick_skip = brick_world_size;
 
     if any(world_pos < lvl.volume_min) || any(world_pos > lvl.volume_max) {
         return brick_skip;
     }
 
-    // 1. Continuous voxel coordinate (world_pos / vs).
-    //    This is the fundamental coordinate — floor gives the integer voxel,
-    //    the fractional part gives interpolation weights.
     let voxel_f = world_pos / vs;
     let world_voxel = vec3<i32>(floor(voxel_f));
-
-    // 2. Toroidal wrapping — must match the CPU's world_to_grid() exactly.
-    //    CPU: grid_idx = ((world_brick % bgd) + bgd) % bgd for each axis.
-    //    world_brick = floor(world_pos / brick_world_size) = floor(voxel_f / bs).
-    //    Using the continuous voxel coordinate avoids integer floor-division issues
-    //    with negative coordinates (WGSL / truncates toward zero, not -inf).
     let bgdi = i32(bgd);
     let world_brick = vec3<i32>(floor(voxel_f / f32(bs)));
     let brick_coord = vec3<u32>(((world_brick % bgdi) + bgdi) % bgdi);
-
-    // Voxel's position within the brick — offset from the brick's world-voxel base
     let local_voxel = vec3<u32>(world_voxel - world_brick * i32(bs));
     let brick_linear = brick_coord.x + brick_coord.y * bgd + brick_coord.z * bgd * bgd;
     let idx_offset = level * bgd * bgd * bgd;
     let atlas_slot = all_brick_indices[idx_offset + brick_linear];
 
     if atlas_slot == 0xFFFFFFFFu {
+        // EMPTY brick: compute distance to exit this brick's AABB so the
+        // ray marcher can skip the entire brick in one step (DDA skip).
+        if dot(ray_dir, ray_dir) > 0.0 {
+            let brick_min = vec3<f32>(world_brick) * brick_world_size;
+            let brick_max = brick_min + vec3<f32>(brick_world_size);
+            let inv_dir = 1.0 / ray_dir;
+            let t0 = (brick_min - world_pos) * inv_dir;
+            let t1 = (brick_max - world_pos) * inv_dir;
+            let t_max = max(t0, t1);
+            let t_exit = min(min(t_max.x, t_max.y), t_max.z);
+            // Return exit distance + small epsilon to land just inside the next brick
+            return max(t_exit + vs * 0.1, vs);
+        }
         return brick_skip;
     }
 
-    // 4. Atlas origin for this brick (padded stride)
     let atlas_brick = vec3<u32>(
         atlas_slot % bpa,
         (atlas_slot / bpa) % bpa,
@@ -194,20 +199,13 @@ fn sample_level(level: u32, world_pos: vec3<f32>) -> f32 {
     );
     let atlas_origin = vec3<f32>(atlas_brick * PADDED_SIZE);
 
-    // 5. Continuous local position within the brick [0.0, 8.0+).
-    //    Corner convention: texel k stores SDF at (brick_world_base + k) * vs.
-    //    local_voxel = position within the brick (integer part from grid coords),
-    //    sub_voxel = sub-voxel fractional part from the continuous world coords.
     let sub_voxel = voxel_f - vec3<f32>(world_voxel);
     let local_f = vec3<f32>(local_voxel) + sub_voxel;
 
-    // 6. Trilinear interpolation — direct floor/fract, no offset needed.
-    //    All texel indices stay in [0..8], fully within the padded 9^3 region.
     let base = vec3<i32>(floor(local_f));
     let frac = local_f - vec3<f32>(vec3<i32>(floor(local_f)));
     let b = base + vec3<i32>(atlas_origin);
 
-    // All 8 corners within padded [0..8] range — no sentinel possible
     let c000 = load_atlas(level, b);
     let c100 = load_atlas(level, b + vec3<i32>(1, 0, 0));
     let c010 = load_atlas(level, b + vec3<i32>(0, 1, 0));
@@ -226,7 +224,12 @@ fn sample_level(level: u32, world_pos: vec3<f32>) -> f32 {
     return mix(c0, c1, frac.z);
 }
 
+// Convenience wrapper for contexts that don't have a ray direction (normals).
 fn sample_distance(world_pos: vec3<f32>) -> f32 {
+    return sample_distance_ray(world_pos, vec3<f32>(0.0));
+}
+
+fn sample_distance_ray(world_pos: vec3<f32>, ray_dir: vec3<f32>) -> f32 {
     // Walk from finest to coarsest, picking the first level that both
     // contains the point AND has a populated brick at this position.
     // This prevents EMPTY_BRICK gaps at the finest level from causing
@@ -236,7 +239,7 @@ fn sample_distance(world_pos: vec3<f32>) -> f32 {
     for (var level = 0u; level < clip_params.level_count; level++) {
         let uvw = level_uvw(level, world_pos);
         if all(uvw >= vec3<f32>(0.0)) && all(uvw <= vec3<f32>(1.0)) {
-            let d = sample_level(level, world_pos);
+            let d = sample_level_ray(level, world_pos, ray_dir);
             let lvl = get_level(level);
             let brick_skip = lvl.voxel_size * f32(lvl.brick_size);
             // If this level returned brick_skip, the brick is EMPTY — try coarser
@@ -244,6 +247,11 @@ fn sample_distance(world_pos: vec3<f32>) -> f32 {
                 finest = i32(level);
                 d_fine = d;
                 break;
+            }
+            // For DDA skip: if the level returned a distance > brick_skip
+            // (exit distance past the brick AABB), use it directly as a skip
+            if d > brick_skip + 0.01 {
+                return d;
             }
         }
     }
@@ -263,13 +271,18 @@ fn sample_distance(world_pos: vec3<f32>) -> f32 {
         );
         let blend_width = 0.1;
         if edge_dist < blend_width {
-            let d_coarse = sample_level(u32(finest + 1), world_pos);
+            let d_coarse = sample_level_ray(u32(finest + 1), world_pos, vec3<f32>(0.0));
             let lvl_c = get_level(u32(finest + 1));
             let brick_skip_c = lvl_c.voxel_size * f32(lvl_c.brick_size);
-            // Only blend if the coarser level has a valid brick
+            let t = smoothstep(0.0, blend_width, edge_dist);
             if d_coarse < brick_skip_c - 0.01 {
-                let t = smoothstep(0.0, blend_width, edge_dist);
+                // Coarser level has valid data: smooth blend
                 return mix(d_coarse, d_fine, t);
+            } else {
+                // Coarser level has no brick: gradually inflate the fine
+                // distance toward the level boundary to soften the cutoff
+                // instead of a hard pop.
+                return d_fine + (1.0 - t) * lvl_c.voxel_size;
             }
         }
     }
@@ -278,15 +291,16 @@ fn sample_distance(world_pos: vec3<f32>) -> f32 {
 }
 
 fn estimate_normal(p: vec3<f32>) -> vec3<f32> {
-    // Use the finest level's voxel size for normal estimation epsilon
+    // Tetrahedron technique (IQ): 4 samples instead of 6 central differences.
     let lvl = get_level(0u);
     let e = lvl.voxel_size;
-    let n = vec3<f32>(
-        sample_distance(p + vec3<f32>(e, 0.0, 0.0)) - sample_distance(p - vec3<f32>(e, 0.0, 0.0)),
-        sample_distance(p + vec3<f32>(0.0, e, 0.0)) - sample_distance(p - vec3<f32>(0.0, e, 0.0)),
-        sample_distance(p + vec3<f32>(0.0, 0.0, e)) - sample_distance(p - vec3<f32>(0.0, 0.0, e)),
+    let k = vec2<f32>(1.0, -1.0);
+    return normalize(
+        k.xyy * sample_distance(p + k.xyy * e) +
+        k.yyx * sample_distance(p + k.yyx * e) +
+        k.yxy * sample_distance(p + k.yxy * e) +
+        k.xxx * sample_distance(p + k.xxx * e)
     );
-    return normalize(n);
 }
 
 fn intersect_aabb(ray_origin: vec3<f32>, ray_dir_inv: vec3<f32>, box_min: vec3<f32>, box_max: vec3<f32>) -> vec2<f32> {
@@ -333,13 +347,13 @@ fn fs_main(in: VertexOutput) -> FragOutput {
     // solid), march forward at fixed steps until we exit the surface.  Without
     // this, the very first sample triggers `d < min_dist` and creates a false
     // hit at the camera position, causing the visual artifacts.
-    let d_start = sample_distance(ray_origin + ray_dir * t);
+    let d_start = sample_distance_ray(ray_origin + ray_dir * t, ray_dir);
     var inside_solid = d_start < 0.0;
     if inside_solid {
         for (var skip = 0u; skip < 128u; skip++) {
             t += step_size;
             if t > max_t { break; }
-            let d_skip = sample_distance(ray_origin + ray_dir * t);
+            let d_skip = sample_distance_ray(ray_origin + ray_dir * t, ray_dir);
             if d_skip >= min_dist {
                 inside_solid = false;
                 break;
@@ -351,14 +365,18 @@ fn fs_main(in: VertexOutput) -> FragOutput {
     if !inside_solid {
         for (var i = 0u; i < 256u; i++) {
             let p = ray_origin + ray_dir * t;
-            let d = sample_distance(p);
+            let d = sample_distance_ray(p, ray_dir);
 
             if d < min_dist {
                 hit = true;
                 break;
             }
 
-            t += max(d, finest_lvl.voxel_size * 0.25);
+            // Distance-adaptive minimum step: near the camera use finest voxel
+            // resolution; far away use a step proportional to distance since
+            // sub-pixel detail is invisible (IQ terrain marching technique).
+            let adaptive_min = max(finest_lvl.voxel_size * 0.25, t * 0.002);
+            t += max(d, adaptive_min);
 
             if t > max_t {
                 break;
@@ -392,7 +410,7 @@ fn fs_main(in: VertexOutput) -> FragOutput {
         for (var level = 0u; level < clip_params.level_count; level++) {
             let uvw = level_uvw(level, hit_pos);
             if all(uvw >= vec3<f32>(0.0)) && all(uvw <= vec3<f32>(1.0)) {
-                let d = sample_level(level, hit_pos);
+                let d = sample_level_ray(level, hit_pos, vec3<f32>(0.0));
                 let lvl_check = get_level(level);
                 let brick_skip_check = lvl_check.voxel_size * f32(lvl_check.brick_size);
                 if d < brick_skip_check - 0.01 {

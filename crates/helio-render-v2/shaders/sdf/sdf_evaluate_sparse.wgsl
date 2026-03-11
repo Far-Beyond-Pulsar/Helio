@@ -1,8 +1,8 @@
 // SDF Sparse Brick Evaluation Compute Shader
 //
 // Evaluates the SDF edit list for active bricks only.
-// One workgroup per active brick, @workgroup_size(128, 1, 1).
-// 128 threads share 729 (9^3) voxels via strided iteration.
+// One workgroup per active brick, @workgroup_size(256, 1, 1).
+// 256 threads share 729 (9^3) voxels via strided iteration.
 
 struct SdfGridParams {
     volume_min:           vec3<f32>,
@@ -268,7 +268,7 @@ fn atlas_linear_index(coord: vec3<u32>) -> u32 {
 const PADDED_SIZE: u32 = 9u;
 const VOXELS_PER_BRICK: u32 = 729u; // 9 * 9 * 9
 
-@compute @workgroup_size(128, 1, 1)
+@compute @workgroup_size(256, 1, 1)
 fn cs_evaluate_sparse(
     @builtin(local_invocation_index) lid: u32,
     @builtin(workgroup_id) wid: vec3<u32>,
@@ -309,9 +309,9 @@ fn cs_evaluate_sparse(
     let brick_offset = ((brick_gv - wrapped_origin + dim) % dim);
     let brick_world_base = world_voxel_origin + brick_offset;
 
-    // 128 threads share 729 voxels. Each thread processes multiple voxels
-    // via a strided loop for better memory access patterns.
-    for (var v = lid; v < VOXELS_PER_BRICK; v += 128u) {
+    // 256 threads share 729 voxels. Each thread processes ~3 voxels
+    // via a strided loop for better occupancy and memory access patterns.
+    for (var v = lid; v < VOXELS_PER_BRICK; v += 256u) {
         let local = vec3<u32>(
             v % PADDED_SIZE,
             (v / PADDED_SIZE) % PADDED_SIZE,
@@ -326,12 +326,18 @@ fn cs_evaluate_sparse(
         let word_idx = linear / 4u;
         let byte_idx = linear % 4u;
         let q = quantize_distance(dist);
-        // Pack u8 into the correct byte of the u32 word via atomic OR.
-        // Each thread writes a different byte position, so no data races
-        // when threads within a brick target different voxels.
+        // Pack u8 into the correct byte of the u32 word via atomic CAS loop.
+        // A two-step atomicAnd+atomicOr would race if two workgroups write
+        // different bytes of the same u32 simultaneously.  CAS retries on
+        // contention so every byte is written correctly.
+        let mask = 0xFFu << (byte_idx * 8u);
         let shifted = q << (byte_idx * 8u);
-        // Clear the byte first, then set it. Use atomicAnd to clear, atomicOr to set.
-        atomicAnd(&atlas[word_idx], ~(0xFFu << (byte_idx * 8u)));
-        atomicOr(&atlas[word_idx], shifted);
+        var old = atomicLoad(&atlas[word_idx]);
+        loop {
+            let desired = (old & ~mask) | shifted;
+            let result = atomicCompareExchangeWeak(&atlas[word_idx], old, desired);
+            if result.exchanged { break; }
+            old = result.old_value;
+        }
     }
 }

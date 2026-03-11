@@ -416,11 +416,10 @@ impl AppState {
 
         self.edit_history_cursor -= 1;
 
-        // Remove all tool edits, then re-add up to cursor
-        sdf.clear_edits();
-        for edit in &self.edit_history[..self.edit_history_cursor] {
-            sdf.add_edit(edit.clone());
-        }
+        // Differential undo: remove just the last edit instead of
+        // clear+replay, which avoids a full reclassify of all bricks.
+        let last_idx = sdf.edit_list().len().saturating_sub(1);
+        sdf.remove_edit(last_idx);
         log::info!("Undo (edit count: {})", sdf.edit_list().len());
     }
 
@@ -435,12 +434,10 @@ impl AppState {
             None => return,
         };
 
+        // Differential redo: add back just the one edit.
+        let edit = self.edit_history[self.edit_history_cursor].clone();
         self.edit_history_cursor += 1;
-
-        sdf.clear_edits();
-        for edit in &self.edit_history[..self.edit_history_cursor] {
-            sdf.add_edit(edit.clone());
-        }
+        sdf.add_edit(edit);
         log::info!("Redo (edit count: {})", sdf.edit_list().len());
     }
 

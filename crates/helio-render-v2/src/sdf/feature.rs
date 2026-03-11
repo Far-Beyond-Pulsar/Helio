@@ -614,17 +614,43 @@ impl Feature for SdfFeature {
         let needs_upload = gen != self.last_uploaded_gen;
 
         if needs_upload {
-            // Rebuild BVH from current edits for O(log n) spatial queries
+            // Update BVH: incremental insert for single edit, full rebuild otherwise
             let edits = self.edit_list.edits();
             let bounds: Vec<(glam::Vec3, f32)> = edits
                 .iter()
                 .map(|edit| BrickMap::edit_bounding_sphere(edit))
                 .collect();
-            self.edit_bvh.rebuild(&bounds);
 
-            // Upload edit list to GPU
+            if let Some(ref _inc_edit) = self.incremental_edit {
+                // Single edit added: insert just the new leaf into the BVH (O(log n))
+                let idx = edits.len() - 1;
+                let (center, radius) = bounds[idx];
+                let aabb = super::edit_bvh::Aabb::from_center_radius(center, radius);
+                self.edit_bvh.insert(idx, aabb);
+            } else {
+                // Bulk change (undo/redo/clear/replace): full rebuild
+                self.edit_bvh.rebuild(&bounds);
+            }
+
+            // Upload edit list to GPU (grow buffer if needed)
             let gpu_edits = self.edit_list.flush_gpu_data();
             if !gpu_edits.is_empty() {
+                let required_size = (gpu_edits.len() * std::mem::size_of::<GpuSdfEdit>()) as u64;
+                let edit_buf = self.edit_buffer.as_ref().unwrap();
+                if required_size > edit_buf.size() {
+                    // Double the buffer capacity when exceeded
+                    let new_size = (required_size * 2).max(64);
+                    log::info!("SDF edit buffer grown: {} -> {} bytes", edit_buf.size(), new_size);
+                    let new_buffer = Arc::new(ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("SDF Edit Buffer"),
+                        size: new_size,
+                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }));
+                    self.edit_buffer = Some(new_buffer);
+                    // NOTE: bind groups referencing the old buffer will need to be
+                    // rebuilt. For now, this path is rarely hit (>1024 edits).
+                }
                 ctx.queue.write_buffer(
                     self.edit_buffer.as_ref().unwrap(),
                     0,

@@ -333,6 +333,14 @@ impl EditBvh {
         self.root == NULL_NODE
     }
 
+    /// Clear all nodes and reset the tree.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.free_list.clear();
+        self.root = NULL_NODE;
+        self.edit_to_node.clear();
+    }
+
     // ── Private helpers ─────────────────────────────────────────────────
 
     fn alloc_node(&mut self) -> u32 {
