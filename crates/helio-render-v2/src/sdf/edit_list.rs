@@ -51,9 +51,6 @@ impl SdfEdit {
     }
 }
 
-/// Maximum number of edits supported
-pub const MAX_EDITS: usize = 256;
-
 /// Ordered list of SDF edits with dirty tracking for GPU upload
 pub struct SdfEditList {
     edits: Vec<SdfEdit>,
@@ -72,7 +69,6 @@ impl SdfEditList {
 
     /// Add an edit to the end of the list
     pub fn add(&mut self, edit: SdfEdit) {
-        assert!(self.edits.len() < MAX_EDITS, "Maximum SDF edit count ({MAX_EDITS}) exceeded");
         self.edits.push(edit);
         self.dirty = true;
         self.generation += 1;

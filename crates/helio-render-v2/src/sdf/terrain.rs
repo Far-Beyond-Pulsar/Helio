@@ -3,16 +3,8 @@
 /// Terrain generation style.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerrainStyle {
-    /// Flat ground plane with small noise ripples.
-    Flat = 0,
     /// Gentle rolling hills (2D heightfield FBM).
-    Rolling = 1,
-    /// Steep mountain terrain with higher amplitude.
-    Mountains = 2,
-    /// Full 3D caves and overhangs (density-based).
-    Caves = 3,
-    /// Islands with radial distance falloff.
-    Islands = 4,
+    Rolling = 0,
 }
 
 /// CPU-side terrain configuration. Use `.build_gpu_params()` to create the GPU uniform.
@@ -35,58 +27,6 @@ impl TerrainConfig {
             height: -2.0,
             amplitude: 4.0,
             frequency: 0.08,
-            octaves: 5,
-            lacunarity: 2.0,
-            persistence: 0.5,
-        }
-    }
-
-    /// Create a flat ground plane with subtle noise.
-    pub fn flat() -> Self {
-        Self {
-            style: TerrainStyle::Flat,
-            height: -2.0,
-            amplitude: 0.3,
-            frequency: 0.1,
-            octaves: 3,
-            lacunarity: 2.0,
-            persistence: 0.5,
-        }
-    }
-
-    /// Create steep mountain terrain.
-    pub fn mountains() -> Self {
-        Self {
-            style: TerrainStyle::Mountains,
-            height: -4.0,
-            amplitude: 10.0,
-            frequency: 0.04,
-            octaves: 6,
-            lacunarity: 2.0,
-            persistence: 0.55,
-        }
-    }
-
-    /// Create cave terrain with 3D density field.
-    pub fn caves() -> Self {
-        Self {
-            style: TerrainStyle::Caves,
-            height: 0.0,
-            amplitude: 8.0,
-            frequency: 0.1,
-            octaves: 4,
-            lacunarity: 2.0,
-            persistence: 0.5,
-        }
-    }
-
-    /// Create island terrain with radial falloff.
-    pub fn islands() -> Self {
-        Self {
-            style: TerrainStyle::Islands,
-            height: -1.0,
-            amplitude: 6.0,
-            frequency: 0.06,
             octaves: 5,
             lacunarity: 2.0,
             persistence: 0.5,

@@ -3,21 +3,25 @@
 //! Interactive SDF rendering with constructive solid geometry.
 //!
 //! Controls:
-//!   WASD        — move forward/left/back/right
-//!   Space/Shift — move up/down
-//!   Mouse drag  — look around (click to grab cursor)
-//!   F3          — toggle debug visualization (brick/clip level overlay)
-//!   F4          — cycle terrain style (Rolling → Mountains → Caves → Islands → Off → …)
-//!   1           — add/remove sphere edits
-//!   2           — toggle smooth blending
-//!   Escape      — release cursor / exit
+//!   WASD          — move forward/left/back/right
+//!   Space/Shift   — move up/down
+//!   Mouse drag    — look around (click to grab cursor)
+//!   Left click    — use active tool (dig/build) at surface
+//!   Scroll wheel  — adjust tool radius
+//!   1             — Dig tool (subtract spheres)
+//!   2             — Build tool (add spheres)
+//!   3             — No tool (camera only)
+//!   F3            — toggle debug visualization (brick/clip level overlay)
+//!   Ctrl+Z        — undo last edit
+//!   Ctrl+Y        — redo
+//!   Escape        — release cursor / exit
 
 use helio_render_v2::{Renderer, RendererConfig, Camera};
 
 use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
-    SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
+    SdfFeature, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
     TerrainConfig,
 };
 
@@ -31,6 +35,13 @@ use winit::{
 
 use std::collections::HashSet;
 use std::sync::Arc;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Tool {
+    None,
+    Dig,
+    Build,
+}
 
 fn main() {
     env_logger::init();
@@ -61,8 +72,14 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
-    // Terrain style cycling (0=Rolling, 1=Mountains, 2=Caves, 3=Islands, 4=Off)
-    terrain_style_index: u32,
+    // Tool state
+    active_tool: Tool,
+    tool_radius: f32,
+    ctrl_held: bool,
+
+    // Undo/Redo
+    edit_history: Vec<SdfEdit>,
+    edit_history_cursor: usize,
 }
 
 impl App {
@@ -105,9 +122,11 @@ impl ApplicationHandler for App {
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("SDF Demo Device"),
-                required_features: wgpu::Features::TIMESTAMP_QUERY
-                    | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits: wgpu::Limits::default(),
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits {
+                    max_storage_buffers_per_shader_stage: 10,
+                    ..wgpu::Limits::default()
+                },
                 memory_hints: wgpu::MemoryHints::default(),
                 experimental_features: Default::default(),
                 trace: wgpu::Trace::Off,
@@ -140,66 +159,10 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         // ── SDF Feature Setup ──────────────────────────────────────────────────
-        let mut sdf_feature = SdfFeature::new()
-            .with_mode(SdfMode::ClipMap)
+        let sdf_feature = SdfFeature::new()
             .with_grid_dim(128)
             .with_volume_bounds([-10.0, -10.0, -10.0], [10.0, 10.0, 10.0])
             .with_terrain(TerrainConfig::rolling());
-
-        // Build scene: some SDF primitives on top of the terrain
-        // Central sphere
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Sphere,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, 0.0)),
-            params: SdfShapeParams::sphere(2.0),
-            blend_radius: 0.0,
-        });
-
-        // Smaller sphere with smooth union (blended merge)
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Sphere,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(2.5, 2.0, 0.0)),
-            params: SdfShapeParams::sphere(1.5),
-            blend_radius: 0.5,
-        });
-
-        // Cube subtracted from the combined shape
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Cube,
-            op: BooleanOp::Subtraction,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.5, 0.0)),
-            params: SdfShapeParams::cube(1.0, 1.0, 1.0),
-            blend_radius: 0.3,
-        });
-
-        // Torus
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Torus,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(-4.0, 2.0, 0.0)),
-            params: SdfShapeParams::torus(1.5, 0.4),
-            blend_radius: 0.0,
-        });
-
-        // Capsule
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Capsule,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.0, -4.0)),
-            params: SdfShapeParams::capsule(0.5, 1.5),
-            blend_radius: 0.0,
-        });
-
-        // Cylinder
-        sdf_feature.add_edit(SdfEdit {
-            shape: SdfShapeType::Cylinder,
-            op: BooleanOp::Union,
-            transform: glam::Mat4::from_translation(glam::Vec3::new(4.0, 1.0, -3.0)),
-            params: SdfShapeParams::cylinder(0.8, 1.5),
-            blend_radius: 0.0,
-        });
 
         let feature_registry = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
@@ -226,7 +189,11 @@ impl ApplicationHandler for App {
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            terrain_style_index: 0,
+            active_tool: Tool::Dig,
+            tool_radius: 1.0,
+            ctrl_held: false,
+            edit_history: Vec::new(),
+            edit_history_cursor: 0,
         });
     }
 
@@ -261,28 +228,43 @@ impl ApplicationHandler for App {
                 match ks {
                     ElementState::Pressed  => {
                         state.keys.insert(key);
+                        if key == KeyCode::ControlLeft || key == KeyCode::ControlRight {
+                            state.ctrl_held = true;
+                        }
                         // F3: toggle SDF debug visualization
                         if key == KeyCode::F3 {
                             if let Some(sdf) = state.renderer.get_feature_mut::<SdfFeature>("sdf") {
                                 sdf.toggle_debug();
                             }
                         }
-                        // F4: cycle terrain style
-                        if key == KeyCode::F4 {
-                            state.terrain_style_index = (state.terrain_style_index + 1) % 5;
-                            let terrain = match state.terrain_style_index {
-                                0 => { log::info!("Terrain: Rolling"); Some(TerrainConfig::rolling()) }
-                                1 => { log::info!("Terrain: Mountains"); Some(TerrainConfig::mountains()) }
-                                2 => { log::info!("Terrain: Caves"); Some(TerrainConfig::caves()) }
-                                3 => { log::info!("Terrain: Islands"); Some(TerrainConfig::islands()) }
-                                _ => { log::info!("Terrain: Off"); None }
-                            };
-                            if let Some(sdf) = state.renderer.get_feature_mut::<SdfFeature>("sdf") {
-                                sdf.set_terrain(terrain);
-                            }
+                        // 1/2/3: tool switching
+                        if key == KeyCode::Digit1 {
+                            state.active_tool = Tool::Dig;
+                            log::info!("Tool: Dig (radius={:.1})", state.tool_radius);
+                        }
+                        if key == KeyCode::Digit2 {
+                            state.active_tool = Tool::Build;
+                            log::info!("Tool: Build (radius={:.1})", state.tool_radius);
+                        }
+                        if key == KeyCode::Digit3 {
+                            state.active_tool = Tool::None;
+                            log::info!("Tool: None (camera only)");
+                        }
+                        // Ctrl+Z: undo
+                        if key == KeyCode::KeyZ && state.ctrl_held {
+                            state.undo();
+                        }
+                        // Ctrl+Y: redo
+                        if key == KeyCode::KeyY && state.ctrl_held {
+                            state.redo();
                         }
                     }
-                    ElementState::Released => { state.keys.remove(&key); }
+                    ElementState::Released => {
+                        state.keys.remove(&key);
+                        if key == KeyCode::ControlLeft || key == KeyCode::ControlRight {
+                            state.ctrl_held = false;
+                        }
+                    }
                 }
             }
 
@@ -299,6 +281,19 @@ impl ApplicationHandler for App {
                         state.window.set_cursor_visible(false);
                         state.cursor_grabbed = true;
                     }
+                } else {
+                    state.use_tool();
+                }
+            }
+
+            WindowEvent::MouseWheel { delta, .. } => {
+                if state.cursor_grabbed {
+                    let scroll = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32 * 0.01,
+                    };
+                    state.tool_radius = (state.tool_radius + scroll * 0.2).clamp(0.2, 5.0);
+                    log::info!("Tool radius: {:.1}", state.tool_radius);
                 }
             }
 
@@ -346,9 +341,111 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
+    /// Perform a center-screen pick and apply the active tool.
+    fn use_tool(&mut self) {
+        if self.active_tool == Tool::None {
+            return;
+        }
+
+        let (sy, cy) = self.cam_yaw.sin_cos();
+        let (sp, cp) = self.cam_pitch.sin_cos();
+        let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
+
+        let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
+            Some(s) => s as *mut SdfFeature,
+            None => return,
+        };
+
+        // Safety: we hold exclusive access to renderer/sdf for this scope.
+        let sdf = unsafe { &mut *sdf };
+
+        let pick = match sdf.pick_surface(self.cam_pos, forward, 100.0) {
+            Some(p) => p,
+            None => {
+                log::debug!("Pick miss");
+                return;
+            }
+        };
+
+        let edit = match self.active_tool {
+            Tool::Dig => {
+                log::info!("Dig at ({:.1}, {:.1}, {:.1}) r={:.1}",
+                    pick.position.x, pick.position.y, pick.position.z, self.tool_radius);
+                SdfEdit {
+                    shape: SdfShapeType::Sphere,
+                    op: BooleanOp::Subtraction,
+                    transform: glam::Mat4::from_translation(pick.position),
+                    params: SdfShapeParams::sphere(self.tool_radius),
+                    blend_radius: self.tool_radius * 0.3,
+                }
+            }
+            Tool::Build => {
+                let place_pos = pick.position + pick.normal * self.tool_radius * 0.5;
+                log::info!("Build at ({:.1}, {:.1}, {:.1}) r={:.1}",
+                    place_pos.x, place_pos.y, place_pos.z, self.tool_radius);
+                SdfEdit {
+                    shape: SdfShapeType::Sphere,
+                    op: BooleanOp::Union,
+                    transform: glam::Mat4::from_translation(place_pos),
+                    params: SdfShapeParams::sphere(self.tool_radius),
+                    blend_radius: self.tool_radius * 0.3,
+                }
+            }
+            Tool::None => unreachable!(),
+        };
+
+        // Record in undo history (truncate any future redo entries)
+        self.edit_history.truncate(self.edit_history_cursor);
+        self.edit_history.push(edit.clone());
+        self.edit_history_cursor += 1;
+
+        sdf.add_edit(edit);
+        log::info!("Edit count: {}", sdf.edit_list().len());
+    }
+
+    fn undo(&mut self) {
+        if self.edit_history_cursor == 0 {
+            log::info!("Nothing to undo");
+            return;
+        }
+
+        let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
+            Some(s) => s,
+            None => return,
+        };
+
+        self.edit_history_cursor -= 1;
+
+        // Remove all tool edits, then re-add up to cursor
+        sdf.clear_edits();
+        for edit in &self.edit_history[..self.edit_history_cursor] {
+            sdf.add_edit(edit.clone());
+        }
+        log::info!("Undo (edit count: {})", sdf.edit_list().len());
+    }
+
+    fn redo(&mut self) {
+        if self.edit_history_cursor >= self.edit_history.len() {
+            log::info!("Nothing to redo");
+            return;
+        }
+
+        let sdf = match self.renderer.get_feature_mut::<SdfFeature>("sdf") {
+            Some(s) => s,
+            None => return,
+        };
+
+        self.edit_history_cursor += 1;
+
+        sdf.clear_edits();
+        for edit in &self.edit_history[..self.edit_history_cursor] {
+            sdf.add_edit(edit.clone());
+        }
+        log::info!("Redo (edit count: {})", sdf.edit_list().len());
+    }
+
     fn render(&mut self, dt: f32) {
-        // ── Camera movement ────────────────────────────────────────────────────
-        const SPEED: f32 = 8.0;
+        const SPEED: f32 = 20.0;
         const LOOK_SENS: f32 = 0.002;
 
         self.cam_yaw += self.mouse_delta.0 * LOOK_SENS;
@@ -379,11 +476,10 @@ impl AppState {
             std::f32::consts::FRAC_PI_4,
             aspect,
             0.1,
-            200.0,
+            5000.0,
             time,
         );
 
-        // ── Acquire surface and render ─────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => { log::warn!("Surface error: {:?}", e); return; }
