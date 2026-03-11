@@ -9,7 +9,7 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   3           — toggle RC probe visualisation
 //!   4           — toggle GPU timing printout (stderr)
-//!   5           — toggle light attenuation debug visualization
+//!   F3          — toggle all debug visualizations (light ranges, mesh bounds, grid)
 //!   Escape      — release cursor / exit
 
 mod demo_portal;
@@ -21,7 +21,7 @@ use helio_render_v2::features::{
     FeatureRegistry,
     LightingFeature,
     BloomFeature, ShadowsFeature,
-    BillboardsFeature, BillboardInstance,
+    BillboardsFeature,
     RadianceCascadesFeature,
 };
 
@@ -128,12 +128,12 @@ struct AppState {
     light_p0_id: LightId,
     light_p1_id: LightId,
     light_p2_id: LightId,
-    billboard_ids: Vec<BillboardId>,
+    // billboard_ids for probe-vis overlays (light icon billboards are managed by editor mode)
+    probe_bb_ids: Vec<BillboardId>,
 
     probe_vis: bool,
     sprite_w: u32,
     sprite_h: u32,
-    debug_lights: bool,  // Toggle light attenuation visualization (press 5)
 }
 
 impl App {
@@ -256,10 +256,8 @@ impl ApplicationHandler for App {
         let light_p1_id = renderer.add_light(SceneLight::point(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
         let light_p2_id = renderer.add_light(SceneLight::point(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
 
-        let mut billboard_ids = Vec::new();
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p0_init, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
+        // Editor mode — automatically spawns icon billboards for every registered light
+        renderer.set_editor_mode(true);
 
         self.state = Some(AppState {
             window,
@@ -278,11 +276,10 @@ impl ApplicationHandler for App {
             light_p0_id,
             light_p1_id,
             light_p2_id,
-            billboard_ids,
+            probe_bb_ids: Vec::new(),
             probe_vis: false,
             sprite_w,
             sprite_h,
-            debug_lights: false,
         });
     }
 
@@ -335,20 +332,13 @@ impl ApplicationHandler for App {
                 if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
                     bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
                 }
-                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
+                for id in state.probe_bb_ids.drain(..) { state.renderer.remove_billboard(id); }
                 if state.probe_vis {
                     for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                        state.billboard_ids.push(state.renderer.add_billboard(b));
+                        state.probe_bb_ids.push(state.renderer.add_billboard(b));
                     }
-                } else {
-                    // Re-register light marker billboards (p0 position at init; will be updated per-frame)
-                    let p0 = [0.0f32, 2.2, 0.0];
-                    let p1 = [-3.5f32, 2.0, -1.5];
-                    let p2 = [3.5f32, 1.5, 1.5];
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p1, [0.35, 0.35]).with_color([0.25, 0.5, 1.0, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(p2, [0.35, 0.35]).with_color([1.0, 0.3, 0.5, 1.0])));
                 }
+                // Light icon billboards are always managed by editor mode — no manual re-registration needed.
             }
             // ── Live profiler portal ──────────────────────────────────────────
             WindowEvent::KeyboardInput {
@@ -360,17 +350,18 @@ impl ApplicationHandler for App {
                 ..
             } => { let _ = state.renderer.start_live_portal_default(); }
 
-            // ── Light debug visualization toggle ──────────────────────────────
+            // ── Debug visualization overlay master toggle (F3) ────────────────
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
                     state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Digit5),
+                    physical_key: PhysicalKey::Code(KeyCode::F3),
                     ..
                 },
                 ..
             } => {
-                state.debug_lights = !state.debug_lights;
-                log::info!("Light debug visualization: {}", if state.debug_lights { "ON" } else { "OFF" });
+                let on = !state.renderer.debug_viz().enabled;
+                state.renderer.debug_viz_mut().enabled = on;
+                log::info!("Debug overlay: {}", if on { "ON" } else { "OFF" });
             }
 
             // ── Keyboard held state ───────────────────────────────────────────
@@ -498,56 +489,9 @@ impl AppState {
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
 
+        // p0 animates — update the light (editor mode auto-syncs the billboard icon position)
         self.renderer.update_light(self.light_p0_id, SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
-        if !self.probe_vis && !self.billboard_ids.is_empty() {
-            self.renderer.update_billboard(self.billboard_ids[0], BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]));
-        }
-
-        // Draw light attenuation debug visualization (press 5 to toggle)
-        if self.debug_lights {
-            // Point light 0 (orange, animated, range=5.0)
-            self.renderer.debug_sphere(
-                glam::Vec3::from_array(p0),
-                5.0,  // attenuation range
-                [1.0, 0.55, 0.15, 0.3],  // semi-transparent orange
-                0.3,  // thin wireframe
-            );
-            // Draw vertical line to ground to show elevation
-            self.renderer.debug_line(
-                glam::Vec3::from_array(p0),
-                glam::Vec3::new(p0[0], 0.0, p0[2]),
-                [1.0, 0.55, 0.15, 0.5],
-                0.5,
-            );
-
-            // Point light 1 (blue, range=6.0)
-            self.renderer.debug_sphere(
-                glam::Vec3::from_array(p1),
-                6.0,  // attenuation range
-                [0.25, 0.5, 1.0, 0.3],  // semi-transparent blue
-                0.3,
-            );
-            self.renderer.debug_line(
-                glam::Vec3::from_array(p1),
-                glam::Vec3::new(p1[0], 0.0, p1[2]),
-                [0.25, 0.5, 1.0, 0.5],
-                0.5,
-            );
-
-            // Point light 2 (pink, range=6.0)
-            self.renderer.debug_sphere(
-                glam::Vec3::from_array(p2),
-                6.0,  // attenuation range
-                [1.0, 0.3, 0.5, 0.3],  // semi-transparent pink
-                0.3,
-            );
-            self.renderer.debug_line(
-                glam::Vec3::from_array(p2),
-                glam::Vec3::new(p2[0], 0.0, p2[2]),
-                [1.0, 0.3, 0.5, 0.5],
-                0.5,
-            );
-        }
+        // Light attenuation spheres + grid are rendered automatically when F3 debug overlay is on.
 
         if let Err(e) = self.renderer.render(&camera, &view, dt) {
             log::error!("Render error: {:?}", e);

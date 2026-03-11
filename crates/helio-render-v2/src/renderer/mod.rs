@@ -21,6 +21,7 @@ use crate::mesh::{GpuMesh, DrawCall, PackedVertex};
 use crate::camera::Camera;
 use crate::scene::{ObjectId, SceneLight, LightId, BillboardId};
 use crate::debug_draw::{self, DebugDrawBatch, DebugShape};
+use crate::debug_viz;
 use crate::features::BillboardsFeature;
 use crate::material::{Material, GpuMaterial, MaterialUniform, DefaultMaterialViews, build_gpu_material};
 use crate::profiler::GpuProfiler;
@@ -292,6 +293,16 @@ pub struct Renderer {
     portal_scene_key: (usize, usize, usize),
     /// Pass names cached once after `graph.build()` to avoid a `Vec<String>` alloc every frame.
     cached_pass_names: Vec<String>,
+
+    // ── Debug Visualization System ────────────────────────────────────────
+    /// Pluggable overlay system.  Toggle master switch with F3; individual
+    /// renderers can be enabled via `debug_viz_mut().set_enabled(name, flag)`.
+    debug_viz: debug_viz::DebugVizSystem,
+    /// When true, each registered light automatically gets an icon billboard
+    /// at its world position, and the billboard follows light transforms.
+    editor_mode: bool,
+    /// Tracks the billboard icon spawned per light so it can be updated/removed.
+    editor_billboard_ids: std::collections::HashMap<LightId, BillboardId>,
 }
 
 impl Renderer {
@@ -547,29 +558,121 @@ impl Renderer {
 
     /// Register a new light.  Returns a stable [`LightId`] valid until
     /// [`remove_light`] is called.  Equivalent to `ULightComponent::RegisterComponent`.
+    ///
+    /// In editor mode, automatically spawns a billboard icon at the light's
+    /// world position to make it selectable in the viewport.
     pub fn add_light(&mut self, light: SceneLight) -> LightId {
-        self.gpu_light_scene.add_light(light)
+        let id = self.gpu_light_scene.add_light(light.clone());
+        if self.editor_mode {
+            self.spawn_editor_light_billboard(id, &light);
+        }
+        id
     }
 
     /// Remove a light permanently.
+    ///
+    /// Also removes the associated editor billboard if one exists.
     pub fn remove_light(&mut self, id: LightId) {
+        if let Some(bb_id) = self.editor_billboard_ids.remove(&id) {
+            self.remove_billboard(bb_id);
+        }
         self.gpu_light_scene.remove_light(id);
     }
 
     /// Replace all parameters of an existing light (position, color, intensity, etc.).
+    ///
+    /// Syncs the editor billboard color/position if editor mode is on.
     pub fn update_light(&mut self, id: LightId, light: SceneLight) {
-        self.gpu_light_scene.update_light(id, light);
+        self.gpu_light_scene.update_light(id, light.clone());
+        if let Some(&bb_id) = self.editor_billboard_ids.get(&id) {
+            let [r, g, b] = light.color;
+            let inst = crate::features::BillboardInstance::new(light.position, [0.35, 0.35])
+                .with_color([r, g, b, 1.0])
+                .with_screen_scale(true);
+            self.update_billboard(bb_id, inst);
+        }
     }
 
     /// Update only the world-space position of a light.  O(1), no shadow-matrix
     /// recompute until `flush_scene_state` runs.
+    ///
+    /// Moves the editor billboard to the new position.
     pub fn move_light(&mut self, id: LightId, position: [f32; 3]) {
         self.gpu_light_scene.move_light(id, position);
+        if let Some(&bb_id) = self.editor_billboard_ids.get(&id) {
+            self.move_billboard(bb_id, position);
+        }
     }
 
     /// Update only color + intensity of a light (does not dirty shadow matrices).
     pub fn set_light_params(&mut self, id: LightId, color: [f32; 3], intensity: f32) {
         self.gpu_light_scene.set_light_params(id, color, intensity);
+    }
+
+    // ── Editor mode ──────────────────────────────────────────────────────────
+
+    /// Enable or disable editor mode.
+    ///
+    /// In editor mode, every registered light automatically shows a billboard
+    /// icon at its world position.  Enabling this mid-session spawns icons for
+    /// all currently active lights; disabling removes them all.
+    pub fn set_editor_mode(&mut self, enabled: bool) {
+        if self.editor_mode == enabled { return; }
+        self.editor_mode = enabled;
+
+        if enabled {
+            // Snapshot existing lights (can't borrow mutably and iterate at the same time).
+            let lights: Vec<(LightId, SceneLight)> = self.gpu_light_scene
+                .iter_lights()
+                .map(|(id, l)| (id, l.clone()))
+                .collect();
+            for (id, light) in lights {
+                self.spawn_editor_light_billboard(id, &light);
+            }
+        } else {
+            // Remove all editor icons.
+            let ids: Vec<BillboardId> = self.editor_billboard_ids.drain().map(|(_, v)| v).collect();
+            for bb_id in ids {
+                self.remove_billboard(bb_id);
+            }
+        }
+    }
+
+    /// Returns `true` when editor mode is active.
+    pub fn is_editor_mode(&self) -> bool { self.editor_mode }
+
+    /// Helper: spawn an editor billboard for `light` keyed under `id`.
+    fn spawn_editor_light_billboard(&mut self, id: LightId, light: &SceneLight) {
+        let [r, g, b] = light.color;
+        let inst = crate::features::BillboardInstance::new(light.position, [0.35, 0.35])
+            .with_color([r, g, b, 1.0])
+            .with_screen_scale(true);
+        let bb_id = self.add_billboard(inst);
+        if bb_id != BillboardId::INVALID {
+            self.editor_billboard_ids.insert(id, bb_id);
+        }
+    }
+
+    // ── Debug Viz accessors ──────────────────────────────────────────────────
+
+    /// Immutable access to the debug visualization system.
+    ///
+    /// Useful for reading which overlays are currently registered/enabled.
+    pub fn debug_viz(&self) -> &debug_viz::DebugVizSystem {
+        &self.debug_viz
+    }
+
+    /// Mutable access to the debug visualization system.
+    ///
+    /// ```no_run
+    /// // Bind to F3 in your event loop:
+    /// renderer.debug_viz_mut().enabled ^= true;
+    ///
+    /// // Toggle individual overlay:
+    /// renderer.debug_viz_mut().set_enabled("grid", false);
+    /// ```
+    pub fn debug_viz_mut(&mut self) -> &mut debug_viz::DebugVizSystem {
+        &mut self.debug_viz
     }
 
     // ── Billboards ────────────────────────────────────────────────────────────
@@ -801,6 +904,21 @@ impl Renderer {
             };
             self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
             gpu_transfer::track_upload(std::mem::size_of::<GlobalsUniform>() as u64);
+
+            // ── Debug Visualization System ────────────────────────────────────
+            // Collect overlay shapes into debug_shapes before the batch is built.
+            if self.debug_viz.enabled {
+                let bounds = self.gpu_scene.collect_world_bounds();
+                let ctx = debug_viz::DebugRenderContext {
+                    lights: &self.gpu_light_scene.cached_scene_lights,
+                    object_bounds: &bounds,
+                    camera_pos: camera.position,
+                    camera_forward: camera.forward(),
+                    dt: delta_time,
+                };
+                let mut shapes = self.debug_shapes.lock().unwrap();
+                self.debug_viz.collect(&ctx, &mut shapes);
+            }
 
             let debug_shapes = {
                 let mut shapes = self.debug_shapes.lock().unwrap();

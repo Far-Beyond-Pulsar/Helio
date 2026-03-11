@@ -436,6 +436,16 @@ impl GpuLightScene {
         }
     }
 
+    /// Enumerate all active light IDs together with their [`SceneLight`] data.
+    ///
+    /// Used by the editor-mode billboard management in [`Renderer::set_editor_mode`].
+    pub(super) fn iter_lights(&self) -> impl Iterator<Item = (LightId, &SceneLight)> {
+        self.proxies.iter().map(|(&raw_id, proxy)| {
+            let light = &self.cached_scene_lights[proxy.index as usize];
+            (LightId(raw_id), light)
+        })
+    }
+
     /// Write dirty light slots to the GPU.
     /// Zero cost when nothing changed.
     ///

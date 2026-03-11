@@ -638,6 +638,11 @@ impl Renderer {
             draw_list_generation:     0,
             persistent_draw_count:   0,
             cached_draw_list_gen:    u64::MAX, // force rebuild on first frame
+
+            // ── Debug Visualization System ────────────────────────────────────
+            debug_viz: crate::debug_viz::DebugVizSystem::default(),
+            editor_mode: false,
+            editor_billboard_ids: std::collections::HashMap::new(),
         })
     }
 

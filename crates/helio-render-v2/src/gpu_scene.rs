@@ -753,6 +753,23 @@ impl GpuScene {
         &self.cpu_data[slot as usize]
     }
 
+    /// Collect world-space bounding spheres for all currently *enabled* scene
+    /// objects.  Used by [`crate::debug_viz::DebugVizSystem`] to power the
+    /// `"mesh_bounds"` overlay.
+    pub fn collect_world_bounds(&self) -> Vec<crate::debug_viz::ObjectBounds> {
+        self.proxies
+            .values()
+            .filter(|p| p.enabled)
+            .map(|p| {
+                let d = &self.cpu_data[p.slot as usize];
+                crate::debug_viz::ObjectBounds {
+                    center: glam::Vec3::from(d.bounds_center),
+                    radius: d.bounds_radius,
+                }
+            })
+            .collect()
+    }
+
     // ── Internal ─────────────────────────────────────────────────────────────
 
     fn mark_dirty(&mut self, slot: u32) {

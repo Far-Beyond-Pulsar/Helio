@@ -20,8 +20,7 @@ use helio_render_v2::features::{
     BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
-    SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
-    TerrainConfig,
+    SdfFeature, SdfMode,
 };
 use winit::{
     application::ApplicationHandler,
