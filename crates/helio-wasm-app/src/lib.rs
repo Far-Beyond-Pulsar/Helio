@@ -97,8 +97,7 @@ impl<'a> HasDisplayHandle for CanvasHandle<'a> {
 
 // renderer/scene types we will exercise
 use helio_render_v2::{
-    Renderer, RendererConfig, Camera, SceneLight, SkyAtmosphere,
-    VolumetricClouds,
+    SceneLight, SkyAtmosphere, VolumetricClouds,
 };
 use helio_render_v2::features::{
     FeatureRegistry, LightingFeature, ShadowsFeature,
