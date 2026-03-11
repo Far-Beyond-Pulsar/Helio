@@ -221,14 +221,15 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
 
         // Texel-snapped light view
         let light_view_raw = mat4_look_at_rh(centroid - dir * SCENE_DEPTH, centroid, up);
-        let centroid_ls = (light_view_raw * vec4f(centroid, 1.0)).xyz;
+        let centroid_ls_v4 = light_view_raw * vec4f(centroid, 1.0);
+        let centroid_ls = centroid_ls_v4.xyz / centroid_ls_v4.w;  // Match CPU transform_point3
         let snap = texel_size;
         let snapped_x = round(centroid_ls.x / snap) * snap;
         let snapped_y = round(centroid_ls.y / snap) * snap;
 
         // Apply snap offset in world space
-        let right_ws = vec3f(light_view_raw[0][0], light_view_raw[1][0], light_view_raw[2][0]);
-        let up_ws    = vec3f(light_view_raw[0][1], light_view_raw[1][1], light_view_raw[2][1]);
+        let right_ws = normalize(vec3f(light_view_raw[0][0], light_view_raw[1][0], light_view_raw[2][0]));
+        let up_ws    = normalize(vec3f(light_view_raw[0][1], light_view_raw[1][1], light_view_raw[2][1]));
         let snap_offset = right_ws * (snapped_x - centroid_ls.x) + up_ws * (snapped_y - centroid_ls.y);
         let stable_centroid = centroid + snap_offset;
 
