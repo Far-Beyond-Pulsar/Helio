@@ -335,16 +335,25 @@ async fn run() -> Result<(), JsValue> {
     ).map_err(|e| JsValue::from_str(&format!("renderer init failed: {:?}", e)))?;
 
     // add a few cubes and a ground/roof like the sky example
+    info!("creating meshes");
+    // deliberately spread cubes wide so they can't all be hidden by camera
     let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
-    let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
-    let cube3  = renderer.create_mesh_cube([ 2.0, 0.3,  0.5], 0.3);
+    let cube2  = renderer.create_mesh_cube([-4.0, 0.4, -2.0], 0.4);
+    let cube3  = renderer.create_mesh_cube([ 4.0, 0.3,  2.0], 0.3);
     let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
     let roof   = renderer.create_mesh_rect3d([0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
+    info!("cube meshes created");
     renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);
+    info!("count after cube1: {}", renderer.object_count());
     renderer.add_object(&cube2,  None, glam::Mat4::IDENTITY);
+    info!("count after cube2: {}", renderer.object_count());
     renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
+    info!("count after cube3: {}", renderer.object_count());
     renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
+    info!("count after ground: {}", renderer.object_count());
     renderer.add_object(&roof,   None, glam::Mat4::IDENTITY);
+    info!("count after roof: {}", renderer.object_count());
+    info!("meshes added");
 
     // lights + sky from sky example (static noon).  record the sun light
     // id and make room for a varying sun angle that the user will control.
@@ -389,6 +398,8 @@ async fn run() -> Result<(), JsValue> {
     let mut eye = glam::Vec3::new(0.0, 2.5, 7.0);
     let mut yaw = 0.0_f32;
     let mut pitch = -0.2_f32;
+    // automatic rotation counter wrapped in Rc so closure can mutate it
+    let auto_rotate = Rc::new(RefCell::new(0u32));
     let proj = glam::Mat4::perspective_rh_gl(std::f32::consts::FRAC_PI_2, width as f32 / height as f32, 0.1, 100.0);
     let (sy, cy) = yaw.sin_cos();
     let (sp, cp) = pitch.sin_cos();
@@ -424,7 +435,14 @@ async fn run() -> Result<(), JsValue> {
         {
             let mut i = input.borrow_mut();
 
-            // look around with mouse
+            // automatic yaw during the first couple hundred frames so the user
+            // sees the other cubes without needing to move the mouse.
+            if *auto_rotate.borrow() < 300 {
+                yaw += 0.005;
+                *auto_rotate.borrow_mut() += 1;
+            }
+
+            // look around with mouse (after or during auto phase)
             yaw += i.mouse_dx * 0.002;
             pitch += i.mouse_dy * 0.002;
             i.mouse_dx = 0.0;
@@ -515,6 +533,9 @@ async fn run() -> Result<(), JsValue> {
         // draw
         let frame = surface.get_current_texture().unwrap();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        // debug: log number of registered scene objects so we can tell if the
+        // extra cubes are actually present in the renderer.
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!("obj count {}", renderer.borrow().object_count())));
         renderer.borrow_mut().render(&camera, &view, 0.0).unwrap();
         frame.present();
 
