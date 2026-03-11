@@ -162,15 +162,17 @@ async fn run() -> Result<(), JsValue> {
         .create_element("canvas")?
         .dyn_into::<HtmlCanvasElement>()?;
 
-    // start with the full window dimensions so content fills the browser
-    let initial_width = window
+    // start with the full window dimensions (in physical pixels) so content
+    // fills the browser at native resolution even on high-DPI / scaled displays.
+    let dpr = window.device_pixel_ratio();
+    let initial_width = (window
         .inner_width()?
         .as_f64()
-        .unwrap_or(800.0) as u32;
-    let initial_height = window
+        .unwrap_or(800.0) * dpr) as u32;
+    let initial_height = (window
         .inner_height()?
         .as_f64()
-        .unwrap_or(600.0) as u32;
+        .unwrap_or(600.0) * dpr) as u32;
     canvas.set_width(initial_width);
     canvas.set_height(initial_height);
 
@@ -456,21 +458,20 @@ async fn run() -> Result<(), JsValue> {
         let window = web_sys::window().unwrap();
         let window_cloned = window.clone();
         let resize_closure = Closure::wrap(Box::new(move |_e: web_sys::UiEvent| {
-            // compute new size and apply to canvas
-            let new_w = window_cloned
+            let dpr = window_cloned.device_pixel_ratio();
+            let new_w = (window_cloned
                 .inner_width()
                 .unwrap()
                 .as_f64()
-                .unwrap_or(canvas.width() as f64) as u32;
-            let new_h = window_cloned
+                .unwrap_or(canvas.width() as f64) * dpr) as u32;
+            let new_h = (window_cloned
                 .inner_height()
                 .unwrap()
                 .as_f64()
-                .unwrap_or(canvas.height() as f64) as u32;
+                .unwrap_or(canvas.height() as f64) * dpr) as u32;
             canvas.set_width(new_w);
             canvas.set_height(new_h);
 
-            // update surface config and renderer
             {
                 let mut cfg = config.borrow_mut();
                 cfg.width = new_w;
@@ -490,6 +491,8 @@ async fn run() -> Result<(), JsValue> {
     let input = input.clone();            // already declared earlier
     let surface = surface.clone();        // Rc<Surface> cloned for the closure
     let canvas = canvas.clone();          // capture a clone for the animation callback
+    let device = device.clone();          // needed for per-frame resize check
+    let config = config.clone();
     let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
     let g = f.clone();
     *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
@@ -563,6 +566,25 @@ async fn run() -> Result<(), JsValue> {
 
             // remember keys for next frame
             i.last_keys = i.keys.clone();
+        }
+
+        // check if the canvas display size changed (handles fullscreen, browser
+        // resize, DPI changes, etc.) and reconfigure the surface + renderer.
+        // clientWidth/Height are CSS pixels; multiply by devicePixelRatio to get
+        // physical pixels matching what winit provides on native.
+        let dpr = web_sys::window().unwrap().device_pixel_ratio();
+        let display_w = (canvas.client_width() as f64 * dpr).max(1.0) as u32;
+        let display_h = (canvas.client_height() as f64 * dpr).max(1.0) as u32;
+        if display_w != canvas.width() || display_h != canvas.height() {
+            canvas.set_width(display_w);
+            canvas.set_height(display_h);
+            {
+                let mut cfg = config.borrow_mut();
+                cfg.width = display_w;
+                cfg.height = display_h;
+                surface.configure(&device, &cfg);
+            }
+            renderer.borrow_mut().resize(display_w, display_h);
         }
 
         // recalc projection using current canvas size so it stays correct when
