@@ -1289,7 +1289,7 @@ dependencies = [
 
 [[package]]
 name = "helio-render-v2"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "bitflags 2.11.0",
  "bytemuck",
