@@ -7,7 +7,7 @@ use helio_render_v2::features::{
     LightingFeature, BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
-    SdfFeature, SdfMode, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
+    SdfFeature, SdfEdit, SdfShapeType, SdfShapeParams, BooleanOp,
     TerrainConfig,
 };
 
@@ -23,7 +23,6 @@ impl WasmScene for SdfDemo {
         let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
 
         let mut sdf = SdfFeature::new()
-            .with_mode(SdfMode::ClipMap)
             .with_grid_dim(128)
             .with_volume_bounds([-3.0, -1.0, -3.0], [3.0, 3.0, 3.0])
             .with_terrain(TerrainConfig::rolling());
