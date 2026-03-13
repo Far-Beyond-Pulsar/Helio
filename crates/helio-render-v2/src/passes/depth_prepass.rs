@@ -41,15 +41,14 @@ impl RenderPass for DepthPrepassPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
+        // Always clear the depth buffer to 1.0, even when there are no mesh
+        // draw calls.  Other passes (e.g. SDF ray march) load the depth buffer
+        // with CompareFunction::Less and depend on a clean far-plane value.
         let indirect_buf = self.shared_indirect.lock().unwrap().clone();
-        let Some(indirect_buf) = indirect_buf else { return Ok(()); };
-
-        let draw_count = {
+        let draw_count = indirect_buf.as_ref().map(|_| {
             let ranges = self.shared_material_ranges.lock().unwrap();
-            if ranges.is_empty() { return Ok(()); }
             ranges.iter().map(|r| r.count).sum::<u32>()
-        };
-        if draw_count == 0 { return Ok(()); }
+        }).unwrap_or(0);
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Depth Prepass"),
@@ -67,19 +66,23 @@ impl RenderPass for DepthPrepassPass {
             multiview_mask: None,
         });
 
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, ctx.global_bind_group, &[]);
-        pass.set_bind_group(1, Some(self.default_material_bg.as_ref()), &[]);
-        pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
-        let vb = self.pool_vertex_buffer.lock().unwrap().clone();
-        let ib = self.pool_index_buffer .lock().unwrap().clone();
-        pass.set_vertex_buffer(0, vb.slice(..));
-        pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
-        if self.has_multi_draw {
-            pass.multi_draw_indexed_indirect(&indirect_buf, 0, draw_count);
-        } else {
-            for j in 0..draw_count {
-                pass.draw_indexed_indirect(&indirect_buf, j as u64 * 20);
+        if let Some(indirect_buf) = &indirect_buf {
+            if draw_count > 0 {
+                pass.set_pipeline(&self.pipeline);
+                pass.set_bind_group(0, ctx.global_bind_group, &[]);
+                pass.set_bind_group(1, Some(self.default_material_bg.as_ref()), &[]);
+                pass.set_bind_group(2, ctx.lighting_bind_group, &[]);
+                let vb = self.pool_vertex_buffer.lock().unwrap().clone();
+                let ib = self.pool_index_buffer .lock().unwrap().clone();
+                pass.set_vertex_buffer(0, vb.slice(..));
+                pass.set_index_buffer(ib.slice(..), wgpu::IndexFormat::Uint32);
+                if self.has_multi_draw {
+                    pass.multi_draw_indexed_indirect(indirect_buf, 0, draw_count);
+                } else {
+                    for j in 0..draw_count {
+                        pass.draw_indexed_indirect(indirect_buf, j as u64 * 20);
+                    }
+                }
             }
         }
         Ok(())

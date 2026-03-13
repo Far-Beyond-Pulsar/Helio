@@ -11,7 +11,7 @@ use helio_render_v2::features::{
     LightingFeature, BloomFeature, ShadowsFeature,
     BillboardsFeature, BillboardInstance,
     RadianceCascadesFeature,
-    SdfFeature, SdfMode,
+    SdfFeature,
 };
 
 use crate::harness::{WasmScene, load_sprite};
@@ -35,7 +35,6 @@ pub struct SdfScene<U: SdfUpdater> {
 impl<U: SdfUpdater> SdfScene<U> {
     pub fn new(mut updater: U) -> Self {
         let mut sdf = SdfFeature::new()
-            .with_mode(SdfMode::ClipMap)
             .with_grid_dim(128)
             .with_volume_bounds([-3.0, -1.0, -3.0], [3.0, 3.0, 3.0]);
         updater.init(&mut sdf);

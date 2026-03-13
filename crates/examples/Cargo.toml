@@ -63,38 +63,6 @@ path = "rc_benchmark.rs"
 name = "sdf_demo"
 path = "sdf_demo.rs"
 
-[[bin]]
-name = "sdf_move"
-path = "sdf_move.rs"
-
-[[bin]]
-name = "sdf_pulse"
-path = "sdf_pulse.rs"
-
-[[bin]]
-name = "sdf_morph"
-path = "sdf_morph.rs"
-
-[[bin]]
-name = "sdf_boolean"
-path = "sdf_boolean.rs"
-
-[[bin]]
-name = "sdf_blend"
-path = "sdf_blend.rs"
-
-[[bin]]
-name = "sdf_grid"
-path = "sdf_grid.rs"
-
-[[bin]]
-name = "sdf_multi"
-path = "sdf_multi.rs"
-
-[[bin]]
-name = "sdf_terrain"
-path = "sdf_terrain.rs"
-
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }
 image = { version = "0.25", default-features = false, features = ["png"] }
