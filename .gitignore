@@ -19,3 +19,4 @@ target/
 .vscode/fastsearch/index-terms.json
 /crates/helio-wasm-app/pkg
 /.vscode/fastsearch
+/textures

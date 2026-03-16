@@ -182,6 +182,9 @@ impl ApplicationHandler for App {
         let mut lights = Vec::new();
 
         // Load scene from test.fbx
+        log::info!("Current directory: {:?}", std::env::current_dir().unwrap());
+        log::info!("Looking for test.fbx...");
+
         match load_scene_file("test.fbx") {
             Ok(scene) => {
                 log::info!("✓ Loaded '{}'", scene.name);

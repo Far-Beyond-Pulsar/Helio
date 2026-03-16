@@ -124,22 +124,45 @@ fn load_texture_data(
                         .and_then(|f| f.to_str())
                         .unwrap_or("<unknown>");
 
-                    let mut searched_paths = vec![
-                        uri_path.to_string(),
-                        base_dir.join(filename).display().to_string(),
-                    ];
+                    let mut searched_paths = Vec::new();
 
+                    // Strategy 1: Path as-is
+                    searched_paths.push(format!("  1. {}", uri_path));
+
+                    // Strategy 2: Filename in base_dir
+                    searched_paths.push(format!("  2. {}", base_dir.join(filename).display()));
+
+                    // Strategy 3: base_dir/<stem>.fbm/filename
                     if let Some(stem) = base_dir.file_stem() {
-                        searched_paths.push(
-                            base_dir.join(format!("{}.fbm", stem.to_string_lossy())).join(filename).display().to_string()
-                        );
+                        searched_paths.push(format!("  3. {}",
+                            base_dir.join(format!("{}.fbm", stem.to_string_lossy())).join(filename).display()));
                     }
 
-                    searched_paths.push(base_dir.join("textures").join(filename).display().to_string());
+                    // Strategy 4: Scan for ANY .fbm directory
+                    if let Ok(entries) = std::fs::read_dir(base_dir) {
+                        let mut found_fbm_dirs = false;
+                        for entry in entries.flatten() {
+                            if let Ok(name) = entry.file_name().into_string() {
+                                if name.ends_with(".fbm") {
+                                    found_fbm_dirs = true;
+                                    searched_paths.push(format!("  4. {}", entry.path().join(filename).display()));
+                                }
+                            }
+                        }
+                        if !found_fbm_dirs {
+                            searched_paths.push(format!("  4. (no .fbm directories found in {})", base_dir.display()));
+                        }
+                    }
+
+                    // Strategy 5: textures/ subdirectory
+                    searched_paths.push(format!("  5. {}", base_dir.join("textures").join(filename).display()));
 
                     return Err(AssetError::InvalidData(format!(
-                        "Could not find texture file. Searched:\n  {}\n\nTip: Copy the .fbm folder to the same directory as the model file.",
-                        searched_paths.join("\n  ")
+                        "Could not find texture file '{}'\n\nSearched:\n{}\n\nCurrent directory: {}\nBase directory: {}\n\nTip: Copy the .fbm folder to the same directory as the model file.",
+                        filename,
+                        searched_paths.join("\n"),
+                        std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_else(|_| "?".to_string()),
+                        base_dir.display()
                     )));
                 }
             };
@@ -171,6 +194,7 @@ fn load_texture_data(
 /// 2. Extract just the filename and look in base_dir
 /// 3. Look in base_dir/.fbm/ (FBX convention)
 /// 4. Look in base_dir/textures/
+/// 5. Try alternate extensions (.jpg <-> .jpeg, .png <-> .PNG)
 fn resolve_texture_path(uri_path: &str, base_dir: &std::path::Path) -> Option<std::path::PathBuf> {
     use std::path::{Path, PathBuf};
 
@@ -184,19 +208,44 @@ fn resolve_texture_path(uri_path: &str, base_dir: &std::path::Path) -> Option<st
     // Extract the filename
     let filename = uri_path.file_name()?;
 
+    // Helper: Try a path with alternate extensions
+    let try_with_extensions = |base_path: PathBuf| -> Option<PathBuf> {
+        if base_path.exists() {
+            return Some(base_path);
+        }
+
+        // Try alternate extensions (jpg <-> jpeg, png <-> PNG, etc.)
+        if let Some(ext) = base_path.extension() {
+            let ext_str = ext.to_str()?;
+            let alternate_exts = match ext_str.to_lowercase().as_str() {
+                "jpg" => vec!["jpeg", "JPG", "JPEG"],
+                "jpeg" => vec!["jpg", "JPG", "JPEG"],
+                "png" => vec!["PNG"],
+                "tga" => vec!["TGA"],
+                _ => vec![],
+            };
+
+            for alt_ext in alternate_exts {
+                let alt_path = base_path.with_extension(alt_ext);
+                if alt_path.exists() {
+                    return Some(alt_path);
+                }
+            }
+        }
+        None
+    };
+
     // Strategy 2: Look in the base directory
-    let base_path = base_dir.join(filename);
-    if base_path.exists() {
-        return Some(base_path);
+    if let Some(path) = try_with_extensions(base_dir.join(filename)) {
+        return Some(path);
     }
 
     // Strategy 3: Look in .fbm directory (FBX convention)
-    let fbm_path = base_dir.join(format!(
-        "{}.fbm",
-        base_dir.file_stem()?.to_str()?
-    )).join(filename);
-    if fbm_path.exists() {
-        return Some(fbm_path);
+    if let Some(stem) = base_dir.file_stem() {
+        let fbm_path = base_dir.join(format!("{}.fbm", stem.to_string_lossy())).join(filename);
+        if let Some(path) = try_with_extensions(fbm_path) {
+            return Some(path);
+        }
     }
 
     // Strategy 4: Look for any .fbm directory
@@ -205,8 +254,8 @@ fn resolve_texture_path(uri_path: &str, base_dir: &std::path::Path) -> Option<st
             if let Ok(name) = entry.file_name().into_string() {
                 if name.ends_with(".fbm") {
                     let fbm_path = entry.path().join(filename);
-                    if fbm_path.exists() {
-                        return Some(fbm_path);
+                    if let Some(path) = try_with_extensions(fbm_path) {
+                        return Some(path);
                     }
                 }
             }
@@ -214,9 +263,8 @@ fn resolve_texture_path(uri_path: &str, base_dir: &std::path::Path) -> Option<st
     }
 
     // Strategy 5: Look in textures/ subdirectory
-    let textures_path = base_dir.join("textures").join(filename);
-    if textures_path.exists() {
-        return Some(textures_path);
+    if let Some(path) = try_with_extensions(base_dir.join("textures").join(filename)) {
+        return Some(path);
     }
 
     None
