@@ -3,6 +3,7 @@ members = [
     "crates/helio-core",
     "crates/helio-render-v2",
     "crates/helio-live-portal",
+    "crates/helio-asset-compat",
 
     "crates/examples",
     "crates/helio-wasm-app",
@@ -18,3 +19,9 @@ glam = { version = "0.29", features = ["bytemuck"] }
 winit = "0.30.12"
 env_logger = "0.11"
 log = "0.4"
+
+# SolidRS - 3D asset loading library
+solid-rs = { path = "../genesis/SolidRS/crates/solid-rs" }
+solid-gltf = { path = "../genesis/SolidRS/crates/solid-gltf" }
+solid-fbx = { path = "../genesis/SolidRS/crates/solid-fbx" }
+solid-obj = { path = "../genesis/SolidRS/crates/solid-obj" }

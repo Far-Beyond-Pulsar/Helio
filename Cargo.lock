@@ -906,7 +906,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "env_logger",
- "glam",
+ "glam 0.29.3",
  "helio-render-v2",
  "image",
  "log",
@@ -1132,6 +1132,12 @@ dependencies = [
 
 [[package]]
 name = "glam"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e05e7e6723e3455f4818c7b26e855439f7546cf617ef669d1adedb8669e5cb9"
+
+[[package]]
+name = "glam"
 version = "0.29.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8babf46d4c1c9d92deac9f7be466f76dfc4482b6452fc5024b5e8daf6ffeb3ee"
@@ -1266,13 +1272,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "helio-asset-compat"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.29.3",
+ "helio-render-v2",
+ "image",
+ "log",
+ "solid-fbx",
+ "solid-gltf",
+ "solid-obj",
+ "solid-rs",
+ "thiserror 1.0.69",
+ "wgpu",
+]
+
+[[package]]
 name = "helio-core"
 version = "0.1.0"
 dependencies = [
  "blade-graphics",
  "blade-macros",
  "bytemuck",
- "glam",
+ "glam 0.29.3",
  "image",
  "log",
 ]
@@ -1295,7 +1318,7 @@ dependencies = [
  "bytemuck",
  "env_logger",
  "getrandom 0.2.17",
- "glam",
+ "glam 0.29.3",
  "helio-live-portal",
  "js-sys",
  "log",
@@ -1315,7 +1338,7 @@ name = "helio-wasm-app"
 version = "0.1.4"
 dependencies = [
  "console_error_panic_hook",
- "glam",
+ "glam 0.29.3",
  "helio-render-v2",
  "image",
  "log",
@@ -1335,7 +1358,7 @@ name = "helio-wasm-examples"
 version = "0.1.0"
 dependencies = [
  "console_error_panic_hook",
- "glam",
+ "glam 0.29.3",
  "helio-render-v2",
  "image",
  "js-sys",
@@ -1604,6 +1627,8 @@ dependencies = [
  "moxcms",
  "num-traits",
  "png",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -3199,6 +3224,43 @@ checksum = "3a766e1110788c36f4fa1c2b71b387a7815aa65f88ce0229841826633d93723e"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "solid-fbx"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "glam 0.27.0",
+ "solid-rs",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "solid-gltf"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "glam 0.27.0",
+ "serde",
+ "serde_json",
+ "solid-rs",
+]
+
+[[package]]
+name = "solid-obj"
+version = "0.1.0"
+dependencies = [
+ "glam 0.27.0",
+ "solid-rs",
+]
+
+[[package]]
+name = "solid-rs"
+version = "0.1.0"
+dependencies = [
+ "glam 0.27.0",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4802,3 +4864,18 @@ name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
+
+[[package]]
+name = "zune-core"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cb8a0807f7c01457d0379ba880ba6322660448ddebc890ce29bb64da71fb40f9"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec5f41c76397b7da451efd19915684f727d7e1d516384ca6bd0ec43ec94de23c"
+dependencies = [
+ "zune-core",
+]
