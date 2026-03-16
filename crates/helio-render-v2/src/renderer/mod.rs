@@ -303,6 +303,8 @@ pub struct Renderer {
     editor_mode: bool,
     /// Tracks the billboard icon spawned per light so it can be updated/removed.
     editor_billboard_ids: std::collections::HashMap<LightId, BillboardId>,
+    /// Shader debug visualization mode: 0=normal, 1=UV grid, 2=texture direct
+    debug_mode: u32,
 }
 
 impl Renderer {
@@ -666,6 +668,19 @@ impl Renderer {
     /// Returns `true` when editor mode is active.
     pub fn is_editor_mode(&self) -> bool { self.editor_mode }
 
+    /// Set shader debug visualization mode:
+    /// - 0 = Normal rendering
+    /// - 1 = UV grid (shows texture coordinates as colors)
+    /// - 2 = Texture direct (bypasses material multiply)
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode.min(2); // Clamp to valid range
+    }
+
+    /// Get current shader debug mode (0=normal, 1=UV grid, 2=texture direct)
+    pub fn debug_mode(&self) -> u32 {
+        self.debug_mode
+    }
+
     /// Helper: spawn an editor billboard for `light` keyed under `id`.
     fn spawn_editor_light_billboard(&mut self, id: LightId, light: &SceneLight) {
         let [r, g, b] = light.color;
@@ -926,6 +941,10 @@ impl Renderer {
                 rc_world_min: [self.rc_world_min[0], self.rc_world_min[1], self.rc_world_min[2], 0.0],
                 rc_world_max: [self.rc_world_max[0], self.rc_world_max[1], self.rc_world_max[2], 0.0],
                 csm_splits: self.scene_csm_splits,
+                debug_mode: self.debug_mode,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             };
             self.queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
             gpu_transfer::track_upload(std::mem::size_of::<GlobalsUniform>() as u64);

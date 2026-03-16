@@ -185,9 +185,10 @@ impl ApplicationHandler for App {
         log::info!("Current directory: {:?}", std::env::current_dir().unwrap());
         log::info!("Looking for test.fbx...");
 
-        // Configure UV handling - try both settings if textures don't look right:
-        // - false (default): Use UVs as-is (OpenGL/modern FBX convention)
-        // - true: Flip Y axis (DirectX/legacy FBX convention)
+        // Configure UV handling:
+        // The FBX loader already flips V coordinates (DirectX → OpenGL)
+        // So we use flip_uv_y = false to avoid double-flipping
+        // If textures look wrong, try true (some exporters may vary)
         let config = helio_asset_compat::LoadConfig::default().with_uv_flip(false);
 
         match helio_asset_compat::load_scene_file_with_config("test.fbx", config) {
@@ -200,7 +201,7 @@ impl ApplicationHandler for App {
                 let gpu_materials: Vec<_> = scene.materials.iter()
                     .enumerate()
                     .map(|(idx, mat)| {
-                        log::debug!("  Uploading material {}: base_color={:?}, metallic={}, roughness={}",
+                        log::info!("  Uploading material {}: base_color={:?}, metallic={}, roughness={}",
                             idx, mat.base_color, mat.metallic, mat.roughness);
                         renderer.upload_material(mat)
                     })
@@ -210,23 +211,29 @@ impl ApplicationHandler for App {
 
                 // Upload all meshes to GPU and register as objects with materials
                 for mesh in scene.meshes.iter() {
-                    log::info!("  Uploading mesh '{}': {} vertices, {} indices",
-                        mesh.name, mesh.vertices.len(), mesh.indices.len());
+                    let mat_status = match mesh.material_index {
+                        Some(idx) => format!("material {}", idx),
+                        None => "NO MATERIAL".to_string(),
+                    };
+
+                    log::info!("  Mesh '{}': {} verts, {} indices, {}",
+                        mesh.name, mesh.vertices.len(), mesh.indices.len(), mat_status);
 
                     let gpu_mesh = renderer.create_mesh(&mesh.vertices, &mesh.indices);
 
                     // Use the mesh's material if it has one
                     let material = mesh.material_index
-                        .and_then(|idx| gpu_materials.get(idx));
-
-                    if let Some(mat_idx) = mesh.material_index {
-                        log::debug!("    → Using material {}", mat_idx);
-                    }
+                        .and_then(|idx| {
+                            if idx >= gpu_materials.len() {
+                                log::error!("    ⚠️  Material index {} out of bounds (have {} materials)", idx, gpu_materials.len());
+                                None
+                            } else {
+                                Some(&gpu_materials[idx])
+                            }
+                        });
 
                     let object_id = renderer.add_object(&gpu_mesh, material, glam::Mat4::IDENTITY);
                     objects.push(object_id);
-
-                    log::debug!("    → Object ID {:?}", object_id);
                 }
 
                 // Add all lights from the scene
@@ -338,6 +345,26 @@ impl ApplicationHandler for App {
                 let on = !state.renderer.debug_viz().enabled;
                 state.renderer.debug_viz_mut().enabled = on;
                 log::info!("Debug overlay: {}", if on { "ON" } else { "OFF" });
+            }
+
+            // U: Toggle UV debug mode
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::KeyU),
+                    ..
+                },
+                ..
+            } => {
+                let mode = (state.renderer.debug_mode() + 1) % 3;
+                state.renderer.set_debug_mode(mode);
+                let mode_name = match mode {
+                    0 => "Normal",
+                    1 => "UV Grid",
+                    2 => "Texture Direct",
+                    _ => "Unknown",
+                };
+                log::info!("Debug mode: {} ({})", mode, mode_name);
             }
 
             WindowEvent::Resized(size) => {

@@ -16,8 +16,16 @@ struct Camera {
 struct Globals {
     frame: u32,
     delta_time: f32,
+    light_count: u32,
     ambient_intensity: f32,
-    _padding: f32,
+    ambient_color: vec4<f32>,
+    rc_world_min: vec4<f32>,
+    rc_world_max: vec4<f32>,
+    csm_splits: vec4<f32>,
+    debug_mode: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;

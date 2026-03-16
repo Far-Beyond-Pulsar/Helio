@@ -23,7 +23,8 @@
       "Bash(copy:*)",
       "Bash(cargo check:*)",
       "Bash(wc:*)",
-      "Bash(del:*)"
+      "Bash(del:*)",
+      "WebFetch(domain:github.com)"
     ]
   }
 }

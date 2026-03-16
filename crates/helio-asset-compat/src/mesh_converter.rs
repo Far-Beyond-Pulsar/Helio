@@ -89,12 +89,12 @@ pub fn convert_primitive(
             }
         }
 
-        log::debug!("Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
+        println!("━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
             mesh.name, min_u, max_u, min_v, max_v);
 
         // Warn if UVs are outside normal range
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
-            log::warn!("Mesh '{}' has UVs outside [0,1] range - may need tiling", mesh.name);
+            println!("⚠️  Mesh '{}' has UVs OUTSIDE [0,1] range!", mesh.name);
         }
     }
 
@@ -106,7 +106,18 @@ pub fn convert_primitive(
     // Use only this primitive's indices
     let indices = primitive.indices.clone();
 
-    log::debug!("Converted primitive '{}': {} vertices, {} indices (material: {:?}, UV flip: {})",
+    // DEBUG: Check if indices are in valid range
+    let max_index = indices.iter().max().copied().unwrap_or(0);
+    let vertices_len = vertices.len();
+    if max_index >= vertices_len as u32 {
+        println!("⚠️  CRITICAL: Mesh '{}' has indices OUT OF BOUNDS! max_index={}, vertices={}",
+            mesh.name, max_index, vertices_len);
+        println!("    First 10 indices: {:?}", &indices[0..indices.len().min(10)]);
+    } else {
+        println!("✓ Indices valid: max={}, vertices={}", max_index, vertices_len);
+    }
+
+    println!("✓ Converted primitive '{}': {} verts, {} indices, material {:?}, UV flip: {}",
         mesh.name, vertices.len(), indices.len(), primitive.material_index, config.flip_uv_y);
 
     Ok((vertices, indices))
@@ -140,12 +151,12 @@ pub fn convert_mesh(
             }
         }
 
-        log::debug!("Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
+        println!("━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
             mesh.name, min_u, max_u, min_v, max_v);
 
         // Warn if UVs are outside normal range
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
-            log::warn!("Mesh '{}' has UVs outside [0,1] range - may need tiling", mesh.name);
+            println!("⚠️  Mesh '{}' has UVs OUTSIDE [0,1] range!", mesh.name);
         }
     }
 

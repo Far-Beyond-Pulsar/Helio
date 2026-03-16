@@ -12,6 +12,21 @@ struct Camera {
     time:      f32,
 }
 
+struct Globals {
+    frame: u32,
+    delta_time: f32,
+    light_count: u32,
+    ambient_intensity: f32,
+    ambient_color: vec4<f32>,
+    rc_world_min: vec4<f32>,
+    rc_world_max: vec4<f32>,
+    csm_splits: vec4<f32>,
+    debug_mode: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 struct Material {
     base_color:      vec4<f32>,
     metallic:        f32,
@@ -33,6 +48,7 @@ struct GpuInstanceData {
 }
 
 @group(0) @binding(0) var<uniform>          camera:        Camera;
+@group(0) @binding(1) var<uniform>          globals:       Globals;
 @group(0) @binding(2) var<storage, read>    instance_data: array<GpuInstanceData>;
 
 @group(1) @binding(0) var<uniform>          material:          Material;
@@ -91,7 +107,29 @@ struct GBufferOutput {
 fn fs_main(input: VertexOutput) -> GBufferOutput {
     let uv = input.tex_coords;
 
+    // DEBUG MODE 1: Show UVs as colors (R=U, G=V, helps verify UV layout)
+    if globals.debug_mode == 1u {
+        return GBufferOutput(
+            vec4<f32>(uv.x, uv.y, 0.0, 1.0),
+            vec4<f32>(0.0, 0.0, 1.0, 0.0),
+            vec4<f32>(0.0),
+            vec4<f32>(0.0)
+        );
+    }
+
     let tex_sample = textureSample(base_color_texture, material_sampler, uv);
+
+    // DEBUG MODE 2: Show texture sample directly (bypass material multiply)
+    if globals.debug_mode == 2u {
+        return GBufferOutput(
+            vec4<f32>(tex_sample.rgb, 1.0),
+            vec4<f32>(0.0, 0.0, 1.0, 0.0),
+            vec4<f32>(0.0),
+            vec4<f32>(0.0)
+        );
+    }
+
+    // NORMAL RENDERING (debug_mode == 0)
     let albedo     = material.base_color.rgb * tex_sample.rgb;
     let alpha      = material.base_color.a  * tex_sample.a;
 

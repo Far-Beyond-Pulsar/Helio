@@ -32,6 +32,10 @@ struct Globals {
     rc_world_min:      vec4<f32>,
     rc_world_max:      vec4<f32>,
     csm_splits:        vec4<f32>,
+    debug_mode:        u32,
+    _pad0:             u32,
+    _pad1:             u32,
+    _pad2:             u32,
 }
 
 struct GpuLight {
@@ -444,6 +448,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let ao        = orm_r.r;
     let roughness = orm_r.g;
     let metallic  = orm_r.b;
+
+    // ── Debug mode: bypass lighting ───────────────────────────────────────────
+    // Mode 1 (UV Grid) and Mode 2 (Texture Direct) should show raw colors
+    if globals.debug_mode >= 1u {
+        return vec4<f32>(albedo, alpha);
+    }
 
     // ── Reconstruct world position from depth + inv_view_proj ────────────────
     // clip_pos.xy is in viewport space (0→width, 0→height, y↓).

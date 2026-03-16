@@ -643,6 +643,7 @@ impl Renderer {
             debug_viz: crate::debug_viz::DebugVizSystem::default(),
             editor_mode: false,
             editor_billboard_ids: std::collections::HashMap::new(),
+            debug_mode: 0, // 0=normal rendering
         })
     }
 

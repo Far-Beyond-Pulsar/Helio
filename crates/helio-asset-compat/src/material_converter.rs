@@ -23,6 +23,13 @@ pub fn convert_material(
         material.base_color_factor.w,
     ];
 
+    log::info!("  Material '{}' base_color: [{:.3}, {:.3}, {:.3}, {:.3}]",
+        material.name,
+        helio_mat.base_color[0],
+        helio_mat.base_color[1],
+        helio_mat.base_color[2],
+        helio_mat.base_color[3]);
+
     // Metallic and roughness factors
     helio_mat.metallic = material.metallic_factor;
     helio_mat.roughness = material.roughness_factor;
@@ -54,12 +61,30 @@ pub fn convert_material(
         }
     }
 
-    // Load textures
+    // Load textures - CHECK FOR UV TRANSFORMS
     if let Some(tex_ref) = &material.base_color_texture {
+        if let Some(ref t) = tex_ref.transform {
+            log::warn!("⚠️  Base color texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
+                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
+        }
         helio_mat.base_color_texture = Some(load_texture_data(tex_ref, scene, base_dir, true)?);
+
+        // FIX: When base_color texture is present, set base_color factor to white
+        // FBX files often have incorrect base_color_factor values that darken/tint the texture
+        println!("    🔧 Material '{}' has texture → overriding base_color from [{:.3}, {:.3}, {:.3}, {:.3}] to [1.0, 1.0, 1.0, 1.0]",
+            material.name,
+            helio_mat.base_color[0],
+            helio_mat.base_color[1],
+            helio_mat.base_color[2],
+            helio_mat.base_color[3]);
+        helio_mat.base_color = [1.0, 1.0, 1.0, 1.0];
     }
 
     if let Some(tex_ref) = &material.normal_texture {
+        if let Some(ref t) = tex_ref.transform {
+            log::warn!("⚠️  Normal texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
+                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
+        }
         helio_mat.normal_map = Some(load_texture_data(tex_ref, scene, base_dir, false)?);
     }
 
@@ -68,17 +93,29 @@ pub fn convert_material(
     // Helio: ORM has R=occlusion, G=roughness, B=metallic
     // TODO: In Phase 3, implement proper texture packing/merging
     if let Some(tex_ref) = &material.metallic_roughness_texture {
+        if let Some(ref t) = tex_ref.transform {
+            log::warn!("⚠️  Metallic-roughness texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
+                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
+        }
         // For now, just load it as-is and log a warning
         log::warn!("Metallic-roughness texture requires packing into ORM format - not yet implemented");
         // helio_mat.orm_texture = Some(load_texture_data(tex_ref, scene, false)?);
     }
 
     if let Some(tex_ref) = &material.occlusion_texture {
+        if let Some(ref t) = tex_ref.transform {
+            log::warn!("⚠️  Occlusion texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
+                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
+        }
         // TODO: Pack with metallic-roughness into ORM
         log::warn!("Occlusion texture requires packing into ORM format - not yet implemented");
     }
 
     if let Some(tex_ref) = &material.emissive_texture {
+        if let Some(ref t) = tex_ref.transform {
+            log::warn!("⚠️  Emissive texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
+                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
+        }
         helio_mat.emissive_texture = Some(load_texture_data(tex_ref, scene, base_dir, true)?);
     }
 
@@ -182,6 +219,9 @@ fn load_texture_data(
 
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
+
+    log::info!("✓ Loaded texture '{}': {}x{} pixels ({} KB)",
+        texture.name, width, height, rgba.len() / 1024);
 
     Ok(TextureData::new(rgba.into_raw(), width, height))
 }

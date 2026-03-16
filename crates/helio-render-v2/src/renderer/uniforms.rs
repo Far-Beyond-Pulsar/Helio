@@ -13,6 +13,11 @@ pub(super) struct GlobalsUniform {
     pub rc_world_max: [f32; 4],   // xyz = RC probe grid world AABB max, w unused
     /// View-space distance at each CSM cascade boundary (4 cascades → 3 splits + sentinel).
     pub csm_splits: [f32; 4],
+    /// Debug visualization mode: 0=normal, 1=UV grid, 2=texture direct
+    pub debug_mode: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 /// Sky uniform data – 112 bytes, must exactly match SkyUniforms in sky.wgsl
