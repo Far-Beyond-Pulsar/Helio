@@ -3,6 +3,7 @@
 use crate::{Result, AssetError};
 use solid_rs::scene::{Image, ImageSource};
 use wgpu::util::DeviceExt;
+use std::fs;
 
 /// Upload a SolidRS image to a GPU texture
 pub fn load_texture(
@@ -12,13 +13,17 @@ pub fn load_texture(
     queue: &wgpu::Queue,
 ) -> Result<wgpu::Texture> {
     // Get image data (either from embedded bytes or URI)
+    let data_vec: Vec<u8>;
     let image_data = match &image.source {
         ImageSource::Embedded { data, .. } => data.as_slice(),
         ImageSource::Uri(path) => {
-            return Err(AssetError::InvalidData(format!(
-                "External image URIs not yet supported: {}",
-                path
-            )));
+            // Load external image file
+            data_vec = fs::read(path)
+                .map_err(|e| AssetError::InvalidData(format!(
+                    "Failed to read image file '{}': {}",
+                    path, e
+                )))?;
+            data_vec.as_slice()
         }
     };
 
