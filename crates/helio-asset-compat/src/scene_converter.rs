@@ -42,13 +42,13 @@ pub struct ConvertedMesh {
 }
 
 /// Convert a SolidRS scene to Helio-compatible structures
-pub fn convert_scene(scene: &Scene) -> Result<ConvertedScene> {
+pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path) -> Result<ConvertedScene> {
     log::info!("Converting SolidRS scene '{}' with {} meshes, {} materials",
         scene.name, scene.meshes.len(), scene.materials.len());
 
     // Convert all materials first
     let materials: Result<Vec<Material>> = scene.materials.iter()
-        .map(|mat| material_converter::convert_material(mat, scene))
+        .map(|mat| material_converter::convert_material(mat, scene, base_dir))
         .collect();
     let materials = materials?;
 

@@ -11,6 +11,7 @@ use solid_rs::scene::{Material as SolidMaterial, Scene, AlphaMode};
 pub fn convert_material(
     material: &SolidMaterial,
     scene: &Scene,
+    base_dir: &std::path::Path,
 ) -> Result<Material> {
     let mut helio_mat = Material::new();
 
@@ -55,11 +56,11 @@ pub fn convert_material(
 
     // Load textures
     if let Some(tex_ref) = &material.base_color_texture {
-        helio_mat.base_color_texture = Some(load_texture_data(tex_ref, scene, true)?);
+        helio_mat.base_color_texture = Some(load_texture_data(tex_ref, scene, base_dir, true)?);
     }
 
     if let Some(tex_ref) = &material.normal_texture {
-        helio_mat.normal_map = Some(load_texture_data(tex_ref, scene, false)?);
+        helio_mat.normal_map = Some(load_texture_data(tex_ref, scene, base_dir, false)?);
     }
 
     // For metallic-roughness texture, we need to pack it into ORM format
@@ -78,7 +79,7 @@ pub fn convert_material(
     }
 
     if let Some(tex_ref) = &material.emissive_texture {
-        helio_mat.emissive_texture = Some(load_texture_data(tex_ref, scene, true)?);
+        helio_mat.emissive_texture = Some(load_texture_data(tex_ref, scene, base_dir, true)?);
     }
 
     Ok(helio_mat)
@@ -88,6 +89,7 @@ pub fn convert_material(
 fn load_texture_data(
     tex_ref: &solid_rs::scene::TextureRef,
     scene: &Scene,
+    base_dir: &std::path::Path,
     _srgb: bool,
 ) -> Result<TextureData> {
     // Get the texture
@@ -104,15 +106,25 @@ fn load_texture_data(
 
     // Extract image data
     use solid_rs::scene::ImageSource;
+    use std::path::{Path, PathBuf};
+
     let data_vec: Vec<u8>;
     let image_data = match &image.source {
         ImageSource::Embedded { data, .. } => data.as_slice(),
-        ImageSource::Uri(path) => {
-            // Load external image file
-            data_vec = std::fs::read(path)
+        ImageSource::Uri(uri_path) => {
+            // Smart path resolution: try multiple locations
+            let resolved_path = resolve_texture_path(uri_path, base_dir)
+                .ok_or_else(|| AssetError::InvalidData(format!(
+                    "Could not find texture file '{}' (searched relative to model, .fbm dir, and as absolute path)",
+                    uri_path
+                )))?;
+
+            log::debug!("Resolved texture '{}' to '{}'", uri_path, resolved_path.display());
+
+            data_vec = std::fs::read(&resolved_path)
                 .map_err(|e| AssetError::InvalidData(format!(
                     "Failed to read image file '{}': {}",
-                    path, e
+                    resolved_path.display(), e
                 )))?;
             data_vec.as_slice()
         }
@@ -126,6 +138,65 @@ fn load_texture_data(
     let (width, height) = rgba.dimensions();
 
     Ok(TextureData::new(rgba.into_raw(), width, height))
+}
+
+/// Resolve texture path: FBX/glTF files often contain absolute paths that are only
+/// valid on the machine where they were exported. This function tries multiple
+/// strategies to find the actual texture file:
+///
+/// 1. Try the path as-is (in case it's a valid absolute or relative path)
+/// 2. Extract just the filename and look in base_dir
+/// 3. Look in base_dir/.fbm/ (FBX convention)
+/// 4. Look in base_dir/textures/
+fn resolve_texture_path(uri_path: &str, base_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    use std::path::{Path, PathBuf};
+
+    let uri_path = Path::new(uri_path);
+
+    // Strategy 1: Try the path as-is
+    if uri_path.exists() {
+        return Some(uri_path.to_path_buf());
+    }
+
+    // Extract the filename
+    let filename = uri_path.file_name()?;
+
+    // Strategy 2: Look in the base directory
+    let base_path = base_dir.join(filename);
+    if base_path.exists() {
+        return Some(base_path);
+    }
+
+    // Strategy 3: Look in .fbm directory (FBX convention)
+    let fbm_path = base_dir.join(format!(
+        "{}.fbm",
+        base_dir.file_stem()?.to_str()?
+    )).join(filename);
+    if fbm_path.exists() {
+        return Some(fbm_path);
+    }
+
+    // Strategy 4: Look for any .fbm directory
+    if let Ok(entries) = std::fs::read_dir(base_dir) {
+        for entry in entries.flatten() {
+            if let Ok(name) = entry.file_name().into_string() {
+                if name.ends_with(".fbm") {
+                    let fbm_path = entry.path().join(filename);
+                    if fbm_path.exists() {
+                        return Some(fbm_path);
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy 5: Look in textures/ subdirectory
+    let textures_path = base_dir.join("textures").join(filename);
+    if textures_path.exists() {
+        return Some(textures_path);
+    }
+
+    None
 }
 
 #[cfg(test)]

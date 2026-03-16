@@ -65,8 +65,13 @@ pub fn load_scene_file<P: AsRef<Path>>(path: P) -> Result<ConvertedScene> {
         solid_scene.materials.len(),
         solid_scene.lights.len());
 
+    // Get the directory containing the model file for resolving relative texture paths
+    let base_dir = path.parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
     // Convert to Helio structures
-    convert_scene(&solid_scene)
+    convert_scene(&solid_scene, &base_dir)
 }
 
 /// Result type for asset loading operations
