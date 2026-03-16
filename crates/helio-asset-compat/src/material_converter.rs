@@ -113,13 +113,36 @@ fn load_texture_data(
         ImageSource::Embedded { data, .. } => data.as_slice(),
         ImageSource::Uri(uri_path) => {
             // Smart path resolution: try multiple locations
-            let resolved_path = resolve_texture_path(uri_path, base_dir)
-                .ok_or_else(|| AssetError::InvalidData(format!(
-                    "Could not find texture file '{}' (searched relative to model, .fbm dir, and as absolute path)",
-                    uri_path
-                )))?;
+            let resolved_path = match resolve_texture_path(uri_path, base_dir) {
+                Some(path) => {
+                    log::debug!("Resolved texture '{}' to '{}'", uri_path, path.display());
+                    path
+                }
+                None => {
+                    // Build helpful error message showing where we looked
+                    let filename = Path::new(uri_path).file_name()
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("<unknown>");
 
-            log::debug!("Resolved texture '{}' to '{}'", uri_path, resolved_path.display());
+                    let mut searched_paths = vec![
+                        uri_path.to_string(),
+                        base_dir.join(filename).display().to_string(),
+                    ];
+
+                    if let Some(stem) = base_dir.file_stem() {
+                        searched_paths.push(
+                            base_dir.join(format!("{}.fbm", stem.to_string_lossy())).join(filename).display().to_string()
+                        );
+                    }
+
+                    searched_paths.push(base_dir.join("textures").join(filename).display().to_string());
+
+                    return Err(AssetError::InvalidData(format!(
+                        "Could not find texture file. Searched:\n  {}\n\nTip: Copy the .fbm folder to the same directory as the model file.",
+                        searched_paths.join("\n  ")
+                    )));
+                }
+            };
 
             data_vec = std::fs::read(&resolved_path)
                 .map_err(|e| AssetError::InvalidData(format!(
