@@ -12,6 +12,7 @@ mod light_converter;
 mod camera_converter;
 mod animation_system;
 
+use std::path::PathBuf;
 use std::collections::HashMap;
 use helio_render_v2::scene::{ObjectId, LightId};
 

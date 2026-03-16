@@ -225,7 +225,7 @@ mod tests {
             extensions: Default::default(),
         };
 
-        let helio_mat = convert_material(&solid_mat, &scene).unwrap();
+        let helio_mat = convert_material(&solid_mat, &scene, std::path::Path::new(".")).unwrap();
 
         assert_eq!(helio_mat.base_color, [1.0, 0.5, 0.25, 1.0]);
         assert_eq!(helio_mat.metallic, 0.8);

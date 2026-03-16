@@ -118,7 +118,7 @@ mod tests {
             ..Default::default()
         };
 
-        let converted = convert_scene(&scene).unwrap();
+        let converted = convert_scene(&scene, std::path::Path::new(".")).unwrap();
         assert_eq!(converted.name, "EmptyScene");
         assert_eq!(converted.meshes.len(), 0);
         assert_eq!(converted.materials.len(), 0);
