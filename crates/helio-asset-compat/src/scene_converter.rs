@@ -3,9 +3,10 @@
 //! This module coordinates the full conversion pipeline from a CPU-side SolidRS
 //! scene to GPU-resident Helio structures.
 
-use crate::{Result, AssetError, mesh_converter, material_converter, SceneAsset};
+use crate::{Result, AssetError, mesh_converter, material_converter, light_converter, camera_converter, SceneAsset, CameraData};
 use helio_render_v2::mesh::PackedVertex;
 use helio_render_v2::material::Material;
+use helio_render_v2::scene::SceneLight;
 use solid_rs::Scene;
 
 /// Converted scene data ready for GPU upload
@@ -19,8 +20,10 @@ pub struct ConvertedScene {
     pub meshes: Vec<ConvertedMesh>,
     /// Converted PBR materials
     pub materials: Vec<Material>,
-    // TODO: Lights (Phase 4)
-    // TODO: Cameras (Phase 4)
+    /// Converted lights
+    pub lights: Vec<SceneLight>,
+    /// Camera data (informational only - not auto-applied)
+    pub cameras: Vec<CameraData>,
     // TODO: Animations (Phase 5)
     // TODO: Skins (Phase 5)
 }
@@ -81,10 +84,26 @@ pub fn convert_scene(scene: &Scene) -> Result<ConvertedScene> {
         meshes.len(),
         meshes.iter().map(|m| m.vertices.len()).sum::<usize>());
 
+    // Convert all lights
+    let lights: Vec<SceneLight> = scene.lights.iter()
+        .filter_map(|light| light_converter::convert_light(light))
+        .collect();
+
+    log::debug!("Converted {} lights", lights.len());
+
+    // Extract camera data
+    let cameras: Vec<CameraData> = scene.cameras.iter()
+        .map(|camera| camera_converter::extract_camera_data(camera))
+        .collect();
+
+    log::debug!("Extracted {} cameras", cameras.len());
+
     Ok(ConvertedScene {
         name: scene.name.clone(),
         meshes,
         materials,
+        lights,
+        cameras,
     })
 }
 

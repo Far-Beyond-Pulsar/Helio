@@ -39,7 +39,7 @@ pub mod culling;
 pub use renderer::{Renderer, RendererConfig};
 pub use camera::Camera;
 pub use profiler::{GpuProfiler, PassTiming, ScopeGuard, CompletedScope};
-pub use mesh::{GpuMesh, PackedVertex, DrawCall, GpuDrawCall};
+pub use mesh::{GpuMesh, PackedVertex, SkinnedVertex, DrawCall, GpuDrawCall};
 pub use buffer_pool::GpuBufferPool;
 pub use scene::{SceneLight, SkyAtmosphere, VolumetricClouds, Skylight, ObjectId, LightId, BillboardId};
 pub use material::{Material, GpuMaterial, TextureData};

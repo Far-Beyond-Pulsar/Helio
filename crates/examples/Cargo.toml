@@ -63,8 +63,13 @@ path = "rc_benchmark.rs"
 name = "sdf_demo"
 path = "sdf_demo.rs"
 
+[[bin]]
+name = "load_fbx"
+path = "load_fbx.rs"
+
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }
+helio-asset-compat = { path = "../helio-asset-compat" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }

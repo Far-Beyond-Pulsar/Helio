@@ -8,6 +8,8 @@ mod scene_converter;
 mod mesh_converter;
 mod material_converter;
 mod texture_loader;
+mod light_converter;
+mod camera_converter;
 mod animation_system;
 
 use std::collections::HashMap;
@@ -15,6 +17,8 @@ use helio_render_v2::scene::{ObjectId, LightId};
 
 pub use mesh_converter::{convert_vertex, convert_mesh};
 pub use material_converter::convert_material;
+pub use light_converter::convert_light;
+pub use camera_converter::{extract_camera_data, CameraData};
 pub use scene_converter::{convert_scene, ConvertedScene, ConvertedMesh};
 
 use std::path::Path;

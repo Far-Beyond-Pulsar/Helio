@@ -70,6 +70,48 @@ fn normal_to_tangent(n: [f32; 3]) -> [f32; 3] {
     [t[0]/len, t[1]/len, t[2]/len]
 }
 
+/// Skinned vertex format for skeletal animation (64 bytes)
+///
+/// Used for meshes with bone weights. A compute shader transforms these
+/// into standard PackedVertex format before rendering.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SkinnedVertex {
+    pub position: [f32; 3],
+    pub bitangent_sign: f32,      // 16 bytes
+    pub tex_coords: [f32; 2],
+    pub _pad0: [f32; 2],          // 24 bytes (padding)
+    pub normal: u32,              // 28 bytes (packed SNORM8x4)
+    pub tangent: u32,             // 32 bytes (packed SNORM8x4)
+    pub joint_indices: [u16; 4],  // 40 bytes (bone indices)
+    pub joint_weights: [f32; 4],  // 56 bytes (bone weights)
+    pub _pad1: [f32; 2],          // 64 bytes (padding to align)
+}
+
+impl SkinnedVertex {
+    /// Create a skinned vertex with joint influences
+    pub fn new(
+        position: [f32; 3],
+        normal: [f32; 3],
+        tex_coords: [f32; 2],
+        tangent: [f32; 3],
+        joint_indices: [u16; 4],
+        joint_weights: [f32; 4],
+    ) -> Self {
+        Self {
+            position,
+            bitangent_sign: 1.0,
+            tex_coords,
+            _pad0: [0.0; 2],
+            normal: pack_snorm8x4(normal[0], normal[1], normal[2], 0.0),
+            tangent: pack_snorm8x4(tangent[0], tangent[1], tangent[2], 1.0),
+            joint_indices,
+            joint_weights,
+            _pad1: [0.0; 2],
+        }
+    }
+}
+
 /// GPU-resident mesh (owns wgpu vertex + index buffers)
 #[derive(Clone)]
 pub struct GpuMesh {

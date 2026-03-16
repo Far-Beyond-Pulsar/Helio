@@ -907,6 +907,7 @@ dependencies = [
  "bytemuck",
  "env_logger",
  "glam 0.29.3",
+ "helio-asset-compat",
  "helio-render-v2",
  "image",
  "log",
