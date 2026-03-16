@@ -104,17 +104,22 @@ fn load_texture_data(
 
     // Extract image data
     use solid_rs::scene::ImageSource;
+    let data_vec: Vec<u8>;
     let image_data = match &image.source {
-        ImageSource::Embedded { data, .. } => data.clone(),
+        ImageSource::Embedded { data, .. } => data.as_slice(),
         ImageSource::Uri(path) => {
-            return Err(AssetError::InvalidData(format!(
-                "External image URIs not yet supported: {}", path
-            )));
+            // Load external image file
+            data_vec = std::fs::read(path)
+                .map_err(|e| AssetError::InvalidData(format!(
+                    "Failed to read image file '{}': {}",
+                    path, e
+                )))?;
+            data_vec.as_slice()
         }
     };
 
     // Decode image to RGBA8
-    let decoded = image::load_from_memory(&image_data)
+    let decoded = image::load_from_memory(image_data)
         .map_err(|e| AssetError::InvalidData(format!("Failed to decode image: {}", e)))?;
 
     let rgba = decoded.to_rgba8();
