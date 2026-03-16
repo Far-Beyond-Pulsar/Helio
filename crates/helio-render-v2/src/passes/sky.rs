@@ -35,19 +35,37 @@ impl RenderPass for SkyPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-        // Skip entirely when no atmosphere is configured this frame
-        if !ctx.has_sky { return Ok(()); }
+        let clear_color = wgpu::Color {
+            r: ctx.sky_color[0] as f64,
+            g: ctx.sky_color[1] as f64,
+            b: ctx.sky_color[2] as f64,
+            a: 1.0,
+        };
 
         let color_attachment = Some(wgpu::RenderPassColorAttachment {
             view:           ctx.target,
             resolve_target: None,
             depth_slice:    None,
             ops: wgpu::Operations {
-                // Sky IS the clear – we write every pixel
-                load:  wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                // Always clear the color target — even without an atmosphere,
+                // downstream passes use LoadOp::Load and expect a cleared surface.
+                load:  wgpu::LoadOp::Clear(clear_color),
                 store: wgpu::StoreOp::Store,
             },
         });
+
+        // When no atmosphere is configured, just clear and return (no sky draw).
+        if !ctx.has_sky {
+            let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label:                    Some("Sky Clear"),
+                color_attachments:        &[color_attachment],
+                depth_stencil_attachment: None,
+                timestamp_writes:         None,
+                occlusion_query_set:      None,
+                multiview_mask:           None,
+            });
+            return Ok(());
+        }
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label:                    Some("Sky Pass"),
