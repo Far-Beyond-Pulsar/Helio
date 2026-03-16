@@ -228,10 +228,12 @@ pub(crate) fn build_gpu_material(
     let ov  = orm_view     .as_ref().unwrap_or(&defaults.white_orm);
     let ev  = emissive_view.as_ref().unwrap_or(&defaults.black_emissive);
 
+    // Use ClampToEdge by default to avoid tiling artifacts on models with UVs at boundaries
+    // This is more common for single-texture-per-primitive models like FBX exports
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("Material Sampler"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
         mag_filter: wgpu::FilterMode::Linear,
         min_filter: wgpu::FilterMode::Linear,
         mipmap_filter: wgpu::MipmapFilterMode::Linear,

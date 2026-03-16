@@ -185,19 +185,45 @@ impl ApplicationHandler for App {
         log::info!("Current directory: {:?}", std::env::current_dir().unwrap());
         log::info!("Looking for test.fbx...");
 
-        match load_scene_file("test.fbx") {
+        // Configure UV handling - try both settings if textures don't look right:
+        // - false (default): Use UVs as-is (OpenGL/modern FBX convention)
+        // - true: Flip Y axis (DirectX/legacy FBX convention)
+        let config = helio_asset_compat::LoadConfig::default().with_uv_flip(false);
+
+        match helio_asset_compat::load_scene_file_with_config("test.fbx", config) {
             Ok(scene) => {
                 log::info!("✓ Loaded '{}'", scene.name);
                 log::info!("  {} meshes, {} materials, {} lights",
                     scene.meshes.len(), scene.materials.len(), scene.lights.len());
 
-                // Upload all meshes to GPU and register as objects
+                // Upload all materials to GPU
+                let gpu_materials: Vec<_> = scene.materials.iter()
+                    .enumerate()
+                    .map(|(idx, mat)| {
+                        log::debug!("  Uploading material {}: base_color={:?}, metallic={}, roughness={}",
+                            idx, mat.base_color, mat.metallic, mat.roughness);
+                        renderer.upload_material(mat)
+                    })
+                    .collect();
+
+                log::info!("  Uploaded {} materials to GPU", gpu_materials.len());
+
+                // Upload all meshes to GPU and register as objects with materials
                 for mesh in scene.meshes.iter() {
                     log::info!("  Uploading mesh '{}': {} vertices, {} indices",
                         mesh.name, mesh.vertices.len(), mesh.indices.len());
 
                     let gpu_mesh = renderer.create_mesh(&mesh.vertices, &mesh.indices);
-                    let object_id = renderer.add_object(&gpu_mesh, None, glam::Mat4::IDENTITY);
+
+                    // Use the mesh's material if it has one
+                    let material = mesh.material_index
+                        .and_then(|idx| gpu_materials.get(idx));
+
+                    if let Some(mat_idx) = mesh.material_index {
+                        log::debug!("    → Using material {}", mat_idx);
+                    }
+
+                    let object_id = renderer.add_object(&gpu_mesh, material, glam::Mat4::IDENTITY);
                     objects.push(object_id);
 
                     log::debug!("    → Object ID {:?}", object_id);

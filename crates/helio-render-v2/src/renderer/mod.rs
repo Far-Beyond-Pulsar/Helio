@@ -494,6 +494,31 @@ impl Renderer {
         id
     }
 
+    /// Upload a Material to the GPU and return a GpuMaterial that can be used with add_object.
+    ///
+    /// This uploads the material uniforms (base color, metallic, roughness, etc.) and all
+    /// textures (base_color, normal, ORM, emissive) to the GPU, creating a bind group.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use helio_render_v2::*;
+    /// # let mut renderer: Renderer = todo!();
+    /// let mut mat = Material::new();
+    /// mat.base_color = [1.0, 0.5, 0.25, 1.0];
+    /// mat.metallic = 0.8;
+    /// mat.roughness = 0.6;
+    /// let gpu_mat = renderer.upload_material(&mat);
+    /// ```
+    pub fn upload_material(&self, material: &Material) -> GpuMaterial {
+        build_gpu_material(
+            &self.device,
+            &self.queue,
+            &self.resources.bind_group_layouts.material,
+            material,
+            &self.default_material_views,
+        )
+    }
+
     /// Remove an object from the GPU-resident scene.
     ///
     /// Equivalent to `UPrimitiveComponent::UnregisterComponent()` → `FScene::RemovePrimitive()`.

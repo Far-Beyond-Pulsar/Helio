@@ -9,7 +9,7 @@ use solid_rs::geometry::{Vertex, Topology};
 use solid_rs::scene::Mesh;
 
 /// Convert a SolidRS vertex to Helio's PackedVertex format
-pub fn convert_vertex(v: &Vertex) -> PackedVertex {
+pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
     // Extract position (mandatory)
     let position = [v.position.x, v.position.y, v.position.z];
 
@@ -23,7 +23,11 @@ pub fn convert_vertex(v: &Vertex) -> PackedVertex {
 
     // Extract primary UV channel (default to 0,0 if missing)
     let tex_coords = if let Some(uv) = v.uvs[0] {
-        [uv.x, uv.y]
+        if flip_uv_y {
+            [uv.x, 1.0 - uv.y]  // Flip for DirectX → OpenGL
+        } else {
+            [uv.x, uv.y]  // Use as-is
+        }
     } else {
         [0.0, 0.0]
     };
@@ -46,17 +50,111 @@ pub fn convert_vertex(v: &Vertex) -> PackedVertex {
     PackedVertex::new_with_tangent(position, normal, tex_coords, tangent)
 }
 
-/// Convert a SolidRS mesh to Helio vertex/index buffers
+/// Convert a single SolidRS primitive (submesh) to Helio vertex/index buffers
+///
+/// This is the correct approach: each primitive has its own material and should be
+/// rendered as a separate draw call.
+pub fn convert_primitive(
+    mesh: &Mesh,
+    primitive: &solid_rs::geometry::Primitive,
+    config: &crate::LoadConfig,
+) -> Result<(Vec<PackedVertex>, Vec<u32>)> {
+    use solid_rs::geometry::Topology;
+
+    // Only support triangle lists for now
+    if primitive.topology != Topology::TriangleList {
+        return Err(crate::AssetError::UnsupportedFormat(format!(
+            "Primitive topology {:?} not supported, only TriangleList",
+            primitive.topology
+        )));
+    }
+
+    // Check UV coverage for debugging
+    let has_uvs = mesh.vertices.iter().any(|v| v.uvs[0].is_some());
+    if !has_uvs {
+        log::warn!("Mesh '{}' has NO UV coordinates - textures will not display correctly", mesh.name);
+    } else {
+        // Calculate UV bounds to detect issues
+        let mut min_u = f32::MAX;
+        let mut max_u = f32::MIN;
+        let mut min_v = f32::MAX;
+        let mut max_v = f32::MIN;
+
+        for v in &mesh.vertices {
+            if let Some(uv) = v.uvs[0] {
+                min_u = min_u.min(uv.x);
+                max_u = max_u.max(uv.x);
+                min_v = min_v.min(uv.y);
+                max_v = max_v.max(uv.y);
+            }
+        }
+
+        log::debug!("Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
+            mesh.name, min_u, max_u, min_v, max_v);
+
+        // Warn if UVs are outside normal range
+        if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
+            log::warn!("Mesh '{}' has UVs outside [0,1] range - may need tiling", mesh.name);
+        }
+    }
+
+    // Convert all vertices
+    let vertices: Vec<PackedVertex> = mesh.vertices.iter()
+        .map(|v| convert_vertex(v, config.flip_uv_y))
+        .collect();
+
+    // Use only this primitive's indices
+    let indices = primitive.indices.clone();
+
+    log::debug!("Converted primitive '{}': {} vertices, {} indices (material: {:?}, UV flip: {})",
+        mesh.name, vertices.len(), indices.len(), primitive.material_index, config.flip_uv_y);
+
+    Ok((vertices, indices))
+}
+
+/// Convert a SolidRS mesh to Helio vertex/index buffers (deprecated - merges all primitives)
+///
+/// DEPRECATED: This merges all primitives together and loses per-primitive material info.
+/// Use convert_primitive instead.
+#[allow(dead_code)]
 pub fn convert_mesh(
     mesh: &Mesh,
 ) -> Result<(Vec<PackedVertex>, Vec<u32>)> {
-    // Convert all vertices
+    // Check UV coverage for debugging
+    let has_uvs = mesh.vertices.iter().any(|v| v.uvs[0].is_some());
+    if !has_uvs {
+        log::warn!("Mesh '{}' has NO UV coordinates - textures will not display correctly", mesh.name);
+    } else {
+        // Calculate UV bounds to detect issues
+        let mut min_u = f32::MAX;
+        let mut max_u = f32::MIN;
+        let mut min_v = f32::MAX;
+        let mut max_v = f32::MIN;
+
+        for v in &mesh.vertices {
+            if let Some(uv) = v.uvs[0] {
+                min_u = min_u.min(uv.x);
+                max_u = max_u.max(uv.x);
+                min_v = min_v.min(uv.y);
+                max_v = max_v.max(uv.y);
+            }
+        }
+
+        log::debug!("Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
+            mesh.name, min_u, max_u, min_v, max_v);
+
+        // Warn if UVs are outside normal range
+        if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
+            log::warn!("Mesh '{}' has UVs outside [0,1] range - may need tiling", mesh.name);
+        }
+    }
+
+    // Convert all vertices (deprecated - uses no UV flip)
     let vertices: Vec<PackedVertex> = mesh.vertices.iter()
-        .map(convert_vertex)
+        .map(|v| convert_vertex(v, false))
         .collect();
 
     // Collect all indices from all primitives
-    // TODO: In Phase 3, we'll separate by material to create multiple DrawCalls
     let mut indices = Vec::new();
     for primitive in &mesh.primitives {
         // Only support triangle lists for now
@@ -105,7 +203,7 @@ mod tests {
             skin_weights: None,
         };
 
-        let packed = convert_vertex(&v);
+        let packed = convert_vertex(&v, false);
         assert_eq!(packed.position, [1.0, 2.0, 3.0]);
         assert_eq!(packed.tex_coords, [0.0, 0.0]);
     }

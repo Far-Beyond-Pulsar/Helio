@@ -19,6 +19,8 @@
 
 > Cross-platform, data-driven, physically-based rendering — with a render graph, radiance cascades GI, cascaded shadow maps, volumetric sky, and bloom — all in pure Rust.
 
+Sample model from https://sketchfab.com/mohamedhussien
+
 </div>
 
 

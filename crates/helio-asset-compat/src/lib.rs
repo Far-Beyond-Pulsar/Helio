@@ -16,13 +16,38 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use helio_render_v2::scene::{ObjectId, LightId};
 
-pub use mesh_converter::{convert_vertex, convert_mesh};
+pub use mesh_converter::{convert_vertex, convert_primitive};
 pub use material_converter::convert_material;
 pub use light_converter::convert_light;
 pub use camera_converter::{extract_camera_data, CameraData};
 pub use scene_converter::{convert_scene, ConvertedScene, ConvertedMesh};
 
 use std::path::Path;
+
+/// Configuration for asset loading
+#[derive(Debug, Clone)]
+pub struct LoadConfig {
+    /// Flip UV Y-axis (1.0 - v)
+    /// - true: DirectX convention (0,0 at top-left) → OpenGL (0,0 at bottom-left)
+    /// - false: Use UVs as-is
+    pub flip_uv_y: bool,
+}
+
+impl Default for LoadConfig {
+    fn default() -> Self {
+        Self {
+            // Default: no flip - most modern exporters use OpenGL convention
+            flip_uv_y: false,
+        }
+    }
+}
+
+impl LoadConfig {
+    pub fn with_uv_flip(mut self, flip: bool) -> Self {
+        self.flip_uv_y = flip;
+        self
+    }
+}
 
 /// Load a 3D scene file (FBX, glTF, OBJ, etc.) and convert to Helio structures
 ///
@@ -39,6 +64,11 @@ use std::path::Path;
 /// println!("Loaded {} meshes, {} materials", scene.meshes.len(), scene.materials.len());
 /// ```
 pub fn load_scene_file<P: AsRef<Path>>(path: P) -> Result<ConvertedScene> {
+    load_scene_file_with_config(path, LoadConfig::default())
+}
+
+/// Load with custom configuration (e.g., UV flipping)
+pub fn load_scene_file_with_config<P: AsRef<Path>>(path: P, config: LoadConfig) -> Result<ConvertedScene> {
     let path = path.as_ref();
 
     // Detect format from extension
@@ -48,7 +78,7 @@ pub fn load_scene_file<P: AsRef<Path>>(path: P) -> Result<ConvertedScene> {
             "File has no extension".to_string()
         ))?;
 
-    log::info!("Loading 3D model: {}", path.display());
+    log::info!("Loading 3D model: {} (UV flip: {})", path.display(), config.flip_uv_y);
 
     // Create SolidRS registry and register loaders
     let mut registry = solid_rs::registry::Registry::new();
@@ -72,7 +102,7 @@ pub fn load_scene_file<P: AsRef<Path>>(path: P) -> Result<ConvertedScene> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     // Convert to Helio structures
-    convert_scene(&solid_scene, &base_dir)
+    convert_scene(&solid_scene, &base_dir, &config)
 }
 
 /// Result type for asset loading operations

@@ -28,21 +28,23 @@ pub struct ConvertedScene {
     // TODO: Skins (Phase 5)
 }
 
-/// A single converted mesh with its primitives
+/// A single converted mesh (one primitive/submesh)
+///
+/// Note: SolidRS Mesh objects can contain multiple Primitives, each with a different material.
+/// We split them into separate ConvertedMesh entries so each can have its own material.
 pub struct ConvertedMesh {
-    /// Mesh name from SolidRS
+    /// Mesh name from SolidRS (with "_N" suffix if multiple primitives)
     pub name: String,
-    /// Converted vertices
+    /// Converted vertices (shared across all primitives of the original mesh)
     pub vertices: Vec<PackedVertex>,
-    /// Indices for all primitives
+    /// Indices for this specific primitive
     pub indices: Vec<u32>,
     /// Material index (into ConvertedScene::materials)
-    /// Note: For now we merge all primitives, in Phase 3 we'll separate by material
     pub material_index: Option<usize>,
 }
 
 /// Convert a SolidRS scene to Helio-compatible structures
-pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path) -> Result<ConvertedScene> {
+pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path, config: &crate::LoadConfig) -> Result<ConvertedScene> {
     log::info!("Converting SolidRS scene '{}' with {} meshes, {} materials",
         scene.name, scene.meshes.len(), scene.materials.len());
 
@@ -54,31 +56,39 @@ pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path) -> Result<Conver
 
     log::debug!("Converted {} materials", materials.len());
 
-    // Convert all meshes
-    let meshes: Result<Vec<ConvertedMesh>> = scene.meshes.iter()
-        .enumerate()
-        .map(|(idx, mesh)| {
-            let (vertices, indices) = mesh_converter::convert_mesh(mesh)?;
+    // Convert all meshes - split primitives into separate meshes
+    // Each primitive can have a different material, so we create one ConvertedMesh per primitive
+    let mut meshes = Vec::new();
+    for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
+        if mesh.primitives.is_empty() {
+            log::warn!("Mesh '{}' has no primitives, skipping", mesh.name);
+            continue;
+        }
 
-            // Find the material index for this mesh
-            // Note: SolidRS meshes can have multiple primitives with different materials
-            // For now, we take the first primitive's material
-            let material_index = mesh.primitives.first()
-                .and_then(|p| p.material_index);
+        // Each primitive becomes a separate ConvertedMesh with its own material
+        for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
+            let (vertices, indices) = mesh_converter::convert_primitive(mesh, primitive, config)?;
 
-            Ok(ConvertedMesh {
-                name: if mesh.name.is_empty() {
-                    format!("Mesh_{}", idx)
+            let mesh_name = if mesh.name.is_empty() {
+                if mesh.primitives.len() > 1 {
+                    format!("Mesh_{}_{}", mesh_idx, prim_idx)
                 } else {
-                    mesh.name.clone()
-                },
+                    format!("Mesh_{}", mesh_idx)
+                }
+            } else if mesh.primitives.len() > 1 {
+                format!("{}_{}", mesh.name, prim_idx)
+            } else {
+                mesh.name.clone()
+            };
+
+            meshes.push(ConvertedMesh {
+                name: mesh_name,
                 vertices,
                 indices,
-                material_index,
-            })
-        })
-        .collect();
-    let meshes = meshes?;
+                material_index: primitive.material_index,
+            });
+        }
+    }
 
     log::debug!("Converted {} meshes ({} total vertices)",
         meshes.len(),
