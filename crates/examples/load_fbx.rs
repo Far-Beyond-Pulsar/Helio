@@ -8,9 +8,10 @@
 //! You can also specify a file path:
 //!   cargo run --bin load_fbx -- path/to/scene.usdc
 
-use helio_render_v2::{Renderer, RendererConfig, Camera, ObjectId, LightId};
+use helio_render_v2::{Renderer, RendererConfig, Camera, ObjectId, LightId, BillboardId};
 use helio_render_v2::features::{
-    FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature
+    FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
+    BillboardsFeature, BillboardInstance,
 };
 use helio_render_v2::scene::SceneLight;
 use helio_asset_compat::load_scene_file;
@@ -25,6 +26,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::collections::HashSet;
 use glam::Vec3;
+
+fn load_sprite() -> (Vec<u8>, u32, u32) {
+    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .into_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
 
 fn main() {
     env_logger::Builder::from_default_env()
@@ -49,7 +58,9 @@ struct AppState {
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
     objects: Vec<ObjectId>,
-    lights: Vec<LightId>,
+    point_light_id: LightId,
+    point_light_pos: Vec3,
+    point_billboard_id: BillboardId,
     start_time: Instant,
     last_frame: Instant,
 
@@ -71,7 +82,7 @@ impl App {
 impl AppState {
     fn update_camera(&mut self, dt: f32) -> Vec3 {
         // Camera movement (exact same as render_v2_basic)
-        const SPEED: f32 = 5.0;
+        const SPEED: f32 = 50.0;
         const LOOK_SENS: f32 = 0.002;
 
         // Apply mouse look — yaw left/right, pitch up/down (non-inverted)
@@ -168,10 +179,12 @@ impl ApplicationHandler for App {
         surface.configure(&device, &config);
 
         // Create feature registry
+        let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
         let feature_registry = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
             .with_feature(BloomFeature::new().with_intensity(0.3).with_threshold(1.5))
             .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
+            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(64))
             .build();
 
         let mut renderer = Renderer::new(
@@ -182,7 +195,6 @@ impl ApplicationHandler for App {
         .expect("Failed to create renderer");
 
         let mut objects = Vec::new();
-        let mut lights = Vec::new();
 
         // Load scene file (default: test.usdc)
         let scene_path = std::env::args().nth(1).unwrap_or_else(|| "test.fbx".to_string());
@@ -241,35 +253,7 @@ impl ApplicationHandler for App {
                     objects.push(object_id);
                 }
 
-                // Add all lights from the scene
-                for light in scene.lights.iter() {
-                    let light_id = renderer.add_light(light.clone());
-                    lights.push(light_id);
-                    log::debug!("  Added light {:?}", light_id);
-                }
-
-                // If no lights in the scene, add default lighting
-                if scene.lights.is_empty() {
-                    log::info!("  No lights in scene, adding default lighting");
-
-                    let key = renderer.add_light(SceneLight::directional(
-                        [-0.5, -1.0, -0.3],
-                        [1.0, 0.95, 0.9],
-                        3.0,
-                    ));
-                    let fill = renderer.add_light(SceneLight::directional(
-                        [0.5, 0.3, 0.5],
-                        [0.6, 0.7, 1.0],
-                        0.8,
-                    ));
-                    lights.push(key);
-                    lights.push(fill);
-                }
-
-                // Set ambient lighting
-                renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
-
-                log::info!("✓ Scene loaded: {} objects, {} lights", objects.len(), lights.len());
+                log::info!("✓ Scene loaded: {} objects", objects.len());
             }
             Err(e) => {
                 log::error!("Failed to load '{}': {}", scene_path, e);
@@ -281,19 +265,30 @@ impl ApplicationHandler for App {
                 let cube_id = renderer.add_object(&cube, None, glam::Mat4::IDENTITY);
                 objects.push(cube_id);
 
-                // Add default lights
-                let key = renderer.add_light(SceneLight::directional(
-                    [-0.5, -1.0, -0.3],
-                    [1.0, 0.95, 0.9],
-                    3.0,
-                ));
-                lights.push(key);
 
-                renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
             }
         }
 
+        // Single controllable point light — starts above the scene centre
+        let point_light_pos = Vec3::new(0.0, 3.0, 0.0);
+        let point_light_id = renderer.add_light(SceneLight::point(
+            [point_light_pos.x, point_light_pos.y, point_light_pos.z],
+            [1.0, 0.95, 0.8],
+            10.0,
+            15.0,
+        ));
+        renderer.set_ambient([0.05, 0.05, 0.08], 1.0);
+        let point_billboard_id = renderer.add_billboard(
+            BillboardInstance::new(
+                [point_light_pos.x, point_light_pos.y, point_light_pos.z],
+                [0.3, 0.3],
+            )
+            .with_color([1.0, 0.95, 0.8, 1.0]),
+        );
+        log::info!("Point light added at {:?} — use IJKL to move it", point_light_pos);
+
         let now = Instant::now();
+
         self.state = Some(AppState {
             window,
             surface,
@@ -301,7 +296,9 @@ impl ApplicationHandler for App {
             surface_format,
             renderer,
             objects,
-            lights,
+            point_light_id,
+            point_light_pos,
+            point_billboard_id,
             start_time: now,
             last_frame: now,
 
@@ -361,7 +358,7 @@ impl ApplicationHandler for App {
                 },
                 ..
             } => {
-                let mode = (state.renderer.debug_mode() + 1) % 5;
+                let mode = (state.renderer.debug_mode() + 1) % 6;
                 state.renderer.set_debug_mode(mode);
                 let mode_name = match mode {
                     0 => "Normal (with normal mapping)",
@@ -369,6 +366,7 @@ impl ApplicationHandler for App {
                     2 => "Texture Direct (G-buffer write)",
                     3 => "Lit without normal mapping",
                     4 => "G-buffer Readback Test",
+                    5 => "World Normals (RGB = XYZ remapped)",
                     _ => "Unknown",
                 };
                 println!("════════════════════════════════════════");
@@ -431,6 +429,25 @@ impl ApplicationHandler for App {
 
                 // Update camera from mouse and keyboard input (returns forward vector)
                 let forward = state.update_camera(dt);
+
+                // Move point light with IJKL (mirrors WASD: I/K = ±Z, J/L = ±X)
+                const LIGHT_SPEED: f32 = 5.0;
+                if state.keys.contains(&KeyCode::KeyI) { state.point_light_pos.z -= LIGHT_SPEED * dt; }
+                if state.keys.contains(&KeyCode::KeyK) { state.point_light_pos.z += LIGHT_SPEED * dt; }
+                if state.keys.contains(&KeyCode::KeyJ) { state.point_light_pos.x -= LIGHT_SPEED * dt; }
+                if state.keys.contains(&KeyCode::KeyL) { state.point_light_pos.x += LIGHT_SPEED * dt; }
+                let p = state.point_light_pos;
+                state.renderer.update_light(state.point_light_id, SceneLight::point(
+                    [p.x, p.y, p.z],
+                    [1.0, 0.95, 0.8],
+                    10.0,
+                    15.0,
+                ));
+                state.renderer.update_billboard(
+                    state.point_billboard_id,
+                    BillboardInstance::new([p.x, p.y, p.z], [0.3, 0.3])
+                        .with_color([1.0, 0.95, 0.8, 1.0]),
+                );
 
                 let size = state.window.inner_size();
                 let aspect = size.width as f32 / size.height.max(1) as f32;

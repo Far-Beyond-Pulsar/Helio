@@ -674,8 +674,9 @@ impl Renderer {
     /// - 2 = Texture direct (G-buffer write, bypasses material multiply)
     /// - 3 = Lit without normal mapping (uses geometry normals only)
     /// - 4 = G-buffer readback test (reads albedo from G-buffer without lighting)
+    /// - 5 = World normals (remaps N from [-1,1] to [0,1] as RGB)
     pub fn set_debug_mode(&mut self, mode: u32) {
-        self.debug_mode = mode.min(4); // Clamp to valid range
+        self.debug_mode = mode.min(5); // Clamp to valid range
     }
 
     /// Get current shader debug mode

@@ -453,8 +453,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Mode 1 (UV Grid) and Mode 2 (Texture Direct) show raw colors without lighting
     // Mode 3 (Lit without normal mapping) goes through normal lighting
     // Mode 4 (G-buffer readback test) shows albedo read from G-buffer without lighting
+    // Mode 5 (World normals) remaps N from [-1,1] → [0,1] as RGB (R=+X, G=+Y, B=+Z)
     if globals.debug_mode == 1u || globals.debug_mode == 2u || globals.debug_mode == 4u {
         return vec4<f32>(albedo, alpha);
+    }
+    if globals.debug_mode == 5u {
+        return vec4<f32>(N * 0.5 + 0.5, 1.0);
     }
 
     // ── Reconstruct world position from depth + inv_view_proj ────────────────
