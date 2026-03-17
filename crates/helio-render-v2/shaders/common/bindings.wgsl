@@ -39,14 +39,26 @@ struct Material {
     base_color: vec4<f32>,
     metallic: f32,
     roughness: f32,
-    emissive: f32,
+    emissive_factor: f32,
     ao: f32,
+    emissive_color: vec3<f32>,
+    alpha_cutoff: f32,
+    workflow: u32,
+    workflow_flags: u32,
+    _pad0: vec2<u32>,
+    specular_color: vec3<f32>,
+    specular_weight: f32,
+    ior: f32,
+    dielectric_f0: f32,
+    _reserved: vec2<f32>,
 }
 
 @group(1) @binding(0) var<uniform> material: Material;
 @group(1) @binding(1) var base_color_texture: texture_2d<f32>;
 @group(1) @binding(2) var normal_map: texture_2d<f32>;
 @group(1) @binding(3) var material_sampler: sampler;
+@group(1) @binding(4) var orm_texture: texture_2d<f32>;
+@group(1) @binding(5) var emissive_texture: texture_2d<f32>;
 
 // ============================================================================
 // Group 2: Lighting (per-scene)

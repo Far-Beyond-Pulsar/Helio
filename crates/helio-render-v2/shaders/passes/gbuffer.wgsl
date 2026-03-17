@@ -1,10 +1,11 @@
 //! G-buffer write pass (GPU-driven).
 //!
-//! Rasterises scene geometry into four screen-sized textures:
+//! Rasterises scene geometry into five screen-sized textures:
 //!   target 0 – albedo   (Rgba8Unorm)
 //!   target 1 – normal   (Rgba16Float)
 //!   target 2 – orm      (Rgba8Unorm)
 //!   target 3 – emissive (Rgba16Float)
+//!   target 4 – specular (Rgba16Float; resolved F0 RGB + workflow payload A)
 
 struct Camera {
     view_proj: mat4x4<f32>,
@@ -35,6 +36,14 @@ struct Material {
     ao:              f32,
     emissive_color:  vec3<f32>,
     alpha_cutoff:    f32,
+    workflow:        u32,
+    workflow_flags:  u32,
+    _pad0:           vec2<u32>,
+    specular_color:  vec3<f32>,
+    specular_weight: f32,
+    ior:             f32,
+    dielectric_f0:   f32,
+    _reserved:       vec2<f32>,
 }
 
 /// Per-instance data (128 bytes).  Must match `GpuInstanceData` in gpu_scene.rs.
@@ -116,6 +125,27 @@ struct GBufferOutput {
     @location(1) normal:   vec4<f32>,
     @location(2) orm:      vec4<f32>,
     @location(3) emissive: vec4<f32>,
+    @location(4) specular: vec4<f32>,
+}
+
+const MATERIAL_WORKFLOW_SPECULAR_IOR: u32 = 1u;
+
+fn resolve_specular_f0(albedo: vec3<f32>, metallic: f32) -> vec3<f32> {
+    if material.workflow == MATERIAL_WORKFLOW_SPECULAR_IOR {
+        let weighted_tint = max(material.specular_color * material.specular_weight, vec3<f32>(0.0));
+        let dielectric_f0 = vec3<f32>(material.dielectric_f0);
+        return clamp(dielectric_f0 * weighted_tint, vec3<f32>(0.0), vec3<f32>(0.999));
+    }
+
+    return clamp(
+        mix(vec3<f32>(material.dielectric_f0), albedo, metallic),
+        vec3<f32>(0.0),
+        vec3<f32>(0.999),
+    );
+}
+
+fn encode_workflow_payload() -> f32 {
+    return select(0.0, 1.0, material.workflow == MATERIAL_WORKFLOW_SPECULAR_IOR);
 }
 
 @fragment
@@ -128,6 +158,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(uv.x, uv.y, 0.0, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
+            vec4<f32>(0.0),
             vec4<f32>(0.0)
         );
     }
@@ -139,6 +170,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         return GBufferOutput(
             vec4<f32>(tex_sample.rgb, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
+            vec4<f32>(0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0)
         );
@@ -178,6 +210,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let ao        = material.ao       * orm.r;
     let roughness = clamp(material.roughness * orm.g, 0.04, 1.0);
     let metallic  = clamp(material.metallic  * orm.b, 0.0,  1.0);
+    let specular_f0 = resolve_specular_f0(albedo, metallic);
 
     let emissive_tex = textureSample(emissive_texture, material_sampler, uv).rgb;
     let emissive     = material.emissive_color * emissive_tex * material.emissive_factor;
@@ -185,7 +218,8 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     var out: GBufferOutput;
     out.albedo   = vec4<f32>(albedo,         alpha);
     out.normal   = vec4<f32>(N,              0.0);
-    out.orm      = vec4<f32>(ao, roughness, metallic, 0.0);
+    out.orm      = vec4<f32>(ao, roughness, metallic, encode_workflow_payload());
     out.emissive = vec4<f32>(emissive,       0.0);
+    out.specular = vec4<f32>(specular_f0,    encode_workflow_payload());
     return out;
 }

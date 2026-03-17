@@ -42,7 +42,15 @@ pub use profiler::{GpuProfiler, PassTiming, ScopeGuard, CompletedScope};
 pub use mesh::{GpuMesh, PackedVertex, SkinnedVertex, DrawCall, GpuDrawCall};
 pub use buffer_pool::GpuBufferPool;
 pub use scene::{SceneLight, SkyAtmosphere, VolumetricClouds, Skylight, ObjectId, LightId, BillboardId};
-pub use material::{Material, GpuMaterial, TextureData};
+pub use material::{
+    GpuMaterial,
+    Material,
+    MaterialWorkflow,
+    MaterialWorkflowKind,
+    MetallicRoughnessWorkflow,
+    SpecularIorWorkflow,
+    TextureData,
+};
 pub use debug_draw::DebugShape;
 pub use debug_viz::{DebugRenderer, DebugVizSystem, DebugRenderContext, ObjectBounds};
 pub use gpu_scene::{GpuScene, GpuInstanceData};

@@ -32,7 +32,7 @@ struct Globals {
     csm_splits: vec4<f32>,
 }
 
-// Material uniform – must match material::MaterialUniform (48 bytes).
+// Material uniform – must match material::MaterialUniform (96 bytes).
 struct Material {
     base_color:      vec4<f32>,   // offset  0
     metallic:        f32,          // offset 16
@@ -41,6 +41,14 @@ struct Material {
     ao:              f32,          // offset 28
     emissive_color:  vec3<f32>,   // offset 32  (alignment 16 — ok)
     alpha_cutoff:    f32,         // offset 44
+    workflow:        u32,         // offset 48
+    workflow_flags:  u32,         // offset 52
+    _pad0:           vec2<u32>,   // offset 56
+    specular_color:  vec3<f32>,   // offset 64
+    specular_weight: f32,         // offset 76
+    ior:             f32,         // offset 80
+    dielectric_f0:   f32,         // offset 84
+    _reserved:       vec2<f32>,   // offset 88
 }
 
 @group(0) @binding(0) var<uniform>       camera:        Camera;
@@ -278,6 +286,22 @@ fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> v
     return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
+const MATERIAL_WORKFLOW_SPECULAR_IOR: u32 = 1u;
+
+fn resolve_specular_f0(albedo: vec3<f32>, metallic: f32) -> vec3<f32> {
+    if material.workflow == MATERIAL_WORKFLOW_SPECULAR_IOR {
+        let weighted_tint = max(material.specular_color * material.specular_weight, vec3<f32>(0.0));
+        let dielectric_f0 = vec3<f32>(material.dielectric_f0);
+        return clamp(dielectric_f0 * weighted_tint, vec3<f32>(0.0), vec3<f32>(0.999));
+    }
+
+    return clamp(
+        mix(vec3<f32>(material.dielectric_f0), albedo, metallic),
+        vec3<f32>(0.0),
+        vec3<f32>(0.999),
+    );
+}
+
 // Evaluate one light using the full Cook-Torrance BRDF.
 // `sf` is the shadow factor (0=fully shadowed, 1=lit), computed by the caller
 // so a single shadow_factor() call can be shared with sky_occlusion.
@@ -511,8 +535,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let metallic  = clamp(material.metallic  * orm.b, 0.0,  1.0);
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
-    // Dielectric F0 = 0.04; metallic surfaces use albedo as F0
-    let F0   = mix(vec3<f32>(0.04), albedo, metallic);
+    let F0   = resolve_specular_f0(albedo, metallic);
     let V    = normalize(camera.position - input.world_position);
     let NdV  = max(dot(N, V), 0.0);
 
@@ -595,4 +618,3 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     // alpha controls how much background shows through
     return vec4<f32>(color, alpha);
 }
-

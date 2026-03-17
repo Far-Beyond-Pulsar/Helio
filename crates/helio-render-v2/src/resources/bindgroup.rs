@@ -3,8 +3,10 @@
 //! This is the FOUNDATION of the entire renderer. All pipelines use these
 //! standard bind group layouts, enabling proper resource sharing between features.
 
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 use wgpu;
+
+use crate::material::MaterialUniform;
 
 /// Standard bind group layouts used by all pipelines
 ///
@@ -108,7 +110,7 @@ impl BindGroupLayouts {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: None,
+                        min_binding_size: NonZeroU64::new(std::mem::size_of::<MaterialUniform>() as u64),
                     },
                     count: None,
                 },
@@ -351,7 +353,7 @@ impl BindGroupLayouts {
         })
     }
 
-    /// Group 1 for DeferredLightingPass – reads the four G-buffer textures plus the
+    /// Group 1 for DeferredLightingPass – reads the five G-buffer textures plus the
     /// depth texture.  All reads use `textureLoad` (no sampler required).
     fn create_gbuffer_read_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -401,9 +403,20 @@ impl BindGroupLayouts {
                     },
                     count: None,
                 },
-                // 4: depth     (Depth32Float via texture_depth_2d)
+                // 4: resolved specular F0 / workflow payload (Rgba16Float)
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // 5: depth     (Depth32Float via texture_depth_2d)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,

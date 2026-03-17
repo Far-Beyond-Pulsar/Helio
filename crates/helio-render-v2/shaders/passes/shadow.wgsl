@@ -12,6 +12,14 @@ struct Material {
     ao:              f32,
     emissive_color:  vec3<f32>,
     alpha_cutoff:    f32,
+    workflow:        u32,
+    workflow_flags:  u32,
+    _pad0:           vec2<u32>,
+    specular_color:  vec3<f32>,
+    specular_weight: f32,
+    ior:             f32,
+    dielectric_f0:   f32,
+    _reserved:       vec2<f32>,
 }
 
 /// Per-instance GPU data.  Must match `GpuInstanceData` in gpu_scene.rs.

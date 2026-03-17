@@ -34,12 +34,19 @@ pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u3
     (tex, write_view, sample_view)
 }
 
-/// Create all four G-buffer textures and return their views packaged as `GBufferTargets`.
+/// Create all G-buffer textures and return their views packaged as `GBufferTargets`.
 pub(super) fn create_gbuffer_textures(
     device: &wgpu::Device,
     width: u32,
     height: u32,
-) -> (wgpu::Texture, wgpu::Texture, wgpu::Texture, wgpu::Texture, GBufferTargets) {
+) -> (
+    wgpu::Texture,
+    wgpu::Texture,
+    wgpu::Texture,
+    wgpu::Texture,
+    wgpu::Texture,
+    GBufferTargets,
+) {
     let make = |label: &str, format: wgpu::TextureFormat| {
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
@@ -56,12 +63,14 @@ pub(super) fn create_gbuffer_textures(
     let normal_tex  = make("GBuf Normal",   GBUF_FLOAT_FORMAT);
     let orm_tex     = make("GBuf ORM",      wgpu::TextureFormat::Rgba8Unorm);
     let emissive_tex = make("GBuf Emissive", GBUF_FLOAT_FORMAT);
+    let specular_tex = make("GBuf Specular", GBUF_FLOAT_FORMAT);
     let albedo_view   = albedo_tex.create_view(&Default::default());
     let normal_view   = normal_tex.create_view(&Default::default());
     let orm_view      = orm_tex.create_view(&Default::default());
     let emissive_view = emissive_tex.create_view(&Default::default());
-    let targets = GBufferTargets { albedo_view, normal_view, orm_view, emissive_view };
-    (albedo_tex, normal_tex, orm_tex, emissive_tex, targets)
+    let specular_view = specular_tex.create_view(&Default::default());
+    let targets = GBufferTargets { albedo_view, normal_view, orm_view, emissive_view, specular_view };
+    (albedo_tex, normal_tex, orm_tex, emissive_tex, specular_tex, targets)
 }
 
 /// Build the G-buffer read bind group used by the deferred lighting pass (group 1).
@@ -79,7 +88,8 @@ pub(super) fn create_gbuffer_bind_group(
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&targets.normal_view) },
             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&targets.orm_view) },
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&targets.emissive_view) },
-            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(depth_sample_view) },
+            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&targets.specular_view) },
+            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(depth_sample_view) },
         ],
     })
 }

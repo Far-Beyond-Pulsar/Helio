@@ -225,8 +225,9 @@ impl Renderer {
         let (depth_texture, depth_view, depth_sample_view) =
             create_depth_texture(&device, config.width, config.height);
 
-        // Four G-buffer render targets.
-        let (gbuf_albedo_texture, gbuf_normal_texture, gbuf_orm_texture, gbuf_emissive_texture, gbuf_targets) =
+        // Five G-buffer render targets: base color, normal, ORM, emissive, and
+        // resolved specular payload for deferred workflow-aware Fresnel.
+        let (gbuf_albedo_texture, gbuf_normal_texture, gbuf_orm_texture, gbuf_emissive_texture, gbuf_specular_texture, gbuf_targets) =
             create_gbuffer_textures(&device, config.width, config.height);
         let gbuffer_targets = Arc::new(Mutex::new(gbuf_targets));
 
@@ -242,6 +243,9 @@ impl Renderer {
             base_color: [1.0, 1.0, 1.0, 1.0],
             metallic: 0.0, roughness: 0.5, emissive_factor: 0.0, ao: 1.0,
             emissive_color: [0.0; 3], alpha_cutoff: 0.0,
+            workflow: 0, workflow_flags: 0, _pad0: [0; 2],
+            specular_color: [0.04; 3], specular_weight: 1.0,
+            ior: 1.5, dielectric_f0: 0.04, _reserved: [0.0; 2],
         };
         let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Default Material Uniform"),
@@ -589,6 +593,7 @@ impl Renderer {
             gbuf_normal_texture,
             gbuf_orm_texture,
             gbuf_emissive_texture,
+            gbuf_specular_texture,
             gbuffer_targets,
             deferred_bg,
             default_material_views,

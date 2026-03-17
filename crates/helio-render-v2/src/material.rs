@@ -23,6 +23,81 @@ impl TextureData {
     }
 }
 
+/// Canonical CPU-side material workflow selection.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaterialWorkflowKind {
+    MetallicRoughness = 0,
+    SpecularIor = 1,
+}
+
+/// Canonical metallic/roughness material workflow parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MetallicRoughnessWorkflow {
+    pub metallic: f32,
+    pub roughness: f32,
+}
+
+impl Default for MetallicRoughnessWorkflow {
+    fn default() -> Self {
+        Self { metallic: 0.0, roughness: 0.5 }
+    }
+}
+
+/// Canonical explicit specular/IOR workflow parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpecularIorWorkflow {
+    /// Linear RGB F0 tint used by explicit specular workflows.
+    pub specular_color: [f32; 3],
+    /// Scalar multiplier for the specular term.
+    pub specular_weight: f32,
+    /// Index of refraction used to derive the dielectric Fresnel baseline.
+    pub ior: f32,
+    /// Perceptual roughness in [0, 1].
+    pub roughness: f32,
+}
+
+impl SpecularIorWorkflow {
+    pub fn dielectric_f0(self) -> f32 {
+        let ior = self.ior.max(1.0);
+        let f0 = (ior - 1.0) / (ior + 1.0);
+        f0 * f0
+    }
+}
+
+impl Default for SpecularIorWorkflow {
+    fn default() -> Self {
+        Self {
+            specular_color: [1.0; 3],
+            specular_weight: 1.0,
+            ior: 1.5,
+            roughness: 0.5,
+        }
+    }
+}
+
+/// Canonical CPU-side material workflow representation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MaterialWorkflow {
+    MetallicRoughness(MetallicRoughnessWorkflow),
+    SpecularIor(SpecularIorWorkflow),
+}
+
+impl Default for MaterialWorkflow {
+    fn default() -> Self {
+        Self::MetallicRoughness(MetallicRoughnessWorkflow::default())
+    }
+}
+
+impl MaterialWorkflow {
+    pub fn kind(self) -> MaterialWorkflowKind {
+        match self {
+            Self::MetallicRoughness(_) => MaterialWorkflowKind::MetallicRoughness,
+            Self::SpecularIor(_) => MaterialWorkflowKind::SpecularIor,
+        }
+    }
+}
+
 /// CPU-side description of a PBR material.
 ///
 /// All texture fields are optional – omitting one falls back to a sensible
@@ -33,9 +108,22 @@ pub struct Material {
     // ── Scalar / tint factors ────────────────────────────────────────────────
     /// Base color multiplier (RGBA, linear).  Default white.
     pub base_color: [f32; 4],
+    /// Canonical material workflow selection.
+    ///
+    /// Legacy `metallic`/`roughness` fields remain available for existing
+    /// metallic-roughness call sites and are mirrored when that workflow is
+    /// active.
+    pub workflow: MaterialWorkflow,
     /// Metallic factor in [0, 1].  Default 0.
+    ///
+    /// This is preserved for backward compatibility with the existing
+    /// metallic/roughness workflow API.
     pub metallic: f32,
     /// Roughness factor in [0, 1].  Default 0.5.
+    ///
+    /// This remains the compatibility surface for existing code and is also
+    /// mirrored into explicit workflows when those are authored through the
+    /// provided helpers.
     pub roughness: f32,
     /// Ambient occlusion factor in [0, 1].  Default 1.
     pub ao: f32,
@@ -71,6 +159,7 @@ impl Material {
     pub fn new() -> Self {
         Self {
             base_color: [1.0; 4],
+            workflow: MaterialWorkflow::default(),
             metallic: 0.0,
             roughness: 0.5,
             ao: 1.0,
@@ -83,8 +172,32 @@ impl Material {
     }
 
     pub fn with_base_color(mut self, color: [f32; 4]) -> Self { self.base_color = color; self }
-    pub fn with_metallic(mut self, v: f32) -> Self { self.metallic = v; self }
-    pub fn with_roughness(mut self, v: f32) -> Self { self.roughness = v; self }
+    pub fn with_metallic(mut self, v: f32) -> Self {
+        self.metallic = v;
+        self.workflow = MaterialWorkflow::MetallicRoughness(MetallicRoughnessWorkflow {
+            metallic: self.metallic,
+            roughness: self.roughness,
+        });
+        self
+    }
+    pub fn with_roughness(mut self, v: f32) -> Self {
+        self.roughness = v;
+        self.workflow = match self.workflow {
+            MaterialWorkflow::MetallicRoughness(_) => {
+                MaterialWorkflow::MetallicRoughness(MetallicRoughnessWorkflow {
+                    metallic: self.metallic,
+                    roughness: self.roughness,
+                })
+            }
+            MaterialWorkflow::SpecularIor(specular) => {
+                MaterialWorkflow::SpecularIor(SpecularIorWorkflow {
+                    roughness: self.roughness,
+                    ..specular
+                })
+            }
+        };
+        self
+    }
     pub fn with_ao(mut self, v: f32) -> Self { self.ao = v; self }
     pub fn with_emissive(mut self, color: [f32; 3], factor: f32) -> Self {
         self.emissive_color = color;
@@ -99,6 +212,67 @@ impl Material {
     pub fn with_alpha_blend(mut self) -> Self {
         self.transparent_blend = true;
         self
+    }
+    pub fn with_workflow(mut self, workflow: MaterialWorkflow) -> Self {
+        self.set_workflow(workflow);
+        self
+    }
+    pub fn with_metallic_roughness_workflow(mut self, metallic: f32, roughness: f32) -> Self {
+        self.metallic = metallic;
+        self.roughness = roughness;
+        self.workflow = MaterialWorkflow::MetallicRoughness(MetallicRoughnessWorkflow {
+            metallic,
+            roughness,
+        });
+        self
+    }
+    pub fn with_specular_ior_workflow(
+        mut self,
+        specular_color: [f32; 3],
+        specular_weight: f32,
+        ior: f32,
+        roughness: f32,
+    ) -> Self {
+        self.roughness = roughness;
+        self.workflow = MaterialWorkflow::SpecularIor(SpecularIorWorkflow {
+            specular_color,
+            specular_weight,
+            ior,
+            roughness,
+        });
+        self
+    }
+    pub fn set_workflow(&mut self, workflow: MaterialWorkflow) {
+        match workflow {
+            MaterialWorkflow::MetallicRoughness(workflow) => {
+                self.metallic = workflow.metallic;
+                self.roughness = workflow.roughness;
+                self.workflow = MaterialWorkflow::MetallicRoughness(workflow);
+            }
+            MaterialWorkflow::SpecularIor(workflow) => {
+                self.roughness = workflow.roughness;
+                self.workflow = MaterialWorkflow::SpecularIor(workflow);
+            }
+        }
+    }
+    pub fn workflow(&self) -> MaterialWorkflow {
+        match self.workflow {
+            MaterialWorkflow::MetallicRoughness(_) => {
+                MaterialWorkflow::MetallicRoughness(MetallicRoughnessWorkflow {
+                    metallic: self.metallic,
+                    roughness: self.roughness,
+                })
+            }
+            MaterialWorkflow::SpecularIor(workflow) => {
+                MaterialWorkflow::SpecularIor(SpecularIorWorkflow {
+                    roughness: self.roughness,
+                    ..workflow
+                })
+            }
+        }
+    }
+    pub fn workflow_kind(&self) -> MaterialWorkflowKind {
+        self.workflow().kind()
     }
     pub fn with_base_color_texture(mut self, t: TextureData) -> Self { self.base_color_texture = Some(t); self }
     pub fn with_normal_map(mut self, t: TextureData) -> Self { self.normal_map = Some(t); self }
@@ -122,7 +296,7 @@ impl GpuMaterial {
 
 // ── Internal uniform struct (must match geometry.wgsl `Material`) ────────────
 
-/// Must match the WGSL `Material` struct exactly (48 bytes).
+/// Must match the WGSL `Material` struct exactly (96 bytes).
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct MaterialUniform {
@@ -133,19 +307,61 @@ pub(crate) struct MaterialUniform {
     pub ao: f32,                     // offset 28
     pub emissive_color: [f32; 3],   // offset 32, 12 bytes
     pub alpha_cutoff: f32,           // offset 44
-    // total: 48 bytes (multiple of 16 — satisfies vec3 alignment)
+    pub workflow: u32,              // offset 48
+    pub workflow_flags: u32,        // offset 52
+    pub _pad0: [u32; 2],            // offset 56, 8 bytes
+    pub specular_color: [f32; 3],   // offset 64, 12 bytes
+    pub specular_weight: f32,       // offset 76
+    pub ior: f32,                   // offset 80
+    pub dielectric_f0: f32,         // offset 84
+    pub _reserved: [f32; 2],        // offset 88, 8 bytes
+    // total: 96 bytes (multiple of 16 — satisfies uniform alignment)
 }
 
 impl From<&Material> for MaterialUniform {
     fn from(m: &Material) -> Self {
+        let workflow = m.workflow();
+        let (metallic, roughness, workflow_kind, specular_color, specular_weight, ior, dielectric_f0) =
+            match workflow {
+                MaterialWorkflow::MetallicRoughness(workflow) => {
+                    let specular = SpecularIorWorkflow::default();
+                    (
+                        workflow.metallic,
+                        workflow.roughness,
+                        MaterialWorkflowKind::MetallicRoughness,
+                        [specular.dielectric_f0(); 3],
+                        specular.specular_weight,
+                        specular.ior,
+                        specular.dielectric_f0(),
+                    )
+                }
+                MaterialWorkflow::SpecularIor(workflow) => (
+                    0.0,
+                    workflow.roughness,
+                    MaterialWorkflowKind::SpecularIor,
+                    workflow.specular_color,
+                    workflow.specular_weight,
+                    workflow.ior,
+                    workflow.dielectric_f0(),
+                ),
+            };
+
         Self {
             base_color: m.base_color,
-            metallic: m.metallic,
-            roughness: m.roughness,
+            metallic,
+            roughness,
             emissive_factor: m.emissive_factor,
             ao: m.ao,
             emissive_color: m.emissive_color,
             alpha_cutoff: m.alpha_cutoff,
+            workflow: workflow_kind as u32,
+            workflow_flags: 0,
+            _pad0: [0; 2],
+            specular_color,
+            specular_weight,
+            ior,
+            dielectric_f0,
+            _reserved: [0.0; 2],
         }
     }
 }
@@ -298,5 +514,53 @@ impl DefaultMaterialViews {
         });
 
         Self { white_srgb, flat_normal, white_orm, black_emissive, sampler }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn material_uniform_size_matches_wgsl_layout() {
+        assert_eq!(std::mem::size_of::<MaterialUniform>(), 96);
+    }
+
+    #[test]
+    fn legacy_metallic_roughness_fields_still_drive_workflow() {
+        let mut material = Material::new();
+        material.metallic = 0.8;
+        material.roughness = 0.3;
+
+        assert_eq!(
+            material.workflow(),
+            MaterialWorkflow::MetallicRoughness(MetallicRoughnessWorkflow {
+                metallic: 0.8,
+                roughness: 0.3,
+            })
+        );
+
+        let uniform = MaterialUniform::from(&material);
+        assert_eq!(uniform.workflow, MaterialWorkflowKind::MetallicRoughness as u32);
+        assert_eq!(uniform.metallic, 0.8);
+        assert_eq!(uniform.roughness, 0.3);
+        assert_eq!(uniform.ior, 1.5);
+        assert!((uniform.dielectric_f0 - 0.04).abs() < 1e-6);
+    }
+
+    #[test]
+    fn explicit_specular_ior_workflow_populates_uniform_fields() {
+        let material = Material::new().with_specular_ior_workflow([0.9, 0.8, 0.7], 0.65, 1.33, 0.18);
+
+        assert_eq!(material.workflow_kind(), MaterialWorkflowKind::SpecularIor);
+
+        let uniform = MaterialUniform::from(&material);
+        assert_eq!(uniform.workflow, MaterialWorkflowKind::SpecularIor as u32);
+        assert_eq!(uniform.metallic, 0.0);
+        assert_eq!(uniform.roughness, 0.18);
+        assert_eq!(uniform.specular_color, [0.9, 0.8, 0.7]);
+        assert_eq!(uniform.specular_weight, 0.65);
+        assert!((uniform.ior - 1.33).abs() < 1e-6);
+        assert!((uniform.dielectric_f0 - 0.020059314).abs() < 1e-6);
     }
 }
