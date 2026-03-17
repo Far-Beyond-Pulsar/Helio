@@ -2,8 +2,11 @@
 //!
 //! This example demonstrates loading external 3D model files using SolidRS.
 //!
-//! Usage: Place a file named "test.fbx" in the working directory and run:
+//! Usage: Place a file named "test.usdc" in the working directory and run:
 //!   cargo run --bin load_fbx
+//!
+//! You can also specify a file path:
+//!   cargo run --bin load_fbx -- path/to/scene.usdc
 
 use helio_render_v2::{Renderer, RendererConfig, Camera, ObjectId, LightId};
 use helio_render_v2::features::{
@@ -181,9 +184,11 @@ impl ApplicationHandler for App {
         let mut objects = Vec::new();
         let mut lights = Vec::new();
 
-        // Load scene from test.fbx
+        // Load scene file (default: test.usdc)
+        let scene_path = std::env::args().nth(1).unwrap_or_else(|| "test.usdc".to_string());
+
         log::info!("Current directory: {:?}", std::env::current_dir().unwrap());
-        log::info!("Looking for test.fbx...");
+        log::info!("Loading scene file: {}", scene_path);
 
         // Configure UV handling:
         // The FBX loader already flips V coordinates (DirectX → OpenGL)
@@ -191,7 +196,7 @@ impl ApplicationHandler for App {
         // If textures look wrong, try true (some exporters may vary)
         let config = helio_asset_compat::LoadConfig::default().with_uv_flip(false);
 
-        match helio_asset_compat::load_scene_file_with_config("test.fbx", config) {
+        match helio_asset_compat::load_scene_file_with_config(&scene_path, config) {
             Ok(scene) => {
                 log::info!("✓ Loaded '{}'", scene.name);
                 log::info!("  {} meshes, {} materials, {} lights",
@@ -267,8 +272,8 @@ impl ApplicationHandler for App {
                 log::info!("✓ Scene loaded: {} objects, {} lights", objects.len(), lights.len());
             }
             Err(e) => {
-                log::error!("Failed to load test.fbx: {}", e);
-                log::info!("Place test.fbx in the working directory");
+                log::error!("Failed to load '{}': {}", scene_path, e);
+                log::info!("Place '{}' in the working directory or pass a path as the first argument", scene_path);
                 log::info!("Creating fallback cube for demonstration");
 
                 // Fallback: create a simple cube
@@ -356,15 +361,19 @@ impl ApplicationHandler for App {
                 },
                 ..
             } => {
-                let mode = (state.renderer.debug_mode() + 1) % 3;
+                let mode = (state.renderer.debug_mode() + 1) % 5;
                 state.renderer.set_debug_mode(mode);
                 let mode_name = match mode {
-                    0 => "Normal",
+                    0 => "Normal (with normal mapping)",
                     1 => "UV Grid",
-                    2 => "Texture Direct",
+                    2 => "Texture Direct (G-buffer write)",
+                    3 => "Lit without normal mapping",
+                    4 => "G-buffer Readback Test",
                     _ => "Unknown",
                 };
-                log::info!("Debug mode: {} ({})", mode, mode_name);
+                println!("════════════════════════════════════════");
+                println!("Debug mode {}: {}", mode, mode_name);
+                println!("════════════════════════════════════════");
             }
 
             WindowEvent::Resized(size) => {

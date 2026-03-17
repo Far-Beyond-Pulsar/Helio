@@ -669,14 +669,16 @@ impl Renderer {
     pub fn is_editor_mode(&self) -> bool { self.editor_mode }
 
     /// Set shader debug visualization mode:
-    /// - 0 = Normal rendering
+    /// - 0 = Normal rendering (with normal mapping)
     /// - 1 = UV grid (shows texture coordinates as colors)
-    /// - 2 = Texture direct (bypasses material multiply)
+    /// - 2 = Texture direct (G-buffer write, bypasses material multiply)
+    /// - 3 = Lit without normal mapping (uses geometry normals only)
+    /// - 4 = G-buffer readback test (reads albedo from G-buffer without lighting)
     pub fn set_debug_mode(&mut self, mode: u32) {
-        self.debug_mode = mode.min(2); // Clamp to valid range
+        self.debug_mode = mode.min(4); // Clamp to valid range
     }
 
-    /// Get current shader debug mode (0=normal, 1=UV grid, 2=texture direct)
+    /// Get current shader debug mode
     pub fn debug_mode(&self) -> u32 {
         self.debug_mode
     }

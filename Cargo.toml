@@ -25,3 +25,4 @@ solid-rs = { path = "../genesis/SolidRS/crates/solid-rs" }
 solid-gltf = { path = "../genesis/SolidRS/crates/solid-gltf" }
 solid-fbx = { path = "../genesis/SolidRS/crates/solid-fbx" }
 solid-obj = { path = "../genesis/SolidRS/crates/solid-obj" }
+solid-usd = { path = "../genesis/SolidRS/crates/solid-usd" }

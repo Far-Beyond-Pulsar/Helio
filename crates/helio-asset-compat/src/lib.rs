@@ -79,12 +79,14 @@ pub fn load_scene_file_with_config<P: AsRef<Path>>(path: P, config: LoadConfig) 
         ))?;
 
     log::info!("Loading 3D model: {} (UV flip: {})", path.display(), config.flip_uv_y);
+    log::info!("Detected extension: {}", extension);
 
     // Create SolidRS registry and register loaders
     let mut registry = solid_rs::registry::Registry::new();
     registry.register_loader(solid_fbx::FbxLoader);
     registry.register_loader(solid_gltf::GltfLoader);
     registry.register_loader(solid_obj::ObjLoader);
+    registry.register_loader(solid_usd::UsdLoader); // supports usda/usdc/usdz
 
     // Load the scene
     let solid_scene = registry.load_file(path)

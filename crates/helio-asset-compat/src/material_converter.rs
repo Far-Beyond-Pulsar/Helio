@@ -67,16 +67,13 @@ pub fn convert_material(
             log::warn!("⚠️  Base color texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
                 t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
         }
+        println!("    Loading texture for material '{}' (texture_index={})", material.name, tex_ref.texture_index);
         helio_mat.base_color_texture = Some(load_texture_data(tex_ref, scene, base_dir, true)?);
 
-        // FIX: When base_color texture is present, set base_color factor to white
-        // FBX files often have incorrect base_color_factor values that darken/tint the texture
-        println!("    🔧 Material '{}' has texture → overriding base_color from [{:.3}, {:.3}, {:.3}, {:.3}] to [1.0, 1.0, 1.0, 1.0]",
-            material.name,
-            helio_mat.base_color[0],
-            helio_mat.base_color[1],
-            helio_mat.base_color[2],
-            helio_mat.base_color[3]);
+        // FIX: When base_color texture is present, override base_color factor to white
+        // FBX exports often have incorrect base_color_factor that darkens/tints textures
+        println!("    🔧 Overriding base_color from [{:.3}, {:.3}, {:.3}] to [1.0, 1.0, 1.0]",
+            helio_mat.base_color[0], helio_mat.base_color[1], helio_mat.base_color[2]);
         helio_mat.base_color = [1.0, 1.0, 1.0, 1.0];
     }
 
@@ -144,6 +141,12 @@ fn load_texture_data(
     // Extract image data
     use solid_rs::scene::ImageSource;
     use std::path::{Path, PathBuf};
+
+    // Log which image we're loading
+    println!("      → Image source: {}", match &image.source {
+        ImageSource::Embedded { .. } => "<embedded>".to_string(),
+        ImageSource::Uri(uri) => uri.clone(),
+    });
 
     let data_vec: Vec<u8>;
     let image_data = match &image.source {
@@ -220,7 +223,7 @@ fn load_texture_data(
     let rgba = decoded.to_rgba8();
     let (width, height) = rgba.dimensions();
 
-    log::info!("✓ Loaded texture '{}': {}x{} pixels ({} KB)",
+    println!("      → Decoded: '{}' ({}x{}, {} KB)",
         texture.name, width, height, rgba.len() / 1024);
 
     Ok(TextureData::new(rgba.into_raw(), width, height))

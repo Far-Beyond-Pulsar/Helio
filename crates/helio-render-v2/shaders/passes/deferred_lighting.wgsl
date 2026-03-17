@@ -450,8 +450,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let metallic  = orm_r.b;
 
     // ── Debug mode: bypass lighting ───────────────────────────────────────────
-    // Mode 1 (UV Grid) and Mode 2 (Texture Direct) should show raw colors
-    if globals.debug_mode >= 1u {
+    // Mode 1 (UV Grid) and Mode 2 (Texture Direct) show raw colors without lighting
+    // Mode 3 (Lit without normal mapping) goes through normal lighting
+    // Mode 4 (G-buffer readback test) shows albedo read from G-buffer without lighting
+    if globals.debug_mode == 1u || globals.debug_mode == 2u || globals.debug_mode == 4u {
         return vec4<f32>(albedo, alpha);
     }
 

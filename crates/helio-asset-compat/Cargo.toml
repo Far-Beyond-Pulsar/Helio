@@ -13,6 +13,7 @@ solid-rs.workspace = true
 solid-gltf.workspace = true
 solid-fbx.workspace = true
 solid-obj.workspace = true
+solid-usd.workspace = true
 
 # Math and utilities
 glam.workspace = true

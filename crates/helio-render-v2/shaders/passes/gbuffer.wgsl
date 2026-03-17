@@ -119,7 +119,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
 
     let tex_sample = textureSample(base_color_texture, material_sampler, uv);
 
-    // DEBUG MODE 2: Show texture sample directly (bypass material multiply)
+    // DEBUG MODE 2: Show texture sample directly (bypass material multiply AND lighting)
     if globals.debug_mode == 2u {
         return GBufferOutput(
             vec4<f32>(tex_sample.rgb, 1.0),
@@ -129,7 +129,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         );
     }
 
-    // NORMAL RENDERING (debug_mode == 0)
+    // Common for modes 0 and 3
     let albedo     = material.base_color.rgb * tex_sample.rgb;
     let alpha      = material.base_color.a  * tex_sample.a;
 
@@ -137,22 +137,30 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     if alpha < material.alpha_cutoff { discard; }
 
     let N_geom  = normalize(input.world_normal);
-    let q0      = dpdx(input.world_position);
-    let q1      = dpdy(input.world_position);
-    let st0     = dpdx(uv);
-    let st1     = dpdy(uv);
-    let q1perp  = cross(q1, N_geom);
-    let q0perp  = cross(N_geom, q0);
-    let T_deriv = q1perp * st0.x + q0perp * st1.x;
-    let B_deriv = q1perp * st0.y + q0perp * st1.y;
-    let det     = max(dot(T_deriv, T_deriv), dot(B_deriv, B_deriv));
-    let scale   = select(0.0, inverseSqrt(det), det > 1e-10);
-    let norm_ts = textureSample(normal_map, material_sampler, uv).rgb * 2.0 - 1.0;
-    let N       = normalize(
-        T_deriv * (norm_ts.x * scale) +
-        B_deriv * (norm_ts.y * scale) +
-        N_geom  *  norm_ts.z
-    );
+
+    // DEBUG MODE 3: Use geometry normal only (skip normal mapping)
+    var N: vec3<f32>;
+    if globals.debug_mode == 3u {
+        N = N_geom;
+    } else {
+        // NORMAL RENDERING (mode 0): Apply normal mapping
+        let q0      = dpdx(input.world_position);
+        let q1      = dpdy(input.world_position);
+        let st0     = dpdx(uv);
+        let st1     = dpdy(uv);
+        let q1perp  = cross(q1, N_geom);
+        let q0perp  = cross(N_geom, q0);
+        let T_deriv = q1perp * st0.x + q0perp * st1.x;
+        let B_deriv = q1perp * st0.y + q0perp * st1.y;
+        let det     = max(dot(T_deriv, T_deriv), dot(B_deriv, B_deriv));
+        let scale   = select(0.0, inverseSqrt(det), det > 1e-10);
+        let norm_ts = textureSample(normal_map, material_sampler, uv).rgb * 2.0 - 1.0;
+        N = normalize(
+            T_deriv * (norm_ts.x * scale) +
+            B_deriv * (norm_ts.y * scale) +
+            N_geom  *  norm_ts.z
+        );
+    }
 
     let orm       = textureSample(orm_texture, material_sampler, uv).rgb;
     let ao        = material.ao       * orm.r;
