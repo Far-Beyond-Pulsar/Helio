@@ -21,8 +21,8 @@ env_logger = "0.11"
 log = "0.4"
 
 # SolidRS - 3D asset loading library
-solid-rs = { path = "../genesis/SolidRS/crates/solid-rs" }
-solid-gltf = { path = "../genesis/SolidRS/crates/solid-gltf" }
-solid-fbx = { path = "../genesis/SolidRS/crates/solid-fbx" }
-solid-obj = { path = "../genesis/SolidRS/crates/solid-obj" }
-solid-usd = { path = "../genesis/SolidRS/crates/solid-usd" }
+solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
+solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
+solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
+solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
+solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
