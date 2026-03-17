@@ -35,7 +35,30 @@ impl PackedVertex {
             bitangent_sign: 1.0,
             tex_coords,
             normal:  pack_snorm8x4(normal[0],  normal[1],  normal[2],  0.0),
-            tangent: pack_snorm8x4(tangent[0], tangent[1], tangent[2], 1.0),
+            tangent: pack_snorm8x4(tangent[0], tangent[1], tangent[2], 0.0),
+        }
+    }
+
+    /// Create a vertex with an explicit tangent **and** bitangent handedness sign.
+    ///
+    /// Use this when the source data provides a `Vec4` tangent where the `w`
+    /// component encodes the bitangent sign (`+1.0` or `-1.0`), as produced by
+    /// MikkTSpace and stored in FBX / glTF files.  The sign is kept in the
+    /// dedicated `bitangent_sign` field so the shader can reconstruct the full
+    /// TBN matrix as `B = cross(N, T) * bitangent_sign`.
+    pub fn from_components(
+        position:       [f32; 3],
+        normal:         [f32; 3],
+        tex_coords:     [f32; 2],
+        tangent:        [f32; 3],
+        bitangent_sign: f32,
+    ) -> Self {
+        Self {
+            position,
+            bitangent_sign,
+            tex_coords,
+            normal:  pack_snorm8x4(normal[0],  normal[1],  normal[2],  0.0),
+            tangent: pack_snorm8x4(tangent[0], tangent[1], tangent[2], 0.0),
         }
     }
 }

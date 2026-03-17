@@ -32,11 +32,17 @@ pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
         [0.0, 0.0]
     };
 
-    // Extract tangent (or generate from normal if missing)
-    let tangent = if let Some(t) = v.tangent {
-        [t.x, t.y, t.z]
+    // Extract tangent XYZ and bitangent handedness sign from the Vec4.
+    // SolidRS stores tangent as Vec4 where w = bitangent sign (+1 or -1),
+    // following the MikkTSpace / FBX / glTF convention.
+    // The SolidRS FBX loader already flips V (1.0 - v) to convert from the
+    // DirectX top-left UV origin to the OpenGL bottom-left convention.
+    // Flipping V inverts the bitangent direction, so we negate w here to
+    // keep the TBN frame consistent with the flipped UVs.
+    let (tangent, bitangent_sign) = if let Some(t) = v.tangent {
+        ([t.x, t.y, t.z], -t.w)
     } else {
-        normal_to_tangent(normal)
+        (normal_to_tangent(normal), 1.0)
     };
 
     // Warn if we're dropping data
@@ -47,7 +53,7 @@ pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
         log::warn!("Mesh has vertex colors - not yet supported, will be discarded");
     }
 
-    PackedVertex::new_with_tangent(position, normal, tex_coords, tangent)
+    PackedVertex::from_components(position, normal, tex_coords, tangent, bitangent_sign)
 }
 
 /// Convert a single SolidRS primitive (submesh) to Helio vertex/index buffers

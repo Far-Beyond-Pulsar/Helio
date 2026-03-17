@@ -71,6 +71,8 @@ struct VertexOutput {
     @location(0) world_position: vec3<f32>,
     @location(1) world_normal:   vec3<f32>,
     @location(2) tex_coords:     vec2<f32>,
+    @location(3) world_tangent:  vec3<f32>,
+    @location(4) bitangent_sign: f32,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -81,15 +83,28 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     let inst       = instance_data[slot];
     let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
+
+    // Normals transform by the inverse-transpose (stored in normal_mat).
     let normal_mat = mat3x3<f32>(
         inst.normal_mat_0.xyz,
         inst.normal_mat_1.xyz,
         inst.normal_mat_2.xyz,
     );
+
+    // Tangents are NOT normals — they transform by the regular upper-3×3 of
+    // the model matrix (no inverse-transpose).  Extract it from column vectors.
+    let model_mat3 = mat3x3<f32>(
+        inst.transform[0].xyz,
+        inst.transform[1].xyz,
+        inst.transform[2].xyz,
+    );
+
     var out: VertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;
-    out.world_normal   = normalize(normal_mat * decode_snorm8x4(v.normal));
+    out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
+    out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
+    out.bitangent_sign = v.bitangent_sign;
     out.tex_coords     = v.tex_coords;
     return out;
 }
@@ -143,23 +158,20 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     if globals.debug_mode == 3u {
         N = N_geom;
     } else {
-        // NORMAL RENDERING (mode 0): Apply normal mapping
-        let q0      = dpdx(input.world_position);
-        let q1      = dpdy(input.world_position);
-        let st0     = dpdx(uv);
-        let st1     = dpdy(uv);
-        let q1perp  = cross(q1, N_geom);
-        let q0perp  = cross(N_geom, q0);
-        let T_deriv = q1perp * st0.x + q0perp * st1.x;
-        let B_deriv = q1perp * st0.y + q0perp * st1.y;
-        let det     = max(dot(T_deriv, T_deriv), dot(B_deriv, B_deriv));
-        let scale   = select(0.0, inverseSqrt(det), det > 1e-10);
+        // NORMAL RENDERING (mode 0): vertex TBN normal mapping (MikkTSpace-compatible).
+        //
+        // Use the per-vertex tangent and bitangent sign that were computed by the
+        // DCC tool (Maya / Blender / etc.) and stored in the FBX/glTF file.
+        // Gram-Schmidt re-orthogonalization keeps T strictly perpendicular to N
+        // after interpolation across the triangle, then B = cross(N, T) * sign.
+        //
+        // This replaces the previous screen-space derivative approach which
+        // produced checkerboard artifacts at every UV island boundary because
+        // dpdx/dpdy are undefined at triangle edges and discontinuous across seams.
+        let T       = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
+        let B       = cross(N_geom, T) * input.bitangent_sign;
         let norm_ts = textureSample(normal_map, material_sampler, uv).rgb * 2.0 - 1.0;
-        N = normalize(
-            T_deriv * (norm_ts.x * scale) +
-            B_deriv * (norm_ts.y * scale) +
-            N_geom  *  norm_ts.z
-        );
+        N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
     }
 
     let orm       = textureSample(orm_texture, material_sampler, uv).rgb;

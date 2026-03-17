@@ -326,6 +326,14 @@ impl ShadowPass {
                         has_dynamic_offset: false, min_binding_size: None,
                     }, count: None,
                 },
+                // binding 4: shadow matrices — used by directional light cascade frustum cull
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    }, count: None,
+                },
             ],
         });
         let pl = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -478,6 +486,7 @@ impl RenderPass for ShadowPass {
                     wgpu::BindGroupEntry { binding: 1, resource: self.shadow_light_buf.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: self.shadow_indirect_buf.as_ref().unwrap().as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 3, resource: params.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 4, resource: self._shadow_matrix_buffer.as_entire_binding() },
                 ],
             }));
             self.last_dc_buf_ptr  = dc_ptr;
