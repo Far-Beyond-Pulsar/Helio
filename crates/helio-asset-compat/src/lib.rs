@@ -12,6 +12,7 @@ mod light_converter;
 mod camera_converter;
 mod animation_system;
 
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use helio_render_v2::scene::{ObjectId, LightId};
@@ -105,6 +106,59 @@ pub fn load_scene_file_with_config<P: AsRef<Path>>(path: P, config: LoadConfig) 
 
     // Convert to Helio structures
     convert_scene(&solid_scene, &base_dir, &config)
+}
+
+/// Load a 3D scene from embedded bytes using a known format identifier.
+///
+/// This is useful for examples or applications that bundle assets with
+/// `include_bytes!` but still want Helio's normal scene conversion pipeline.
+pub fn load_scene_bytes(
+    bytes: &[u8],
+    format_id: &str,
+    base_dir: Option<&Path>,
+) -> Result<ConvertedScene> {
+    load_scene_bytes_with_config(bytes, format_id, base_dir, LoadConfig::default())
+}
+
+/// Load embedded scene bytes with custom configuration (e.g., UV flipping).
+pub fn load_scene_bytes_with_config(
+    bytes: &[u8],
+    format_id: &str,
+    base_dir: Option<&Path>,
+    config: LoadConfig,
+) -> Result<ConvertedScene> {
+    log::info!(
+        "Loading embedded 3D model as '{}' (UV flip: {})",
+        format_id,
+        config.flip_uv_y
+    );
+
+    let mut registry = solid_rs::registry::Registry::new();
+    registry.register_loader(solid_fbx::FbxLoader);
+    registry.register_loader(solid_gltf::GltfLoader);
+    registry.register_loader(solid_obj::ObjLoader);
+    registry.register_loader(solid_usd::UsdLoader);
+
+    let mut options = solid_rs::traits::LoadOptions::default();
+    options.base_dir = base_dir.map(Path::to_path_buf);
+
+    let solid_scene = registry
+        .load_from(Cursor::new(bytes), format_id, &options)
+        .map_err(AssetError::Solid)?;
+
+    log::info!(
+        "Loaded embedded SolidRS scene '{}' - {} meshes, {} materials, {} lights",
+        solid_scene.name,
+        solid_scene.meshes.len(),
+        solid_scene.materials.len(),
+        solid_scene.lights.len()
+    );
+
+    let conversion_base_dir = base_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    convert_scene(&solid_scene, &conversion_base_dir, &config)
 }
 
 /// Result type for asset loading operations

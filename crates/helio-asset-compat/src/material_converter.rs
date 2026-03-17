@@ -1,6 +1,6 @@
 //! PBR material mapping from SolidRS to Helio
 
-use crate::{Result, AssetError, texture_loader};
+use crate::{AssetError, Result};
 use helio_render_v2::material::{Material, TextureData};
 use solid_rs::scene::{Material as SolidMaterial, Scene, AlphaMode};
 
@@ -85,27 +85,8 @@ pub fn convert_material(
         helio_mat.normal_map = Some(load_texture_data(tex_ref, scene, base_dir, false)?);
     }
 
-    // For metallic-roughness texture, we need to pack it into ORM format
-    // glTF: metallic_roughness has G=roughness, B=metallic
-    // Helio: ORM has R=occlusion, G=roughness, B=metallic
-    // TODO: In Phase 3, implement proper texture packing/merging
-    if let Some(tex_ref) = &material.metallic_roughness_texture {
-        if let Some(ref t) = tex_ref.transform {
-            log::warn!("⚠️  Metallic-roughness texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
-                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
-        }
-        // For now, just load it as-is and log a warning
-        log::warn!("Metallic-roughness texture requires packing into ORM format - not yet implemented");
-        // helio_mat.orm_texture = Some(load_texture_data(tex_ref, scene, false)?);
-    }
-
-    if let Some(tex_ref) = &material.occlusion_texture {
-        if let Some(ref t) = tex_ref.transform {
-            log::warn!("⚠️  Occlusion texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
-                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
-        }
-        // TODO: Pack with metallic-roughness into ORM
-        log::warn!("Occlusion texture requires packing into ORM format - not yet implemented");
+    if let Some(orm_texture) = build_orm_texture(material, scene, base_dir)? {
+        helio_mat.orm_texture = Some(orm_texture);
     }
 
     if let Some(tex_ref) = &material.emissive_texture {
@@ -117,6 +98,82 @@ pub fn convert_material(
     }
 
     Ok(helio_mat)
+}
+
+fn build_orm_texture(
+    material: &SolidMaterial,
+    scene: &Scene,
+    base_dir: &std::path::Path,
+) -> Result<Option<TextureData>> {
+    let metallic_roughness = if let Some(tex_ref) = &material.metallic_roughness_texture {
+        if let Some(ref t) = tex_ref.transform {
+            log::warn!("⚠️  Metallic-roughness texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
+                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
+        }
+        Some(load_texture_data(tex_ref, scene, base_dir, false)?)
+    } else {
+        None
+    };
+
+    let occlusion = if let Some(tex_ref) = &material.occlusion_texture {
+        if let Some(ref t) = tex_ref.transform {
+            log::warn!("⚠️  Occlusion texture HAS UV TRANSFORM: offset=({:.3}, {:.3}), scale=({:.3}, {:.3}), rot={:.1}° - NOT YET APPLIED!",
+                t.offset.x, t.offset.y, t.scale.x, t.scale.y, t.rotation.to_degrees());
+        }
+        Some(load_texture_data(tex_ref, scene, base_dir, false)?)
+    } else {
+        None
+    };
+
+    let Some((width, height)) = metallic_roughness
+        .as_ref()
+        .map(|texture| (texture.width, texture.height))
+        .or_else(|| occlusion.as_ref().map(|texture| (texture.width, texture.height)))
+    else {
+        return Ok(None);
+    };
+
+    let metallic_roughness = metallic_roughness
+        .as_ref()
+        .map(|texture| resize_texture_if_needed(texture, width, height));
+    let occlusion = occlusion
+        .as_ref()
+        .map(|texture| resize_texture_if_needed(texture, width, height));
+
+    let mut orm = vec![255u8; width as usize * height as usize * 4];
+    for pixel_index in 0..(width as usize * height as usize) {
+        let base = pixel_index * 4;
+        orm[base] = occlusion.as_ref().map_or(255, |texture| texture.data[base]);
+        orm[base + 1] = metallic_roughness
+            .as_ref()
+            .map_or(255, |texture| texture.data[base + 1]);
+        orm[base + 2] = metallic_roughness
+            .as_ref()
+            .map_or(255, |texture| texture.data[base + 2]);
+        orm[base + 3] = 255;
+    }
+
+    log::info!(
+        "  Packed ORM texture for material '{}' ({}x{}, ao={}, metallic_roughness={})",
+        material.name,
+        width,
+        height,
+        occlusion.is_some(),
+        metallic_roughness.is_some()
+    );
+
+    Ok(Some(TextureData::new(orm, width, height)))
+}
+
+fn resize_texture_if_needed(texture: &TextureData, width: u32, height: u32) -> TextureData {
+    if texture.width == width && texture.height == height {
+        return TextureData::new(texture.data.clone(), texture.width, texture.height);
+    }
+
+    let image = image::RgbaImage::from_raw(texture.width, texture.height, texture.data.clone())
+        .expect("TextureData should always contain tightly-packed RGBA8 pixels");
+    let resized = image::imageops::resize(&image, width, height, image::imageops::FilterType::Triangle);
+    TextureData::new(resized.into_raw(), width, height)
 }
 
 /// Load texture data from a SolidRS TextureRef
@@ -316,7 +373,19 @@ fn resolve_texture_path(uri_path: &str, base_dir: &std::path::Path) -> Option<st
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::{Vec3, Vec4};
+    use image::{DynamicImage, ImageFormat, RgbaImage};
+    use solid_rs::glam::{Vec3, Vec4};
+    use solid_rs::scene::{Image, ImageSource, Texture, TextureRef};
+    use std::io::Cursor;
+
+    fn encode_png(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+        let image = RgbaImage::from_raw(width, height, rgba.to_vec()).unwrap();
+        let mut cursor = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(image)
+            .write_to(&mut cursor, ImageFormat::Png)
+            .unwrap();
+        cursor.into_inner()
+    }
 
     #[test]
     fn test_convert_basic_material() {
@@ -336,6 +405,7 @@ mod tests {
             metallic_roughness_texture: None,
             occlusion_texture: None,
             emissive_texture: None,
+            double_sided: false,
             extensions: Default::default(),
         };
 
@@ -346,5 +416,77 @@ mod tests {
         assert_eq!(helio_mat.roughness, 0.6);
         assert_eq!(helio_mat.alpha_cutoff, 0.0); // Opaque mode
         assert!(!helio_mat.transparent_blend);
+    }
+
+    #[test]
+    fn test_convert_material_packs_orm_texture() {
+        let mut scene = Scene::default();
+        scene.images.push(Image {
+            name: "mr".to_string(),
+            source: ImageSource::Embedded {
+                mime_type: "image/png".to_string(),
+                data: encode_png(
+                    &[
+                        0, 32, 64, 255,
+                        0, 96, 160, 255,
+                    ],
+                    2,
+                    1,
+                ),
+            },
+            extensions: Default::default(),
+        });
+        scene.images.push(Image {
+            name: "ao".to_string(),
+            source: ImageSource::Embedded {
+                mime_type: "image/png".to_string(),
+                data: encode_png(
+                    &[
+                        200, 0, 0, 255,
+                        120, 0, 0, 255,
+                    ],
+                    2,
+                    1,
+                ),
+            },
+            extensions: Default::default(),
+        });
+        scene.textures.push(Texture::new("mr_tex", 0));
+        scene.textures.push(Texture::new("ao_tex", 1));
+
+        let solid_mat = SolidMaterial {
+            name: "OrmMaterial".to_string(),
+            base_color_factor: Vec4::ONE,
+            metallic_factor: 0.8,
+            roughness_factor: 0.6,
+            occlusion_strength: 0.75,
+            emissive_factor: Vec3::ZERO,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            base_color_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            metallic_roughness_texture: Some(TextureRef::new(0)),
+            occlusion_texture: Some(TextureRef::new(1)),
+            emissive_texture: None,
+            double_sided: false,
+            extensions: Default::default(),
+        };
+
+        let helio_mat = convert_material(&solid_mat, &scene, std::path::Path::new(".")).unwrap();
+
+        assert_eq!(helio_mat.metallic, 0.8);
+        assert_eq!(helio_mat.roughness, 0.6);
+        assert_eq!(helio_mat.ao, 0.75);
+
+        let orm = helio_mat.orm_texture.expect("expected packed ORM texture");
+        assert_eq!((orm.width, orm.height), (2, 1));
+        assert_eq!(
+            orm.data,
+            vec![
+                200, 32, 64, 255,
+                120, 96, 160, 255,
+            ]
+        );
     }
 }
