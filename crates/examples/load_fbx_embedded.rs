@@ -10,8 +10,7 @@ use glam::Vec3;
 use helio_asset_compat::{load_scene_bytes_with_config, AssetError, ConvertedScene, LoadConfig};
 use helio_render_v2::features::{BloomFeature, FeatureRegistry, LightingFeature, ShadowsFeature};
 use helio_render_v2::{
-    Camera, Material, Renderer, RendererConfig, SceneLight, SkyAtmosphere, Skylight,
-    VolumetricClouds,
+    Camera, Material, Renderer, RendererConfig, SceneLight,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -157,7 +156,7 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
         &Material::new()
             .with_base_color([0.04, 0.05, 0.08, 1.0])
             .with_roughness(0.82)
-            .with_emissive([0.04, 0.06, 0.12], 0.2),
+            .with_emissive([0.04, 0.06, 0.12], 0.03),
     );
 
     renderer.add_object(&floor, Some(&floor_material), glam::Mat4::IDENTITY);
@@ -168,69 +167,60 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
 fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
     let focus = bounds.focus_point();
     let radius = bounds.radius;
+    let elevated_focus = focus + Vec3::new(0.0, radius * 0.08, 0.0);
+    let upper_focus = focus + Vec3::new(0.0, radius * 0.18, 0.0);
 
-    let sun_dir = Vec3::new(-0.35, -0.82, -0.45).normalize();
-    renderer.add_light(SceneLight::directional(
-        sun_dir.to_array(),
-        [0.62, 0.70, 0.95],
-        0.85,
-    ));
-
-    let key_pos = focus + Vec3::new(radius * 0.95, radius * 0.75, radius * 1.05);
-    let key_dir = (focus - key_pos).normalize_or_zero();
+    let key_pos = focus + Vec3::new(radius * 0.95, radius * 0.82, radius * 1.08);
+    let key_dir = (elevated_focus - key_pos).normalize_or_zero();
     renderer.add_light(SceneLight::spot(
         key_pos.to_array(),
         key_dir.to_array(),
-        [1.0, 0.78, 0.58],
-        20.0,
-        radius * 4.2,
-        0.42,
-        0.78,
+        [1.0, 0.80, 0.62],
+        18.0,
+        radius * 2.8,
+        0.20,
+        0.38,
     ));
 
-    let rim_pos = focus + Vec3::new(-radius * 1.15, radius * 0.45, -radius * 1.35);
-    let rim_dir = (focus + Vec3::new(0.0, radius * 0.08, 0.0) - rim_pos).normalize_or_zero();
+    let fill_pos = focus + Vec3::new(-radius * 1.10, radius * 0.38, radius * 1.18);
+    let fill_dir = (focus - fill_pos).normalize_or_zero();
+    renderer.add_light(SceneLight::spot(
+        fill_pos.to_array(),
+        fill_dir.to_array(),
+        [0.52, 0.66, 1.0],
+        6.5,
+        radius * 2.9,
+        0.28,
+        0.46,
+    ));
+
+    let rim_pos = focus + Vec3::new(-radius * 1.22, radius * 0.56, -radius * 1.42);
+    let rim_dir = (upper_focus - rim_pos).normalize_or_zero();
     renderer.add_light(SceneLight::spot(
         rim_pos.to_array(),
         rim_dir.to_array(),
         [0.36, 0.55, 1.0],
-        15.0,
-        radius * 4.4,
-        0.48,
-        0.88,
+        14.0,
+        radius * 2.7,
+        0.22,
+        0.40,
     ));
 
-    let bounce_pos = Vec3::new(
-        bounds.center.x,
-        bounds.floor_y() + radius * 0.18,
-        bounds.center.z + radius * 0.55,
-    );
-    renderer.add_light(SceneLight::point(
-        bounce_pos.to_array(),
-        [1.0, 0.30, 0.16],
-        5.5,
-        radius * 2.3,
+    let kicker_pos = focus + Vec3::new(radius * 1.24, radius * 0.26, -radius * 1.02);
+    let kicker_dir = (focus + Vec3::new(0.0, radius * 0.05, 0.0) - kicker_pos).normalize_or_zero();
+    renderer.add_light(SceneLight::spot(
+        kicker_pos.to_array(),
+        kicker_dir.to_array(),
+        [1.0, 0.52, 0.32],
+        7.0,
+        radius * 2.5,
+        0.18,
+        0.34,
     ));
 
-    renderer.set_ambient([0.02, 0.025, 0.04], 0.22);
-    renderer.set_sky_atmosphere(Some(
-        SkyAtmosphere::new()
-            .with_sun_intensity(10.0)
-            .with_exposure(2.8)
-            .with_mie_g(0.78)
-            .with_clouds(
-                VolumetricClouds::new()
-                    .with_coverage(0.18)
-                    .with_density(0.45)
-                    .with_layer(900.0, 1700.0)
-                    .with_wind([0.8, 0.15], 0.03),
-            ),
-    ));
-    renderer.set_skylight(Some(
-        Skylight::new()
-            .with_intensity(0.05)
-            .with_tint([0.68, 0.78, 1.0]),
-    ));
+    renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
+    renderer.set_sky_atmosphere(None);
+    renderer.set_skylight(None);
 }
 
 struct App {
@@ -374,8 +364,8 @@ impl ApplicationHandler for App {
 
         let feature_registry = FeatureRegistry::builder()
             .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.85).with_threshold(0.95))
-            .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
+            .with_feature(BloomFeature::new().with_intensity(0.92).with_threshold(0.90))
+            .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(6))
             .build();
 
         let mut renderer = Renderer::new(
