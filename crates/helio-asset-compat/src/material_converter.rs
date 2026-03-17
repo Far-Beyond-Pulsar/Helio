@@ -679,7 +679,18 @@ mod tests {
 
         let helio_mat = convert_material(&solid_mat, &scene, std::path::Path::new(".")).unwrap();
 
-        assert!(matches!(helio_mat.workflow(), MaterialWorkflow::SpecularIor(_)));
+        assert!(matches!(
+            helio_mat.workflow(),
+            MaterialWorkflow::SpecularIor(SpecularIorWorkflow {
+                specular_color,
+                specular_weight,
+                ior,
+                roughness,
+            }) if specular_color == [1.0, 1.0, 1.0]
+                && (specular_weight - 1.0).abs() < 1e-6
+                && (ior - 1.5).abs() < 1e-6
+                && (roughness - 0.4).abs() < 1e-6
+        ));
         let specular_color = helio_mat.specular_color_texture.expect("specular color texture");
         assert_eq!((specular_color.width, specular_color.height), (2, 1));
         assert_eq!(specular_color.data, vec![255, 128, 64, 255, 32, 64, 255, 255]);
@@ -687,5 +698,75 @@ mod tests {
         let specular_weight = helio_mat.specular_weight_texture.expect("specular weight texture");
         assert_eq!((specular_weight.width, specular_weight.height), (2, 1));
         assert_eq!(specular_weight.data, vec![0, 0, 0, 32, 0, 0, 0, 224]);
+    }
+
+    #[test]
+    fn test_convert_material_textured_specular_workflow_retains_authored_factors() {
+        let mut scene = Scene::default();
+        scene.images.push(Image {
+            name: "specular_weight".to_string(),
+            source: ImageSource::Embedded {
+                mime_type: "image/png".to_string(),
+                data: encode_png(&[0, 0, 0, 51], 1, 1),
+            },
+            extensions: Default::default(),
+        });
+        scene.images.push(Image {
+            name: "specular_color".to_string(),
+            source: ImageSource::Embedded {
+                mime_type: "image/png".to_string(),
+                data: encode_png(&[224, 176, 96, 255], 1, 1),
+            },
+            extensions: Default::default(),
+        });
+        scene.textures.push(Texture::new("specular_weight_tex", 0));
+        scene.textures.push(Texture::new("specular_color_tex", 1));
+
+        let solid_mat = SolidMaterial {
+            name: "SpecularTexturedAuthored".to_string(),
+            base_color_factor: Vec4::ONE,
+            metallic_factor: 0.0,
+            roughness_factor: 0.22,
+            specular_color: Vec3::new(0.88, 0.69, 0.38),
+            specular_color_texture: Some(TextureRef::new(1)),
+            specular_weight: 0.41,
+            specular_weight_texture: Some(TextureRef::new(0)),
+            ior: 1.62,
+            occlusion_strength: 1.0,
+            emissive_factor: Vec3::ZERO,
+            alpha_mode: AlphaMode::Opaque,
+            alpha_cutoff: 0.5,
+            base_color_texture: None,
+            normal_texture: None,
+            normal_scale: 1.0,
+            metallic_roughness_texture: None,
+            occlusion_texture: None,
+            emissive_texture: None,
+            double_sided: false,
+            extensions: Default::default(),
+        };
+
+        let helio_mat = convert_material(&solid_mat, &scene, std::path::Path::new(".")).unwrap();
+
+        assert!(matches!(
+            helio_mat.workflow(),
+            MaterialWorkflow::SpecularIor(SpecularIorWorkflow {
+                specular_color,
+                specular_weight,
+                ior,
+                roughness,
+            }) if specular_color == [0.88, 0.69, 0.38]
+                && (specular_weight - 0.41).abs() < 1e-6
+                && (ior - 1.62).abs() < 1e-6
+                && (roughness - 0.22).abs() < 1e-6
+        ));
+
+        let specular_color = helio_mat.specular_color_texture.expect("specular color texture");
+        assert_eq!((specular_color.width, specular_color.height), (1, 1));
+        assert_eq!(specular_color.data, vec![224, 176, 96, 255]);
+
+        let specular_weight = helio_mat.specular_weight_texture.expect("specular weight texture");
+        assert_eq!((specular_weight.width, specular_weight.height), (1, 1));
+        assert_eq!(specular_weight.data, vec![0, 0, 0, 51]);
     }
 }

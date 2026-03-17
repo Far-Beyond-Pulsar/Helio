@@ -21,8 +21,8 @@ env_logger = "0.11"
 log = "0.4"
 
 # SolidRS - 3D asset loading library
-solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
-solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
-solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
-solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
-solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D" }
+solid-rs =   { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
+solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
+solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
+solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
+solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }

@@ -374,6 +374,14 @@ impl From<&Material> for MaterialUniform {
     }
 }
 
+const fn specular_color_texture_format() -> wgpu::TextureFormat {
+    wgpu::TextureFormat::Rgba8UnormSrgb
+}
+
+const fn specular_weight_texture_format() -> wgpu::TextureFormat {
+    wgpu::TextureFormat::Rgba8Unorm
+}
+
 // ── Helper: upload a 2D texture ───────────────────────────────────────────────
 
 fn upload_texture_2d(
@@ -449,11 +457,11 @@ pub(crate) fn build_gpu_material(
     });
     let specular_color_view = mat.specular_color_texture.as_ref().map(|t| {
         upload_texture_2d(device, queue, &t.data, t.width, t.height,
-            wgpu::TextureFormat::Rgba8UnormSrgb, "Material Specular Color")
+            specular_color_texture_format(), "Material Specular Color")
     });
     let specular_weight_view = mat.specular_weight_texture.as_ref().map(|t| {
         upload_texture_2d(device, queue, &t.data, t.width, t.height,
-            wgpu::TextureFormat::Rgba8Unorm, "Material Specular Weight")
+            specular_weight_texture_format(), "Material Specular Weight")
     });
 
     let bv  = base_view    .as_ref().unwrap_or(&defaults.white_srgb);
@@ -583,5 +591,42 @@ mod tests {
         assert_eq!(uniform.specular_weight, 0.65);
         assert!((uniform.ior - 1.33).abs() < 1e-6);
         assert!((uniform.dielectric_f0 - 0.020059314).abs() < 1e-6);
+    }
+
+    #[test]
+    fn textured_specular_ior_workflow_populates_uniform_fields() {
+        let material = Material::new()
+            .with_specular_ior_workflow([0.76, 0.58, 0.42], 0.37, 1.61, 0.24)
+            .with_specular_color_texture(TextureData::new(vec![194, 148, 107, 255], 1, 1))
+            .with_specular_weight_texture(TextureData::new(vec![0, 0, 0, 94], 1, 1));
+
+        assert_eq!(material.workflow_kind(), MaterialWorkflowKind::SpecularIor);
+        assert!(material.specular_color_texture.is_some());
+        assert!(material.specular_weight_texture.is_some());
+        assert_eq!(
+            material.workflow(),
+            MaterialWorkflow::SpecularIor(SpecularIorWorkflow {
+                specular_color: [0.76, 0.58, 0.42],
+                specular_weight: 0.37,
+                ior: 1.61,
+                roughness: 0.24,
+            })
+        );
+
+        let uniform = MaterialUniform::from(&material);
+        let expected_f0 = ((1.61_f32 - 1.0_f32) / (1.61_f32 + 1.0_f32)).powi(2);
+        assert_eq!(uniform.workflow, MaterialWorkflowKind::SpecularIor as u32);
+        assert_eq!(uniform.metallic, 0.0);
+        assert_eq!(uniform.roughness, 0.24);
+        assert_eq!(uniform.specular_color, [0.76, 0.58, 0.42]);
+        assert_eq!(uniform.specular_weight, 0.37);
+        assert!((uniform.ior - 1.61).abs() < 1e-6);
+        assert!((uniform.dielectric_f0 - expected_f0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn specular_texture_slots_use_expected_color_spaces() {
+        assert_eq!(specular_color_texture_format(), wgpu::TextureFormat::Rgba8UnormSrgb);
+        assert_eq!(specular_weight_texture_format(), wgpu::TextureFormat::Rgba8Unorm);
     }
 }
