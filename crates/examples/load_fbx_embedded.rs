@@ -428,10 +428,15 @@ impl ApplicationHandler for App {
         let gpu_materials: Vec<_> = scene
             .materials
             .iter()
-            .map(|material| renderer.upload_material(material))
+            .enumerate()
+            .map(|(index, material)| {
+                println!("Uploading material #{}", index);
+                renderer.upload_material(material)
+            })
             .collect();
 
         for mesh in &scene.meshes {
+            println!("Uploading mesh '{}' with {} vertices and {} indices", mesh.name, mesh.vertices.len(), mesh.indices.len());
             let gpu_mesh = renderer.create_mesh(&mesh.vertices, &mesh.indices);
             let material = mesh
                 .material_index
