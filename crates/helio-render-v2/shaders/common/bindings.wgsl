@@ -59,6 +59,8 @@ struct Material {
 @group(1) @binding(3) var material_sampler: sampler;
 @group(1) @binding(4) var orm_texture: texture_2d<f32>;
 @group(1) @binding(5) var emissive_texture: texture_2d<f32>;
+@group(1) @binding(6) var specular_color_texture: texture_2d<f32>;
+@group(1) @binding(7) var specular_weight_texture: texture_2d<f32>;
 
 // ============================================================================
 // Group 2: Lighting (per-scene)

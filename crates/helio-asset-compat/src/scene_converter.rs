@@ -128,7 +128,9 @@ mod tests {
             ..Default::default()
         };
 
-        let converted = convert_scene(&scene, std::path::Path::new(".")).unwrap();
+        let converted =
+            convert_scene(&scene, std::path::Path::new("."), &crate::LoadConfig::default())
+                .unwrap();
         assert_eq!(converted.name, "EmptyScene");
         assert_eq!(converted.meshes.len(), 0);
         assert_eq!(converted.materials.len(), 0);

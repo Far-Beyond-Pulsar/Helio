@@ -5,6 +5,8 @@
 //! - `normal_map`         – linear RGBA, tangent-space normals (packed 0..1 → -1..1)
 //! - `orm_texture`        – linear RGBA; R = occlusion, G = roughness, B = metallic
 //! - `emissive_texture`   – sRGB RGBA emissive color (multiplied by `emissive_color × emissive_factor`)
+//! - `specular_color_texture`  – sRGB RGBA; RGB = explicit F0 tint, A unused
+//! - `specular_weight_texture` – linear RGBA; A = explicit specular weight, RGB unused
 
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -153,6 +155,10 @@ pub struct Material {
     pub orm_texture: Option<TextureData>,
     /// sRGB RGBA emissive texture.
     pub emissive_texture: Option<TextureData>,
+    /// sRGB RGBA explicit specular-colour texture. RGB modulates F0 tint.
+    pub specular_color_texture: Option<TextureData>,
+    /// Linear RGBA explicit specular-weight texture. Alpha modulates weight.
+    pub specular_weight_texture: Option<TextureData>,
 }
 
 impl Material {
@@ -278,6 +284,8 @@ impl Material {
     pub fn with_normal_map(mut self, t: TextureData) -> Self { self.normal_map = Some(t); self }
     pub fn with_orm_texture(mut self, t: TextureData) -> Self { self.orm_texture = Some(t); self }
     pub fn with_emissive_texture(mut self, t: TextureData) -> Self { self.emissive_texture = Some(t); self }
+    pub fn with_specular_color_texture(mut self, t: TextureData) -> Self { self.specular_color_texture = Some(t); self }
+    pub fn with_specular_weight_texture(mut self, t: TextureData) -> Self { self.specular_weight_texture = Some(t); self }
 }
 
 /// GPU-resident material ready to be used in draw calls.
@@ -400,7 +408,8 @@ fn upload_texture_2d(
 /// Upload a [`Material`] to the GPU and return a [`GpuMaterial`].
 ///
 /// `default_views` should be the renderer's 1×1 fallback views in order:
-/// `[white_srgb, flat_normal, white_orm, black_emissive]`.
+/// `[white_srgb, flat_normal, white_orm, black_emissive]` plus the shared
+/// white defaults reused for explicit specular colour/weight slots.
 pub(crate) fn build_gpu_material(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -438,11 +447,21 @@ pub(crate) fn build_gpu_material(
         upload_texture_2d(device, queue, &t.data, t.width, t.height,
             wgpu::TextureFormat::Rgba8UnormSrgb, "Material Emissive")
     });
+    let specular_color_view = mat.specular_color_texture.as_ref().map(|t| {
+        upload_texture_2d(device, queue, &t.data, t.width, t.height,
+            wgpu::TextureFormat::Rgba8UnormSrgb, "Material Specular Color")
+    });
+    let specular_weight_view = mat.specular_weight_texture.as_ref().map(|t| {
+        upload_texture_2d(device, queue, &t.data, t.width, t.height,
+            wgpu::TextureFormat::Rgba8Unorm, "Material Specular Weight")
+    });
 
     let bv  = base_view    .as_ref().unwrap_or(&defaults.white_srgb);
     let nv  = normal_view  .as_ref().unwrap_or(&defaults.flat_normal);
     let ov  = orm_view     .as_ref().unwrap_or(&defaults.white_orm);
     let ev  = emissive_view.as_ref().unwrap_or(&defaults.black_emissive);
+    let scv = specular_color_view.as_ref().unwrap_or(&defaults.white_srgb);
+    let swv = specular_weight_view.as_ref().unwrap_or(&defaults.white_orm);
 
     // Use ClampToEdge by default to avoid tiling artifacts on models with UVs at boundaries
     // This is more common for single-texture-per-primitive models like FBX exports
@@ -466,6 +485,8 @@ pub(crate) fn build_gpu_material(
             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
             wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(ov) },
             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(ev) },
+            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(scv) },
+            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(swv) },
         ],
     });
 

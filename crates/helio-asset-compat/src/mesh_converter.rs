@@ -209,7 +209,7 @@ mod tests {
 
     #[test]
     fn test_convert_minimal_vertex() {
-        use glam::{Vec2, Vec3};
+        use solid_rs::glam::Vec3;
 
         let v = Vertex {
             position: Vec3::new(1.0, 2.0, 3.0),

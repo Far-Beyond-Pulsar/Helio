@@ -225,9 +225,10 @@ impl Renderer {
         let (depth_texture, depth_view, depth_sample_view) =
             create_depth_texture(&device, config.width, config.height);
 
-        // Five G-buffer render targets: base color, normal, ORM, emissive, and
-        // resolved specular payload for deferred workflow-aware Fresnel.
-        let (gbuf_albedo_texture, gbuf_normal_texture, gbuf_orm_texture, gbuf_emissive_texture, gbuf_specular_texture, gbuf_targets) =
+        // Four G-buffer render targets: base color, normal, ORM, and emissive.
+        // Resolved F0 is packed into otherwise-unused alpha channels of the
+        // existing targets to stay within WGPU's MRT byte budget.
+        let (gbuf_albedo_texture, gbuf_normal_texture, gbuf_orm_texture, gbuf_emissive_texture, gbuf_targets) =
             create_gbuffer_textures(&device, config.width, config.height);
         let gbuffer_targets = Arc::new(Mutex::new(gbuf_targets));
 
@@ -263,6 +264,8 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&default_material_views.sampler) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&default_material_views.white_orm) },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&default_material_views.black_emissive) },
+                wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&default_material_views.white_srgb) },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&default_material_views.white_orm) },
             ],
         }));
 
@@ -593,7 +596,6 @@ impl Renderer {
             gbuf_normal_texture,
             gbuf_orm_texture,
             gbuf_emissive_texture,
-            gbuf_specular_texture,
             gbuffer_targets,
             deferred_bg,
             default_material_views,

@@ -165,6 +165,28 @@ impl BindGroupLayouts {
                     },
                     count: None,
                 },
+                // Binding 6: Explicit specular-colour texture (sRGB RGB tint)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // Binding 7: Explicit specular-weight texture (alpha channel)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         })
     }
@@ -353,7 +375,7 @@ impl BindGroupLayouts {
         })
     }
 
-    /// Group 1 for DeferredLightingPass – reads the five G-buffer textures plus the
+    /// Group 1 for DeferredLightingPass – reads the four G-buffer textures plus the
     /// depth texture.  All reads use `textureLoad` (no sampler required).
     fn create_gbuffer_read_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -403,20 +425,9 @@ impl BindGroupLayouts {
                     },
                     count: None,
                 },
-                // 4: resolved specular F0 / workflow payload (Rgba16Float)
+                // 4: depth     (Depth32Float via texture_depth_2d)
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // 5: depth     (Depth32Float via texture_depth_2d)
-                wgpu::BindGroupLayoutEntry {
-                    binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Depth,

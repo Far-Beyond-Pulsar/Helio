@@ -327,17 +327,7 @@ impl PipelineCache {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
-                    // target 3: emissive (half float or 8‑bit on wasm)
-                    Some(wgpu::ColorTargetState {
-                        format: if cfg!(target_arch = "wasm32") {
-                            wgpu::TextureFormat::Rgba8Unorm
-                        } else {
-                            wgpu::TextureFormat::Rgba16Float
-                        },
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    // target 4: resolved specular F0 / workflow payload
+                    // target 3: emissive + packed F0.b (half float or 8-bit on wasm)
                     Some(wgpu::ColorTargetState {
                         format: if cfg!(target_arch = "wasm32") {
                             wgpu::TextureFormat::Rgba8Unorm

@@ -61,6 +61,8 @@ struct Material {
 @group(1) @binding(3) var material_sampler:   sampler;
 @group(1) @binding(4) var orm_texture:        texture_2d<f32>;
 @group(1) @binding(5) var emissive_texture:   texture_2d<f32>;
+@group(1) @binding(6) var specular_color_texture: texture_2d<f32>;
+@group(1) @binding(7) var specular_weight_texture: texture_2d<f32>;
 
 // ============================================================================
 // Vertex Input/Output
@@ -288,11 +290,18 @@ fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> v
 
 const MATERIAL_WORKFLOW_SPECULAR_IOR: u32 = 1u;
 
-fn resolve_specular_f0(albedo: vec3<f32>, metallic: f32) -> vec3<f32> {
+fn resolve_specular_f0(albedo: vec3<f32>, metallic: f32, uv: vec2<f32>) -> vec3<f32> {
     if material.workflow == MATERIAL_WORKFLOW_SPECULAR_IOR {
-        let weighted_tint = max(material.specular_color * material.specular_weight, vec3<f32>(0.0));
-        let dielectric_f0 = vec3<f32>(material.dielectric_f0);
-        return clamp(dielectric_f0 * weighted_tint, vec3<f32>(0.0), vec3<f32>(0.999));
+        let specular_color = max(
+            material.specular_color * textureSample(specular_color_texture, material_sampler, uv).rgb,
+            vec3<f32>(0.0),
+        );
+        let specular_weight = max(
+            material.specular_weight * textureSample(specular_weight_texture, material_sampler, uv).a,
+            0.0,
+        );
+        let dielectric_f0 = min(vec3<f32>(material.dielectric_f0) * specular_color, vec3<f32>(1.0));
+        return clamp(dielectric_f0 * specular_weight, vec3<f32>(0.0), vec3<f32>(0.999));
     }
 
     return clamp(
@@ -535,7 +544,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let metallic  = clamp(material.metallic  * orm.b, 0.0,  1.0);
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
-    let F0   = resolve_specular_f0(albedo, metallic);
+    let F0   = resolve_specular_f0(albedo, metallic, input.tex_coords);
     let V    = normalize(camera.position - input.world_position);
     let NdV  = max(dot(N, V), 0.0);
 

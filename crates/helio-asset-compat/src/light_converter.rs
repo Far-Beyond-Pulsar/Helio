@@ -78,7 +78,7 @@ fn convert_area_as_point(light: &AreaLight) -> SceneLight {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::Vec3;
+    use solid_rs::glam::Vec3;
     use solid_rs::scene::LightBase;
 
     #[test]
@@ -89,6 +89,7 @@ mod tests {
                 color: Vec3::new(1.0, 0.9, 0.8),
                 intensity: 5.0,
             },
+            extensions: Default::default(),
         };
 
         let scene_light = convert_directional(&light);
@@ -105,6 +106,7 @@ mod tests {
                 intensity: 100.0,
             },
             range: Some(15.0),
+            extensions: Default::default(),
         };
 
         let scene_light = convert_point(&light);

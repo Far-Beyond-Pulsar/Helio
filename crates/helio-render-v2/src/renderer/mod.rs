@@ -196,7 +196,6 @@ pub struct Renderer {
     gbuf_normal_texture:   wgpu::Texture,
     gbuf_orm_texture:      wgpu::Texture,
     gbuf_emissive_texture: wgpu::Texture,
-    gbuf_specular_texture: wgpu::Texture,
     /// Shared with GBufferPass.  Swapped on resize.
     gbuffer_targets: Arc<Mutex<GBufferTargets>>,
     /// Shared with DeferredLightingPass.  Swapped on resize.
@@ -1336,13 +1335,12 @@ impl Renderer {
         self.depth_view = view;
         self.depth_sample_view = sample_view;
 
-        let (albedo_tex, normal_tex, orm_tex, emissive_tex, specular_tex, new_targets) =
+        let (albedo_tex, normal_tex, orm_tex, emissive_tex, new_targets) =
             helpers::create_gbuffer_textures(&self.device, width, height);
         self.gbuf_albedo_texture  = albedo_tex;
         self.gbuf_normal_texture  = normal_tex;
         self.gbuf_orm_texture     = orm_tex;
         self.gbuf_emissive_texture = emissive_tex;
-        self.gbuf_specular_texture = specular_tex;
 
         *self.gbuffer_targets.lock().unwrap() = new_targets;
 

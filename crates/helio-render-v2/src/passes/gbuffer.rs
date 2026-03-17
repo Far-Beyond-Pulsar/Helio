@@ -13,7 +13,6 @@ pub struct GBufferTargets {
     pub normal_view:   wgpu::TextureView,
     pub orm_view:      wgpu::TextureView,
     pub emissive_view: wgpu::TextureView,
-    pub specular_view: wgpu::TextureView,
 }
 
 pub struct GBufferPass {
@@ -74,10 +73,6 @@ impl RenderPass for GBufferPass {
             }),
             Some(wgpu::RenderPassColorAttachment {
                 view: &targets.emissive_view, resolve_target: None, depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
-            }),
-            Some(wgpu::RenderPassColorAttachment {
-                view: &targets.specular_view, resolve_target: None, depth_slice: None,
                 ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store },
             }),
         ];

@@ -60,8 +60,7 @@ struct LightMatrix { mat: mat4x4<f32> }
 @group(1) @binding(1) var gbuf_normal:   texture_2d<f32>;       // Rgba16Float  world-space normal
 @group(1) @binding(2) var gbuf_orm:      texture_2d<f32>;       // Rgba8Unorm   AO, roughness, metallic
 @group(1) @binding(3) var gbuf_emissive: texture_2d<f32>;       // Rgba16Float  pre-multiplied emissive
-@group(1) @binding(4) var gbuf_specular: texture_2d<f32>;       // Rgba16Float  resolved F0.rgb + workflow payload
-@group(1) @binding(5) var gbuf_depth:    texture_depth_2d;      // Depth32Float
+@group(1) @binding(4) var gbuf_depth:    texture_depth_2d;      // Depth32Float
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -441,8 +440,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let albedo_a  = textureLoad(gbuf_albedo,   pix, 0);
     let normal_r  = textureLoad(gbuf_normal,   pix, 0);
     let orm_r     = textureLoad(gbuf_orm,      pix, 0);
-    let emissive  = textureLoad(gbuf_emissive, pix, 0).rgb;
-    let specular_r = textureLoad(gbuf_specular, pix, 0);
+    let emissive_r = textureLoad(gbuf_emissive, pix, 0);
+    let emissive  = emissive_r.rgb;
 
     let albedo    = albedo_a.rgb;
     let alpha     = albedo_a.a;
@@ -473,7 +472,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let world_pos   = world_h.xyz / world_h.w;
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
-    let F0  = clamp(specular_r.rgb, vec3<f32>(0.0), vec3<f32>(0.999));
+    let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
     let V   = normalize(camera.position - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
