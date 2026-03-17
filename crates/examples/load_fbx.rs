@@ -185,7 +185,7 @@ impl ApplicationHandler for App {
         let mut lights = Vec::new();
 
         // Load scene file (default: test.usdc)
-        let scene_path = std::env::args().nth(1).unwrap_or_else(|| "test.usdc".to_string());
+        let scene_path = std::env::args().nth(1).unwrap_or_else(|| "test.fbx".to_string());
 
         log::info!("Current directory: {:?}", std::env::current_dir().unwrap());
         log::info!("Loading scene file: {}", scene_path);
