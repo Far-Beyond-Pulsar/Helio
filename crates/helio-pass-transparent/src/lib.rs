@@ -210,7 +210,7 @@ impl RenderPass for TransparentPass {
         let globals = GBufferGlobals {
             frame: ctx.frame as u32,
             delta_time: 0.0,
-            light_count: ctx.scene.light_count(),
+            light_count: ctx.scene.lights.len() as u32,
             ambient_intensity: 0.1,
             ambient_color: [0.1, 0.1, 0.15, 1.0],
             rc_world_min: [0.0; 4],
@@ -223,44 +223,47 @@ impl RenderPass for TransparentPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.scene.draw_count == 0 {
+        let draw_count = ctx.scene.draw_count;
+        if draw_count == 0 {
             return Ok(());
         }
+        let indirect = ctx.scene.indirect;
 
         // Load existing colour (preserves opaque geometry rendered earlier).
         // Depth is read-only (depth_write_enabled = false in pipeline state).
-        let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Transparent"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: ctx.target,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: ctx.depth,
-                // depth_write_enabled=false in pipeline; only read during depth test.
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
+        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: ctx.target,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+        let depth_stencil = wgpu::RenderPassDepthStencilAttachment {
+            view: ctx.depth,
+            depth_ops: Some(wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
             }),
+            stencil_ops: None,
+        };
+        let desc = wgpu::RenderPassDescriptor {
+            label: Some("Transparent"),
+            color_attachments: &color_attachments,
+            depth_stencil_attachment: Some(depth_stencil),
             timestamp_writes: None,
             occlusion_query_set: None,
-        });
+        };
+        let mut pass = ctx.begin_render_pass(&desc);
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
 
         // O(1): single GPU-driven indirect draw; the GPU fans out all draw calls.
-        // NOTE: Vertex and index buffers must be set by the caller before this pass
-        //       (or managed through the render graph's shared mesh buffer).
+        // NOTE: Vertex and index buffers must be set by the caller before this pass.
         // TODO: pass.set_vertex_buffer(0, mesh_vtx_buf.slice(..));
         // TODO: pass.set_index_buffer(mesh_idx_buf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.multi_draw_indexed_indirect(ctx.scene.indirect, 0, ctx.scene.draw_count);
+        pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
 
         Ok(())
     }
