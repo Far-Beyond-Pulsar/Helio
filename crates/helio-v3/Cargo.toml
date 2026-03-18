@@ -1,0 +1,20 @@
+[package]
+name = "helio-v3"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helio Contributors"]
+description = "AAA GPU-driven rendering core with trait-based architecture"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+wgpu = "23"
+bytemuck = { version = "1.14", features = ["derive"] }
+glam = { version = "0.29", features = ["bytemuck"] }
+thiserror = "2.0"
+
+[dev-dependencies]
+pollster = "0.4"
+
+[features]
+default = []
+profiling = []  # Enable CPU/GPU profiling (enabled by default in debug builds)
