@@ -377,6 +377,14 @@ pub mod profiling;
 pub mod scene;
 pub mod graph;
 
+// Re-export libhelio types for convenience
+pub use libhelio::{
+    GpuCameraUniforms, GpuInstanceData, GpuInstanceAabb, GpuDrawCall,
+    GpuLight, GpuMaterial, GpuShadowMatrix, DrawIndexedIndirectArgs,
+    GBufferViews, FrameResources, SkyContext, SkyUniforms,
+};
+// Re-export managers
+pub use crate::scene::managers::*;
 // Re-export core types
 pub use traits::{RenderPass, GpuSceneManager, GpuResource};
 pub use error::{Error, Result};

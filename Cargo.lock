@@ -1373,6 +1373,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-hiz"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-indirect-dispatch"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-occlusion-cull"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-shadow-matrix"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "wgpu 23.0.1",
+]
+
+[[package]]
 name = "helio-render-v2"
 version = "0.1.11"
 dependencies = [
@@ -1401,6 +1437,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam 0.29.3",
+ "libhelio",
  "pollster 0.4.0",
  "thiserror 2.0.18",
  "wgpu 23.0.1",
@@ -1848,6 +1885,15 @@ name = "libc"
 version = "0.2.183"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
+
+[[package]]
+name = "libhelio"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.29.3",
+ "wgpu 23.0.1",
+]
 
 [[package]]
 name = "libloading"

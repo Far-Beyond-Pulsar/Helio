@@ -1,0 +1,9 @@
+[package]
+name = "helio-pass-occlusion-cull"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helio-v3 = { path = "../helio-v3" }
+wgpu = "23"
+bytemuck = { version = "1.14", features = ["derive"] }

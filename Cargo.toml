@@ -3,8 +3,14 @@ members = [
     "crates/helio-core",
     "crates/helio-render-v2",
     "crates/helio-v3",
+    "crates/libhelio",
     "crates/helio-live-portal",
     "crates/helio-asset-compat",
+
+    "crates/helio-pass-hiz",
+    "crates/helio-pass-indirect-dispatch",
+    "crates/helio-pass-occlusion-cull",
+    "crates/helio-pass-shadow-matrix",
 
     "crates/examples",
     "crates/helio-wasm-app",

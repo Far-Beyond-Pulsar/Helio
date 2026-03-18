@@ -1,21 +1,12 @@
 [package]
-name = "helio-v3"
+name = "libhelio"
 version = "0.1.0"
 edition = "2021"
 authors = ["Helio Contributors"]
-description = "AAA GPU-driven rendering core with trait-based architecture"
+description = "Shared GPU types and utilities for the Helio renderer"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 wgpu = "23"
 bytemuck = { version = "1.14", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
-thiserror = "2.0"
-libhelio = { path = "../libhelio" }
-
-[dev-dependencies]
-pollster = "0.4"
-
-[features]
-default = []
-profiling = []

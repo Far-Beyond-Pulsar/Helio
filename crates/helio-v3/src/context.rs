@@ -89,6 +89,7 @@
 //! ```
 
 use crate::{SceneResources, Profiler};
+use crate::scene::GpuScene;
 
 /// Context passed to `RenderPass::execute()` for recording GPU commands.
 ///
@@ -135,7 +136,7 @@ use crate::{SceneResources, Profiler};
 ///         let depth = ctx.depth;
 ///
 ///         // Access frame metadata
-///         let frame_num = ctx.frame;
+///         let frame_num = ctx.frame_num;
 ///         let (width, height) = (ctx.width, ctx.height);
 ///
 ///         // Record GPU commands (automatic profiling)
@@ -195,13 +196,19 @@ pub struct PassContext<'a> {
     /// Current frame number (starts at 0).
     ///
     /// Useful for time-based effects (e.g., animations, TAA jitter).
-    pub frame: u64,
+    pub frame_num: u64,
 
     /// Render target width in pixels.
     pub width: u32,
 
     /// Render target height in pixels.
     pub height: u32,
+
+    /// Device reference for creating bind groups in execute() if needed (rare).
+    pub device: &'a wgpu::Device,
+
+    /// Per-frame transient resource views (GBuffer, HiZ, shadow atlas, sky LUT, etc.)
+    pub frame: &'a libhelio::FrameResources<'a>,
 }
 
 impl<'a> PassContext<'a> {
@@ -398,4 +405,19 @@ pub struct PrepareContext<'a> {
     ///
     /// Useful for time-based effects (e.g., animations, TAA jitter).
     pub frame: u64,
+
+    /// Zero-copy scene resource references for prepare().
+    pub scene: &'a GpuScene,
+
+    /// Per-frame transient resource views (for passes that need them in prepare).
+    pub frame_resources: &'a libhelio::FrameResources<'a>,
+
+    /// True if the render target was resized this frame.
+    pub resize: bool,
+
+    /// Render target width.
+    pub width: u32,
+
+    /// Render target height.
+    pub height: u32,
 }

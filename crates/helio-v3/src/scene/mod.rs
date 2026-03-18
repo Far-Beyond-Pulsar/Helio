@@ -48,7 +48,9 @@
 //! ```
 
 mod gpu_scene;
+pub mod managers;
 mod resources;
 
 pub use gpu_scene::GpuScene;
+pub use managers::*;
 pub use resources::SceneResources;

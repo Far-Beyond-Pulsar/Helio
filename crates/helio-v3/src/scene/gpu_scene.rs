@@ -72,6 +72,11 @@
 
 use std::sync::Arc;
 use crate::scene::SceneResources;
+use crate::scene::managers::{
+    GpuCameraBuffer, GpuInstanceBuffer, GpuAabbBuffer, GpuDrawCallBuffer,
+    GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuIndirectBuffer, GpuVisibilityBuffer,
+};
 
 /// GPU-native scene container with dirty-tracked state.
 ///
@@ -155,11 +160,15 @@ pub struct GpuScene {
     /// Render target height in pixels.
     pub height: u32,
 
-    // Future: Add managers
-    // pub lights: GpuLightBuffer,
-    // pub meshes: GpuMeshBuffer,
-    // pub materials: GpuMaterialBuffer,
-    // pub camera: GpuCameraBuffer,
+    pub camera: GpuCameraBuffer,
+    pub instances: GpuInstanceBuffer,
+    pub aabbs: GpuAabbBuffer,
+    pub draw_calls: GpuDrawCallBuffer,
+    pub lights: GpuLightBuffer,
+    pub materials: GpuMaterialBuffer,
+    pub shadow_matrices: GpuShadowMatrixBuffer,
+    pub indirect: GpuIndirectBuffer,
+    pub visibility: GpuVisibilityBuffer,
 }
 
 impl GpuScene {
@@ -190,18 +199,30 @@ impl GpuScene {
     /// );
     /// ```
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        let camera = GpuCameraBuffer::new(&device);
+        let instances = GpuInstanceBuffer::new(device.clone());
+        let aabbs = GpuAabbBuffer::new(device.clone());
+        let draw_calls = GpuDrawCallBuffer::new(device.clone());
+        let lights = GpuLightBuffer::new(device.clone());
+        let materials = GpuMaterialBuffer::new(device.clone());
+        let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
+        let indirect = GpuIndirectBuffer::new(device.clone());
+        let visibility = GpuVisibilityBuffer::new(device.clone());
         Self {
             device,
             queue,
             frame_count: 0,
             width: 1920,
             height: 1080,
-
-            // Future: Initialize managers
-            // lights: GpuLightBuffer::new(&device, 1024),
-            // meshes: GpuMeshBuffer::new(&device, 4096),
-            // materials: GpuMaterialBuffer::new(&device, 2048),
-            // camera: GpuCameraBuffer::new(&device),
+            camera,
+            instances,
+            aabbs,
+            draw_calls,
+            lights,
+            materials,
+            shadow_matrices,
+            indirect,
+            visibility,
         }
     }
 
@@ -232,14 +253,19 @@ impl GpuScene {
     /// ```
     pub fn resources(&self) -> SceneResources<'_> {
         SceneResources {
-            // Future: Populate with actual buffers
-            // lights: &self.lights,
-            // meshes: &self.meshes,
-            // materials: &self.materials,
-            // camera: &self.camera,
-
-            // Stub placeholder
-            _marker: std::marker::PhantomData,
+            camera: self.camera.buffer(),
+            instances: self.instances.buffer(),
+            aabbs: self.aabbs.buffer(),
+            draw_calls: self.draw_calls.buffer(),
+            lights: self.lights.buffer(),
+            materials: self.materials.buffer(),
+            shadow_matrices: self.shadow_matrices.buffer(),
+            indirect: self.indirect.buffer(),
+            visibility: self.visibility.buffer(),
+            instance_count: self.instances.len() as u32,
+            draw_count: self.draw_calls.len() as u32,
+            light_count: self.lights.len() as u32,
+            shadow_count: self.shadow_matrices.len() as u32,
         }
     }
 
@@ -291,12 +317,15 @@ impl GpuScene {
     ///   scene.flush()                   // Uploads light buffer
     /// ```
     pub fn flush(&mut self) {
-        // Future: Flush each manager
-        // self.lights.flush(&self.queue);
-        // self.meshes.flush(&self.queue);
-        // self.materials.flush(&self.queue);
-        // self.camera.flush(&self.queue);
-
-        // Stub: No-op until managers are implemented
+        let queue = self.queue.clone();
+        self.camera.flush(&queue);
+        self.instances.flush(&queue);
+        self.aabbs.flush(&queue);
+        self.draw_calls.flush(&queue);
+        self.lights.flush(&queue);
+        self.materials.flush(&queue);
+        self.shadow_matrices.flush(&queue);
+        self.indirect.flush(&queue);
+        self.visibility.flush(&queue);
     }
 }

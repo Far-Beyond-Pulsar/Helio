@@ -60,7 +60,7 @@
 //! // }
 //! ```
 
-use crate::{RenderPass, GpuScene, PassContext, Profiler, Result};
+use crate::{RenderPass, GpuScene, PassContext, PrepareContext, Profiler, Result};
 
 /// Render graph executor with automatic profiling.
 ///
@@ -291,10 +291,26 @@ impl RenderGraph {
             label: Some("Render Graph"),
         });
 
+        // Create empty per-frame transient resources (populated by passes as they run)
+        let frame_resources = libhelio::FrameResources::empty();
+
         // Execute passes with automatic profiling
         for pass in &mut self.passes {
             // CPU profiling scope (automatic)
             let _scope = self.profiler.scope(pass.name());
+
+            // Prepare pass (upload per-frame uniforms before GPU execution)
+            let prepare_ctx = PrepareContext {
+                device: &scene.device,
+                queue: &scene.queue,
+                frame: scene.frame_count,
+                scene,
+                frame_resources: &frame_resources,
+                resize: false,
+                width: scene.width,
+                height: scene.height,
+            };
+            pass.prepare(&prepare_ctx)?;
 
             // Build context with zero-copy references (scoped to each pass)
             let mut ctx = PassContext {
@@ -303,9 +319,11 @@ impl RenderGraph {
                 depth,
                 scene: scene.resources(),
                 profiler: &mut self.profiler,
-                frame: scene.frame_count,
+                frame_num: scene.frame_count,
                 width: scene.width,
                 height: scene.height,
+                device: &scene.device,
+                frame: &frame_resources,
             };
 
             // Execute pass (GPU profiling injected via ctx.begin_render_pass)

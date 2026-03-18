@@ -114,12 +114,17 @@
 /// }
 /// ```
 pub struct SceneResources<'a> {
-    // Future: Add references to managers
-    // pub lights: &'a GpuLightBuffer,
-    // pub meshes: &'a GpuMeshBuffer,
-    // pub materials: &'a GpuMaterialBuffer,
-    // pub camera: &'a GpuCameraBuffer,
-
-    /// Placeholder marker (will be removed when managers are added)
-    pub(crate) _marker: std::marker::PhantomData<&'a ()>,
+    pub camera: &'a wgpu::Buffer,
+    pub instances: &'a wgpu::Buffer,
+    pub aabbs: &'a wgpu::Buffer,
+    pub draw_calls: &'a wgpu::Buffer,
+    pub lights: &'a wgpu::Buffer,
+    pub materials: &'a wgpu::Buffer,
+    pub shadow_matrices: &'a wgpu::Buffer,
+    pub indirect: &'a wgpu::Buffer,
+    pub visibility: &'a wgpu::Buffer,
+    pub instance_count: u32,
+    pub draw_count: u32,
+    pub light_count: u32,
+    pub shadow_count: u32,
 }
