@@ -130,14 +130,14 @@ impl SsaoPass {
             view_formats:    &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
+            wgpu::ImageCopyTexture {
                 texture:   &noise_texture,
                 mip_level: 0,
                 origin:    wgpu::Origin3d::ZERO,
                 aspect:    wgpu::TextureAspect::All,
             },
             &noise_data,
-            wgpu::TexelCopyBufferLayout {
+            wgpu::ImageDataLayout {
                 offset:         0,
                 bytes_per_row:  Some(NOISE_DIM * 4),
                 rows_per_image: Some(NOISE_DIM),
@@ -399,11 +399,11 @@ impl RenderPass for SsaoPass {
         pass.draw(0..3, 0..1);
         Ok(())
     }
+}
 
-    fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        // Recreate the AO output texture at the new resolution.
-        // noise_scale is updated on the next prepare() call.
-        // bind_group_1 (GBuffer views) must be rebuilt externally if GBuffer resizes.
+impl SsaoPass {
+    /// Recreates the SSAO output texture at a new resolution (call on window resize).
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let (tex, view) = make_ssao_texture(device, width, height);
         self.ssao_texture = tex;
         self.ssao_view    = view;

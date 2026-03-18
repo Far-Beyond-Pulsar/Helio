@@ -133,7 +133,7 @@ impl RenderPass for FxaaPass {
                 view: ctx.target,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::DontCare,
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],

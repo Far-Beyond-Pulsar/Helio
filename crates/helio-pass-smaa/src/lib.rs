@@ -256,15 +256,7 @@ impl RenderPass for SmaaPass {
                     view: &self.edge_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::DontCare,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.edge_pipeline);
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             pass.set_bind_group(0, &self.edge_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
