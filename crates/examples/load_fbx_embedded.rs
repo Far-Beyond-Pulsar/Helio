@@ -170,50 +170,50 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
     let elevated_focus = focus + Vec3::new(0.0, radius * 0.08, 0.0);
     let upper_focus = focus + Vec3::new(0.0, radius * 0.18, 0.0);
 
-    let key_pos = focus + Vec3::new(radius * 0.74, radius * 0.76, radius * 0.86);
+    let key_pos = focus + Vec3::new(radius * 0.22, radius * 0.34, radius * 0.24);
     let key_dir = (elevated_focus - key_pos).normalize_or_zero();
     renderer.add_light(SceneLight::spot(
         key_pos.to_array(),
         key_dir.to_array(),
         [1.0, 0.80, 0.62],
         18.0,
-        radius * 2.8,
+        radius * 0.62,
         0.20,
         0.38,
     ));
 
-    let fill_pos = focus + Vec3::new(-radius * 0.86, radius * 0.34, radius * 0.92);
+    let fill_pos = focus + Vec3::new(-radius * 0.26, radius * 0.14, radius * 0.28);
     let fill_dir = (focus - fill_pos).normalize_or_zero();
     renderer.add_light(SceneLight::spot(
         fill_pos.to_array(),
         fill_dir.to_array(),
         [0.52, 0.66, 1.0],
         6.5,
-        radius * 2.9,
+        radius * 0.59,
         0.28,
         0.46,
     ));
 
-    let rim_pos = focus + Vec3::new(-radius * 0.96, radius * 0.50, -radius * 1.04);
+    let rim_pos = focus + Vec3::new(-radius * 0.30, radius * 0.22, -radius * 0.32);
     let rim_dir = (upper_focus - rim_pos).normalize_or_zero();
     renderer.add_light(SceneLight::spot(
         rim_pos.to_array(),
         rim_dir.to_array(),
         [0.36, 0.55, 1.0],
         14.0,
-        radius * 2.7,
+        radius * 0.57,
         0.22,
         0.40,
     ));
 
-    let kicker_pos = focus + Vec3::new(radius * 0.92, radius * 0.24, -radius * 0.76);
+    let kicker_pos = focus + Vec3::new(radius * 0.24, radius * 0.10, -radius * 0.22);
     let kicker_dir = (focus + Vec3::new(0.0, radius * 0.05, 0.0) - kicker_pos).normalize_or_zero();
     renderer.add_light(SceneLight::spot(
         kicker_pos.to_array(),
         kicker_dir.to_array(),
         [1.0, 0.52, 0.32],
         7.0,
-        radius * 2.5,
+        radius * 0.53,
         0.18,
         0.34,
     ));

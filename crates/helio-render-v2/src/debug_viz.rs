@@ -241,11 +241,13 @@ impl DebugRenderer for LightDirectionRenderer {
         for light in ctx.lights {
             let [r, g, b] = light.color;
             match light.light_type {
-                LightType::Spot { .. } => {
+                LightType::Spot { inner_angle, outer_angle } => {
                     let pos = Vec3::from(light.position);
-                    let dir = Vec3::from(light.direction).normalize();
-                    let shaft_len = (light.range * 0.4).max(0.5);
-                    let shaft_end = pos + dir * shaft_len;
+                    let dir = Vec3::from(light.direction).normalize_or_zero();
+                    let dir = if dir.length_squared() > 1.0e-6 { dir } else { Vec3::NEG_Y };
+                    let cone_height = light.range.max(0.5);
+                    let shaft_end = pos + dir * cone_height;
+                    let outer_radius = (cone_height * outer_angle.tan()).max(0.02);
 
                     out.push(DebugShape::Line {
                         start:     pos,
@@ -254,13 +256,23 @@ impl DebugRenderer for LightDirectionRenderer {
                         thickness: 0.05,
                     });
                     out.push(DebugShape::Cone {
-                        apex:      shaft_end,
+                        apex:      pos,
                         direction: dir,
-                        height:    shaft_len * 0.25,
-                        radius:    shaft_len * 0.12,
+                        height:    cone_height,
+                        radius:    outer_radius,
                         color:     [r, g, b, 0.95],
                         thickness: 0.04,
                     });
+                    if inner_angle > 0.001 && inner_angle < outer_angle {
+                        out.push(DebugShape::Cone {
+                            apex:      pos,
+                            direction: dir,
+                            height:    cone_height,
+                            radius:    (cone_height * inner_angle.tan()).max(0.01),
+                            color:     [r, g, b, 0.35],
+                            thickness: 0.025,
+                        });
+                    }
                 }
                 LightType::Directional => {
                     // Three arrows in a ring near the camera to show sun direction.
