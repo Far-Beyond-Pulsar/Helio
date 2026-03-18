@@ -136,14 +136,14 @@ impl BillboardPass {
             view_formats:        &[],
         });
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
+            wgpu::ImageCopyTexture {
                 texture:   &white_texture,
                 mip_level: 0,
                 origin:    wgpu::Origin3d::ZERO,
                 aspect:    wgpu::TextureAspect::All,
             },
             &[255u8, 255, 255, 255],
-            wgpu::TexelCopyBufferLayout {
+            wgpu::ImageDataLayout {
                 offset:         0,
                 bytes_per_row:  Some(4),
                 rows_per_image: Some(1),

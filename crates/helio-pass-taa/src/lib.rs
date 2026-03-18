@@ -296,20 +296,22 @@ impl RenderPass for TaaPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): one fullscreen draw to output_view
         {
-            let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: &self.output_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let desc = wgpu::RenderPassDescriptor {
                 label: Some("TAA"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.output_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &color_attachments,
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-            });
+            };
+            let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.draw(0..3, 0..1);
