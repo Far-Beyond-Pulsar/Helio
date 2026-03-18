@@ -1373,6 +1373,66 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-billboard"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-debug"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-deferred-light"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-depth-prepass"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-fxaa"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-gbuffer"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
 name = "helio-pass-hiz"
 version = "0.1.0"
 dependencies = [
@@ -1400,11 +1460,91 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-radiance-cascades"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-shadow"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
 name = "helio-pass-shadow-matrix"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-v3",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-sky"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-sky-lut"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-smaa"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-ssao"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-taa"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 23.0.1",
+]
+
+[[package]]
+name = "helio-pass-transparent"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
  "wgpu 23.0.1",
 ]
 

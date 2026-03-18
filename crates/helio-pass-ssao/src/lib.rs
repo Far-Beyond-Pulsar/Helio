@@ -9,7 +9,7 @@ use bytemuck::{Pod, Zeroable};
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
 
-/// Camera uniform matching ssao.wgsl CameraUniform (272 bytes).
+/// Camera uniform matching ssao.wgsl CameraUniform (272 bytes, 4 × mat4 + vec3 + pad).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SsaoCameraUniform {
@@ -48,30 +48,31 @@ struct SsaoUniform {
 }
 
 pub struct SsaoPass {
-    pipeline:         wgpu::RenderPipeline,
+    pipeline:          wgpu::RenderPipeline,
     #[allow(dead_code)]
-    bgl_0:            wgpu::BindGroupLayout,
+    bgl_0:             wgpu::BindGroupLayout,
     #[allow(dead_code)]
-    bgl_1:            wgpu::BindGroupLayout,
-    bgl_2:            wgpu::BindGroupLayout,
-    bind_group_0:     wgpu::BindGroup,
-    bind_group_1:     wgpu::BindGroup,
-    bind_group_2:     wgpu::BindGroup,
-    ssao_camera_buf:  wgpu::Buffer,
-    globals_buf:      wgpu::Buffer,
-    ssao_uniform_buf: wgpu::Buffer,
+    bgl_1:             wgpu::BindGroupLayout,
+    bgl_2:             wgpu::BindGroupLayout,
+    bind_group_0:      wgpu::BindGroup,
+    bind_group_1:      wgpu::BindGroup,
+    bind_group_2:      wgpu::BindGroup,
+    ssao_camera_buf:   wgpu::Buffer,
+    globals_buf:       wgpu::Buffer,
+    ssao_uniform_buf:  wgpu::Buffer,
     sample_kernel_buf: wgpu::Buffer,
-    noise_texture:    wgpu::Texture,
-    noise_sampler:    wgpu::Sampler,
-    pub ssao_texture: wgpu::Texture,
-    pub ssao_view:    wgpu::TextureView,
+    noise_texture:     wgpu::Texture,
+    noise_sampler:     wgpu::Sampler,
+    pub ssao_texture:  wgpu::Texture,
+    pub ssao_view:     wgpu::TextureView,
 }
 
 impl SsaoPass {
     pub fn new(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
+        device:        &wgpu::Device,
+        queue:         &wgpu::Queue,
+        width:         u32,
+        height:        u32,
         gbuf_albedo:   &wgpu::TextureView,
         gbuf_normal:   &wgpu::TextureView,
         gbuf_orm:      &wgpu::TextureView,
@@ -106,7 +107,7 @@ impl SsaoPass {
             mapped_at_creation: false,
         });
 
-        // 64-sample hemisphere kernel
+        // 64-sample hemisphere kernel — fixed size, O(1)
         let kernel = generate_kernel();
         let sample_kernel_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label:              Some("SSAO Kernel"),
@@ -114,11 +115,7 @@ impl SsaoPass {
             usage:              wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        device.queue().write_buffer(
-            &sample_kernel_buf,
-            0,
-            bytemuck::cast_slice(&kernel),
-        );
+        queue.write_buffer(&sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
 
         // ── Noise texture (4×4 Rgba8Unorm, random rotation vectors) ───────────
         let noise_data = generate_noise();
@@ -132,7 +129,7 @@ impl SsaoPass {
             usage:           wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats:    &[],
         });
-        device.queue().write_texture(
+        queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture:   &noise_texture,
                 mip_level: 0,
@@ -149,7 +146,7 @@ impl SsaoPass {
         );
         let noise_view = noise_texture.create_view(&Default::default());
 
-        // Non-filtering repeat sampler for noise tile (works with depth texture too)
+        // Non-filtering repeat sampler for the noise tile (also used for depth reads)
         let noise_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label:          Some("SSAO Noise Sampler"),
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -193,19 +190,15 @@ impl SsaoPass {
             ],
         });
 
-        // Group 1: GBuffer textures
+        // Group 1: GBuffer textures (albedo, normal, orm, emissive — float; depth)
         let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("SSAO BGL1"),
             entries: &[
-                // albedo
-                gbuf_texture_entry(0),
-                // normal
-                gbuf_texture_entry(1),
-                // orm
-                gbuf_texture_entry(2),
-                // emissive
-                gbuf_texture_entry(3),
-                // depth
+                gbuf_float_entry(0),
+                gbuf_float_entry(1),
+                gbuf_float_entry(2),
+                gbuf_float_entry(3),
+                // binding 4: depth
                 wgpu::BindGroupLayoutEntry {
                     binding:    4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -219,7 +212,7 @@ impl SsaoPass {
             ],
         });
 
-        // Group 2: ssao uniforms, kernel (storage), noise texture, noise sampler
+        // Group 2: ssao uniform, kernel (storage read), noise tex, noise sampler
         let bgl_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label:   Some("SSAO BGL2"),
             entries: &[
@@ -359,9 +352,8 @@ impl RenderPass for SsaoPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // TODO: populate ssao_camera_buf from the real scene camera decomposition.
-        // Currently zeroed as a placeholder; the GPU will output 1.0 (no occlusion)
-        // for sky pixels and undefined values for geometry pixels.
+        // TODO: Derive view, proj, inv_view_proj from scene camera for accurate SSAO.
+        // Currently zeroed — GPU will return 1.0 (no occlusion) for sky pixels.
         let camera = SsaoCameraUniform::zeroed();
         ctx.queue.write_buffer(&self.ssao_camera_buf, 0, bytemuck::bytes_of(&camera));
 
@@ -370,8 +362,11 @@ impl RenderPass for SsaoPass {
             bias:        0.025,
             power:       2.0,
             samples:     KERNEL_SIZE as u32,
-            noise_scale: [ctx.width as f32 / NOISE_DIM as f32, ctx.height as f32 / NOISE_DIM as f32],
-            _pad:        [0.0; 2],
+            noise_scale: [
+                ctx.width  as f32 / NOISE_DIM as f32,
+                ctx.height as f32 / NOISE_DIM as f32,
+            ],
+            _pad: [0.0; 2],
         };
         ctx.queue.write_buffer(&self.ssao_uniform_buf, 0, bytemuck::bytes_of(&ssao));
         Ok(())
@@ -407,15 +402,15 @@ impl RenderPass for SsaoPass {
 
     fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         // Recreate the AO output texture at the new resolution.
-        // bind_group_2 (noise scale) is updated on next prepare().
-        // bind_group_1 (GBuffer views) must be rebuilt externally via a new SsaoPass.
+        // noise_scale is updated on the next prepare() call.
+        // bind_group_1 (GBuffer views) must be rebuilt externally if GBuffer resizes.
         let (tex, view) = make_ssao_texture(device, width, height);
         self.ssao_texture = tex;
         self.ssao_view    = view;
     }
 }
 
-// ── Helpers ────────────────────────────────────────────────────────────────────
+// ── Private helpers ────────────────────────────────────────────────────────────
 
 fn make_ssao_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -432,7 +427,7 @@ fn make_ssao_texture(device: &wgpu::Device, width: u32, height: u32) -> (wgpu::T
     (tex, view)
 }
 
-fn gbuf_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+fn gbuf_float_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::FRAGMENT,
@@ -446,20 +441,19 @@ fn gbuf_texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 /// Deterministic 64-sample hemisphere kernel in tangent space (z ≥ 0).
-/// Uses a simple LCG — no external crates needed.
 fn generate_kernel() -> [[f32; 4]; KERNEL_SIZE] {
     let mut result = [[0f32; 4]; KERNEL_SIZE];
     let mut state: u32 = 1_234_567;
-    let mut rand_f = move || -> f32 {
+    let mut rng = move || -> f32 {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         (state >> 16) as f32 / 65_535.0
     };
     for i in 0..KERNEL_SIZE {
-        let x = rand_f() * 2.0 - 1.0;
-        let y = rand_f() * 2.0 - 1.0;
-        let z = rand_f(); // [0, 1] keeps sample in +z hemisphere
+        let x = rng() * 2.0 - 1.0;
+        let y = rng() * 2.0 - 1.0;
+        let z = rng(); // [0, 1] → +z hemisphere in tangent space
         let len = (x * x + y * y + z * z).sqrt().max(1e-6);
-        // Accelerating interpolation: more samples near the origin
+        // Accelerating scale: more samples near origin for better near-field AO
         let t = (i as f32) / (KERNEL_SIZE as f32);
         let scale = 0.1 + 0.9 * t * t;
         result[i] = [x / len * scale, y / len * scale, z / len * scale, 0.0];
@@ -467,34 +461,22 @@ fn generate_kernel() -> [[f32; 4]; KERNEL_SIZE] {
     result
 }
 
-/// 4×4 Rgba8Unorm noise texture with random rotation vectors packed to [0, 255].
+/// 4×4 Rgba8Unorm noise texture.
+/// R/G store packed random XY rotation components; B is fixed at 128 (z=0).
 fn generate_noise() -> [u8; (NOISE_DIM * NOISE_DIM * 4) as usize] {
     let mut data = [0u8; (NOISE_DIM * NOISE_DIM * 4) as usize];
     let mut state: u32 = 9_876_543;
-    let mut rand_u8 = move || -> u8 {
+    let mut rng = move || -> u8 {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         (state >> 24) as u8
     };
-    for i in (0..data.len()).step_by(4) {
-        data[i]     = rand_u8(); // R (x rotation)
-        data[i + 1] = rand_u8(); // G (y rotation)
-        data[i + 2] = 128;       // B (z = 0 in [-1,1]; keeps noise in XY plane)
-        data[i + 3] = 255;       // A (unused)
+    let mut i = 0;
+    while i < data.len() {
+        data[i]     = rng(); // R
+        data[i + 1] = rng(); // G
+        data[i + 2] = 128;   // B — z component = 0 in [-1,1], keeps rotations in XY
+        data[i + 3] = 255;   // A (unused)
+        i += 4;
     }
     data
 }
-
-// ── wgpu::Device::queue() shim ─────────────────────────────────────────────────
-// wgpu 23 exposes Device::queue() for convenience uploads during construction.
-trait DeviceExt {
-    fn queue(&self) -> &wgpu::Queue;
-}
-
-// NOTE: wgpu 23 does NOT expose queue from Device directly; the queue() calls
-// above are compile-time placeholders that must be replaced by the caller
-// passing a queue. For construction-time uploads we accept this via a local
-// helper that requires the caller to supply a queue. The public API is adjusted
-// below to take a queue parameter.
-
-// ── Revised API taking queue for construction-time uploads ────────────────────
-// (The original new() above is replaced by the one below which takes a queue.)
