@@ -408,8 +408,11 @@ impl RenderPass for GBufferPass {
         pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
         Ok(())
     }
+}
 
-    fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+impl GBufferPass {
+    /// Recreates GBuffer textures at a new resolution (call on window resize).
+    pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let (albedo_tex, albedo_view) = gbuffer_texture(
             device, width, height, wgpu::TextureFormat::Rgba8Unorm, "GBuffer/Albedo",
         );
