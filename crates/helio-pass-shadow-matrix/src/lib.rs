@@ -175,7 +175,7 @@ impl RenderPass for ShadowMatrixPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = ShadowMatrixUniforms {
-            light_count: 0, // TODO: ctx.scene.lights.len() as u32 when available
+            light_count: ctx.scene.lights.len() as u32,
             shadow_atlas_size: 4096,
             _pad: [0; 2],
         };
@@ -185,7 +185,7 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = 0u32; // TODO: ctx.scene.light_count when SceneResources has this field
+        let count = ctx.scene.light_count;
         if count == 0 {
             return Ok(());
         }
