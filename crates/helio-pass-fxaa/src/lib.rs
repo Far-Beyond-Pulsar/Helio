@@ -127,20 +127,23 @@ impl RenderPass for FxaaPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): single fullscreen draw
-        let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let target = ctx.target;
+        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+        })];
+        let desc = wgpu::RenderPassDescriptor {
             label: Some("FXAA"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: ctx.target,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
+            color_attachments: &color_attachments,
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
-        });
+        };
+        let mut pass = ctx.begin_render_pass(&desc);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.draw(0..3, 0..1);
