@@ -250,33 +250,45 @@ impl RenderPass for SmaaPass {
 
         // Pass 1 — edge detection → edge_view
         {
-            let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let color = [Some(wgpu::RenderPassColorAttachment {
+                view: &self.edge_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let desc = wgpu::RenderPassDescriptor {
                 label: Some("SMAA Edge"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.edge_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                color_attachments: &color,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            };
+            let mut pass = ctx.encoder.begin_render_pass(&desc);
+            pass.set_pipeline(&self.edge_pipeline);
             pass.set_bind_group(0, &self.edge_bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
 
         // Pass 2 — blend weight calculation → blend_view
         {
-            let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let color = [Some(wgpu::RenderPassColorAttachment {
+                view: &self.blend_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let desc = wgpu::RenderPassDescriptor {
                 label: Some("SMAA Blend"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.blend_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &color,
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-            });
+            };
+            let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.blend_pipeline);
             pass.set_bind_group(0, &self.blend_bind_group, &[]);
             pass.draw(0..3, 0..1);
@@ -284,20 +296,23 @@ impl RenderPass for SmaaPass {
 
         // Pass 3 — neighborhood blending → ctx.target
         {
-            let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let target = ctx.target;
+            let color = [Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let desc = wgpu::RenderPassDescriptor {
                 label: Some("SMAA Neighbor"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: ctx.target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &color,
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-            });
+            };
+            let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.neighbor_pipeline);
             pass.set_bind_group(0, &self.neighbor_bind_group, &[]);
             pass.draw(0..3, 0..1);
