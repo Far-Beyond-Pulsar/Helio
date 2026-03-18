@@ -40,7 +40,7 @@ Sample model from https://sketchfab.com/mohamedhussien
         </tr>
     </table>
 </div>
-
+<img width="1262" height="707" alt="image" src="https://github.com/user-attachments/assets/7787f33a-5e82-44ba-a1f8-a5342da5090d" />
 <img width="1594" height="1017" alt="image" src="https://github.com/user-attachments/assets/e2232053-fa0c-4f43-b4aa-447053959c58" />
 
 ## 🚀 Features
