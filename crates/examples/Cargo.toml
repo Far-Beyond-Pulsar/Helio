@@ -71,6 +71,10 @@ path = "load_fbx.rs"
 name = "load_fbx_embedded"
 path = "load_fbx_embedded.rs"
 
+[[bin]]
+name = "ship_flight"
+path = "ship_flight.rs"
+
 [dependencies]
 helio-render-v2 = { path = "../helio-render-v2" }
 helio-asset-compat = { path = "../helio-asset-compat" }
