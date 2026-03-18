@@ -159,10 +159,10 @@ impl RenderPass for OcclusionCullPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = OcclusionUniforms {
-            instance_count: 0, // TODO: ctx.scene.instances.len() as u32 when available
-            hiz_width: 0,      // TODO: ctx.width when PrepareContext exposes it
-            hiz_height: 0,     // TODO: ctx.height when PrepareContext exposes it
-            hiz_mip_count: 0,  // TODO: mip_count(ctx.width, ctx.height) when available
+            instance_count: ctx.scene.instances.len() as u32,
+            hiz_width: ctx.width,
+            hiz_height: ctx.height,
+            hiz_mip_count: mip_count(ctx.width, ctx.height),
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));
@@ -170,7 +170,7 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = 0u32; // TODO: ctx.scene.instance_count when SceneResources has this field
+        let count = ctx.scene.instance_count;
         if count == 0 {
             return Ok(());
         }
