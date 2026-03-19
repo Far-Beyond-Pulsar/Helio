@@ -272,7 +272,7 @@ impl RenderPass for DeferredLightPass {
         let (ambient_color, ambient_intensity) = if let Some(main_scene) = main_scene {
             (main_scene.ambient_color, main_scene.ambient_intensity)
         } else {
-            ([0.1, 0.1, 0.15], 0.1)
+            ([0.5, 0.5, 0.6], 1.0)  // Brighter fallback ambient: sky-blue tint
         };
         let globals = DeferredGlobals {
             frame: ctx.frame as u32,
