@@ -210,8 +210,10 @@ impl Ship {
     fn right(&self) -> Vec3 { self.quat * Vec3::X }
     fn up(&self) -> Vec3 { self.quat * Vec3::Y }
     fn render_forward(&self) -> Vec3 { self.render_quat * -Vec3::Z }
+    fn render_right(&self) -> Vec3 { self.render_quat * Vec3::X }
     fn render_up(&self) -> Vec3 { self.render_quat * Vec3::Y }
     fn engine_pos(&self) -> Vec3 { self.render_pos - self.render_forward() * self.radius * 0.8 }
+
     fn update_visual_follow(&mut self, dt: f32) {
         self.render_pos = self.render_pos.lerp(self.pos, follow_factor(SHIP_POSITION_LAG, dt));
         self.render_quat = self
@@ -219,15 +221,92 @@ impl Ship {
             .slerp(self.quat, follow_factor(SHIP_ROTATION_LAG, dt))
             .normalize();
     }
+
     fn push_transforms(&self, renderer: &mut Renderer) {
         let transform = Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
         for &id in &self.ids {
             let _ = renderer.update_object_transform(id, transform);
         }
     }
+
+    fn update_lights(&self, renderer: &mut Renderer) {
+        let forward = self.render_forward();
+        let right = self.render_right();
+        let up = self.render_up();
+
+        // Update forward spotlights (headlights)
+        let spotlight_range = self.radius * 15.0;
+        let spotlight_intensity = 35.0;
+
+        let left_spot_pos = self.render_pos + right * (-self.radius * 0.4) + up * (self.radius * 0.15) + forward * (-self.radius * 0.9);
+        let _ = renderer.update_light(
+            self.forward_spotlight_left,
+            spot_light(
+                left_spot_pos.to_array(),
+                forward.to_array(),
+                [1.0, 1.0, 0.95],
+                spotlight_intensity,
+                spotlight_range,
+                25_f32.to_radians(),
+                35_f32.to_radians(),
+            ),
+        );
+
+        let right_spot_pos = self.render_pos + right * (self.radius * 0.4) + up * (self.radius * 0.15) + forward * (-self.radius * 0.9);
+        let _ = renderer.update_light(
+            self.forward_spotlight_right,
+            spot_light(
+                right_spot_pos.to_array(),
+                forward.to_array(),
+                [1.0, 1.0, 0.95],
+                spotlight_intensity,
+                spotlight_range,
+                25_f32.to_radians(),
+                35_f32.to_radians(),
+            ),
+        );
+
+        // Update hull marker lights (navigation lights)
+        let hull_intensity = 12.0;
+        let hull_range = self.radius * 4.0;
+
+        let port_pos = self.render_pos + right * (-self.radius * 0.75) + up * (self.radius * 0.2);
+        let _ = renderer.update_light(
+            self.hull_light_port,
+            point_light(port_pos.to_array(), [1.0, 0.1, 0.1], hull_intensity, hull_range),
+        );
+
+        let starboard_pos = self.render_pos + right * (self.radius * 0.75) + up * (self.radius * 0.2);
+        let _ = renderer.update_light(
+            self.hull_light_starboard,
+            point_light(starboard_pos.to_array(), [0.1, 1.0, 0.1], hull_intensity, hull_range),
+        );
+
+        let top_pos = self.render_pos + up * (self.radius * 0.5) + forward * (self.radius * 0.2);
+        let _ = renderer.update_light(
+            self.hull_light_top,
+            point_light(top_pos.to_array(), [1.0, 1.0, 1.0], hull_intensity * 0.8, hull_range),
+        );
+
+        let belly_pos = self.render_pos + up * (-self.radius * 0.4) + forward * (self.radius * 0.2);
+        let _ = renderer.update_light(
+            self.hull_light_belly,
+            point_light(belly_pos.to_array(), [0.4, 0.6, 1.0], hull_intensity * 0.7, hull_range),
+        );
+
+        // Update engine light
+        let glow = if self.thrusting { 9.0 } else { 1.8 };
+        let engine_pos = self.render_pos - forward * (self.radius * 0.8);
+        let _ = renderer.update_light(
+            self.engine_light,
+            point_light(engine_pos.to_array(), [0.35, 0.65, 1.0], glow, self.radius * 3.5),
+        );
+    }
+
     fn desired_cam_pos(&self) -> Vec3 {
         self.render_pos - self.render_forward() * self.radius * 3.2 + self.render_up() * self.radius * 0.95
     }
+
     fn desired_cam_target(&self) -> Vec3 {
         self.render_pos + self.render_forward() * self.radius * 1.15 + self.render_up() * self.radius * 0.18
     }
@@ -321,6 +400,7 @@ impl AppState {
 
         self.ship.update_visual_follow(dt);
         self.ship.push_transforms(&mut self.renderer);
+        self.ship.update_lights(&mut self.renderer);
         self.camera_pos = self
             .camera_pos
             .lerp(self.ship.desired_cam_pos(), follow_factor(CAMERA_POSITION_LAG, dt));
@@ -334,11 +414,6 @@ impl AppState {
         if self.camera_up.length_squared() < 1.0e-4 {
             self.camera_up = Vec3::Y;
         }
-        let glow = if self.ship.thrusting { 9.0 } else { 1.8 };
-        let _ = self.renderer.update_light(
-            self.ship.engine_light,
-            point_light(self.ship.engine_pos().to_array(), [0.35, 0.65, 1.0], glow, self.ship.radius * 3.5),
-        );
     }
 }
 

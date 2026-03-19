@@ -49,16 +49,15 @@ struct Globals {
     _pad2:             u32,
 }
 
+/// GpuLight (64 bytes, matches libhelio::GpuLight)
 struct GpuLight {
-    position:   vec3<f32>,
-    light_type: f32,
-    direction:  vec3<f32>,   // prenormalized
-    range:      f32,
-    color:      vec3<f32>,
-    intensity:  f32,
-    cos_inner:  f32,
-    cos_outer:  f32,
-    _pad:       vec2<f32>,
+    position_range:  vec4<f32>,  // xyz = position, w = range
+    direction_outer: vec4<f32>,  // xyz = direction, w = spot outer cos angle
+    color_intensity: vec4<f32>,  // xyz = color, w = intensity
+    shadow_index:    u32,        // -1u32 if no shadow
+    light_type:      u32,        // LightType enum (0=directional, 1=point, 2=spot)
+    inner_angle:     f32,        // spot inner cos angle
+    _pad:            u32,
 }
 
 struct LightMatrix { mat: mat4x4<f32> }
@@ -162,13 +161,13 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
 
     let light = lights[light_idx];
     var layer: u32;
-    if light.light_type > 0.5 && light.light_type < 1.5 {
-        let to_frag = world_pos - light.position;
+    if light.light_type > 0u && light.light_type < 2u {  // Point light (type 1)
+        let to_frag = world_pos - light.position_range.xyz;
         layer = light_idx * 6u + point_light_face(to_frag);
         let depth_bias   = 0.0002;
         let cascade_scale = 1.0;
         return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
-    } else if light.light_type < 0.5 {
+    } else if light.light_type == 0u {  // Directional light (type 0)
         let dist = length(world_pos - camera.position_near.xyz);
         let splits = globals.csm_splits;
         
@@ -298,22 +297,22 @@ fn pbr_direct_light(
     var L:        vec3<f32>;
     var radiance: vec3<f32>;
 
-    if light.light_type < 0.5 {
-        L        = normalize(-light.direction);
-        radiance = light.color * light.intensity;
-    } else {
-        let to_light = light.position - world_pos;
+    if light.light_type == 0u {  // Directional light
+        L        = normalize(-light.direction_outer.xyz);
+        radiance = light.color_intensity.xyz * light.color_intensity.w;
+    } else {  // Point or spot light
+        let to_light = light.position_range.xyz - world_pos;
         let dist     = length(to_light);
-        if dist > light.range { return vec3<f32>(0.0); }
+        if dist > light.position_range.w { return vec3<f32>(0.0); }
         L = to_light / dist;
-        let ratio   = dist / light.range;
+        let ratio   = dist / light.position_range.w;
         let falloff = max(0.0, 1.0 - ratio * ratio);
         var atten   = falloff * falloff;
-        if light.light_type > 1.5 {
-            let cos_a = dot(-L, light.direction);
-            atten    *= smoothstep(light.cos_outer, light.cos_inner, cos_a);
+        if light.light_type == 2u {  // Spot light
+            let cos_a = dot(-L, light.direction_outer.xyz);
+            atten    *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
         }
-        radiance = light.color * light.intensity * atten;
+        radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
     }
 
     let NdL = max(dot(N, L), 0.0);
