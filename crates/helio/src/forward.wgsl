@@ -270,11 +270,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         material_tex.params.x,
     );
     let f0 = compute_base_reflectance(material, material_tex, input, base_color.rgb);
-    let diffuse_color = if material.workflow == WORKFLOW_SPECULAR {
-        base_color.rgb * (vec3<f32>(1.0) - clamp(f0, vec3<f32>(0.0), vec3<f32>(1.0)))
-    } else {
-        base_color.rgb * (1.0 - metallic)
-    };
+    var diffuse_color = base_color.rgb * (1.0 - metallic);
+    if material.workflow == WORKFLOW_SPECULAR {
+        diffuse_color = base_color.rgb * (vec3<f32>(1.0) - clamp(f0, vec3<f32>(0.0), vec3<f32>(1.0)));
+    }
 
     var lit = diffuse_color * frame_uniforms.ambient_color.rgb * frame_uniforms.ambient_color.w * occlusion;
 
