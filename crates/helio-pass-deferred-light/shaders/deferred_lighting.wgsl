@@ -167,7 +167,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>) -> f32 {
         let cascade_scale = 1.0;
         return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos);
     } else if light.light_type < 0.5 {
-        let dist = length(world_pos - camera.position);
+        let dist = length(world_pos - camera.position_near.xyz);
         let splits = globals.csm_splits;
         
         // Determine cascades and blend factor
