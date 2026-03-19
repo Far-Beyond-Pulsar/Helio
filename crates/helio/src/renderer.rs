@@ -1,12 +1,22 @@
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
+use arrayvec::ArrayVec;
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 
 use crate::mesh::MeshBuffers;
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
+use crate::material::MAX_TEXTURES;
 use crate::mesh::MeshUpload;
 use crate::scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene};
+
+pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    let optional = wgpu::Features::MULTI_DRAW_INDIRECT;
+    required | (adapter_features & optional)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -46,6 +56,7 @@ pub struct Renderer {
     frame_uniforms: wgpu::Buffer,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    use_multi_draw_indirect: bool,
     ambient_color: [f32; 3],
     ambient_intensity: f32,
     clear_color: [f32; 4],
@@ -57,6 +68,7 @@ impl Renderer {
         queue: Arc<wgpu::Queue>,
         config: RendererConfig,
     ) -> Self {
+        let texture_array_count = NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");
         let mut scene = Scene::new(device.clone(), queue.clone());
         scene.set_render_size(config.width, config.height);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -118,6 +130,32 @@ impl Renderer {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: Some(texture_array_count),
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: Some(texture_array_count),
+                    },
                 ],
             });
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -133,7 +171,7 @@ impl Renderer {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 32,
+                    array_stride: 40,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
                         wgpu::VertexAttribute {
@@ -152,14 +190,19 @@ impl Renderer {
                             shader_location: 2,
                         },
                         wgpu::VertexAttribute {
-                            format: wgpu::VertexFormat::Uint32,
+                            format: wgpu::VertexFormat::Float32x2,
                             offset: 24,
                             shader_location: 3,
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Uint32,
-                            offset: 28,
+                            offset: 32,
                             shader_location: 4,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Uint32,
+                            offset: 36,
+                            shader_location: 5,
                         },
                     ],
                 }],
@@ -207,6 +250,9 @@ impl Renderer {
             frame_uniforms,
             depth_texture,
             depth_view,
+            use_multi_draw_indirect: device
+                .features()
+                .contains(wgpu::Features::MULTI_DRAW_INDIRECT),
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
@@ -309,6 +355,12 @@ impl Renderer {
             .write_buffer(&self.frame_uniforms, 0, bytemuck::bytes_of(&frame_uniforms));
 
         let resources = self.scene.gpu_scene().resources();
+        let mut texture_views = ArrayVec::<&wgpu::TextureView, MAX_TEXTURES>::new();
+        let mut samplers = ArrayVec::<&wgpu::Sampler, MAX_TEXTURES>::new();
+        for slot in 0..MAX_TEXTURES {
+            texture_views.push(self.scene.texture_view_for_slot(slot));
+            samplers.push(self.scene.texture_sampler_for_slot(slot));
+        }
         let scene_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Helio Forward Scene BG"),
             layout: &self.scene_bind_group_layout,
@@ -332,6 +384,18 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: resources.lights.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.scene.material_texture_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureViewArray(texture_views.as_slice()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::SamplerArray(samplers.as_slice()),
                 },
             ],
         });
@@ -374,9 +438,13 @@ impl Renderer {
             pass.set_vertex_buffer(0, mesh_buffers.vertices.slice(..));
             pass.set_index_buffer(mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
             if resources.draw_count > 0 {
-                let stride = std::mem::size_of::<crate::DrawIndexedIndirectArgs>() as u64;
-                for draw_index in 0..resources.draw_count {
-                    pass.draw_indexed_indirect(resources.indirect, draw_index as u64 * stride);
+                if self.use_multi_draw_indirect {
+                    pass.multi_draw_indexed_indirect(resources.indirect, 0, resources.draw_count);
+                } else {
+                    let stride = std::mem::size_of::<crate::DrawIndexedIndirectArgs>() as u64;
+                    for draw_index in 0..resources.draw_count {
+                        pass.draw_indexed_indirect(resources.indirect, draw_index as u64 * stride);
+                    }
                 }
             }
         }

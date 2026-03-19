@@ -8,12 +8,13 @@ use helio_v3::{
     GpuLight, GpuMaterial, GpuScene,
 };
 use thiserror::Error;
+use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, DenseRemove, SparsePool};
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId, TextureId};
 use crate::material::{
-    GpuMaterialTextureSlot, GpuMaterialTextures, MaterialAsset, MaterialTextureRef,
-    MaterialTextures, TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES,
+    GpuMaterialTextureSlot, GpuMaterialTextures, MaterialAsset, MaterialTextureRef, MaterialTextures,
+    TextureTransform, TextureUpload, MAX_TEXTURES,
 };
 use crate::mesh::{MeshBuffers, MeshPool, MeshSlice, MeshUpload};
 
@@ -159,6 +160,26 @@ fn gpu_material_textures(textures: &MaterialTextures) -> GpuMaterialTextures {
     }
 }
 
+fn each_material_texture_ref<F>(textures: &MaterialTextures, mut f: F)
+where
+    F: FnMut(MaterialTextureRef),
+{
+    for texture in [
+        textures.base_color,
+        textures.normal,
+        textures.roughness_metallic,
+        textures.emissive,
+        textures.occlusion,
+        textures.specular_color,
+        textures.specular_weight,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        f(texture);
+    }
+}
+
 fn normal_matrix(transform: Mat4) -> [f32; 12] {
     let mat3 = Mat3::from_mat4(transform).inverse().transpose();
     let cols = mat3.to_cols_array();
@@ -211,6 +232,9 @@ pub struct Scene {
     mesh_pool: MeshPool,
     textures: SparsePool<TextureRecord, TextureId>,
     material_textures: GrowableBuffer<GpuMaterialTextures>,
+    placeholder_texture: wgpu::Texture,
+    placeholder_view: wgpu::TextureView,
+    placeholder_sampler: wgpu::Sampler,
     materials: SparsePool<MaterialRecord, MaterialId>,
     lights: DenseArena<LightRecord, LightId>,
     objects: DenseArena<ObjectRecord, ObjectId>,
@@ -219,16 +243,50 @@ pub struct Scene {
 
 impl Scene {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        let placeholder_texture = device.create_texture_with_data(
+            &queue,
+            &wgpu::TextureDescriptor {
+                label: Some("Helio Placeholder Texture"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &[255, 255, 255, 255],
+        );
+        let placeholder_view =
+            placeholder_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let placeholder_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Helio Placeholder Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         Self {
             mesh_pool: MeshPool::new(device.clone()),
-            gpu_scene: GpuScene::new(device, queue),
+            gpu_scene: GpuScene::new(device.clone(), queue.clone()),
             textures: SparsePool::new(),
             material_textures: GrowableBuffer::new(
-                queue.device().clone(),
+                device,
                 256,
                 wgpu::BufferUsages::STORAGE,
                 "Helio Material Texture Buffer",
             ),
+            placeholder_texture,
+            placeholder_view,
+            placeholder_sampler,
             materials: SparsePool::new(),
             lights: DenseArena::new(),
             objects: DenseArena::new(),
@@ -242,6 +300,24 @@ impl Scene {
 
     pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
         self.mesh_pool.buffers()
+    }
+
+    pub fn material_texture_buffer(&self) -> &wgpu::Buffer {
+        self.material_textures.buffer()
+    }
+
+    pub fn texture_view_for_slot(&self, slot: usize) -> &wgpu::TextureView {
+        self.textures
+            .get_by_slot(slot)
+            .map(|texture| &texture.view)
+            .unwrap_or(&self.placeholder_view)
+    }
+
+    pub fn texture_sampler_for_slot(&self, slot: usize) -> &wgpu::Sampler {
+        self.textures
+            .get_by_slot(slot)
+            .map(|texture| &texture.sampler)
+            .unwrap_or(&self.placeholder_sampler)
     }
 
     pub fn set_render_size(&mut self, width: u32, height: u32) {
@@ -268,6 +344,61 @@ impl Scene {
         self.mesh_pool.insert(mesh)
     }
 
+    pub fn insert_texture(&mut self, texture: TextureUpload) -> Result<TextureId> {
+        if !self.textures.has_free_slot() && self.textures.slot_len() >= MAX_TEXTURES {
+            return Err(SceneError::TextureCapacityExceeded);
+        }
+
+        let gpu_texture = self.gpu_scene.device.create_texture_with_data(
+            &self.gpu_scene.queue,
+            &wgpu::TextureDescriptor {
+                label: texture.label.as_deref(),
+                size: wgpu::Extent3d {
+                    width: texture.width,
+                    height: texture.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: texture.format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            },
+            wgpu::util::TextureDataOrder::LayerMajor,
+            &texture.data,
+        );
+        let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = self.gpu_scene.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: texture.label.as_deref(),
+            address_mode_u: texture.sampler.address_mode_u,
+            address_mode_v: texture.sampler.address_mode_v,
+            address_mode_w: texture.sampler.address_mode_w,
+            mag_filter: texture.sampler.mag_filter,
+            min_filter: texture.sampler.min_filter,
+            mipmap_filter: texture.sampler.mipmap_filter,
+            ..Default::default()
+        });
+        let (id, _, _) = self.textures.insert(TextureRecord {
+            _texture: gpu_texture,
+            view,
+            sampler,
+            ref_count: 0,
+        });
+        Ok(id)
+    }
+
+    pub fn remove_texture(&mut self, id: TextureId) -> Result<()> {
+        let Some(texture) = self.textures.get(id) else {
+            return Err(invalid("texture"));
+        };
+        if texture.ref_count != 0 {
+            return Err(SceneError::ResourceInUse { resource: "texture" });
+        }
+        self.textures.remove(id).ok_or_else(|| invalid("texture"))?;
+        Ok(())
+    }
+
     pub fn remove_mesh(&mut self, id: MeshId) -> Result<()> {
         let Some(record) = self.mesh_pool.get(id) else {
             return Err(invalid("mesh"));
@@ -280,16 +411,29 @@ impl Scene {
     }
 
     pub fn insert_material(&mut self, material: GpuMaterial) -> MaterialId {
+        self.insert_material_asset(material.into())
+            .expect("plain GPU materials must insert without texture validation failures")
+    }
+
+    pub fn insert_material_asset(&mut self, material: MaterialAsset) -> Result<MaterialId> {
+        self.validate_material_textures(&material.textures)?;
+        self.bump_texture_refs(&material.textures, 1)?;
+
+        let gpu_textures = gpu_material_textures(&material.textures);
         let (id, slot, is_new) = self.materials.insert(MaterialRecord {
-            gpu: material,
+            gpu: material.gpu,
+            textures: material.textures,
             ref_count: 0,
         });
         if is_new {
-            let pushed = self.gpu_scene.materials.push(material);
+            let pushed = self.gpu_scene.materials.push(material.gpu);
+            debug_assert_eq!(pushed, slot);
+            let pushed = self.material_textures.push(gpu_textures);
             debug_assert_eq!(pushed, slot);
         } else {
-            let updated = self.gpu_scene.materials.update(slot, material);
-            debug_assert!(updated);
+            let updated_material = self.gpu_scene.materials.update(slot, material.gpu);
+            let updated_textures = self.material_textures.update(slot, gpu_textures);
+            debug_assert!(updated_material && updated_textures);
         }
         id
     }
@@ -304,6 +448,27 @@ impl Scene {
         Ok(())
     }
 
+    pub fn update_material_asset(&mut self, id: MaterialId, material: MaterialAsset) -> Result<()> {
+        self.validate_material_textures(&material.textures)?;
+        let Some((slot, record)) = self.materials.get_mut_with_slot(id) else {
+            return Err(invalid("material"));
+        };
+
+        let old_textures = record.textures.clone();
+        self.bump_texture_refs(&material.textures, 1)?;
+        self.bump_texture_refs(&old_textures, -1)?;
+
+        record.gpu = material.gpu;
+        record.textures = material.textures.clone();
+
+        let updated_material = self.gpu_scene.materials.update(slot, material.gpu);
+        let updated_textures = self
+            .material_textures
+            .update(slot, gpu_material_textures(&material.textures));
+        debug_assert!(updated_material && updated_textures);
+        Ok(())
+    }
+
     pub fn remove_material(&mut self, id: MaterialId) -> Result<()> {
         let Some(record) = self.materials.get(id) else {
             return Err(invalid("material"));
@@ -311,9 +476,13 @@ impl Scene {
         if record.ref_count != 0 {
             return Err(SceneError::ResourceInUse { resource: "material" });
         }
-        let (slot, _) = self.materials.remove(id).ok_or_else(|| invalid("material"))?;
-        let updated = self.gpu_scene.materials.update(slot, tombstone_material());
-        debug_assert!(updated);
+        let (slot, removed) = self.materials.remove(id).ok_or_else(|| invalid("material"))?;
+        self.bump_texture_refs(&removed.textures, -1)?;
+        let updated_material = self.gpu_scene.materials.update(slot, tombstone_material());
+        let updated_textures = self
+            .material_textures
+            .update(slot, tombstone_material_textures());
+        debug_assert!(updated_material && updated_textures);
         Ok(())
     }
 
@@ -481,10 +650,50 @@ impl Scene {
     pub fn flush(&mut self) {
         let queue = self.gpu_scene.queue.clone();
         self.mesh_pool.flush(&queue);
+        self.material_textures.flush(&queue);
         self.gpu_scene.flush();
     }
 
     pub fn advance_frame(&mut self) {
         self.gpu_scene.frame_count = self.gpu_scene.frame_count.wrapping_add(1);
+    }
+
+    fn validate_material_textures(&self, textures: &MaterialTextures) -> Result<()> {
+        let mut validation = Ok(());
+        each_material_texture_ref(textures, |texture| {
+            if validation.is_err() {
+                return;
+            }
+            if self.textures.get(texture.texture).is_none() {
+                validation = Err(invalid("texture"));
+            }
+        });
+        validation
+    }
+
+    fn bump_texture_refs(&mut self, textures: &MaterialTextures, delta: i32) -> Result<()> {
+        for texture in [
+            textures.base_color,
+            textures.normal,
+            textures.roughness_metallic,
+            textures.emissive,
+            textures.occlusion,
+            textures.specular_color,
+            textures.specular_weight,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let (_, record) = self
+                .textures
+                .get_mut_with_slot(texture.texture)
+                .ok_or_else(|| invalid("texture"))?;
+            if delta >= 0 {
+                record.ref_count = record.ref_count.saturating_add(delta as u32);
+            } else {
+                record.ref_count = record.ref_count.saturating_sub((-delta) as u32);
+            }
+        }
+        Ok(())
     }
 }

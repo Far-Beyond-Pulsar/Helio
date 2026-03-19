@@ -153,6 +153,14 @@ impl<T, H: Handle> SparsePool<T, H> {
         slot.value.as_ref()
     }
 
+    pub fn get_by_slot(&self, slot_index: usize) -> Option<&T> {
+        self.slots.get(slot_index)?.value.as_ref()
+    }
+
+    pub fn get_mut_by_slot(&mut self, slot_index: usize) -> Option<&mut T> {
+        self.slots.get_mut(slot_index)?.value.as_mut()
+    }
+
     pub fn get_mut_with_slot(&mut self, handle: H) -> Option<(usize, &mut T)> {
         let slot_index = handle.slot() as usize;
         let slot = self.slots.get_mut(slot_index)?;
