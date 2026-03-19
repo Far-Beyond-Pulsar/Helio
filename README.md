@@ -1,194 +1,255 @@
 <div align="center">
-
-<img src="./branding/Helio.svg" alt="Helio Renderer" width="400"/>
-
-**A production-grade real-time renderer built on [wgpu](https://wgpu.rs/)**
-
-**WIP**
-
-[![Rust](https://img.shields.io/badge/rust-stable-orange?logo=rust)](https://www.rust-lang.org/)
-[![wgpu](https://img.shields.io/badge/wgpu-28-blue)](https://wgpu.rs/)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey)](#)
-[![glam](https://img.shields.io/badge/glam-math-blue)](https://docs.rs/glam/)
-[![bytemuck](https://img.shields.io/badge/bytemuck-serialization-blue)](https://docs.rs/bytemuck/)
-[![PBR](https://img.shields.io/badge/feature-PBR-brightgreen)]()
-[![GI](https://img.shields.io/badge/feature-Global%20Illumination-brightgreen)]()
-[![CSM](https://img.shields.io/badge/feature-Cascaded%20Shadows-brightgreen)]()
-[![Sky](https://img.shields.io/badge/feature-Volumetric%20Sky-brightgreen)]()
-
-> Cross-platform, data-driven, physically-based rendering — with a render graph, radiance cascades GI, cascaded shadow maps, volumetric sky, and bloom — all in pure Rust.
-
-Sample model from https://sketchfab.com/mohamedhussien
-
+  <img src="./branding/Helio.svg" alt="Helio" width="360" />
 </div>
 
+Helio is a Rust rendering workspace built around `wgpu`. The repo currently contains three main layers:
 
-<div align="center">
-    <table style="border-collapse: collapse; border: none;">
-        <tr>
-            <td style="border: none;"><img src="media/image1.png" alt="Screenshot 1" width="100%"/></td>
-            <td style="border: none;"><img src="media/image2.png" alt="Screenshot 2" width="100%"/></td>
-        </tr>
-        <tr>
-            <td style="border: none;"><img src="media/image3.png" alt="Screenshot 3" width="100%"/></td>
-            <td style="border: none;"><img src="media/image4.png" alt="Screenshot 4" width="100%"/></td>
-        </tr>
-        <tr>
-            <td style="border: none;"><img src="media/image5.png" alt="Screenshot 5" width="100%"/></td>
-            <td style="border: none;"><img src="media/image6.png" alt="Screenshot 6" width="100%"/></td>
-        </tr>
-    </table>
-</div>
-<img width="1262" height="707" alt="image" src="https://github.com/user-attachments/assets/7787f33a-5e82-44ba-a1f8-a5342da5090d" />
-<img width="1594" height="1017" alt="image" src="https://github.com/user-attachments/assets/e2232053-fa0c-4f43-b4aa-447053959c58" />
+- `helio-v3`: the low-level render-graph and pass runtime
+- `helio`: a higher-level wrapper with stable handles, scene mutation helpers, and a forward renderer
+- `helio-pass-*`: modular render-pass crates that plug into `helio-v3`
 
-## 🚀 Features
+This repository is actively evolving. Some older examples and comments still reflect earlier APIs, so this README focuses on the code paths that exist in the workspace today.
 
-### Rendering
-- **Physically-Based Shading** — metallic/roughness PBR with Cook-Torrance BRDF
-- **Cascaded Shadow Maps** — 4-cascade CSM with PCF filtering, zero Peter-Panning front-face culling
-- **Radiance Cascades GI** — screen-space global illumination with smooth probe volume blending
-- **Hemisphere Ambient** — HL2-style two-color analytical ambient fallback for areas outside GI coverage
-- **Bloom** — multi-pass physically-based bloom
+## What is in this repo
 
-### Lighting
-- Directional lights (sun/moon with CSM)
-- Point lights with attenuation
-- Spot lights
-- Per-light shadow casting
-- Skylight ambient from atmosphere color
+The workspace is split into a few clear pieces.
 
-### Sky & Atmosphere
-- **Rayleigh + Mie scattering** — physically accurate multi-layer atmosphere
-- **Dynamic time-of-day** — rotate the sun in real time; sky, shadows, and ambient all respond
-- **Cheap volumetric clouds** — planar-intersection FBM clouds with analytical sun lighting and sunset tint; near-zero GPU cost
+### Core crates
 
-### Architecture
-- **Render graph** — automatic pass ordering and resource dependency resolution
-- **Pipeline cache** — compiled PSO variants with instant hot-swapping via specialization constants
-- **Resource pooling** — texture and buffer aliasing for minimal VRAM overhead
-- **Shared bind groups** — proper resource sharing across features; no redundant uploads
-- **Billboards** — GPU-instanced camera-facing sprites with correct depth occlusion
+| Crate | What it does |
+| --- | --- |
+| `crates/helio-v3` | Core render graph, `RenderPass` trait, profiling, GPU scene buffers, and zero-copy pass contexts |
+| `crates/helio` | Higher-level wrapper over `helio-v3` with stable handles for meshes, materials, lights, textures, and objects |
+| `crates/libhelio` | Shared GPU structs, frame resources, and common rendering data types |
+| `crates/helio-asset-compat` | Asset loading bridge for FBX, glTF, OBJ, and USD via Solid3D |
+| `crates/examples` | Native example binaries |
+| `crates/helio-live-portal` | Live telemetry / dashboard integration |
+| `crates/helio-wasm-app` | WASM-facing app crate |
+| `crates/helio-wasm-examples` | WASM example harnesses |
 
----
+### Pass crates
 
-## 📦 Crates
+These are normal Rust crates. Each crate exposes one pass type that implements `helio_v3::RenderPass`.
 
-| Crate | Description |
-|---|---|
-| `helio-render-v2` | Core renderer library — scene, mesh, material, passes, features |
-| `helio-core` | Shared primitives and math utilities |
-| `examples` | Runnable demos |
+Examples:
 
----
+- `helio-pass-shadow` -> `ShadowPass`
+- `helio-pass-gbuffer` -> `GBufferPass`
+- `helio-pass-sky-lut` -> `SkyLutPass`
+- `helio-pass-sky` -> `SkyPass`
+- `helio-pass-ssao` -> `SsaoPass`
+- `helio-pass-hiz` -> `HiZBuildPass`
+- `helio-pass-billboard` -> `BillboardPass`
+- `helio-pass-taa` -> `TaaPass`
+- `helio-pass-fxaa` -> `FxaaPass`
+- `helio-pass-smaa` -> `SmaaPass`
+- `helio-pass-radiance-cascades` -> `RadianceCascadesPass`
 
-## 🏁 Getting Started
+Some pass crates are further along than others. A few are still placeholders or are being reshaped.
 
-### Prerequisites
-- [Rust stable toolchain](https://rustup.rs/)
-- A GPU supporting Vulkan, Metal, DX12, or WebGPU
+## The two main ways to use Helio
 
-### Run the examples
+### 1. Use `helio` when you want a higher-level scene API
 
-```bash
-# Sky atmosphere demo — sun rotation, colored point lights, clouds
-cargo run --example render_v2_sky --release
+`helio` gives you a renderer plus stable IDs for scene resources. It is the easier entry point if you want to:
 
-# Basic scene — geometry, point lights, shadows
-cargo run --example render_v2_basic --release
+- insert meshes, materials, textures, lights, and objects
+- update them through handles
+- keep CPU-side scene mutation straightforward
+- optionally attach a render graph with custom passes
+
+The high-level type to start from is usually `helio::Renderer`.
+
+### 2. Use `helio-v3` when you want to build the graph yourself
+
+`helio-v3` is the lower-level layer. You work directly with:
+
+- `GpuScene`
+- `RenderGraph`
+- `RenderPass`
+- `PassContext`
+- `PrepareContext`
+
+This is the right level if you want explicit control over pass ordering and resource wiring.
+
+## How passes are actually imported and used
+
+This is the part that tends to be confusing at first:
+
+Passes are not loaded automatically.
+
+They are not discovered by filename.
+
+They are not registered through a config file.
+
+They are just Rust types from other crates that implement `helio_v3::RenderPass`.
+
+You use them by adding the pass crate as a dependency, importing the pass type, constructing it, and then pushing it into a `RenderGraph` or into `helio::Renderer::add_pass(...)`.
+
+### Step 1: add pass crates to `Cargo.toml`
+
+```toml
+[dependencies]
+helio = { path = "crates/helio" }
+helio-v3 = { path = "crates/helio-v3" }
+helio-pass-shadow = { path = "crates/helio-pass-shadow" }
+helio-pass-gbuffer = { path = "crates/helio-pass-gbuffer" }
+helio-pass-sky-lut = { path = "crates/helio-pass-sky-lut" }
+helio-pass-sky = { path = "crates/helio-pass-sky" }
 ```
 
-#### WASM example server (Ensure your browser ships with WASM and WebGPU (latest Chrome is a good bet))
-
-##### Univrsal (https://github.com/powershell/powershell/releases/latest)
-
-```bash
- ./build-wasm.ps1
- cargo run --release --bin helio-wasm-server
-```
-
-##### Unix
-
-```bash
- ./build-wasm.sh
- cargo run --release --bin helio-wasm-server
-```
-
-
-### Controls (sky example)
-| Key | Action |
-|---|---|
-| `W A S D` | Move forward / left / back / right |
-| `Space` / `Shift` | Move up / down |
-| `Q` / `E` | Rotate sun (time of day) |
-| Mouse drag | Look around (click to grab cursor) |
-| `Escape` | Release cursor |
-
----
-
-## 🔧 Usage
+### Step 2: import the pass types in Rust
 
 ```rust
-use helio_render_v2::{Renderer, RendererConfig, Camera, Scene, SceneLight};
-use helio_render_v2::features::{
-    FeatureRegistry, LightingFeature, ShadowsFeature,
-    BloomFeature, RadianceCascadesFeature,
-};
-
-// Build the renderer
-let config = RendererConfig::default();
-let mut renderer = Renderer::new(&device, &queue, surface_format, config).await?;
-
-// Register features
-let mut registry = FeatureRegistry::new();
-registry.add(LightingFeature::new(&device));
-registry.add(ShadowsFeature::new(&device));
-registry.add(RadianceCascadesFeature::new(&device));
-registry.add(BloomFeature::new(&device));
-
-// Describe your scene
-let scene = Scene {
-    lights: vec![
-        SceneLight::directional([0.4, -0.8, 0.4], [1.0, 0.95, 0.8], 3.0),
-    ],
-    sky: Some(SkyAtmosphere::default()),
-    ..Default::default()
-};
-
-// Render loop
-renderer.render(&device, &queue, &surface, &camera, &scene, &registry)?;
+use helio_v3::RenderGraph;
+use helio_pass_gbuffer::GBufferPass;
+use helio_pass_shadow::ShadowPass;
+use helio_pass_sky::SkyPass;
+use helio_pass_sky_lut::SkyLutPass;
 ```
 
----
+### Step 3: construct the passes with the GPU resources they need
 
-## 🗺️ Roadmap
+Pass constructors usually take explicit buffers or views. They are not magical: you pass in the camera buffer, instance buffer, shadow matrices, LUT views, target format, and so on.
 
-- [ ] SSAO
-- [ ] Screen-space reflections
-- [ ] Skeletal animation
-- [ ] Point light shadows
-- [ ] Temporal anti-aliasing (TAA)
-- [ ] WASM / WebGPU target
+```rust
+let mut scene = helio_v3::GpuScene::new(device.clone(), queue.clone());
+let mut graph = RenderGraph::new(&device, &queue);
 
----
+let sky_lut = SkyLutPass::new(&device, scene.camera.buffer());
+let sky = SkyPass::new(&device, scene.camera.buffer(), &sky_lut.sky_lut_view, surface_format);
+let shadow = ShadowPass::new(&device, scene.shadow_matrices.buffer(), scene.instances.buffer());
+let gbuffer = GBufferPass::new(
+    &device,
+    scene.camera.buffer(),
+    scene.instances.buffer(),
+    width,
+    height,
+);
 
-## 📱 Android
+graph.add_pass(Box::new(sky_lut));
+graph.add_pass(Box::new(shadow));
+graph.add_pass(Box::new(gbuffer));
+graph.add_pass(Box::new(sky));
+```
+
+The key idea is that pass wiring happens in Rust code, not through a registry.
+
+### Step 4: if you are using `helio::Renderer`, you can add passes there too
+
+The `helio` wrapper exposes:
+
+```rust
+renderer.add_pass(Box<dyn RenderPass>)
+```
+
+Internally that creates or reuses a `RenderGraph` and appends the pass. The relevant entry point today is `crates/helio/src/renderer.rs`.
+
+## Why the examples may not show this clearly
+
+Not every example in this repository is demonstrating the same layer of the stack.
+
+In particular:
+
+- some examples use the `helio` wrapper directly
+- some older examples still reference earlier renderer APIs
+- pass crates live in the workspace as modular building blocks, but not every demo is a small “build your own graph” sample
+
+So if you were looking for a single `main.rs` that imports every pass crate and wires the whole pipeline together, that is exactly what this README is trying to make explicit: the pass system exists, but it is composed in Rust by the application that chooses to use it.
+
+## What Helio is aiming for architecturally
+
+The current direction of the codebase is consistent in a few places:
+
+- pass-oriented rendering through `helio-v3`
+- zero-copy pass contexts where passes borrow GPU resources instead of cloning them
+- dirty-tracked GPU scene buffers
+- constant-time or bounded CPU-side scene updates where possible
+- modular crates so features can be developed independently
+
+That architecture shows up in files like:
+
+- `crates/helio-v3/src/context.rs`
+- `crates/helio-v3/src/graph/executor.rs`
+- `crates/helio-v3/src/scene/gpu_scene.rs`
+- `crates/helio-v3/src/scene/managers.rs`
+- `crates/helio/src/renderer.rs`
+
+## Running the examples
+
+The example binaries live in `crates/examples/Cargo.toml`.
+
+Some useful current entry points:
 
 ```powershell
-$env:ANDROID_HOME = "C:\Users\...\Android\Sdk"
-$env:ANDROID_NDK_ROOT = "$env:ANDROID_HOME\ndk\29.0.14206865"
-cargo apk build -p feature_complete_android --target aarch64-linux-android
+cargo run -p examples --bin load_fbx
+cargo run -p examples --bin load_fbx_embedded
+cargo run -p examples --bin ship_flight
 ```
 
----
+If you only want a compile check:
 
-## 📄 License
+```powershell
+cargo check -p helio --quiet
+cargo check -p examples --bin load_fbx --bin load_fbx_embedded --bin ship_flight --quiet
+```
 
-[MIT](LICENSE)
+## Asset loading
 
----
+`helio-asset-compat` is the current bridge for scene import.
 
-<div align="center">
-  <sub>Built with ❤️ in Rust · Powered by <a href="https://wgpu.rs/">wgpu</a></sub>
-</div>
+It loads data through Solid3D and converts it into Helio-friendly meshes, textures, and materials. At the moment that path is where FBX, glTF, OBJ, and USD support lives.
+
+Relevant crate:
+
+- `crates/helio-asset-compat`
+
+## A practical mental model for the repo
+
+If you are trying to understand the workspace quickly, this is the easiest way to think about it:
+
+- `libhelio` defines shared rendering data
+- `helio-v3` defines the render-graph runtime and pass interfaces
+- `helio-pass-*` crates define individual rendering stages
+- `helio` wraps the lower level in a more ergonomic scene API
+- `examples` exercise different pieces of the stack
+
+## Current rough edges
+
+A few things are worth saying plainly:
+
+- the repository is in transition
+- not every crate is equally finished
+- some examples and comments still describe earlier APIs
+- the root README used to point at crates and commands that no longer match the current workspace
+
+If you are trying to find the truth, trust the workspace manifests and the crate sources first.
+
+## Where to start reading
+
+If you want the big picture:
+
+1. `crates/helio-v3/src/lib.rs`
+2. `crates/helio-v3/src/graph/executor.rs`
+3. `crates/helio-v3/src/context.rs`
+4. `crates/helio/src/renderer.rs`
+5. `crates/examples`
+
+If you want to understand scene data and uploads:
+
+1. `crates/helio/src/scene.rs`
+2. `crates/helio/src/mesh.rs`
+3. `crates/helio-v3/src/scene/managers.rs`
+4. `crates/helio-v3/src/scene/gpu_scene.rs`
+
+If you want to understand passes:
+
+1. `crates/helio-pass-shadow`
+2. `crates/helio-pass-gbuffer`
+3. `crates/helio-pass-sky-lut`
+4. `crates/helio-pass-sky`
+5. `crates/helio-pass-ssao`
+
+## License
+
+This project is licensed under MIT or Apache-2.0.
