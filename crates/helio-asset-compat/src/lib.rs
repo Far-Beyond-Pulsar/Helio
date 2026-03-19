@@ -15,7 +15,7 @@ mod animation_system;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::collections::HashMap;
-use helio_render_v2::scene::{ObjectId, LightId};
+use helio::{ObjectId, LightId};
 
 pub use mesh_converter::{convert_vertex, convert_primitive};
 pub use material_converter::convert_material;
@@ -179,8 +179,6 @@ pub enum AssetError {
     #[error("Invalid data: {0}")]
     InvalidData(String),
 
-    #[error("Helio renderer error: {0}")]
-    Renderer(#[from] helio_render_v2::Error),
 }
 
 /// Handle to a loaded 3D scene

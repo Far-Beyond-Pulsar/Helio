@@ -4,9 +4,7 @@
 //! scene to GPU-resident Helio structures.
 
 use crate::{Result, AssetError, mesh_converter, material_converter, light_converter, camera_converter, SceneAsset, CameraData};
-use helio_render_v2::mesh::PackedVertex;
-use helio_render_v2::material::Material;
-use helio_render_v2::scene::SceneLight;
+use helio::{GpuLight, GpuMaterial, PackedVertex};
 use solid_rs::Scene;
 
 /// Converted scene data ready for GPU upload
@@ -19,9 +17,9 @@ pub struct ConvertedScene {
     /// Converted meshes (vertices + indices)
     pub meshes: Vec<ConvertedMesh>,
     /// Converted PBR materials
-    pub materials: Vec<Material>,
+    pub materials: Vec<GpuMaterial>,
     /// Converted lights
-    pub lights: Vec<SceneLight>,
+    pub lights: Vec<GpuLight>,
     /// Camera data (informational only - not auto-applied)
     pub cameras: Vec<CameraData>,
     // TODO: Animations (Phase 5)
@@ -49,7 +47,7 @@ pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path, config: &crate::
         scene.name, scene.meshes.len(), scene.materials.len());
 
     // Convert all materials first
-    let materials: Result<Vec<Material>> = scene.materials.iter()
+    let materials: Result<Vec<GpuMaterial>> = scene.materials.iter()
         .map(|mat| material_converter::convert_material(mat, scene, base_dir))
         .collect();
     let materials = materials?;
@@ -95,7 +93,7 @@ pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path, config: &crate::
         meshes.iter().map(|m| m.vertices.len()).sum::<usize>());
 
     // Convert all lights
-    let lights: Vec<SceneLight> = scene.lights.iter()
+    let lights: Vec<GpuLight> = scene.lights.iter()
         .filter_map(|light| light_converter::convert_light(light))
         .collect();
 

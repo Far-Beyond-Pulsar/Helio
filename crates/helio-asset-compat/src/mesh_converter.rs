@@ -3,7 +3,7 @@
 //! Converts SolidRS's rich vertex format (up to 8 UVs, 4 colors, optional tangents)
 //! to Helio's compact PackedVertex format (32 bytes).
 
-use helio_render_v2::mesh::PackedVertex;
+use helio::PackedVertex;
 use crate::Result;
 use solid_rs::geometry::{Vertex, Topology};
 use solid_rs::scene::Mesh;

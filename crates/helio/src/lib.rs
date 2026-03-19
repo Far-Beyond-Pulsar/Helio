@@ -10,7 +10,6 @@
 //! - partial dirty-range uploads to `helio-v3` managers.
 
 mod arena;
-mod forward;
 mod handles;
 mod mesh;
 mod renderer;

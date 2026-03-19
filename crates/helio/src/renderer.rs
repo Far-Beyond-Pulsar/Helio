@@ -4,7 +4,9 @@ use bytemuck::{Pod, Zeroable};
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 
 use crate::mesh::MeshBuffers;
-use crate::scene::Scene;
+use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
+use crate::mesh::MeshUpload;
+use crate::scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene};
 
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
@@ -241,10 +243,48 @@ impl Renderer {
         self.ambient_intensity = intensity;
     }
 
+    pub fn insert_mesh(&mut self, mesh: MeshUpload) -> MeshId {
+        self.scene.insert_mesh(mesh)
+    }
+
+    pub fn insert_material(&mut self, material: crate::GpuMaterial) -> MaterialId {
+        self.scene.insert_material(material)
+    }
+
+    pub fn update_material(
+        &mut self,
+        id: MaterialId,
+        material: crate::GpuMaterial,
+    ) -> SceneResult<()> {
+        self.scene.update_material(id, material)
+    }
+
+    pub fn insert_light(&mut self, light: crate::GpuLight) -> LightId {
+        self.scene.insert_light(light)
+    }
+
+    pub fn update_light(&mut self, id: LightId, light: crate::GpuLight) -> SceneResult<()> {
+        self.scene.update_light(id, light)
+    }
+
+    pub fn insert_object(&mut self, desc: ObjectDescriptor) -> SceneResult<ObjectId> {
+        self.scene.insert_object(desc)
+    }
+
+    pub fn update_object_transform(
+        &mut self,
+        id: ObjectId,
+        transform: glam::Mat4,
+    ) -> SceneResult<()> {
+        self.scene.update_object_transform(id, transform)
+    }
+
     pub fn render(
         &mut self,
+        camera: &Camera,
         target: &wgpu::TextureView,
     ) -> HelioResult<()> {
+        self.scene.update_camera(*camera);
         self.scene.flush();
         let frame_uniforms = FrameUniforms {
             ambient_color: [
