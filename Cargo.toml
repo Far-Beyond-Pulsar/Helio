@@ -1,11 +1,9 @@
 [workspace]
 members = [
-    "crates/helio-core",
-    "crates/helio-render-v2",
     "crates/helio-v3",
+    "crates/helio",
     "crates/libhelio",
     "crates/helio-live-portal",
-    "crates/helio-asset-compat",
 
     # GPU-driven pass crates (each O(1) CPU)
     "crates/helio-pass-sky-lut",
@@ -26,10 +24,6 @@ members = [
     "crates/helio-pass-smaa",
     "crates/helio-pass-debug",
     "crates/helio-pass-radiance-cascades",
-
-    "crates/examples",
-    "crates/helio-wasm-app",
-    "crates/helio-wasm-examples",
 ]
 resolver = "2"
 
