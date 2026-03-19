@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::{required_wgpu_features, Camera, Renderer, RendererConfig};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
 use helio_asset_compat::{
     load_scene_bytes_with_config, upload_scene_materials, AssetError, ConvertedScene, LoadConfig,
 };
@@ -229,6 +229,7 @@ impl ApplicationHandler for App {
             adapter.request_device(
                 &wgpu::DeviceDescriptor {
                     required_features: required_wgpu_features(adapter.features()),
+                    required_limits: required_wgpu_limits(adapter.limits()),
                     ..Default::default()
                 },
                 None,

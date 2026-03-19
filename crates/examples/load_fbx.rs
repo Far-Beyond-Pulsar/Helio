@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::Vec3;
-use helio::{required_wgpu_features, Camera, Renderer, RendererConfig};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
 use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
 use v3_demo_common::{cube_mesh, point_light, update_point_light};
 use winit::{
@@ -101,6 +101,7 @@ impl ApplicationHandler for App {
             adapter.request_device(
                 &wgpu::DeviceDescriptor {
                     required_features: required_wgpu_features(adapter.features()),
+                    required_limits: required_wgpu_limits(adapter.limits()),
                     ..Default::default()
                 },
                 None,
