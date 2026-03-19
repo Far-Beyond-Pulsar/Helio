@@ -231,8 +231,9 @@ pub struct Scene {
     gpu_scene: GpuScene,
     mesh_pool: MeshPool,
     textures: SparsePool<TextureRecord, TextureId>,
+    texture_binding_version: u64,
     material_textures: GrowableBuffer<GpuMaterialTextures>,
-    placeholder_texture: wgpu::Texture,
+    _placeholder_texture: wgpu::Texture,
     placeholder_view: wgpu::TextureView,
     placeholder_sampler: wgpu::Sampler,
     materials: SparsePool<MaterialRecord, MaterialId>,
@@ -279,13 +280,14 @@ impl Scene {
             mesh_pool: MeshPool::new(device.clone()),
             gpu_scene: GpuScene::new(device.clone(), queue.clone()),
             textures: SparsePool::new(),
+            texture_binding_version: 0,
             material_textures: GrowableBuffer::new(
                 device,
                 256,
                 wgpu::BufferUsages::STORAGE,
                 "Helio Material Texture Buffer",
             ),
-            placeholder_texture,
+            _placeholder_texture: placeholder_texture,
             placeholder_view,
             placeholder_sampler,
             materials: SparsePool::new(),
@@ -305,6 +307,10 @@ impl Scene {
 
     pub fn material_texture_buffer(&self) -> &wgpu::Buffer {
         self.material_textures.buffer()
+    }
+
+    pub fn texture_binding_version(&self) -> u64 {
+        self.texture_binding_version
     }
 
     pub fn texture_view_for_slot(&self, slot: usize) -> &wgpu::TextureView {
@@ -387,6 +393,7 @@ impl Scene {
             sampler,
             ref_count: 0,
         });
+        self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
         Ok(id)
     }
 
@@ -398,6 +405,7 @@ impl Scene {
             return Err(SceneError::ResourceInUse { resource: "texture" });
         }
         self.textures.remove(id).ok_or_else(|| invalid("texture"))?;
+        self.texture_binding_version = self.texture_binding_version.wrapping_add(1);
         Ok(())
     }
 

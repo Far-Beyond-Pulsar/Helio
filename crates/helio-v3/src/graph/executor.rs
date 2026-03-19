@@ -287,32 +287,36 @@ impl RenderGraph {
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
     ) -> Result<()> {
+        let frame_resources = libhelio::FrameResources::empty();
+        self.execute_with_frame_resources(scene, target, depth, &frame_resources)
+    }
+
+    pub fn execute_with_frame_resources(
+        &mut self,
+        scene: &GpuScene,
+        target: &wgpu::TextureView,
+        depth: &wgpu::TextureView,
+        frame_resources: &libhelio::FrameResources<'_>,
+    ) -> Result<()> {
         let mut encoder = scene.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Graph"),
         });
 
-        // Create empty per-frame transient resources (populated by passes as they run)
-        let frame_resources = libhelio::FrameResources::empty();
-
-        // Execute passes with automatic profiling
         for pass in &mut self.passes {
-            // CPU profiling scope (automatic)
             let _scope = self.profiler.scope(pass.name());
 
-            // Prepare pass (upload per-frame uniforms before GPU execution)
             let prepare_ctx = PrepareContext {
                 device: &scene.device,
                 queue: &scene.queue,
                 frame: scene.frame_count,
                 scene,
-                frame_resources: &frame_resources,
+                frame_resources,
                 resize: false,
                 width: scene.width,
                 height: scene.height,
             };
             pass.prepare(&prepare_ctx)?;
 
-            // Build context with zero-copy references (scoped to each pass)
             let mut ctx = PassContext {
                 encoder: &mut encoder,
                 target,
@@ -323,14 +327,12 @@ impl RenderGraph {
                 width: scene.width,
                 height: scene.height,
                 device: &scene.device,
-                frame: &frame_resources,
+                frame: frame_resources,
             };
 
-            // Execute pass (GPU profiling injected via ctx.begin_render_pass)
             pass.execute(&mut ctx)?;
         }
 
-        // Submit command buffer to GPU
         scene.queue.submit([encoder.finish()]);
         crate::upload::finish_frame();
         Ok(())

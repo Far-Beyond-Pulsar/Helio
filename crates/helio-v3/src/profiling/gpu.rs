@@ -100,14 +100,18 @@ impl GpuProfiler {
     /// let profiler = GpuProfiler::new(&device, &queue);
     /// ```
     pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue) -> Self {
-        let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
-            label: Some("GPU Profiler"),
-            ty: wgpu::QueryType::Timestamp,
-            count: 256, // 128 passes * 2 timestamps per pass
-        });
+        let query_set = if device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            Some(device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("GPU Profiler"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 256, // 128 passes * 2 timestamps per pass
+            }))
+        } else {
+            None
+        };
 
         Self {
-            query_set: Some(query_set),
+            query_set,
             // Future: Initialize query buffer and allocation
             // query_buffer: device.create_buffer(...),
             // pending_queries: VecDeque::new(),

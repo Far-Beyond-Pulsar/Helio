@@ -18,6 +18,29 @@ pub struct GBufferViews<'a> {
     pub velocity: &'a wgpu::TextureView,
 }
 
+/// Borrowed mesh buffers for passes that render scene geometry directly.
+pub struct MeshBuffers<'a> {
+    pub vertices: &'a wgpu::Buffer,
+    pub indices: &'a wgpu::Buffer,
+}
+
+/// Borrowed material-texture state for passes that sample Helio's texture table.
+pub struct MaterialTextureBindings<'a> {
+    pub material_textures: &'a wgpu::Buffer,
+    pub texture_views: &'a [&'a wgpu::TextureView],
+    pub samplers: &'a [&'a wgpu::Sampler],
+    pub version: u64,
+}
+
+/// Frame-local scene inputs for the high-level Helio renderer.
+pub struct MainSceneResources<'a> {
+    pub mesh_buffers: MeshBuffers<'a>,
+    pub material_textures: MaterialTextureBindings<'a>,
+    pub clear_color: [f32; 4],
+    pub ambient_color: [f32; 3],
+    pub ambient_intensity: f32,
+}
+
 /// All transient per-frame texture references.
 ///
 /// The `RenderGraph` creates the actual `wgpu::Texture` objects and passes
@@ -41,6 +64,8 @@ pub struct FrameResources<'a> {
     pub ssao: Option<&'a wgpu::TextureView>,
     /// Pre-AA HDR color buffer (input to TAA/FXAA/SMAA)
     pub pre_aa: Option<&'a wgpu::TextureView>,
+    /// High-level Helio scene resources used by wrapper-owned passes.
+    pub main_scene: Option<MainSceneResources<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::SkyContext,
 }
@@ -58,6 +83,7 @@ impl<'a> FrameResources<'a> {
             sky_lut_sampler: None,
             ssao: None,
             pre_aa: None,
+            main_scene: None,
             sky: crate::SkyContext::default(),
         }
     }
