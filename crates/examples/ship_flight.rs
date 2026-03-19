@@ -34,6 +34,10 @@ const SHIP_ROTATION_LAG: f32 = 14.0;
 const CAMERA_POSITION_LAG: f32 = 8.5;
 const CAMERA_TARGET_LAG: f32 = 9.5;
 const CAMERA_UP_LAG: f32 = 10.5;
+const YAW_THRUST: f32 = 16.0;
+const PITCH_THRUST: f32 = 14.0;
+const ROLL_THRUST: f32 = 3.4;
+const ANGULAR_DAMPING: f32 = 6.5;
 const FORWARD_THRUST_SCALE: f32 = 1.7;
 const REVERSE_THRUST_SCALE: f32 = 0.9;
 const STRAFE_THRUST_SCALE: f32 = 1.15;
@@ -188,6 +192,7 @@ struct Ship {
     render_pos: Vec3,
     render_quat: Quat,
     velocity: Vec3,
+    angular_velocity: Vec3,
     engine_light: helio::LightId,
     thrusting: bool,
     thrust_accel: f32,
@@ -248,14 +253,24 @@ impl AppState {
         let pitch_delta = self.mouse_delta.1 * LOOK_SENS;
         self.mouse_delta = (0.0, 0.0);
 
-        let mut roll_delta = 0.0;
-        if self.keys.contains(&KeyCode::KeyQ) { roll_delta += ROLL_SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyE) { roll_delta -= ROLL_SPEED * dt; }
+        let mut roll_input = 0.0;
+        if self.keys.contains(&KeyCode::KeyQ) { roll_input += ROLL_SPEED; }
+        if self.keys.contains(&KeyCode::KeyE) { roll_input -= ROLL_SPEED; }
 
-        let rot = Quat::from_axis_angle(self.ship.up(), -yaw_delta)
-            * Quat::from_axis_angle(self.ship.right(), -pitch_delta)
-            * Quat::from_axis_angle(self.ship.forward(), roll_delta);
-        self.ship.quat = (rot * self.ship.quat).normalize();
+        self.ship.angular_velocity += Vec3::new(
+            -pitch_delta * PITCH_THRUST,
+            -yaw_delta * YAW_THRUST,
+            roll_input * ROLL_THRUST * dt,
+        );
+        self.ship.angular_velocity /= 1.0 + ANGULAR_DAMPING * dt;
+
+        let local_rot = Quat::from_euler(
+            EulerRot::XYZ,
+            self.ship.angular_velocity.x * dt,
+            self.ship.angular_velocity.y * dt,
+            self.ship.angular_velocity.z * dt,
+        );
+        self.ship.quat = (self.ship.quat * local_rot).normalize();
 
         let mut local_velocity = self.ship.quat.conjugate() * self.ship.velocity;
         let mut thrusting = false;
@@ -408,6 +423,7 @@ impl ApplicationHandler for App {
             render_pos: Vec3::ZERO,
             render_quat: Quat::IDENTITY,
             velocity: Vec3::ZERO,
+            angular_velocity: Vec3::ZERO,
             engine_light,
             thrusting: false,
             thrust_accel,
