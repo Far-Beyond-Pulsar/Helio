@@ -10,3 +10,4 @@ helio-v3  = { path = "../helio-v3" }
 libhelio  = { path = "../libhelio" }
 wgpu      = "23"
 bytemuck  = { version = "1.14", features = ["derive"] }
+log       = "0.4"

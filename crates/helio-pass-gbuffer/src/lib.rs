@@ -75,8 +75,9 @@ pub struct GBufferPass {
     bind_group_layout_0: wgpu::BindGroupLayout,
     #[allow(dead_code)]
     bind_group_layout_1: wgpu::BindGroupLayout,
-    /// Group 0: camera + globals + instance_data.
-    bind_group_0: wgpu::BindGroup,
+    /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
+    bind_group_0: Option<wgpu::BindGroup>,
+    bind_group_0_key: Option<(usize, usize)>,
     /// Placeholder group 1 (all textures = white 1×1).
     placeholder_bind_group_1: wgpu::BindGroup,
     /// Per-frame globals uploaded in `prepare()`.
@@ -100,8 +101,6 @@ impl GBufferPass {
     /// * `width/height`  – initial render resolution
     pub fn new(
         device: &wgpu::Device,
-        camera_buf: &wgpu::Buffer,
-        instances_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
     ) -> Self {
@@ -252,7 +251,7 @@ impl GBufferPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Equal, // depth prepass already ran
+                depth_compare: wgpu::CompareFunction::LessEqual, // allows minor FP precision differences vs prepass
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -276,25 +275,6 @@ impl GBufferPass {
         );
 
         // ── Bind groups ───────────────────────────────────────────────────────
-        let bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("GBuffer BG 0"),
-            layout: &bind_group_layout_0,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: globals_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: instances_buf.as_entire_binding(),
-                },
-            ],
-        });
-
         let placeholder_bind_group_1 =
             create_placeholder_material_bg(device, &bind_group_layout_1);
 
@@ -302,7 +282,8 @@ impl GBufferPass {
             pipeline,
             bind_group_layout_0,
             bind_group_layout_1,
-            bind_group_0,
+            bind_group_0: None,
+            bind_group_0_key: None,
             placeholder_bind_group_1,
             globals_buf,
             albedo_tex,
@@ -365,6 +346,33 @@ impl RenderPass for GBufferPass {
                 "GBuffer requires main_scene mesh buffers".to_string(),
             ))?;
 
+        // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
+        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let instances_ptr = ctx.scene.instances as *const _ as usize;
+        let key = (camera_ptr, instances_ptr);
+        if self.bind_group_0_key != Some(key) {
+            log::debug!("GBuffer: rebuilding bind group (buffer pointers changed)");
+            self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GBuffer BG 0"),
+                layout: &self.bind_group_layout_0,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.globals_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ctx.scene.instances.as_entire_binding(),
+                    },
+                ],
+            }));
+            self.bind_group_0_key = Some(key);
+        }
+
         let indirect = ctx.scene.indirect;
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -416,7 +424,7 @@ impl RenderPass for GBufferPass {
         });
 
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group_0, &[]);
+        pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
         // Group 1: placeholder material (real material system sets this per-draw).
         pass.set_bind_group(1, &self.placeholder_bind_group_1, &[]);
         pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));

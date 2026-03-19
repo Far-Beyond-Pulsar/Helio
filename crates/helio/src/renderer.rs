@@ -239,21 +239,13 @@ fn build_default_graph(
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);
-    graph.add_pass(Box::new(ShadowPass::new(
-        device,
-        gpu_scene.shadow_matrices.buffer(),
-        gpu_scene.instances.buffer(),
-    )));
+    graph.add_pass(Box::new(ShadowPass::new(device)));
     graph.add_pass(Box::new(DepthPrepassPass::new(
         device,
-        gpu_scene.camera.buffer(),
-        gpu_scene.instances.buffer(),
         wgpu::TextureFormat::Depth32Float,
     )));
     graph.add_pass(Box::new(GBufferPass::new(
         device,
-        gpu_scene.camera.buffer(),
-        gpu_scene.instances.buffer(),
         config.width,
         config.height,
     )));

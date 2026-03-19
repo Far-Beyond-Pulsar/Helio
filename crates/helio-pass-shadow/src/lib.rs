@@ -70,7 +70,9 @@ pub struct ShadowPass {
     /// One uniform buffer per face, each holding its `layer_idx`.
     layer_uniform_bufs: Vec<wgpu::Buffer>,
     /// One bind group (group 0) per face: shadow_matrices + layer_idx + instance_data.
+    /// Rebuilt lazily when shadow_matrices or instances buffer pointers change.
     bind_groups_0: Vec<wgpu::BindGroup>,
+    bind_groups_0_key: Option<(usize, usize)>,
     /// Shared placeholder bind group for group 1 (material + textures).
     placeholder_bind_group_1: wgpu::BindGroup,
     /// Full 2D-array depth texture (owned; exposed for downstream passes).
@@ -85,14 +87,7 @@ pub struct ShadowPass {
 
 impl ShadowPass {
     /// Create the shadow pass.
-    ///
-    /// * `shadow_matrices_buf` – array of light-view-projection matrices
-    /// * `instances_buf`       – per-instance transform storage buffer
-    pub fn new(
-        device: &wgpu::Device,
-        shadow_matrices_buf: &wgpu::Buffer,
-        instances_buf: &wgpu::Buffer,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow Shader"),
@@ -294,9 +289,8 @@ impl ShadowPass {
             ..Default::default()
         });
 
-        // ── Per-face layer uniform buffers + bind groups ───────────────────────
+        // ── Per-face layer uniform buffers (fixed; written once at creation) ────
         let mut layer_uniform_bufs = Vec::with_capacity(MAX_SHADOW_FACES as usize);
-        let mut bind_groups_0 = Vec::with_capacity(MAX_SHADOW_FACES as usize);
 
         for i in 0..MAX_SHADOW_FACES {
             let uniform = ShadowLayerUniform {
@@ -309,33 +303,11 @@ impl ShadowPass {
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: true,
             });
-            // Write the layer index into the buffer at creation time.
             buf.slice(..)
                 .get_mapped_range_mut()
                 .copy_from_slice(bytemuck::bytes_of(&uniform));
             buf.unmap();
-
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(&format!("Shadow BG0 face {i}")),
-                layout: &bind_group_layout_0,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: shadow_matrices_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: instances_buf.as_entire_binding(),
-                    },
-                ],
-            });
-
             layer_uniform_bufs.push(buf);
-            bind_groups_0.push(bg);
         }
 
         // ── Placeholder group 1 (white 1×1 texture + default material) ─────────
@@ -347,7 +319,8 @@ impl ShadowPass {
             bind_group_layout_0,
             bind_group_layout_1,
             layer_uniform_bufs,
-            bind_groups_0,
+            bind_groups_0: Vec::new(),
+            bind_groups_0_key: None,
             placeholder_bind_group_1,
             shadow_texture,
             shadow_views,
@@ -387,6 +360,38 @@ impl RenderPass for ShadowPass {
         // O(1): bounded by MAX_SHADOW_FACES (compile-time constant), not scene size.
         let face_count = ctx.scene.shadow_count.min(MAX_SHADOW_FACES);
         let indirect = ctx.scene.indirect;
+
+        // Rebuild all face bind groups when shadow_matrices or instances buffer pointers change.
+        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+        let inst_ptr = ctx.scene.instances as *const _ as usize;
+        let key = (sm_ptr, inst_ptr);
+        if self.bind_groups_0_key != Some(key) {
+            log::debug!("Shadow: rebuilding all {} face bind groups (buffer pointers changed)", MAX_SHADOW_FACES);
+            self.bind_groups_0 = (0..MAX_SHADOW_FACES as usize)
+                .map(|i| {
+                    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some(&format!("Shadow BG0 face {i}")),
+                        layout: &self.bind_group_layout_0,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: self.layer_uniform_bufs[i].as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: ctx.scene.instances.as_entire_binding(),
+                            },
+                        ],
+                    })
+                })
+                .collect();
+            self.bind_groups_0_key = Some(key);
+        }
+
         let mesh_vertices = main_scene.mesh_buffers.vertices;
         let mesh_indices = main_scene.mesh_buffers.indices;
 

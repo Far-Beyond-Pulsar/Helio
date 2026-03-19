@@ -972,6 +972,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
+ "log",
  "wgpu",
 ]
 
@@ -992,6 +993,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
+ "log",
  "wgpu",
 ]
 
@@ -1039,6 +1041,7 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
+ "log",
  "wgpu",
 ]
 

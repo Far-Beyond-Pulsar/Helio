@@ -12,21 +12,17 @@ use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
 
 pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
-    #[allow(dead_code)]
     bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_key: Option<(usize, usize)>,
 }
 
 impl DepthPrepassPass {
     /// Create the depth-prepass pipeline.
     ///
-    /// * `camera_buf`    – scene camera uniform buffer (view_proj + position)
-    /// * `instances_buf` – per-instance transform storage buffer
-    /// * `depth_format`  – format of the depth attachment (e.g. `Depth32Float`)
+    /// * `depth_format` – format of the depth attachment (e.g. `Depth32Float`)
     pub fn new(
         device: &wgpu::Device,
-        camera_buf: &wgpu::Buffer,
-        instances_buf: &wgpu::Buffer,
         depth_format: wgpu::TextureFormat,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -64,21 +60,6 @@ impl DepthPrepassPass {
                     },
                 ],
             });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("DepthPrepass BG"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: instances_buf.as_entire_binding(),
-                },
-            ],
-        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DepthPrepass PL"),
@@ -138,7 +119,8 @@ impl DepthPrepassPass {
         Self {
             pipeline,
             bind_group_layout,
-            bind_group,
+            bind_group: None,
+            bind_group_key: None,
         }
     }
 }
@@ -167,6 +149,27 @@ impl RenderPass for DepthPrepassPass {
             ))?;
 
         // Extract before the mutable encoder borrow.
+        let camera_ptr = ctx.scene.camera as *const _ as usize;
+        let instances_ptr = ctx.scene.instances as *const _ as usize;
+        let key = (camera_ptr, instances_ptr);
+        if self.bind_group_key != Some(key) {
+            log::debug!("DepthPrepass: rebuilding bind group (buffer pointers changed)");
+            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DepthPrepass BG"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: ctx.scene.instances.as_entire_binding(),
+                    },
+                ],
+            }));
+            self.bind_group_key = Some(key);
+        }
         let indirect = ctx.scene.indirect;
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -186,7 +189,7 @@ impl RenderPass for DepthPrepassPass {
         });
 
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
         pass.set_index_buffer(
             main_scene.mesh_buffers.indices.slice(..),
