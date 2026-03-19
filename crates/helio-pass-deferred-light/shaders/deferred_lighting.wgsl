@@ -20,6 +20,8 @@ const ENABLE_LIGHTING: bool = true;
 const ENABLE_SHADOWS: bool = false;
 const ENABLE_BLOOM: bool = false;
 const MAX_SHADOW_LIGHTS: u32 = 4u;
+const BLOOM_INTENSITY: f32 = 0.3;
+const BLOOM_THRESHOLD: f32 = 1.0;
 
 struct Camera {
     view:           mat4x4<f32>,
