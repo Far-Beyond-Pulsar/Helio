@@ -100,12 +100,12 @@ pub fn create_sampler(
 
     // Min filter and mipmap filter come from min_filter setting
     let (min_filter, mipmap_filter) = match sampler.min_filter {
-        SolidFilter::Nearest => (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest),
-        SolidFilter::Linear => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear),
-        SolidFilter::NearestMipmapNearest => (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest),
-        SolidFilter::LinearMipmapNearest => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Nearest),
-        SolidFilter::NearestMipmapLinear => (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Linear),
-        SolidFilter::LinearMipmapLinear => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear),
+        SolidFilter::Nearest => (wgpu::FilterMode::Nearest, wgpu::FilterMode::Nearest),
+        SolidFilter::Linear => (wgpu::FilterMode::Linear, wgpu::FilterMode::Linear),
+        SolidFilter::NearestMipmapNearest => (wgpu::FilterMode::Nearest, wgpu::FilterMode::Nearest),
+        SolidFilter::LinearMipmapNearest => (wgpu::FilterMode::Linear, wgpu::FilterMode::Nearest),
+        SolidFilter::NearestMipmapLinear => (wgpu::FilterMode::Nearest, wgpu::FilterMode::Linear),
+        SolidFilter::LinearMipmapLinear => (wgpu::FilterMode::Linear, wgpu::FilterMode::Linear),
     };
 
     device.create_sampler(&wgpu::SamplerDescriptor {

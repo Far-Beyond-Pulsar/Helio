@@ -3,7 +3,7 @@
 //! This module coordinates the full conversion pipeline from a CPU-side SolidRS
 //! scene to GPU-resident Helio structures.
 
-use crate::{Result, AssetError, mesh_converter, material_converter, light_converter, camera_converter, SceneAsset, CameraData};
+use crate::{Result, mesh_converter, material_converter, light_converter, camera_converter, CameraData};
 use helio::{GpuLight, GpuMaterial, PackedVertex};
 use solid_rs::Scene;
 

@@ -4,6 +4,8 @@ members = [
     "crates/helio",
     "crates/libhelio",
     "crates/helio-live-portal",
+    "crates/helio-asset-compat",
+    "crates/examples",
 
     # GPU-driven pass crates (each O(1) CPU)
     "crates/helio-pass-sky-lut",
