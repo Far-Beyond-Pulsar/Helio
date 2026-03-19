@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::Vec3;
-use helio::{Camera, Renderer, RendererConfig};
-use helio_asset_compat::load_scene_file_with_config;
+use helio::{required_wgpu_features, Camera, Renderer, RendererConfig};
+use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
 use v3_demo_common::{cube_mesh, point_light, update_point_light};
 use winit::{
     application::ApplicationHandler,
@@ -98,7 +98,13 @@ impl ApplicationHandler for App {
         }))
         .expect("no adapter");
         let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor::default(), None),
+            adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    required_features: required_wgpu_features(adapter.features()),
+                    ..Default::default()
+                },
+                None,
+            ),
         )
             .expect("no device");
 
@@ -144,7 +150,8 @@ impl ApplicationHandler for App {
                     scene.meshes.len(),
                     scene.materials.len()
                 );
-                let material_ids: Vec<_> = scene.materials.into_iter().map(|m| renderer.insert_material(m)).collect();
+                let material_ids =
+                    upload_scene_materials(&mut renderer, &scene).expect("upload scene materials");
                 for mesh in scene.meshes {
                     let radius = mesh
                         .vertices

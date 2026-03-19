@@ -8,8 +8,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::Vec3;
-use helio::{Camera, Renderer, RendererConfig};
-use helio_asset_compat::{load_scene_bytes_with_config, AssetError, ConvertedScene, LoadConfig};
+use helio::{required_wgpu_features, Camera, Renderer, RendererConfig};
+use helio_asset_compat::{
+    load_scene_bytes_with_config, upload_scene_materials, AssetError, ConvertedScene, LoadConfig,
+};
 use v3_demo_common::{box_mesh, directional_light, make_material, plane_mesh, spot_light};
 use winit::{
     application::ApplicationHandler,
@@ -217,7 +219,13 @@ impl ApplicationHandler for App {
         }))
         .expect("no adapter");
         let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor::default(), None),
+            adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    required_features: required_wgpu_features(adapter.features()),
+                    ..Default::default()
+                },
+                None,
+            ),
         )
         .expect("no device");
         let device = Arc::new(device);
@@ -278,7 +286,8 @@ impl ApplicationHandler for App {
             }
         };
 
-        let material_ids: Vec<_> = scene.materials.into_iter().map(|m| renderer.insert_material(m)).collect();
+        let material_ids =
+            upload_scene_materials(&mut renderer, &scene).expect("upload scene materials");
         for mesh in scene.meshes {
             let radius = mesh.vertices.iter().map(|v| Vec3::from_array(v.position).distance(bounds.center)).fold(0.5, f32::max);
             let mesh_id = renderer.insert_mesh(helio::MeshUpload { vertices: mesh.vertices, indices: mesh.indices });
