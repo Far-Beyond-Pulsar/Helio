@@ -22,7 +22,10 @@ use winit::{
 };
 
 const EMBEDDED_SCENE_BYTES: &[u8] = include_bytes!("../../test.fbx");
-const ASTEROID_COUNT: usize = 90;
+const ASTEROID_COUNT: usize = 260;
+const ASTEROID_FIELD_SCALE: f32 = 180.0;
+const ASTEROID_FIELD_MIN_RADIUS: f32 = 900.0;
+const ASTEROID_FIELD_MAX_RADIUS: f32 = 7000.0;
 const LOOK_SENS: f32 = 0.0025;
 const ROLL_SPEED: f32 = 1.2;
 const SHIP_POSITION_LAG: f32 = 7.5;
@@ -108,7 +111,7 @@ fn build_asteroid_field(renderer: &mut Renderer, field_radius: f32, min_size: f3
 
     let mut seed: u64 = 0xCAFE_BABE_1234_5678;
     for i in 0..ASTEROID_COUNT {
-        let dist = field_radius * (0.25 + lcg(&mut seed) * 0.75);
+        let dist = field_radius * (0.18 + lcg(&mut seed) * 0.82);
         let theta = lcg(&mut seed) * std::f32::consts::TAU;
         let phi = rand_s(&mut seed).asin();
         let pos = Vec3::new(
@@ -351,7 +354,8 @@ impl ApplicationHandler for App {
             }
         };
 
-        let field_radius = (ship_radius * 100.0).clamp(250.0, 2500.0);
+        let field_radius = (ship_radius * ASTEROID_FIELD_SCALE)
+            .clamp(ASTEROID_FIELD_MIN_RADIUS, ASTEROID_FIELD_MAX_RADIUS);
         let thrust_accel = (ship_radius * 4.5).clamp(8.0, 250.0);
         let max_speed = (ship_radius * 22.0).clamp(25.0, 700.0);
         build_asteroid_field(&mut renderer, field_radius, (ship_radius * 0.3).clamp(0.5, 8.0));
