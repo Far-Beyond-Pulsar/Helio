@@ -27,24 +27,24 @@ const LOCAL_ASTEROID_COUNT: usize = 320;
 const ASTEROID_FIELD_SCALE: f32 = 180.0;
 const ASTEROID_FIELD_MIN_RADIUS: f32 = 900.0;
 const ASTEROID_FIELD_MAX_RADIUS: f32 = 7000.0;
-const LOOK_SENS: f32 = 0.0034;
+const LOOK_SENS: f32 = 0.0024;
 const ROLL_SPEED: f32 = 1.9;
 const SHIP_POSITION_LAG: f32 = 12.0;
 const SHIP_ROTATION_LAG: f32 = 14.0;
 const CAMERA_POSITION_LAG: f32 = 8.5;
 const CAMERA_TARGET_LAG: f32 = 9.5;
 const CAMERA_UP_LAG: f32 = 10.5;
-const YAW_THRUST: f32 = 16.0;
-const PITCH_THRUST: f32 = 14.0;
-const ROLL_THRUST: f32 = 3.4;
-const ANGULAR_DAMPING: f32 = 6.5;
-const FORWARD_THRUST_SCALE: f32 = 1.7;
-const REVERSE_THRUST_SCALE: f32 = 0.9;
-const STRAFE_THRUST_SCALE: f32 = 1.15;
-const LIFT_THRUST_SCALE: f32 = 1.1;
-const FORWARD_DRAG: f32 = 0.18;
-const LATERAL_DRAG: f32 = 2.9;
-const VERTICAL_DRAG: f32 = 2.4;
+const YAW_THRUST: f32 = 9.0;
+const PITCH_THRUST: f32 = 8.0;
+const ROLL_THRUST: f32 = 2.6;
+const ANGULAR_DAMPING: f32 = 9.0;
+const FORWARD_THRUST_SCALE: f32 = 0.9;
+const REVERSE_THRUST_SCALE: f32 = 0.5;
+const STRAFE_THRUST_SCALE: f32 = 0.62;
+const LIFT_THRUST_SCALE: f32 = 0.58;
+const FORWARD_DRAG: f32 = 0.28;
+const LATERAL_DRAG: f32 = 3.4;
+const VERTICAL_DRAG: f32 = 2.9;
 const MESH_BASE_ROT: Quat = Quat::from_xyzw(
     -std::f32::consts::FRAC_1_SQRT_2,
     0.0,
@@ -410,8 +410,8 @@ impl ApplicationHandler for App {
 
         let field_radius = (ship_radius * ASTEROID_FIELD_SCALE)
             .clamp(ASTEROID_FIELD_MIN_RADIUS, ASTEROID_FIELD_MAX_RADIUS);
-        let thrust_accel = (ship_radius * 8.5).clamp(18.0, 420.0);
-        let max_speed = (ship_radius * 38.0).clamp(60.0, 1250.0);
+        let thrust_accel = (ship_radius * 4.8).clamp(10.0, 220.0);
+        let max_speed = (ship_radius * 22.0).clamp(35.0, 520.0);
         build_asteroid_field(&mut renderer, ship_radius, field_radius, (ship_radius * 0.3).clamp(0.5, 8.0));
 
         let engine_light = renderer.insert_light(point_light([0.0, 0.0, ship_radius * 0.8], [0.35, 0.65, 1.0], 1.8, ship_radius * 3.5));
