@@ -16,6 +16,7 @@ helio-pass-depth-prepass = { path = "../helio-pass-depth-prepass" }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-pass-shadow = { path = "../helio-pass-shadow" }
+helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
 libhelio = { path = "../libhelio" }
 thiserror = "2.0"
 wgpu = "23"

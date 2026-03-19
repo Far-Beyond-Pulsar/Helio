@@ -6,6 +6,7 @@ use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_depth_prepass::DepthPrepassPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
+use helio_pass_simple_cube::SimpleCubePass;
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
 use crate::material::{MaterialAsset, MAX_TEXTURES, TextureUpload};
 use crate::mesh::{MeshBuffers, MeshUpload};
@@ -47,6 +48,7 @@ pub struct Renderer {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     graph: RenderGraph,
+    graph_kind: GraphKind,
     scene: Scene,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
@@ -54,6 +56,16 @@ pub struct Renderer {
     ambient_color: [f32; 3],
     ambient_intensity: f32,
     clear_color: [f32; 4],
+}
+
+/// Which graph is currently active — used by `set_render_size` to rebuild correctly.
+enum GraphKind {
+    /// Full deferred pipeline (default).
+    Default,
+    /// Minimal single-cube debug graph.
+    Simple,
+    /// User-provided graph; never rebuilt automatically.
+    Custom,
 }
 
 impl Renderer {
@@ -73,6 +85,7 @@ impl Renderer {
             device,
             queue,
             graph,
+            graph_kind: GraphKind::Default,
             scene,
             depth_texture,
             depth_view,
@@ -104,12 +117,18 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth_resources(&self.device, width, height);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
-        self.graph = build_default_graph(
-            &self.device,
-            &self.queue,
-            &self.scene,
-            RendererConfig::new(width, height, self.surface_format),
-        );
+        let config = RendererConfig::new(width, height, self.surface_format);
+        match self.graph_kind {
+            GraphKind::Default => {
+                self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+            }
+            GraphKind::Simple => {
+                self.graph = build_simple_graph(&self.device, &self.queue, self.surface_format);
+            }
+            GraphKind::Custom => {
+                // User-provided graph: do not replace it.
+            }
+        }
     }
 
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
@@ -119,6 +138,31 @@ impl Renderer {
     pub fn set_ambient(&mut self, color: [f32; 3], intensity: f32) {
         self.ambient_color = color;
         self.ambient_intensity = intensity;
+    }
+
+    /// Replace the active render graph. Use [`build_simple_graph`] or
+    /// [`build_default_graph`](fn.build_default_graph.html) to construct one.
+    /// The graph will NOT be automatically rebuilt on window resize.
+    pub fn set_graph(&mut self, graph: RenderGraph) {
+        self.graph = graph;
+        self.graph_kind = GraphKind::Custom;
+    }
+
+    /// Convenience helper: switch to the simple single-cube graph.
+    pub fn use_simple_graph(&mut self) {
+        self.graph = build_simple_graph(&self.device, &self.queue, self.surface_format);
+        self.graph_kind = GraphKind::Simple;
+    }
+
+    /// Convenience helper: switch back to the full deferred graph.
+    pub fn use_default_graph(&mut self) {
+        let config = RendererConfig {
+            width:          self.depth_texture.size().width,
+            height:         self.depth_texture.size().height,
+            surface_format: self.surface_format,
+        };
+        self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+        self.graph_kind = GraphKind::Default;
     }
 
     pub fn insert_mesh(&mut self, mesh: MeshUpload) -> MeshId {
@@ -257,6 +301,18 @@ fn build_default_graph(
         config.height,
         config.surface_format,
     )));
+    graph
+}
+
+/// A minimal graph with a single geometry-only pass that always renders one
+/// hardcoded cube at full brightness. Useful as a sanity-check baseline.
+pub fn build_simple_graph(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    surface_format: wgpu::TextureFormat,
+) -> RenderGraph {
+    let mut graph = RenderGraph::new(device, queue);
+    graph.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
     graph
 }
 

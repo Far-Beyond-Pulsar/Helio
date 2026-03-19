@@ -181,11 +181,12 @@ impl GBufferPass {
                 // Full vertex layout (stride = 32 bytes, matching shared mesh buffer).
                 //   offset  0 — position       Float32x3  location 0
                 //   offset 12 — bitangent_sign Float32    location 1
-                //   offset 16 — tex_coords     Float32x2  location 2
-                //   offset 24 — normal         Uint32     location 3
-                //   offset 28 — tangent        Uint32     location 4
+                //   offset 16 — tex_coords0   Float32x2  location 2
+                //   offset 24 — tex_coords1   Float32x2  (unused, skipped)
+                //   offset 32 — normal        Uint32     location 3
+                //   offset 36 — tangent       Uint32     location 4
                 buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 32,
+                    array_stride: 40,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
                         wgpu::VertexAttribute {
@@ -205,12 +206,12 @@ impl GBufferPass {
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Uint32,
-                            offset: 24,
+                            offset: 32,
                             shader_location: 3,
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Uint32,
-                            offset: 28,
+                            offset: 36,
                             shader_location: 4,
                         },
                     ],

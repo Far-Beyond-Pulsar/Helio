@@ -75,6 +75,10 @@ path = "load_fbx_embedded.rs"
 name = "ship_flight"
 path = "ship_flight.rs"
 
+[[bin]]
+name = "simple_graph"
+path = "simple_graph.rs"
+
 [dependencies]
 helio = { path = "../helio" }
 helio-asset-compat = { path = "../helio-asset-compat" }

@@ -22,7 +22,7 @@ pub use material::{
     TextureUpload, MAX_TEXTURES,
 };
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex};
-pub use renderer::{required_wgpu_features, required_wgpu_limits, Renderer, RendererConfig};
+pub use renderer::{required_wgpu_features, required_wgpu_limits, build_simple_graph, Renderer, RendererConfig};
 pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError};
 
 pub use helio_v3::{

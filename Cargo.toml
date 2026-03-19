@@ -26,6 +26,7 @@ members = [
     "crates/helio-pass-smaa",
     "crates/helio-pass-debug",
     "crates/helio-pass-radiance-cascades",
+    "crates/helio-pass-simple-cube",
 ]
 resolver = "2"
 

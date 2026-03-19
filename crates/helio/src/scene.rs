@@ -62,7 +62,7 @@ impl Camera {
         far: f32,
     ) -> Self {
         let view = Mat4::look_at_rh(position, target, up);
-        let proj = Mat4::perspective_rh_gl(fov_y_radians, aspect, near, far);
+        let proj = Mat4::perspective_rh(fov_y_radians, aspect, near, far);
         Self::from_matrices(view, proj, position, near, far)
     }
 }

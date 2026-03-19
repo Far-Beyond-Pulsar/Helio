@@ -900,6 +900,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-shadow",
+ "helio-pass-simple-cube",
  "helio-v3",
  "libhelio",
  "thiserror 2.0.18",
@@ -1051,6 +1052,16 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-v3",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-simple-cube"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "log",
  "wgpu",
 ]
 
