@@ -11,6 +11,11 @@ arrayvec = "0.7"
 bytemuck = { version = "1.14", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
 helio-v3 = { path = "../helio-v3" }
+helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
+helio-pass-depth-prepass = { path = "../helio-pass-depth-prepass" }
+helio-pass-fxaa = { path = "../helio-pass-fxaa" }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+helio-pass-shadow = { path = "../helio-pass-shadow" }
 libhelio = { path = "../libhelio" }
 thiserror = "2.0"
 wgpu = "23"

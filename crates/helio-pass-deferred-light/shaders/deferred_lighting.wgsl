@@ -16,11 +16,20 @@
 
 // ── Uniforms ──────────────────────────────────────────────────────────────────
 
+const ENABLE_LIGHTING: bool = true;
+const ENABLE_SHADOWS: bool = false;
+const ENABLE_BLOOM: bool = false;
+const MAX_SHADOW_LIGHTS: u32 = 4u;
+
 struct Camera {
-    view_proj:     mat4x4<f32>,
-    position:      vec3<f32>,
-    time:          f32,
-    view_proj_inv: mat4x4<f32>,   // offset 80 – used to reconstruct world pos from depth
+    view:           mat4x4<f32>,
+    proj:           mat4x4<f32>,
+    view_proj:      mat4x4<f32>,
+    view_proj_inv:  mat4x4<f32>,
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
 }
 
 struct Globals {
@@ -473,7 +482,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
     let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
-    let V   = normalize(camera.position - world_pos);
+    let V   = normalize(camera.position_near.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
     // ── Direct lighting ────────────────────────────────────────────────────────

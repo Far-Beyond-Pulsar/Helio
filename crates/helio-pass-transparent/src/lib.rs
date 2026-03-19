@@ -227,6 +227,13 @@ impl RenderPass for TransparentPass {
         if draw_count == 0 {
             return Ok(());
         }
+        let main_scene = ctx
+            .frame
+            .main_scene
+            .as_ref()
+            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+                "TransparentPass requires main_scene mesh buffers".to_string(),
+            ))?;
         let indirect = ctx.scene.indirect;
 
         // Load existing colour (preserves opaque geometry rendered earlier).
@@ -258,11 +265,11 @@ impl RenderPass for TransparentPass {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.bind_group, &[]);
-
-        // O(1): single GPU-driven indirect draw; the GPU fans out all draw calls.
-        // NOTE: Vertex and index buffers must be set by the caller before this pass.
-        // TODO: pass.set_vertex_buffer(0, mesh_vtx_buf.slice(..));
-        // TODO: pass.set_index_buffer(mesh_idx_buf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        pass.set_index_buffer(
+            main_scene.mesh_buffers.indices.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
         pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
 
         Ok(())

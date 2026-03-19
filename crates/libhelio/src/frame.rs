@@ -7,24 +7,27 @@
 /// Views into the GBuffer textures.
 ///
 /// Produced by `GBufferPass`, consumed by `DeferredLightingPass`, `SsaoPass`, etc.
+#[derive(Clone, Copy)]
 pub struct GBufferViews<'a> {
-    /// Albedo (RGB) + AO (A) — `Rgba8Unorm`
-    pub albedo_ao: &'a wgpu::TextureView,
-    /// Normal (RGB, encoded) + roughness (A) — `Rgba16Float`
-    pub normal_roughness: &'a wgpu::TextureView,
-    /// Emissive (RGB) + metallic (A) — `Rgba8Unorm`
-    pub emissive_metallic: &'a wgpu::TextureView,
-    /// Velocity (RG) — `Rg16Float`
-    pub velocity: &'a wgpu::TextureView,
+    /// Albedo (RGB) + alpha (A) — `Rgba8Unorm`
+    pub albedo: &'a wgpu::TextureView,
+    /// World normal (RGB) + F0.r (A) — `Rgba16Float`
+    pub normal: &'a wgpu::TextureView,
+    /// AO, roughness, metallic, F0.g — `Rgba8Unorm`
+    pub orm: &'a wgpu::TextureView,
+    /// Emissive (RGB) + F0.b (A) — `Rgba16Float`
+    pub emissive: &'a wgpu::TextureView,
 }
 
 /// Borrowed mesh buffers for passes that render scene geometry directly.
+#[derive(Clone, Copy)]
 pub struct MeshBuffers<'a> {
     pub vertices: &'a wgpu::Buffer,
     pub indices: &'a wgpu::Buffer,
 }
 
 /// Borrowed material-texture state for passes that sample Helio's texture table.
+#[derive(Clone, Copy)]
 pub struct MaterialTextureBindings<'a> {
     pub material_textures: &'a wgpu::Buffer,
     pub texture_views: &'a [&'a wgpu::TextureView],
@@ -33,6 +36,7 @@ pub struct MaterialTextureBindings<'a> {
 }
 
 /// Frame-local scene inputs for the high-level Helio renderer.
+#[derive(Clone, Copy)]
 pub struct MainSceneResources<'a> {
     pub mesh_buffers: MeshBuffers<'a>,
     pub material_textures: MaterialTextureBindings<'a>,
@@ -45,6 +49,7 @@ pub struct MainSceneResources<'a> {
 ///
 /// The `RenderGraph` creates the actual `wgpu::Texture` objects and passes
 /// borrowed views through this struct. Zero allocations in the hot path.
+#[derive(Clone, Copy)]
 pub struct FrameResources<'a> {
     /// GBuffer textures (populated after GBufferPass)
     pub gbuffer: Option<GBufferViews<'a>>,

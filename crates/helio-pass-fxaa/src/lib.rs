@@ -11,7 +11,9 @@ use helio_v3::{RenderPass, PassContext, Result as HelioResult};
 
 pub struct FxaaPass {
     pipeline: wgpu::RenderPipeline,
-    bind_group: wgpu::BindGroup,
+    bind_group_layout: wgpu::BindGroupLayout,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_key: Option<usize>,
     #[allow(dead_code)]
     sampler: wgpu::Sampler,
 }
@@ -19,11 +21,9 @@ pub struct FxaaPass {
 impl FxaaPass {
     /// Create the FXAA pass.
     ///
-    /// `input_view` — the texture to anti-alias (e.g. the resolved HDR buffer).
     /// `target_format` — the format of `ctx.target` (e.g. `Bgra8UnormSrgb`).
     pub fn new(
         device: &wgpu::Device,
-        input_view: &wgpu::TextureView,
         target_format: wgpu::TextureFormat,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -66,21 +66,6 @@ impl FxaaPass {
                 ],
             });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("FXAA BG"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(input_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("FXAA PL"),
             bind_group_layouts: &[&bind_group_layout],
@@ -116,7 +101,13 @@ impl FxaaPass {
             cache: None,
         });
 
-        Self { pipeline, bind_group, sampler }
+        Self {
+            pipeline,
+            bind_group_layout,
+            bind_group: None,
+            bind_group_key: None,
+            sampler,
+        }
     }
 }
 
@@ -126,6 +117,31 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let input_view = ctx
+            .frame
+            .pre_aa
+            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+                "FXAA requires published pre_aa input".to_string(),
+            ))?;
+        let input_key = input_view as *const _ as usize;
+        if self.bind_group_key != Some(input_key) {
+            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("FXAA BG"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(input_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            }));
+            self.bind_group_key = Some(input_key);
+        }
+
         // O(1): single fullscreen draw
         let target = ctx.target;
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -145,7 +161,7 @@ impl RenderPass for FxaaPass {
         };
         let mut pass = ctx.begin_render_pass(&desc);
         pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
         Ok(())
     }

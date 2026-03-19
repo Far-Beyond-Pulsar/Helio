@@ -246,6 +246,12 @@ pub trait RenderPass: Send + Sync {
     /// Returns `Err` if GPU command recording fails (rare).
     fn execute(&mut self, ctx: &mut PassContext) -> Result<()>;
 
+    /// Publishes outputs into the shared frame-resource contract for later passes.
+    ///
+    /// Passes should expose only stable resource contracts here (e.g. GBuffer,
+    /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
+
     /// Optionally declares resource dependencies (future feature).
     ///
     /// Used for automatic resource lifetime management and pass reordering.

@@ -322,6 +322,15 @@ impl RenderPass for GBufferPass {
         "GBuffer"
     }
 
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        frame.gbuffer = Some(libhelio::GBufferViews {
+            albedo: &self.albedo_view,
+            normal: &self.normal_view,
+            orm: &self.orm_view,
+            emissive: &self.emissive_view,
+        });
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Upload per-frame globals (O(1) — fixed-size struct).
         let globals = GBufferGlobals {
@@ -348,6 +357,13 @@ impl RenderPass for GBufferPass {
         if draw_count == 0 {
             return Ok(());
         }
+        let main_scene = ctx
+            .frame
+            .main_scene
+            .as_ref()
+            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+                "GBuffer requires main_scene mesh buffers".to_string(),
+            ))?;
 
         let indirect = ctx.scene.indirect;
 
@@ -403,8 +419,11 @@ impl RenderPass for GBufferPass {
         pass.set_bind_group(0, &self.bind_group_0, &[]);
         // Group 1: placeholder material (real material system sets this per-draw).
         pass.set_bind_group(1, &self.placeholder_bind_group_1, &[]);
-        // TODO: Caller must set_vertex_buffer(0, mesh_vb) and set_index_buffer
-        //       before this pass, matching the 32-byte stride vertex layout.
+        pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
+        pass.set_index_buffer(
+            main_scene.mesh_buffers.indices.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
         pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
         Ok(())
     }

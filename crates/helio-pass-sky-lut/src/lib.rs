@@ -208,6 +208,10 @@ impl RenderPass for SkyLutPass {
         "SkyLUT"
     }
 
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        frame.sky_lut = Some(&self.sky_lut_view);
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Upload default Nishita atmosphere parameters.
         // A real engine would derive these from a SkySystem component.

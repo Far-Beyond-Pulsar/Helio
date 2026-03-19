@@ -2,8 +2,11 @@ use std::sync::Arc;
 
 use arrayvec::ArrayVec;
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
-
-use crate::forward_pass::ForwardPass;
+use helio_pass_deferred_light::DeferredLightPass;
+use helio_pass_depth_prepass::DepthPrepassPass;
+use helio_pass_fxaa::FxaaPass;
+use helio_pass_gbuffer::GBufferPass;
+use helio_pass_shadow::ShadowPass;
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
 use crate::material::{MaterialAsset, MAX_TEXTURES, TextureUpload};
 use crate::mesh::{MeshBuffers, MeshUpload};
@@ -43,10 +46,12 @@ impl RendererConfig {
 
 pub struct Renderer {
     device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     graph: RenderGraph,
     scene: Scene,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    surface_format: wgpu::TextureFormat,
     ambient_color: [f32; 3],
     ambient_intensity: f32,
     clear_color: [f32; 4],
@@ -61,17 +66,18 @@ impl Renderer {
         let mut scene = Scene::new(device.clone(), queue.clone());
         scene.set_render_size(config.width, config.height);
 
-        let mut graph = RenderGraph::new(&device, &queue);
-        graph.add_pass(Box::new(ForwardPass::new(&device, config.surface_format)));
+        let graph = build_default_graph(&device, &queue, &scene, config);
 
         let (depth_texture, depth_view) =
             create_depth_resources(&device, config.width, config.height);
         Self {
             device,
+            queue,
             graph,
             scene,
             depth_texture,
             depth_view,
+            surface_format: config.surface_format,
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
@@ -99,6 +105,12 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth_resources(&self.device, width, height);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
+        self.graph = build_default_graph(
+            &self.device,
+            &self.queue,
+            &self.scene,
+            RendererConfig::new(width, height, self.surface_format),
+        );
     }
 
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
@@ -218,6 +230,44 @@ impl Renderer {
         self.scene.advance_frame();
         Ok(())
     }
+}
+
+fn build_default_graph(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+) -> RenderGraph {
+    let gpu_scene = scene.gpu_scene();
+    let mut graph = RenderGraph::new(device, queue);
+    graph.add_pass(Box::new(ShadowPass::new(
+        device,
+        gpu_scene.shadow_matrices.buffer(),
+        gpu_scene.instances.buffer(),
+    )));
+    graph.add_pass(Box::new(DepthPrepassPass::new(
+        device,
+        gpu_scene.camera.buffer(),
+        gpu_scene.instances.buffer(),
+        wgpu::TextureFormat::Depth32Float,
+    )));
+    graph.add_pass(Box::new(GBufferPass::new(
+        device,
+        gpu_scene.camera.buffer(),
+        gpu_scene.instances.buffer(),
+        config.width,
+        config.height,
+    )));
+    graph.add_pass(Box::new(DeferredLightPass::new(
+        device,
+        queue,
+        gpu_scene.camera.buffer(),
+        config.width,
+        config.height,
+        config.surface_format,
+    )));
+    graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
+    graph
 }
 
 fn create_depth_resources(

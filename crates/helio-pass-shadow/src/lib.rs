@@ -79,6 +79,8 @@ pub struct ShadowPass {
     pub shadow_views: Vec<wgpu::TextureView>,
     /// Full array view (used by lighting passes to sample the atlas).
     pub shadow_atlas_view: wgpu::TextureView,
+    /// Comparison sampler for sampling the shadow atlas in lighting passes.
+    shadow_compare_sampler: wgpu::Sampler,
 }
 
 impl ShadowPass {
@@ -280,6 +282,17 @@ impl ShadowPass {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
         });
+        let shadow_compare_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ShadowAtlas Compare Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
 
         // ── Per-face layer uniform buffers + bind groups ───────────────────────
         let mut layer_uniform_bufs = Vec::with_capacity(MAX_SHADOW_FACES as usize);
@@ -339,6 +352,7 @@ impl ShadowPass {
             shadow_texture,
             shadow_views,
             shadow_atlas_view,
+            shadow_compare_sampler,
         }
     }
 }
@@ -346,6 +360,11 @@ impl ShadowPass {
 impl RenderPass for ShadowPass {
     fn name(&self) -> &'static str {
         "Shadow"
+    }
+
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        frame.shadow_atlas = Some(&self.shadow_atlas_view);
+        frame.shadow_sampler = Some(&self.shadow_compare_sampler);
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
@@ -357,10 +376,19 @@ impl RenderPass for ShadowPass {
         if draw_count == 0 {
             return Ok(());
         }
+        let main_scene = ctx
+            .frame
+            .main_scene
+            .as_ref()
+            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+                "ShadowPass requires main_scene mesh buffers".to_string(),
+            ))?;
 
         // O(1): bounded by MAX_SHADOW_FACES (compile-time constant), not scene size.
         let face_count = ctx.scene.shadow_count.min(MAX_SHADOW_FACES);
         let indirect = ctx.scene.indirect;
+        let mesh_vertices = main_scene.mesh_buffers.vertices;
+        let mesh_indices = main_scene.mesh_buffers.indices;
 
         for face in 0..face_count {
             let face_idx = face as usize;
@@ -388,8 +416,8 @@ impl RenderPass for ShadowPass {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bg0, &[]);
             pass.set_bind_group(1, bg1, &[]);
-            // TODO: Caller must set_vertex_buffer(0, mesh_vb) and set_index_buffer
-            //       before this pass, matching the 32-byte stride vertex layout.
+            pass.set_vertex_buffer(0, mesh_vertices.slice(..));
+            pass.set_index_buffer(mesh_indices.slice(..), wgpu::IndexFormat::Uint32);
             pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
         }
 

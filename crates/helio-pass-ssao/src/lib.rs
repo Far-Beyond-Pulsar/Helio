@@ -352,6 +352,10 @@ impl RenderPass for SsaoPass {
         "SSAO"
     }
 
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        frame.ssao = Some(&self.ssao_view);
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // TODO: Derive view, proj, inv_view_proj from scene camera for accurate SSAO.
         // Currently zeroed — GPU will return 1.0 (no occlusion) for sky pixels.

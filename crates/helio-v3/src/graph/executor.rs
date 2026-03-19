@@ -301,16 +301,23 @@ impl RenderGraph {
         let mut encoder = scene.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Graph"),
         });
-
-        for pass in &mut self.passes {
+        for pass_index in 0..self.passes.len() {
+            let (published_passes, pending_passes) = self.passes.split_at_mut(pass_index);
+            let (pass, _) = pending_passes
+                .split_first_mut()
+                .expect("pass_index within bounds");
             let _scope = self.profiler.scope(pass.name());
+            let mut visible_frame_resources = *frame_resources;
+            for published_pass in published_passes {
+                published_pass.publish(&mut visible_frame_resources);
+            }
 
             let prepare_ctx = PrepareContext {
                 device: &scene.device,
                 queue: &scene.queue,
                 frame: scene.frame_count,
                 scene,
-                frame_resources,
+                frame_resources: &visible_frame_resources,
                 resize: false,
                 width: scene.width,
                 height: scene.height,
@@ -327,7 +334,7 @@ impl RenderGraph {
                 width: scene.width,
                 height: scene.height,
                 device: &scene.device,
-                frame: frame_resources,
+                frame: &visible_frame_resources,
             };
 
             pass.execute(&mut ctx)?;
