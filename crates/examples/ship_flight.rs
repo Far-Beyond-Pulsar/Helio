@@ -12,7 +12,7 @@ use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, Rend
 use helio_asset_compat::{
     load_scene_bytes_with_config, upload_scene_materials, AssetError, ConvertedScene, LoadConfig,
 };
-use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
+use v3_demo_common::{cube_mesh, directional_light, make_material, point_light, spot_light};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -194,6 +194,12 @@ struct Ship {
     velocity: Vec3,
     angular_velocity: Vec3,
     engine_light: helio::LightId,
+    forward_spotlight_left: helio::LightId,
+    forward_spotlight_right: helio::LightId,
+    hull_light_port: helio::LightId,      // Red - left wing
+    hull_light_starboard: helio::LightId, // Green - right wing
+    hull_light_top: helio::LightId,       // White - top
+    hull_light_belly: helio::LightId,     // Blue - bottom
     thrusting: bool,
     thrust_accel: f32,
     max_speed: f32,
@@ -394,9 +400,25 @@ impl ApplicationHandler for App {
 
         let mut renderer = Renderer::new(device.clone(), queue, RendererConfig::new(size.width, size.height, surface_format));
         renderer.set_clear_color([0.0, 0.0, 0.01, 1.0]);
-        renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
+        renderer.set_ambient([0.15, 0.15, 0.20], 0.8);  // Increased ambient lighting
         renderer.insert_light(directional_light([-0.55, -0.38, -0.74], [1.0, 0.97, 0.88], 4.2));
         renderer.insert_light(directional_light([0.72, 0.18, 0.68], [0.50, 0.70, 1.0], 0.65));
+
+        // Add scattered point lights throughout the asteroid field
+        let light_positions = [
+            ([200.0, 100.0, 150.0], [1.0, 0.8, 0.6], 80.0, 500.0),    // Warm orange
+            ([-180.0, -80.0, 220.0], [0.6, 0.8, 1.0], 60.0, 450.0),   // Cool blue
+            ([150.0, -120.0, -200.0], [1.0, 0.6, 0.7], 70.0, 480.0),  // Pink/magenta
+            ([-220.0, 140.0, -100.0], [0.7, 1.0, 0.6], 65.0, 460.0),  // Green tint
+            ([0.0, 180.0, 250.0], [1.0, 1.0, 0.8], 75.0, 520.0),      // Warm white
+            ([280.0, -60.0, 80.0], [0.8, 0.6, 1.0], 55.0, 440.0),     // Purple
+            ([-150.0, 90.0, 180.0], [1.0, 0.9, 0.7], 68.0, 470.0),    // Warm yellow
+            ([120.0, -150.0, -150.0], [0.6, 0.9, 1.0], 62.0, 450.0),  // Cyan
+        ];
+
+        for (position, color, intensity, range) in &light_positions {
+            renderer.insert_light(point_light(*position, *color, *intensity, *range));
+        }
 
         let (ship_radius, ship_ids) = match load_ship() {
             Ok((scene, bounds)) => (bounds.radius, upload_ship_meshes(&mut renderer, &scene, bounds)),
@@ -414,7 +436,59 @@ impl ApplicationHandler for App {
         let max_speed = (ship_radius * 22.0).clamp(35.0, 520.0);
         build_asteroid_field(&mut renderer, ship_radius, field_radius, (ship_radius * 0.3).clamp(0.5, 8.0));
 
+        // Ship lights - engine thruster
         let engine_light = renderer.insert_light(point_light([0.0, 0.0, ship_radius * 0.8], [0.35, 0.65, 1.0], 1.8, ship_radius * 3.5));
+
+        // Ship lights - forward spotlights (headlights)
+        let spotlight_range = ship_radius * 15.0;
+        let spotlight_intensity = 35.0;
+        let forward_spotlight_left = renderer.insert_light(spot_light(
+            [-ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9],  // Position: left side of nose
+            [0.0, 0.0, -1.0],                                                // Direction: forward
+            [1.0, 1.0, 0.95],                                                // Color: warm white
+            spotlight_intensity,
+            spotlight_range,
+            25_f32.to_radians(),  // Inner angle: 25 degrees
+            35_f32.to_radians(),  // Outer angle: 35 degrees
+        ));
+        let forward_spotlight_right = renderer.insert_light(spot_light(
+            [ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9],   // Position: right side of nose
+            [0.0, 0.0, -1.0],                                                // Direction: forward
+            [1.0, 1.0, 0.95],                                                // Color: warm white
+            spotlight_intensity,
+            spotlight_range,
+            25_f32.to_radians(),
+            35_f32.to_radians(),
+        ));
+
+        // Ship lights - hull marker lights (navigation lights)
+        let hull_intensity = 12.0;
+        let hull_range = ship_radius * 4.0;
+        let hull_light_port = renderer.insert_light(point_light(
+            [-ship_radius * 0.75, ship_radius * 0.2, 0.0],  // Left wing
+            [1.0, 0.1, 0.1],                                 // Red (port)
+            hull_intensity,
+            hull_range,
+        ));
+        let hull_light_starboard = renderer.insert_light(point_light(
+            [ship_radius * 0.75, ship_radius * 0.2, 0.0],   // Right wing
+            [0.1, 1.0, 0.1],                                 // Green (starboard)
+            hull_intensity,
+            hull_range,
+        ));
+        let hull_light_top = renderer.insert_light(point_light(
+            [0.0, ship_radius * 0.5, ship_radius * 0.2],    // Top center
+            [1.0, 1.0, 1.0],                                 // White
+            hull_intensity * 0.8,
+            hull_range,
+        ));
+        let hull_light_belly = renderer.insert_light(point_light(
+            [0.0, -ship_radius * 0.4, ship_radius * 0.2],   // Bottom center
+            [0.4, 0.6, 1.0],                                 // Blue
+            hull_intensity * 0.7,
+            hull_range,
+        ));
+
         let mut ship = Ship {
             ids: ship_ids,
             radius: ship_radius,
@@ -425,6 +499,12 @@ impl ApplicationHandler for App {
             velocity: Vec3::ZERO,
             angular_velocity: Vec3::ZERO,
             engine_light,
+            forward_spotlight_left,
+            forward_spotlight_right,
+            hull_light_port,
+            hull_light_starboard,
+            hull_light_top,
+            hull_light_belly,
             thrusting: false,
             thrust_accel,
             max_speed,
