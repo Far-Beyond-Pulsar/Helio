@@ -15,10 +15,10 @@ mod animation_system;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::collections::HashMap;
-use helio::{ObjectId, LightId};
+use helio::{LightId, MaterialId, ObjectId, Renderer, TextureId};
 
 pub use mesh_converter::{convert_vertex, convert_primitive};
-pub use material_converter::convert_material;
+pub use material_converter::{convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef};
 pub use light_converter::convert_light;
 pub use camera_converter::{extract_camera_data, CameraData};
 pub use scene_converter::{convert_scene, ConvertedScene, ConvertedMesh};
@@ -159,6 +159,34 @@ pub fn load_scene_bytes_with_config(
         .unwrap_or_else(|| PathBuf::from("."));
 
     convert_scene(&solid_scene, &conversion_base_dir, &config)
+}
+
+pub fn upload_scene_materials(
+    renderer: &mut Renderer,
+    scene: &ConvertedScene,
+) -> Result<Vec<MaterialId>> {
+    let texture_ids: Result<Vec<TextureId>> = scene
+        .textures
+        .iter()
+        .cloned()
+        .map(|texture| {
+            renderer
+                .insert_texture(texture)
+                .map_err(|err| AssetError::InvalidData(err.to_string()))
+        })
+        .collect();
+    let texture_ids = texture_ids?;
+
+    scene
+        .materials
+        .iter()
+        .map(|material| {
+            let asset = scene_converter::material_asset_from_converted(material, &texture_ids);
+            renderer
+                .insert_material_asset(asset)
+                .map_err(|err| AssetError::InvalidData(err.to_string()))
+        })
+        .collect()
 }
 
 /// Result type for asset loading operations

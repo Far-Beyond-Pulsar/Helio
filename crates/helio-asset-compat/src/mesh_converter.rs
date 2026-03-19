@@ -46,14 +46,26 @@ pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
     };
 
     // Warn if we're dropping data
-    if v.uvs.iter().skip(1).any(|uv| uv.is_some()) {
-        log::warn!("Mesh has multiple UV channels - only UV0 is supported, others will be discarded");
+    let tex_coords1 = if let Some(uv) = v.uvs[1] {
+        if flip_uv_y {
+            [uv.x, 1.0 - uv.y]
+        } else {
+            [uv.x, uv.y]
+        }
+    } else {
+        [0.0, 0.0]
+    };
+
+    if v.uvs.iter().skip(2).any(|uv| uv.is_some()) {
+        log::warn!("Mesh has more than two UV channels - only UV0/UV1 are supported, higher channels will be discarded");
     }
     if v.colors.iter().any(|c| c.is_some()) {
         log::warn!("Mesh has vertex colors - not yet supported, will be discarded");
     }
 
-    PackedVertex::from_components(position, normal, tex_coords, tangent, bitangent_sign)
+    let mut packed = PackedVertex::from_components(position, normal, tex_coords, tangent, bitangent_sign);
+    packed.tex_coords1 = tex_coords1;
+    packed
 }
 
 /// Convert a single SolidRS primitive (submesh) to Helio vertex/index buffers
@@ -222,6 +234,7 @@ mod tests {
 
         let packed = convert_vertex(&v, false);
         assert_eq!(packed.position, [1.0, 2.0, 3.0]);
-        assert_eq!(packed.tex_coords, [0.0, 0.0]);
+        assert_eq!(packed.tex_coords0, [0.0, 0.0]);
+        assert_eq!(packed.tex_coords1, [0.0, 0.0]);
     }
 }
