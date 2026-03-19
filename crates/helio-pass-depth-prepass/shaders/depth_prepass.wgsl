@@ -30,7 +30,7 @@ fn vs_main(
     @location(0)             position:    vec3<f32>,
     @location(2)             _tex_coords: vec2<f32>,  // kept for vertex layout compatibility
     @builtin(instance_index) slot:        u32,
-) -> @builtin(position) vec4<f32> {
+) -> @invariant @builtin(position) vec4<f32> {
     let inst      = instance_data[slot];
     let world_pos = inst.transform * vec4<f32>(position, 1.0);
     return camera.view_proj * world_pos;
