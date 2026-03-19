@@ -238,7 +238,7 @@ fn sample_normal_map(
     let bitangent = normalize(cross(world_normal, tangent)) * input.bitangent_sign;
     let tbn = mat3x3<f32>(tangent, bitangent, world_normal);
     var mapped = sample_texture(slot, input, vec4<f32>(0.5, 0.5, 1.0, 1.0)).xyz * 2.0 - 1.0;
-    mapped.xy *= normal_scale;
+    mapped = vec3<f32>(mapped.x * normal_scale, mapped.y * normal_scale, mapped.z);
     return normalize(tbn * mapped);
 }
 
