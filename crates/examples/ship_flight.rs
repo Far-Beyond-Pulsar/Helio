@@ -8,8 +8,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::{Camera, Renderer, RendererConfig};
-use helio_asset_compat::{load_scene_bytes_with_config, AssetError, ConvertedScene, LoadConfig};
+use helio::{required_wgpu_features, Camera, Renderer, RendererConfig};
+use helio_asset_compat::{
+    load_scene_bytes_with_config, upload_scene_materials, AssetError, ConvertedScene, LoadConfig,
+};
 use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
 use winit::{
     application::ApplicationHandler,
@@ -96,7 +98,7 @@ fn upload_ship_meshes(renderer: &mut Renderer, scene: &ConvertedScene, ship_radi
         return vec![v3_demo_common::insert_object(renderer, mesh, mat, Mat4::IDENTITY, ship_radius).expect("fallback object")];
     }
 
-    let material_ids: Vec<_> = scene.materials.iter().copied().map(|m| renderer.insert_material(m)).collect();
+    let material_ids = upload_scene_materials(renderer, scene).expect("upload ship materials");
     scene.meshes
         .iter()
         .map(|mesh| {
@@ -224,7 +226,13 @@ impl ApplicationHandler for App {
         }))
         .expect("no adapter");
         let (device, queue) = pollster::block_on(
-            adapter.request_device(&wgpu::DeviceDescriptor::default(), None),
+            adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    required_features: required_wgpu_features(adapter.features()),
+                    ..Default::default()
+                },
+                None,
+            ),
         )
         .expect("no device");
         let device = Arc::new(device);

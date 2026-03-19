@@ -450,14 +450,15 @@ impl Scene {
 
     pub fn update_material_asset(&mut self, id: MaterialId, material: MaterialAsset) -> Result<()> {
         self.validate_material_textures(&material.textures)?;
-        let Some((slot, record)) = self.materials.get_mut_with_slot(id) else {
+        let Some(old_textures) = self.materials.get(id).map(|record| record.textures.clone()) else {
             return Err(invalid("material"));
         };
-
-        let old_textures = record.textures.clone();
         self.bump_texture_refs(&material.textures, 1)?;
         self.bump_texture_refs(&old_textures, -1)?;
 
+        let Some((slot, record)) = self.materials.get_mut_with_slot(id) else {
+            return Err(invalid("material"));
+        };
         record.gpu = material.gpu;
         record.textures = material.textures.clone();
 

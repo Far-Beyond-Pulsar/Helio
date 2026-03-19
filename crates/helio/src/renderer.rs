@@ -7,7 +7,7 @@ use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 
 use crate::mesh::MeshBuffers;
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
-use crate::material::MAX_TEXTURES;
+use crate::material::{MaterialAsset, MAX_TEXTURES, TextureUpload};
 use crate::mesh::MeshUpload;
 use crate::scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene};
 
@@ -297,8 +297,16 @@ impl Renderer {
         self.scene.insert_mesh(mesh)
     }
 
+    pub fn insert_texture(&mut self, texture: TextureUpload) -> SceneResult<crate::TextureId> {
+        self.scene.insert_texture(texture)
+    }
+
     pub fn insert_material(&mut self, material: crate::GpuMaterial) -> MaterialId {
         self.scene.insert_material(material)
+    }
+
+    pub fn insert_material_asset(&mut self, material: MaterialAsset) -> SceneResult<MaterialId> {
+        self.scene.insert_material_asset(material)
     }
 
     pub fn update_material(
@@ -307,6 +315,14 @@ impl Renderer {
         material: crate::GpuMaterial,
     ) -> SceneResult<()> {
         self.scene.update_material(id, material)
+    }
+
+    pub fn update_material_asset(
+        &mut self,
+        id: MaterialId,
+        material: MaterialAsset,
+    ) -> SceneResult<()> {
+        self.scene.update_material_asset(id, material)
     }
 
     pub fn insert_light(&mut self, light: crate::GpuLight) -> LightId {
@@ -449,6 +465,9 @@ impl Renderer {
             }
         }
         self.scene.gpu_scene().queue.submit([encoder.finish()]);
+        drop(scene_bind_group);
+        drop(texture_views);
+        drop(samplers);
         self.scene.advance_frame();
         Ok(())
     }
