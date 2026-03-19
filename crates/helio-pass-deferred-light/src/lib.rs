@@ -376,8 +376,9 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_2_key = Some(scene_key);
         }
 
+        let color_target = ctx.frame.pre_aa.unwrap_or(ctx.target);
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: &self.pre_aa_view,
+            view: color_target,
             resolve_target: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),

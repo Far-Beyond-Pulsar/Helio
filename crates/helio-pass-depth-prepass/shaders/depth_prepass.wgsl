@@ -4,9 +4,14 @@
 //! No fragment output — depth writes are implicit.
 
 struct Camera {
-    view_proj: mat4x4<f32>,
-    position:  vec3<f32>,
-    _pad:      f32,
+    view:           mat4x4<f32>,
+    proj:           mat4x4<f32>,
+    view_proj:      mat4x4<f32>,
+    view_proj_inv:  mat4x4<f32>,
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
 }
 
 /// Per-instance GPU data.  Must match `GpuInstanceData` in libhelio.

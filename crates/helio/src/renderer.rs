@@ -4,7 +4,6 @@ use arrayvec::ArrayVec;
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_depth_prepass::DepthPrepassPass;
-use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
@@ -266,7 +265,6 @@ fn build_default_graph(
         config.height,
         config.surface_format,
     )));
-    graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
     graph
 }
 
