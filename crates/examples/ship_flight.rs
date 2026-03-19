@@ -25,6 +25,11 @@ const EMBEDDED_SCENE_BYTES: &[u8] = include_bytes!("../../test.fbx");
 const ASTEROID_COUNT: usize = 90;
 const LOOK_SENS: f32 = 0.0025;
 const ROLL_SPEED: f32 = 1.2;
+const SHIP_POSITION_LAG: f32 = 7.5;
+const SHIP_ROTATION_LAG: f32 = 9.0;
+const CAMERA_POSITION_LAG: f32 = 4.5;
+const CAMERA_TARGET_LAG: f32 = 5.5;
+const CAMERA_UP_LAG: f32 = 6.5;
 const MESH_BASE_ROT: Quat = Quat::from_xyzw(
     -std::f32::consts::FRAC_1_SQRT_2,
     0.0,
@@ -92,6 +97,10 @@ fn rand_s(seed: &mut u64) -> f32 {
     lcg(seed) * 2.0 - 1.0
 }
 
+fn follow_factor(strength: f32, dt: f32) -> f32 {
+    1.0 - (-strength * dt).exp()
+}
+
 fn build_asteroid_field(renderer: &mut Renderer, field_radius: f32, min_size: f32) {
     let rocky = renderer.insert_material(make_material([0.15, 0.12, 0.09, 1.0], 0.90, 0.0, [0.0, 0.0, 0.0], 0.0));
     let dark = renderer.insert_material(make_material([0.09, 0.09, 0.11, 1.0], 0.70, 0.25, [0.0, 0.0, 0.0], 0.0));
@@ -156,6 +165,8 @@ struct Ship {
     radius: f32,
     pos: Vec3,
     quat: Quat,
+    render_pos: Vec3,
+    render_quat: Quat,
     velocity: Vec3,
     engine_light: helio::LightId,
     thrusting: bool,
@@ -167,15 +178,28 @@ impl Ship {
     fn forward(&self) -> Vec3 { self.quat * -Vec3::Z }
     fn right(&self) -> Vec3 { self.quat * Vec3::X }
     fn up(&self) -> Vec3 { self.quat * Vec3::Y }
-    fn engine_pos(&self) -> Vec3 { self.pos - self.forward() * self.radius * 0.8 }
+    fn render_forward(&self) -> Vec3 { self.render_quat * -Vec3::Z }
+    fn render_up(&self) -> Vec3 { self.render_quat * Vec3::Y }
+    fn engine_pos(&self) -> Vec3 { self.render_pos - self.render_forward() * self.radius * 0.8 }
+    fn update_visual_follow(&mut self, dt: f32) {
+        self.render_pos = self.render_pos.lerp(self.pos, follow_factor(SHIP_POSITION_LAG, dt));
+        self.render_quat = self
+            .render_quat
+            .slerp(self.quat, follow_factor(SHIP_ROTATION_LAG, dt))
+            .normalize();
+    }
     fn push_transforms(&self, renderer: &mut Renderer) {
-        let transform = Mat4::from_rotation_translation(self.quat * MESH_BASE_ROT, self.pos);
+        let transform = Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
         for &id in &self.ids {
             let _ = renderer.update_object_transform(id, transform);
         }
     }
-    fn chase_cam_pos(&self) -> Vec3 { self.pos - self.forward() * self.radius * 1.5 + self.up() * self.radius * 0.35 }
-    fn chase_cam_target(&self) -> Vec3 { self.pos + self.forward() * self.radius * 0.5 }
+    fn desired_cam_pos(&self) -> Vec3 {
+        self.render_pos - self.render_forward() * self.radius * 3.2 + self.render_up() * self.radius * 0.95
+    }
+    fn desired_cam_target(&self) -> Vec3 {
+        self.render_pos + self.render_forward() * self.radius * 1.15 + self.render_up() * self.radius * 0.18
+    }
 }
 
 struct App {
@@ -190,6 +214,9 @@ struct AppState {
     renderer: Renderer,
     last_frame: Instant,
     ship: Ship,
+    camera_pos: Vec3,
+    camera_target: Vec3,
+    camera_up: Vec3,
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
@@ -229,7 +256,21 @@ impl AppState {
         self.ship.velocity *= 1.0 - 0.55 * dt;
         self.ship.pos += self.ship.velocity * dt;
 
+        self.ship.update_visual_follow(dt);
         self.ship.push_transforms(&mut self.renderer);
+        self.camera_pos = self
+            .camera_pos
+            .lerp(self.ship.desired_cam_pos(), follow_factor(CAMERA_POSITION_LAG, dt));
+        self.camera_target = self
+            .camera_target
+            .lerp(self.ship.desired_cam_target(), follow_factor(CAMERA_TARGET_LAG, dt));
+        self.camera_up = self
+            .camera_up
+            .lerp(self.ship.render_up(), follow_factor(CAMERA_UP_LAG, dt))
+            .normalize_or_zero();
+        if self.camera_up.length_squared() < 1.0e-4 {
+            self.camera_up = Vec3::Y;
+        }
         let glow = if self.ship.thrusting { 9.0 } else { 1.8 };
         let _ = self.renderer.update_light(
             self.ship.engine_light,
@@ -316,17 +357,23 @@ impl ApplicationHandler for App {
         build_asteroid_field(&mut renderer, field_radius, (ship_radius * 0.3).clamp(0.5, 8.0));
 
         let engine_light = renderer.insert_light(point_light([0.0, 0.0, ship_radius * 0.8], [0.35, 0.65, 1.0], 1.8, ship_radius * 3.5));
-        let ship = Ship {
+        let mut ship = Ship {
             ids: ship_ids,
             radius: ship_radius,
             pos: Vec3::ZERO,
             quat: Quat::IDENTITY,
+            render_pos: Vec3::ZERO,
+            render_quat: Quat::IDENTITY,
             velocity: Vec3::ZERO,
             engine_light,
             thrusting: false,
             thrust_accel,
             max_speed,
         };
+        ship.push_transforms(&mut renderer);
+        let camera_pos = ship.desired_cam_pos();
+        let camera_target = ship.desired_cam_target();
+        let camera_up = ship.render_up();
 
         self.state = Some(AppState {
             window,
@@ -336,6 +383,9 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: Instant::now(),
             ship,
+            camera_pos,
+            camera_target,
+            camera_up,
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
@@ -412,9 +462,9 @@ impl ApplicationHandler for App {
 
                 let size = state.window.inner_size();
                 let camera = Camera::perspective_look_at(
-                    state.ship.chase_cam_pos(),
-                    state.ship.chase_cam_target(),
-                    state.ship.up(),
+                    state.camera_pos,
+                    state.camera_target,
+                    state.camera_up,
                     std::f32::consts::FRAC_PI_4,
                     size.width as f32 / size.height.max(1) as f32,
                     0.05,
