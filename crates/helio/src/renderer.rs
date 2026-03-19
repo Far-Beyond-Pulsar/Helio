@@ -38,7 +38,8 @@ struct FrameUniforms {
 
 pub struct Renderer {
     device: Arc<wgpu::Device>,
-    graph: RenderGraph,
+    queue: Arc<wgpu::Queue>,
+    graph: Option<RenderGraph>,
     scene: Scene,
     pipeline: wgpu::RenderPipeline,
     scene_bind_group_layout: wgpu::BindGroupLayout,
@@ -198,7 +199,8 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth_resources(&device, config.width, config.height);
         Self {
             device: device.clone(),
-            graph: RenderGraph::new(&device, &queue),
+            queue,
+            graph: None,
             scene,
             pipeline,
             scene_bind_group_layout,
@@ -224,7 +226,9 @@ impl Renderer {
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
-        self.graph.add_pass(pass);
+        self.graph
+            .get_or_insert_with(|| RenderGraph::new(&self.device, &self.queue))
+            .add_pass(pass);
     }
 
     pub fn set_render_size(&mut self, width: u32, height: u32) {
@@ -370,7 +374,10 @@ impl Renderer {
             pass.set_vertex_buffer(0, mesh_buffers.vertices.slice(..));
             pass.set_index_buffer(mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
             if resources.draw_count > 0 {
-                pass.multi_draw_indexed_indirect(resources.indirect, 0, resources.draw_count);
+                let stride = std::mem::size_of::<crate::DrawIndexedIndirectArgs>() as u64;
+                for draw_index in 0..resources.draw_count {
+                    pass.draw_indexed_indirect(resources.indirect, draw_index as u64 * stride);
+                }
             }
         }
         self.scene.gpu_scene().queue.submit([encoder.finish()]);
