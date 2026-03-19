@@ -22,7 +22,8 @@ use winit::{
 };
 
 const EMBEDDED_SCENE_BYTES: &[u8] = include_bytes!("../../test.fbx");
-const ASTEROID_COUNT: usize = 260;
+const ASTEROID_COUNT: usize = 900;
+const LOCAL_ASTEROID_COUNT: usize = 320;
 const ASTEROID_FIELD_SCALE: f32 = 180.0;
 const ASTEROID_FIELD_MIN_RADIUS: f32 = 900.0;
 const ASTEROID_FIELD_MAX_RADIUS: f32 = 7000.0;
@@ -104,36 +105,45 @@ fn follow_factor(strength: f32, dt: f32) -> f32 {
     1.0 - (-strength * dt).exp()
 }
 
-fn build_asteroid_field(renderer: &mut Renderer, field_radius: f32, min_size: f32) {
+fn build_asteroid_field(renderer: &mut Renderer, ship_radius: f32, field_radius: f32, min_size: f32) {
     let rocky = renderer.insert_material(make_material([0.15, 0.12, 0.09, 1.0], 0.90, 0.0, [0.0, 0.0, 0.0], 0.0));
     let dark = renderer.insert_material(make_material([0.09, 0.09, 0.11, 1.0], 0.70, 0.25, [0.0, 0.0, 0.0], 0.0));
     let cube = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
-    let mut seed: u64 = 0xCAFE_BABE_1234_5678;
-    for i in 0..ASTEROID_COUNT {
-        let dist = field_radius * (0.18 + lcg(&mut seed) * 0.82);
-        let theta = lcg(&mut seed) * std::f32::consts::TAU;
-        let phi = rand_s(&mut seed).asin();
+    let local_radius = (ship_radius * 40.0).clamp(120.0, 420.0);
+    let spawn_asteroid = |renderer: &mut Renderer, seed: &mut u64, i: usize, dist: f32, size_bias: f32| {
+        let theta = lcg(seed) * std::f32::consts::TAU;
+        let phi = rand_s(seed).asin();
         let pos = Vec3::new(
             dist * phi.cos() * theta.cos(),
             dist * phi.sin(),
             dist * phi.cos() * theta.sin(),
         );
-        let base = min_size * (1.0 + lcg(&mut seed) * 9.0);
+        let base = min_size * size_bias * (1.0 + lcg(seed) * 9.0);
         let scale = Vec3::new(
-            base * (0.6 + lcg(&mut seed) * 0.8),
-            base * (0.5 + lcg(&mut seed) * 0.7),
-            base * (0.6 + lcg(&mut seed) * 0.8),
+            base * (0.6 + lcg(seed) * 0.8),
+            base * (0.5 + lcg(seed) * 0.7),
+            base * (0.6 + lcg(seed) * 0.8),
         );
         let rot = Quat::from_euler(
             EulerRot::XYZ,
-            rand_s(&mut seed) * std::f32::consts::PI,
-            rand_s(&mut seed) * std::f32::consts::PI,
-            rand_s(&mut seed) * std::f32::consts::PI,
+            rand_s(seed) * std::f32::consts::PI,
+            rand_s(seed) * std::f32::consts::PI,
+            rand_s(seed) * std::f32::consts::PI,
         );
         let material = if i % 3 == 0 { dark } else { rocky };
         let transform = Mat4::from_scale_rotation_translation(scale, rot, pos);
         let _ = v3_demo_common::insert_object(renderer, cube, material, transform, base);
+    };
+
+    let mut seed: u64 = 0xCAFE_BABE_1234_5678;
+    for i in 0..LOCAL_ASTEROID_COUNT {
+        let dist = ship_radius * 10.0 + lcg(&mut seed) * local_radius;
+        spawn_asteroid(renderer, &mut seed, i, dist, 0.85);
+    }
+    for i in 0..ASTEROID_COUNT {
+        let dist = field_radius * (0.12 + lcg(&mut seed) * 0.88);
+        spawn_asteroid(renderer, &mut seed, i + LOCAL_ASTEROID_COUNT, dist, 1.0);
     }
 }
 
@@ -358,7 +368,7 @@ impl ApplicationHandler for App {
             .clamp(ASTEROID_FIELD_MIN_RADIUS, ASTEROID_FIELD_MAX_RADIUS);
         let thrust_accel = (ship_radius * 4.5).clamp(8.0, 250.0);
         let max_speed = (ship_radius * 22.0).clamp(25.0, 700.0);
-        build_asteroid_field(&mut renderer, field_radius, (ship_radius * 0.3).clamp(0.5, 8.0));
+        build_asteroid_field(&mut renderer, ship_radius, field_radius, (ship_radius * 0.3).clamp(0.5, 8.0));
 
         let engine_light = renderer.insert_light(point_light([0.0, 0.0, ship_radius * 0.8], [0.35, 0.65, 1.0], 1.8, ship_radius * 3.5));
         let mut ship = Ship {
