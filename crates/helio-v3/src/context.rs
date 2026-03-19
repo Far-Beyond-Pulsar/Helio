@@ -355,7 +355,7 @@ impl<'a> PassContext<'a> {
 ///             time: ctx.frame as f32,
 ///             resolution: [1920, 1080],
 ///         };
-///         ctx.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+///         ctx.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 ///         Ok(())
 ///     }
 ///
@@ -420,4 +420,22 @@ pub struct PrepareContext<'a> {
 
     /// Render target height.
     pub height: u32,
+}
+
+impl<'a> PrepareContext<'a> {
+    /// Upload bytes into a GPU buffer while participating in Helio's debug upload accounting.
+    pub fn write_buffer(&self, buffer: &wgpu::Buffer, offset: u64, data: &[u8]) {
+        crate::upload::write_buffer(self.queue, buffer, offset, data);
+    }
+
+    /// Upload bytes into a GPU texture while participating in Helio's debug upload accounting.
+    pub fn write_texture(
+        &self,
+        texture: wgpu::ImageCopyTexture<'_>,
+        data: &[u8],
+        data_layout: wgpu::ImageDataLayout,
+        size: wgpu::Extent3d,
+    ) {
+        crate::upload::write_texture(self.queue, texture, data, data_layout, size);
+    }
 }

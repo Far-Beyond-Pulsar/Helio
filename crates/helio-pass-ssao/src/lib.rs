@@ -115,7 +115,7 @@ impl SsaoPass {
             usage:              wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
+        helio_v3::upload::write_buffer(queue, &sample_kernel_buf, 0, bytemuck::cast_slice(&kernel));
 
         // ── Noise texture (4×4 Rgba8Unorm, random rotation vectors) ───────────
         let noise_data = generate_noise();
@@ -129,7 +129,8 @@ impl SsaoPass {
             usage:           wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats:    &[],
         });
-        queue.write_texture(
+        helio_v3::upload::write_texture(
+            queue,
             wgpu::ImageCopyTexture {
                 texture:   &noise_texture,
                 mip_level: 0,
@@ -355,7 +356,7 @@ impl RenderPass for SsaoPass {
         // TODO: Derive view, proj, inv_view_proj from scene camera for accurate SSAO.
         // Currently zeroed — GPU will return 1.0 (no occlusion) for sky pixels.
         let camera = SsaoCameraUniform::zeroed();
-        ctx.queue.write_buffer(&self.ssao_camera_buf, 0, bytemuck::bytes_of(&camera));
+        ctx.write_buffer(&self.ssao_camera_buf, 0, bytemuck::bytes_of(&camera));
 
         let ssao = SsaoUniform {
             radius:      0.5,
@@ -368,7 +369,7 @@ impl RenderPass for SsaoPass {
             ],
             _pad: [0.0; 2],
         };
-        ctx.queue.write_buffer(&self.ssao_uniform_buf, 0, bytemuck::bytes_of(&ssao));
+        ctx.write_buffer(&self.ssao_uniform_buf, 0, bytemuck::bytes_of(&ssao));
         Ok(())
     }
 

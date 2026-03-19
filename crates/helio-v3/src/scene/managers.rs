@@ -3,6 +3,7 @@
 //! Each manager wraps a `wgpu::Buffer` with a CPU-side `Vec` mirror.
 //! Dirty tracking ensures `flush()` is a no-op when data hasn't changed.
 
+use crate::upload;
 use libhelio::{
     GpuCameraUniforms, GpuInstanceData, GpuInstanceAabb, GpuDrawCall,
     GpuLight, GpuMaterial, GpuShadowMatrix, DrawIndexedIndirectArgs,
@@ -138,12 +139,12 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
                 usage: self.usage | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&self.buf, 0, bytemuck::cast_slice(&self.data));
+            upload::write_buffer(queue, &self.buf, 0, bytemuck::cast_slice(&self.data));
             self.dirty_range = None;
             return;
         }
         let byte_offset = (start * std::mem::size_of::<T>()) as u64;
-        queue.write_buffer(&self.buf, byte_offset, bytemuck::cast_slice(&self.data[start..end]));
+        upload::write_buffer(queue, &self.buf, byte_offset, bytemuck::cast_slice(&self.data[start..end]));
         self.dirty_range = None;
     }
 
@@ -184,7 +185,7 @@ impl GpuCameraBuffer {
 
     pub fn flush(&mut self, queue: &wgpu::Queue) {
         if !self.dirty { return; }
-        queue.write_buffer(&self.buf, 0, bytemuck::bytes_of(&self.data));
+        upload::write_buffer(queue, &self.buf, 0, bytemuck::bytes_of(&self.data));
         self.dirty = false;
     }
 }

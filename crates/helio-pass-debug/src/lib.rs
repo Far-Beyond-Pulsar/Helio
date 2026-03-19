@@ -153,7 +153,7 @@ impl DebugPass {
     pub fn update_lines(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
         let count = verts.len().min(MAX_DEBUG_VERTS as usize);
         if count > 0 {
-            queue.write_buffer(&self.vertex_buf, 0, bytemuck::cast_slice(&verts[..count]));
+            helio_v3::upload::write_buffer(queue, &self.vertex_buf, 0, bytemuck::cast_slice(&verts[..count]));
         }
         self.vertex_count = count as u32;
     }

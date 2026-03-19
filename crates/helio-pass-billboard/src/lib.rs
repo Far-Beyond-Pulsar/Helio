@@ -135,7 +135,8 @@ impl BillboardPass {
             usage:               wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats:        &[],
         });
-        queue.write_texture(
+        helio_v3::upload::write_texture(
+            queue,
             wgpu::ImageCopyTexture {
                 texture:   &white_texture,
                 mip_level: 0,
@@ -209,7 +210,7 @@ impl BillboardPass {
             usage:              wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        queue.write_buffer(&quad_vertex_buf, 0, bytemuck::cast_slice(&quad_verts));
+        helio_v3::upload::write_buffer(queue, &quad_vertex_buf, 0, bytemuck::cast_slice(&quad_verts));
 
         // ── Instance buffer ───────────────────────────────────────────────────
         let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -304,7 +305,7 @@ impl BillboardPass {
     pub fn update_instances(&mut self, queue: &wgpu::Queue, instances: &[BillboardInstance]) {
         let count = instances.len().min(MAX_BILLBOARDS as usize);
         if count > 0 {
-            queue.write_buffer(&self.instance_buf, 0, bytemuck::cast_slice(&instances[..count]));
+            helio_v3::upload::write_buffer(queue, &self.instance_buf, 0, bytemuck::cast_slice(&instances[..count]));
         }
         self.instance_count = count as u32;
     }
@@ -320,7 +321,7 @@ impl RenderPass for BillboardPass {
             ambient_intensity: 1.0,
             _pad:              0.0,
         };
-        ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
     }
 

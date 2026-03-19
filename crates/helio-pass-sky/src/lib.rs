@@ -245,7 +245,7 @@ impl RenderPass for SkyPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let uniforms = ShaderSkyUniforms::earth_like();
-        ctx.queue.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        ctx.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
 

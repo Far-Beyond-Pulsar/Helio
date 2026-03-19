@@ -231,7 +231,7 @@ impl RenderPass for HiZBuildPass {
                 src_size: [src_w, src_h],
                 dst_size: [dst_w, dst_h],
             };
-            ctx.queue.write_buffer(ub, 0, bytemuck::bytes_of(&uniforms));
+            ctx.write_buffer(ub, 0, bytemuck::bytes_of(&uniforms));
         }
         Ok(())
     }

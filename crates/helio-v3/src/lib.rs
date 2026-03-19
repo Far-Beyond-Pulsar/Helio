@@ -376,6 +376,7 @@ pub mod context;
 pub mod profiling;
 pub mod scene;
 pub mod graph;
+pub mod upload;
 
 // Re-export libhelio types for convenience
 pub use libhelio::{

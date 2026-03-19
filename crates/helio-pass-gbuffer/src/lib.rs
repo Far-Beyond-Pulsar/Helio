@@ -338,7 +338,7 @@ impl RenderPass for GBufferPass {
             _pad1: 0,
             _pad2: 0,
         };
-        ctx.queue.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
     }
 

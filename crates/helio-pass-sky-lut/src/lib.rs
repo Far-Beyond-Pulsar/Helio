@@ -212,7 +212,7 @@ impl RenderPass for SkyLutPass {
         // Upload default Nishita atmosphere parameters.
         // A real engine would derive these from a SkySystem component.
         let uniforms = ShaderSkyUniforms::earth_like();
-        ctx.queue.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        ctx.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
 

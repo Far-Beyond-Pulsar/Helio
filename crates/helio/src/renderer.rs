@@ -373,10 +373,12 @@ impl Renderer {
             _pad1: 0,
             _pad2: 0,
         };
-        self.scene
-            .gpu_scene()
-            .queue
-            .write_buffer(&self.frame_uniforms, 0, bytemuck::bytes_of(&frame_uniforms));
+        helio_v3::upload::write_buffer(
+            &self.scene.gpu_scene().queue,
+            &self.frame_uniforms,
+            0,
+            bytemuck::bytes_of(&frame_uniforms),
+        );
 
         let resources = self.scene.gpu_scene().resources();
         let mut texture_views = ArrayVec::<&wgpu::TextureView, MAX_TEXTURES>::new();
@@ -473,6 +475,7 @@ impl Renderer {
             }
         }
         self.scene.gpu_scene().queue.submit([encoder.finish()]);
+        helio_v3::upload::finish_frame();
         drop(scene_bind_group);
         drop(texture_views);
         drop(samplers);

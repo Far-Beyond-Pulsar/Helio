@@ -196,7 +196,7 @@ impl RenderPass for RadianceCascadesPass {
             _pad1:       0,
             sky_color:   [sky[0], sky[1], sky[2], 0.0],
         };
-        ctx.queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&dyn_data));
+        ctx.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&dyn_data));
         Ok(())
     }
 

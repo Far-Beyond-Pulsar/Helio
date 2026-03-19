@@ -243,6 +243,7 @@ pub struct Scene {
 
 impl Scene {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        helio_v3::upload::record_upload_bytes(4);
         let placeholder_texture = device.create_texture_with_data(
             &queue,
             &wgpu::TextureDescriptor {
@@ -349,6 +350,7 @@ impl Scene {
             return Err(SceneError::TextureCapacityExceeded);
         }
 
+        helio_v3::upload::record_upload_bytes(texture.data.len() as u64);
         let gpu_texture = self.gpu_scene.device.create_texture_with_data(
             &self.gpu_scene.queue,
             &wgpu::TextureDescriptor {

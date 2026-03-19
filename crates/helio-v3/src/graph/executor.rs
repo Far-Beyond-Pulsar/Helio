@@ -332,6 +332,7 @@ impl RenderGraph {
 
         // Submit command buffer to GPU
         scene.queue.submit([encoder.finish()]);
+        crate::upload::finish_frame();
         Ok(())
     }
 }
