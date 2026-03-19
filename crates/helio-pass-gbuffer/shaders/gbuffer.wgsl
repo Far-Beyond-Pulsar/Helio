@@ -50,14 +50,17 @@ struct Material {
     _reserved:       vec2<f32>,
 }
 
-/// Per-instance data (128 bytes).  Must match `GpuInstanceData` in gpu_scene.rs.
+/// Per-instance data (144 bytes). Must match `GpuInstanceData` in libhelio.
 struct GpuInstanceData {
     transform:    mat4x4<f32>,  // offset   0  (64 bytes)
     normal_mat_0: vec4<f32>,    // offset  64  — row 0 of inv-transpose 3×3
     normal_mat_1: vec4<f32>,    // offset  80
     normal_mat_2: vec4<f32>,    // offset  96
-    bounds_center: vec3<f32>,   // offset 112
-    bounds_radius: f32,         // offset 124
+    bounds:       vec4<f32>,    // offset 112
+    mesh_id:      u32,          // offset 128
+    material_id:  u32,          // offset 132
+    flags:        u32,          // offset 136
+    _pad:         u32,          // offset 140
 }
 
 @group(0) @binding(0) var<uniform>          camera:        Camera;

@@ -15,8 +15,11 @@ struct GpuInstanceData {
     normal_mat_0:  vec4<f32>,
     normal_mat_1:  vec4<f32>,
     normal_mat_2:  vec4<f32>,
-    bounds_center: vec3<f32>,
-    bounds_radius: f32,
+    bounds:        vec4<f32>,
+    mesh_id:       u32,
+    material_id:   u32,
+    flags:         u32,
+    _pad:          u32,
 }
 
 @group(0) @binding(0) var<uniform>       camera:        Camera;
