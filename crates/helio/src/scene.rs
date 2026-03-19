@@ -435,7 +435,7 @@ impl Scene {
             let updated_textures = self.material_textures.update(slot, gpu_textures);
             debug_assert!(updated_material && updated_textures);
         }
-        id
+        Ok(id)
     }
 
     pub fn update_material(&mut self, id: MaterialId, material: GpuMaterial) -> Result<()> {

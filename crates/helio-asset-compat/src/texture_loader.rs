@@ -1,94 +1,75 @@
-//! GPU texture loading from SolidRS images
+//! Texture conversion from SolidRS assets to Helio uploads.
 
-use crate::{Result, AssetError};
-use solid_rs::scene::{Image, ImageSource};
-use wgpu::util::DeviceExt;
 use std::fs;
+use std::path::{Path, PathBuf};
 
-/// Upload a SolidRS image to a GPU texture
-pub fn load_texture(
-    image: &Image,
-    srgb: bool,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-) -> Result<wgpu::Texture> {
-    // Get image data (either from embedded bytes or URI)
-    let data_vec: Vec<u8>;
-    let image_data = match &image.source {
-        ImageSource::Embedded { data, .. } => data.as_slice(),
-        ImageSource::Uri(path) => {
-            // Load external image file
-            data_vec = fs::read(path)
-                .map_err(|e| AssetError::InvalidData(format!(
-                    "Failed to read image file '{}': {}",
-                    path, e
-                )))?;
-            data_vec.as_slice()
-        }
-    };
+use helio::{TextureSamplerDesc, TextureUpload};
+use solid_rs::scene::{FilterMode as SolidFilter, Image, ImageSource, Sampler, Scene, Texture, WrapMode};
 
-    // Decode image using the `image` crate
-    let decoded = image::load_from_memory(image_data)
-        .map_err(|e| AssetError::InvalidData(format!("Failed to decode image: {}", e)))?;
+use crate::{AssetError, Result};
 
-    let rgba = decoded.to_rgba8();
-    let (width, height) = rgba.dimensions();
-
-    // Determine texture format based on sRGB flag
-    let format = if srgb {
-        wgpu::TextureFormat::Rgba8UnormSrgb
-    } else {
-        wgpu::TextureFormat::Rgba8Unorm
-    };
-
-    // Create GPU texture
-    let size = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-
-    let texture = device.create_texture_with_data(
-        queue,
-        &wgpu::TextureDescriptor {
-            label: Some(&format!("Texture {}", if image.name.is_empty() { "unnamed" } else { &image.name })),
-            size,
-            mip_level_count: 1, // TODO: Generate mipmaps in Phase 3
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        },
-        wgpu::util::TextureDataOrder::LayerMajor,
-        rgba.as_raw(),
-    );
-
-    Ok(texture)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureSemantic {
+    BaseColor,
+    MetallicRoughness,
+    Normal,
+    Occlusion,
+    Emissive,
+    SpecularColor,
+    SpecularWeight,
 }
 
-/// Create a wgpu sampler from SolidRS sampler settings
-pub fn create_sampler(
-    sampler: &solid_rs::scene::Sampler,
-    device: &wgpu::Device,
-) -> wgpu::Sampler {
-    use solid_rs::scene::WrapMode;
+impl TextureSemantic {
+    pub fn is_srgb(self) -> bool {
+        matches!(
+            self,
+            TextureSemantic::BaseColor | TextureSemantic::Emissive | TextureSemantic::SpecularColor
+        )
+    }
 
-    let address_mode_u = match sampler.wrap_s {
+    pub fn suffix(self) -> &'static str {
+        match self {
+            TextureSemantic::BaseColor => "base-color",
+            TextureSemantic::MetallicRoughness => "metallic-roughness",
+            TextureSemantic::Normal => "normal",
+            TextureSemantic::Occlusion => "occlusion",
+            TextureSemantic::Emissive => "emissive",
+            TextureSemantic::SpecularColor => "specular-color",
+            TextureSemantic::SpecularWeight => "specular-weight",
+        }
+    }
+}
+
+fn resolve_image_bytes(image: &Image, base_dir: &Path) -> Result<Vec<u8>> {
+    match &image.source {
+        ImageSource::Embedded { data, .. } => Ok(data.clone()),
+        ImageSource::Uri(path) => {
+            let resolved = {
+                let candidate = PathBuf::from(path);
+                if candidate.is_absolute() {
+                    candidate
+                } else {
+                    base_dir.join(candidate)
+                }
+            };
+            fs::read(&resolved).map_err(|e| {
+                AssetError::InvalidData(format!(
+                    "Failed to read image file '{}': {}",
+                    resolved.display(),
+                    e
+                ))
+            })
+        }
+    }
+}
+
+fn convert_sampler(sampler: &Sampler) -> TextureSamplerDesc {
+    let address_mode = |wrap: WrapMode| match wrap {
         WrapMode::Repeat => wgpu::AddressMode::Repeat,
         WrapMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
         WrapMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
     };
 
-    let address_mode_v = match sampler.wrap_t {
-        WrapMode::Repeat => wgpu::AddressMode::Repeat,
-        WrapMode::ClampToEdge => wgpu::AddressMode::ClampToEdge,
-        WrapMode::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
-    };
-
-    use solid_rs::scene::FilterMode as SolidFilter;
-
-    // Mag filter doesn't use mipmaps (magnification = texture larger than source)
     let mag_filter = match sampler.mag_filter {
         SolidFilter::Nearest | SolidFilter::NearestMipmapNearest | SolidFilter::NearestMipmapLinear => {
             wgpu::FilterMode::Nearest
@@ -98,7 +79,6 @@ pub fn create_sampler(
         }
     };
 
-    // Min filter and mipmap filter come from min_filter setting
     let (min_filter, mipmap_filter) = match sampler.min_filter {
         SolidFilter::Nearest => (wgpu::FilterMode::Nearest, wgpu::FilterMode::Nearest),
         SolidFilter::Linear => (wgpu::FilterMode::Linear, wgpu::FilterMode::Linear),
@@ -108,18 +88,62 @@ pub fn create_sampler(
         SolidFilter::LinearMipmapLinear => (wgpu::FilterMode::Linear, wgpu::FilterMode::Linear),
     };
 
-    device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("SolidRS Sampler"),
-        address_mode_u,
-        address_mode_v,
-        address_mode_w: address_mode_u, // Use U mode for W
+    TextureSamplerDesc {
+        address_mode_u: address_mode(sampler.wrap_s),
+        address_mode_v: address_mode(sampler.wrap_t),
+        address_mode_w: address_mode(sampler.wrap_s),
         mag_filter,
         min_filter,
         mipmap_filter,
-        lod_min_clamp: 0.0,
-        lod_max_clamp: 32.0,
-        compare: None,
-        anisotropy_clamp: 1,
-        border_color: None,
-    })
+    }
+}
+
+pub fn load_texture_upload(
+    scene: &Scene,
+    texture_index: usize,
+    semantic: TextureSemantic,
+    base_dir: &Path,
+) -> Result<TextureUpload> {
+    let texture = scene.textures.get(texture_index).ok_or_else(|| {
+        AssetError::InvalidData(format!("Texture index {} is out of bounds", texture_index))
+    })?;
+    let image = scene.images.get(texture.image_index).ok_or_else(|| {
+        AssetError::InvalidData(format!(
+            "Texture '{}' references missing image index {}",
+            texture.name, texture.image_index
+        ))
+    })?;
+
+    load_texture_upload_from_parts(texture, image, semantic, base_dir)
+}
+
+fn load_texture_upload_from_parts(
+    texture: &Texture,
+    image: &Image,
+    semantic: TextureSemantic,
+    base_dir: &Path,
+) -> Result<TextureUpload> {
+    let bytes = resolve_image_bytes(image, base_dir)?;
+    let decoded = image::load_from_memory(&bytes)
+        .map_err(|e| AssetError::InvalidData(format!("Failed to decode image: {}", e)))?;
+    let rgba = decoded.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    let label = if texture.name.is_empty() {
+        format!(
+            "{} ({})",
+            if image.name.is_empty() { "texture" } else { &image.name },
+            semantic.suffix()
+        )
+    } else {
+        format!("{} ({})", texture.name, semantic.suffix())
+    };
+
+    Ok(TextureUpload::rgba8(
+        label,
+        width,
+        height,
+        semantic.is_srgb(),
+        rgba.into_raw(),
+        convert_sampler(&texture.sampler),
+    ))
 }

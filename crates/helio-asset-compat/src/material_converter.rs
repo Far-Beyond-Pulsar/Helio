@@ -1,11 +1,40 @@
-//! PBR material mapping from SolidRS to Helio GPU material data.
+//! PBR material mapping from SolidRS to Helio material assets.
+
+use helio::{GpuMaterial, TextureTransform};
+use libhelio::MaterialWorkflow;
+use solid_rs::scene::{AlphaMode, Material as SolidMaterial, TextureRef as SolidTextureRef};
 
 use crate::Result;
-use helio::GpuMaterial;
-use libhelio::MaterialWorkflow;
-use solid_rs::scene::{AlphaMode, Material as SolidMaterial, Scene};
+use crate::texture_loader::TextureSemantic;
 
 const MATERIAL_WORKFLOW_EPSILON: f32 = 1.0e-6;
+
+#[derive(Debug, Clone, Copy)]
+pub struct ConvertedTextureRef {
+    pub texture_index: usize,
+    pub uv_channel: u32,
+    pub transform: TextureTransform,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConvertedMaterialTextures {
+    pub base_color: Option<ConvertedTextureRef>,
+    pub normal: Option<ConvertedTextureRef>,
+    pub roughness_metallic: Option<ConvertedTextureRef>,
+    pub emissive: Option<ConvertedTextureRef>,
+    pub occlusion: Option<ConvertedTextureRef>,
+    pub specular_color: Option<ConvertedTextureRef>,
+    pub specular_weight: Option<ConvertedTextureRef>,
+    pub normal_scale: f32,
+    pub occlusion_strength: f32,
+    pub alpha_cutoff: f32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConvertedMaterial {
+    pub gpu: GpuMaterial,
+    pub textures: ConvertedMaterialTextures,
+}
 
 fn uses_explicit_specular_ior_workflow(material: &SolidMaterial) -> bool {
     let specular_color_is_default =
@@ -23,18 +52,35 @@ fn uses_explicit_specular_ior_workflow(material: &SolidMaterial) -> bool {
         || !ior_is_default
 }
 
-/// Convert a SolidRS material to Helio's GPU material layout.
-///
-/// The current `helio` desktop wrapper uses constant factors only, so texture slots
-/// are left unbound for now. This keeps the asset bridge compatible with the v3
-/// examples while the texture system is reintroduced on top of the new facade.
-pub fn convert_material(
-    material: &SolidMaterial,
-    scene: &Scene,
-    base_dir: &std::path::Path,
-) -> Result<GpuMaterial> {
-    let _ = (scene, base_dir);
+fn convert_texture_ref(texture: &SolidTextureRef, semantic: TextureSemantic) -> ConvertedTextureRef {
+    if texture.uv_channel > 1 {
+        log::warn!(
+            "Texture semantic {:?} uses UV channel {}, but the current Helio wrapper only carries UV0/UV1; falling back to UV1.",
+            semantic,
+            texture.uv_channel
+        );
+    }
 
+    let transform = texture.transform.as_ref().map_or_else(
+        TextureTransform::default,
+        |transform| TextureTransform {
+            offset: [transform.offset.x, transform.offset.y],
+            scale: [transform.scale.x, transform.scale.y],
+            rotation_radians: transform.rotation,
+        },
+    );
+
+    ConvertedTextureRef {
+        texture_index: texture.texture_index,
+        uv_channel: texture.uv_channel.min(1) as u32,
+        transform,
+    }
+}
+
+pub fn convert_material<F>(material: &SolidMaterial, mut resolve_texture: F) -> Result<ConvertedMaterial>
+where
+    F: FnMut(ConvertedTextureRef, TextureSemantic) -> Result<ConvertedTextureRef>,
+{
     let mut workflow = MaterialWorkflow::Metallic as u32;
     let mut metallic = material.metallic_factor;
     let mut roughness = material.roughness_factor;
@@ -63,27 +109,64 @@ pub fn convert_material(
         flags |= 1;
     }
 
-    Ok(GpuMaterial {
-        base_color: [
-            material.base_color_factor.x,
-            material.base_color_factor.y,
-            material.base_color_factor.z,
-            material.base_color_factor.w,
-        ],
-        emissive: [
-            material.emissive_factor.x,
-            material.emissive_factor.y,
-            material.emissive_factor.z,
-            1.0,
-        ],
-        roughness_metallic: [roughness, metallic, ior, specular],
-        tex_base_color: GpuMaterial::NO_TEXTURE,
-        tex_normal: GpuMaterial::NO_TEXTURE,
-        tex_roughness: GpuMaterial::NO_TEXTURE,
-        tex_emissive: GpuMaterial::NO_TEXTURE,
-        tex_occlusion: GpuMaterial::NO_TEXTURE,
-        workflow,
-        flags,
-        _pad: 0,
+    let convert_slot = |slot: &Option<SolidTextureRef>,
+                        semantic: TextureSemantic,
+                        resolve_texture: &mut F|
+     -> Result<Option<ConvertedTextureRef>> {
+        slot.as_ref()
+            .map(|texture| resolve_texture(convert_texture_ref(texture, semantic), semantic))
+            .transpose()
+    };
+
+    let textures = ConvertedMaterialTextures {
+        base_color: convert_slot(&material.base_color_texture, TextureSemantic::BaseColor, &mut resolve_texture)?,
+        normal: convert_slot(&material.normal_texture, TextureSemantic::Normal, &mut resolve_texture)?,
+        roughness_metallic: convert_slot(
+            &material.metallic_roughness_texture,
+            TextureSemantic::MetallicRoughness,
+            &mut resolve_texture,
+        )?,
+        emissive: convert_slot(&material.emissive_texture, TextureSemantic::Emissive, &mut resolve_texture)?,
+        occlusion: convert_slot(&material.occlusion_texture, TextureSemantic::Occlusion, &mut resolve_texture)?,
+        specular_color: convert_slot(
+            &material.specular_color_texture,
+            TextureSemantic::SpecularColor,
+            &mut resolve_texture,
+        )?,
+        specular_weight: convert_slot(
+            &material.specular_weight_texture,
+            TextureSemantic::SpecularWeight,
+            &mut resolve_texture,
+        )?,
+        normal_scale: material.normal_scale,
+        occlusion_strength: material.occlusion_strength,
+        alpha_cutoff: material.alpha_cutoff,
+    };
+
+    Ok(ConvertedMaterial {
+        gpu: GpuMaterial {
+            base_color: [
+                material.base_color_factor.x,
+                material.base_color_factor.y,
+                material.base_color_factor.z,
+                material.base_color_factor.w,
+            ],
+            emissive: [
+                material.emissive_factor.x,
+                material.emissive_factor.y,
+                material.emissive_factor.z,
+                1.0,
+            ],
+            roughness_metallic: [roughness, metallic, ior, specular],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow,
+            flags,
+            _pad: 0,
+        },
+        textures,
     })
 }

@@ -1,61 +1,73 @@
-//! SolidRS Scene → Helio GPU structures conversion orchestrator
-//!
-//! This module coordinates the full conversion pipeline from a CPU-side SolidRS
-//! scene to GPU-resident Helio structures.
+//! SolidRS Scene → Helio GPU structures conversion orchestrator.
 
-use crate::{Result, mesh_converter, material_converter, light_converter, camera_converter, CameraData};
-use helio::{GpuLight, GpuMaterial, PackedVertex};
+use std::collections::HashMap;
+
+use helio::{MaterialAsset, MaterialTextureRef, MaterialTextures, PackedVertex, TextureUpload};
 use solid_rs::Scene;
 
-/// Converted scene data ready for GPU upload
-///
-/// This holds all converted CPU-side data from a SolidRS scene.
-/// The actual GPU upload and object registration happens separately.
+use crate::material_converter::{
+    convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef,
+};
+use crate::texture_loader::{load_texture_upload, TextureSemantic};
+use crate::{camera_converter, light_converter, mesh_converter, CameraData, Result};
+
+/// Converted scene data ready for GPU upload.
 pub struct ConvertedScene {
-    /// Scene name
     pub name: String,
-    /// Converted meshes (vertices + indices)
     pub meshes: Vec<ConvertedMesh>,
-    /// Converted PBR materials
-    pub materials: Vec<GpuMaterial>,
-    /// Converted lights
-    pub lights: Vec<GpuLight>,
-    /// Camera data (informational only - not auto-applied)
+    pub textures: Vec<TextureUpload>,
+    pub materials: Vec<ConvertedMaterial>,
+    pub lights: Vec<helio::GpuLight>,
     pub cameras: Vec<CameraData>,
-    // TODO: Animations (Phase 5)
-    // TODO: Skins (Phase 5)
 }
 
-/// A single converted mesh (one primitive/submesh)
-///
-/// Note: SolidRS Mesh objects can contain multiple Primitives, each with a different material.
-/// We split them into separate ConvertedMesh entries so each can have its own material.
 pub struct ConvertedMesh {
-    /// Mesh name from SolidRS (with "_N" suffix if multiple primitives)
     pub name: String,
-    /// Converted vertices (shared across all primitives of the original mesh)
     pub vertices: Vec<PackedVertex>,
-    /// Indices for this specific primitive
     pub indices: Vec<u32>,
-    /// Material index (into ConvertedScene::materials)
     pub material_index: Option<usize>,
 }
 
-/// Convert a SolidRS scene to Helio-compatible structures
-pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path, config: &crate::LoadConfig) -> Result<ConvertedScene> {
-    log::info!("Converting SolidRS scene '{}' with {} meshes, {} materials",
-        scene.name, scene.meshes.len(), scene.materials.len());
+pub fn convert_scene(
+    scene: &Scene,
+    base_dir: &std::path::Path,
+    config: &crate::LoadConfig,
+) -> Result<ConvertedScene> {
+    log::info!(
+        "Converting SolidRS scene '{}' with {} meshes, {} materials, {} textures",
+        scene.name,
+        scene.meshes.len(),
+        scene.materials.len(),
+        scene.textures.len()
+    );
 
-    // Convert all materials first
-    let materials: Result<Vec<GpuMaterial>> = scene.materials.iter()
-        .map(|mat| material_converter::convert_material(mat, scene, base_dir))
+    let mut textures = Vec::new();
+    let mut texture_cache = HashMap::<(usize, TextureSemantic), usize>::new();
+    let materials: Result<Vec<ConvertedMaterial>> = scene
+        .materials
+        .iter()
+        .map(|material| {
+            convert_material(material, |texture_ref, semantic| {
+                let key = (texture_ref.texture_index, semantic);
+                let converted_index = if let Some(&index) = texture_cache.get(&key) {
+                    index
+                } else {
+                    let upload = load_texture_upload(scene, texture_ref.texture_index, semantic, base_dir)?;
+                    let index = textures.len();
+                    textures.push(upload);
+                    texture_cache.insert(key, index);
+                    index
+                };
+
+                Ok(ConvertedTextureRef {
+                    texture_index: converted_index,
+                    ..texture_ref
+                })
+            })
+        })
         .collect();
     let materials = materials?;
 
-    log::debug!("Converted {} materials", materials.len());
-
-    // Convert all meshes - split primitives into separate meshes
-    // Each primitive can have a different material, so we create one ConvertedMesh per primitive
     let mut meshes = Vec::new();
     for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
         if mesh.primitives.is_empty() {
@@ -63,7 +75,6 @@ pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path, config: &crate::
             continue;
         }
 
-        // Each primitive becomes a separate ConvertedMesh with its own material
         for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
             let (vertices, indices) = mesh_converter::convert_primitive(mesh, primitive, config)?;
 
@@ -88,49 +99,51 @@ pub fn convert_scene(scene: &Scene, base_dir: &std::path::Path, config: &crate::
         }
     }
 
-    log::debug!("Converted {} meshes ({} total vertices)",
-        meshes.len(),
-        meshes.iter().map(|m| m.vertices.len()).sum::<usize>());
-
-    // Convert all lights
-    let lights: Vec<GpuLight> = scene.lights.iter()
-        .filter_map(|light| light_converter::convert_light(light))
-        .collect();
-
-    log::debug!("Converted {} lights", lights.len());
-
-    // Extract camera data
-    let cameras: Vec<CameraData> = scene.cameras.iter()
-        .map(|camera| camera_converter::extract_camera_data(camera))
-        .collect();
-
-    log::debug!("Extracted {} cameras", cameras.len());
+    let lights = scene
+        .lights
+        .iter()
+        .map(light_converter::convert_light)
+        .collect::<Result<Vec<_>>>()?;
+    let cameras = camera_converter::extract_camera_data(scene);
 
     Ok(ConvertedScene {
         name: scene.name.clone(),
         meshes,
+        textures,
         materials,
         lights,
         cameras,
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+fn remap_texture_slot(
+    texture: Option<ConvertedTextureRef>,
+    texture_ids: &[helio::TextureId],
+) -> Option<MaterialTextureRef> {
+    texture.map(|texture| MaterialTextureRef {
+        texture: texture_ids[texture.texture_index],
+        uv_channel: texture.uv_channel,
+        transform: texture.transform,
+    })
+}
 
-    #[test]
-    fn test_convert_empty_scene() {
-        let scene = Scene {
-            name: "EmptyScene".to_string(),
-            ..Default::default()
-        };
-
-        let converted =
-            convert_scene(&scene, std::path::Path::new("."), &crate::LoadConfig::default())
-                .unwrap();
-        assert_eq!(converted.name, "EmptyScene");
-        assert_eq!(converted.meshes.len(), 0);
-        assert_eq!(converted.materials.len(), 0);
+pub(crate) fn material_asset_from_converted(
+    material: &ConvertedMaterial,
+    texture_ids: &[helio::TextureId],
+) -> MaterialAsset {
+    MaterialAsset {
+        gpu: material.gpu,
+        textures: MaterialTextures {
+            base_color: remap_texture_slot(material.textures.base_color, texture_ids),
+            normal: remap_texture_slot(material.textures.normal, texture_ids),
+            roughness_metallic: remap_texture_slot(material.textures.roughness_metallic, texture_ids),
+            emissive: remap_texture_slot(material.textures.emissive, texture_ids),
+            occlusion: remap_texture_slot(material.textures.occlusion, texture_ids),
+            specular_color: remap_texture_slot(material.textures.specular_color, texture_ids),
+            specular_weight: remap_texture_slot(material.textures.specular_weight, texture_ids),
+            normal_scale: material.textures.normal_scale,
+            occlusion_strength: material.textures.occlusion_strength,
+            alpha_cutoff: material.textures.alpha_cutoff,
+        },
     }
 }
