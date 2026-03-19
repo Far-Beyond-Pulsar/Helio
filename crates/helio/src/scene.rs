@@ -3,13 +3,18 @@ use std::sync::Arc;
 use bytemuck::Zeroable;
 use glam::{Mat3, Mat4, Vec3};
 use helio_v3::{
+    scene::GrowableBuffer,
     DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb, GpuInstanceData,
     GpuLight, GpuMaterial, GpuScene,
 };
 use thiserror::Error;
 
 use crate::arena::{DenseArena, DenseRemove, SparsePool};
-use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
+use crate::handles::{LightId, MaterialId, MeshId, ObjectId, TextureId};
+use crate::material::{
+    GpuMaterialTextureSlot, GpuMaterialTextures, MaterialAsset, MaterialTextureRef,
+    MaterialTextures, TextureSamplerDesc, TextureTransform, TextureUpload, MAX_TEXTURES,
+};
 use crate::mesh::{MeshBuffers, MeshPool, MeshSlice, MeshUpload};
 
 #[derive(Debug, Error)]
@@ -18,6 +23,8 @@ pub enum SceneError {
     InvalidHandle { resource: &'static str },
     #[error("{resource} is still in use")]
     ResourceInUse { resource: &'static str },
+    #[error("scene texture capacity exceeded")]
+    TextureCapacityExceeded,
 }
 
 pub type Result<T> = std::result::Result<T, SceneError>;
@@ -71,6 +78,7 @@ pub struct ObjectDescriptor {
 #[derive(Debug, Clone)]
 struct MaterialRecord {
     gpu: GpuMaterial,
+    textures: MaterialTextures,
     ref_count: u32,
 }
 
@@ -88,6 +96,13 @@ struct ObjectRecord {
     draw: GpuDrawCall,
 }
 
+struct TextureRecord {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    ref_count: u32,
+}
+
 fn invalid(resource: &'static str) -> SceneError {
     SceneError::InvalidHandle { resource }
 }
@@ -100,6 +115,47 @@ fn tombstone_material() -> GpuMaterial {
         tex_emissive: GpuMaterial::NO_TEXTURE,
         tex_occlusion: GpuMaterial::NO_TEXTURE,
         ..GpuMaterial::zeroed()
+    }
+}
+
+fn tombstone_material_textures() -> GpuMaterialTextures {
+    GpuMaterialTextures::missing()
+}
+
+fn gpu_texture_slot(texture: Option<MaterialTextureRef>) -> GpuMaterialTextureSlot {
+    let Some(texture) = texture else {
+        return GpuMaterialTextureSlot::missing();
+    };
+    let uv_channel = texture.uv_channel.min(1);
+    let TextureTransform {
+        offset,
+        scale,
+        rotation_radians,
+    } = texture.transform;
+    GpuMaterialTextureSlot {
+        texture_index: texture.texture.slot(),
+        uv_channel,
+        _pad: [0; 2],
+        offset_scale: [offset[0], offset[1], scale[0], scale[1]],
+        rotation: [rotation_radians.sin(), rotation_radians.cos(), 0.0, 0.0],
+    }
+}
+
+fn gpu_material_textures(textures: &MaterialTextures) -> GpuMaterialTextures {
+    GpuMaterialTextures {
+        base_color: gpu_texture_slot(textures.base_color),
+        normal: gpu_texture_slot(textures.normal),
+        roughness_metallic: gpu_texture_slot(textures.roughness_metallic),
+        emissive: gpu_texture_slot(textures.emissive),
+        occlusion: gpu_texture_slot(textures.occlusion),
+        specular_color: gpu_texture_slot(textures.specular_color),
+        specular_weight: gpu_texture_slot(textures.specular_weight),
+        params: [
+            textures.normal_scale,
+            textures.occlusion_strength,
+            textures.alpha_cutoff,
+            0.0,
+        ],
     }
 }
 
@@ -153,6 +209,8 @@ fn object_gpu_data(mesh: MeshId, material_slot: usize, desc: ObjectDescriptor, s
 pub struct Scene {
     gpu_scene: GpuScene,
     mesh_pool: MeshPool,
+    textures: SparsePool<TextureRecord, TextureId>,
+    material_textures: GrowableBuffer<GpuMaterialTextures>,
     materials: SparsePool<MaterialRecord, MaterialId>,
     lights: DenseArena<LightRecord, LightId>,
     objects: DenseArena<ObjectRecord, ObjectId>,
@@ -164,6 +222,13 @@ impl Scene {
         Self {
             mesh_pool: MeshPool::new(device.clone()),
             gpu_scene: GpuScene::new(device, queue),
+            textures: SparsePool::new(),
+            material_textures: GrowableBuffer::new(
+                queue.device().clone(),
+                256,
+                wgpu::BufferUsages::STORAGE,
+                "Helio Material Texture Buffer",
+            ),
             materials: SparsePool::new(),
             lights: DenseArena::new(),
             objects: DenseArena::new(),

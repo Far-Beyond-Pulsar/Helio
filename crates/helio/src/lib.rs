@@ -11,13 +11,18 @@
 
 mod arena;
 mod handles;
+mod material;
 mod mesh;
 mod renderer;
 mod scene;
 
-pub use handles::{LightId, MaterialId, MeshId, ObjectId};
+pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId};
+pub use material::{
+    MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
+    TextureUpload, MAX_TEXTURES,
+};
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex};
-pub use renderer::{Renderer, RendererConfig};
+pub use renderer::{required_wgpu_features, Renderer, RendererConfig};
 pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError};
 
 pub use helio_v3::{

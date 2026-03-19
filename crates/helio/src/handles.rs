@@ -44,5 +44,6 @@ pub trait Handle: Copy {
 
 define_handle!(MeshId);
 define_handle!(MaterialId);
+define_handle!(TextureId);
 define_handle!(LightId);
 define_handle!(ObjectId);

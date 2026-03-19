@@ -9,7 +9,8 @@ use crate::handles::MeshId;
 pub struct PackedVertex {
     pub position: [f32; 3],
     pub bitangent_sign: f32,
-    pub tex_coords: [f32; 2],
+    pub tex_coords0: [f32; 2],
+    pub tex_coords1: [f32; 2],
     pub normal: u32,
     pub tangent: u32,
 }
@@ -25,7 +26,8 @@ impl PackedVertex {
         Self {
             position,
             bitangent_sign,
-            tex_coords,
+            tex_coords0: tex_coords,
+            tex_coords1: [0.0, 0.0],
             normal: pack_snorm4x8([normal[0], normal[1], normal[2], 0.0]),
             tangent: pack_snorm4x8([tangent[0], tangent[1], tangent[2], 0.0]),
         }
