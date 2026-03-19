@@ -14,9 +14,11 @@
 //!
 //! # Material Bind Group
 //!
-//! Group 1 (textures) uses a placeholder white 1×1 for all texture slots so the
-//! pipeline is fully bound at creation time.  In production, the material system
-//! should supply per-draw group 1 bind groups.
+//! Group 1 provides bindless texture access:
+//!  - binding 0: materials storage buffer
+//!  - binding 1: material_textures storage buffer (MaterialTextureData array)
+//!  - binding 2: scene_textures (256-slot texture array)
+//!  - binding 3: scene_samplers (256-slot sampler array)
 //!
 //! # Vertex / Index Buffers
 //!
@@ -25,6 +27,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
+use std::num::NonZeroU32;
 
 // ── Uniform types ─────────────────────────────────────────────────────────────
 
@@ -46,27 +49,6 @@ pub struct GBufferGlobals {
     pub _pad2:             u32,
 }
 
-/// Placeholder material — opaque white, no alpha cutoff, metallic-roughness workflow.
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct PlaceholderMaterial {
-    base_color:      [f32; 4],
-    metallic:        f32,
-    roughness:       f32,
-    emissive_factor: f32,
-    ao:              f32,
-    emissive_color:  [f32; 3],
-    alpha_cutoff:    f32,
-    workflow:        u32,
-    workflow_flags:  u32,
-    _pad0:           [u32; 2],
-    specular_color:  [f32; 3],
-    specular_weight: f32,
-    ior:             f32,
-    dielectric_f0:   f32,
-    _reserved:       [f32; 2],
-}
-
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct GBufferPass {
@@ -78,8 +60,9 @@ pub struct GBufferPass {
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_0_key: Option<(usize, usize)>,
-    /// Placeholder group 1 (all textures = white 1×1).
-    placeholder_bind_group_1: wgpu::BindGroup,
+    /// Group 1: materials + material_textures + bindless texture arrays.
+    bind_group_1: Option<wgpu::BindGroup>,
+    bind_group_1_version: Option<u64>,
     /// Per-frame globals uploaded in `prepare()`.
     globals_buf: wgpu::Buffer,
     // ── GBuffer textures (owned; exposed for downstream passes) ───────────────
@@ -275,17 +258,14 @@ impl GBufferPass {
             device, width, height, wgpu::TextureFormat::Rgba16Float, "GBuffer/Emissive",
         );
 
-        // ── Bind groups ───────────────────────────────────────────────────────
-        let placeholder_bind_group_1 =
-            create_placeholder_material_bg(device, &bind_group_layout_1);
-
         Self {
             pipeline,
             bind_group_layout_0,
             bind_group_layout_1,
             bind_group_0: None,
             bind_group_0_key: None,
-            placeholder_bind_group_1,
+            bind_group_1: None,
+            bind_group_1_version: None,
             globals_buf,
             albedo_tex,
             albedo_view,
@@ -352,7 +332,7 @@ impl RenderPass for GBufferPass {
         let instances_ptr = ctx.scene.instances as *const _ as usize;
         let key = (camera_ptr, instances_ptr);
         if self.bind_group_0_key != Some(key) {
-            log::debug!("GBuffer: rebuilding bind group (buffer pointers changed)");
+            log::debug!("GBuffer: rebuilding bind group 0 (buffer pointers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GBuffer BG 0"),
                 layout: &self.bind_group_layout_0,
@@ -372,6 +352,43 @@ impl RenderPass for GBufferPass {
                 ],
             }));
             self.bind_group_0_key = Some(key);
+        }
+
+        // Rebuild bind group 1 when material textures version changes.
+        let needs_rebuild = self.bind_group_1_version != Some(main_scene.material_textures.version)
+            || self.bind_group_1.is_none();
+        if needs_rebuild {
+            log::debug!("GBuffer: rebuilding bind group 1 (material textures version changed)");
+            self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GBuffer BG 1"),
+                layout: &self.bind_group_layout_1,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.materials.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: main_scene
+                            .material_textures
+                            .material_textures
+                            .as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureViewArray(
+                            main_scene.material_textures.texture_views,
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::SamplerArray(
+                            main_scene.material_textures.samplers,
+                        ),
+                    },
+                ],
+            }));
+            self.bind_group_1_version = Some(main_scene.material_textures.version);
         }
 
         let indirect = ctx.scene.indirect;
@@ -426,8 +443,7 @@ impl RenderPass for GBufferPass {
 
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group_0.as_ref().unwrap(), &[]);
-        // Group 1: placeholder material (real material system sets this per-draw).
-        pass.set_bind_group(1, &self.placeholder_bind_group_1, &[]);
+        pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
         pass.set_index_buffer(
             main_scene.mesh_buffers.indices.slice(..),
@@ -488,129 +504,54 @@ fn gbuffer_texture(
     (tex, view)
 }
 
-/// Create a 1×1 white `Rgba8Unorm` placeholder texture.
-fn create_white_texture(device: &wgpu::Device) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("GBuffer Placeholder White 1x1"),
-        size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba8Unorm,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-    (texture, view)
-}
-
-/// Build the BGL for group 1 (material + 6 textures + 1 sampler).
+/// Build the BGL for group 1 (bindless materials + textures).
 fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let tex_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    };
+    const MAX_TEXTURES: usize = 256;
+    let texture_array_count = NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");
 
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("GBuffer BGL 1"),
         entries: &[
-            // binding 0: material uniform
+            // binding 0: materials storage buffer
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
                 count: None,
             },
-            tex_entry(1), // base_color_texture
-            tex_entry(2), // normal_map
-            // binding 3: sampler
+            // binding 1: material_textures storage buffer
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // binding 2: scene_textures (256-slot texture array)
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: Some(texture_array_count),
+            },
+            // binding 3: scene_samplers (256-slot sampler array)
             wgpu::BindGroupLayoutEntry {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                count: None,
+                count: Some(texture_array_count),
             },
-            tex_entry(4), // orm_texture
-            tex_entry(5), // emissive_texture
-            tex_entry(6), // specular_color_texture
-            tex_entry(7), // specular_weight_texture
-        ],
-    })
-}
-
-/// Create the placeholder material bind group for group 1.
-fn create_placeholder_material_bg(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-) -> wgpu::BindGroup {
-    let material = PlaceholderMaterial {
-        base_color:      [1.0, 1.0, 1.0, 1.0],
-        metallic:        0.0,
-        roughness:       0.5,
-        emissive_factor: 0.0,
-        ao:              1.0,
-        emissive_color:  [0.0, 0.0, 0.0],
-        alpha_cutoff:    0.0,
-        workflow:        0,
-        workflow_flags:  0,
-        _pad0:           [0; 2],
-        specular_color:  [0.04, 0.04, 0.04],
-        specular_weight: 1.0,
-        ior:             1.5,
-        dielectric_f0:   0.04,
-        _reserved:       [0.0; 2],
-    };
-    let material_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("GBuffer PlaceholderMaterial"),
-        size: std::mem::size_of::<PlaceholderMaterial>() as u64,
-        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: true,
-    });
-    material_buf
-        .slice(..)
-        .get_mapped_range_mut()
-        .copy_from_slice(bytemuck::bytes_of(&material));
-    material_buf.unmap();
-
-    let (_tex1, white1) = create_white_texture(device);
-    let (_tex2, white2) = create_white_texture(device);
-    let (_tex3, white3) = create_white_texture(device);
-    let (_tex4, white4) = create_white_texture(device);
-    let (_tex5, white5) = create_white_texture(device);
-    let (_tex6, white6) = create_white_texture(device);
-
-    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("GBuffer PlaceholderSampler"),
-        address_mode_u: wgpu::AddressMode::Repeat,
-        address_mode_v: wgpu::AddressMode::Repeat,
-        mag_filter: wgpu::FilterMode::Linear,
-        min_filter: wgpu::FilterMode::Linear,
-        mipmap_filter: wgpu::FilterMode::Nearest,
-        ..Default::default()
-    });
-
-    device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("GBuffer PlaceholderMaterial BG"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: material_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&white1) },
-            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&white2) },
-            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&sampler) },
-            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&white3) },
-            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&white4) },
-            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&white5) },
-            wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&white6) },
         ],
     })
 }

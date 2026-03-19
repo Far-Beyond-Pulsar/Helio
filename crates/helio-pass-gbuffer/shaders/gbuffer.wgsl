@@ -37,22 +37,40 @@ struct Globals {
     _pad2: u32,
 }
 
-struct Material {
-    base_color:      vec4<f32>,
-    metallic:        f32,
-    roughness:       f32,
-    emissive_factor: f32,
-    ao:              f32,
-    emissive_color:  vec3<f32>,
-    alpha_cutoff:    f32,
-    workflow:        u32,
-    workflow_flags:  u32,
-    _pad0:           vec2<u32>,
-    specular_color:  vec3<f32>,
-    specular_weight: f32,
-    ior:             f32,
-    dielectric_f0:   f32,
-    _reserved:       vec2<f32>,
+/// GPU material (96 bytes, matches libhelio::GpuMaterial)
+struct GpuMaterial {
+    base_color:         vec4<f32>,
+    emissive:           vec4<f32>,
+    roughness_metallic: vec4<f32>,
+    tex_base_color:     u32,
+    tex_normal:         u32,
+    tex_roughness:      u32,
+    tex_emissive:       u32,
+    tex_occlusion:      u32,
+    workflow:           u32,
+    flags:              u32,
+    _pad:               u32,
+}
+
+/// Per-material texture metadata (224 bytes, matches helio::GpuMaterialTextures)
+struct MaterialTextureSlot {
+    texture_index: u32,
+    uv_channel:    u32,
+    _pad0:         u32,
+    _pad1:         u32,
+    offset_scale:  vec4<f32>,
+    rotation:      vec4<f32>,
+}
+
+struct MaterialTextureData {
+    base_color:         MaterialTextureSlot,
+    normal:             MaterialTextureSlot,
+    roughness_metallic: MaterialTextureSlot,
+    emissive:           MaterialTextureSlot,
+    occlusion:          MaterialTextureSlot,
+    specular_color:     MaterialTextureSlot,
+    specular_weight:    MaterialTextureSlot,
+    params:             vec4<f32>,  // x=normal_scale, y=occlusion_strength, z=alpha_cutoff
 }
 
 /// Per-instance data (144 bytes). Must match `GpuInstanceData` in libhelio.
@@ -72,14 +90,10 @@ struct GpuInstanceData {
 @group(0) @binding(1) var<uniform>          globals:       Globals;
 @group(0) @binding(2) var<storage, read>    instance_data: array<GpuInstanceData>;
 
-@group(1) @binding(0) var<uniform>          material:          Material;
-@group(1) @binding(1) var                   base_color_texture: texture_2d<f32>;
-@group(1) @binding(2) var                   normal_map:         texture_2d<f32>;
-@group(1) @binding(3) var                   material_sampler:   sampler;
-@group(1) @binding(4) var                   orm_texture:        texture_2d<f32>;
-@group(1) @binding(5) var                   emissive_texture:   texture_2d<f32>;
-@group(1) @binding(6) var                   specular_color_texture: texture_2d<f32>;
-@group(1) @binding(7) var                   specular_weight_texture: texture_2d<f32>;
+@group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
+@group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
+@group(1) @binding(2) var                   scene_textures:     binding_array<texture_2d<f32>, 256>;
+@group(1) @binding(3) var                   scene_samplers:     binding_array<sampler, 256>;
 
 struct Vertex {
     @location(0) position:       vec3<f32>,
@@ -96,6 +110,7 @@ struct VertexOutput {
     @location(2) tex_coords:     vec2<f32>,
     @location(3) world_tangent:  vec3<f32>,
     @location(4) bitangent_sign: f32,
+    @location(5) material_id:    u32,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -129,6 +144,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
     out.bitangent_sign = v.bitangent_sign;
     out.tex_coords     = v.tex_coords;
+    out.material_id    = inst.material_id;
     return out;
 }
 
@@ -141,24 +157,50 @@ struct GBufferOutput {
     @location(3) emissive: vec4<f32>,
 }
 
-const MATERIAL_WORKFLOW_SPECULAR_IOR: u32 = 1u;
+const NO_TEXTURE: u32 = 0xffffffffu;
+const MATERIAL_WORKFLOW_METALLIC: u32 = 0u;
+const MATERIAL_WORKFLOW_SPECULAR: u32 = 1u;
 
-fn resolve_specular_f0(albedo: vec3<f32>, metallic: f32, uv: vec2<f32>) -> vec3<f32> {
-    if material.workflow == MATERIAL_WORKFLOW_SPECULAR_IOR {
-        let specular_color = max(
-            material.specular_color * textureSample(specular_color_texture, material_sampler, uv).rgb,
-            vec3<f32>(0.0),
-        );
-        let specular_weight = max(
-            material.specular_weight * textureSample(specular_weight_texture, material_sampler, uv).a,
-            0.0,
-        );
-        let dielectric_f0 = min(vec3<f32>(material.dielectric_f0) * specular_color, vec3<f32>(1.0));
-        return clamp(dielectric_f0 * specular_weight, vec3<f32>(0.0), vec3<f32>(0.999));
+/// Select UV channel and apply texture transform
+fn select_uv(slot: MaterialTextureSlot, base_uv: vec2<f32>) -> vec2<f32> {
+    // TODO: support uv_channel when we have tex_coords1
+    let scaled = base_uv * slot.offset_scale.zw;
+    let s = slot.rotation.x;
+    let c = slot.rotation.y;
+    let rotated = vec2<f32>(
+        scaled.x * c - scaled.y * s,
+        scaled.x * s + scaled.y * c,
+    );
+    return rotated + slot.offset_scale.xy;
+}
+
+/// Sample texture from bindless array, or return fallback if NO_TEXTURE
+fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<f32>) -> vec4<f32> {
+    if slot.texture_index == NO_TEXTURE {
+        return fallback;
+    }
+    let uv = select_uv(slot, base_uv);
+    return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);
+}
+
+fn resolve_specular_f0(
+    material: GpuMaterial,
+    material_tex: MaterialTextureData,
+    albedo: vec3<f32>,
+    metallic: f32,
+    uv: vec2<f32>,
+) -> vec3<f32> {
+    if material.workflow == MATERIAL_WORKFLOW_SPECULAR {
+        let specular_color = sample_texture(material_tex.specular_color, uv, vec4<f32>(1.0)).rgb;
+        let specular_weight = sample_texture(material_tex.specular_weight, uv, vec4<f32>(1.0)).a;
+        let ior = max(material.roughness_metallic.z, 1.0);
+        let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
+        return material.roughness_metallic.w * specular_weight * specular_color * dielectric_f0;
     }
 
+    // Metallic workflow: F0 = mix(0.04, albedo, metallic)
     return clamp(
-        mix(vec3<f32>(material.dielectric_f0), albedo, metallic),
+        mix(vec3<f32>(0.04), albedo, metallic),
         vec3<f32>(0.0),
         vec3<f32>(0.999),
     );
@@ -166,6 +208,8 @@ fn resolve_specular_f0(albedo: vec3<f32>, metallic: f32, uv: vec2<f32>) -> vec3<
 
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
+    let material = materials[input.material_id];
+    let material_tex = material_textures[input.material_id];
     let uv = input.tex_coords;
 
     // DEBUG MODE 1: Show UVs as colors (R=U, G=V, helps verify UV layout)
@@ -178,7 +222,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         );
     }
 
-    let tex_sample = textureSample(base_color_texture, material_sampler, uv);
+    let tex_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
 
     // DEBUG MODE 2: Show texture sample directly (bypass material multiply AND lighting)
     if globals.debug_mode == 2u {
@@ -191,13 +235,14 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     }
 
     // Common for modes 0 and 3
-    let albedo     = material.base_color.rgb * tex_sample.rgb;
-    let alpha      = material.base_color.a  * tex_sample.a;
+    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
+    let albedo = material.base_color * base_sample;
+    let alpha = albedo.a;
 
     if alpha <= 0.001 { discard; }
-    if alpha < material.alpha_cutoff { discard; }
+    if alpha < material_tex.params.z { discard; }  // alpha_cutoff in params.z
 
-    let N_geom  = normalize(input.world_normal);
+    let N_geom = normalize(input.world_normal);
 
     // DEBUG MODE 3: Use geometry normal only (skip normal mapping)
     var N: vec3<f32>;
@@ -214,25 +259,32 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         // This replaces the previous screen-space derivative approach which
         // produced checkerboard artifacts at every UV island boundary because
         // dpdx/dpdy are undefined at triangle edges and discontinuous across seams.
-        let T       = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
-        let B       = cross(N_geom, T) * input.bitangent_sign;
-        let norm_ts = textureSample(normal_map, material_sampler, uv).rgb * 2.0 - 1.0;
-        N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
+        if material_tex.normal.texture_index != NO_TEXTURE {
+            let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
+            let B = cross(N_geom, T) * input.bitangent_sign;
+            var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
+            norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);  // normal_scale in params.x
+            N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
+        } else {
+            N = N_geom;
+        }
     }
 
-    let orm       = textureSample(orm_texture, material_sampler, uv).rgb;
-    let ao        = material.ao       * orm.r;
-    let roughness = clamp(material.roughness * orm.g, 0.04, 1.0);
-    let metallic  = clamp(material.metallic  * orm.b, 0.0,  1.0);
-    let specular_f0 = resolve_specular_f0(albedo, metallic, uv);
+    let orm_sample = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
+    let occlusion_sample = sample_texture(material_tex.occlusion, uv, vec4<f32>(1.0));
+    let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
 
-    let emissive_tex = textureSample(emissive_texture, material_sampler, uv).rgb;
-    let emissive     = material.emissive_color * emissive_tex * material.emissive_factor;
+    let ao = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;  // occlusion_strength in params.y
+    let roughness = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
+    let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
+    let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
+
+    let emissive = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
 
     var out: GBufferOutput;
-    out.albedo   = vec4<f32>(albedo,         alpha);
-    out.normal   = vec4<f32>(N,              specular_f0.r);
-    out.orm      = vec4<f32>(ao, roughness, metallic, specular_f0.g);
-    out.emissive = vec4<f32>(emissive,       specular_f0.b);
+    out.albedo = vec4<f32>(albedo.rgb, alpha);
+    out.normal = vec4<f32>(N, specular_f0.r);
+    out.orm = vec4<f32>(ao, roughness, metallic, specular_f0.g);
+    out.emissive = vec4<f32>(emissive, specular_f0.b);
     return out;
 }

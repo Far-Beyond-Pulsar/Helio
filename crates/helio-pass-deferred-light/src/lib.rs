@@ -283,7 +283,7 @@ impl RenderPass for DeferredLightPass {
             rc_world_min: [0.0; 4],
             rc_world_max: [0.0; 4],
             csm_splits: [5.0, 20.0, 60.0, 200.0],
-            debug_mode: 0,
+            debug_mode: 0, // 0 = full PBR lighting
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
