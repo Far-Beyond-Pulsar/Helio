@@ -36,7 +36,39 @@ fn base_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-fn load_ship() -> Result<(ConvertedScene, f32), AssetError> {
+#[derive(Clone, Copy, Debug)]
+struct ShipBounds {
+    center: Vec3,
+    radius: f32,
+}
+
+impl ShipBounds {
+    fn from_scene(scene: &ConvertedScene) -> Option<Self> {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        let mut found = false;
+        for mesh in &scene.meshes {
+            for vertex in &mesh.vertices {
+                let position = Vec3::from_array(vertex.position);
+                min = min.min(position);
+                max = max.max(position);
+                found = true;
+            }
+        }
+
+        if !found {
+            return None;
+        }
+
+        let extents = (max - min).max(Vec3::splat(0.1));
+        Some(Self {
+            center: (min + max) * 0.5,
+            radius: (extents.length() * 0.5).max(1.0),
+        })
+    }
+}
+
+fn load_ship() -> Result<(ConvertedScene, ShipBounds), AssetError> {
     let dir = base_dir();
     let scene = load_scene_bytes_with_config(
         EMBEDDED_SCENE_BYTES,
@@ -44,7 +76,9 @@ fn load_ship() -> Result<(ConvertedScene, f32), AssetError> {
         Some(dir.as_path()),
         LoadConfig::default().with_uv_flip(false),
     )?;
-    Ok((scene, 2.0))
+    let bounds = ShipBounds::from_scene(&scene)
+        .ok_or_else(|| AssetError::InvalidData("embedded ship scene did not contain any vertices".to_string()))?;
+    Ok((scene, bounds))
 }
 
 fn lcg(seed: &mut u64) -> f32 {
@@ -91,23 +125,28 @@ fn build_asteroid_field(renderer: &mut Renderer, field_radius: f32, min_size: f3
     }
 }
 
-fn upload_ship_meshes(renderer: &mut Renderer, scene: &ConvertedScene, ship_radius: f32) -> Vec<helio::ObjectId> {
+fn upload_ship_meshes(renderer: &mut Renderer, scene: &ConvertedScene, ship_bounds: ShipBounds) -> Vec<helio::ObjectId> {
     if scene.meshes.is_empty() {
         let mat = renderer.insert_material(make_material([0.25, 0.40, 0.70, 1.0], 0.25, 0.85, [0.0, 0.0, 0.0], 0.0));
-        let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], ship_radius));
-        return vec![v3_demo_common::insert_object(renderer, mesh, mat, Mat4::IDENTITY, ship_radius).expect("fallback object")];
+        let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], ship_bounds.radius));
+        return vec![v3_demo_common::insert_object(renderer, mesh, mat, Mat4::IDENTITY, ship_bounds.radius).expect("fallback object")];
     }
 
     let material_ids = upload_scene_materials(renderer, scene).expect("upload ship materials");
     scene.meshes
         .iter()
         .map(|mesh| {
+            let mut vertices = mesh.vertices.clone();
+            for vertex in &mut vertices {
+                let centered = Vec3::from_array(vertex.position) - ship_bounds.center;
+                vertex.position = centered.to_array();
+            }
             let mesh_id = renderer.insert_mesh(helio::MeshUpload {
-                vertices: mesh.vertices.clone(),
+                vertices,
                 indices: mesh.indices.clone(),
             });
             let material = mesh.material_index.and_then(|i| material_ids.get(i).copied()).unwrap_or(material_ids[0]);
-            v3_demo_common::insert_object(renderer, mesh_id, material, Mat4::IDENTITY, ship_radius).expect("ship object")
+            v3_demo_common::insert_object(renderer, mesh_id, material, Mat4::IDENTITY, ship_bounds.radius).expect("ship object")
         })
         .collect()
 }
@@ -262,7 +301,7 @@ impl ApplicationHandler for App {
         renderer.insert_light(directional_light([0.72, 0.18, 0.68], [0.50, 0.70, 1.0], 0.65));
 
         let (ship_radius, ship_ids) = match load_ship() {
-            Ok((scene, radius)) => (radius, upload_ship_meshes(&mut renderer, &scene, radius)),
+            Ok((scene, bounds)) => (bounds.radius, upload_ship_meshes(&mut renderer, &scene, bounds)),
             Err(error) => {
                 log::warn!("failed to load embedded ship: {}. using fallback cube.", error);
                 let material = renderer.insert_material(make_material([0.25, 0.40, 0.70, 1.0], 0.25, 0.85, [0.0, 0.0, 0.0], 0.0));
