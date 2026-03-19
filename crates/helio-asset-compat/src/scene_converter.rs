@@ -6,7 +6,7 @@ use helio::{MaterialAsset, MaterialTextureRef, MaterialTextures, PackedVertex, T
 use solid_rs::Scene;
 
 use crate::material_converter::{
-    convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef,
+    convert_material, ConvertedMaterial, ConvertedTextureRef,
 };
 use crate::texture_loader::{load_texture_upload, TextureSemantic};
 use crate::{camera_converter, light_converter, mesh_converter, CameraData, Result};
@@ -102,9 +102,13 @@ pub fn convert_scene(
     let lights = scene
         .lights
         .iter()
-        .map(light_converter::convert_light)
-        .collect::<Result<Vec<_>>>()?;
-    let cameras = camera_converter::extract_camera_data(scene);
+        .filter_map(light_converter::convert_light)
+        .collect::<Vec<_>>();
+    let cameras = scene
+        .cameras
+        .iter()
+        .map(camera_converter::extract_camera_data)
+        .collect::<Vec<_>>();
 
     Ok(ConvertedScene {
         name: scene.name.clone(),
