@@ -110,6 +110,7 @@ struct SparseSlot<T> {
 pub struct SparsePool<T, H> {
     slots: Vec<SparseSlot<T>>,
     free_list: Vec<u32>,
+    live_count: usize,
     marker: PhantomData<H>,
 }
 
@@ -118,6 +119,7 @@ impl<T, H: Handle> SparsePool<T, H> {
         Self {
             slots: Vec::new(),
             free_list: Vec::new(),
+            live_count: 0,
             marker: PhantomData,
         }
     }
@@ -126,6 +128,7 @@ impl<T, H: Handle> SparsePool<T, H> {
         if let Some(slot) = self.free_list.pop() {
             let entry = &mut self.slots[slot as usize];
             entry.value = Some(value);
+            self.live_count += 1;
             return (
                 H::from_parts(slot, entry.generation),
                 slot as usize,
@@ -138,6 +141,7 @@ impl<T, H: Handle> SparsePool<T, H> {
             generation: 1,
             value: Some(value),
         });
+        self.live_count += 1;
         (H::from_parts(slot, 1), slot as usize, true)
     }
 
@@ -167,6 +171,19 @@ impl<T, H: Handle> SparsePool<T, H> {
         let value = slot.value.take()?;
         slot.generation = slot.generation.wrapping_add(1).max(1);
         self.free_list.push(slot_index as u32);
+        self.live_count = self.live_count.saturating_sub(1);
         Some((slot_index, value))
+    }
+
+    pub fn live_len(&self) -> usize {
+        self.live_count
+    }
+
+    pub fn slot_len(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn has_free_slot(&self) -> bool {
+        !self.free_list.is_empty()
     }
 }
