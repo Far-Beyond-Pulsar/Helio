@@ -76,7 +76,7 @@ name = "ship_flight"
 path = "ship_flight.rs"
 
 [dependencies]
-helio-render-v2 = { path = "../helio-render-v2" }
+helio = { path = "../helio" }
 helio-asset-compat = { path = "../helio-asset-compat" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
@@ -84,5 +84,5 @@ glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
-wgpu = {git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8"}
-pollster = "0.3"
+wgpu = "23"
+pollster = "0.4"
