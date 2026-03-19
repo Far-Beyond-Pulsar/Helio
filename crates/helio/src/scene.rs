@@ -302,11 +302,20 @@ impl Scene {
         let pushed_aabb = self.gpu_scene.aabbs.push(record.aabb);
         let pushed_draw = self.gpu_scene.draw_calls.push(record.draw);
         self.gpu_scene.indirect.push(DrawIndexedIndirectArgs::culled(
-            record.draw.index_count,
-            record.draw.first_index,
-            record.draw.vertex_offset,
-            dense_index as u32,
+            0,
+            0,
+            0,
+            0,
         ));
+        let visible = DrawIndexedIndirectArgs {
+            index_count: record.draw.index_count,
+            instance_count: 1,
+            first_index: record.draw.first_index,
+            base_vertex: record.draw.vertex_offset,
+            first_instance: dense_index as u32,
+        };
+        let updated_indirect = self.gpu_scene.indirect.update(dense_index, visible);
+        debug_assert!(updated_indirect);
         self.gpu_scene.visibility.push(1);
 
         debug_assert_eq!(pushed_instance, dense_index);
@@ -390,12 +399,13 @@ impl Scene {
             let updated_draw = self.gpu_scene.draw_calls.update(moved_index, moved_record.draw);
             let updated_indirect = self.gpu_scene.indirect.update(
                 moved_index,
-                DrawIndexedIndirectArgs::culled(
-                    moved_record.draw.index_count,
-                    moved_record.draw.first_index,
-                    moved_record.draw.vertex_offset,
-                    moved_index as u32,
-                ),
+                DrawIndexedIndirectArgs {
+                    index_count: moved_record.draw.index_count,
+                    instance_count: 1,
+                    first_index: moved_record.draw.first_index,
+                    base_vertex: moved_record.draw.vertex_offset,
+                    first_instance: moved_index as u32,
+                },
             );
             debug_assert!(updated_draw && updated_indirect);
         }
