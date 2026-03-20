@@ -2,17 +2,7 @@
 //!
 //! A dramatic desert canyon at golden hour.  The sun is low on the horizon
 //! (controllable with Q/E), casting long shadows across layered rock terraces.
-//! Volumetric clouds drift overhead.  Three campfire-orange point lights sit
-//! in a valley camp; one cool-blue moonlight-style fill light provides
-//! contrast in shaded alcoves.  The RC global-illumination system bounces the
-//! warm sun colour into the rock faces.
-//!
-//! Scene geometry:
-//!   - Large flat valley floor
-//!   - Four canyon wall slabs at varying heights and depths
-//!   - Three rock terrace shelves stepping up each side
-//!   - A mesa/butte plateau in the background
-//!   - Small camp: three tent prisms (rect3d) + a central firepit cube
+//! Three campfire-orange point lights sit in a valley camp.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
@@ -21,23 +11,10 @@
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
+mod v3_demo_common;
 
-
-mod demo_portal;
-
-use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId,
-    SkyAtmosphere, VolumetricClouds, Skylight,
-};
-
-
-use helio_render_v2::features::{
-    FeatureRegistry,
-    LightingFeature,
-    BloomFeature, ShadowsFeature,
-    BillboardsFeature, BillboardInstance,
-    RadianceCascadesFeature,
-};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig};
+use v3_demo_common::{box_mesh, cube_mesh, directional_light, make_material, plane_mesh, point_light};
 
 
 use winit::{
@@ -50,62 +27,7 @@ use winit::{
 
 
 use std::collections::HashSet;
-
-
 use std::sync::Arc;
-
-fn load_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-#[allow(dead_code)]
-fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../probe.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-const RC_WORLD_MIN: [f32; 3] = [-40.0, -0.5, -60.0];
-const RC_WORLD_MAX: [f32; 3] = [40.0, 30.0, 40.0];
-
-fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
-    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
-    const COLORS: [[f32; 4]; 4] = [
-        [0.0, 1.0, 1.0, 0.85],
-        [0.0, 1.0, 0.0, 0.80],
-        [1.0, 1.0, 0.0, 0.75],
-        [1.0, 0.35, 0.0, 0.70],
-    ];
-    // screen_scale=true: sizes are angular (multiplied by distance), giving constant apparent size
-    const SIZES: [[f32; 2]; 4] = [
-        [0.035, 0.035],  // cascade 0 — finest (4096 probes) — tiny dots
-        [0.075, 0.075],  // cascade 1
-        [0.140, 0.140],  // cascade 2
-        [0.260, 0.260],  // cascade 3 — coarsest (8 probes) — large markers
-    ];
-    let mut out = Vec::new();
-    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
-        for i in 0..dim {
-            for j in 0..dim {
-                for k in 0..dim {
-                    let x = world_min[0] + (i as f32 + 0.5) / dim as f32 * (world_max[0] - world_min[0]);
-                    let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
-                    let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
-                    out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c])
-                        .with_screen_scale(true));
-                }
-            }
-        }
-    }
-    out
-}
 
 fn main() {
     env_logger::init();
@@ -123,29 +45,16 @@ struct AppState {
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
     last_frame: std::time::Instant,
+    start_time: std::time::Instant,
 
-    // Terrain
-    valley_floor: GpuMesh,
-    // Canyon walls – left side
-    wall_l1: GpuMesh,
-    wall_l2: GpuMesh,
-    wall_l3: GpuMesh,
-    // Canyon walls – right side
-    wall_r1: GpuMesh,
-    wall_r2: GpuMesh,
-    wall_r3: GpuMesh,
-    // Terraces stepping up the walls
-    terrace_l1: GpuMesh,
-    terrace_l2: GpuMesh,
-    terrace_r1: GpuMesh,
-    terrace_r2: GpuMesh,
-    // Background mesa
-    mesa: GpuMesh,
-    // Camp
-    tent_a: GpuMesh,
-    tent_b: GpuMesh,
-    tent_c: GpuMesh,
-    firepit: GpuMesh,
+    valley_floor: MeshId,
+    wall_l1: MeshId, wall_l2: MeshId, wall_l3: MeshId,
+    wall_r1: MeshId, wall_r2: MeshId, wall_r3: MeshId,
+    terrace_l1: MeshId, terrace_l2: MeshId,
+    terrace_r1: MeshId, terrace_r2: MeshId,
+    mesa: MeshId,
+    tent_a: MeshId, tent_b: MeshId, tent_c: MeshId,
+    firepit: MeshId,
 
     cam_pos:        glam::Vec3,
     cam_yaw:        f32,
@@ -155,17 +64,10 @@ struct AppState {
     mouse_delta:    (f32, f32),
     sun_angle:      f32,
 
-    // Scene state
     sun_light_id:   LightId,
     fire_light_id:  LightId,
-    ember_a_id:     LightId,
-    ember_b_id:     LightId,
-    moon_light_id:  LightId,
-    billboard_ids:  Vec<BillboardId>,
-
-    probe_vis: bool,
-    sprite_w: u32,
-    sprite_h: u32,
+    _moon_light_id: LightId,
+    _ember_ids:     Vec<LightId>,
 }
 
 impl App {
@@ -196,19 +98,14 @@ impl ApplicationHandler for App {
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Device"),
-            required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-            required_limits: wgpu::Limits::default()
-                .using_minimum_supported_acceleration_structure_values(),
-            memory_hints: wgpu::MemoryHints::default(),
-            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
-            trace: wgpu::Trace::Off,
-        })).expect("device");
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }, None)).expect("device");
 
-        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+        device.on_uncaptured_error(Box::new(|e| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
-        let info = adapter.get_info();
-        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
 
@@ -223,102 +120,64 @@ impl ApplicationHandler for App {
             view_formats: vec![], desired_maximum_frame_latency: 2,
         });
 
-        let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        let features = FeatureRegistry::builder()
-            .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.4).with_threshold(1.1))
-            .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000))
-            .with_feature(
-                RadianceCascadesFeature::new()
-                    .with_world_bounds([-40.0, -0.5, -60.0], [40.0, 30.0, 40.0]),
-            )
-            .build();
-
         let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
-            RendererConfig::new(size.width, size.height, format, features),
-        ).expect("renderer");
+            RendererConfig::new(size.width, size.height, format),
+        );
 
-        // Valley floor
-        let valley_floor = renderer.create_mesh_plane([0.0, 0.0, 0.0], 35.0);
+        let mat = renderer.insert_material(make_material([0.72, 0.58, 0.42, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0));
+        let fire_mat = renderer.insert_material(make_material([0.3, 0.1, 0.05, 1.0], 0.9, 0.0, [1.0, 0.4, 0.05], 4.0));
 
-        // Canyon walls – left side, stairstepping upward away from center
-        let wall_l1 = renderer.create_mesh_rect3d([-12.0,  4.0, 0.0], [3.0,  4.0, 30.0]);
-        let wall_l2 = renderer.create_mesh_rect3d([-18.0,  8.0, 0.0], [3.0,  8.0, 25.0]);
-        let wall_l3 = renderer.create_mesh_rect3d([-24.0, 14.0, 0.0], [3.0, 14.0, 20.0]);
-        // Canyon walls – right side
-        let wall_r1 = renderer.create_mesh_rect3d([ 12.0,  4.0, 0.0], [3.0,  4.0, 30.0]);
-        let wall_r2 = renderer.create_mesh_rect3d([ 18.0,  8.0, 0.0], [3.0,  8.0, 25.0]);
-        let wall_r3 = renderer.create_mesh_rect3d([ 24.0, 14.0, 0.0], [3.0, 14.0, 20.0]);
-        // Terraces (horizontal slabs on top of wall tiers)
-        let terrace_l1 = renderer.create_mesh_rect3d([-13.5, 8.1, -2.0],  [1.5, 0.2, 12.0]);
-        let terrace_l2 = renderer.create_mesh_rect3d([-19.5, 16.1, -4.0], [1.5, 0.2,  8.0]);
-        let terrace_r1 = renderer.create_mesh_rect3d([ 13.5, 8.1, -2.0],  [1.5, 0.2, 12.0]);
-        let terrace_r2 = renderer.create_mesh_rect3d([ 19.5, 16.1, -4.0], [1.5, 0.2,  8.0]);
-        // Background mesa
-        let mesa = renderer.create_mesh_rect3d([3.0, 12.0, -38.0], [10.0, 12.0, 8.0]);
-        // Camp tents
-        let tent_a = renderer.create_mesh_rect3d([-2.5, 0.6, 8.0],  [0.8, 0.6, 1.2]);
-        let tent_b = renderer.create_mesh_rect3d([ 0.0, 0.7, 7.5],  [0.9, 0.7, 1.3]);
-        let tent_c = renderer.create_mesh_rect3d([ 2.8, 0.55, 8.5], [0.7, 0.55, 1.1]);
-        let firepit = renderer.create_mesh_cube( [0.0, 0.15, 9.5], 0.2);
-        demo_portal::enable_live_dashboard(&mut renderer);
+        let valley_floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 35.0));
+        let wall_l1 = renderer.insert_mesh(box_mesh([-12.0,  4.0, 0.0], [3.0,  4.0, 30.0]));
+        let wall_l2 = renderer.insert_mesh(box_mesh([-18.0,  8.0, 0.0], [3.0,  8.0, 25.0]));
+        let wall_l3 = renderer.insert_mesh(box_mesh([-24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
+        let wall_r1 = renderer.insert_mesh(box_mesh([ 12.0,  4.0, 0.0], [3.0,  4.0, 30.0]));
+        let wall_r2 = renderer.insert_mesh(box_mesh([ 18.0,  8.0, 0.0], [3.0,  8.0, 25.0]));
+        let wall_r3 = renderer.insert_mesh(box_mesh([ 24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
+        let terrace_l1 = renderer.insert_mesh(box_mesh([-13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
+        let terrace_l2 = renderer.insert_mesh(box_mesh([-19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
+        let terrace_r1 = renderer.insert_mesh(box_mesh([ 13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
+        let terrace_r2 = renderer.insert_mesh(box_mesh([ 19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
+        let mesa    = renderer.insert_mesh(box_mesh([3.0, 12.0, -38.0], [10.0, 12.0, 8.0]));
+        let tent_a  = renderer.insert_mesh(box_mesh([-2.5, 0.6, 8.0], [0.8, 0.6, 1.2]));
+        let tent_b  = renderer.insert_mesh(box_mesh([ 0.0, 0.7, 7.5], [0.9, 0.7, 1.3]));
+        let tent_c  = renderer.insert_mesh(box_mesh([ 2.8, 0.55, 8.5], [0.7, 0.55, 1.1]));
+        let firepit = renderer.insert_mesh(cube_mesh([0.0, 0.15, 9.5], 0.2));
 
-        renderer.add_object(&valley_floor, None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_l1,      None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_l2,      None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_l3,      None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_r1,      None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_r2,      None, glam::Mat4::IDENTITY);
-        renderer.add_object(&wall_r3,      None, glam::Mat4::IDENTITY);
-        renderer.add_object(&terrace_l1,   None, glam::Mat4::IDENTITY);
-        renderer.add_object(&terrace_l2,   None, glam::Mat4::IDENTITY);
-        renderer.add_object(&terrace_r1,   None, glam::Mat4::IDENTITY);
-        renderer.add_object(&terrace_r2,   None, glam::Mat4::IDENTITY);
-        renderer.add_object(&mesa,         None, glam::Mat4::IDENTITY);
-        renderer.add_object(&tent_a,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&tent_b,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&tent_c,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&firepit,      None, glam::Mat4::IDENTITY);
+        let _ = v3_demo_common::insert_object(&mut renderer, valley_floor, mat,      glam::Mat4::IDENTITY, 35.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, wall_l1,     mat,      glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, wall_l2,     mat,      glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, wall_l3,     mat,      glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, wall_r1,     mat,      glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, wall_r2,     mat,      glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, wall_r3,     mat,      glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, terrace_l1,  mat,      glam::Mat4::IDENTITY, 10.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, terrace_l2,  mat,      glam::Mat4::IDENTITY, 8.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, terrace_r1,  mat,      glam::Mat4::IDENTITY, 10.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, terrace_r2,  mat,      glam::Mat4::IDENTITY, 8.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, mesa,        mat,      glam::Mat4::IDENTITY, 14.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, tent_a,      mat,      glam::Mat4::IDENTITY, 1.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, tent_b,      mat,      glam::Mat4::IDENTITY, 1.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, tent_c,      mat,      glam::Mat4::IDENTITY, 1.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, firepit,     fire_mat, glam::Mat4::IDENTITY, 0.3);
 
-        // Register initial lights (sun & moon updated per-frame; fire has flicker)
         let fire_pos = [0.0f32, 0.5, 9.5];
-        let ember_a  = [-0.4f32, 0.4, 9.2];
-        let ember_b  = [ 0.4f32, 0.4, 9.8];
-        let moon_dir_v = glam::Vec3::new(0.4, -0.7, 0.3).normalize();
-        let initial_sun_dir: [f32; 3] = [-0.0, -1.0, -0.5];
-        let sun_light_id  = renderer.add_light(SceneLight::directional(initial_sun_dir, [1.0, 0.9, 0.7], 0.005));
-        let fire_light_id = renderer.add_light(SceneLight::point(fire_pos, [1.0, 0.45, 0.1], 5.0, 12.0));
-        let ember_a_id    = renderer.add_light(SceneLight::point(ember_a,  [1.0, 0.35, 0.05], 1.5, 5.0));
-        let ember_b_id    = renderer.add_light(SceneLight::point(ember_b,  [1.0, 0.35, 0.05], 1.5, 5.0));
-        let moon_light_id = renderer.add_light(SceneLight::directional(
-            [moon_dir_v.x, moon_dir_v.y, moon_dir_v.z], [0.5, 0.65, 1.0], 0.05,
+        let moon_dir = glam::Vec3::new(0.4, -0.7, 0.3).normalize();
+        let sun_light_id  = renderer.insert_light(directional_light([-0.0, -1.0, -0.5], [1.0, 0.9, 0.7], 0.005));
+        let fire_light_id = renderer.insert_light(point_light(fire_pos, [1.0, 0.45, 0.1], 5.0, 12.0));
+        let ember_a_id    = renderer.insert_light(point_light([-0.4, 0.4, 9.2], [1.0, 0.35, 0.05], 1.5, 5.0));
+        let ember_b_id    = renderer.insert_light(point_light([ 0.4, 0.4, 9.8], [1.0, 0.35, 0.05], 1.5, 5.0));
+        let moon_light_id = renderer.insert_light(directional_light(
+            [moon_dir.x, moon_dir.y, moon_dir.z], [0.5, 0.65, 1.0], 0.05,
         ));
-        renderer.set_sky_atmosphere(Some(
-            SkyAtmosphere::new()
-                .with_sun_intensity(20.0)
-                .with_exposure(3.5)
-                .with_mie_g(0.78)
-                .with_clouds(
-                    VolumetricClouds::new()
-                        .with_coverage(0.20)
-                        .with_density(0.5)
-                        .with_layer(600.0, 1600.0)
-                        .with_wind([0.7, 0.3], 0.05),
-                ),
-        ));
-        renderer.set_skylight(Some(
-            Skylight::new().with_intensity(0.10).with_tint([1.0, 0.92, 0.82]),
-        ));
-
-        // Register fire billboard marker
-        let mut billboard_ids = Vec::new();
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(fire_pos, [0.5, 0.5]).with_color([1.0, 0.45, 0.1, 1.0])));
+        renderer.set_ambient([0.6, 0.55, 0.45], 0.08);
+        renderer.set_clear_color([0.45, 0.6, 0.85, 1.0]);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
             last_frame: std::time::Instant::now(),
+            start_time: std::time::Instant::now(),
             valley_floor,
             wall_l1, wall_l2, wall_l3,
             wall_r1, wall_r2, wall_r3,
@@ -328,16 +187,11 @@ impl ApplicationHandler for App {
             cam_pos: glam::Vec3::new(0.0, 4.0, 25.0),
             cam_yaw: 0.0, cam_pitch: -0.15,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
-            sun_angle: 0.45, // golden-hour low sun
+            sun_angle: 0.45,
             sun_light_id,
             fire_light_id,
-            ember_a_id,
-            ember_b_id,
-            moon_light_id,
-            billboard_ids,
-            probe_vis: false,
-            sprite_w,
-            sprite_h,
+            _moon_light_id: moon_light_id,
+            _ember_ids: vec![ember_a_id, ember_b_id],
         });
     }
 
@@ -356,50 +210,10 @@ impl ApplicationHandler for App {
                 } else { event_loop.exit(); }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                physical_key: PhysicalKey::Code(KeyCode::Digit3), ..
-            }, .. } => {
-                state.probe_vis = !state.probe_vis;
-                let raw: &[u8] = if state.probe_vis {
-                    include_bytes!("../../probe.png")
-                } else {
-                    include_bytes!("../../spotlight.png")
-                };
-                let img = image::load_from_memory(raw)
-                    .unwrap_or_else(|_| image::DynamicImage::new_rgba8(state.sprite_w, state.sprite_h))
-                    .resize_exact(state.sprite_w, state.sprite_h, image::imageops::FilterType::Triangle)
-                    .into_rgba8();
-                if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
-                    bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
-                }
-                // Remove existing billboards and register new set
-                for id in state.billboard_ids.drain(..) {
-                    state.renderer.remove_billboard(id);
-                }
-                if state.probe_vis {
-                    for inst in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                        state.billboard_ids.push(state.renderer.add_billboard(inst));
-                    }
-                } else {
-                    let fire_pos = [0.0f32, 0.5, 9.5];
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(fire_pos, [0.5, 0.5]).with_color([1.0, 0.45, 0.1, 1.0])));
-                }
-            }
-            WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit4), ..
-            }, .. } => {
-                let _ = state.renderer.start_live_portal_default();
-            }
-            WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
                 match ks {
-                    ElementState::Pressed  => {
-                        if key == KeyCode::F3 {
-                            state.renderer.debug_viz_mut().enabled ^= true;
-                        }
-                        state.keys.insert(key);
-                    }
+                    ElementState::Pressed  => { state.keys.insert(key); }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }
@@ -419,7 +233,7 @@ impl ApplicationHandler for App {
                     alpha_mode: wgpu::CompositeAlphaMode::Auto,
                     view_formats: vec![], desired_maximum_frame_latency: 2,
                 });
-                state.renderer.resize(s.width, s.height);
+                state.renderer.set_render_size(s.width, s.height);
             }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
@@ -474,11 +288,11 @@ impl AppState {
 
         let size   = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let time   = self.renderer.frame_count() as f32 * 0.016;
+        let time   = self.start_time.elapsed().as_secs_f32();
 
-        let camera = Camera::perspective(
+        let camera = Camera::perspective_look_at(
             self.cam_pos, self.cam_pos + forward, glam::Vec3::Y,
-            std::f32::consts::FRAC_PI_4, aspect, 0.1, 1000.0, time,
+            std::f32::consts::FRAC_PI_4, aspect, 0.1, 1000.0,
         );
 
         // Sun direction
@@ -490,8 +304,7 @@ impl AppState {
         let light_dir = [-sun_dir.x, -sun_dir.y, -sun_dir.z];
         let sun_elev  = sun_dir.y.clamp(-1.0, 1.0);
         let sun_lux   = (sun_elev * 3.0).clamp(0.0, 1.0);
-        // Warm golden-hour tint when sun is low
-        let warmth = (1.0 - sun_elev).clamp(0.0, 1.0);
+        let warmth    = (1.0 - sun_elev).clamp(0.0, 1.0);
         let sun_color = [
             1.0_f32.min(1.0 + warmth * 0.5),
             (0.75 + sun_elev * 0.25).clamp(0.0, 1.0),
@@ -499,14 +312,11 @@ impl AppState {
         ];
 
         // Campfire flicker
-        let flicker = 1.0 + (time * 13.1).sin() * 0.08 + (time * 7.3).cos() * 0.05;
+        let flicker  = 1.0 + (time * 13.1).sin() * 0.08 + (time * 7.3).cos() * 0.05;
         let fire_pos = [0.0f32, 0.5, 9.5];
 
-        // Update dynamic lights
-        self.renderer.update_light(self.sun_light_id, SceneLight::directional(light_dir, sun_color, (sun_lux * 0.4).max(0.005)));
-        self.renderer.update_light(self.fire_light_id, SceneLight::point(fire_pos, [1.0, 0.45, 0.1], 5.0 * flicker, 12.0));
-
-        // Scene state is persistent — no per-frame setup needed.
+        let _ = self.renderer.update_light(self.sun_light_id,  directional_light(light_dir, sun_color, (sun_lux * 0.4).max(0.005)));
+        let _ = self.renderer.update_light(self.fire_light_id, point_light(fire_pos, [1.0, 0.45, 0.1], 5.0 * flicker, 12.0));
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
@@ -514,7 +324,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        if let Err(e) = self.renderer.render(&camera, &view, dt) {
+        if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
         output.present();
