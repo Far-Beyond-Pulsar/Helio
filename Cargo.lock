@@ -1043,6 +1043,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-sdf"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "wgpu",
+]
+
+[[package]]
 name = "helio-pass-shadow"
 version = "0.1.0"
 dependencies = [
