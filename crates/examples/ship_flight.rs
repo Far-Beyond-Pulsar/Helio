@@ -22,7 +22,7 @@ use winit::{
 };
 
 const EMBEDDED_SCENE_BYTES: &[u8] = include_bytes!("../../test.fbx");
-const ASTEROID_COUNT: usize = 18000;
+const ASTEROID_COUNT: usize = 50000;
 const LOCAL_ASTEROID_COUNT: usize = 620;
 const ASTEROID_FIELD_SCALE: f32 = 500.0;
 const ASTEROID_FIELD_MIN_RADIUS: f32 = 10000.0;
