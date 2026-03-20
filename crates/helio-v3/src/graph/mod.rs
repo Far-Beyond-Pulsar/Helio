@@ -49,4 +49,6 @@ mod executor;
 mod resource;
 
 pub use executor::RenderGraph;
-pub use resource::{ResourceBuilder, ResourceHandle};
+pub use resource::{
+    ResourceAccess, ResourceBuilder, ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize,
+};

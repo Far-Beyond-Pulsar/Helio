@@ -2,11 +2,19 @@ use std::sync::Arc;
 
 use arrayvec::ArrayVec;
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
+use helio_pass_billboard::BillboardPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_depth_prepass::DepthPrepassPass;
+use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_simple_cube::SimpleCubePass;
+use helio_pass_sky_lut::SkyLutPass;
+use helio_pass_transparent::TransparentPass;
+// TODO: Add these passes once cross-reference issues are resolved:
+// - SkyPass (needs sky_lut_view from SkyLutPass)
+// - SsaoPass (needs gbuffer views + depth view)
+// - SmaaPass, TaaPass (for higher-quality AA)
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
 use crate::material::{MaterialAsset, MAX_TEXTURES, TextureUpload};
 use crate::mesh::{MeshBuffers, MeshUpload};
@@ -283,24 +291,53 @@ fn build_default_graph(
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);
+
+    let camera_buf = gpu_scene.camera.buffer();
+    let _instances_buf = gpu_scene.instances.buffer();
+
+    // 1. ShadowPass — generates shadow atlas for all shadow-casting lights
     graph.add_pass(Box::new(ShadowPass::new(device)));
+
+    // 2. SkyLutPass — generates atmospheric sky lookup texture
+    // Publishes "sky_lut" resource for SkyPass to consume
+    graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
+
+    // 3. DepthPrepassPass — early depth pass for better GPU culling
     graph.add_pass(Box::new(DepthPrepassPass::new(
         device,
         wgpu::TextureFormat::Depth32Float,
     )));
+
+    // 4. GBufferPass — fills G-buffer (albedo, normal, ORM, emissive)
     graph.add_pass(Box::new(GBufferPass::new(
         device,
         config.width,
         config.height,
     )));
+
+    // TODO: Add SsaoPass — needs resource declaration support
+
+    // 5. DeferredLightPass — lighting pass (reads G-buffer, shadow maps)
+    // With automatic resource management, this will write to "pre_aa" if declared,
+    // or directly to surface if no post-processing passes are present
     graph.add_pass(Box::new(DeferredLightPass::new(
         device,
         queue,
-        gpu_scene.camera.buffer(),
+        camera_buf,
         config.width,
         config.height,
         config.surface_format,
     )));
+
+    // TODO: Enable these passes once they declare resources properly:
+    // - SkyPass (reads "sky_lut", writes to scene color)
+    // - TransparentPass (reads scene depth, writes to scene color with blending)
+    // - BillboardPass (reads scene depth, writes to scene color)
+    // - FxaaPass (reads "pre_aa", writes to final surface)
+
+    // Initialize transient textures from pass declarations
+    graph.set_render_size(config.width, config.height);
+
     graph
 }
 
