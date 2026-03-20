@@ -629,6 +629,7 @@ dependencies = [
  "glam 0.29.3",
  "helio",
  "helio-asset-compat",
+ "helio-pass-sdf",
  "image",
  "log",
  "pollster",
@@ -1047,7 +1048,10 @@ name = "helio-pass-sdf"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam 0.29.3",
  "helio-v3",
+ "libhelio",
+ "log",
  "wgpu",
 ]
 

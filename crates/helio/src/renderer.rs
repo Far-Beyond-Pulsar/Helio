@@ -112,6 +112,12 @@ impl Renderer {
         &mut self.scene
     }
 
+    /// Returns a reference to the GPU camera uniform buffer.
+    /// Useful for creating custom render passes that need to read camera data (e.g. SDF ray march).
+    pub fn camera_buffer(&self) -> &wgpu::Buffer {
+        self.scene.gpu_scene().camera.buffer()
+    }
+
     pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
         self.scene.mesh_buffers()
     }

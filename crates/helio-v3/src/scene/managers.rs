@@ -178,6 +178,12 @@ impl GpuCameraBuffer {
 
     pub fn buffer(&self) -> &wgpu::Buffer { &self.buf }
 
+    /// Returns the camera world-space position as `[x, y, z]`.
+    pub fn position(&self) -> [f32; 3] {
+        let p = self.data.position_near;
+        [p[0], p[1], p[2]]
+    }
+
     pub fn update(&mut self, camera: GpuCameraUniforms) {
         self.data = camera;
         self.dirty = true;

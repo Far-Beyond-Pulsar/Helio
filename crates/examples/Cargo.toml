@@ -82,6 +82,7 @@ path = "simple_graph.rs"
 [dependencies]
 helio = { path = "../helio" }
 helio-asset-compat = { path = "../helio-asset-compat" }
+helio-pass-sdf = { path = "../helio-pass-sdf" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
