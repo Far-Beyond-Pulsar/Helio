@@ -315,6 +315,17 @@ impl RenderPass for BillboardPass {
     fn name(&self) -> &'static str { "Billboard" }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Upload billboard instances from the high-level renderer's frame data.
+        if let Some(data) = ctx.frame_resources.billboards {
+            let max_bytes = MAX_BILLBOARDS as usize * std::mem::size_of::<BillboardInstance>();
+            let upload_bytes = data.instances.len().min(max_bytes);
+            if upload_bytes > 0 {
+                ctx.write_buffer(&self.instance_buf, 0, &data.instances[..upload_bytes]);
+            }
+            self.instance_count = data.count.min(MAX_BILLBOARDS);
+        } else {
+            self.instance_count = 0;
+        }
         let globals = BillboardGlobals {
             frame:             ctx.frame as u32,
             delta_time:        0.0,

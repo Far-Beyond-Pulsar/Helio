@@ -4,6 +4,19 @@
 //! `RenderGraph` owns. These are passed into `PassContext` and `PrepareContext` so
 //! passes can read outputs of earlier passes without any allocation or locking.
 
+/// Per-frame billboard instance data, provided by the high-level `Renderer`.
+///
+/// The high-level renderer stores a `Vec<BillboardInstance>` and populates this
+/// struct each frame so that `BillboardPass::prepare()` can upload the data to
+/// the GPU without any extra allocation.
+#[derive(Clone, Copy)]
+pub struct BillboardFrameData<'a> {
+    /// Raw bytes of a `BillboardInstance` array (must be `Pod`-compatible).
+    pub instances: &'a [u8],
+    /// Number of valid instances in the slice.
+    pub count: u32,
+}
+
 /// Views into the GBuffer textures.
 ///
 /// Produced by `GBufferPass`, consumed by `DeferredLightingPass`, `SsaoPass`, etc.
@@ -77,6 +90,8 @@ pub struct FrameResources<'a> {
     pub main_scene: Option<MainSceneResources<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::SkyContext,
+    /// Billboards to render this frame (uploaded by the high-level Renderer).
+    pub billboards: Option<BillboardFrameData<'a>>,
 }
 
 impl<'a> FrameResources<'a> {
@@ -94,6 +109,7 @@ impl<'a> FrameResources<'a> {
             pre_aa: None,
             main_scene: None,
             sky: crate::SkyContext::default(),
+            billboards: None,
         }
     }
 }

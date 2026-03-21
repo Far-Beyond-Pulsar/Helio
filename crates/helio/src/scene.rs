@@ -204,7 +204,7 @@ fn sphere_to_aabb(bounds: [f32; 4]) -> GpuInstanceAabb {
     }
 }
 
-fn object_gpu_data(mesh: MeshId, material_slot: usize, desc: ObjectDescriptor, slice: MeshSlice, instance_id: usize) -> ObjectRecord {
+fn object_gpu_data(mesh: MeshId, material_slot: usize, desc: ObjectDescriptor, slice: MeshSlice) -> ObjectRecord {
     ObjectRecord {
         mesh,
         material: desc.material,
@@ -218,12 +218,15 @@ fn object_gpu_data(mesh: MeshId, material_slot: usize, desc: ObjectDescriptor, s
             _pad: 0,
         },
         aabb: sphere_to_aabb(desc.bounds),
+        // `first_instance` is set to 0 here; the actual GPU slot is assigned during
+        // `rebuild_instance_buffers()` called from `flush()`. `instance_count` is not
+        // meaningful per-object — it is computed per-group during the rebuild.
         draw: GpuDrawCall {
             index_count: slice.index_count,
             first_index: slice.first_index,
             vertex_offset: slice.first_vertex as i32,
-            instance_id: instance_id as u32,
-            _pad: 0,
+            first_instance: 0,
+            instance_count: 0,
         },
     }
 }
@@ -240,6 +243,9 @@ pub struct Scene {
     materials: SparsePool<MaterialRecord, MaterialId>,
     lights: DenseArena<LightRecord, LightId>,
     objects: DenseArena<ObjectRecord, ObjectId>,
+    /// True when the objects list has changed and the GPU instance/draw_call/indirect
+    /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
+    objects_dirty: bool,
     prev_view_proj: Mat4,
 }
 
@@ -294,6 +300,7 @@ impl Scene {
             materials: SparsePool::new(),
             lights: DenseArena::new(),
             objects: DenseArena::new(),
+            objects_dirty: true, // rebuild on first flush
             prev_view_proj: Mat4::IDENTITY,
         }
     }
@@ -540,52 +547,30 @@ impl Scene {
             .ok_or_else(|| invalid("mesh"))?
             .ref_count += 1;
 
-        let next_instance = self.gpu_scene.instances.len();
-        let record = object_gpu_data(desc.mesh, material_slot, desc, mesh_slice, next_instance);
-        let (id, dense_index) = self.objects.insert(record.clone());
-
-        let pushed_instance = self.gpu_scene.instances.push(record.instance);
-        let pushed_aabb = self.gpu_scene.aabbs.push(record.aabb);
-        let pushed_draw = self.gpu_scene.draw_calls.push(record.draw);
-        self.gpu_scene.indirect.push(DrawIndexedIndirectArgs::culled(
-            0,
-            0,
-            0,
-            0,
-        ));
-        let visible = DrawIndexedIndirectArgs {
-            index_count: record.draw.index_count,
-            instance_count: 1,
-            first_index: record.draw.first_index,
-            base_vertex: record.draw.vertex_offset,
-            first_instance: dense_index as u32,
-        };
-        let updated_indirect = self.gpu_scene.indirect.update(dense_index, visible);
-        debug_assert!(updated_indirect);
-        self.gpu_scene.visibility.push(1);
-
-        debug_assert_eq!(pushed_instance, dense_index);
-        debug_assert_eq!(pushed_aabb, dense_index);
-        debug_assert_eq!(pushed_draw, dense_index);
-
+        let record = object_gpu_data(desc.mesh, material_slot, desc, mesh_slice);
+        let (id, _) = self.objects.insert(record);
+        // Defer GPU buffer upload to flush() which will sort by (mesh,material)
+        // and build instanced draw calls automatically.
+        self.objects_dirty = true;
         Ok(id)
     }
 
     pub fn update_object_transform(&mut self, id: ObjectId, transform: Mat4) -> Result<()> {
-        let Some((dense_index, record)) = self.objects.get_mut_with_index(id) else {
+        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
             return Err(invalid("object"));
         };
         record.instance.model = transform.to_cols_array();
         record.instance.normal_mat = normal_matrix(transform);
-        let updated = self.gpu_scene.instances.update(dense_index, record.instance);
-        debug_assert!(updated);
+        // If the GPU layout is stable (no pending rebuild), update the slot in-place.
+        // If a rebuild is pending the new data will be included in it automatically.
+        if !self.objects_dirty {
+            let slot = record.draw.first_instance as usize;
+            self.gpu_scene.instances.update(slot, record.instance);
+        }
         Ok(())
     }
 
     pub fn update_object_material(&mut self, id: ObjectId, material: MaterialId) -> Result<()> {
-        let Some((dense_index, record)) = self.objects.get_mut_with_index(id) else {
-            return Err(invalid("object"));
-        };
         let new_slot = {
             let (slot, new_material) = self
                 .materials
@@ -594,68 +579,47 @@ impl Scene {
             new_material.ref_count += 1;
             slot
         };
-        let (_, old_material) = self
-            .materials
-            .get_mut_with_slot(record.material)
-            .ok_or_else(|| invalid("material"))?;
-        old_material.ref_count = old_material.ref_count.saturating_sub(1);
-
+        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        let old_material_id = record.material;
         record.material = material;
         record.instance.material_id = new_slot as u32;
-        let updated = self.gpu_scene.instances.update(dense_index, record.instance);
-        debug_assert!(updated);
+        if let Some((_, old_material)) = self.materials.get_mut_with_slot(old_material_id) {
+            old_material.ref_count = old_material.ref_count.saturating_sub(1);
+        }
+        // Material change may move the object to a different instancing group.
+        self.objects_dirty = true;
         Ok(())
     }
 
     pub fn update_object_bounds(&mut self, id: ObjectId, bounds: [f32; 4]) -> Result<()> {
-        let Some((dense_index, record)) = self.objects.get_mut_with_index(id) else {
+        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
             return Err(invalid("object"));
         };
         record.instance.bounds = bounds;
         record.aabb = sphere_to_aabb(bounds);
-        let updated_instance = self.gpu_scene.instances.update(dense_index, record.instance);
-        let updated_aabb = self.gpu_scene.aabbs.update(dense_index, record.aabb);
-        debug_assert!(updated_instance && updated_aabb);
+        // Bounds don't affect the instancing group, so update in-place when layout is stable.
+        if !self.objects_dirty {
+            let slot = record.draw.first_instance as usize;
+            self.gpu_scene.instances.update(slot, record.instance);
+            self.gpu_scene.aabbs.update(slot, record.aabb);
+        }
         Ok(())
     }
 
     pub fn remove_object(&mut self, id: ObjectId) -> Result<()> {
-        let DenseRemove { removed, dense_index, moved } =
+        let DenseRemove { removed, .. } =
             self.objects.remove(id).ok_or_else(|| invalid("object"))?;
 
-        if let Some(material) = self.materials.get_mut_with_slot(removed.material).map(|(_, material)| material) {
+        if let Some(material) = self.materials.get_mut_with_slot(removed.material).map(|(_, m)| m) {
             material.ref_count = material.ref_count.saturating_sub(1);
         }
         if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
             mesh.ref_count = mesh.ref_count.saturating_sub(1);
         }
-
-        let _ = self.gpu_scene.instances.swap_remove(dense_index);
-        let _ = self.gpu_scene.aabbs.swap_remove(dense_index);
-        let _ = self.gpu_scene.draw_calls.swap_remove(dense_index);
-        let _ = self.gpu_scene.indirect.swap_remove(dense_index);
-        let _ = self.gpu_scene.visibility.swap_remove(dense_index);
-
-        if let Some((moved_handle, moved_index)) = moved {
-            let (_, moved_record) = self
-                .objects
-                .get_mut_with_index(moved_handle)
-                .ok_or_else(|| invalid("object"))?;
-            moved_record.draw.instance_id = moved_index as u32;
-            let updated_draw = self.gpu_scene.draw_calls.update(moved_index, moved_record.draw);
-            let updated_indirect = self.gpu_scene.indirect.update(
-                moved_index,
-                DrawIndexedIndirectArgs {
-                    index_count: moved_record.draw.index_count,
-                    instance_count: 1,
-                    first_index: moved_record.draw.first_index,
-                    base_vertex: moved_record.draw.vertex_offset,
-                    first_instance: moved_index as u32,
-                },
-            );
-            debug_assert!(updated_draw && updated_indirect);
-        }
-
+        // GPU buffers rebuilt on next flush().
+        self.objects_dirty = true;
         Ok(())
     }
 
@@ -702,8 +666,105 @@ impl Scene {
         let queue = self.gpu_scene.queue.clone();
         self.mesh_pool.flush(&queue);
         self.material_textures.flush(&queue);
+        // Rebuild instanced draw lists when the object set has changed.
+        if self.objects_dirty {
+            self.rebuild_instance_buffers();
+            self.objects_dirty = false;
+        }
         self.gpu_scene.flush();
     }
+
+    /// Sorts all registered objects by (mesh_id, material_id) and reconstructs the
+    /// GPU instance buffer, draw_call buffer, and indirect buffer so that objects with
+    /// the same mesh **and** material share a single `DrawIndexedIndirect` command with
+    /// `instance_count > 1`.  This gives the GPU hardware instancing for free.
+    ///
+    /// Called once from `flush()` whenever `objects_dirty` is true.  For a fully static
+    /// scene (no additions/removals after the first frame) this path executes exactly
+    /// once and is then skipped on every subsequent frame — O(0) steady-state cost.
+    fn rebuild_instance_buffers(&mut self) {
+        let n = self.objects.dense_len();
+        if n == 0 {
+            self.gpu_scene.instances.set_data(Vec::new());
+            self.gpu_scene.aabbs.set_data(Vec::new());
+            self.gpu_scene.draw_calls.set_data(Vec::new());
+            self.gpu_scene.indirect.set_data(Vec::new());
+            self.gpu_scene.visibility.set_data(Vec::new());
+            return;
+        }
+
+        // Build a sort order over the dense array indices, grouped by (mesh_id, material_id).
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| {
+            let r = self.objects.get_dense(i).unwrap();
+            (r.instance.mesh_id, r.instance.material_id)
+        });
+
+        let mut instances: Vec<GpuInstanceData> = Vec::with_capacity(n);
+        let mut aabbs: Vec<GpuInstanceAabb> = Vec::with_capacity(n);
+        let mut draw_calls: Vec<GpuDrawCall> = Vec::new();
+        let mut indirect: Vec<DrawIndexedIndirectArgs> = Vec::new();
+        // Track the new GPU slot assigned to each dense-array entry.
+        let mut gpu_slots: Vec<u32> = vec![0u32; n];
+
+        let mut i = 0;
+        while i < order.len() {
+            let r0 = self.objects.get_dense(order[i]).unwrap();
+            let key = (r0.instance.mesh_id, r0.instance.material_id);
+            let group_start = instances.len() as u32;
+            let (index_count, first_index, vertex_offset) =
+                (r0.draw.index_count, r0.draw.first_index, r0.draw.vertex_offset);
+
+            // Consume all objects in this group.
+            while i < order.len() {
+                let r = self.objects.get_dense(order[i]).unwrap();
+                if (r.instance.mesh_id, r.instance.material_id) != key {
+                    break;
+                }
+                gpu_slots[order[i]] = instances.len() as u32;
+                instances.push(r.instance);
+                aabbs.push(r.aabb);
+                i += 1;
+            }
+
+            let instance_count = instances.len() as u32 - group_start;
+            draw_calls.push(GpuDrawCall {
+                index_count,
+                first_index,
+                vertex_offset,
+                first_instance: group_start,
+                instance_count,
+            });
+            indirect.push(DrawIndexedIndirectArgs {
+                index_count,
+                instance_count,
+                first_index,
+                base_vertex: vertex_offset,
+                first_instance: group_start,
+            });
+        }
+
+        // Patch each ObjectRecord with its new GPU slot so that in-frame
+        // `update_object_transform` / `update_object_bounds` can update in-place.
+        for (di, &slot) in gpu_slots.iter().enumerate() {
+            if let Some(r) = self.objects.get_dense_mut(di) {
+                r.draw.first_instance = slot;
+            }
+        }
+
+        log::debug!(
+            "rebuild_instance_buffers: {} objects → {} draw groups",
+            n,
+            draw_calls.len()
+        );
+
+        self.gpu_scene.instances.set_data(instances);
+        self.gpu_scene.aabbs.set_data(aabbs);
+        self.gpu_scene.draw_calls.set_data(draw_calls);
+        self.gpu_scene.indirect.set_data(indirect);
+        self.gpu_scene.visibility.set_data(vec![1u32; self.gpu_scene.instances.len()]);
+    }
+
 
     pub fn advance_frame(&mut self) {
         self.gpu_scene.frame_count = self.gpu_scene.frame_count.wrapping_add(1);

@@ -8,9 +8,10 @@ use bytemuck::{Pod, Zeroable};
 
 /// A template draw call that the GPU culling compute uses to emit indirect commands.
 ///
-/// This describes one draw — typically one mesh LOD × one material slot.
-/// The culling pass writes `DrawIndexedIndirect` from this template when the instance
-/// survives frustum + occlusion culling.
+/// Describes one batched draw — all instances in the batch share the same mesh geometry
+/// (index range) and are stored consecutively in the instance buffer starting at
+/// `first_instance`.  Identical (mesh, material) pairs are automatically merged into
+/// a single `GpuDrawCall` during `Scene::flush()`, enabling hardware instancing.
 ///
 /// # WGSL equivalent
 /// ```wgsl
@@ -18,8 +19,8 @@ use bytemuck::{Pod, Zeroable};
 ///     index_count:    u32,
 ///     first_index:    u32,
 ///     vertex_offset:  i32,
-///     instance_id:    u32,   // index into GpuInstance array
-///     _pad:           u32,
+///     first_instance: u32,  // first index into GpuInstance array for this batch
+///     instance_count: u32,  // number of consecutive instances in the batch
 /// }
 /// ```
 #[repr(C)]
@@ -28,8 +29,10 @@ pub struct GpuDrawCall {
     pub index_count: u32,
     pub first_index: u32,
     pub vertex_offset: i32,
-    pub instance_id: u32,
-    pub _pad: u32,
+    /// First index into the `GpuInstance` storage buffer for this instanced batch.
+    pub first_instance: u32,
+    /// Number of instances in the batch (≥ 1).  Maximises GPU hardware instancing.
+    pub instance_count: u32,
 }
 
 /// GPU-side indirect draw command (matches `wgpu::util::DrawIndexedIndirectArgs`).

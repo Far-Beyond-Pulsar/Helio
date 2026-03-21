@@ -34,6 +34,21 @@ impl<T, H: Handle> DenseArena<T, H> {
         }
     }
 
+    /// Number of live items in the arena.
+    pub fn dense_len(&self) -> usize {
+        self.dense.len()
+    }
+
+    /// Access item by dense-array index (0..dense_len). Used for bulk rebuilds.
+    pub fn get_dense(&self, index: usize) -> Option<&T> {
+        self.dense.get(index)
+    }
+
+    /// Mutable access by dense-array index. Used to patch GPU slot bookkeeping after rebuild.
+    pub fn get_dense_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.dense.get_mut(index)
+    }
+
     pub fn insert(&mut self, value: T) -> (H, usize) {
         let dense_index = self.dense.len();
         let slot_index = if let Some(slot) = self.free_list.pop() {

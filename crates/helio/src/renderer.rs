@@ -128,6 +128,7 @@ pub struct Renderer {
     gi_config: GiConfig,
     shadow_quality: libhelio::ShadowQuality,
     debug_mode: u32,
+    billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
 }
 
 /// Which graph is currently active — used by `set_render_size` to rebuild correctly.
@@ -168,6 +169,7 @@ impl Renderer {
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
             debug_mode: 0,
+            billboard_instances: Vec::new(),
         }
     }
 
@@ -352,6 +354,16 @@ impl Renderer {
         self.scene.update_object_transform(id, transform)
     }
 
+    /// Replace the billboard instance list for the next frame.
+    ///
+    /// Call once per frame (or whenever the billboard set changes).
+    /// Billboards are camera-facing quads rendered with alpha blending on top of
+    /// the opaque scene.  Pass an empty slice to disable billboards entirely.
+    pub fn set_billboard_instances(&mut self, instances: &[helio_pass_billboard::BillboardInstance]) {
+        self.billboard_instances.clear();
+        self.billboard_instances.extend_from_slice(instances);
+    }
+
     pub fn render(
         &mut self,
         camera: &Camera,
@@ -410,6 +422,14 @@ impl Renderer {
                 rc_world_max: rc_max,
             }),
             sky: libhelio::SkyContext::default(),
+            billboards: if self.billboard_instances.is_empty() {
+                None
+            } else {
+                Some(libhelio::BillboardFrameData {
+                    instances: bytemuck::cast_slice(&self.billboard_instances),
+                    count: self.billboard_instances.len() as u32,
+                })
+            },
         };
 
         self.graph.execute_with_frame_resources(
@@ -504,8 +524,15 @@ fn build_default_graph(
     // TODO: Enable these passes once they declare resources properly:
     // - SkyPass (reads "sky_lut", writes to scene color)
     // - TransparentPass (reads scene depth, writes to scene color with blending)
-    // - BillboardPass (reads scene depth, writes to scene color)
     // - FxaaPass (reads "pre_aa", writes to final surface)
+
+    // 6. BillboardPass — camera-facing instanced quads (composited after opaque geometry)
+    graph.add_pass(Box::new(BillboardPass::new(
+        device,
+        queue,
+        camera_buf,
+        config.surface_format,
+    )));
 
     // Initialize transient textures from pass declarations
     graph.set_render_size(config.width, config.height);

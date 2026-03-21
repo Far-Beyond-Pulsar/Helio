@@ -20,3 +20,4 @@ target/
 /crates/helio-wasm-app/pkg
 /.vscode/fastsearch
 /.vscode/fastsearch
+/3d

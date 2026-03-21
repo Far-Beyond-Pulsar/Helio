@@ -912,6 +912,7 @@ dependencies = [
  "helio-pass-transparent",
  "helio-v3",
  "libhelio",
+ "log",
  "thiserror 2.0.18",
  "wgpu",
 ]

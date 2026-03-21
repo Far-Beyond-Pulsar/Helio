@@ -79,6 +79,10 @@ path = "ship_flight.rs"
 name = "simple_graph"
 path = "simple_graph.rs"
 
+[[bin]]
+name = "outdoor_rocks"
+path = "outdoor_rocks.rs"
+
 [dependencies]
 helio = { path = "../helio" }
 helio-asset-compat = { path = "../helio-asset-compat" }

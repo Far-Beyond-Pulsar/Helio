@@ -26,5 +26,6 @@ helio-pass-ssao = { path = "../helio-pass-ssao" }
 helio-pass-taa = { path = "../helio-pass-taa" }
 helio-pass-transparent = { path = "../helio-pass-transparent" }
 libhelio = { path = "../libhelio" }
+log = "0.4"
 thiserror = "2.0"
 wgpu = "23"

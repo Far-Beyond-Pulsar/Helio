@@ -34,11 +34,11 @@ struct GpuInstance {
 }
 
 struct GpuDrawCall {
-    index_count:   u32,
-    first_index:   u32,
-    vertex_offset: i32,
-    instance_id:   u32,
-    _pad:          u32,
+    index_count:    u32,
+    first_index:    u32,
+    vertex_offset:  i32,
+    first_instance: u32,  // base index into instances[] for this batch
+    instance_count: u32,  // number of consecutive instances
 }
 
 struct DrawIndexedIndirect {
@@ -70,7 +70,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if idx >= cull.draw_count { return; }
 
     let dc   = draw_calls[idx];
-    let inst = instances[dc.instance_id];
+    // Test the first instance of the group for frustum culling (group-level cull).
+    // If the representative passes, all instances in the batch are drawn.
+    let inst = instances[dc.first_instance];
 
     // Transform bounding sphere center to world space via model matrix
     let model = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
@@ -86,9 +88,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     indirect[idx] = DrawIndexedIndirect(
         dc.index_count,
-        select(0u, 1u, visible),
+        select(0u, dc.instance_count, visible),  // cull entire batch or keep all N instances
         dc.first_index,
         dc.vertex_offset,
-        dc.instance_id,
+        dc.first_instance,
     );
 }

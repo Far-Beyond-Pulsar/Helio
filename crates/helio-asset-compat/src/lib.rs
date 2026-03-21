@@ -16,6 +16,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use helio::{LightId, MaterialId, ObjectId, Renderer, TextureId};
+use helio::MeshId;
 
 pub use mesh_converter::{convert_vertex, convert_primitive};
 pub use material_converter::{convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef};
@@ -159,6 +160,64 @@ pub fn load_scene_bytes_with_config(
         .unwrap_or_else(|| PathBuf::from("."));
 
     convert_scene(&solid_scene, &conversion_base_dir, &config)
+}
+
+/// GPU handles for a scene that has been fully uploaded to the renderer.
+///
+/// `mesh_ids[i]` corresponds to `ConvertedScene::meshes[i]`.
+/// `material_ids[i]` corresponds to `ConvertedScene::materials[i]`.
+/// Use `mesh_material(mesh_index)` to look up the material for a given mesh.
+#[derive(Debug, Clone)]
+pub struct UploadedScene {
+    pub mesh_ids: Vec<MeshId>,
+    pub material_ids: Vec<MaterialId>,
+}
+
+impl UploadedScene {
+    /// Convenience: return the `MaterialId` that should be used for mesh at `mesh_index`.
+    ///
+    /// Falls back to `material_ids[0]` when the mesh has no material index, and
+    /// returns `None` when `material_ids` is empty.
+    pub fn mesh_material(&self, mesh_index: usize, converted: &scene_converter::ConvertedMesh) -> Option<MaterialId> {
+        let idx = converted.material_index?;
+        self.material_ids.get(idx).copied().or_else(|| self.material_ids.first().copied())
+    }
+}
+
+/// Load a scene file **and** upload all its meshes + materials in a single pass.
+///
+/// This is a convenience wrapper around [`load_scene_file_with_config`] +
+/// [`upload_scene`] that avoids loading the file twice when you need both.
+pub fn load_and_upload_scene<P: AsRef<Path>>(
+    path: P,
+    config: LoadConfig,
+    renderer: &mut Renderer,
+) -> Result<UploadedScene> {
+    let scene = load_scene_file_with_config(path, config)?;
+    upload_scene(renderer, &scene)
+}
+
+/// Upload a already-converted scene (meshes **and** materials) to the renderer
+/// in a single pass, returning stable GPU handles for both.
+///
+/// Prefer this over calling `upload_scene_materials` + a manual mesh loop so
+/// the `ConvertedScene` is only traversed once.
+pub fn upload_scene(
+    renderer: &mut Renderer,
+    scene: &ConvertedScene,
+) -> Result<UploadedScene> {
+    let material_ids = upload_scene_materials(renderer, scene)?;
+    let mesh_ids = scene
+        .meshes
+        .iter()
+        .map(|mesh| {
+            renderer.insert_mesh(helio::MeshUpload {
+                vertices: mesh.vertices.clone(),
+                indices:  mesh.indices.clone(),
+            })
+        })
+        .collect();
+    Ok(UploadedScene { mesh_ids, material_ids })
 }
 
 pub fn upload_scene_materials(

@@ -17,6 +17,7 @@ mod renderer;
 mod scene;
 
 pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId};
+pub use helio_pass_billboard::BillboardInstance;
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
     TextureUpload, MAX_TEXTURES,

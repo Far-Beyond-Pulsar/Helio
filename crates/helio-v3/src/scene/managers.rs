@@ -308,6 +308,7 @@ impl GpuIndirectBuffer {
     pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
     pub fn len(&self) -> usize { self.0.len() }
     pub fn push(&mut self, item: DrawIndexedIndirectArgs) -> usize { self.0.push(item) }
+    pub fn set_data(&mut self, data: Vec<DrawIndexedIndirectArgs>) { self.0.set_data(data); }
     pub fn update(&mut self, index: usize, item: DrawIndexedIndirectArgs) -> bool { self.0.update(index, item) }
     pub fn swap_remove(&mut self, index: usize) -> Option<DrawIndexedIndirectArgs> { self.0.swap_remove(index) }
     pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
@@ -320,6 +321,7 @@ impl GpuVisibilityBuffer {
     pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
     pub fn len(&self) -> usize { self.0.len() }
     pub fn push(&mut self, item: u32) -> usize { self.0.push(item) }
+    pub fn set_data(&mut self, data: Vec<u32>) { self.0.set_data(data); }
     pub fn update(&mut self, index: usize, item: u32) -> bool { self.0.update(index, item) }
     pub fn swap_remove(&mut self, index: usize) -> Option<u32> { self.0.swap_remove(index) }
     pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
