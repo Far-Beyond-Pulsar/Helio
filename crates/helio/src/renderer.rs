@@ -35,11 +35,52 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     }
 }
 
+/// Global Illumination configuration (AAA dual-tier: RC near, ambient far).
+#[derive(Debug, Clone, Copy)]
+pub struct GiConfig {
+    /// Radiance Cascades volume radius around camera (world units).
+    /// GI within this radius uses RC, outside uses cheap ambient fallback.
+    /// Default: 80.0 (AAA near-field quality like Unreal Lumen).
+    pub rc_radius: f32,
+    /// Fade margin for smooth RC→ambient transition (world units).
+    /// Default: 20.0 (soft blend zone).
+    pub rc_fade_margin: f32,
+}
+
+impl Default for GiConfig {
+    fn default() -> Self {
+        Self {
+            rc_radius: 80.0,      // AAA near-field GI
+            rc_fade_margin: 20.0, // Smooth transition
+        }
+    }
+}
+
+impl GiConfig {
+    /// Disable RC entirely (use only ambient/hemisphere for all distances).
+    pub fn ambient_only() -> Self {
+        Self {
+            rc_radius: 0.0,
+            rc_fade_margin: 0.0,
+        }
+    }
+
+    /// High-quality large-radius RC (for open worlds).
+    pub fn large_radius(radius: f32) -> Self {
+        Self {
+            rc_radius: radius,
+            rc_fade_margin: radius * 0.25,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct RendererConfig {
     pub width: u32,
     pub height: u32,
     pub surface_format: wgpu::TextureFormat,
+    /// Global illumination configuration (RC near, ambient far).
+    pub gi_config: GiConfig,
 }
 
 impl RendererConfig {
@@ -48,7 +89,14 @@ impl RendererConfig {
             width,
             height,
             surface_format,
+            gi_config: GiConfig::default(), // AAA default: RC close, ambient far
         }
+    }
+
+    /// Builder: set custom GI configuration.
+    pub fn with_gi_config(mut self, gi_config: GiConfig) -> Self {
+        self.gi_config = gi_config;
+        self
     }
 }
 
@@ -64,6 +112,7 @@ pub struct Renderer {
     ambient_color: [f32; 3],
     ambient_intensity: f32,
     clear_color: [f32; 4],
+    gi_config: GiConfig,
 }
 
 /// Which graph is currently active — used by `set_render_size` to rebuild correctly.
@@ -101,7 +150,18 @@ impl Renderer {
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
+            gi_config: config.gi_config,
         }
+    }
+
+    /// Set GI configuration (RC radius, fade margin).
+    pub fn set_gi_config(&mut self, gi_config: GiConfig) {
+        self.gi_config = gi_config;
+    }
+
+    /// Get current GI configuration.
+    pub fn gi_config(&self) -> GiConfig {
+        self.gi_config
     }
 
     pub fn scene(&self) -> &Scene {
@@ -131,7 +191,8 @@ impl Renderer {
         let (depth_texture, depth_view) = create_depth_resources(&self.device, width, height);
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
-        let config = RendererConfig::new(width, height, self.surface_format);
+        let config = RendererConfig::new(width, height, self.surface_format)
+            .with_gi_config(self.gi_config);
         match self.graph_kind {
             GraphKind::Default => {
                 self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
@@ -174,6 +235,7 @@ impl Renderer {
             width:          self.depth_texture.size().width,
             height:         self.depth_texture.size().height,
             surface_format: self.surface_format,
+            gi_config:      self.gi_config,
         };
         self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         self.graph_kind = GraphKind::Default;
@@ -247,6 +309,20 @@ impl Renderer {
         }
 
         let mesh_buffers = self.scene.mesh_buffers();
+        // Compute RC bounds (AAA dual-tier GI: RC near, ambient far)
+        let cam_pos = camera.position; // Camera.position is a field (Vec3), not a method
+        let rc_radius = self.gi_config.rc_radius;
+        let rc_min = [
+            cam_pos.x - rc_radius,
+            cam_pos.y - rc_radius,
+            cam_pos.z - rc_radius,
+        ];
+        let rc_max = [
+            cam_pos.x + rc_radius,
+            cam_pos.y + rc_radius,
+            cam_pos.z + rc_radius,
+        ];
+
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
             shadow_atlas: None,
@@ -271,6 +347,8 @@ impl Renderer {
                 clear_color: self.clear_color,
                 ambient_color: self.ambient_color,
                 ambient_intensity: self.ambient_intensity,
+                rc_world_min: rc_min,
+                rc_world_max: rc_max,
             }),
             sky: libhelio::SkyContext::default(),
         };
@@ -281,7 +359,7 @@ impl Renderer {
             &self.depth_view,
             &frame_resources,
         )?;
-        drop(frame_resources);
+        // frame_resources is Copy, no need to drop
         drop(texture_views);
         drop(samplers);
         self.scene.advance_frame();

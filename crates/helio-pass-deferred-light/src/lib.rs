@@ -274,14 +274,21 @@ impl RenderPass for DeferredLightPass {
         } else {
             ([0.5, 0.5, 0.6], 1.0)  // Brighter fallback ambient: sky-blue tint
         };
+        // Get RC bounds from frame resources (AAA dual-tier GI: RC near, ambient far)
+        let (rc_min, rc_max) = if let Some(main) = main_scene {
+            (main.rc_world_min, main.rc_world_max)
+        } else {
+            ([0.0; 3], [0.0; 3]) // Fallback: RC disabled
+        };
+
         let globals = DeferredGlobals {
             frame: ctx.frame as u32,
             delta_time: 0.0,
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
-            rc_world_min: [0.0; 4],
-            rc_world_max: [0.0; 4],
+            rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
+            rc_world_max: [rc_max[0], rc_max[1], rc_max[2], 0.0],
             csm_splits: [5.0, 20.0, 60.0, 200.0],
             debug_mode: 0, // 0 = full PBR lighting
             _pad0: 0,

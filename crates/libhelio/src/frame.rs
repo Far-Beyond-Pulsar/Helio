@@ -43,6 +43,10 @@ pub struct MainSceneResources<'a> {
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
+    /// Radiance Cascades volume bounds (AAA dual-tier GI: RC near, ambient far).
+    /// RC active within these bounds, simpler ambient fallback outside.
+    pub rc_world_min: [f32; 3],
+    pub rc_world_max: [f32; 3],
 }
 
 /// All transient per-frame texture references.
