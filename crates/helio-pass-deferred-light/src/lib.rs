@@ -42,6 +42,7 @@ pub struct DeferredLightPass {
     fallback_env_sampler: wgpu::Sampler,
     fallback_rc_texture: wgpu::Texture,
     fallback_rc_view: wgpu::TextureView,
+    pub debug_mode: u32,
 }
 
 impl DeferredLightPass {
@@ -295,7 +296,16 @@ impl DeferredLightPass {
             fallback_env_sampler,
             fallback_rc_texture,
             fallback_rc_view,
+            debug_mode: 0,
         }
+    }
+
+    /// Set the debug visualisation mode:
+    /// - 0  = normal PBR lighting
+    /// - 10 = shadow factor greyscale (white=lit, black=shadowed)
+    /// - 11 = raw shadow atlas depth slice 0 (unmipped, linear)
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode;
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -344,7 +354,7 @@ impl RenderPass for DeferredLightPass {
             rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
             rc_world_max: [rc_max[0], rc_max[1], rc_max[2], 0.0],
             csm_splits: [5.0, 20.0, 60.0, 200.0],
-            debug_mode: 0, // 0 = full PBR lighting
+            debug_mode: self.debug_mode,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,

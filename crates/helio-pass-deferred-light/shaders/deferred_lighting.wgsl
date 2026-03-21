@@ -640,6 +640,36 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let world_h     = camera.view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
     let world_pos   = world_h.xyz / world_h.w;
 
+    // ── Debug mode 10: shadow factor heatmap ──────────────────────────────────
+    // Shows shadow_factor() per light averaged across all lights.
+    // White = fully lit, black = fully occluded.
+    // Useful for verifying shadow atlas is filled and matrices are correct.
+    if globals.debug_mode == 10u {
+        var shadow_sum = 0.0;
+        for (var i = 0u; i < globals.light_count; i++) {
+            shadow_sum += shadow_factor(i, world_pos, in.clip_pos.xy, globals.frame);
+        }
+        let sf = shadow_sum / max(f32(globals.light_count), 1.0);
+        return vec4<f32>(sf, sf, sf, 1.0);
+    }
+
+    // ── Debug mode 11: light-space projection for first light face 0 ─────────
+    // Orange gradient = pixel is inside the light frustum, depth = ndc.z.
+    // Dark blue = pixel is outside the frustum (w<=0 or uv out of [0,1]).
+    // Use this to verify shadow matrices are computed by ShadowMatrixPass.
+    if globals.debug_mode == 11u && globals.light_count > 0u {
+        let lc  = shadow_matrices[0u].mat * vec4<f32>(world_pos, 1.0);
+        if lc.w > 0.001 {
+            let ndc3 = lc.xyz / lc.w;
+            let uv   = vec2<f32>(ndc3.x * 0.5 + 0.5, -ndc3.y * 0.5 + 0.5);
+            if all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))
+                    && ndc3.z >= 0.0 && ndc3.z <= 1.0 {
+                return vec4<f32>(ndc3.z, ndc3.z * 0.3, 0.0, 1.0);
+            }
+        }
+        return vec4<f32>(0.0, 0.0, 0.2, 1.0);
+    }
+
     // ── PBR setup ─────────────────────────────────────────────────────────────
     let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
     let V   = normalize(camera.position_near.xyz - world_pos);

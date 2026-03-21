@@ -84,6 +84,8 @@ pub struct RendererConfig {
     pub gi_config: GiConfig,
     /// Shadow quality (Low, Medium, High, Ultra).
     pub shadow_quality: libhelio::ShadowQuality,
+    /// Debug visualisation mode (0=normal, 10=shadow heatmap, 11=light-space depth).
+    pub debug_mode: u32,
 }
 
 impl RendererConfig {
@@ -94,6 +96,7 @@ impl RendererConfig {
             surface_format,
             gi_config: GiConfig::default(), // AAA default: RC close, ambient far
             shadow_quality: libhelio::ShadowQuality::Medium, // Default quality
+            debug_mode: 0,
         }
     }
 
@@ -124,6 +127,7 @@ pub struct Renderer {
     clear_color: [f32; 4],
     gi_config: GiConfig,
     shadow_quality: libhelio::ShadowQuality,
+    debug_mode: u32,
 }
 
 /// Which graph is currently active — used by `set_render_size` to rebuild correctly.
@@ -163,6 +167,7 @@ impl Renderer {
             clear_color: [0.02, 0.02, 0.03, 1.0],
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
+            debug_mode: 0,
         }
     }
 
@@ -187,6 +192,23 @@ impl Renderer {
                 surface_format: self.surface_format,
                 gi_config: self.gi_config,
                 shadow_quality: self.shadow_quality,
+                debug_mode: self.debug_mode,
+            };
+            self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+        }
+    }
+
+    /// Set the debug visualisation mode (0=normal, 10=shadow heatmap, 11=light-space depth).
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode;
+        if matches!(self.graph_kind, GraphKind::Default) {
+            let config = RendererConfig {
+                width: self.depth_texture.size().width,
+                height: self.depth_texture.size().height,
+                surface_format: self.surface_format,
+                gi_config: self.gi_config,
+                shadow_quality: self.shadow_quality,
+                debug_mode: self.debug_mode,
             };
             self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         }
@@ -227,6 +249,7 @@ impl Renderer {
         let config = RendererConfig::new(width, height, self.surface_format)
             .with_gi_config(self.gi_config)
             .with_shadow_quality(self.shadow_quality);
+        let config = RendererConfig { debug_mode: self.debug_mode, ..config };
         match self.graph_kind {
             GraphKind::Default => {
                 self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
@@ -271,6 +294,7 @@ impl Renderer {
             surface_format: self.surface_format,
             gi_config:      self.gi_config,
             shadow_quality: self.shadow_quality,
+            debug_mode:     self.debug_mode,
         };
         self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         self.graph_kind = GraphKind::Default;
@@ -474,6 +498,7 @@ fn build_default_graph(
         config.surface_format,
     );
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
+    deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
 
     // TODO: Enable these passes once they declare resources properly:

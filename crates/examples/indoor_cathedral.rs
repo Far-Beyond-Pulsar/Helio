@@ -130,6 +130,9 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
+    // Debug
+    debug_mode: u32,
+
     // Scene state
     chandelier_light_ids: Vec<LightId>,
     candle_light_ids: Vec<LightId>,
@@ -302,6 +305,7 @@ impl ApplicationHandler for App {
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
             cam_yaw: std::f32::consts::PI, cam_pitch: -0.05,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
+            debug_mode: 0,
             chandelier_light_ids,
             candle_light_ids,
             start_time: std::time::Instant::now(),
@@ -320,6 +324,19 @@ impl ApplicationHandler for App {
                     let _ = state.window.set_cursor_grab(CursorGrabMode::None);
                     state.window.set_cursor_visible(true);
                 } else { event_loop.exit(); }
+            }
+
+            // F1: cycle debug modes (0=normal → 10=shadow heatmap → 11=light-space depth → 0)
+            WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::F1), ..
+            }, .. } => {
+                state.debug_mode = match state.debug_mode {
+                    0  => 10,
+                    10 => 11,
+                    _  => 0,
+                };
+                state.renderer.set_debug_mode(state.debug_mode);
+                println!("[debug] shadow debug mode = {}", state.debug_mode);
             }
 
             WindowEvent::KeyboardInput { event: KeyEvent {
