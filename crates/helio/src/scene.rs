@@ -662,10 +662,14 @@ impl Scene {
     pub fn flush(&mut self) {
         // Assign sequential shadow atlas base layers to each shadow-casting light.
         // Convention: shadow_index == u32::MAX  → no shadow.
-        // Faces per light type: point = 6, directional = 4 (CSM), spot = 1.
+        // Always 6 slots per light (matches FACES_PER_LIGHT in shadow_matrices.wgsl):
+        //   Point:       6 cube-face matrices
+        //   Directional: 4 CSM cascades + 2 identity padding slots
+        //   Spot:        1 perspective matrix + 5 unused (zeroed) slots
         // Cap at 42 shadow casters (42 × 6 = 252 ≤ 256 atlas layers).
         {
             const MAX_SHADOW_CASTERS: usize = 42;
+            const FACES_PER_LIGHT: u32 = 6;
             let light_count = self.gpu_scene.lights.len();
             let mut next_layer: u32 = 0;
             let mut shadow_caster_count = 0usize;
@@ -682,15 +686,10 @@ impl Scene {
                     self.gpu_scene.lights.update(i, disabled);
                     continue;
                 }
-                let faces: u32 = match light.light_type {
-                    0 => 4, // Directional (CSM 4 cascades)
-                    1 => 6, // Point (cube 6 faces)
-                    _ => 1, // Spot
-                };
                 let mut assigned = light;
                 assigned.shadow_index = next_layer;
                 self.gpu_scene.lights.update(i, assigned);
-                next_layer += faces;
+                next_layer += FACES_PER_LIGHT;
                 shadow_caster_count += 1;
             }
             let needed = (next_layer as usize).max(1);

@@ -177,7 +177,18 @@ impl ShadowPass {
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
+                // slope_scale compensates for FP depth precision on surfaces at
+                // grazing angles to the light.  Without it the shadow map depth for
+                // a surface can be equal-to or less-than the depth reconstructed in
+                // the lighting shader for that same surface, causing self-shadowing
+                // on every light independently (making each light appear to inherit
+                // every other light's shadow geometry).
+                // constant is left at 0 — that was the source of the visible offset.
+                bias: wgpu::DepthBiasState {
+                    constant: 0,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,

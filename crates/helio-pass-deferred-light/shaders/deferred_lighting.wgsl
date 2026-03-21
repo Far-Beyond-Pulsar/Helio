@@ -156,10 +156,16 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
     }
 }
 
-// High-quality PCF shadow sampling with Vogel disk pattern
+// Normal-offset bias constant (world-space units).
+// Shifts the shadow query point along the surface normal before projecting into
+// light space, eliminating self-shadowing without any visible surface gap.
+// This is the same technique used by UE4 ("Normal Shadow Bias") and Unity HDRP.
+const NORMAL_OFFSET_SCALE: f32 = 0.05;
+
+// High-quality PCF shadow sampling with Vogel disk pattern.
+// world_pos must already have normal-offset applied (call shadow_factor, not this directly).
 fn sample_cascade_shadow(
     layer: u32,
-    depth_bias: f32,
     cascade_scale: f32,
     world_pos: vec3<f32>,
     frag_coord: vec2<f32>,
@@ -176,7 +182,7 @@ fn sample_cascade_shadow(
         return 1.0;
     }
 
-    let biased_depth = ndc.z - depth_bias;
+    let biased_depth = ndc.z;
     let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
 
     // Per-pixel rotation to break up banding (stable with frame counter)
@@ -249,7 +255,8 @@ fn pcss_penumbra_size(
     return (receiver_depth - avg_blocker_depth) / max(avg_blocker_depth, 0.001) * light_size;
 }
 
-// Step 3: Full PCSS shadow sampling (blocker search + variable-kernel PCF)
+// Step 3: Full PCSS shadow sampling (blocker search + variable-kernel PCF).
+// world_pos must already have normal-offset applied (call shadow_factor, not this directly).
 fn sample_cascade_shadow_pcss(
     layer: u32,
     cascade_idx: u32,
@@ -269,7 +276,7 @@ fn sample_cascade_shadow_pcss(
         return 1.0;
     }
 
-    let receiver_depth = ndc.z - config.depth_bias;
+    let receiver_depth = ndc.z;
     let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
 
     // Step 1: Blocker search (average occluder depth)
@@ -302,7 +309,7 @@ fn sample_cascade_shadow_pcss(
     return lit_sum / f32(shadow_config.pcss_filter_samples);
 }
 
-fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
     if !ENABLE_SHADOWS { return 1.0; }
     if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
 
@@ -310,13 +317,28 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, fr
 
     // Check if this light actually casts shadows (shadow_index != u32::MAX)
     if light.shadow_index == 4294967295u { return 1.0; }
+
+    // Normal-offset: shift the world-space query point along the surface normal
+    // toward the light before projecting.  This eliminates self-shadowing caused
+    // by floating-point depth quantization, without the visible gap from a
+    // constant depth-offset.  Scale by (1 - NdotL) so face-on surfaces (no
+    // self-shadow risk) get near-zero offset while grazing surfaces get the full
+    // amount — exactly matching the UE4 / Unity HDRP normal-bias approach.
+    var light_dir: vec3<f32>;
+    if light.light_type == 0u {
+        light_dir = normalize(-light.direction_outer.xyz);
+    } else {
+        light_dir = normalize(light.position_range.xyz - world_pos);
+    }
+    let NdotL         = max(dot(N, light_dir), 0.0);
+    let normal_offset = N * NORMAL_OFFSET_SCALE * (1.0 - NdotL);
+    let biased_pos    = world_pos + normal_offset;
+
     var layer: u32;
     if light.light_type > 0u && light.light_type < 2u {  // Point light (type 1)
-        let to_frag = world_pos - light.position_range.xyz;
+        let to_frag = biased_pos - light.position_range.xyz;
         layer = light.shadow_index + point_light_face(to_frag);
-        let depth_bias   = 0.0002;
-        let cascade_scale = 1.0;
-        return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos, frag_coord, frame);
+        return sample_cascade_shadow(layer, 1.0, biased_pos, frag_coord, frame);
     } else if light.light_type == 0u {  // Directional light (type 0)
         let dist = length(world_pos - camera.position_near.xyz);
         let splits = globals.csm_splits;
@@ -371,11 +393,10 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, fr
         let layer_a = light.shadow_index + cascade_a;
         var shadow_a: f32;
         if use_pcss {
-            shadow_a = sample_cascade_shadow_pcss(layer_a, cascade_a, world_pos, frag_coord, frame);
+            shadow_a = sample_cascade_shadow_pcss(layer_a, cascade_a, biased_pos, frag_coord, frame);
         } else {
-            let depth_bias = 0.00012;
             let cascade_scale_a = 1.0 + f32(cascade_a) * 1.5;
-            shadow_a = sample_cascade_shadow(layer_a, depth_bias, cascade_scale_a, world_pos, frag_coord, frame);
+            shadow_a = sample_cascade_shadow(layer_a, cascade_scale_a, biased_pos, frag_coord, frame);
         }
 
         // If no blending needed, return immediately
@@ -387,21 +408,19 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, fr
             let layer_b = light.shadow_index + cascade_b;
             var shadow_b: f32;
             if use_pcss_b {
-                shadow_b = sample_cascade_shadow_pcss(layer_b, cascade_b, world_pos, frag_coord, frame);
+                shadow_b = sample_cascade_shadow_pcss(layer_b, cascade_b, biased_pos, frag_coord, frame);
             } else {
-                let depth_bias = 0.00012;
                 let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
-                shadow_b = sample_cascade_shadow(layer_b, depth_bias, cascade_scale_b, world_pos, frag_coord, frame);
+                shadow_b = sample_cascade_shadow(layer_b, cascade_scale_b, biased_pos, frag_coord, frame);
             }
             return mix(shadow_a, shadow_b, blend);
         }
 
         return shadow_a;
     } else {
+        // Spot light (type 2)
         layer = light.shadow_index;
-        let depth_bias   = 0.00015;
-        let cascade_scale = 1.0;
-        return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos, frag_coord, frame);
+        return sample_cascade_shadow(layer, 1.0, biased_pos, frag_coord, frame);
     }
 }
 
@@ -647,7 +666,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     if globals.debug_mode == 10u {
         var shadow_sum = 0.0;
         for (var i = 0u; i < globals.light_count; i++) {
-            shadow_sum += shadow_factor(i, world_pos, in.clip_pos.xy, globals.frame);
+            shadow_sum += shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame);
         }
         let sf = shadow_sum / max(f32(globals.light_count), 1.0);
         return vec4<f32>(sf, sf, sf, 1.0);
@@ -682,7 +701,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         for (var i = 0u; i < globals.light_count; i++) {
-            let sf = shadow_factor(i, world_pos, in.clip_pos.xy, globals.frame);
+            let sf = shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame);
             let light_contrib = pbr_direct_light(lights[i], world_pos, N, V,
                                    F0, albedo, roughness, metallic, sf);
             Lo += light_contrib;
