@@ -113,7 +113,7 @@ fn mat4_look_at_rh(eye: vec3f, center: vec3f, up: vec3f) -> mat4x4f {
 // ── Point light matrices (6 cube faces) ───────────────────────────────────────
 
 fn compute_point_light_matrices(light_idx: u32, position: vec3f, range: f32) {
-    let base = light_idx * FACES_PER_LIGHT;
+    let base = lights[light_idx].shadow_index;
     // Extend far plane to ensure full spherical coverage
     // With 90° FOV, worst case is corners at sqrt(3) * range from light center
     let far_plane = max(range, 0.1) * 2.5;  // 2.5x provides full coverage with margin
@@ -136,7 +136,7 @@ fn compute_point_light_matrices(light_idx: u32, position: vec3f, range: f32) {
 // ── Spot light matrix (single perspective) ────────────────────────────────────
 
 fn compute_spot_matrix(light_idx: u32, position: vec3f, direction: vec3f, range: f32, cos_outer: f32) {
-    let base = light_idx * FACES_PER_LIGHT;
+    let base = lights[light_idx].shadow_index;
     let dir = normalize(direction);
 
     // Outer angle from cos(outer) → fov = 2 * acos(cos_outer), clamped to [45°, 179°]
@@ -148,22 +148,12 @@ fn compute_spot_matrix(light_idx: u32, position: vec3f, direction: vec3f, range:
     let proj = mat4_perspective_rh(fov, 1.0, 0.05, max(range, 0.1));
 
     shadow_mats[base].mat = proj * view;
-
-    // Fill remaining 5 slots with identity (unused for spot lights)
-    for (var i = 1u; i < 6u; i++) {
-        shadow_mats[base + i].mat = mat4x4f(
-            vec4f(1.0, 0.0, 0.0, 0.0),
-            vec4f(0.0, 1.0, 0.0, 0.0),
-            vec4f(0.0, 0.0, 1.0, 0.0),
-            vec4f(0.0, 0.0, 0.0, 1.0),
-        );
-    }
 }
 
 // ── Directional light cascades (CSM with sphere-fit + texel snap) ─────────────
 
 fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
-    let base = light_idx * FACES_PER_LIGHT;
+    let base = lights[light_idx].shadow_index;
     let dir = normalize(direction);
     let up = select(vec3f(0.0, 1.0, 0.0), vec3f(0.0, 0.0, 1.0), abs(dot(dir, vec3f(0.0, 1.0, 0.0))) > 0.99);
 

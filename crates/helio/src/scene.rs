@@ -660,11 +660,40 @@ impl Scene {
     }
 
     pub fn flush(&mut self) {
-        // Ensure shadow_matrices has N_lights * 6 entries so shadow_count is correct
-        // and the GPU storage buffer covers the full range ShadowMatrixPass will write.
-        // The actual matrix values are computed GPU-side by ShadowMatrixPass.
+        // Assign sequential shadow atlas base layers to each shadow-casting light.
+        // Convention: shadow_index == u32::MAX  → no shadow.
+        // Faces per light type: point = 6, directional = 4 (CSM), spot = 1.
+        // Cap at 42 shadow casters (42 × 6 = 252 ≤ 256 atlas layers).
         {
-            let needed = self.gpu_scene.lights.0.len() * 6;
+            const MAX_SHADOW_CASTERS: usize = 42;
+            let light_count = self.gpu_scene.lights.len();
+            let mut next_layer: u32 = 0;
+            let mut shadow_caster_count = 0usize;
+            for i in 0..light_count {
+                let light = self.gpu_scene.lights.0.as_slice()[i];
+                if light.shadow_index == u32::MAX {
+                    // Explicitly disabled — leave as-is.
+                    continue;
+                }
+                if shadow_caster_count >= MAX_SHADOW_CASTERS {
+                    // Over cap: disable shadow for this light.
+                    let mut disabled = light;
+                    disabled.shadow_index = u32::MAX;
+                    self.gpu_scene.lights.update(i, disabled);
+                    continue;
+                }
+                let faces: u32 = match light.light_type {
+                    0 => 4, // Directional (CSM 4 cascades)
+                    1 => 6, // Point (cube 6 faces)
+                    _ => 1, // Spot
+                };
+                let mut assigned = light;
+                assigned.shadow_index = next_layer;
+                self.gpu_scene.lights.update(i, assigned);
+                next_layer += faces;
+                shadow_caster_count += 1;
+            }
+            let needed = (next_layer as usize).max(1);
             if self.gpu_scene.shadow_matrices.len() != needed {
                 self.gpu_scene.shadow_matrices.set_data(
                     vec![GpuShadowMatrix::zeroed(); needed],

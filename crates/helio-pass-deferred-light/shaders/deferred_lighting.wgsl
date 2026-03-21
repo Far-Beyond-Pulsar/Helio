@@ -19,7 +19,7 @@
 const ENABLE_LIGHTING: bool = true;
 const ENABLE_SHADOWS: bool = true;
 const ENABLE_BLOOM: bool = false;
-const MAX_SHADOW_LIGHTS: u32 = 4u;
+const MAX_SHADOW_LIGHTS: u32 = 42u;
 const BLOOM_INTENSITY: f32 = 0.3;
 const BLOOM_THRESHOLD: f32 = 1.0;
 
@@ -313,7 +313,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, fr
     var layer: u32;
     if light.light_type > 0u && light.light_type < 2u {  // Point light (type 1)
         let to_frag = world_pos - light.position_range.xyz;
-        layer = light_idx * 6u + point_light_face(to_frag);
+        layer = light.shadow_index + point_light_face(to_frag);
         let depth_bias   = 0.0002;
         let cascade_scale = 1.0;
         return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos, frag_coord, frame);
@@ -368,7 +368,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, fr
         // Use PCSS if enabled and light size is non-zero for this cascade
         let use_pcss = shadow_config.enable_pcss != 0u && shadow_config.cascades[cascade_a].pcss_light_size > 0.0;
 
-        let layer_a = light_idx * 6u + cascade_a;
+        let layer_a = light.shadow_index + cascade_a;
         var shadow_a: f32;
         if use_pcss {
             shadow_a = sample_cascade_shadow_pcss(layer_a, cascade_a, world_pos, frag_coord, frame);
@@ -384,7 +384,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, fr
         // Blend between cascades if needed
         if cascade_b != cascade_a && blend > 0.001 {
             let use_pcss_b = shadow_config.enable_pcss != 0u && shadow_config.cascades[cascade_b].pcss_light_size > 0.0;
-            let layer_b = light_idx * 6u + cascade_b;
+            let layer_b = light.shadow_index + cascade_b;
             var shadow_b: f32;
             if use_pcss_b {
                 shadow_b = sample_cascade_shadow_pcss(layer_b, cascade_b, world_pos, frag_coord, frame);
@@ -398,7 +398,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, fr
 
         return shadow_a;
     } else {
-        layer = light_idx * 6u;
+        layer = light.shadow_index;
         let depth_bias   = 0.00015;
         let cascade_scale = 1.0;
         return sample_cascade_shadow(layer, depth_bias, cascade_scale, world_pos, frag_coord, frame);
