@@ -902,6 +902,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-shadow",
+ "helio-pass-shadow-matrix",
  "helio-pass-simple-cube",
  "helio-pass-sky",
  "helio-pass-sky-lut",

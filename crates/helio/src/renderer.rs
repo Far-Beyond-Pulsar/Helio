@@ -8,6 +8,7 @@ use helio_pass_depth_prepass::DepthPrepassPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
+use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_transparent::TransparentPass;
@@ -413,7 +414,30 @@ fn build_default_graph(
     let camera_buf = gpu_scene.camera.buffer();
     let _instances_buf = gpu_scene.instances.buffer();
 
-    // 1. ShadowPass — generates shadow atlas for all shadow-casting lights
+    // 1. ShadowMatrixPass — GPU compute: generates shadow matrices (O(1) CPU, AAA-style)
+    // TODO: Add shadow dirty/hash buffers for delta updates (only recompute when lights/camera move)
+    let shadow_dirty_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Shadow Dirty Flags"),
+        size: 64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Shadow Hashes"),
+        size: 64,
+        usage: wgpu::BufferUsages::STORAGE,
+        mapped_at_creation: false,
+    });
+    graph.add_pass(Box::new(ShadowMatrixPass::new(
+        device,
+        gpu_scene.lights.buffer(),
+        gpu_scene.shadow_matrices.buffer(),
+        camera_buf,
+        &shadow_dirty_buf,  // shadow_dirty (TODO: implement dirty tracking)
+        &shadow_hashes_buf,  // shadow_hashes (TODO: implement hash tracking)
+    )));
+
+    // 2. ShadowPass — generates shadow atlas for all shadow-casting lights
     graph.add_pass(Box::new(ShadowPass::new(device)));
 
     // 2. SkyLutPass — generates atmospheric sky lookup texture
