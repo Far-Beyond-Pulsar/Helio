@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrayvec::ArrayVec;
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 use helio_pass_billboard::BillboardPass;
+use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_depth_prepass::DepthPrepassPass;
 use helio_pass_fxaa::FxaaPass;
@@ -430,6 +431,7 @@ impl Renderer {
                     count: self.billboard_instances.len() as u32,
                 })
             },
+            vg: self.scene.vg_frame_data(),
         };
 
         self.graph.execute_with_frame_resources(
@@ -502,6 +504,12 @@ fn build_default_graph(
         device,
         config.width,
         config.height,
+    )));
+
+    // 4b. VirtualGeometryPass — GPU-driven meshlet cull + draw into the same GBuffer
+    graph.add_pass(Box::new(VirtualGeometryPass::new(
+        device,
+        camera_buf,
     )));
 
     // TODO: Add SsaoPass — needs resource declaration support

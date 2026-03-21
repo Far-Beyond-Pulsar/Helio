@@ -910,6 +910,7 @@ dependencies = [
  "helio-pass-ssao",
  "helio-pass-taa",
  "helio-pass-transparent",
+ "helio-pass-virtual-geometry",
  "helio-v3",
  "libhelio",
  "log",
@@ -1144,6 +1145,17 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-virtual-geometry"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "log",
  "wgpu",
 ]
 

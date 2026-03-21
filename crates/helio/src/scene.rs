@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytemuck::Zeroable;
@@ -7,17 +8,18 @@ use helio_v3::{
     DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb, GpuInstanceData,
     GpuLight, GpuMaterial, GpuScene,
 };
-use libhelio::GpuShadowMatrix;
+use libhelio::{GpuMeshletEntry, GpuShadowMatrix, VgFrameData};
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, DenseRemove, SparsePool};
-use crate::handles::{LightId, MaterialId, MeshId, ObjectId, TextureId};
+use crate::handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId};
 use crate::material::{
     GpuMaterialTextureSlot, GpuMaterialTextures, MaterialAsset, MaterialTextureRef, MaterialTextures,
     TextureTransform, TextureUpload, MAX_TEXTURES,
 };
 use crate::mesh::{MeshBuffers, MeshPool, MeshSlice, MeshUpload};
+use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor, meshletize};
 
 #[derive(Debug, Error)]
 pub enum SceneError {
@@ -107,6 +109,24 @@ struct TextureRecord {
 
 fn invalid(resource: &'static str) -> SceneError {
     SceneError::InvalidHandle { resource }
+}
+
+// ─── Virtual geometry records ────────────────────────────────────────────────
+
+/// CPU-side record for a virtual mesh: the uploaded mesh handle + its precomputed meshlets.
+#[derive(Debug, Clone)]
+struct VirtualMeshRecord {
+    pub mesh_id: MeshId,
+    /// Precomputed meshlet descriptors (instance_index is 0; patched during rebuild).
+    pub meshlets: Vec<GpuMeshletEntry>,
+    pub ref_count: u32,
+}
+
+/// CPU-side record for one virtual object (a VG instance in the scene).
+#[derive(Debug, Clone)]
+struct VirtualObjectRecord {
+    pub virtual_mesh: VirtualMeshId,
+    pub instance: GpuInstanceData,
 }
 
 fn tombstone_material() -> GpuMaterial {
@@ -247,6 +267,23 @@ pub struct Scene {
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     objects_dirty: bool,
     prev_view_proj: Mat4,
+
+    // ── Virtual geometry ──────────────────────────────────────────────────────
+    /// All uploaded virtual meshes keyed by their handle.
+    vg_meshes: HashMap<VirtualMeshId, VirtualMeshRecord>,
+    /// Next free VirtualMeshId slot counter (monotonically increasing).
+    vg_next_mesh_id: u32,
+    /// Dense array of virtual objects (one entry per `insert_virtual_object` call).
+    vg_objects: DenseArena<VirtualObjectRecord, VirtualObjectId>,
+    /// Set when VG topology or transforms change; triggers `rebuild_vg_buffers()`.
+    vg_objects_dirty: bool,
+    /// Monotonically increasing counter forwarded to `VgFrameData::buffer_version`.
+    /// The VG pass re-uploads GPU buffers only when this advances.
+    vg_buffer_version: u64,
+    /// Flattened meshlet entries for the current VG layout (rebuilt when dirty).
+    vg_cpu_meshlets: Vec<GpuMeshletEntry>,
+    /// Instance data for all VG objects (one entry per VG object, in order).
+    vg_cpu_instances: Vec<GpuInstanceData>,
 }
 
 impl Scene {
@@ -302,6 +339,13 @@ impl Scene {
             objects: DenseArena::new(),
             objects_dirty: true, // rebuild on first flush
             prev_view_proj: Mat4::IDENTITY,
+            vg_meshes: HashMap::new(),
+            vg_next_mesh_id: 0,
+            vg_objects: DenseArena::new(),
+            vg_objects_dirty: false,
+            vg_buffer_version: 0,
+            vg_cpu_meshlets: Vec::new(),
+            vg_cpu_instances: Vec::new(),
         }
     }
 
@@ -671,6 +715,11 @@ impl Scene {
             self.rebuild_instance_buffers();
             self.objects_dirty = false;
         }
+        // Rebuild virtual geometry CPU buffers when VG topology or transforms changed.
+        if self.vg_objects_dirty {
+            self.rebuild_vg_buffers();
+            self.vg_objects_dirty = false;
+        }
         self.gpu_scene.flush();
     }
 
@@ -807,6 +856,144 @@ impl Scene {
             }
         }
         Ok(())
+    }
+
+    // ── Virtual geometry API ──────────────────────────────────────────────────
+
+    /// Upload a high-resolution mesh and decompose it into GPU meshlets for virtual
+    /// geometry rendering.  The mesh is also registered in the normal `MeshPool` so
+    /// it shares vertex/index storage with regular meshes.
+    ///
+    /// Returns a `VirtualMeshId` that you pass to `insert_virtual_object`.
+    pub fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
+        // Upload vertices/indices into the shared mega-buffer.
+        let mesh_id = self.mesh_pool.insert(MeshUpload {
+            vertices: upload.vertices.clone(),
+            indices: upload.indices.clone(),
+        });
+        let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
+
+        // CPU-side meshlet decomposition using absolute mega-buffer offsets.
+        let meshlets = meshletize(
+            &upload.vertices,
+            &upload.indices,
+            slice.first_index,
+            slice.first_vertex,
+        );
+
+        let id = VirtualMeshId(self.vg_next_mesh_id);
+        self.vg_next_mesh_id += 1;
+        self.vg_meshes.insert(id, VirtualMeshRecord {
+            mesh_id,
+            meshlets,
+            ref_count: 0,
+        });
+        id
+    }
+
+    /// Remove a virtual mesh.  Fails if any `VirtualObjectId` still references it.
+    pub fn remove_virtual_mesh(&mut self, id: VirtualMeshId) -> Result<()> {
+        let record = self.vg_meshes.get(&id).ok_or_else(|| invalid("virtual_mesh"))?;
+        if record.ref_count != 0 {
+            return Err(SceneError::ResourceInUse { resource: "virtual_mesh" });
+        }
+        self.vg_meshes.remove(&id);
+        Ok(())
+    }
+
+    /// Place an instance of a virtual mesh into the scene.
+    pub fn insert_virtual_object(&mut self, desc: VirtualObjectDescriptor) -> Result<VirtualObjectId> {
+        let record = self.vg_meshes.get_mut(&desc.virtual_mesh)
+            .ok_or_else(|| invalid("virtual_mesh"))?;
+        record.ref_count += 1;
+
+        let instance = GpuInstanceData {
+            model: desc.transform.to_cols_array(),
+            normal_mat: normal_matrix(desc.transform),
+            bounds: desc.bounds,
+            mesh_id: record.mesh_id.slot(),
+            material_id: desc.material_id,
+            flags: desc.flags,
+            _pad: 0,
+        };
+        let (id, _) = self.vg_objects.insert(VirtualObjectRecord {
+            virtual_mesh: desc.virtual_mesh,
+            instance,
+        });
+        self.vg_objects_dirty = true;
+        Ok(id)
+    }
+
+    /// Update the world transform of a virtual object.  In-place if no topology rebuild
+    /// is pending; otherwise the change will be included in the next rebuild automatically.
+    pub fn update_virtual_object_transform(
+        &mut self,
+        id: VirtualObjectId,
+        transform: Mat4,
+    ) -> Result<()> {
+        let Some((_, record)) = self.vg_objects.get_mut_with_index(id) else {
+            return Err(invalid("virtual_object"));
+        };
+        record.instance.model = transform.to_cols_array();
+        record.instance.normal_mat = normal_matrix(transform);
+        // Mark dirty so vg_frame_data() picks up the new transform.
+        self.vg_objects_dirty = true;
+        Ok(())
+    }
+
+    /// Remove a virtual object from the scene.
+    pub fn remove_virtual_object(&mut self, id: VirtualObjectId) -> Result<()> {
+        let removed = self.vg_objects.remove(id).ok_or_else(|| invalid("virtual_object"))?;
+        if let Some(mesh_record) = self.vg_meshes.get_mut(&removed.removed.virtual_mesh) {
+            mesh_record.ref_count = mesh_record.ref_count.saturating_sub(1);
+        }
+        self.vg_objects_dirty = true;
+        Ok(())
+    }
+
+    /// Returns a `VgFrameData` view into the CPU-side meshlet/instance buffers, or
+    /// `None` if there are no virtual geometry objects in the scene.
+    pub fn vg_frame_data(&self) -> Option<VgFrameData<'_>> {
+        if self.vg_cpu_meshlets.is_empty() {
+            return None;
+        }
+        Some(VgFrameData {
+            meshlets: bytemuck::cast_slice(&self.vg_cpu_meshlets),
+            instances: bytemuck::cast_slice(&self.vg_cpu_instances),
+            meshlet_count: self.vg_cpu_meshlets.len() as u32,
+            instance_count: self.vg_cpu_instances.len() as u32,
+            buffer_version: self.vg_buffer_version,
+        })
+    }
+
+    /// Rebuild `vg_cpu_meshlets` and `vg_cpu_instances` from the current VG object set.
+    ///
+    /// This assigns each VG object a contiguous `instance_index` slot and patches the
+    /// `GpuMeshletEntry::instance_index` field in all meshlets owned by that object.
+    fn rebuild_vg_buffers(&mut self) {
+        let instance_count = self.vg_objects.dense_len();
+        self.vg_cpu_instances.clear();
+        self.vg_cpu_meshlets.clear();
+        self.vg_cpu_instances.reserve(instance_count);
+
+        for i in 0..instance_count {
+            let Some(obj) = self.vg_objects.get_dense(i) else { continue };
+            let instance_index = self.vg_cpu_instances.len() as u32;
+            self.vg_cpu_instances.push(obj.instance);
+
+            let Some(mesh_record) = self.vg_meshes.get(&obj.virtual_mesh) else { continue };
+            for mut meshlet in mesh_record.meshlets.iter().copied() {
+                meshlet.instance_index = instance_index;
+                self.vg_cpu_meshlets.push(meshlet);
+            }
+        }
+
+        self.vg_buffer_version = self.vg_buffer_version.wrapping_add(1);
+        log::debug!(
+            "rebuild_vg_buffers: {} VG objects → {} meshlets",
+            instance_count,
+            self.vg_cpu_meshlets.len()
+        );
     }
 }
 

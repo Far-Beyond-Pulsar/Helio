@@ -1,0 +1,14 @@
+[package]
+name = "helio-pass-virtual-geometry"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helio Contributors"]
+description = "GPU-driven virtual geometry pass: per-meshlet frustum + backface-cone culling followed by an indirect GBuffer draw"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+bytemuck = { version = "1.14", features = ["derive"] }
+helio-v3 = { path = "../helio-v3" }
+libhelio = { path = "../libhelio" }
+log = "0.4"
+wgpu = "23"

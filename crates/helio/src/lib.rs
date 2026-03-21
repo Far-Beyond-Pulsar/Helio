@@ -15,8 +15,9 @@ mod material;
 mod mesh;
 mod renderer;
 mod scene;
+mod vg;
 
-pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId};
+pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId};
 pub use helio_pass_billboard::BillboardInstance;
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
@@ -25,6 +26,7 @@ pub use material::{
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex};
 pub use renderer::{required_wgpu_features, required_wgpu_limits, build_simple_graph, GiConfig, Renderer, RendererConfig};
 pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError};
+pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 pub use helio_v3::{
     DrawIndexedIndirectArgs, Error, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
