@@ -125,7 +125,7 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
 
 // ── Shadow helpers ────────────────────────────────────────────────────────────
 
-const ATLAS_SIZE: f32 = 2048.0;
+const ATLAS_SIZE: f32 = 1024.0;
 
 // PCF sample count (override at pipeline creation for quality tiers)
 override PCF_SAMPLE_COUNT: u32 = 16u;

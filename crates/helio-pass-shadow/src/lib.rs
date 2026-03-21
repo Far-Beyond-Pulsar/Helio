@@ -177,15 +177,7 @@ impl ShadowPass {
                 depth_write_enabled: true,
                 depth_compare: wgpu::CompareFunction::Less,
                 stencil: wgpu::StencilState::default(),
-                // Slope-scale + constant bias: standard values from UE4 and Unity.
-                // Shifts shadow receiver depth slightly away from caster to avoid
-                // floating-point precision aliasing ("peter-panning" is tuned out
-                // by the front-face cull above).
-                bias: wgpu::DepthBiasState {
-                    constant: 2,
-                    slope_scale: 2.0,
-                    clamp: 0.0,
-                },
+                bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
