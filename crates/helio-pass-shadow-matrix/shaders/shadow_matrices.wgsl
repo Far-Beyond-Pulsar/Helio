@@ -15,24 +15,22 @@ const CSM_SPLITS: vec4f = vec4f(16.0, 80.0, 300.0, 1400.0);
 const SCENE_DEPTH: f32 = 4000.0;
 const ATLAS_TEXELS: f32 = 2048.0;
 
-// Light types (must match LightType encoding in gpu_light_scene.rs:514-516)
-const LIGHT_TYPE_DIRECTIONAL: f32 = 0.0;
-const LIGHT_TYPE_POINT: f32 = 1.0;
-const LIGHT_TYPE_SPOT: f32 = 2.0;
+// Light types (must match LightType in libhelio/src/light.rs)
+const LIGHT_TYPE_DIRECTIONAL: u32 = 0u;
+const LIGHT_TYPE_POINT: u32 = 1u;
+const LIGHT_TYPE_SPOT: u32 = 2u;
 
 // ── Input/Output structs ──────────────────────────────────────────────────────
 
-/// Must match GpuLight in lighting.rs (48 bytes)
+/// Must match GpuLight in libhelio/src/light.rs (64 bytes)
 struct GpuLight {
-    position:   vec3f,
-    light_type: f32,
-    direction:  vec3f,
-    range:      f32,
-    color:      vec3f,
-    intensity:  f32,
-    cos_inner:  f32,
-    cos_outer:  f32,
-    _pad:       vec2f,
+    position_range:   vec4f,  // xyz = position, w = range
+    direction_outer:  vec4f,  // xyz = direction, w = cos(outer_angle)
+    color_intensity:  vec4f,  // xyz = color, w = intensity
+    shadow_index:     u32,    // u32::MAX = no shadow, otherwise shadow matrix base index
+    light_type:       u32,    // 0=Directional, 1=Point, 2=Spot
+    inner_angle:      f32,    // cos(inner_angle) for spot lights
+    _pad:             u32,
 }
 
 /// Must match GpuShadowMatrix in uniforms.rs (64 bytes)
@@ -303,11 +301,11 @@ fn compute_shadow_matrices(@builtin(global_invocation_id) gid: vec3u) {
 
     // Compute matrices based on light type
     if light.light_type == LIGHT_TYPE_POINT {
-        compute_point_light_matrices(light_idx, light.position, light.range);
+        compute_point_light_matrices(light_idx, light.position_range.xyz, light.position_range.w);
     } else if is_directional {
-        compute_directional_cascades(light_idx, light.direction);
+        compute_directional_cascades(light_idx, light.direction_outer.xyz);
     } else if light.light_type == LIGHT_TYPE_SPOT {
-        compute_spot_matrix(light_idx, light.position, light.direction, light.range, light.cos_outer);
+        compute_spot_matrix(light_idx, light.position_range.xyz, light.direction_outer.xyz, light.position_range.w, light.direction_outer.w);
     }
 
     // Compute hash of all 6 matrices for this light
