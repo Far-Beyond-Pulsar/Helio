@@ -115,7 +115,8 @@ impl ApplicationHandler for App {
         });
 
         let mut renderer = Renderer::new(device.clone(), queue.clone(),
-            RendererConfig::new(size.width, size.height, format),
+            RendererConfig::new(size.width, size.height, format)
+                .with_shadow_quality(helio::ShadowQuality::Ultra),
         );
         renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
         renderer.set_ambient([0.6, 0.72, 1.0], 0.06);

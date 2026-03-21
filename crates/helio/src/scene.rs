@@ -227,6 +227,72 @@ fn object_gpu_data(mesh: MeshId, material_slot: usize, desc: ObjectDescriptor, s
     }
 }
 
+fn compute_cascade_matrix(
+    inv_view_proj: Mat4,
+    view: Mat4,
+    light_dir: Vec3,
+    near: f32,
+    far: f32,
+    cam_near: f32,
+    cam_far: f32,
+) -> Mat4 {
+    // Compute frustum corners for this cascade in world space
+    let ndc_corners = [
+        Vec3::new(-1.0, -1.0, 0.0),  // near bottom-left
+        Vec3::new( 1.0, -1.0, 0.0),  // near bottom-right
+        Vec3::new(-1.0,  1.0, 0.0),  // near top-left
+        Vec3::new( 1.0,  1.0, 0.0),  // near top-right
+        Vec3::new(-1.0, -1.0, 1.0),  // far bottom-left
+        Vec3::new( 1.0, -1.0, 1.0),  // far bottom-right
+        Vec3::new(-1.0,  1.0, 1.0),  // far top-left
+        Vec3::new( 1.0,  1.0, 1.0),  // far top-right
+    ];
+
+    // Transform corners to world space
+    let mut world_corners = [Vec3::ZERO; 8];
+    for (i, ndc) in ndc_corners.iter().enumerate() {
+        let w = inv_view_proj * ndc.extend(1.0);
+        world_corners[i] = w.truncate() / w.w;
+    }
+
+    // Interpolate corners to cascade near/far planes
+    let lambda_near = (near - cam_near) / (cam_far - cam_near);
+    let lambda_far = (far - cam_near) / (cam_far - cam_near);
+
+    for i in 0..4 {
+        let near_pt = world_corners[i];
+        let far_pt = world_corners[i + 4];
+        world_corners[i] = near_pt + (far_pt - near_pt) * lambda_near;
+        world_corners[i + 4] = near_pt + (far_pt - near_pt) * lambda_far;
+    }
+
+    // Compute bounding sphere center (simple average)
+    let center = world_corners.iter().fold(Vec3::ZERO, |acc, &v| acc + v) / 8.0;
+
+    // Compute light view matrix
+    let light_up = if light_dir.y.abs() > 0.9 { Vec3::Z } else { Vec3::Y };
+    let light_view = Mat4::look_at_rh(center, center + light_dir, light_up);
+
+    // Transform corners to light space and find bounds
+    let mut min = Vec3::splat(f32::MAX);
+    let mut max = Vec3::splat(f32::MIN);
+    for corner in world_corners {
+        let light_space = (light_view * corner.extend(1.0)).truncate();
+        min = min.min(light_space);
+        max = max.max(light_space);
+    }
+
+    // Expand bounds slightly to avoid edge clipping
+    let expand = 2.0;
+    min -= Vec3::splat(expand);
+    max += Vec3::splat(expand);
+
+    // Create orthographic projection for this cascade
+    let light_proj = Mat4::orthographic_rh(min.x, max.x, min.y, max.y, -max.z, -min.z);
+
+    light_proj * light_view
+}
+
 pub struct Scene {
     gpu_scene: GpuScene,
     mesh_pool: MeshPool,
@@ -659,10 +725,106 @@ impl Scene {
     }
 
     pub fn flush(&mut self) {
+        // Compute shadow matrices for all shadow-casting lights
+        self.compute_shadow_matrices();
+
         let queue = self.gpu_scene.queue.clone();
         self.mesh_pool.flush(&queue);
         self.material_textures.flush(&queue);
         self.gpu_scene.flush();
+    }
+
+    fn compute_shadow_matrices(&mut self) {
+        use libhelio::GpuShadowMatrix;
+
+        const MAX_SHADOW_LIGHTS: usize = 4;
+
+        // Clear existing matrices
+        self.gpu_scene.shadow_matrices.0.clear();
+
+        // Get camera uniforms for CSM computation
+        let camera_uniforms = self.gpu_scene.camera.get();
+        let view_mat = Mat4::from_cols_array(&camera_uniforms.view);
+        let proj_mat = Mat4::from_cols_array(&camera_uniforms.proj);
+        let view_proj = proj_mat * view_mat;
+        let inv_view_proj = view_proj.inverse();
+
+        // O(1): Only process first MAX_SHADOW_LIGHTS (4) shadow-casting lights
+        let mut shadow_lights_processed = 0;
+        for (_, light_record) in self.lights.iter() {
+            if shadow_lights_processed >= MAX_SHADOW_LIGHTS {
+                break;  // O(1) guarantee: stop after 4 lights
+            }
+
+            let light = &light_record.gpu;
+
+            // Skip lights without shadows
+            if light.shadow_index == u32::MAX {
+                continue;
+            }
+
+            shadow_lights_processed += 1;
+
+            let light_type = light.light_type;
+            let light_pos = Vec3::new(light.position_range[0], light.position_range[1], light.position_range[2]);
+            let light_dir = Vec3::new(light.direction_outer[0], light.direction_outer[1], light.direction_outer[2]).normalize();
+
+            if light_type == 0 {  // Directional light - 4 CSM cascades
+                let csm_splits = [16.0, 80.0, 300.0, 1400.0];
+                let near = camera_uniforms.position_near[3];
+                let far = camera_uniforms.projection[3];
+
+                let mut prev_split = near;
+                for (cascade_idx, &split_far) in csm_splits.iter().enumerate() {
+                    let split_near = prev_split;
+                    let split_far = split_far.min(far);
+
+                    // Compute frustum corners for this cascade
+                    let cascade_view_proj = compute_cascade_matrix(
+                        inv_view_proj, view_mat, light_dir, split_near, split_far, near, far,
+                    );
+
+                    let matrix = GpuShadowMatrix {
+                        light_view_proj: cascade_view_proj.to_cols_array(),
+                        atlas_rect: [0.0, 0.0, 1.0, 1.0],  // Full atlas (no tiling yet)
+                        bias_split: [0.0001, 0.0, split_far, 0.0],
+                    };
+                    self.gpu_scene.shadow_matrices.push(matrix);
+
+                    prev_split = split_far;
+                }
+            } else if light_type == 1 {  // Point light - 6 cube faces
+                let faces = [
+                    (Vec3::X,  Vec3::Y),  // +X
+                    (Vec3::NEG_X, Vec3::Y),  // -X
+                    (Vec3::Y,  Vec3::NEG_Z), // +Y
+                    (Vec3::NEG_Y, Vec3::Z),  // -Y
+                    (Vec3::Z,  Vec3::Y),  // +Z
+                    (Vec3::NEG_Z, Vec3::Y),  // -Z
+                ];
+
+                for (forward, up) in faces {
+                    let view = Mat4::look_at_rh(light_pos, light_pos + forward, up);
+                    let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, 0.1, light.position_range[3]);
+                    let matrix = GpuShadowMatrix {
+                        light_view_proj: (proj * view).to_cols_array(),
+                        atlas_rect: [0.0, 0.0, 1.0, 1.0],
+                        bias_split: [0.0001, 0.0, 0.0, 0.0],
+                    };
+                    self.gpu_scene.shadow_matrices.push(matrix);
+                }
+            } else if light_type == 2 {  // Spot light - 1 perspective matrix
+                let view = Mat4::look_at_rh(light_pos, light_pos + light_dir, Vec3::Y);
+                let outer_angle = light.direction_outer[3].acos() * 2.0;
+                let proj = Mat4::perspective_rh(outer_angle, 1.0, 0.1, light.position_range[3]);
+                let matrix = GpuShadowMatrix {
+                    light_view_proj: (proj * view).to_cols_array(),
+                    atlas_rect: [0.0, 0.0, 1.0, 1.0],
+                    bias_split: [0.0001, 0.0, 0.0, 0.0],
+                };
+                self.gpu_scene.shadow_matrices.push(matrix);
+            }
+        }
     }
 
     pub fn advance_frame(&mut self) {

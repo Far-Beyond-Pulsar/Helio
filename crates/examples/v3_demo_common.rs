@@ -28,7 +28,7 @@ pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -
         position_range: [0.0, 0.0, 0.0, f32::MAX],
         direction_outer: [direction[0], direction[1], direction[2], 0.0],
         color_intensity: [color[0], color[1], color[2], intensity],
-        shadow_index: u32::MAX,
+        shadow_index: 0,  // Enable shadows
         light_type: LightType::Directional as u32,
         inner_angle: 0.0,
         _pad: 0,
@@ -40,7 +40,7 @@ pub fn point_light(position: [f32; 3], color: [f32; 3], intensity: f32, range: f
         position_range: [position[0], position[1], position[2], range],
         direction_outer: [0.0, 0.0, -1.0, 0.0],
         color_intensity: [color[0], color[1], color[2], intensity],
-        shadow_index: u32::MAX,
+        shadow_index: 0,  // Enable shadows
         light_type: LightType::Point as u32,
         inner_angle: 0.0,
         _pad: 0,
@@ -60,7 +60,7 @@ pub fn spot_light(
         position_range: [position[0], position[1], position[2], range],
         direction_outer: [direction[0], direction[1], direction[2], outer_angle.cos()],
         color_intensity: [color[0], color[1], color[2], intensity],
-        shadow_index: u32::MAX,
+        shadow_index: 0,  // Enable shadows
         light_type: LightType::Spot as u32,
         inner_angle: inner_angle.cos(),
         _pad: 0,

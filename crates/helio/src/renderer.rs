@@ -81,6 +81,8 @@ pub struct RendererConfig {
     pub surface_format: wgpu::TextureFormat,
     /// Global illumination configuration (RC near, ambient far).
     pub gi_config: GiConfig,
+    /// Shadow quality (Low, Medium, High, Ultra).
+    pub shadow_quality: libhelio::ShadowQuality,
 }
 
 impl RendererConfig {
@@ -90,12 +92,19 @@ impl RendererConfig {
             height,
             surface_format,
             gi_config: GiConfig::default(), // AAA default: RC close, ambient far
+            shadow_quality: libhelio::ShadowQuality::Medium, // Default quality
         }
     }
 
     /// Builder: set custom GI configuration.
     pub fn with_gi_config(mut self, gi_config: GiConfig) -> Self {
         self.gi_config = gi_config;
+        self
+    }
+
+    /// Builder: set shadow quality.
+    pub fn with_shadow_quality(mut self, quality: libhelio::ShadowQuality) -> Self {
+        self.shadow_quality = quality;
         self
     }
 }
@@ -113,6 +122,7 @@ pub struct Renderer {
     ambient_intensity: f32,
     clear_color: [f32; 4],
     gi_config: GiConfig,
+    shadow_quality: libhelio::ShadowQuality,
 }
 
 /// Which graph is currently active — used by `set_render_size` to rebuild correctly.
@@ -151,6 +161,7 @@ impl Renderer {
             ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
             gi_config: config.gi_config,
+            shadow_quality: config.shadow_quality,
         }
     }
 
@@ -162,6 +173,27 @@ impl Renderer {
     /// Get current GI configuration.
     pub fn gi_config(&self) -> GiConfig {
         self.gi_config
+    }
+
+    /// Set shadow quality (Low, Medium, High, Ultra). Rebuilds the render graph.
+    pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality) {
+        self.shadow_quality = quality;
+        // Rebuild the default graph to apply the new shadow quality
+        if matches!(self.graph_kind, GraphKind::Default) {
+            let config = RendererConfig {
+                width: self.depth_texture.size().width,
+                height: self.depth_texture.size().height,
+                surface_format: self.surface_format,
+                gi_config: self.gi_config,
+                shadow_quality: self.shadow_quality,
+            };
+            self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+        }
+    }
+
+    /// Get current shadow quality.
+    pub fn shadow_quality(&self) -> libhelio::ShadowQuality {
+        self.shadow_quality
     }
 
     pub fn scene(&self) -> &Scene {
@@ -192,7 +224,8 @@ impl Renderer {
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
         let config = RendererConfig::new(width, height, self.surface_format)
-            .with_gi_config(self.gi_config);
+            .with_gi_config(self.gi_config)
+            .with_shadow_quality(self.shadow_quality);
         match self.graph_kind {
             GraphKind::Default => {
                 self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
@@ -236,6 +269,7 @@ impl Renderer {
             height:         self.depth_texture.size().height,
             surface_format: self.surface_format,
             gi_config:      self.gi_config,
+            shadow_quality: self.shadow_quality,
         };
         self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         self.graph_kind = GraphKind::Default;
@@ -404,14 +438,16 @@ fn build_default_graph(
     // 5. DeferredLightPass — lighting pass (reads G-buffer, shadow maps)
     // With automatic resource management, this will write to "pre_aa" if declared,
     // or directly to surface if no post-processing passes are present
-    graph.add_pass(Box::new(DeferredLightPass::new(
+    let mut deferred_light_pass = DeferredLightPass::new(
         device,
         queue,
         camera_buf,
         config.width,
         config.height,
         config.surface_format,
-    )));
+    );
+    deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
+    graph.add_pass(Box::new(deferred_light_pass));
 
     // TODO: Enable these passes once they declare resources properly:
     // - SkyPass (reads "sky_lut", writes to scene color)

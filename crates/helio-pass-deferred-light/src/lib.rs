@@ -36,6 +36,7 @@ pub struct DeferredLightPass {
     fallback_shadow_texture: wgpu::Texture,
     fallback_shadow_view: wgpu::TextureView,
     fallback_shadow_sampler: wgpu::Sampler,
+    shadow_depth_sampler: wgpu::Sampler,
     fallback_env_texture: wgpu::Texture,
     fallback_env_view: wgpu::TextureView,
     fallback_env_sampler: wgpu::Sampler,
@@ -172,6 +173,12 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
@@ -241,6 +248,16 @@ impl DeferredLightPass {
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
+        let shadow_depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Depth Sampler (PCSS)"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: None,  // No comparison - returns actual depth values for PCSS blocker search
+            ..Default::default()
+        });
         let (fallback_env_texture, fallback_env_view) = black_cube_texture(device, queue);
         let fallback_env_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Deferred Env Sampler"),
@@ -272,6 +289,7 @@ impl DeferredLightPass {
             fallback_shadow_texture,
             fallback_shadow_view,
             fallback_shadow_sampler,
+            shadow_depth_sampler,
             fallback_env_texture,
             fallback_env_view,
             fallback_env_sampler,
@@ -413,6 +431,10 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: wgpu::BindingResource::Sampler(&self.fallback_env_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
                     },
                 ],
             }));

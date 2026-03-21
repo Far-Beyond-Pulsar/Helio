@@ -180,7 +180,8 @@ impl ApplicationHandler for App {
         });
 
         let mut renderer = Renderer::new(device.clone(), queue.clone(),
-            RendererConfig::new(size.width, size.height, format),
+            RendererConfig::new(size.width, size.height, format)
+                .with_shadow_quality(helio::ShadowQuality::Ultra),
         );
 
         let mat = renderer.insert_material(make_material([0.75, 0.72, 0.68, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0));
