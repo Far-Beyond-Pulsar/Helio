@@ -701,10 +701,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
         for (var i = 0u; i < globals.light_count; i++) {
+            let light = lights[i];
+            // Range-cull point/spot lights before the expensive shadow fetch.
+            // Directional lights (type 0) have no position so always pass.
+            if light.light_type != 0u {
+                let dist = length(light.position_range.xyz - world_pos);
+                if dist > light.position_range.w { continue; }
+            }
             let sf = shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame);
-            let light_contrib = pbr_direct_light(lights[i], world_pos, N, V,
-                                   F0, albedo, roughness, metallic, sf);
-            Lo += light_contrib;
+            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf);
         }
     }
 
