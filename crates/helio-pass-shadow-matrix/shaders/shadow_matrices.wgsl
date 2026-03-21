@@ -38,12 +38,17 @@ struct GpuShadowMatrix {
     mat: mat4x4f,
 }
 
-/// Camera data for CSM cascade computation
+/// Camera data for CSM cascade computation.
+/// Layout must match GpuCameraUniforms in libhelio/src/camera.rs (256 bytes).
 struct CameraUniforms {
-    view_proj:     mat4x4f,
-    position:      vec3f,
-    time:          f32,
-    view_proj_inv: mat4x4f,
+    view:           mat4x4f,   // offset   0
+    proj:           mat4x4f,   // offset  64
+    view_proj:      mat4x4f,   // offset 128
+    inv_view_proj:  mat4x4f,   // offset 192
+    position_near:  vec4f,     // offset 256 — xyz = world pos, w = near plane
+    forward_far:    vec4f,     // offset 272
+    jitter_frame:   vec4f,     // offset 288
+    prev_view_proj: mat4x4f,   // offset 304
 }
 
 struct ShadowMatrixParams {
@@ -172,7 +177,7 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
 
     var world: array<vec3f, 8>;
     for (var i = 0u; i < 8u; i++) {
-        let v = camera.view_proj_inv * ndc[i];
+        let v = camera.inv_view_proj * ndc[i];
         world[i] = v.xyz / v.w;
     }
 
@@ -180,8 +185,8 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
     var near_dist = 0.0;
     var far_dist = 0.0;
     for (var i = 0u; i < 4u; i++) {
-        near_dist += length(world[i] - camera.position);
-        far_dist  += length(world[i + 4u] - camera.position);
+        near_dist += length(world[i] - camera.position_near.xyz);
+        far_dist  += length(world[i + 4u] - camera.position_near.xyz);
     }
     near_dist /= 4.0;
     far_dist  /= 4.0;
@@ -292,23 +297,14 @@ fn compute_shadow_matrices(@builtin(global_invocation_id) gid: vec3u) {
     if light_idx >= params.light_count { return; }
 
     let light = lights[light_idx];
-    let is_directional = light.light_type == LIGHT_TYPE_DIRECTIONAL;
-    let is_dirty = (shadow_dirty[light_idx] & 1u) != 0u;
 
-    // Skip update if not dirty AND (not directional OR camera didn't move)
-    let needs_update = is_dirty || (is_directional && params.camera_moved != 0u);
-    if !needs_update { return; }
-
-    // Compute matrices based on light type
+    // Compute matrices based on light type (every frame; dirty tracking removed
+    // because shadow_dirty is never written and would skip all non-directional lights)
     if light.light_type == LIGHT_TYPE_POINT {
         compute_point_light_matrices(light_idx, light.position_range.xyz, light.position_range.w);
-    } else if is_directional {
+    } else if light.light_type == LIGHT_TYPE_DIRECTIONAL {
         compute_directional_cascades(light_idx, light.direction_outer.xyz);
     } else if light.light_type == LIGHT_TYPE_SPOT {
         compute_spot_matrix(light_idx, light.position_range.xyz, light.direction_outer.xyz, light.position_range.w, light.direction_outer.w);
     }
-
-    // Compute hash of all 6 matrices for this light
-    let new_hash = fnv_hash_mats_6(light_idx * FACES_PER_LIGHT);
-    shadow_hashes[light_idx] = new_hash;
 }

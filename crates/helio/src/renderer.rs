@@ -414,8 +414,10 @@ fn build_default_graph(
     let camera_buf = gpu_scene.camera.buffer();
     let _instances_buf = gpu_scene.instances.buffer();
 
-    // 1. ShadowMatrixPass — GPU compute: generates shadow matrices (O(1) CPU, AAA-style)
-    // TODO: Add shadow dirty/hash buffers for delta updates (only recompute when lights/camera move)
+    // 1. ShadowMatrixPass — GPU compute: writes correct view-projection matrices for
+    //    every shadow face into the shadow_matrices storage buffer.
+    //    Scene::flush() pre-sizes that buffer to N_lights*6 entries so shadow_count
+    //    is nonzero and this binding covers the full range.
     let shadow_dirty_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
         size: 64,
@@ -433,14 +435,15 @@ fn build_default_graph(
         gpu_scene.lights.buffer(),
         gpu_scene.shadow_matrices.buffer(),
         camera_buf,
-        &shadow_dirty_buf,  // shadow_dirty (TODO: implement dirty tracking)
-        &shadow_hashes_buf,  // shadow_hashes (TODO: implement hash tracking)
+        &shadow_dirty_buf,
+        &shadow_hashes_buf,
     )));
 
-    // 2. ShadowPass — generates shadow atlas for all shadow-casting lights
+    // 2. ShadowPass — renders geometry into the shadow atlas (one face per entry in shadow_matrices)
+    // publish()es shadow_atlas + shadow_sampler into FrameResources for DeferredLightPass
     graph.add_pass(Box::new(ShadowPass::new(device)));
 
-    // 2. SkyLutPass — generates atmospheric sky lookup texture
+    // 3. SkyLutPass — generates atmospheric sky lookup texture
     // Publishes "sky_lut" resource for SkyPass to consume
     graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
 

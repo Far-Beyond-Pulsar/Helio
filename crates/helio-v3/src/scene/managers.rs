@@ -55,6 +55,9 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
     /// Returns true if there are no elements.
     pub fn is_empty(&self) -> bool { self.data.is_empty() }
 
+    /// Returns a read-only view of the CPU-side data (mirrors the GPU buffer).
+    pub fn as_slice(&self) -> &[T] { &self.data }
+
     fn mark_dirty_range(&mut self, start: usize, end: usize) {
         if start >= end {
             return;

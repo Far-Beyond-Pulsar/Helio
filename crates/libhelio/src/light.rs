@@ -45,14 +45,14 @@ pub struct GpuLight {
 }
 
 /// Per-light shadow matrix for the shadow map atlas.
-/// One matrix per shadow-casting light (directional: 4 cascades, spot/point: 1–6 faces).
+/// Layout: one `mat4x4<f32>` = 64 bytes, matching `LightMatrix` in all WGSL shaders.
+/// 6 consecutive entries per light (indices light_idx*6 .. light_idx*6+5):
+///   - Point lights: 6 cube-face view-projection matrices (+X/-X/+Y/-Y/+Z/-Z)
+///   - Spot lights:  face 0 = perspective view-proj, faces 1-5 = identity (unused)
+///   - Directional:  face 0 = ortho view-proj,       faces 1-5 = identity (unused)
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuShadowMatrix {
-    /// Light-space view-projection matrix
+    /// Light-space view-projection matrix (64 bytes, matches `LightMatrix { mat: mat4x4<f32> }`)
     pub light_view_proj: [f32; 16],
-    /// Shadow atlas UV rect (x, y, width, height) in [0,1]
-    pub atlas_rect: [f32; 4],
-    /// Depth bias + normal bias + cascade split (w) + padding
-    pub bias_split: [f32; 4],
 }

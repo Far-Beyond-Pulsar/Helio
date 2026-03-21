@@ -7,6 +7,7 @@ use helio_v3::{
     DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb, GpuInstanceData,
     GpuLight, GpuMaterial, GpuScene,
 };
+use libhelio::GpuShadowMatrix;
 use thiserror::Error;
 use wgpu::util::DeviceExt;
 
@@ -659,6 +660,17 @@ impl Scene {
     }
 
     pub fn flush(&mut self) {
+        // Ensure shadow_matrices has N_lights * 6 entries so shadow_count is correct
+        // and the GPU storage buffer covers the full range ShadowMatrixPass will write.
+        // The actual matrix values are computed GPU-side by ShadowMatrixPass.
+        {
+            let needed = self.gpu_scene.lights.0.len() * 6;
+            if self.gpu_scene.shadow_matrices.len() != needed {
+                self.gpu_scene.shadow_matrices.set_data(
+                    vec![GpuShadowMatrix::zeroed(); needed],
+                );
+            }
+        }
         let queue = self.gpu_scene.queue.clone();
         self.mesh_pool.flush(&queue);
         self.material_textures.flush(&queue);
@@ -708,3 +720,5 @@ impl Scene {
         Ok(())
     }
 }
+
+
