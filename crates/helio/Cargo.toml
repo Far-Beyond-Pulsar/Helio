@@ -1,0 +1,31 @@
+[package]
+name = "helio"
+version = "0.1.0"
+edition = "2021"
+authors = ["Helio Contributors"]
+description = "High-level facade over helio-v3 for stable scene handles and O(1)-style CPU updates"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+arrayvec = "0.7"
+bytemuck = { version = "1.14", features = ["derive"] }
+glam = { version = "0.29", features = ["bytemuck"] }
+helio-v3 = { path = "../helio-v3" }
+helio-pass-billboard = { path = "../helio-pass-billboard" }
+helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
+helio-pass-depth-prepass = { path = "../helio-pass-depth-prepass" }
+helio-pass-fxaa = { path = "../helio-pass-fxaa" }
+helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
+helio-pass-shadow = { path = "../helio-pass-shadow" }
+helio-pass-shadow-matrix = { path = "../helio-pass-shadow-matrix" }
+helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
+helio-pass-sky = { path = "../helio-pass-sky" }
+helio-pass-sky-lut = { path = "../helio-pass-sky-lut" }
+helio-pass-smaa = { path = "../helio-pass-smaa" }
+helio-pass-ssao = { path = "../helio-pass-ssao" }
+helio-pass-taa = { path = "../helio-pass-taa" }
+helio-pass-transparent = { path = "../helio-pass-transparent" }
+libhelio = { path = "../libhelio" }
+log = "0.4"
+thiserror = "2.0"
+wgpu = "23"

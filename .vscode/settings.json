@@ -3,6 +3,7 @@
         "/^powershell -Command \"Get-ChildItem -Path \\$env:USERPROFILE\\\\\\\\\\.cargo\\\\\\\\registry\\\\\\\\src -Recurse -Directory -ErrorAction SilentlyContinue \\| Where-Object \\{ \\$_\\.Name -like 'raw_window_handle\\*' \\} \\| Select-Object -First 10 FullName\"$/": {
             "approve": true,
             "matchCommandLine": true
-        }
+        },
+        "Add-Content": true
     }
 }

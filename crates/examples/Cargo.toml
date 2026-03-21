@@ -75,14 +75,23 @@ path = "load_fbx_embedded.rs"
 name = "ship_flight"
 path = "ship_flight.rs"
 
+[[bin]]
+name = "simple_graph"
+path = "simple_graph.rs"
+
+[[bin]]
+name = "outdoor_rocks"
+path = "outdoor_rocks.rs"
+
 [dependencies]
-helio-render-v2 = { path = "../helio-render-v2" }
+helio = { path = "../helio" }
 helio-asset-compat = { path = "../helio-asset-compat" }
+helio-pass-sdf = { path = "../helio-pass-sdf" }
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
-wgpu = {git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8"}
-pollster = "0.3"
+wgpu = "23"
+pollster = "0.4"

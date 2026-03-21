@@ -1,38 +1,19 @@
-//! Sky atmosphere example using helio-render-v2
+//! Sky example using helio v3.
 //!
-//! Demonstrates the volumetric sky system working together with colored scene
-//! lights: a sun directional light drives the sky's sun direction and casts
-//! shadows; a sky-based ambient (Skylight) fills shadowed areas with the sky
-//! colour; and three point lights with distinct hues (warm amber, cool blue,
-//! deep red) show how colored scene lights interact with the sky-lit scene.
-//! Optional volumetric clouds drift overhead.
+//! A simple scene with a sun directional light and three colored point lights.
+//! Q/E keys rotate the sun, simulating time of day.
 //!
 //! Controls:
 //!   WASD        — move forward/left/back/right
 //!   Space/Shift — move up/down
 //!   Q/E         — rotate sun left/right (changes time of day)
 //!   Mouse drag  — look around (click to grab cursor)
-//!   3           — toggle RC probe visualisation
-//!   4           — toggle GPU timing printout (stderr)
 //!   Escape      — release cursor / exit
 
+mod v3_demo_common;
 
-
-mod demo_portal;
-
-use helio_render_v2::{
-    Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId,
-    SkyAtmosphere, VolumetricClouds, Skylight,
-};
-
-
-use helio_render_v2::features::{
-    FeatureRegistry,
-    LightingFeature,
-    BloomFeature, ShadowsFeature,
-    BillboardsFeature, BillboardInstance,
-    RadianceCascadesFeature,
-};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig};
+use v3_demo_common::{box_mesh, cube_mesh, directional_light, make_material, plane_mesh, point_light};
 
 
 use winit::{
@@ -48,59 +29,6 @@ use std::collections::HashSet;
 
 
 use std::sync::Arc;
-
-fn load_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-#[allow(dead_code)]
-fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../probe.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-const RC_WORLD_MIN: [f32; 3] = [-10.0, -0.3, -10.0];
-const RC_WORLD_MAX: [f32; 3] = [10.0, 8.0, 10.0];
-
-fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
-    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
-    const COLORS: [[f32; 4]; 4] = [
-        [0.0, 1.0, 1.0, 0.85],
-        [0.0, 1.0, 0.0, 0.80],
-        [1.0, 1.0, 0.0, 0.75],
-        [1.0, 0.35, 0.0, 0.70],
-    ];
-    // screen_scale=true: sizes are angular (multiplied by distance), giving constant apparent size
-    const SIZES: [[f32; 2]; 4] = [
-        [0.035, 0.035],  // cascade 0 — finest (4096 probes) — tiny dots
-        [0.075, 0.075],  // cascade 1
-        [0.140, 0.140],  // cascade 2
-        [0.260, 0.260],  // cascade 3 — coarsest (8 probes) — large markers
-    ];
-    let mut out = Vec::new();
-    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
-        for i in 0..dim {
-            for j in 0..dim {
-                for k in 0..dim {
-                    let x = world_min[0] + (i as f32 + 0.5) / dim as f32 * (world_max[0] - world_min[0]);
-                    let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
-                    let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
-                    out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c])
-                        .with_screen_scale(true));
-                }
-            }
-        }
-    }
-    out
-}
 
 fn main() {
     env_logger::init();
@@ -123,11 +51,11 @@ struct AppState {
     renderer: Renderer,
     last_frame: std::time::Instant,
 
-    cube1: GpuMesh,
-    cube2: GpuMesh,
-    cube3: GpuMesh,
-    ground: GpuMesh,
-    roof: GpuMesh,
+    cube1: MeshId,
+    cube2: MeshId,
+    cube3: MeshId,
+    ground: MeshId,
+    roof: MeshId,
 
     // Free-camera state
     cam_pos:   glam::Vec3,
@@ -142,11 +70,6 @@ struct AppState {
 
     // Scene state
     sun_light_id: LightId,
-    billboard_ids: Vec<BillboardId>,
-
-    probe_vis: bool,
-    sprite_w: u32,
-    sprite_h: u32,
 }
 
 impl App {
@@ -168,7 +91,7 @@ impl ApplicationHandler for App {
         );
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::DX12,
+            backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION | wgpu::InstanceFlags::DEBUG,
             ..Default::default()
         });
@@ -183,29 +106,19 @@ impl ApplicationHandler for App {
         }))
         .expect("Failed to find adapter");
 
-        // compute features based on what the adapter actually provides; ray
-        // query support is optional but enables radiance cascades, TLAS, etc.
-        let mut req_feats = wgpu::Features::TIMESTAMP_QUERY
-            | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
-        let has_ray = adapter.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-        if has_ray {
-            req_feats |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-        }
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("Main Device"),
-                required_features: req_feats,
-                required_limits: wgpu::Limits::default(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                trace: wgpu::Trace::Off,
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
             },
+            None,
         ))
         .expect("Failed to create device");
-        // later we will only add radiance cascades if has_ray
 
 
-        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+        device.on_uncaptured_error(Box::new(|e| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
         let info = adapter.get_info();
@@ -233,71 +146,36 @@ impl ApplicationHandler for App {
         };
         surface.configure(&device, &config);
 
-        let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        let mut registry_builder = FeatureRegistry::builder()
-            .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.3).with_threshold(1.2))
-            .with_feature(ShadowsFeature::new().with_atlas_size(1024).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000));
-        if has_ray {
-            registry_builder = registry_builder.with_feature(
-                RadianceCascadesFeature::new()
-                    .with_world_bounds([-10.0, -0.3, -10.0], [10.0, 8.0, 10.0]),
-            );
-        }
-        let feature_registry = registry_builder.build();
-
         let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
-            RendererConfig::new(size.width, size.height, surface_format, feature_registry),
-        )
-        .expect("Failed to create renderer");
-        renderer.set_editor_mode(true);
+            RendererConfig::new(size.width, size.height, surface_format),
+        );
 
-        let cube1  = renderer.create_mesh_cube([ 0.0, 0.5,  0.0], 0.5);
-        let cube2  = renderer.create_mesh_cube([-2.0, 0.4, -1.0], 0.4);
-        let cube3  = renderer.create_mesh_cube([ 2.0, 0.3,  0.5], 0.3);
-        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
-        // Thin slab roof sitting just above the colored lights (y=2.7..3.0).
-        // rect3d gives independent extents: wide/deep but only 0.15 thick.
-        let roof   = renderer.create_mesh_rect3d([0.0, 2.85, 0.0], [4.5, 0.15, 4.5]);
-        demo_portal::enable_live_dashboard(&mut renderer);
+        let mat = renderer.insert_material(make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0));
 
-        renderer.add_object(&cube1,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&cube2,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&cube3,  None, glam::Mat4::IDENTITY);
-        renderer.add_object(&ground, None, glam::Mat4::IDENTITY);
-        renderer.add_object(&roof,   None, glam::Mat4::IDENTITY);
+        let cube1  = renderer.insert_mesh(cube_mesh([ 0.0, 0.5,  0.0], 0.5));
+        let cube2  = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
+        let cube3  = renderer.insert_mesh(cube_mesh([ 2.0, 0.3,  0.5], 0.3));
+        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let roof   = renderer.insert_mesh(box_mesh([0.0, 2.85, 0.0], [4.5, 0.15, 4.5]));
+
+        let _ = v3_demo_common::insert_object(&mut renderer, cube1,  mat, glam::Mat4::IDENTITY, 0.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube2,  mat, glam::Mat4::IDENTITY, 0.4);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube3,  mat, glam::Mat4::IDENTITY, 0.3);
+        let _ = v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, roof,   mat, glam::Mat4::IDENTITY, 4.5);
 
         // Compute initial sun direction from starting sun_angle=1.0
         let init_sun_dir = glam::Vec3::new(1.0_f32.cos() * 0.3, 1.0_f32.sin(), 0.5).normalize();
         let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
-        let sun_light_id = renderer.add_light(SceneLight::directional(init_light_dir, [1.0, 0.85, 0.7], (init_lux * 0.35).max(0.01)));
-        renderer.add_light(SceneLight::point([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0));
-        renderer.add_light(SceneLight::point([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0));
-        renderer.add_light(SceneLight::point([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0));
-        renderer.set_sky_atmosphere(Some(
-            SkyAtmosphere::new()
-                .with_sun_intensity(22.0)
-                .with_exposure(4.0)
-                .with_mie_g(0.76)
-                .with_clouds(
-                    VolumetricClouds::new()
-                        .with_coverage(0.30)
-                        .with_density(0.7)
-                        .with_layer(800.0, 1800.0)
-                        .with_wind([1.0, 0.0], 0.08),
-                ),
-        ));
-        renderer.set_skylight(Some(Skylight::new().with_intensity(0.08).with_tint([1.0, 1.0, 1.0])));
-
-        let mut billboard_ids = Vec::new();
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0])));
+        let sun_light_id = renderer.insert_light(directional_light(init_light_dir, [1.0, 0.85, 0.7], (init_lux * 0.35).max(0.01)));
+        renderer.insert_light(point_light([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0));
+        renderer.insert_light(point_light([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0));
+        renderer.insert_light(point_light([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0));
+        renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
 
         self.state = Some(AppState {
             window, surface, device, surface_format, renderer,
@@ -312,10 +190,6 @@ impl ApplicationHandler for App {
             // Start at a nice afternoon angle (sun ~50° above horizon)
             sun_angle: 1.0,
             sun_light_id,
-            billboard_ids,
-            probe_vis: false,
-            sprite_w,
-            sprite_h,
         });
     }
 
@@ -341,57 +215,10 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Digit3),
-                    ..
-                },
-                ..
-            } => {
-                state.probe_vis = !state.probe_vis;
-                let raw: &[u8] = if state.probe_vis {
-                    include_bytes!("../../probe.png")
-                } else {
-                    include_bytes!("../../spotlight.png")
-                };
-                let img = image::load_from_memory(raw)
-                    .unwrap_or_else(|_| image::DynamicImage::new_rgba8(state.sprite_w, state.sprite_h))
-                    .resize_exact(state.sprite_w, state.sprite_h, image::imageops::FilterType::Triangle)
-                    .into_rgba8();
-                if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
-                    bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
-                }
-                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
-                if state.probe_vis {
-                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                        state.billboard_ids.push(state.renderer.add_billboard(b));
-                    }
-                } else {
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([ 0.0, 2.5,  0.0], [0.35, 0.35]).with_color([1.0, 0.85, 0.6, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([-2.5, 2.0, -1.5], [0.35, 0.35]).with_color([0.4, 0.6, 1.0, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new([ 2.5, 1.8,  1.5], [0.35, 0.35]).with_color([1.0, 0.3, 0.3, 1.0])));
-                }
-            }
-
-            WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Digit4),
-                    ..
-                },
-                ..
-            } => { let _ = state.renderer.start_live_portal_default(); }
-
-            WindowEvent::KeyboardInput {
                 event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, ..
             } => {
                 match ks {
-                    ElementState::Pressed  => {
-                        if key == KeyCode::F3 {
-                            state.renderer.debug_viz_mut().enabled ^= true;
-                        }
-                        state.keys.insert(key);
-                    }
+                    ElementState::Pressed  => { state.keys.insert(key); }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }
@@ -421,7 +248,7 @@ impl ApplicationHandler for App {
                     desired_maximum_frame_latency: 2,
                 };
                 state.surface.configure(&state.device, &cfg);
-                state.renderer.resize(size.width, size.height);
+                state.renderer.set_render_size(size.width, size.height);
             }
 
             WindowEvent::RedrawRequested => {
@@ -479,14 +306,13 @@ impl AppState {
 
         let size   = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let time   = self.renderer.frame_count() as f32 * 0.016;
 
-        let camera = Camera::perspective(
+        let camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + forward,
             glam::Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            aspect, 0.1, 1000.0, time,
+            aspect, 0.1, 1000.0,
         );
 
         // Sun direction: orbits in the XY plane (rotate sun_angle around Z axis)
@@ -514,8 +340,8 @@ impl AppState {
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Update dynamic sun light
-        self.renderer.update_light(self.sun_light_id, SceneLight::directional(light_dir, sun_color, (sun_lux * 0.35).max(0.01)));
-        if let Err(e) = self.renderer.render(&camera, &view, dt) {
+        let _ = self.renderer.update_light(self.sun_light_id, directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)));
+        if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }
 

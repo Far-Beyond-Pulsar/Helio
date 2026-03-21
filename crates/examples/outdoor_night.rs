@@ -1,30 +1,15 @@
 //! Outdoor night plaza example – medium complexity
 //!
-//! A city plaza at night: a large paved ground plane, several building-block
-//! structures of varying heights, four streetlamps with warm sodium-orange
-//! glow, and two neon sign lights (magenta + cyan) on the taller buildings.
-//! A deep-blue night sky with subtle ambient.
-//!
 //! Controls:
 //!   WASD        — move forward/left/back/right
 //!   Space/Shift — move up/down
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
+mod v3_demo_common;
 
-
-mod demo_portal;
-
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
-
-
-use helio_render_v2::features::{
-    FeatureRegistry,
-    LightingFeature,
-    BloomFeature, ShadowsFeature,
-    BillboardsFeature, BillboardInstance,
-    RadianceCascadesFeature,
-};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig};
+use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
 
 
 use winit::{
@@ -37,62 +22,7 @@ use winit::{
 
 
 use std::collections::HashSet;
-
-
 use std::sync::Arc;
-
-fn load_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-#[allow(dead_code)]
-fn load_probe_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../probe.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-const RC_WORLD_MIN: [f32; 3] = [-20.0, -0.1, -20.0];
-const RC_WORLD_MAX: [f32; 3] = [20.0, 20.0, 20.0];
-
-fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<helio_render_v2::features::BillboardInstance> {
-    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
-    const COLORS: [[f32; 4]; 4] = [
-        [0.0, 1.0, 1.0, 0.85],
-        [0.0, 1.0, 0.0, 0.80],
-        [1.0, 1.0, 0.0, 0.75],
-        [1.0, 0.35, 0.0, 0.70],
-    ];
-    // screen_scale=true: sizes are angular (multiplied by distance), giving constant apparent size
-    const SIZES: [[f32; 2]; 4] = [
-        [0.035, 0.035],  // cascade 0 — finest (4096 probes) — tiny dots
-        [0.075, 0.075],  // cascade 1
-        [0.140, 0.140],  // cascade 2
-        [0.260, 0.260],  // cascade 3 — coarsest (8 probes) — large markers
-    ];
-    let mut out = Vec::new();
-    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
-        for i in 0..dim {
-            for j in 0..dim {
-                for k in 0..dim {
-                    let x = world_min[0] + (i as f32 + 0.5) / dim as f32 * (world_max[0] - world_min[0]);
-                    let y = world_min[1] + (j as f32 + 0.5) / dim as f32 * (world_max[1] - world_min[1]);
-                    let z = world_min[2] + (k as f32 + 0.5) / dim as f32 * (world_max[2] - world_min[2]);
-                    out.push(helio_render_v2::features::BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c])
-                        .with_screen_scale(true));
-                }
-            }
-        }
-    }
-    out
-}
 
 fn main() {
     env_logger::init();
@@ -111,18 +41,16 @@ struct AppState {
     renderer: Renderer,
     last_frame: std::time::Instant,
 
-    ground:    GpuMesh,
-    // Buildings of varying heights
-    bld_a:     GpuMesh, // tall
-    bld_b:     GpuMesh, // medium-left
-    bld_c:     GpuMesh, // medium-right
-    bld_d:     GpuMesh, // short squat
-    bld_e:     GpuMesh, // background tower
-    // Streetlamp poles
-    lamp_pole_a: GpuMesh,
-    lamp_pole_b: GpuMesh,
-    lamp_pole_c: GpuMesh,
-    lamp_pole_d: GpuMesh,
+    ground:    MeshId,
+    bld_a:     MeshId,
+    bld_b:     MeshId,
+    bld_c:     MeshId,
+    bld_d:     MeshId,
+    bld_e:     MeshId,
+    lamp_pole_a: MeshId,
+    lamp_pole_b: MeshId,
+    lamp_pole_c: MeshId,
+    lamp_pole_d: MeshId,
 
     cam_pos:        glam::Vec3,
     cam_yaw:        f32,
@@ -131,13 +59,7 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
 
-    // Scene state
-    light_ids: Vec<LightId>,
-    billboard_ids: Vec<BillboardId>,
-
-    probe_vis: bool,
-    sprite_w: u32,
-    sprite_h: u32,
+    _light_ids: Vec<LightId>,
 }
 
 impl App {
@@ -168,15 +90,12 @@ impl ApplicationHandler for App {
 
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("Device"),
-            required_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY | wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-            required_limits: wgpu::Limits::default()
-                .using_minimum_supported_acceleration_structure_values(),
-            memory_hints: wgpu::MemoryHints::default(),
-            experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
-            trace: wgpu::Trace::Off,
-        })).expect("device");
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }, None)).expect("device");
 
-        device.on_uncaptured_error(std::sync::Arc::new(|e| {
+        device.on_uncaptured_error(Box::new(|e| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
         let info = adapter.get_info();
@@ -195,77 +114,44 @@ impl ApplicationHandler for App {
             view_formats: vec![], desired_maximum_frame_latency: 2,
         });
 
-        let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        let features = FeatureRegistry::builder()
-            .with_feature(LightingFeature::new())
-            .with_feature(BloomFeature::new().with_intensity(0.8).with_threshold(0.9))
-            .with_feature(ShadowsFeature::new().with_atlas_size(2048).with_max_lights(4))
-            .with_feature(BillboardsFeature::new().with_sprite(sprite_rgba, sprite_w, sprite_h).with_max_instances(5000))
-            .with_feature(
-                RadianceCascadesFeature::new()
-                    .with_world_bounds([-20.0, -0.1, -20.0], [20.0, 20.0, 20.0]),
-            )
-            .build();
-
         let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
-            RendererConfig::new(size.width, size.height, format, features),
-        ).expect("renderer");
-        renderer.set_editor_mode(true);
+            RendererConfig::new(size.width, size.height, format),
+        );
 
-        let ground = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
+        let mat = renderer.insert_material(make_material([0.7, 0.7, 0.72, 1.0], 0.8, 0.0, [0.0, 0.0, 0.0], 0.0));
 
-        // Buildings placed asymmetrically around the plaza
-        let bld_a = renderer.create_mesh_rect3d([ 8.0, 7.0, -6.0],  [2.5, 7.0, 2.5]); // tall
-        let bld_b = renderer.create_mesh_rect3d([-7.0, 4.5, -5.0],  [3.0, 4.5, 2.0]); // medium-left
-        let bld_c = renderer.create_mesh_rect3d([ 6.0, 3.0,  6.0],  [2.0, 3.0, 3.0]); // medium-right
-        let bld_d = renderer.create_mesh_rect3d([-5.0, 1.5,  5.0],  [3.5, 1.5, 2.5]); // short squat
-        let bld_e = renderer.create_mesh_rect3d([ 0.0, 9.5, -14.0], [4.0, 9.5, 3.0]); // bg tower
+        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let bld_a = renderer.insert_mesh(box_mesh([ 8.0, 7.0, -6.0],  [2.5, 7.0, 2.5]));
+        let bld_b = renderer.insert_mesh(box_mesh([-7.0, 4.5, -5.0],  [3.0, 4.5, 2.0]));
+        let bld_c = renderer.insert_mesh(box_mesh([ 6.0, 3.0,  6.0],  [2.0, 3.0, 3.0]));
+        let bld_d = renderer.insert_mesh(box_mesh([-5.0, 1.5,  5.0],  [3.5, 1.5, 2.5]));
+        let bld_e = renderer.insert_mesh(box_mesh([ 0.0, 9.5, -14.0], [4.0, 9.5, 3.0]));
+        let lamp_pole_a = renderer.insert_mesh(box_mesh([-5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_b = renderer.insert_mesh(box_mesh([ 5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_c = renderer.insert_mesh(box_mesh([-5.0, 2.5,   5.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_d = renderer.insert_mesh(box_mesh([ 5.0, 2.5,   5.0], [0.08, 2.5, 0.08]));
 
-        // Thin poles + small cap for each streetlamp
-        let lamp_pole_a = renderer.create_mesh_rect3d([-5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]);
-        let lamp_pole_b = renderer.create_mesh_rect3d([ 5.0, 2.5,  -5.0], [0.08, 2.5, 0.08]);
-        let lamp_pole_c = renderer.create_mesh_rect3d([-5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
-        let lamp_pole_d = renderer.create_mesh_rect3d([ 5.0, 2.5,   5.0], [0.08, 2.5, 0.08]);
-        demo_portal::enable_live_dashboard(&mut renderer);
+        let _ = v3_demo_common::insert_object(&mut renderer, ground,      mat, glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, bld_a,       mat, glam::Mat4::IDENTITY, 7.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, bld_b,       mat, glam::Mat4::IDENTITY, 4.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, bld_c,       mat, glam::Mat4::IDENTITY, 3.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, bld_d,       mat, glam::Mat4::IDENTITY, 3.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, bld_e,       mat, glam::Mat4::IDENTITY, 9.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, lamp_pole_a, mat, glam::Mat4::IDENTITY, 2.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, lamp_pole_b, mat, glam::Mat4::IDENTITY, 2.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, lamp_pole_c, mat, glam::Mat4::IDENTITY, 2.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, lamp_pole_d, mat, glam::Mat4::IDENTITY, 2.5);
 
-        renderer.add_object(&ground,      None, glam::Mat4::IDENTITY);
-        renderer.add_object(&bld_a,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&bld_b,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&bld_c,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&bld_d,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&bld_e,       None, glam::Mat4::IDENTITY);
-        renderer.add_object(&lamp_pole_a, None, glam::Mat4::IDENTITY);
-        renderer.add_object(&lamp_pole_b, None, glam::Mat4::IDENTITY);
-        renderer.add_object(&lamp_pole_c, None, glam::Mat4::IDENTITY);
-        renderer.add_object(&lamp_pole_d, None, glam::Mat4::IDENTITY);
-
-        // Streetlamp heads at top of each pole
-        let lamp_a = [-5.0f32, 5.1, -5.0];
-        let lamp_b = [ 5.0f32, 5.1, -5.0];
-        let lamp_c = [-5.0f32, 5.1,  5.0];
-        let lamp_d = [ 5.0f32, 5.1,  5.0];
-        // Neon signs: magenta on tall building, cyan on bg tower
-        let neon_m = [ 8.0f32, 12.0, -5.8];
-        let neon_c = [ 0.0f32, 16.5, -14.0];
-
-        let mut light_ids = Vec::new();
-        light_ids.push(renderer.add_light(SceneLight::point(lamp_a, [1.0, 0.72, 0.3], 6.0, 14.0)));
-        light_ids.push(renderer.add_light(SceneLight::point(lamp_b, [1.0, 0.72, 0.3], 6.0, 14.0)));
-        light_ids.push(renderer.add_light(SceneLight::point(lamp_c, [1.0, 0.72, 0.3], 6.0, 14.0)));
-        light_ids.push(renderer.add_light(SceneLight::point(lamp_d, [1.0, 0.72, 0.3], 6.0, 14.0)));
-        light_ids.push(renderer.add_light(SceneLight::point(neon_m, [1.0, 0.05, 0.8], 5.0, 12.0)));
-        light_ids.push(renderer.add_light(SceneLight::point(neon_c, [0.05, 0.9, 1.0], 4.0, 10.0)));
+        let mut _light_ids: Vec<LightId> = Vec::new();
+        _light_ids.push(renderer.insert_light(point_light([-5.0, 5.1, -5.0], [1.0, 0.72, 0.3], 6.0, 14.0)));
+        _light_ids.push(renderer.insert_light(point_light([ 5.0, 5.1, -5.0], [1.0, 0.72, 0.3], 6.0, 14.0)));
+        _light_ids.push(renderer.insert_light(point_light([-5.0, 5.1,  5.0], [1.0, 0.72, 0.3], 6.0, 14.0)));
+        _light_ids.push(renderer.insert_light(point_light([ 5.0, 5.1,  5.0], [1.0, 0.72, 0.3], 6.0, 14.0)));
+        _light_ids.push(renderer.insert_light(point_light([ 8.0, 12.0, -5.8], [1.0, 0.05, 0.8], 5.0, 12.0)));
+        _light_ids.push(renderer.insert_light(point_light([ 0.0, 16.5, -14.0], [0.05, 0.9, 1.0], 4.0, 10.0)));
         renderer.set_ambient([0.1, 0.15, 0.3], 0.06);
-        renderer.set_sky_color([0.005, 0.005, 0.025]);
-
-        let mut billboard_ids = Vec::new();
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(lamp_a, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(lamp_b, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(lamp_c, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(lamp_d, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(neon_m, [0.6, 0.25]).with_color([1.0, 0.05, 0.8, 1.0])));
-        billboard_ids.push(renderer.add_billboard(BillboardInstance::new(neon_c, [0.6, 0.25]).with_color([0.05, 0.9, 1.0, 1.0])));
+        renderer.set_clear_color([0.005, 0.005, 0.025, 1.0]);
 
         self.state = Some(AppState {
             window, surface, device, surface_format: format, renderer,
@@ -275,11 +161,7 @@ impl ApplicationHandler for App {
             cam_pos: glam::Vec3::new(0.0, 3.0, 12.0),
             cam_yaw: std::f32::consts::PI, cam_pitch: -0.15,
             keys: HashSet::new(), cursor_grabbed: false, mouse_delta: (0.0, 0.0),
-            light_ids,
-            billboard_ids,
-            probe_vis: false,
-            sprite_w,
-            sprite_h,
+            _light_ids,
         });
     }
 
@@ -298,57 +180,10 @@ impl ApplicationHandler for App {
                 } else { event_loop.exit(); }
             }
             WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                physical_key: PhysicalKey::Code(KeyCode::Digit3), ..
-            }, .. } => {
-                state.probe_vis = !state.probe_vis;
-                let raw: &[u8] = if state.probe_vis {
-                    include_bytes!("../../probe.png")
-                } else {
-                    include_bytes!("../../spotlight.png")
-                };
-                let img = image::load_from_memory(raw)
-                    .unwrap_or_else(|_| image::DynamicImage::new_rgba8(state.sprite_w, state.sprite_h))
-                    .resize_exact(state.sprite_w, state.sprite_h, image::imageops::FilterType::Triangle)
-                    .into_rgba8();
-                if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
-                    bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
-                }
-                for id in state.billboard_ids.drain(..) { state.renderer.remove_billboard(id); }
-                if state.probe_vis {
-                    for b in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                        state.billboard_ids.push(state.renderer.add_billboard(b));
-                    }
-                } else {
-                    let lamp_a = [-5.0f32, 5.1, -5.0];
-                    let lamp_b = [ 5.0f32, 5.1, -5.0];
-                    let lamp_c = [-5.0f32, 5.1,  5.0];
-                    let lamp_d = [ 5.0f32, 5.1,  5.0];
-                    let neon_m = [ 8.0f32, 12.0, -5.8];
-                    let neon_c = [ 0.0f32, 16.5, -14.0];
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(lamp_a, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(lamp_b, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(lamp_c, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(lamp_d, [0.4, 0.4]).with_color([1.0, 0.72, 0.3, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(neon_m, [0.6, 0.25]).with_color([1.0, 0.05, 0.8, 1.0])));
-                    state.billboard_ids.push(state.renderer.add_billboard(BillboardInstance::new(neon_c, [0.6, 0.25]).with_color([0.05, 0.9, 1.0, 1.0])));
-                }
-            }
-            WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Digit4), ..
-            }, .. } => {
-                let _ = state.renderer.start_live_portal_default();
-            }
-            WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
                 match ks {
-                    ElementState::Pressed  => {
-                        if key == KeyCode::F3 {
-                            state.renderer.debug_viz_mut().enabled ^= true;
-                        }
-                        state.keys.insert(key);
-                    }
+                    ElementState::Pressed  => { state.keys.insert(key); }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }
@@ -368,7 +203,7 @@ impl ApplicationHandler for App {
                     alpha_mode: wgpu::CompositeAlphaMode::Auto,
                     view_formats: vec![], desired_maximum_frame_latency: 2,
                 });
-                state.renderer.resize(s.width, s.height);
+                state.renderer.set_render_size(s.width, s.height);
             }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
@@ -419,11 +254,10 @@ impl AppState {
 
         let size   = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let time   = self.renderer.frame_count() as f32 * 0.016;
 
-        let camera = Camera::perspective(
+        let camera = Camera::perspective_look_at(
             self.cam_pos, self.cam_pos + forward, glam::Vec3::Y,
-            std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0, time,
+            std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0,
         );
 
         let output = match self.surface.get_current_texture() {
@@ -432,8 +266,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        // Scene state is persistent — no per-frame setup needed.
-        if let Err(e) = self.renderer.render(&camera, &view, dt) {
+        if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
         output.present();
