@@ -21,6 +21,7 @@ struct DeferredGlobals {
 pub struct DeferredLightPass {
     pipeline: wgpu::RenderPipeline,
     globals_buf: wgpu::Buffer,
+    shadow_config_buf: wgpu::Buffer,
     bgl_0: wgpu::BindGroupLayout,
     bgl_1: wgpu::BindGroupLayout,
     bgl_2: wgpu::BindGroupLayout,
@@ -65,6 +66,20 @@ impl DeferredLightPass {
             mapped_at_creation: false,
         });
 
+        let shadow_config_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Config"),
+            size: std::mem::size_of::<libhelio::ShadowConfig>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(
+            &shadow_config_buf,
+            0,
+            bytemuck::bytes_of(&libhelio::ShadowConfig::from_quality(
+                libhelio::ShadowQuality::Medium,
+            )),
+        );
+
         let bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DeferredLight BGL0"),
             entries: &[
@@ -80,6 +95,16 @@ impl DeferredLightPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -162,6 +187,10 @@ impl DeferredLightPass {
                     binding: 1,
                     resource: globals_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: shadow_config_buf.as_entire_binding(),
+                },
             ],
         });
 
@@ -228,6 +257,7 @@ impl DeferredLightPass {
         Self {
             pipeline,
             globals_buf,
+            shadow_config_buf,
             bgl_0,
             bgl_1,
             bgl_2,
@@ -255,6 +285,12 @@ impl DeferredLightPass {
             color_texture(device, width, height, self.pre_aa_format, "Deferred PreAA");
         self.pre_aa_texture = texture;
         self.pre_aa_view = view;
+    }
+
+    /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
+    pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality, queue: &wgpu::Queue) {
+        let config = libhelio::ShadowConfig::from_quality(quality);
+        queue.write_buffer(&self.shadow_config_buf, 0, bytemuck::bytes_of(&config));
     }
 }
 
