@@ -878,29 +878,18 @@ impl Scene {
             // Spatially sort triangles before uploading so the mega-buffer index
             // data matches what meshletize expects (sorted = tight cluster bounds).
             let sorted_indices = sort_triangles_spatially(&lod_verts, &lod_indices);
-
-            // First generate meshlets in the local (per-mesh) index/vertex space.
-            // We use zero-based offsets here and will patch them after inserting
-            // into the global mesh pool once we know the slice offsets.
-            let mut meshlets = meshletize(
-                &lod_verts,
-                &sorted_indices,
-                0,
-                0,
-            );
-
-            // Now upload the data without cloning; ownership moves into MeshUpload.
             let mesh_id = self.mesh_pool.insert(MeshUpload {
-                vertices: lod_verts,
-                indices:  sorted_indices,
+                vertices: lod_verts.clone(),
+                indices:  sorted_indices.clone(),
             });
             let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
 
-            // Patch meshlet offsets to account for their location in the mega-buffer.
-            for m in &mut meshlets {
-                m.first_index += slice.first_index;
-                m.vertex_offset += slice.first_vertex;
-            }
+            let mut meshlets = meshletize(
+                &lod_verts,
+                &sorted_indices,
+                slice.first_index,
+                slice.first_vertex,
+            );
             // Tag with LOD level so the cull shader can select by distance.
             for m in &mut meshlets {
                 m.lod_error = lod_level as f32;
@@ -921,20 +910,11 @@ impl Scene {
 
     /// Remove a virtual mesh.  Fails if any `VirtualObjectId` still references it.
     pub fn remove_virtual_mesh(&mut self, id: VirtualMeshId) -> Result<()> {
-        let ref_count = {
-            let record = self.vg_meshes.get(&id).ok_or_else(|| invalid("virtual_mesh"))?;
-            record.ref_count
-        };
-        if ref_count != 0 {
+        let record = self.vg_meshes.get(&id).ok_or_else(|| invalid("virtual_mesh"))?;
+        if record.ref_count != 0 {
             return Err(SceneError::ResourceInUse { resource: "virtual_mesh" });
         }
-        if let Some(record) = self.vg_meshes.remove(&id) {
-            for mesh_id in record.mesh_ids {
-                // Ignore the return value to avoid altering observable behavior if
-                // `remove_mesh` returns a Result or other value.
-                let _ = self.remove_mesh(mesh_id);
-            }
-        }
+        self.vg_meshes.remove(&id);
         Ok(())
     }
 
