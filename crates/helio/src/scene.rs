@@ -910,11 +910,20 @@ impl Scene {
 
     /// Remove a virtual mesh.  Fails if any `VirtualObjectId` still references it.
     pub fn remove_virtual_mesh(&mut self, id: VirtualMeshId) -> Result<()> {
-        let record = self.vg_meshes.get(&id).ok_or_else(|| invalid("virtual_mesh"))?;
-        if record.ref_count != 0 {
+        let ref_count = {
+            let record = self.vg_meshes.get(&id).ok_or_else(|| invalid("virtual_mesh"))?;
+            record.ref_count
+        };
+        if ref_count != 0 {
             return Err(SceneError::ResourceInUse { resource: "virtual_mesh" });
         }
-        self.vg_meshes.remove(&id);
+        if let Some(record) = self.vg_meshes.remove(&id) {
+            for mesh_id in record.mesh_ids {
+                // Ignore the return value to avoid altering observable behavior if
+                // `remove_mesh` returns a Result or other value.
+                let _ = self.remove_mesh(mesh_id);
+            }
+        }
         Ok(())
     }
 
