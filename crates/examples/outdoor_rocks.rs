@@ -98,6 +98,15 @@ struct AppState {
 
     sun_light_id: LightId,
     sun_angle: f32,
+
+    // ── CPU-side profiling ───────────────────────────────────────────────
+    frame_count:      u64,
+    prof_frame_total: f64, // ms
+    prof_update:      f64, // ms: sun, billboards, camera update
+    prof_render:      f64, // ms: renderer.render() call
+    prof_present:     f64, // ms: get_current_texture + present
+    prof_frame_min:   f64,
+    prof_frame_max:   f64,
 }
 
 impl App {
@@ -183,7 +192,7 @@ impl ApplicationHandler for App {
                 format:   surface_format,
                 width:    size.width,
                 height:   size.height,
-                present_mode: wgpu::PresentMode::Fifo,
+                present_mode: wgpu::PresentMode::AutoNoVsync,
                 alpha_mode:   caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
@@ -420,6 +429,13 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             sun_light_id,
             sun_angle,
+            frame_count:      0,
+            prof_frame_total: 0.0,
+            prof_update:      0.0,
+            prof_render:      0.0,
+            prof_present:     0.0,
+            prof_frame_min:   f64::MAX,
+            prof_frame_max:   0.0,
         });
     }
 
@@ -458,7 +474,7 @@ impl ApplicationHandler for App {
                         format: state.surface_format,
                         width:  size.width,
                         height: size.height,
-                        present_mode: wgpu::PresentMode::Fifo,
+                        present_mode: wgpu::PresentMode::AutoNoVsync,
                         alpha_mode:   wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
@@ -496,12 +512,14 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                let now = Instant::now();
+                let frame_start = Instant::now();
+                let now = frame_start;
                 let dt  = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
                 let t   = now.duration_since(state.start_time).as_secs_f32();
                 state.last_frame = now;
 
                 // ── Sun rotation ──────────────────────────────────────────
+                let t_update_start = Instant::now();
                 const SUN_SPEED: f32 = 0.6;
                 if state.keys.contains(&KeyCode::KeyQ) { state.sun_angle += SUN_SPEED * dt; }
                 if state.keys.contains(&KeyCode::KeyE) { state.sun_angle -= SUN_SPEED * dt; }
@@ -548,8 +566,10 @@ impl ApplicationHandler for App {
                     0.15,
                     2000.0,
                 );
+                let t_update_ms = t_update_start.elapsed().as_secs_f64() * 1000.0;
 
                 // ── Render ────────────────────────────────────────────────
+                let t_render_start = Instant::now();
                 let output = match state.surface.get_current_texture() {
                     Ok(t) => t,
                     Err(e) => { log::warn!("surface error: {e:?}"); return; }
@@ -558,7 +578,46 @@ impl ApplicationHandler for App {
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {e:?}");
                 }
+                let t_render_ms = t_render_start.elapsed().as_secs_f64() * 1000.0;
+
+                let t_present_start = Instant::now();
                 output.present();
+                let t_present_ms = t_present_start.elapsed().as_secs_f64() * 1000.0;
+
+                // ── Profiling accumulate + print every 100 frames ─────────
+                let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+                state.prof_frame_total += frame_ms;
+                state.prof_update      += t_update_ms;
+                state.prof_render      += t_render_ms;
+                state.prof_present     += t_present_ms;
+                if frame_ms < state.prof_frame_min { state.prof_frame_min = frame_ms; }
+                if frame_ms > state.prof_frame_max { state.prof_frame_max = frame_ms; }
+                state.frame_count += 1;
+
+                const REPORT_EVERY: u64 = 100;
+                if state.frame_count % REPORT_EVERY == 0 {
+                    let n = REPORT_EVERY as f64;
+                    let avg   = state.prof_frame_total / n;
+                    let fps   = 1000.0 / avg;
+                    let upd   = state.prof_update  / n;
+                    let rnd   = state.prof_render  / n;
+                    let pres  = state.prof_present / n;
+                    let other = avg - upd - rnd - pres;
+                    eprintln!(
+                        "[PROF #{:>6}] avg {:.2}ms ({:.0} fps) | min {:.2}ms max {:.2}ms",
+                        state.frame_count, avg, fps, state.prof_frame_min, state.prof_frame_max
+                    );
+                    eprintln!(
+                        "             update {:.2}ms  render {:.2}ms  present {:.2}ms  other {:.2}ms",
+                        upd, rnd, pres, other
+                    );
+                    state.prof_frame_total = 0.0;
+                    state.prof_update      = 0.0;
+                    state.prof_render      = 0.0;
+                    state.prof_present     = 0.0;
+                    state.prof_frame_min   = f64::MAX;
+                    state.prof_frame_max   = 0.0;
+                }
             }
             _ => {}
         }

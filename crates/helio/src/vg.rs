@@ -144,13 +144,15 @@ fn backface_cone(positions: &[Vec3], indices: &[u32]) -> (Vec3, Vec3, f32) {
         if d < min_dot { min_dot = d; }
     }
 
-    // cutoff = cos(half_angle + small margin for numerical safety).
-    // A meshlet is back-facing when every triangle in it is back-facing, i.e.
-    //   dot(view_dir, axis) < cutoff
-    // We add a -0.1 margin so borderline cases are not incorrectly culled.
-    let cutoff = (min_dot - 0.1).max(-1.0);
-    // If the triangles show enough variation (180° spread) cone culling is useless.
-    if cutoff <= -1.0 {
+    // The shader culls when: dot(view_dir, -axis) >= cutoff
+    // All triangles are back-facing when: dot(view_dir, axis) <= -sqrt(1 - min_dot²)
+    // i.e., cull when dot(view_dir, -axis) >= sqrt(1 - min_dot²)
+    // So cutoff = sqrt(1 - min_dot²) + margin (margin makes culling slightly less
+    // aggressive, preventing false culls on silhouettes).
+    let spread = (1.0_f32 - min_dot * min_dot).max(0.0).sqrt();
+    let cutoff = spread + 0.1;
+    // If spread >= 0.9 the cone covers nearly all directions; cone culling cannot help.
+    if cutoff >= 1.0 {
         return (apex, axis, 2.0);
     }
     (apex, axis, cutoff)

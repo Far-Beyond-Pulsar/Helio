@@ -27,7 +27,8 @@ use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::TEXTURE_BINDING_ARRAY
         | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
-    let optional = wgpu::Features::MULTI_DRAW_INDIRECT;
+    let optional = wgpu::Features::MULTI_DRAW_INDIRECT
+        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT; // compacted indirect count buffer
     required | (adapter_features & optional)
 }
 

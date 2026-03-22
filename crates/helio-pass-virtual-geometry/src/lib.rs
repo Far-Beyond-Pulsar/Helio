@@ -72,7 +72,13 @@ pub struct VirtualGeometryPass {
     // ── VG data buffers (owned; rebuilt when buffer_version changes) ──────────
     meshlet_buf:        wgpu::Buffer,
     instance_buf:       wgpu::Buffer,
+    /// Compacted visible-only draw commands (AAA approach: written by atomic appending).
     indirect_buf:       wgpu::Buffer,
+    /// Single u32 written by the cull shader via atomicAdd — the visible meshlet count.
+    /// Passed as the count argument to multi_draw_indexed_indirect_count.
+    draw_count_buf:     wgpu::Buffer,
+    /// True when the device supports MULTI_DRAW_INDIRECT_COUNT (Vulkan 1.2+, DX12 tier2).
+    use_count_indirect: bool,
     last_version:       u64,
     last_meshlet_count: u32,
 }
@@ -102,7 +108,9 @@ impl VirtualGeometryPass {
         // ── Initial GPU buffers (grown in prepare() when data arrives) ─────────
         let meshlet_buf  = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
-        let indirect_buf = Self::make_indirect_buf(device, INITIAL_MESHLETS);
+        let indirect_buf     = Self::make_indirect_buf(device, INITIAL_MESHLETS);
+        let draw_count_buf   = Self::make_draw_count_buf(device);
+        let use_count_indirect = device.features().contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT);
 
         // ── Cull uniform buffer ───────────────────────────────────────────────
         let cull_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -164,6 +172,15 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                // binding 5: atomic draw count — written by atomicAdd in cs_cull
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false, min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -177,6 +194,7 @@ impl VirtualGeometryPass {
                 wgpu::BindGroupEntry { binding: 2, resource: meshlet_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: instance_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: indirect_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: draw_count_buf.as_entire_binding() },
             ],
         }));
 
@@ -307,6 +325,8 @@ impl VirtualGeometryPass {
             meshlet_buf,
             instance_buf,
             indirect_buf,
+            draw_count_buf,
+            use_count_indirect,
             last_version: u64::MAX, // force upload on first frame
             last_meshlet_count: 0,
         }
@@ -343,6 +363,17 @@ impl VirtualGeometryPass {
         })
     }
 
+    fn make_draw_count_buf(device: &wgpu::Device) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label:              Some("VG Draw Count"),
+            size:               4, // single u32 atomic counter
+            usage:              wgpu::BufferUsages::STORAGE
+                              | wgpu::BufferUsages::INDIRECT
+                              | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     /// Rebuild cull + draw_bg_0 bind groups after buffer reallocation.
     fn rebuild_owned_bind_groups(
         &mut self,
@@ -358,6 +389,7 @@ impl VirtualGeometryPass {
                 wgpu::BindGroupEntry { binding: 2, resource: self.meshlet_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.instance_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 4, resource: self.indirect_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.draw_count_buf.as_entire_binding() },
             ],
         }));
         self.draw_bg_0 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -490,6 +522,14 @@ impl RenderPass for VirtualGeometryPass {
 
         let meshlet_count = self.last_meshlet_count;
 
+        // Reset the atomic draw count so the cull shader appends from slot 0 each frame.
+        ctx.encoder.clear_buffer(&self.draw_count_buf, 0, None);
+        if !self.use_count_indirect {
+            // No count-indirect support: must zero the indirect buffer so stale
+            // entries beyond the visible range have instance_count = 0.
+            ctx.encoder.clear_buffer(&self.indirect_buf, 0, None);
+        }
+
         // ── Cull compute pass ─────────────────────────────────────────────────
         {
             let mut cpass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -540,7 +580,16 @@ impl RenderPass for VirtualGeometryPass {
             rpass.set_bind_group(1, draw_bg1, &[]);
             rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
             rpass.set_index_buffer(main_scene.mesh_buffers.indices.slice(..), wgpu::IndexFormat::Uint32);
-            rpass.multi_draw_indexed_indirect(&self.indirect_buf, 0, meshlet_count);
+            if self.use_count_indirect {
+                // AAA compaction path: GPU-written count drives how many compact
+                // draw commands the hardware reads — zero wasted command reads.
+                rpass.multi_draw_indexed_indirect_count(
+                    &self.indirect_buf, 0, &self.draw_count_buf, 0, meshlet_count);
+            } else {
+                // Fallback: compacted writes fill indirect[0..N_visible]; the rest
+                // were cleared above so instance_count = 0 for the tail.
+                rpass.multi_draw_indexed_indirect(&self.indirect_buf, 0, meshlet_count);
+            }
         }
 
         Ok(())

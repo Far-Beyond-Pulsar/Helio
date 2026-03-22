@@ -1,12 +1,14 @@
 // Virtual geometry culling compute shader.
 //
-// One thread per meshlet. Tests each meshlet against the view frustum and the
-// backface cone. Visible meshlets write a full DrawIndexedIndirect command into
-// the indirect buffer; invisible meshlets write instance_count = 0.
+// One thread per meshlet. Tests each meshlet against the view frustum.
+// Visible meshlets are atomically appended to a compact indirect draw list:
 //
-// Because every meshlet slot is unconditionally written, there is no need for
-// atomic counters or separate compaction passes. The GPU simply skips draw
-// commands where instance_count == 0.
+//   slot = atomicAdd(&draw_count, 1u);
+//   indirect[slot] = cmd;
+//
+// The GPU-written draw_count is passed to multi_draw_indexed_indirect_count so
+// the hardware only reads the N_visible compact commands — never stale zero-
+// instance_count entries (Nanite / DOTS style AAA compaction).
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -62,29 +64,14 @@ struct CullUniforms {
     _pad2: u32,
 }
 
-@group(0) @binding(0) var<uniform>          camera:    Camera;
-@group(0) @binding(1) var<uniform>          cull_uni:  CullUniforms;
-@group(0) @binding(2) var<storage, read>    meshlets:  array<MeshletEntry>;
-@group(0) @binding(3) var<storage, read>    instances: array<InstanceData>;
-@group(0) @binding(4) var<storage, read_write> indirect: array<DrawIndexedIndirect>;
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-/// Backface cone test.
-/// Returns true if the meshlet might be *front-facing* for the current camera.
-/// cone_cutoff > 1.0 disables cone culling (mixed-winding or nearly flat).
-fn cone_visible(
-    apex_ws: vec3<f32>,
-    axis_ws: vec3<f32>,
-    cutoff:  f32,
-    cam_pos: vec3<f32>,
-) -> bool {
-    if cutoff > 1.0 {
-        return true;
-    }
-    let view_dir = normalize(cam_pos - apex_ws);
-    return dot(view_dir, -axis_ws) < cutoff;
-}
+@group(0) @binding(0) var<uniform>             camera:     Camera;
+@group(0) @binding(1) var<uniform>             cull_uni:   CullUniforms;
+@group(0) @binding(2) var<storage, read>       meshlets:   array<MeshletEntry>;
+@group(0) @binding(3) var<storage, read>       instances:  array<InstanceData>;
+@group(0) @binding(4) var<storage, read_write> indirect:   array<DrawIndexedIndirect>;
+/// Atomic counter: cull shader increments once per visible meshlet.
+/// CPU passes this buffer to multi_draw_indexed_indirect_count as the count arg.
+@group(0) @binding(5) var<storage, read_write> draw_count: atomic<u32>;
 
 // ─── Main ────────────────────────────────────────────────────────────────────
 
@@ -106,40 +93,40 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let scale_z = length(model[2].xyz);
     let world_radius = m.radius * max(scale_x, max(scale_y, scale_z));
 
-    // ── Frustum cull (inline — avoids array<T,N> as return / param type) ─────
-    // Each plane: vec4(normal.xyz, d)  with  sign convention  normal·p + d >= 0 = inside.
+    // ── Frustum cull ──────────────────────────────────────────────────────────
+    // Planes extracted from VP using Gribb/Hartmann (column-major, depth ∈ [0,1]).
+    // Plane normals are NOT normalised; scale world_radius by |n| per plane.
     let vp = camera.view_proj;
     let pl0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // left
     let pl1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // right
     let pl2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // bottom
     let pl3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // top
-    let pl4 = vec4<f32>(vp[0][3] + vp[0][2], vp[1][3] + vp[1][2], vp[2][3] + vp[2][2], vp[3][3] + vp[3][2]); // near
+    let pl4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);                                               // near (depth∈[0,1])
     let pl5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // far
 
-    var visible = (dot(pl0.xyz, center_ws) + pl0.w >= -world_radius)
-               && (dot(pl1.xyz, center_ws) + pl1.w >= -world_radius)
-               && (dot(pl2.xyz, center_ws) + pl2.w >= -world_radius)
-               && (dot(pl3.xyz, center_ws) + pl3.w >= -world_radius)
-               && (dot(pl4.xyz, center_ws) + pl4.w >= -world_radius)
-               && (dot(pl5.xyz, center_ws) + pl5.w >= -world_radius);
+    // Correct sphere-vs-plane test: scale the radius by the plane normal magnitude.
+    let visible = (dot(pl0.xyz, center_ws) + pl0.w >= -world_radius * length(pl0.xyz))
+               && (dot(pl1.xyz, center_ws) + pl1.w >= -world_radius * length(pl1.xyz))
+               && (dot(pl2.xyz, center_ws) + pl2.w >= -world_radius * length(pl2.xyz))
+               && (dot(pl3.xyz, center_ws) + pl3.w >= -world_radius * length(pl3.xyz))
+               && (dot(pl4.xyz, center_ws) + pl4.w >= -world_radius * length(pl4.xyz))
+               && (dot(pl5.xyz, center_ws) + pl5.w >= -world_radius * length(pl5.xyz));
+
+    // NOTE: No backface cone cull here. Per-triangle backface culling is already
+    // performed by the GPU rasterizer (cull_mode = Back). The meshlet cone test
+    // is a pure optimisation and is disabled because the apex-centroid approximation
+    // produces false culls when the camera is close to the surface.
 
     if visible {
-        let apex_ws = (model * vec4<f32>(m.cone_apex, 1.0)).xyz;
-        let norm_mat = mat3x3<f32>(
-            inst.normal_mat_0.xyz,
-            inst.normal_mat_1.xyz,
-            inst.normal_mat_2.xyz,
-        );
-        let axis_ws = normalize(norm_mat * m.cone_axis);
-        let cam_pos = camera.position_near.xyz;
-        visible = cone_visible(apex_ws, axis_ws, m.cone_cutoff, cam_pos);
+        var cmd: DrawIndexedIndirect;
+        cmd.index_count    = m.index_count;
+        cmd.instance_count = 1u;
+        cmd.first_index    = m.first_index;
+        cmd.base_vertex    = m.vertex_offset;
+        cmd.first_instance = m.instance_index;
+        // Atomically claim a compact slot and write directly — no zero-instance
+        // padding entries, no wasted GPU reads.
+        let slot = atomicAdd(&draw_count, 1u);
+        indirect[slot] = cmd;
     }
-
-    var cmd: DrawIndexedIndirect;
-    cmd.index_count    = m.index_count;
-    cmd.instance_count = select(0u, 1u, visible);
-    cmd.first_index    = m.first_index;
-    cmd.base_vertex    = m.vertex_offset;
-    cmd.first_instance = m.instance_index;
-    indirect[idx] = cmd;
 }
