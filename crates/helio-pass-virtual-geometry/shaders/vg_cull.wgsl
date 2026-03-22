@@ -1,0 +1,167 @@
+// Virtual geometry culling compute shader.
+//
+// One thread per meshlet. Tests each meshlet against the view frustum.
+// Visible meshlets are atomically appended to a compact indirect draw list:
+//
+//   slot = atomicAdd(&draw_count, 1u);
+//   indirect[slot] = cmd;
+//
+// The GPU-written draw_count is passed to multi_draw_indexed_indirect_count so
+// the hardware only reads the N_visible compact commands — never stale zero-
+// instance_count entries (Nanite / DOTS style AAA compaction).
+
+struct Camera {
+    view:           mat4x4<f32>,
+    proj:           mat4x4<f32>,
+    view_proj:      mat4x4<f32>,
+    view_proj_inv:  mat4x4<f32>,
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+}
+
+/// Mirrors GpuMeshletEntry (Rust, 64 bytes).
+struct MeshletEntry {
+    center:         vec3<f32>,
+    radius:         f32,
+    cone_apex:      vec3<f32>,
+    cone_cutoff:    f32,
+    cone_axis:      vec3<f32>,
+    lod_error:      f32,
+    first_index:    u32,
+    index_count:    u32,
+    vertex_offset:  i32,
+    instance_index: u32,
+}
+
+/// Mirrors GpuInstanceData (Rust, 144 bytes).
+struct InstanceData {
+    transform:    mat4x4<f32>,
+    normal_mat_0: vec4<f32>,
+    normal_mat_1: vec4<f32>,
+    normal_mat_2: vec4<f32>,
+    bounds:       vec4<f32>,
+    mesh_id:      u32,
+    material_id:  u32,
+    flags:        u32,
+    _pad:         u32,
+}
+
+/// Mirrors wgpu::util::DrawIndexedIndirectArgs (20 bytes, but aligned to 4).
+struct DrawIndexedIndirect {
+    index_count:    u32,
+    instance_count: u32,
+    first_index:    u32,
+    base_vertex:    i32,
+    first_instance: u32,
+}
+
+struct CullUniforms {
+    meshlet_count: u32,
+    // Screen-space LOD thresholds (Nanite-style).
+    // Computed as: screen_radius = (obj_radius * proj[1][1]) / dist
+    // This is the fraction of the screen-height the bounding sphere covers.
+    // Fully resolution-, FOV-, and scale-invariant — no per-scene tuning needed.
+    lod_s0: f32,   // LOD 0→1 when screen_radius drops below this (e.g. 0.05 = 5 % screen)
+    lod_s1: f32,   // LOD 1→2 when screen_radius drops below this (e.g. 0.01 = 1 % screen)
+    _pad2:  u32,
+}
+
+@group(0) @binding(0) var<uniform>             camera:     Camera;
+@group(0) @binding(1) var<uniform>             cull_uni:   CullUniforms;
+@group(0) @binding(2) var<storage, read>       meshlets:   array<MeshletEntry>;
+@group(0) @binding(3) var<storage, read>       instances:  array<InstanceData>;
+@group(0) @binding(4) var<storage, read_write> indirect:   array<DrawIndexedIndirect>;
+/// Atomic counter: cull shader increments once per visible meshlet.
+/// CPU passes this buffer to multi_draw_indexed_indirect_count as the count arg.
+@group(0) @binding(5) var<storage, read_write> draw_count: atomic<u32>;
+
+// ─── Main ────────────────────────────────────────────────────────────────────
+
+@compute @workgroup_size(64)
+fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= cull_uni.meshlet_count {
+        return;
+    }
+
+    let m    = meshlets[idx];
+    let inst = instances[m.instance_index];
+
+    let model     = inst.transform;
+    let center_ws = (model * vec4<f32>(m.center, 1.0)).xyz;
+
+    let scale_x = length(model[0].xyz);
+    let scale_y = length(model[1].xyz);
+    let scale_z = length(model[2].xyz);
+    let world_radius = m.radius * max(scale_x, max(scale_y, scale_z));
+
+    // ── Frustum cull ──────────────────────────────────────────────────────────
+    // Planes extracted from VP using Gribb/Hartmann (column-major, depth ∈ [0,1]).
+    // Plane normals are NOT normalised; scale world_radius by |n| per plane.
+    let vp = camera.view_proj;
+    let pl0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // left
+    let pl1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // right
+    let pl2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // bottom
+    let pl3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // top
+    let pl4 = vec4<f32>(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);                                               // near (depth∈[0,1])
+    let pl5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // far
+
+    // Correct sphere-vs-plane test: scale the radius by the plane normal magnitude.
+    let visible = (dot(pl0.xyz, center_ws) + pl0.w >= -world_radius * length(pl0.xyz))
+               && (dot(pl1.xyz, center_ws) + pl1.w >= -world_radius * length(pl1.xyz))
+               && (dot(pl2.xyz, center_ws) + pl2.w >= -world_radius * length(pl2.xyz))
+               && (dot(pl3.xyz, center_ws) + pl3.w >= -world_radius * length(pl3.xyz))
+               && (dot(pl4.xyz, center_ws) + pl4.w >= -world_radius * length(pl4.xyz))
+               && (dot(pl5.xyz, center_ws) + pl5.w >= -world_radius * length(pl5.xyz));
+
+    // NOTE: No backface cone cull here. Per-triangle backface culling is already
+    // performed by the GPU rasterizer (cull_mode = Back). The meshlet cone test
+    // is a pure optimisation and is disabled because the apex-centroid approximation
+    // produces false culls when the camera is close to the surface.
+
+    if visible {
+        // ── LOD selection — Nanite-style projected screen coverage ─────────────
+        //
+        // screen_radius = (obj_radius * focal_length) / cluster_dist
+        //   = fraction of the screen height that the object's bounding sphere would
+        //     cover if projected from this cluster's world position.
+        //
+        // camera.proj[1][1] is the perspective Y focal length (cot(fov/2),
+        // typically 1.0–2.4 for 45–90° vertical FOV).  Using it instead of a
+        // fixed denominator makes the threshold FOV-invariant.
+        //
+        // KEY: we use center_ws (this cluster's world centre) for the distance,
+        // but inst.bounds.w (the whole object's world-space radius) for the size.
+        // This gives each cluster its own independent LOD level (clusters on the
+        // far side of a large mesh use lower detail while the near side stays high)
+        // WITHOUT any seams or overdraw — because all clusters of the same object
+        // share the same inst.bounds.w denominator, so the LOD bands remain mutually
+        // exclusive: at any given cluster distance exactly one lod_level fires.
+        //
+        // lod_error encodes LOD level: 0.0 = full detail, 1.0 = medium, 2.0 = coarse.
+        let cluster_dist = max(length(center_ws - camera.position_near.xyz), 0.001);
+        let obj_radius   = max(inst.bounds.w, 0.001);
+        let focal_len    = camera.proj[1][1]; // cot(fov/2)
+        let screen_size  = (obj_radius * focal_len) / cluster_dist;
+        let lod_level   = u32(m.lod_error + 0.5);
+        let lod_ok      = (lod_level == 0u && screen_size >= cull_uni.lod_s0)
+                       || (lod_level == 1u && screen_size <  cull_uni.lod_s0 && screen_size >= cull_uni.lod_s1)
+                       || (lod_level == 2u && screen_size <  cull_uni.lod_s1);
+        if !lod_ok {
+            return;
+        }
+
+        var cmd: DrawIndexedIndirect;
+        cmd.index_count    = m.index_count;
+        cmd.instance_count = 1u;
+        cmd.first_index    = m.first_index;
+        cmd.base_vertex    = m.vertex_offset;
+        cmd.first_instance = m.instance_index;
+        // Atomically claim a compact slot and write directly — no zero-instance
+        // padding entries, no wasted GPU reads.
+        let slot = atomicAdd(&draw_count, 1u);
+        indirect[slot] = cmd;
+    }
+}

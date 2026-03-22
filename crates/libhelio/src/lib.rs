@@ -17,6 +17,7 @@ pub mod frame;
 pub mod instance;
 pub mod light;
 pub mod material;
+pub mod meshlet;
 pub mod shadow;
 pub mod sky;
 
@@ -26,5 +27,6 @@ pub use frame::*;
 pub use instance::*;
 pub use light::*;
 pub use material::*;
+pub use meshlet::*;
 pub use shadow::*;
 pub use sky::*;

@@ -92,6 +92,8 @@ pub struct FrameResources<'a> {
     pub sky: crate::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
     pub billboards: Option<BillboardFrameData<'a>>,
+    /// Virtual geometry meshlet + instance data for this frame.
+    pub vg: Option<VgFrameData<'a>>,
 }
 
 impl<'a> FrameResources<'a> {
@@ -110,6 +112,26 @@ impl<'a> FrameResources<'a> {
             main_scene: None,
             sky: crate::SkyContext::default(),
             billboards: None,
+            vg: None,
         }
     }
+}
+
+/// Per-frame virtual geometry data: CPU-side meshlet and instance byte slices.
+///
+/// The `VirtualGeometryPass` uploads these slices to its owned GPU buffers on the
+/// first frame and whenever `buffer_version` advances (topology or transform change).
+#[derive(Clone, Copy)]
+pub struct VgFrameData<'a> {
+    /// Raw bytes of a `GpuMeshletEntry` array.
+    pub meshlets: &'a [u8],
+    /// Raw bytes of a `GpuInstanceData` array (one entry per VG object).
+    pub instances: &'a [u8],
+    /// Total number of meshlets across all VG objects.
+    pub meshlet_count: u32,
+    /// Number of VG object instances.
+    pub instance_count: u32,
+    /// Version counter incremented each time meshlet or instance data changes.
+    /// The pass re-uploads GPU buffers only when this advances.
+    pub buffer_version: u64,
 }

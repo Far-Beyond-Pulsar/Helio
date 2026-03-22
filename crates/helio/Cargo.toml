@@ -12,6 +12,7 @@ bytemuck = { version = "1.14", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
 helio-v3 = { path = "../helio-v3" }
 helio-pass-billboard = { path = "../helio-pass-billboard" }
+helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
 helio-pass-depth-prepass = { path = "../helio-pass-depth-prepass" }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }

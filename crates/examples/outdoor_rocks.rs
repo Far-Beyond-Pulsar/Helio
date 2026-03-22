@@ -13,6 +13,7 @@
 //!   Q/E         — rotate sun (time of day)
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
+//!   F3          — toggle virtual geometry triangle debug view
 
 mod v3_demo_common;
 
@@ -25,9 +26,10 @@ use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     BillboardInstance, Camera, LightId, Renderer, RendererConfig,
     required_wgpu_features, required_wgpu_limits,
+    VirtualMeshUpload, VirtualObjectDescriptor,
 };
-use helio_asset_compat::{load_and_upload_scene, load_scene_bytes_with_config,
-                         upload_scene_materials, LoadConfig, UploadedScene};
+use helio_asset_compat::{load_scene_bytes_with_config, load_scene_file_with_config,
+                         upload_scene_materials, LoadConfig};
 use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
 use winit::{
     application::ApplicationHandler,
@@ -42,7 +44,7 @@ const SHIP_BYTES: &[u8] = include_bytes!("../../test.fbx");
 
 // ── Rock scatter parameters ───────────────────────────────────────────────────
 const ROCK_COUNT_PER_TYPE: usize = 30;
-const FIELD_RADIUS: f32 = 120.0;
+const FIELD_RADIUS: f32 = 80.0;
 const BILLBOARD_EVERY_N: usize = 4; // place a billboard above every Nth rock
 
 fn base_dir() -> PathBuf {
@@ -97,6 +99,19 @@ struct AppState {
 
     sun_light_id: LightId,
     sun_angle: f32,
+
+    // ── VG debug mode ─────────────────────────────────────────────
+    /// True when F3 VG triangle debug is active (debug_mode 20).
+    vg_debug: bool,
+
+    // ── CPU-side profiling ───────────────────────────────────────────────
+    frame_count:      u64,
+    prof_frame_total: f64, // ms
+    prof_update:      f64, // ms: sun, billboards, camera update
+    prof_render:      f64, // ms: renderer.render() call
+    prof_present:     f64, // ms: get_current_texture + present
+    prof_frame_min:   f64,
+    prof_frame_max:   f64,
 }
 
 impl App {
@@ -182,7 +197,7 @@ impl ApplicationHandler for App {
                 format:   surface_format,
                 width:    size.width,
                 height:   size.height,
-                present_mode: wgpu::PresentMode::Fifo,
+                present_mode: wgpu::PresentMode::AutoNoVsync,
                 alpha_mode:   caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
@@ -223,26 +238,15 @@ impl ApplicationHandler for App {
             250.0,
         );
 
-        // ── Load rock FBX files (each loaded exactly once) ────────────────
+        // ── Load rock FBX files as virtual geometry (meshlets) ────────────
+        // Each rock type is meshletised once at upload time; the GPU cull
+        // compute then handles per-meshlet frustum + backface culling O(1) CPU.
         let asset_dir = base_dir().join("3d");
         let rock_paths = [
             asset_dir.join("Chiseled_Rock_rafue_Raw.fbx"),
             asset_dir.join("Granite_Rock_pjtsT_Raw.fbx"),
             asset_dir.join("Granite_Rock_pkeeM_Raw.fbx"),
         ];
-        // Load + upload each file in one pass; no double-parse.
-        let rock_uploads: Vec<Option<UploadedScene>> = rock_paths
-            .iter()
-            .map(|path| {
-                match load_and_upload_scene(path, LoadConfig::default(), &mut renderer) {
-                    Ok(uploaded) => Some(uploaded),
-                    Err(e) => {
-                        log::warn!("Could not load rock '{}': {e}", path.display());
-                        None
-                    }
-                }
-            })
-            .collect();
 
         // Fallback cube material/mesh for any type that failed to load
         let fallback_mat = renderer.insert_material(make_material(
@@ -250,13 +254,52 @@ impl ApplicationHandler for App {
         ));
         let fallback_mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
+        // rock_vg[type] = Some(vec of (VirtualMeshId, material_slot_u32))
+        let rock_vg: Vec<Option<Vec<(helio::VirtualMeshId, u32)>>> = rock_paths
+            .iter()
+            .map(|path| {
+                let scene = match load_scene_file_with_config(path, LoadConfig::default()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("Could not load rock '{}': {e}", path.display());
+                        return None;
+                    }
+                };
+                let mat_ids = match upload_scene_materials(&mut renderer, &scene) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        log::warn!("Could not upload rock materials for '{}': {e}", path.display());
+                        return None;
+                    }
+                };
+                let entries: Vec<(helio::VirtualMeshId, u32)> = scene
+                    .meshes
+                    .iter()
+                    .map(|mesh| {
+                        let vm_id = renderer.insert_virtual_mesh(VirtualMeshUpload {
+                            vertices: mesh.vertices.clone(),
+                            indices: mesh.indices.clone(),
+                        });
+                        let mat_id = mesh
+                            .material_index
+                            .and_then(|idx| mat_ids.get(idx))
+                            .or_else(|| mat_ids.first())
+                            .copied()
+                            .unwrap_or(fallback_mat);
+                        (vm_id, mat_id.slot())
+                    })
+                    .collect();
+                Some(entries)
+            })
+            .collect();
+
         // ── Scatter rocks ─────────────────────────────────────────────────
         let mut seed: u64 = 0xDEAD_BEEF_CAFE_1234;
         let mut billboard_positions: Vec<(Vec3, usize)> = Vec::new();
         let mut global_rock_idx: usize = 0;
 
         for rock_type in 0..3usize {
-            let uploaded = rock_uploads[rock_type].as_ref();
+            let vg_entries = rock_vg[rock_type].as_deref();
 
             for _ in 0..ROCK_COUNT_PER_TYPE {
                 // Random position in a disc
@@ -264,12 +307,12 @@ impl ApplicationHandler for App {
                 let dist  = FIELD_RADIUS * lcg(&mut seed).sqrt();
                 let pos   = Vec3::new(angle.cos() * dist, 0.0, angle.sin() * dist);
 
-                // Random scale (world-space rock sizes vary a lot)
-                let base_scale = 0.6 + lcg(&mut seed) * 2.8;
+                // Random scale — small floor rocks, no overlapping giants
+                let base_scale = 0.08 + lcg(&mut seed) * 0.22;  // 0.08..0.30
                 let scale = Vec3::new(
-                    base_scale * (0.7 + lcg(&mut seed) * 0.6),
-                    base_scale * (0.5 + lcg(&mut seed) * 0.7),
-                    base_scale * (0.7 + lcg(&mut seed) * 0.6),
+                    base_scale * (0.8 + lcg(&mut seed) * 0.4),
+                    base_scale * (0.5 + lcg(&mut seed) * 0.5),
+                    base_scale * (0.8 + lcg(&mut seed) * 0.4),
                 );
                 let rot = Quat::from_euler(
                     EulerRot::XYZ,
@@ -279,18 +322,25 @@ impl ApplicationHandler for App {
                 );
                 let transform = Mat4::from_scale_rotation_translation(scale, rot, pos);
 
-                match uploaded {
+                // World-space bounding sphere used for instance-level culling.
+                let center = pos + Vec3::Y * scale.y * 0.5;
+                let bounds_radius = base_scale * 1.2;
+
+                match vg_entries {
                     None => {
                         let _ = v3_demo_common::insert_object(
                             &mut renderer, fallback_mesh, fallback_mat, transform, base_scale,
                         );
                     }
-                    Some(up) => {
-                        for &mesh_id in &up.mesh_ids {
-                            let mat = up.material_ids.first().copied().unwrap_or(fallback_mat);
-                            let _ = v3_demo_common::insert_object(
-                                &mut renderer, mesh_id, mat, transform, base_scale,
-                            );
+                    Some(entries) => {
+                        for &(vm_id, mat_slot) in entries {
+                            let _ = renderer.insert_virtual_object(VirtualObjectDescriptor {
+                                virtual_mesh: vm_id,
+                                material_id: mat_slot,
+                                transform,
+                                bounds: [center.x, center.y, center.z, bounds_radius],
+                                flags: 0,
+                            });
                         }
                     }
                 }
@@ -384,6 +434,14 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             sun_light_id,
             sun_angle,
+            vg_debug: false,
+            frame_count:      0,
+            prof_frame_total: 0.0,
+            prof_update:      0.0,
+            prof_render:      0.0,
+            prof_present:     0.0,
+            prof_frame_min:   f64::MAX,
+            prof_frame_max:   0.0,
         });
     }
 
@@ -422,13 +480,30 @@ impl ApplicationHandler for App {
                         format: state.surface_format,
                         width:  size.width,
                         height: size.height,
-                        present_mode: wgpu::PresentMode::Fifo,
+                        present_mode: wgpu::PresentMode::AutoNoVsync,
                         alpha_mode:   wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
                     },
                 );
                 state.renderer.set_render_size(size.width, size.height);
+            }
+
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::F3),
+                    state: ElementState::Pressed,
+                    ..
+                },
+                ..
+            } => {
+                state.vg_debug = !state.vg_debug;
+                state.renderer.set_debug_mode(if state.vg_debug { 20 } else { 0 });
+                state.window.set_title(if state.vg_debug {
+                    "Helio — Outdoor Rocks  [VG TRIANGLE DEBUG — F3 to exit]"
+                } else {
+                    "Helio — Outdoor Rocks"
+                });
             }
 
             WindowEvent::KeyboardInput {
@@ -460,12 +535,14 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                let now = Instant::now();
+                let frame_start = Instant::now();
+                let now = frame_start;
                 let dt  = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
                 let t   = now.duration_since(state.start_time).as_secs_f32();
                 state.last_frame = now;
 
                 // ── Sun rotation ──────────────────────────────────────────
+                let t_update_start = Instant::now();
                 const SUN_SPEED: f32 = 0.6;
                 if state.keys.contains(&KeyCode::KeyQ) { state.sun_angle += SUN_SPEED * dt; }
                 if state.keys.contains(&KeyCode::KeyE) { state.sun_angle -= SUN_SPEED * dt; }
@@ -512,8 +589,10 @@ impl ApplicationHandler for App {
                     0.15,
                     2000.0,
                 );
+                let t_update_ms = t_update_start.elapsed().as_secs_f64() * 1000.0;
 
                 // ── Render ────────────────────────────────────────────────
+                let t_render_start = Instant::now();
                 let output = match state.surface.get_current_texture() {
                     Ok(t) => t,
                     Err(e) => { log::warn!("surface error: {e:?}"); return; }
@@ -522,7 +601,46 @@ impl ApplicationHandler for App {
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {e:?}");
                 }
+                let t_render_ms = t_render_start.elapsed().as_secs_f64() * 1000.0;
+
+                let t_present_start = Instant::now();
                 output.present();
+                let t_present_ms = t_present_start.elapsed().as_secs_f64() * 1000.0;
+
+                // ── Profiling accumulate + print every 100 frames ─────────
+                let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
+                state.prof_frame_total += frame_ms;
+                state.prof_update      += t_update_ms;
+                state.prof_render      += t_render_ms;
+                state.prof_present     += t_present_ms;
+                if frame_ms < state.prof_frame_min { state.prof_frame_min = frame_ms; }
+                if frame_ms > state.prof_frame_max { state.prof_frame_max = frame_ms; }
+                state.frame_count += 1;
+
+                const REPORT_EVERY: u64 = 100;
+                if state.frame_count % REPORT_EVERY == 0 {
+                    let n = REPORT_EVERY as f64;
+                    let avg   = state.prof_frame_total / n;
+                    let fps   = 1000.0 / avg;
+                    let upd   = state.prof_update  / n;
+                    let rnd   = state.prof_render  / n;
+                    let pres  = state.prof_present / n;
+                    let other = avg - upd - rnd - pres;
+                    eprintln!(
+                        "[PROF #{:>6}] avg {:.2}ms ({:.0} fps) | min {:.2}ms max {:.2}ms",
+                        state.frame_count, avg, fps, state.prof_frame_min, state.prof_frame_max
+                    );
+                    eprintln!(
+                        "             update {:.2}ms  render {:.2}ms  present {:.2}ms  other {:.2}ms",
+                        upd, rnd, pres, other
+                    );
+                    state.prof_frame_total = 0.0;
+                    state.prof_update      = 0.0;
+                    state.prof_render      = 0.0;
+                    state.prof_present     = 0.0;
+                    state.prof_frame_min   = f64::MAX;
+                    state.prof_frame_max   = 0.0;
+                }
             }
             _ => {}
         }
