@@ -124,24 +124,27 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     if visible {
         // ── LOD selection — Nanite-style projected screen coverage ─────────────
         //
-        // screen_radius = (obj_radius * focal_length) / dist
-        //   = fraction of the screen height that inst.bounds covers.
+        // screen_radius = (obj_radius * focal_length) / cluster_dist
+        //   = fraction of the screen height that the object's bounding sphere would
+        //     cover if projected from this cluster's world position.
         //
         // camera.proj[1][1] is the perspective Y focal length (cot(fov/2),
         // typically 1.0–2.4 for 45–90° vertical FOV).  Using it instead of a
-        // fixed denominator makes the threshold FOV-invariant: a narrower FOV
-        // makes objects appear larger so they correctly stay at higher detail,
-        // and a wider FOV makes them appear smaller so they downgrade sooner.
+        // fixed denominator makes the threshold FOV-invariant.
         //
-        // Every meshlet of the same object shares the same bounding sphere so
-        // all meshlets select the identical LOD — no seams.
+        // KEY: we use center_ws (this cluster's world centre) for the distance,
+        // but inst.bounds.w (the whole object's world-space radius) for the size.
+        // This gives each cluster its own independent LOD level (clusters on the
+        // far side of a large mesh use lower detail while the near side stays high)
+        // WITHOUT any seams or overdraw — because all clusters of the same object
+        // share the same inst.bounds.w denominator, so the LOD bands remain mutually
+        // exclusive: at any given cluster distance exactly one lod_level fires.
         //
         // lod_error encodes LOD level: 0.0 = full detail, 1.0 = medium, 2.0 = coarse.
-        let obj_offset  = inst.bounds.xyz - camera.position_near.xyz;
-        let obj_dist    = max(length(obj_offset), 0.001);
-        let obj_radius  = max(inst.bounds.w, 0.001);
-        let focal_len   = camera.proj[1][1]; // cot(fov/2)
-        let screen_size = (obj_radius * focal_len) / obj_dist;
+        let cluster_dist = max(length(center_ws - camera.position_near.xyz), 0.001);
+        let obj_radius   = max(inst.bounds.w, 0.001);
+        let focal_len    = camera.proj[1][1]; // cot(fov/2)
+        let screen_size  = (obj_radius * focal_len) / cluster_dist;
         let lod_level   = u32(m.lod_error + 0.5);
         let lod_ok      = (lod_level == 0u && screen_size >= cull_uni.lod_s0)
                        || (lod_level == 1u && screen_size <  cull_uni.lod_s0 && screen_size >= cull_uni.lod_s1)
