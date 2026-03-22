@@ -59,9 +59,9 @@ struct DrawIndexedIndirect {
 
 struct CullUniforms {
     meshlet_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    lod_d0: f32,   // LOD 0→1 transition distance (world-space metres)
+    lod_d1: f32,   // LOD 1→2 transition distance (world-space metres)
+    _pad2:  u32,
 }
 
 @group(0) @binding(0) var<uniform>             camera:     Camera;
@@ -118,6 +118,22 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     // produces false culls when the camera is close to the surface.
 
     if visible {
+        // ── LOD selection (per-object, not per-meshlet) ───────────────────────
+        // Use the instance's world-space bounding sphere centre so every meshlet
+        // of the same object selects the SAME LOD level.  Per-meshlet distance
+        // causes mixed LOD within one rock and creates visible seams / holes at
+        // the transition boundary.
+        //
+        // lod_error encodes the LOD level: 0.0 = full, 1.0 = medium, 2.0 = coarse.
+        let obj_dist  = length(inst.bounds.xyz - camera.position_near.xyz);
+        let lod_level = u32(m.lod_error + 0.5);
+        let lod_ok    = (lod_level == 0u && obj_dist <  cull_uni.lod_d0)
+                     || (lod_level == 1u && obj_dist >= cull_uni.lod_d0 && obj_dist < cull_uni.lod_d1)
+                     || (lod_level == 2u && obj_dist >= cull_uni.lod_d1);
+        if !lod_ok {
+            return;
+        }
+
         var cmd: DrawIndexedIndirect;
         cmd.index_count    = m.index_count;
         cmd.instance_count = 1u;

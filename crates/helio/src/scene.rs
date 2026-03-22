@@ -19,7 +19,7 @@ use crate::material::{
     TextureTransform, TextureUpload, MAX_TEXTURES,
 };
 use crate::mesh::{MeshBuffers, MeshPool, MeshSlice, MeshUpload};
-use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor, meshletize};
+use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor, generate_lod_meshes, meshletize, sort_triangles_spatially};
 
 #[derive(Debug, Error)]
 pub enum SceneError {
@@ -113,11 +113,13 @@ fn invalid(resource: &'static str) -> SceneError {
 
 // ─── Virtual geometry records ────────────────────────────────────────────────
 
-/// CPU-side record for a virtual mesh: the uploaded mesh handle + its precomputed meshlets.
+/// CPU-side record for a virtual mesh: uploaded mesh handles (one per LOD) + precomputed meshlets.
 #[derive(Debug, Clone)]
 struct VirtualMeshRecord {
-    pub mesh_id: MeshId,
-    /// Precomputed meshlet descriptors (instance_index is 0; patched during rebuild).
+    /// Mesh pool handles for each LOD level; index 0 = full detail, 1 = medium, 2 = coarse.
+    pub mesh_ids: Vec<MeshId>,
+    /// Precomputed meshlet descriptors for all LODs combined.
+    /// `lod_error` encodes the LOD level: 0.0 = full, 1.0 = medium, 2.0 = coarse.
     pub meshlets: Vec<GpuMeshletEntry>,
     pub ref_count: u32,
 }
@@ -866,26 +868,41 @@ impl Scene {
     ///
     /// Returns a `VirtualMeshId` that you pass to `insert_virtual_object`.
     pub fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
-        // Upload vertices/indices into the shared mega-buffer.
-        let mesh_id = self.mesh_pool.insert(MeshUpload {
-            vertices: upload.vertices.clone(),
-            indices: upload.indices.clone(),
-        });
-        let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
+        // Generate three LOD levels (full, medium, coarse) via vertex clustering.
+        let lod_meshes = generate_lod_meshes(&upload.vertices, &upload.indices);
 
-        // CPU-side meshlet decomposition using absolute mega-buffer offsets.
-        let meshlets = meshletize(
-            &upload.vertices,
-            &upload.indices,
-            slice.first_index,
-            slice.first_vertex,
-        );
+        let mut all_meshlets: Vec<GpuMeshletEntry> = Vec::new();
+        let mut mesh_ids: Vec<MeshId> = Vec::new();
+
+        for (lod_level, (lod_verts, lod_indices)) in lod_meshes.into_iter().enumerate() {
+            // Spatially sort triangles before uploading so the mega-buffer index
+            // data matches what meshletize expects (sorted = tight cluster bounds).
+            let sorted_indices = sort_triangles_spatially(&lod_verts, &lod_indices);
+            let mesh_id = self.mesh_pool.insert(MeshUpload {
+                vertices: lod_verts.clone(),
+                indices:  sorted_indices.clone(),
+            });
+            let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
+
+            let mut meshlets = meshletize(
+                &lod_verts,
+                &sorted_indices,
+                slice.first_index,
+                slice.first_vertex,
+            );
+            // Tag with LOD level so the cull shader can select by distance.
+            for m in &mut meshlets {
+                m.lod_error = lod_level as f32;
+            }
+            all_meshlets.extend(meshlets);
+            mesh_ids.push(mesh_id);
+        }
 
         let id = VirtualMeshId(self.vg_next_mesh_id);
         self.vg_next_mesh_id += 1;
         self.vg_meshes.insert(id, VirtualMeshRecord {
-            mesh_id,
-            meshlets,
+            mesh_ids,
+            meshlets: all_meshlets,
             ref_count: 0,
         });
         id
@@ -911,7 +928,7 @@ impl Scene {
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),
             bounds: desc.bounds,
-            mesh_id: record.mesh_id.slot(),
+            mesh_id: record.mesh_ids[0].slot(),
             material_id: desc.material_id,
             flags: desc.flags,
             _pad: 0,

@@ -45,8 +45,8 @@ struct VgGlobals {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
     meshlet_count: u32,
-    _pad0: u32,
-    _pad1: u32,
+    lod_d0: f32,  // LOD 0→1 transition distance in world-space metres
+    lod_d1: f32,  // LOD 1→2 transition distance in world-space metres
     _pad2: u32,
 }
 
@@ -486,7 +486,9 @@ impl RenderPass for VirtualGeometryPass {
         // ── Upload cull uniforms ──────────────────────────────────────────────
         let cull_uni = CullUniforms {
             meshlet_count: self.last_meshlet_count,
-            _pad0: 0, _pad1: 0, _pad2: 0,
+            lod_d0: 30.0,
+            lod_d1: 80.0,
+            _pad2: 0,
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
