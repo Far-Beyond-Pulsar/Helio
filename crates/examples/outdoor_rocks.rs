@@ -44,7 +44,7 @@ const SHIP_BYTES: &[u8] = include_bytes!("../../test.fbx");
 
 // ── Rock scatter parameters ───────────────────────────────────────────────────
 const ROCK_COUNT_PER_TYPE: usize = 30;
-const FIELD_RADIUS: f32 = 120.0;
+const FIELD_RADIUS: f32 = 80.0;
 const BILLBOARD_EVERY_N: usize = 4; // place a billboard above every Nth rock
 
 fn base_dir() -> PathBuf {
@@ -307,12 +307,12 @@ impl ApplicationHandler for App {
                 let dist  = FIELD_RADIUS * lcg(&mut seed).sqrt();
                 let pos   = Vec3::new(angle.cos() * dist, 0.0, angle.sin() * dist);
 
-                // Random scale (world-space rock sizes vary a lot)
-                let base_scale = 0.6 + lcg(&mut seed) * 2.8;
+                // Random scale — small floor rocks, no overlapping giants
+                let base_scale = 0.08 + lcg(&mut seed) * 0.22;  // 0.08..0.30
                 let scale = Vec3::new(
-                    base_scale * (0.7 + lcg(&mut seed) * 0.6),
-                    base_scale * (0.5 + lcg(&mut seed) * 0.7),
-                    base_scale * (0.7 + lcg(&mut seed) * 0.6),
+                    base_scale * (0.8 + lcg(&mut seed) * 0.4),
+                    base_scale * (0.5 + lcg(&mut seed) * 0.5),
+                    base_scale * (0.8 + lcg(&mut seed) * 0.4),
                 );
                 let rot = Quat::from_euler(
                     EulerRot::XYZ,
@@ -324,7 +324,7 @@ impl ApplicationHandler for App {
 
                 // World-space bounding sphere used for instance-level culling.
                 let center = pos + Vec3::Y * scale.y * 0.5;
-                let bounds_radius = base_scale * 3.0;
+                let bounds_radius = base_scale * 1.2;
 
                 match vg_entries {
                     None => {

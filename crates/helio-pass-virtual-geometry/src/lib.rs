@@ -45,8 +45,8 @@ struct VgGlobals {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
     meshlet_count: u32,
-    lod_d0: f32,  // LOD 0→1 transition distance in world-space metres
-    lod_d1: f32,  // LOD 1→2 transition distance in world-space metres
+    lod_d0: f32,  // LOD 0→1 threshold in object-radii (e.g. 4.0 = LOD0 within 4× radius)
+    lod_d1: f32,  // LOD 1→2 threshold in object-radii (e.g. 12.0 = LOD1 within 12× radius)
     _pad2: u32,
 }
 
@@ -486,8 +486,11 @@ impl RenderPass for VirtualGeometryPass {
         // ── Upload cull uniforms ──────────────────────────────────────────────
         let cull_uni = CullUniforms {
             meshlet_count: self.last_meshlet_count,
-            lod_d0: 30.0,
-            lod_d1: 80.0,
+            // Scale-invariant thresholds: LOD0 when dist < 4× radius,
+            // LOD1 when 4–12×, LOD2 beyond 12×.  Huge objects stay at
+            // full detail proportionally longer.
+            lod_d0: 4.0,
+            lod_d1: 12.0,
             _pad2: 0,
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
