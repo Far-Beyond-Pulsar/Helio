@@ -1,0 +1,14 @@
+[package]
+name = "helio-pass-sdf"
+version = "0.1.0"
+edition = "2021"
+description = "Helio render pass: screen-space SDF via GPU Jump Flooding Algorithm (O(1) CPU)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-v3  = { path = "../helio-v3" }
+libhelio  = { path = "../libhelio" }
+wgpu      = "23"
+bytemuck  = { version = "1.14", features = ["derive"] }
+glam      = "0.29"
+log       = "0.4"

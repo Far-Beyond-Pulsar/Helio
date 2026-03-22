@@ -1,32 +1,17 @@
-//! Light-count benchmark — 150 simultaneous point lights with RC GI
+//! Light Benchmark — helio v3
 //!
-//! A large warehouse floor with a 6×6 pillar grid and scattered crates,
-//! lit by a 10×15 array of 150 colored point lights at mid-height.
-//! Tests deferred rendering + radiance cascades with high light count.
-//!
-//! Press 3 to toggle probe visualization, 4 for GPU timing.
+//! 150 simultaneous point lights (10×15 grid) over a warehouse floor.
+//! Tests v3 deferred + radiance-cascade GI with high light count.
 //!
 //! Controls:
-//!   WASD        — move forward/left/back/right
-//!   Space/Shift — move up/down
-//!   Mouse drag  — look around (click to grab cursor)
-//!   3           — toggle RC probe visualization ↔ light markers
-//!   4           — toggle GPU timing printout (stderr)
-//!   +/-         — increase/decrease light intensity
-//!   Escape      — release cursor / exit
+//!   WASD / Space / Shift — fly
+//!   +/-                  — increase/decrease light intensity
+//!   Escape               — release cursor / exit
 
+mod v3_demo_common;
+use v3_demo_common::{box_mesh, make_material, point_light, insert_object};
 
-
-mod demo_portal;
-
-use helio_render_v2::{Renderer, RendererConfig, Camera, GpuMesh, SceneLight, LightId, BillboardId};
-
-
-use helio_render_v2::features::{
-    FeatureRegistry, LightingFeature, BloomFeature, ShadowsFeature,
-    BillboardsFeature, BillboardInstance, RadianceCascadesFeature,
-};
-
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, LightId, Renderer, RendererConfig};
 
 use winit::{
     application::ApplicationHandler,
@@ -35,25 +20,20 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId, CursorGrabMode},
 };
-
-
 use std::collections::HashSet;
-
-
 use std::sync::Arc;
 
-// ── Light grid ─────────────────────────────────────────────────────────────────
-// 10 columns × 15 rows = 150 lights
-const LIGHT_COLS:       usize = 10;
-const LIGHT_ROWS:       usize = 15;
-const LIGHT_HEIGHT:     f32   = 2.5;   // metres above floor
-const LIGHT_SPACING_X:  f32   = 3.8;   // cols span ±18 m
-const LIGHT_SPACING_Z:  f32   = 2.6;   // rows span ±19 m
-const LIGHT_RANGE:      f32   = 7.0;
-const LIGHT_INTENSITY:  f32   = 6.0;
+// ── Light grid ──────────────────────────────────────────────────────────────
+const LIGHT_COLS:      usize = 10;
+const LIGHT_ROWS:      usize = 15;
+const LIGHT_HEIGHT:    f32   = 2.5;
+const LIGHT_SPACING_X: f32   = 3.8;
+const LIGHT_SPACING_Z: f32   = 2.6;
+const LIGHT_RANGE:     f32   = 7.0;
+const LIGHT_INTENSITY: f32   = 6.0;
 
-/// Build the 150 lights deterministically from grid position.
-fn build_lights() -> Vec<SceneLight> {
+/// Build 150 light params (position, color, intensity, range) from grid.
+fn build_light_params() -> Vec<([f32; 3], [f32; 3], f32, f32)> {
     let mut out = Vec::with_capacity(LIGHT_COLS * LIGHT_ROWS);
     let half_x = (LIGHT_COLS as f32 - 1.0) * 0.5 * LIGHT_SPACING_X;
     let half_z = (LIGHT_ROWS as f32 - 1.0) * 0.5 * LIGHT_SPACING_Z;
@@ -61,15 +41,9 @@ fn build_lights() -> Vec<SceneLight> {
         for col in 0..LIGHT_COLS {
             let x = col as f32 * LIGHT_SPACING_X - half_x;
             let z = row as f32 * LIGHT_SPACING_Z - half_z;
-            // Spread hue smoothly across the grid for visual variety.
             let hue = (col * LIGHT_ROWS + row) as f32 / (LIGHT_COLS * LIGHT_ROWS) as f32;
             let color = hsv_to_rgb(hue, 0.75, 1.0);
-            out.push(SceneLight::point(
-                [x, LIGHT_HEIGHT, z],
-                color,
-                LIGHT_INTENSITY,
-                LIGHT_RANGE,
-            ));
+            out.push(([x, LIGHT_HEIGHT, z], color, LIGHT_INTENSITY, LIGHT_RANGE));
         }
     }
     out
@@ -92,65 +66,16 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [f32; 3] {
         _ => [v, p, q],
     }
 }
-
-fn load_sprite() -> (Vec<u8>, u32, u32) {
-    let img = image::load_from_memory(include_bytes!("../../spotlight.png"))
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (w, h) = img.dimensions();
-    (img.into_raw(), w, h)
-}
-
-const RC_WORLD_MIN: [f32; 3] = [-22.0, -0.5, -22.0];
-const RC_WORLD_MAX: [f32; 3] = [ 22.0,  8.0,  22.0];
-
-fn probe_billboards(world_min: [f32; 3], world_max: [f32; 3]) -> Vec<BillboardInstance> {
-    use helio_render_v2::features::radiance_cascades::PROBE_DIMS;
-    const COLORS: [[f32; 4]; 4] = [
-        [0.0, 1.0, 1.0, 0.85],
-        [0.0, 1.0, 0.0, 0.80],
-        [1.0, 1.0, 0.0, 0.75],
-        [1.0, 0.35, 0.0, 0.70],
-    ];
-    const SIZES: [[f32; 2]; 4] = [
-        [0.035, 0.035],
-        [0.075, 0.075],
-        [0.140, 0.140],
-        [0.260, 0.260],
-    ];
-    let mut out = Vec::new();
-    for (c, &dim) in PROBE_DIMS.iter().enumerate() {
-        for i in 0..dim {
-            for j in 0..dim {
-                for k in 0..dim {
-                    let [xmin, ymin, zmin] = world_min;
-                    let [xmax, ymax, zmax] = world_max;
-                    let t = 1.0 / (dim as f32 - 1.0).max(1.0);
-                    let x = xmin + (xmax - xmin) * (i as f32 * t);
-                    let y = ymin + (ymax - ymin) * (j as f32 * t);
-                    let z = zmin + (zmax - zmin) * (k as f32 * t);
-                    out.push(BillboardInstance::new([x, y, z], SIZES[c])
-                        .with_color(COLORS[c]).with_screen_scale(true));
-                }
-            }
-        }
-    }
-    out
-}
-
-// ── App / state ────────────────────────────────────────────────────────────────
-
 fn main() {
     env_logger::init();
     log::info!("Starting Light Benchmark ({} lights)", LIGHT_COLS * LIGHT_ROWS);
     EventLoop::new()
         .expect("event loop")
-        .run_app(&mut App::new())
+        .run_app(&mut App { state: None })
         .expect("run");
 }
 
 struct App { state: Option<AppState> }
-impl App { fn new() -> Self { Self { state: None } } }
 
 struct AppState {
     window:         Arc<Window>,
@@ -159,18 +84,11 @@ struct AppState {
     surface_format: wgpu::TextureFormat,
     renderer:       Renderer,
     last_frame:     std::time::Instant,
+    frame_count:    u64,
 
-    // geometry
-    floor:   GpuMesh,
-    pillars: Vec<GpuMesh>,
-    crates:  Vec<GpuMesh>,
+    light_ids:   Vec<LightId>,
+    base_lights: Vec<([f32; 3], [f32; 3], f32, f32)>,
 
-    // scene state
-    light_ids:     Vec<LightId>,
-    base_lights:   Vec<SceneLight>,
-    billboard_ids: Vec<BillboardId>,
-
-    // camera
     cam_pos:        glam::Vec3,
     cam_yaw:        f32,
     cam_pitch:      f32,
@@ -178,18 +96,12 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta:    (f32, f32),
 
-    // debug
-    probe_vis: bool,
     light_intensity_multiplier: f32,
-    sprite_w: u32,
-    sprite_h: u32,
 
-    // event loop timing trackers
-    time_render_end: Option<std::time::Instant>,
+    time_render_end:          Option<std::time::Instant>,
     time_about_to_wait_start: Option<std::time::Instant>,
-    time_redraw_requested: Option<std::time::Instant>,
+    time_redraw_requested:    Option<std::time::Instant>,
 }
-
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.state.is_some() { return; }
@@ -197,8 +109,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(
             event_loop.create_window(
                 Window::default_attributes()
-                    .with_title(format!("Helio — Light Benchmark ({} lights)",
-                        LIGHT_COLS * LIGHT_ROWS))
+                    .with_title(format!("Helio — Light Benchmark ({} lights)", LIGHT_COLS * LIGHT_ROWS))
                     .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
             ).expect("window"),
         );
@@ -209,35 +120,21 @@ impl ApplicationHandler for App {
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
+            compatible_surface: Some(&surface), force_fallback_adapter: false,
         })).expect("adapter");
-
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
-                label: Some("Benchmark Device"),
-                required_features:
-                    wgpu::Features::EXPERIMENTAL_RAY_QUERY |
-                    wgpu::Features::TIMESTAMP_QUERY |
-                    wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS,
-                required_limits: wgpu::Limits::default()
-                    .using_minimum_supported_acceleration_structure_values(),
-                memory_hints: wgpu::MemoryHints::default(),
-                experimental_features: unsafe { wgpu::ExperimentalFeatures::enabled() },
-                trace: wgpu::Trace::Off,
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits:   required_wgpu_limits(adapter.limits()),
+                ..Default::default()
             },
+            None,
         )).expect("device");
-
-        device.on_uncaptured_error(std::sync::Arc::new(|e| {
-            panic!("[GPU UNCAPTURED ERROR] {:?}", e);
-        }));
-        let info = adapter.get_info();
-        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
+        device.on_uncaptured_error(Box::new(|e| panic!("[GPU] {:?}", e)));
         let device = Arc::new(device);
         let queue  = Arc::new(queue);
         let caps   = surface.get_capabilities(&adapter);
-        let fmt    = caps.formats.iter().find(|f| f.is_srgb()).copied()
-                         .unwrap_or(caps.formats[0]);
+        let fmt    = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
         let size   = window.inner_size();
         surface.configure(&device, &wgpu::SurfaceConfiguration {
             usage:    wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -250,104 +147,67 @@ impl ApplicationHandler for App {
             desired_maximum_frame_latency: 1,
         });
 
-        let (sprite_rgba, sprite_w, sprite_h) = load_sprite();
-        let features = FeatureRegistry::builder()
-            .with_feature(LightingFeature::new())
-            .with_feature(ShadowsFeature::new().with_max_lights(16))
-            .with_feature(BloomFeature::new().with_intensity(0.5).with_threshold(1.0))
-            .with_feature(
-                BillboardsFeature::new()
-                    .with_sprite(sprite_rgba, sprite_w, sprite_h)
-                    .with_max_instances(5000),
-            )
-            .with_feature(
-                RadianceCascadesFeature::new()
-                    .with_world_bounds(RC_WORLD_MIN, RC_WORLD_MAX)
-            )
-            .build();
+        let mut renderer = Renderer::new(device.clone(), queue.clone(),
+            RendererConfig::new(size.width, size.height, fmt),
+        );
+        renderer.set_ambient([0.03, 0.03, 0.04], 1.0);
 
-        let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(
-            size.width, size.height, fmt, features
-        )).expect("renderer");
-        renderer.set_editor_mode(true);
+        // Materials
+        let mat_floor  = renderer.insert_material(make_material([0.55, 0.52, 0.45, 1.0], 0.85, 0.00, [0.0; 3], 0.0));
+        let mat_pillar = renderer.insert_material(make_material([0.60, 0.60, 0.62, 1.0], 0.50, 0.30, [0.0; 3], 0.0));
+        let mat_crate  = renderer.insert_material(make_material([0.50, 0.38, 0.25, 1.0], 0.70, 0.00, [0.0; 3], 0.0));
 
-        // ── Geometry ──────────────────────────────────────────────────────────
-        let floor = renderer.create_mesh_plane([0.0, 0.0, 0.0], 20.0);
+        let mut add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32,
+                       hx: f32, hy: f32, hz: f32, mat| {
+            let m = r.insert_mesh(box_mesh([cx, cy, cz], [hx, hy, hz]));
+            let _ = insert_object(r, m, mat, glam::Mat4::IDENTITY, (hx*hx+hy*hy+hz*hz).sqrt());
+        };
 
-        // 6 × 6 = 36 pillars, spaced 4 m apart (–10 … +10 m on each axis)
-        let mut pillars = Vec::new();
-        for ix in -2..=3i32 {
-            for iz in -2..=3i32 {
-                pillars.push(renderer.create_mesh_cube(
-                    [ix as f32 * 4.0, 0.5, iz as f32 * 4.0],
-                    0.4,
-                ));
+        add(&mut renderer, 0.0, -0.05, 0.0, 20.0, 0.05, 20.0, mat_floor);
+
+        for ix in -2..=3_i32 {
+            for iz in -2..=3_i32 {
+                add(&mut renderer, ix as f32 * 4.0, 2.0, iz as f32 * 4.0, 0.4, 2.0, 0.4, mat_pillar);
             }
         }
 
-        // Scattered crates as props
-        let crate_defs: &[([f32; 3], f32)] = &[
-            ([-8.0,  0.3,  -6.5], 0.30), ([  8.5, 0.3,   4.0], 0.30),
-            ([-5.0,  0.3,  10.5], 0.25), ([  7.0, 0.3,  -9.5], 0.30),
-            ([-13.0, 0.3,   2.0], 0.35), ([ 13.0, 0.3,  -3.0], 0.35),
-            ([-10.0, 0.3, -13.0], 0.30), ([ 10.0, 0.3,  13.0], 0.30),
-            ([  3.0, 0.3, -15.5], 0.25), ([ -3.0, 0.3,  15.5], 0.25),
-            ([  0.0, 0.3,   8.0], 0.30), ([ -1.0, 0.3,  -8.0], 0.28),
-            ([ 15.0, 0.3,   7.0], 0.30), ([-15.0, 0.3,  -7.0], 0.30),
-            ([  6.0, 0.3,  17.0], 0.25), ([ -6.0, 0.3, -17.0], 0.25),
-        ];
-        let crates = crate_defs.iter()
-            .map(|&(pos, hs)| renderer.create_mesh_cube(pos, hs))
-            .collect();
-        demo_portal::enable_live_dashboard(&mut renderer);
-
-        renderer.add_object(&floor, None, glam::Mat4::IDENTITY);
-        for p in &pillars { renderer.add_object(p, None, glam::Mat4::IDENTITY); }
-        for c in &crates  { renderer.add_object(c, None, glam::Mat4::IDENTITY); }
-
-        let base_lights = build_lights();
-        let mut light_ids = Vec::new();
-        for light in &base_lights {
-            light_ids.push(renderer.add_light(light.clone()));
+        for &(pos, hs) in &[
+            ([-8.0_f32,  0.3,  -6.5], 0.30_f32), ([ 8.5, 0.3,   4.0], 0.30),
+            ([-5.0,  0.3,  10.5], 0.25),          ([ 7.0, 0.3,  -9.5], 0.30),
+            ([-13.0, 0.3,   2.0], 0.35),          ([13.0, 0.3,  -3.0], 0.35),
+            ([-10.0, 0.3, -13.0], 0.30),          ([10.0, 0.3,  13.0], 0.30),
+            ([ 3.0, 0.3, -15.5], 0.25),           ([-3.0, 0.3,  15.5], 0.25),
+            ([ 0.0, 0.3,   8.0], 0.30),           ([-1.0, 0.3,  -8.0], 0.28),
+            ([15.0, 0.3,   7.0], 0.30),           ([-15.0, 0.3, -7.0], 0.30),
+            ([ 6.0, 0.3,  17.0], 0.25),           ([-6.0, 0.3, -17.0], 0.25),
+        ] {
+            add(&mut renderer, pos[0], pos[1], pos[2], hs, hs, hs, mat_crate);
         }
-        renderer.set_ambient([0.03, 0.03, 0.04], 1.0);
 
-        // Register billboard markers for each light
-        let mut billboard_ids = Vec::new();
-        for light in &base_lights {
-            let col = light.color;
-            billboard_ids.push(renderer.add_billboard(
-                BillboardInstance::new(light.position, [0.15, 0.15])
-                    .with_color([col[0], col[1], col[2], 0.85])
-                    .with_screen_scale(true)
-            ));
-        }
+        let base_lights = build_light_params();
+        let light_ids: Vec<LightId> = base_lights.iter().map(|&(pos, col, intensity, range)| {
+            renderer.insert_light(point_light(pos, col, intensity, range))
+        }).collect();
 
         self.state = Some(AppState {
             window, surface, device, surface_format: fmt, renderer,
             last_frame: std::time::Instant::now(),
-            floor, pillars, crates,
-            light_ids,
-            base_lights,
-            billboard_ids,
+            frame_count: 0,
+            light_ids, base_lights,
             cam_pos:        glam::Vec3::new(0.0, 4.0, 22.0),
             cam_yaw:        0.0,
             cam_pitch:      -0.18,
             keys:           HashSet::new(),
             cursor_grabbed: false,
             mouse_delta:    (0.0, 0.0),
-            probe_vis: false,
             light_intensity_multiplier: 1.0,
-            sprite_w, sprite_h,
             time_render_end: None,
             time_about_to_wait_start: None,
             time_redraw_requested: None,
         });
     }
 
-    fn window_event(
-        &mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => { event_loop.exit(); }
@@ -363,51 +223,6 @@ impl ApplicationHandler for App {
                 } else { event_loop.exit(); }
             }
 
-            // Toggle probe visualization
-            WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                physical_key: PhysicalKey::Code(KeyCode::Digit3), ..
-            }, .. } => {
-                state.probe_vis = !state.probe_vis;
-                let raw: &[u8] = if state.probe_vis {
-                    include_bytes!("../../probe.png")
-                } else {
-                    include_bytes!("../../spotlight.png")
-                };
-                let img = image::load_from_memory(raw)
-                    .unwrap_or_else(|_| image::DynamicImage::new_rgba8(state.sprite_w, state.sprite_h))
-                    .resize_exact(state.sprite_w, state.sprite_h, image::imageops::FilterType::Triangle)
-                    .into_rgba8();
-                if let Some(bb) = state.renderer.get_feature_mut::<BillboardsFeature>("billboards") {
-                    bb.set_sprite(img.into_raw(), state.sprite_w, state.sprite_h);
-                }
-                // Remove existing billboards and register new set
-                for id in state.billboard_ids.drain(..) {
-                    state.renderer.remove_billboard(id);
-                }
-                if state.probe_vis {
-                    for inst in probe_billboards(RC_WORLD_MIN, RC_WORLD_MAX) {
-                        state.billboard_ids.push(state.renderer.add_billboard(inst));
-                    }
-                } else {
-                    for light in &state.base_lights {
-                        let col = light.color;
-                        state.billboard_ids.push(state.renderer.add_billboard(
-                            BillboardInstance::new(light.position, [0.15, 0.15])
-                                .with_color([col[0], col[1], col[2], 0.85])
-                                .with_screen_scale(true)
-                        ));
-                    }
-                }
-            }
-
-            // Live profiler portal
-            WindowEvent::KeyboardInput { event: KeyEvent {
-                state: ElementState::Pressed,
-                physical_key: PhysicalKey::Code(KeyCode::Digit4), ..
-            }, .. } => { let _ = state.renderer.start_live_portal_default(); }
-
-            // Decrease light intensity
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,
                 physical_key: PhysicalKey::Code(KeyCode::Minus), ..
@@ -416,7 +231,6 @@ impl ApplicationHandler for App {
                 eprintln!("Light intensity: {:.1}x", state.light_intensity_multiplier);
             }
 
-            // Increase light intensity
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ElementState::Pressed,
                 physical_key: PhysicalKey::Code(KeyCode::Equal), ..
@@ -429,27 +243,16 @@ impl ApplicationHandler for App {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
                 match ks {
-                    ElementState::Pressed  => {
-                        if key == KeyCode::F3 {
-                            state.renderer.debug_viz_mut().enabled ^= true;
-                        }
-                        state.keys.insert(key);
-                    }
+                    ElementState::Pressed  => { state.keys.insert(key); }
                     ElementState::Released => { state.keys.remove(&key); }
                 }
             }
 
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed, button: MouseButton::Left, ..
-            } => {
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if !state.cursor_grabbed {
                     let ok = state.window.set_cursor_grab(CursorGrabMode::Confined)
-                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
-                        .is_ok();
-                    if ok {
-                        state.window.set_cursor_visible(false);
-                        state.cursor_grabbed = true;
-                    }
+                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked)).is_ok();
+                    if ok { state.window.set_cursor_visible(false); state.cursor_grabbed = true; }
                 }
             }
 
@@ -457,54 +260,73 @@ impl ApplicationHandler for App {
                 state.surface.configure(&state.device, &wgpu::SurfaceConfiguration {
                     usage:    wgpu::TextureUsages::RENDER_ATTACHMENT,
                     format:   state.surface_format,
-                    width:    s.width,
-                    height:   s.height,
+                    width:    s.width, height: s.height,
                     present_mode: wgpu::PresentMode::Fifo,
                     alpha_mode:   wgpu::CompositeAlphaMode::Auto,
                     view_formats: vec![],
                     desired_maximum_frame_latency: 1,
                 });
-                state.renderer.resize(s.width, s.height);
+                state.renderer.set_render_size(s.width, s.height);
+            }
+
+            WindowEvent::KeyboardInput { event: KeyEvent {
+                state: ks, physical_key: PhysicalKey::Code(key), ..
+            }, .. } => {
+                match ks {
+                    ElementState::Pressed  => { state.keys.insert(key); }
+                    ElementState::Released => { state.keys.remove(&key); }
+                }
+            }
+
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                if !state.cursor_grabbed {
+                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked)).is_ok();
+                    if ok { state.window.set_cursor_visible(false); state.cursor_grabbed = true; }
+                }
+            }
+
+            WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
+                state.surface.configure(&state.device, &wgpu::SurfaceConfiguration {
+                    usage:    wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format:   state.surface_format,
+                    width:    s.width, height: s.height,
+                    present_mode: wgpu::PresentMode::Fifo,
+                    alpha_mode:   wgpu::CompositeAlphaMode::Auto,
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 1,
+                });
+                state.renderer.set_render_size(s.width, s.height);
             }
 
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
-                
-                // Track FULL cycle from last render_end to this RedrawRequested
+
                 if let Some(last_render_end) = state.time_render_end {
                     let full_cycle_ms = last_render_end.elapsed().as_secs_f32() * 1000.0;
-                    if state.renderer.frame_count() % 60 == 0 {
-                        eprintln!("🔄 render_end → next RedrawRequested: {:.2}ms", full_cycle_ms);
+                    if state.frame_count % 60 == 0 {
+                        eprintln!("render_end -> next RedrawRequested: {:.2}ms", full_cycle_ms);
                     }
                 }
-                
-                // Track time from about_to_wait to RedrawRequested
+
                 if let Some(about_to_wait_start) = state.time_about_to_wait_start {
                     let gap_ms = about_to_wait_start.elapsed().as_secs_f32() * 1000.0;
-                    if gap_ms > 2.0 {
-                        eprintln!("⏱️  about_to_wait → RedrawRequested: {:.2}ms", gap_ms);
-                    }
+                    if gap_ms > 2.0 { eprintln!("about_to_wait -> RedrawRequested: {:.2}ms", gap_ms); }
                 }
-                
+
                 state.time_redraw_requested = Some(now);
-                let dt  = (now - state.last_frame).as_secs_f32();
+                let dt = (now - state.last_frame).as_secs_f32();
                 state.last_frame = now;
                 state.render(dt);
-                // Don't call request_redraw() here - about_to_wait() handles it
             }
             _ => {}
         }
     }
 
-    fn device_event(
-        &mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, event: DeviceEvent,
-    ) {
+    fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, event: DeviceEvent) {
         let Some(state) = &mut self.state else { return };
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            if state.cursor_grabbed {
-                state.mouse_delta.0 += dx as f32;
-                state.mouse_delta.1 += dy as f32;
-            }
+            if state.cursor_grabbed { state.mouse_delta.0 += dx as f32; state.mouse_delta.1 += dy as f32; }
         }
     }
 
@@ -513,29 +335,22 @@ impl ApplicationHandler for App {
             let now = std::time::Instant::now();
             if let Some(render_end) = s.time_render_end {
                 let gap_ms = render_end.elapsed().as_secs_f32() * 1000.0;
-                if gap_ms > 2.0 {
-                    eprintln!("⏱️  render_end → about_to_wait: {:.2}ms", gap_ms);
-                }
+                if gap_ms > 2.0 { eprintln!("render_end -> about_to_wait: {:.2}ms", gap_ms); }
             }
             s.time_about_to_wait_start = Some(now);
             s.window.request_redraw();
         }
     }
 }
-
 impl AppState {
     fn render(&mut self, dt: f32) {
-        // Track time from RedrawRequested event to start of render()
         if let Some(redraw_time) = self.time_redraw_requested {
             let gap_ms = redraw_time.elapsed().as_secs_f32() * 1000.0;
-            if gap_ms > 2.0 {
-                eprintln!("⏱️  RedrawRequested → render(): {:.2}ms", gap_ms);
-            }
+            if gap_ms > 2.0 { eprintln!("RedrawRequested -> render(): {:.2}ms", gap_ms); }
         }
-        
+
         const SPEED: f32 = 8.0;
         const SENS:  f32 = 0.002;
-
         self.cam_yaw   += self.mouse_delta.0 * SENS;
         self.cam_pitch  = (self.cam_pitch - self.mouse_delta.1 * SENS).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
@@ -554,80 +369,58 @@ impl AppState {
 
         let size   = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let time   = self.renderer.frame_count() as f32 * 0.016;
-
-        let camera = Camera::perspective(
+        let camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + forward,
             glam::Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            aspect,
-            0.1,
-            300.0,
-            time,
+            aspect, 0.1, 300.0,
         );
 
-        // Time get_current_texture() - this can block waiting for GPU
         let get_texture_start = std::time::Instant::now();
         let output = match self.surface.get_current_texture() {
             Ok(t)  => t,
             Err(e) => { log::warn!("Surface error: {:?}", e); return; }
         };
         let get_texture_ms = get_texture_start.elapsed().as_secs_f32() * 1000.0;
-        if get_texture_ms > 10.0 {
-            eprintln!("⚠️  get_current_texture() blocked for {:.2}ms", get_texture_ms);
-        }
+        if get_texture_ms > 10.0 { eprintln!("get_current_texture() blocked for {:.2}ms", get_texture_ms); }
+
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Time scene construction
         let scene_build_start = std::time::Instant::now();
 
-        // Smooth fade-in over first 2 seconds (~120 frames at 60fps)
-        let fade_in_frames = 120.0;
-        let frame_age = (self.renderer.frame_count() as f32).min(fade_in_frames);
+        let fade_in_frames = 120.0_f32;
+        let frame_age = (self.frame_count as f32).min(fade_in_frames);
         let time_fade = if frame_age < fade_in_frames {
             let t = frame_age / fade_in_frames;
-            t * t * (3.0 - 2.0 * t)  // Hermite smoothstep
-        } else {
-            1.0
-        };
+            t * t * (3.0 - 2.0 * t)
+        } else { 1.0 };
 
-        // Apply time-based fade-in and intensity multiplier via update_light
         let multiplier = self.light_intensity_multiplier * time_fade;
         for (i, &id) in self.light_ids.iter().enumerate() {
-            let mut light = self.base_lights[i].clone();
-            light.intensity *= multiplier;
-            self.renderer.update_light(id, light);
+            let (pos, col, intensity, range) = self.base_lights[i];
+            let _ = self.renderer.update_light(id, point_light(pos, col, intensity * multiplier, range));
         }
-
-        // Scene state is persistent — no per-frame setup needed.
 
         let scene_build_ms = scene_build_start.elapsed().as_secs_f32() * 1000.0;
-        if scene_build_ms > 10.0 {
-            eprintln!("⚠️  Scene construction took {:.2}ms", scene_build_ms);
-        }
+        if scene_build_ms > 10.0 { eprintln!("Scene construction took {:.2}ms", scene_build_ms); }
 
-        if let Err(e) = self.renderer.render(&camera, &view, dt) {
+        if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }
-        
-        // Time the present() call to see if it's blocking
+
         let present_start = std::time::Instant::now();
         output.present();
         let present_ms = present_start.elapsed().as_secs_f32() * 1000.0;
-        
-        // Track when render() completes
-        let render_complete = std::time::Instant::now();
-        self.time_render_end = Some(render_complete);
-        
-        // Print full render cycle timing every 60 frames
-        if self.renderer.frame_count() % 60 == 0 {
+
+        self.time_render_end = Some(std::time::Instant::now());
+        self.frame_count += 1;
+
+        if self.frame_count % 60 == 0 {
             let total_render_ms = if let Some(redraw_time) = self.time_redraw_requested {
                 redraw_time.elapsed().as_secs_f32() * 1000.0
-            } else {
-                0.0
-            };
-            eprintln!("🔄 Full cycle: total_render={:.2}ms, present={:.2}ms", total_render_ms, present_ms);
+            } else { 0.0 };
+            eprintln!("Full cycle: total_render={:.2}ms, present={:.2}ms", total_render_ms, present_ms);
         }
     }
 }

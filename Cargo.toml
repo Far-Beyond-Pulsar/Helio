@@ -1,13 +1,34 @@
 [workspace]
 members = [
-    "crates/helio-core",
-    "crates/helio-render-v2",
+    "crates/helio-v3",
+    "crates/helio",
+    "crates/libhelio",
     "crates/helio-live-portal",
     "crates/helio-asset-compat",
-
     "crates/examples",
-    "crates/helio-wasm-app",
-    "crates/helio-wasm-examples",
+
+    # GPU-driven pass crates (each O(1) CPU)
+    "crates/helio-pass-sky-lut",
+    "crates/helio-pass-sky",
+    "crates/helio-pass-indirect-dispatch",
+    "crates/helio-pass-depth-prepass",
+    "crates/helio-pass-hiz",
+    "crates/helio-pass-occlusion-cull",
+    "crates/helio-pass-shadow-matrix",
+    "crates/helio-pass-shadow",
+    "crates/helio-pass-gbuffer",
+    "crates/helio-pass-ssao",
+    "crates/helio-pass-deferred-light",
+    "crates/helio-pass-transparent",
+    "crates/helio-pass-billboard",
+    "crates/helio-pass-virtual-geometry",
+    "crates/helio-pass-taa",
+    "crates/helio-pass-fxaa",
+    "crates/helio-pass-smaa",
+    "crates/helio-pass-debug",
+    "crates/helio-pass-radiance-cascades",
+    "crates/helio-pass-simple-cube",
+    "crates/helio-pass-sdf",
 ]
 resolver = "2"
 

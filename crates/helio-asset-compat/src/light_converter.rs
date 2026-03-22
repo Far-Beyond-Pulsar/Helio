@@ -1,17 +1,18 @@
-//! Light conversion from SolidRS to Helio
+//! Light conversion from SolidRS to Helio GPU light data.
 
-use helio_render_v2::scene::SceneLight;
-use solid_rs::scene::{Light, DirectionalLight, PointLight, SpotLight, AreaLight};
+use helio::GpuLight;
+use libhelio::LightType;
+use solid_rs::scene::{AreaLight, DirectionalLight, Light, PointLight, SpotLight};
 
-/// Convert a SolidRS light to Helio's SceneLight
-pub fn convert_light(light: &Light) -> Option<SceneLight> {
+/// Convert a SolidRS light to Helio's GPU light format.
+pub fn convert_light(light: &Light) -> Option<GpuLight> {
     match light {
         Light::Directional(dir_light) => Some(convert_directional(dir_light)),
         Light::Point(point_light) => Some(convert_point(point_light)),
         Light::Spot(spot_light) => Some(convert_spot(spot_light)),
         Light::Area(area_light) => {
             log::warn!(
-                "Area light '{}' not supported in Helio - converting to point light",
+                "Area light '{}' not supported in Helio yet - converting to point light",
                 area_light.base.name
             );
             Some(convert_area_as_point(area_light))
@@ -19,60 +20,78 @@ pub fn convert_light(light: &Light) -> Option<SceneLight> {
     }
 }
 
-fn convert_directional(light: &DirectionalLight) -> SceneLight {
-    // DirectionalLight has a base (name, color, intensity) but no direction field
-    // In SolidRS, directional lights point in the -Z direction of their node transform
-    // For now, we'll use a default downward direction
-    SceneLight::directional(
-        [0.0, -1.0, 0.0], // Default: pointing down
-        [light.base.color.x, light.base.color.y, light.base.color.z],
-        light.base.intensity,
-    )
+fn convert_directional(light: &DirectionalLight) -> GpuLight {
+    GpuLight {
+        position_range: [0.0, 0.0, 0.0, f32::MAX],
+        direction_outer: [0.0, -1.0, 0.0, 0.0],
+        color_intensity: [
+            light.base.color.x,
+            light.base.color.y,
+            light.base.color.z,
+            light.base.intensity,
+        ],
+        shadow_index: u32::MAX,
+        light_type: LightType::Directional as u32,
+        inner_angle: 0.0,
+        _pad: 0,
+    }
 }
 
-fn convert_point(light: &PointLight) -> SceneLight {
-    // PointLight has position implicitly from the node transform
-    // For now, we'll use origin - the actual position will be set from the node
-    let range = light.range.unwrap_or(10.0); // Default range if not specified
-
-    SceneLight::point(
-        [0.0, 0.0, 0.0], // Position will be set from node transform
-        [light.base.color.x, light.base.color.y, light.base.color.z],
-        light.base.intensity,
-        range,
-    )
-}
-
-fn convert_spot(light: &SpotLight) -> SceneLight {
+fn convert_point(light: &PointLight) -> GpuLight {
     let range = light.range.unwrap_or(10.0);
+    GpuLight {
+        position_range: [0.0, 0.0, 0.0, range],
+        direction_outer: [0.0, 0.0, -1.0, 0.0],
+        color_intensity: [
+            light.base.color.x,
+            light.base.color.y,
+            light.base.color.z,
+            light.base.intensity,
+        ],
+        shadow_index: u32::MAX,
+        light_type: LightType::Point as u32,
+        inner_angle: 0.0,
+        _pad: 0,
+    }
+}
 
-    // Convert angles to radians (SolidRS stores in radians already)
-    // inner_cone_angle and outer_cone_angle are full cone angles, we need half-angles
+fn convert_spot(light: &SpotLight) -> GpuLight {
+    let range = light.range.unwrap_or(10.0);
     let inner_angle = light.inner_cone_angle / 2.0;
     let outer_angle = light.outer_cone_angle / 2.0;
 
-    SceneLight::spot(
-        [0.0, 0.0, 0.0], // Position from node transform
-        [0.0, 0.0, -1.0], // Direction from node transform (-Z)
-        [light.base.color.x, light.base.color.y, light.base.color.z],
-        light.base.intensity,
-        range,
-        inner_angle,
-        outer_angle,
-    )
+    GpuLight {
+        position_range: [0.0, 0.0, 0.0, range],
+        direction_outer: [0.0, 0.0, -1.0, outer_angle.cos()],
+        color_intensity: [
+            light.base.color.x,
+            light.base.color.y,
+            light.base.color.z,
+            light.base.intensity,
+        ],
+        shadow_index: u32::MAX,
+        light_type: LightType::Spot as u32,
+        inner_angle: inner_angle.cos(),
+        _pad: 0,
+    }
 }
 
-fn convert_area_as_point(light: &AreaLight) -> SceneLight {
-    // Convert area light to point light as a fallback
-    // Use the area size to estimate an appropriate range
+fn convert_area_as_point(light: &AreaLight) -> GpuLight {
     let range = (light.width.max(light.height) * 5.0).max(10.0);
-
-    SceneLight::point(
-        [0.0, 0.0, 0.0],
-        [light.base.color.x, light.base.color.y, light.base.color.z],
-        light.base.intensity,
-        range,
-    )
+    GpuLight {
+        position_range: [0.0, 0.0, 0.0, range],
+        direction_outer: [0.0, 0.0, -1.0, 0.0],
+        color_intensity: [
+            light.base.color.x,
+            light.base.color.y,
+            light.base.color.z,
+            light.base.intensity,
+        ],
+        shadow_index: u32::MAX,
+        light_type: LightType::Point as u32,
+        inner_angle: 0.0,
+        _pad: 0,
+    }
 }
 
 #[cfg(test)]
@@ -93,8 +112,8 @@ mod tests {
         };
 
         let scene_light = convert_directional(&light);
-        assert_eq!(scene_light.color, [1.0, 0.9, 0.8]);
-        assert_eq!(scene_light.intensity, 5.0);
+        assert_eq!(scene_light.color_intensity, [1.0, 0.9, 0.8, 5.0]);
+        assert_eq!(scene_light.light_type, LightType::Directional as u32);
     }
 
     #[test]
@@ -110,7 +129,7 @@ mod tests {
         };
 
         let scene_light = convert_point(&light);
-        assert_eq!(scene_light.range, 15.0);
-        assert_eq!(scene_light.intensity, 100.0);
+        assert_eq!(scene_light.position_range[3], 15.0);
+        assert_eq!(scene_light.color_intensity[3], 100.0);
     }
 }
