@@ -878,18 +878,29 @@ impl Scene {
             // Spatially sort triangles before uploading so the mega-buffer index
             // data matches what meshletize expects (sorted = tight cluster bounds).
             let sorted_indices = sort_triangles_spatially(&lod_verts, &lod_indices);
-            let mesh_id = self.mesh_pool.insert(MeshUpload {
-                vertices: lod_verts.clone(),
-                indices:  sorted_indices.clone(),
-            });
-            let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
 
+            // First generate meshlets in the local (per-mesh) index/vertex space.
+            // We use zero-based offsets here and will patch them after inserting
+            // into the global mesh pool once we know the slice offsets.
             let mut meshlets = meshletize(
                 &lod_verts,
                 &sorted_indices,
-                slice.first_index,
-                slice.first_vertex,
+                0,
+                0,
             );
+
+            // Now upload the data without cloning; ownership moves into MeshUpload.
+            let mesh_id = self.mesh_pool.insert(MeshUpload {
+                vertices: lod_verts,
+                indices:  sorted_indices,
+            });
+            let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
+
+            // Patch meshlet offsets to account for their location in the mega-buffer.
+            for m in &mut meshlets {
+                m.first_index += slice.first_index;
+                m.vertex_offset += slice.first_vertex;
+            }
             // Tag with LOD level so the cull shader can select by distance.
             for m in &mut meshlets {
                 m.lod_error = lod_level as f32;
