@@ -40,6 +40,41 @@ struct VgGlobals {
     _pad2:             u32,
 }
 
+/// Controls how aggressively distant objects are simplified.
+///
+/// Each level raises the screen-coverage thresholds at which LOD transitions
+/// fire, so higher quality = full-detail geometry is visible at greater
+/// distances.  All values are fraction of screen height covered by the
+/// object's bounding sphere (`screen_radius = obj_radius * cot(fov/2) / dist`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LodQuality {
+    /// Aggressive simplification — good for low-end GPUs / perf testing.
+    /// LOD0 only when the object covers ≥ 2 % of screen height.
+    Low,
+    /// Balanced default.  LOD0 ≥ 5 %, LOD1 ≥ 1 %.
+    #[default]
+    Medium,
+    /// Sharper detail at a distance.  LOD0 ≥ 10 %, LOD1 ≥ 2 %.
+    High,
+    /// Near-cinematic — LOD transitions barely visible.  LOD0 ≥ 18 %, LOD1 ≥ 4 %.
+    Ultra,
+}
+
+impl LodQuality {
+    /// Returns `(lod_s0, lod_s1)` screen-radius thresholds for this quality level.
+    ///
+    /// `lod_s0` : transition from LOD 0 → 1 (full → medium)  
+    /// `lod_s1` : transition from LOD 1 → 2 (medium → coarse)
+    pub fn thresholds(self) -> (f32, f32) {
+        match self {
+            LodQuality::Low    => (0.02, 0.004),
+            LodQuality::Medium => (0.05, 0.010),
+            LodQuality::High   => (0.10, 0.020),
+            LodQuality::Ultra  => (0.18, 0.040),
+        }
+    }
+}
+
 /// Cull uniforms passed to the compute shader.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -86,6 +121,9 @@ pub struct VirtualGeometryPass {
     use_count_indirect: bool,
     /// Current debug mode inherited from the renderer — written into globals_buf each prepare().
     pub debug_mode: u32,
+    /// LOD quality preset — controls the screen-size thresholds at which meshlets
+    /// switch from LOD 0 → 1 → 2.  Defaults to `LodQuality::Medium`.
+    pub lod_quality: LodQuality,
     last_version:       u64,
     last_meshlet_count: u32,
 }
@@ -369,6 +407,7 @@ impl VirtualGeometryPass {
             draw_count_buf,
             use_count_indirect,
             debug_mode: 0,
+            lod_quality: LodQuality::default(),
             last_version: u64::MAX, // force upload on first frame
             last_meshlet_count: 0,
         }
@@ -486,15 +525,11 @@ impl RenderPass for VirtualGeometryPass {
         }
 
         // ── Upload cull uniforms ──────────────────────────────────────────────
+        let (lod_s0, lod_s1) = self.lod_quality.thresholds();
         let cull_uni = CullUniforms {
             meshlet_count: self.last_meshlet_count,
-            // Nanite-style screen-space thresholds (fraction of screen height).
-            // LOD 0 (full detail)  : screen_radius >= 0.05  (object >= 5 % tall on screen)
-            // LOD 1 (medium)       : 0.01 <= screen_radius < 0.05
-            // LOD 2 (coarse)       : screen_radius <  0.01
-            // These are completely FOV-, resolution-, and scale-invariant.
-            lod_s0: 0.05,
-            lod_s1: 0.01,
+            lod_s0,
+            lod_s1,
             _pad2: 0,
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
