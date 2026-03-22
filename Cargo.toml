@@ -21,6 +21,7 @@ members = [
     "crates/helio-pass-deferred-light",
     "crates/helio-pass-transparent",
     "crates/helio-pass-billboard",
+    "crates/helio-pass-virtual-geometry",
     "crates/helio-pass-taa",
     "crates/helio-pass-fxaa",
     "crates/helio-pass-smaa",
