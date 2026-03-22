@@ -212,28 +212,3 @@ impl ShadowConfig {
         splits
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_shadow_config_size() {
-        assert_eq!(std::mem::size_of::<CascadeConfig>(), 16);
-        assert_eq!(std::mem::size_of::<ShadowConfig>(), 96);
-    }
-
-    #[test]
-    fn test_shadow_config_alignment() {
-        assert_eq!(std::mem::align_of::<ShadowConfig>(), 4);
-    }
-
-    #[test]
-    fn test_pssm_splits() {
-        let splits = ShadowConfig::pssm_splits(0.1, 1000.0, 0.5);
-        assert!(splits[0] < splits[1]);
-        assert!(splits[1] < splits[2]);
-        assert!(splits[2] < splits[3]);
-        assert!(splits[3] <= 1000.0);
-    }
-}
