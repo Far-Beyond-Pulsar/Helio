@@ -13,6 +13,7 @@
 //!   Q/E         — rotate sun (time of day)
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
+//!   F3          — toggle virtual geometry triangle debug view
 
 mod v3_demo_common;
 
@@ -98,6 +99,10 @@ struct AppState {
 
     sun_light_id: LightId,
     sun_angle: f32,
+
+    // ── VG debug mode ─────────────────────────────────────────────
+    /// True when F3 VG triangle debug is active (debug_mode 20).
+    vg_debug: bool,
 
     // ── CPU-side profiling ───────────────────────────────────────────────
     frame_count:      u64,
@@ -429,6 +434,7 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             sun_light_id,
             sun_angle,
+            vg_debug: false,
             frame_count:      0,
             prof_frame_total: 0.0,
             prof_update:      0.0,
@@ -481,6 +487,23 @@ impl ApplicationHandler for App {
                     },
                 );
                 state.renderer.set_render_size(size.width, size.height);
+            }
+
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(KeyCode::F3),
+                    state: ElementState::Pressed,
+                    ..
+                },
+                ..
+            } => {
+                state.vg_debug = !state.vg_debug;
+                state.renderer.set_debug_mode(if state.vg_debug { 20 } else { 0 });
+                state.window.set_title(if state.vg_debug {
+                    "Helio — Outdoor Rocks  [VG TRIANGLE DEBUG — F3 to exit]"
+                } else {
+                    "Helio — Outdoor Rocks"
+                });
             }
 
             WindowEvent::KeyboardInput {

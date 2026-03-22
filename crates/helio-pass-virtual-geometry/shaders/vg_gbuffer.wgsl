@@ -190,6 +190,7 @@ fn resolve_specular_f0(
 
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
+    // ── Normal rendering ──────────────────────────────────────────────────────
     let material     = materials[input.material_id];
     let material_tex = material_textures[input.material_id];
     let uv = input.tex_coords;
@@ -228,5 +229,39 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.normal  = vec4<f32>(N, specular_f0.r);
     out.orm     = vec4<f32>(ao, roughness, metallic, specular_f0.g);
     out.emissive = vec4<f32>(emissive, specular_f0.b);
+    return out;
+}
+
+// ── VG triangle debug (mode 20): solid colour per triangle via primitive_index ─
+// Lives in a separate entry point so the normal fs_main never pays the cost of
+// primitive_index tracking even when debug is inactive.
+@fragment
+fn fs_debug(input: VertexOutput, @builtin(primitive_index) prim_id: u32) -> GBufferOutput {
+    var h = prim_id * 2747636419u;
+    h ^= h >> 16u;
+    h *= 2654435769u;
+    h ^= h >> 16u;
+    let idx = h % 12u;
+
+    var pal: array<vec3<f32>, 12>;
+    pal[0]  = vec3<f32>(1.00, 0.18, 0.18);
+    pal[1]  = vec3<f32>(1.00, 0.55, 0.00);
+    pal[2]  = vec3<f32>(1.00, 0.90, 0.00);
+    pal[3]  = vec3<f32>(0.35, 1.00, 0.10);
+    pal[4]  = vec3<f32>(0.00, 0.90, 0.40);
+    pal[5]  = vec3<f32>(0.00, 0.85, 1.00);
+    pal[6]  = vec3<f32>(0.10, 0.40, 1.00);
+    pal[7]  = vec3<f32>(0.55, 0.10, 1.00);
+    pal[8]  = vec3<f32>(0.90, 0.10, 1.00);
+    pal[9]  = vec3<f32>(1.00, 0.10, 0.60);
+    pal[10] = vec3<f32>(0.00, 0.65, 0.65);
+    pal[11] = vec3<f32>(1.00, 0.70, 0.10);
+
+    let face_n = normalize(cross(dpdx(input.world_position), dpdy(input.world_position)));
+    var out: GBufferOutput;
+    out.albedo   = vec4<f32>(pal[idx], 1.0);
+    out.normal   = vec4<f32>(face_n, 0.0);
+    out.orm      = vec4<f32>(1.0, 0.9, 0.0, 0.0);
+    out.emissive = vec4<f32>(0.0, 0.0, 0.0, 0.0);
     return out;
 }

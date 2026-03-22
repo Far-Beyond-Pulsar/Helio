@@ -28,7 +28,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     let required = wgpu::Features::TEXTURE_BINDING_ARRAY
         | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
     let optional = wgpu::Features::MULTI_DRAW_INDIRECT
-        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT; // compacted indirect count buffer
+        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT // compacted indirect count buffer
+        | wgpu::Features::SHADER_PRIMITIVE_INDEX;   // @builtin(primitive_index) in fs
     required | (adapter_features & optional)
 }
 
@@ -542,10 +543,9 @@ fn build_default_graph(
     )));
 
     // 4b. VirtualGeometryPass — GPU-driven meshlet cull + draw into the same GBuffer
-    graph.add_pass(Box::new(VirtualGeometryPass::new(
-        device,
-        camera_buf,
-    )));
+    let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
+    vg_pass.debug_mode = config.debug_mode;
+    graph.add_pass(Box::new(vg_pass));
 
     // TODO: Add SsaoPass — needs resource declaration support
 

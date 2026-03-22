@@ -643,7 +643,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Mode 3 (Lit without normal mapping) goes through normal lighting
     // Mode 4 (G-buffer readback test) shows albedo read from G-buffer without lighting
     // Mode 5 (World normals) remaps N from [-1,1] → [0,1] as RGB (R=+X, G=+Y, B=+Z)
-    if globals.debug_mode == 1u || globals.debug_mode == 2u || globals.debug_mode == 4u {
+    // Mode 20 (VG triangle debug, F3): per-face colour written into albedo by vg_gbuffer.wgsl
+    if globals.debug_mode == 1u || globals.debug_mode == 2u || globals.debug_mode == 4u
+    || globals.debug_mode == 20u {
         return vec4<f32>(albedo, alpha);
     }
     if globals.debug_mode == 5u {

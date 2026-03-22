@@ -61,7 +61,10 @@ pub struct VirtualGeometryPass {
     cull_buf:           wgpu::Buffer, // CullUniforms
 
     // ── Render (VG GBuffer) ───────────────────────────────────────────────────
-    draw_pipeline:      wgpu::RenderPipeline,
+    draw_pipeline:       wgpu::RenderPipeline,
+    /// Separate pipeline using `fs_debug` (requires SHADER_PRIMITIVE_INDEX).
+    /// Only bound when debug_mode == 20; normal pipeline has zero primitive_index overhead.
+    debug_draw_pipeline: Option<wgpu::RenderPipeline>,
     draw_bgl_0:         wgpu::BindGroupLayout,
     draw_bgl_1:         wgpu::BindGroupLayout,
     draw_bg_0:          Option<wgpu::BindGroup>,
@@ -79,6 +82,8 @@ pub struct VirtualGeometryPass {
     draw_count_buf:     wgpu::Buffer,
     /// True when the device supports MULTI_DRAW_INDIRECT_COUNT (Vulkan 1.2+, DX12 tier2).
     use_count_indirect: bool,
+    /// Current debug mode inherited from the renderer — written into globals_buf each prepare().
+    pub debug_mode: u32,
     last_version:       u64,
     last_meshlet_count: u32,
 }
@@ -263,6 +268,36 @@ impl VirtualGeometryPass {
             bind_group_layouts:   &[&draw_bgl_0, &draw_bgl_1],
             push_constant_ranges: &[],
         });
+        let vg_vertex_buffers = &[wgpu::VertexBufferLayout {
+            array_stride: 40,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0,  shader_location: 0 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32,   offset: 12, shader_location: 1 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 32, shader_location: 3 },
+                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 36, shader_location: 4 },
+            ],
+        }];
+        let gbuffer_targets = &[
+            Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
+            Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+            Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
+            Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
+        ];
+        let draw_primitive = wgpu::PrimitiveState {
+            topology:  wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: Some(wgpu::Face::Back),
+            ..Default::default()
+        };
+        let draw_depth = Some(wgpu::DepthStencilState {
+            format:              wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare:       wgpu::CompareFunction::LessEqual,
+            stencil:             wgpu::StencilState::default(),
+            bias:                wgpu::DepthBiasState::default(),
+        });
+
         let draw_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label:  Some("VG Draw Pipeline"),
             layout: Some(&draw_pipeline_layout),
@@ -270,45 +305,48 @@ impl VirtualGeometryPass {
                 module:              &draw_shader,
                 entry_point:         Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: 40,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0,  shader_location: 0 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32,   offset: 12, shader_location: 1 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 32, shader_location: 3 },
-                        wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 36, shader_location: 4 },
-                    ],
-                }],
+                buffers:             vg_vertex_buffers,
             },
             fragment: Some(wgpu::FragmentState {
                 module:              &draw_shader,
                 entry_point:         Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba8Unorm,  blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                    Some(wgpu::ColorTargetState { format: wgpu::TextureFormat::Rgba16Float, blend: None, write_mask: wgpu::ColorWrites::ALL }),
-                ],
+                targets:             gbuffer_targets,
             }),
-            primitive: wgpu::PrimitiveState {
-                topology:  wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format:              wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare:       wgpu::CompareFunction::LessEqual,
-                stencil:             wgpu::StencilState::default(),
-                bias:                wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview:   None,
-            cache:       None,
+            primitive:     draw_primitive,
+            depth_stencil: draw_depth.clone(),
+            multisample:   wgpu::MultisampleState::default(),
+            multiview:     None,
+            cache:         None,
         });
+
+        // Debug pipeline: same layout / vertex state, but uses fs_debug which
+        // has @builtin(primitive_index).  Only created when the GPU supports it.
+        let debug_draw_pipeline = if device.features().contains(wgpu::Features::SHADER_PRIMITIVE_INDEX) {
+            Some(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label:  Some("VG Debug Pipeline"),
+                layout: Some(&draw_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module:              &draw_shader,
+                    entry_point:         Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers:             vg_vertex_buffers,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module:              &draw_shader,
+                    entry_point:         Some("fs_debug"),
+                    compilation_options: Default::default(),
+                    targets:             gbuffer_targets,
+                }),
+                primitive:     draw_primitive,
+                depth_stencil: draw_depth,
+                multisample:   wgpu::MultisampleState::default(),
+                multiview:     None,
+                cache:         None,
+            }))
+        } else {
+            None
+        };
 
         Self {
             cull_pipeline,
@@ -316,6 +354,7 @@ impl VirtualGeometryPass {
             cull_bind_group,
             cull_buf,
             draw_pipeline,
+            debug_draw_pipeline,
             draw_bgl_0,
             draw_bgl_1,
             draw_bg_0,
@@ -327,6 +366,7 @@ impl VirtualGeometryPass {
             indirect_buf,
             draw_count_buf,
             use_count_indirect,
+            debug_mode: 0,
             last_version: u64::MAX, // force upload on first frame
             last_meshlet_count: 0,
         }
@@ -501,7 +541,7 @@ impl RenderPass for VirtualGeometryPass {
             rc_world_min: [main_scene.rc_world_min[0], main_scene.rc_world_min[1], main_scene.rc_world_min[2], 0.0],
             rc_world_max: [main_scene.rc_world_max[0], main_scene.rc_world_max[1], main_scene.rc_world_max[2], 0.0],
             csm_splits:   [5.0, 20.0, 60.0, 200.0],
-            debug_mode:   0,
+            debug_mode:   self.debug_mode,
             _pad0: 0, _pad1: 0, _pad2: 0,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -575,7 +615,12 @@ impl RenderPass for VirtualGeometryPass {
                 occlusion_query_set: None,
             });
 
-            rpass.set_pipeline(&self.draw_pipeline);
+            let active_pipeline = if self.debug_mode == 20 {
+                self.debug_draw_pipeline.as_ref().unwrap_or(&self.draw_pipeline)
+            } else {
+                &self.draw_pipeline
+            };
+            rpass.set_pipeline(active_pipeline);
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
             rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
