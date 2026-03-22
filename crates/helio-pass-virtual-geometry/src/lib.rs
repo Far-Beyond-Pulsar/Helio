@@ -45,8 +45,10 @@ struct VgGlobals {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
     meshlet_count: u32,
-    lod_d0: f32,  // LOD 0→1 threshold in object-radii (e.g. 4.0 = LOD0 within 4× radius)
-    lod_d1: f32,  // LOD 1→2 threshold in object-radii (e.g. 12.0 = LOD1 within 12× radius)
+    // Nanite-style screen-space LOD thresholds (0..1 fraction of screen height).
+    // screen_radius = (obj_radius * cot(fov/2)) / dist — FOV/scale/resolution-invariant.
+    lod_s0: f32,  // LOD 0→1 when screen_radius drops below this (e.g. 0.05 = 5 % of screen)
+    lod_s1: f32,  // LOD 1→2 when screen_radius drops below this (e.g. 0.01 = 1 % of screen)
     _pad2: u32,
 }
 
@@ -486,11 +488,13 @@ impl RenderPass for VirtualGeometryPass {
         // ── Upload cull uniforms ──────────────────────────────────────────────
         let cull_uni = CullUniforms {
             meshlet_count: self.last_meshlet_count,
-            // Scale-invariant thresholds: LOD0 when dist < 4× radius,
-            // LOD1 when 4–12×, LOD2 beyond 12×.  Huge objects stay at
-            // full detail proportionally longer.
-            lod_d0: 4.0,
-            lod_d1: 12.0,
+            // Nanite-style screen-space thresholds (fraction of screen height).
+            // LOD 0 (full detail)  : screen_radius >= 0.05  (object >= 5 % tall on screen)
+            // LOD 1 (medium)       : 0.01 <= screen_radius < 0.05
+            // LOD 2 (coarse)       : screen_radius <  0.01
+            // These are completely FOV-, resolution-, and scale-invariant.
+            lod_s0: 0.05,
+            lod_s1: 0.01,
             _pad2: 0,
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));

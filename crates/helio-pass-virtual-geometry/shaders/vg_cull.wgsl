@@ -59,8 +59,12 @@ struct DrawIndexedIndirect {
 
 struct CullUniforms {
     meshlet_count: u32,
-    lod_d0: f32,   // LOD 0→1 transition in units of object-radii (dist / bounds.w)
-    lod_d1: f32,   // LOD 1→2 transition in units of object-radii
+    // Screen-space LOD thresholds (Nanite-style).
+    // Computed as: screen_radius = (obj_radius * proj[1][1]) / dist
+    // This is the fraction of the screen-height the bounding sphere covers.
+    // Fully resolution-, FOV-, and scale-invariant — no per-scene tuning needed.
+    lod_s0: f32,   // LOD 0→1 when screen_radius drops below this (e.g. 0.05 = 5 % screen)
+    lod_s1: f32,   // LOD 1→2 when screen_radius drops below this (e.g. 0.01 = 1 % screen)
     _pad2:  u32,
 }
 
@@ -118,28 +122,30 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     // produces false culls when the camera is close to the surface.
 
     if visible {
-        // ── LOD selection (per-object, scale-invariant) ───────────────────────
-        // Distance is normalised by the object's world-space bounding radius so
-        // that large rocks maintain full detail at proportionally larger distances
-        // and small rocks downgrade sooner.  All meshlets of the same object share
-        // the same bounding sphere, so the LOD level is identical across all of
-        // them — no mixed-LOD seams or holes.
+        // ── LOD selection — Nanite-style projected screen coverage ─────────────
         //
-        // lod_error encodes the LOD level: 0.0 = full, 1.0 = medium, 2.0 = coarse.
-        // lod_d0 / lod_d1 are in units of (object radii):
-        //   dist_radii < lod_d0   → LOD 0  (full detail)
-        //   lod_d0 ≤ dist_radii < lod_d1 → LOD 1  (medium)
-        //   dist_radii ≥ lod_d1   → LOD 2  (coarse)
-        let obj_offset = inst.bounds.xyz - camera.position_near.xyz;
-        let obj_dist_sq = dot(obj_offset, obj_offset);
-        let obj_radius  = max(inst.bounds.w, 0.5);  // guard against degenerate bounds
-        // Use squared comparison to avoid a sqrt on the hot path.
-        let d0_sq = cull_uni.lod_d0 * cull_uni.lod_d0 * obj_radius * obj_radius;
-        let d1_sq = cull_uni.lod_d1 * cull_uni.lod_d1 * obj_radius * obj_radius;
-        let lod_level = u32(m.lod_error + 0.5);
-        let lod_ok    = (lod_level == 0u && obj_dist_sq <  d0_sq)
-                     || (lod_level == 1u && obj_dist_sq >= d0_sq && obj_dist_sq < d1_sq)
-                     || (lod_level == 2u && obj_dist_sq >= d1_sq);
+        // screen_radius = (obj_radius * focal_length) / dist
+        //   = fraction of the screen height that inst.bounds covers.
+        //
+        // camera.proj[1][1] is the perspective Y focal length (cot(fov/2),
+        // typically 1.0–2.4 for 45–90° vertical FOV).  Using it instead of a
+        // fixed denominator makes the threshold FOV-invariant: a narrower FOV
+        // makes objects appear larger so they correctly stay at higher detail,
+        // and a wider FOV makes them appear smaller so they downgrade sooner.
+        //
+        // Every meshlet of the same object shares the same bounding sphere so
+        // all meshlets select the identical LOD — no seams.
+        //
+        // lod_error encodes LOD level: 0.0 = full detail, 1.0 = medium, 2.0 = coarse.
+        let obj_offset  = inst.bounds.xyz - camera.position_near.xyz;
+        let obj_dist    = max(length(obj_offset), 0.001);
+        let obj_radius  = max(inst.bounds.w, 0.001);
+        let focal_len   = camera.proj[1][1]; // cot(fov/2)
+        let screen_size = (obj_radius * focal_len) / obj_dist;
+        let lod_level   = u32(m.lod_error + 0.5);
+        let lod_ok      = (lod_level == 0u && screen_size >= cull_uni.lod_s0)
+                       || (lod_level == 1u && screen_size <  cull_uni.lod_s0 && screen_size >= cull_uni.lod_s1)
+                       || (lod_level == 2u && screen_size <  cull_uni.lod_s1);
         if !lod_ok {
             return;
         }
