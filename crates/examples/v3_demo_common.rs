@@ -80,6 +80,7 @@ pub fn insert_object(
         transform,
         bounds: [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius],
         flags: 0,
+        groups: helio::GroupMask::NONE,
     })
 }
 

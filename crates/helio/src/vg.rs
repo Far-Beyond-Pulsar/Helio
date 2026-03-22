@@ -45,6 +45,8 @@ pub struct VirtualObjectDescriptor {
     /// World-space bounding sphere `[cx, cy, cz, radius]`.
     pub bounds: [f32; 4],
     pub flags: u32,
+    /// Group membership bitmask.  Use `GroupMask::NONE` for ungrouped objects.
+    pub groups: crate::groups::GroupMask,
 }
 
 // ─── Private helpers ────────────────────────────────────────────────────────
