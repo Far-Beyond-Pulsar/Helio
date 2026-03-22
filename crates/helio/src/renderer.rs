@@ -13,14 +13,16 @@ use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_transparent::TransparentPass;
+
 // TODO: Add these passes once cross-reference issues are resolved:
 // - SkyPass (needs sky_lut_view from SkyLutPass)
 // - SsaoPass (needs gbuffer views + depth view)
 // - SmaaPass, TaaPass (for higher-quality AA)
-use crate::handles::{LightId, MaterialId, MeshId, ObjectId};
+use crate::handles::{LightId, MaterialId, MeshId, ObjectId, VirtualObjectId};
 use crate::material::{MaterialAsset, MAX_TEXTURES, TextureUpload};
 use crate::mesh::{MeshBuffers, MeshUpload};
 use crate::scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene};
+use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::TEXTURE_BINDING_ARRAY
@@ -345,6 +347,38 @@ impl Renderer {
 
     pub fn insert_object(&mut self, desc: ObjectDescriptor) -> SceneResult<ObjectId> {
         self.scene.insert_object(desc)
+    }
+
+    // ── Virtual geometry ──────────────────────────────────────────────────────
+
+    /// Meshletise a high-resolution mesh and register it for GPU-driven rendering.
+    /// Returns a `VirtualMeshId` to pass to `insert_virtual_object`.
+    pub fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
+        self.scene.insert_virtual_mesh(upload)
+    }
+
+    pub fn remove_virtual_mesh(&mut self, id: VirtualMeshId) -> SceneResult<()> {
+        self.scene.remove_virtual_mesh(id)
+    }
+
+    /// Place an instance of a virtual mesh into the scene.
+    pub fn insert_virtual_object(
+        &mut self,
+        desc: VirtualObjectDescriptor,
+    ) -> SceneResult<VirtualObjectId> {
+        self.scene.insert_virtual_object(desc)
+    }
+
+    pub fn update_virtual_object_transform(
+        &mut self,
+        id: VirtualObjectId,
+        transform: glam::Mat4,
+    ) -> SceneResult<()> {
+        self.scene.update_virtual_object_transform(id, transform)
+    }
+
+    pub fn remove_virtual_object(&mut self, id: VirtualObjectId) -> SceneResult<()> {
+        self.scene.remove_virtual_object(id)
     }
 
     pub fn update_object_transform(

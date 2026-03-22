@@ -22,9 +22,6 @@ use crate::mesh::PackedVertex;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VirtualMeshId(pub(crate) u32);
 
-// Re-export the arena-compatible VirtualObjectId from handles.
-pub use crate::handles::VirtualObjectId;
-
 // ─── Upload / descriptor types ──────────────────────────────────────────────
 
 /// High-resolution mesh for virtual geometry upload.

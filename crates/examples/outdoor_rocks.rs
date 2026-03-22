@@ -25,9 +25,10 @@ use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
     BillboardInstance, Camera, LightId, Renderer, RendererConfig,
     required_wgpu_features, required_wgpu_limits,
+    VirtualMeshUpload, VirtualObjectDescriptor,
 };
-use helio_asset_compat::{load_and_upload_scene, load_scene_bytes_with_config,
-                         upload_scene_materials, LoadConfig, UploadedScene};
+use helio_asset_compat::{load_scene_bytes_with_config, load_scene_file_with_config,
+                         upload_scene_materials, LoadConfig};
 use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
 use winit::{
     application::ApplicationHandler,
@@ -223,26 +224,15 @@ impl ApplicationHandler for App {
             250.0,
         );
 
-        // ── Load rock FBX files (each loaded exactly once) ────────────────
+        // ── Load rock FBX files as virtual geometry (meshlets) ────────────
+        // Each rock type is meshletised once at upload time; the GPU cull
+        // compute then handles per-meshlet frustum + backface culling O(1) CPU.
         let asset_dir = base_dir().join("3d");
         let rock_paths = [
             asset_dir.join("Chiseled_Rock_rafue_Raw.fbx"),
             asset_dir.join("Granite_Rock_pjtsT_Raw.fbx"),
             asset_dir.join("Granite_Rock_pkeeM_Raw.fbx"),
         ];
-        // Load + upload each file in one pass; no double-parse.
-        let rock_uploads: Vec<Option<UploadedScene>> = rock_paths
-            .iter()
-            .map(|path| {
-                match load_and_upload_scene(path, LoadConfig::default(), &mut renderer) {
-                    Ok(uploaded) => Some(uploaded),
-                    Err(e) => {
-                        log::warn!("Could not load rock '{}': {e}", path.display());
-                        None
-                    }
-                }
-            })
-            .collect();
 
         // Fallback cube material/mesh for any type that failed to load
         let fallback_mat = renderer.insert_material(make_material(
@@ -250,13 +240,52 @@ impl ApplicationHandler for App {
         ));
         let fallback_mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
+        // rock_vg[type] = Some(vec of (VirtualMeshId, material_slot_u32))
+        let rock_vg: Vec<Option<Vec<(helio::VirtualMeshId, u32)>>> = rock_paths
+            .iter()
+            .map(|path| {
+                let scene = match load_scene_file_with_config(path, LoadConfig::default()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::warn!("Could not load rock '{}': {e}", path.display());
+                        return None;
+                    }
+                };
+                let mat_ids = match upload_scene_materials(&mut renderer, &scene) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        log::warn!("Could not upload rock materials for '{}': {e}", path.display());
+                        return None;
+                    }
+                };
+                let entries: Vec<(helio::VirtualMeshId, u32)> = scene
+                    .meshes
+                    .iter()
+                    .map(|mesh| {
+                        let vm_id = renderer.insert_virtual_mesh(VirtualMeshUpload {
+                            vertices: mesh.vertices.clone(),
+                            indices: mesh.indices.clone(),
+                        });
+                        let mat_id = mesh
+                            .material_index
+                            .and_then(|idx| mat_ids.get(idx))
+                            .or_else(|| mat_ids.first())
+                            .copied()
+                            .unwrap_or(fallback_mat);
+                        (vm_id, mat_id.slot())
+                    })
+                    .collect();
+                Some(entries)
+            })
+            .collect();
+
         // ── Scatter rocks ─────────────────────────────────────────────────
         let mut seed: u64 = 0xDEAD_BEEF_CAFE_1234;
         let mut billboard_positions: Vec<(Vec3, usize)> = Vec::new();
         let mut global_rock_idx: usize = 0;
 
         for rock_type in 0..3usize {
-            let uploaded = rock_uploads[rock_type].as_ref();
+            let vg_entries = rock_vg[rock_type].as_deref();
 
             for _ in 0..ROCK_COUNT_PER_TYPE {
                 // Random position in a disc
@@ -279,18 +308,25 @@ impl ApplicationHandler for App {
                 );
                 let transform = Mat4::from_scale_rotation_translation(scale, rot, pos);
 
-                match uploaded {
+                // World-space bounding sphere used for instance-level culling.
+                let center = pos + Vec3::Y * scale.y * 0.5;
+                let bounds_radius = base_scale * 3.0;
+
+                match vg_entries {
                     None => {
                         let _ = v3_demo_common::insert_object(
                             &mut renderer, fallback_mesh, fallback_mat, transform, base_scale,
                         );
                     }
-                    Some(up) => {
-                        for &mesh_id in &up.mesh_ids {
-                            let mat = up.material_ids.first().copied().unwrap_or(fallback_mat);
-                            let _ = v3_demo_common::insert_object(
-                                &mut renderer, mesh_id, mat, transform, base_scale,
-                            );
+                    Some(entries) => {
+                        for &(vm_id, mat_slot) in entries {
+                            let _ = renderer.insert_virtual_object(VirtualObjectDescriptor {
+                                virtual_mesh: vm_id,
+                                material_id: mat_slot,
+                                transform,
+                                bounds: [center.x, center.y, center.z, bounds_radius],
+                                flags: 0,
+                            });
                         }
                     }
                 }

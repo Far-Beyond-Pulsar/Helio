@@ -70,60 +70,8 @@ struct CullUniforms {
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-/// Extract the 6 frustum planes (world space) from the view-projection matrix.
-/// Each plane is stored as vec4(normal.xyz, d) where normal·p + d >= 0 means inside.
-fn extract_frustum_planes(vp: mat4x4<f32>) -> array<vec4<f32>, 6> {
-    var p: array<vec4<f32>, 6>;
-    // Left:   col3 + col0
-    p[0] = vec4<f32>(vp[0][3] + vp[0][0],
-                     vp[1][3] + vp[1][0],
-                     vp[2][3] + vp[2][0],
-                     vp[3][3] + vp[3][0]);
-    // Right:  col3 - col0
-    p[1] = vec4<f32>(vp[0][3] - vp[0][0],
-                     vp[1][3] - vp[1][0],
-                     vp[2][3] - vp[2][0],
-                     vp[3][3] - vp[3][0]);
-    // Bottom: col3 + col1
-    p[2] = vec4<f32>(vp[0][3] + vp[0][1],
-                     vp[1][3] + vp[1][1],
-                     vp[2][3] + vp[2][1],
-                     vp[3][3] + vp[3][1]);
-    // Top:    col3 - col1
-    p[3] = vec4<f32>(vp[0][3] - vp[0][1],
-                     vp[1][3] - vp[1][1],
-                     vp[2][3] - vp[2][1],
-                     vp[3][3] - vp[3][1]);
-    // Near:   col3 + col2
-    p[4] = vec4<f32>(vp[0][3] + vp[0][2],
-                     vp[1][3] + vp[1][2],
-                     vp[2][3] + vp[2][2],
-                     vp[3][3] + vp[3][2]);
-    // Far:    col3 - col2
-    p[5] = vec4<f32>(vp[0][3] - vp[0][2],
-                     vp[1][3] - vp[1][2],
-                     vp[2][3] - vp[2][2],
-                     vp[3][3] - vp[3][2]);
-    return p;
-}
-
-/// Sphere–frustum intersection test.
-/// Returns true if the sphere is at least partially inside all 6 planes.
-fn sphere_visible(center_ws: vec3<f32>, radius: f32, planes: array<vec4<f32>, 6>) -> bool {
-    for (var i = 0u; i < 6u; i++) {
-        let d = dot(planes[i].xyz, center_ws) + planes[i].w;
-        if d < -radius {
-            return false;
-        }
-    }
-    return true;
-}
-
 /// Backface cone test.
-/// Returns true if the meshlet might be *front-facing* for the current camera,
-/// i.e. we should keep it.  Returns false only when all triangles are provably
-/// back-facing.
-///
+/// Returns true if the meshlet might be *front-facing* for the current camera.
 /// cone_cutoff > 1.0 disables cone culling (mixed-winding or nearly flat).
 fn cone_visible(
     apex_ws: vec3<f32>,
@@ -132,11 +80,9 @@ fn cone_visible(
     cam_pos: vec3<f32>,
 ) -> bool {
     if cutoff > 1.0 {
-        return true;  // cone cull disabled for this meshlet
+        return true;
     }
-    // View direction from apex toward camera.
     let view_dir = normalize(cam_pos - apex_ws);
-    // If dot(view_dir, -axis) < cutoff, the camera is inside the cone of back faces.
     return dot(view_dir, -axis_ws) < cutoff;
 }
 
@@ -152,24 +98,32 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
     let m    = meshlets[idx];
     let inst = instances[m.instance_index];
 
-    // Transform bounding sphere center and cone apex/axis to world space.
-    let model   = inst.transform;
+    let model     = inst.transform;
     let center_ws = (model * vec4<f32>(m.center, 1.0)).xyz;
 
-    // Approximate world-space radius: use the max scale axis from the model matrix.
-    // This is conservative (overestimates for non-uniform scale) but correct.
     let scale_x = length(model[0].xyz);
     let scale_y = length(model[1].xyz);
     let scale_z = length(model[2].xyz);
     let world_radius = m.radius * max(scale_x, max(scale_y, scale_z));
 
-    // Extract frustum planes from the view-projection matrix.
-    let planes = extract_frustum_planes(camera.view_proj);
+    // ── Frustum cull (inline — avoids array<T,N> as return / param type) ─────
+    // Each plane: vec4(normal.xyz, d)  with  sign convention  normal·p + d >= 0 = inside.
+    let vp = camera.view_proj;
+    let pl0 = vec4<f32>(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // left
+    let pl1 = vec4<f32>(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // right
+    let pl2 = vec4<f32>(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // bottom
+    let pl3 = vec4<f32>(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // top
+    let pl4 = vec4<f32>(vp[0][3] + vp[0][2], vp[1][3] + vp[1][2], vp[2][3] + vp[2][2], vp[3][3] + vp[3][2]); // near
+    let pl5 = vec4<f32>(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // far
 
-    var visible = sphere_visible(center_ws, world_radius, planes);
+    var visible = (dot(pl0.xyz, center_ws) + pl0.w >= -world_radius)
+               && (dot(pl1.xyz, center_ws) + pl1.w >= -world_radius)
+               && (dot(pl2.xyz, center_ws) + pl2.w >= -world_radius)
+               && (dot(pl3.xyz, center_ws) + pl3.w >= -world_radius)
+               && (dot(pl4.xyz, center_ws) + pl4.w >= -world_radius)
+               && (dot(pl5.xyz, center_ws) + pl5.w >= -world_radius);
 
     if visible {
-        // Backface cone test (mesh local → world via model matrix 3×3).
         let apex_ws = (model * vec4<f32>(m.cone_apex, 1.0)).xyz;
         let norm_mat = mat3x3<f32>(
             inst.normal_mat_0.xyz,
@@ -181,7 +135,6 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         visible = cone_visible(apex_ws, axis_ws, m.cone_cutoff, cam_pos);
     }
 
-    // Write indirect command regardless: instance_count signals visibility.
     var cmd: DrawIndexedIndirect;
     cmd.index_count    = m.index_count;
     cmd.instance_count = select(0u, 1u, visible);
