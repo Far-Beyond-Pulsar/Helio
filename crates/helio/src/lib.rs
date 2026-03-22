@@ -10,6 +10,7 @@
 //! - partial dirty-range uploads to `helio-v3` managers.
 
 mod arena;
+mod groups;
 mod handles;
 mod material;
 mod mesh;
@@ -17,6 +18,7 @@ mod renderer;
 mod scene;
 mod vg;
 
+pub use groups::{GroupId, GroupMask};
 pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId};
 pub use helio_pass_billboard::BillboardInstance;
 pub use material::{

@@ -13,6 +13,7 @@ use thiserror::Error;
 use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, DenseRemove, SparsePool};
+use crate::groups::{GroupId, GroupMask};
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId};
 use crate::material::{
     GpuMaterialTextureSlot, GpuMaterialTextures, MaterialAsset, MaterialTextureRef, MaterialTextures,
@@ -77,6 +78,9 @@ pub struct ObjectDescriptor {
     pub transform: Mat4,
     pub bounds: [f32; 4],
     pub flags: u32,
+    /// Group membership bitmask.  Use `GroupMask::NONE` (the default) for ungrouped
+    /// objects that are always visible regardless of group visibility state.
+    pub groups: GroupMask,
 }
 
 #[derive(Debug, Clone)]
@@ -95,6 +99,7 @@ struct LightRecord {
 struct ObjectRecord {
     mesh: MeshId,
     material: MaterialId,
+    groups: GroupMask,
     instance: GpuInstanceData,
     aabb: GpuInstanceAabb,
     draw: GpuDrawCall,
@@ -128,6 +133,7 @@ struct VirtualMeshRecord {
 #[derive(Debug, Clone)]
 struct VirtualObjectRecord {
     pub virtual_mesh: VirtualMeshId,
+    pub groups: GroupMask,
     pub instance: GpuInstanceData,
 }
 
@@ -226,10 +232,20 @@ fn sphere_to_aabb(bounds: [f32; 4]) -> GpuInstanceAabb {
     }
 }
 
+/// An object is visible when none of its groups are currently hidden.
+///
+/// Ungrouped objects (`groups == GroupMask::NONE`) are **always** visible — they
+/// are unaffected by group visibility changes.
+#[inline(always)]
+fn object_is_visible(groups: GroupMask, group_hidden: GroupMask) -> bool {
+    groups.is_empty() || !groups.intersects(group_hidden)
+}
+
 fn object_gpu_data(mesh: MeshId, material_slot: usize, desc: ObjectDescriptor, slice: MeshSlice) -> ObjectRecord {
     ObjectRecord {
         mesh,
         material: desc.material,
+        groups: desc.groups,
         instance: GpuInstanceData {
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),
@@ -269,6 +285,9 @@ pub struct Scene {
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     objects_dirty: bool,
     prev_view_proj: Mat4,
+    /// Bitmask of currently hidden groups — bit N = GroupId(N) is hidden.
+    /// An object is invisible if any of its groups intersects this mask.
+    group_hidden: GroupMask,
 
     // ── Virtual geometry ──────────────────────────────────────────────────────
     /// All uploaded virtual meshes keyed by their handle.
@@ -341,6 +360,7 @@ impl Scene {
             objects: DenseArena::new(),
             objects_dirty: true, // rebuild on first flush
             prev_view_proj: Mat4::IDENTITY,
+            group_hidden: GroupMask::NONE,
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
             vg_objects: DenseArena::new(),
@@ -742,6 +762,7 @@ impl Scene {
             self.gpu_scene.indirect.set_data(Vec::new());
             self.gpu_scene.visibility.set_data(Vec::new());
             return;
+
         }
 
         // Build a sort order over the dense array indices, grouped by (mesh_id, material_id).
@@ -809,16 +830,175 @@ impl Scene {
             draw_calls.len()
         );
 
+        // Build visibility buffer: 0 = hidden (any group is hidden), 1 = visible.
+        let group_hidden = self.group_hidden;
+        let visibility: Vec<u32> = order.iter().map(|&di| {
+            let r = self.objects.get_dense(di).unwrap();
+            if object_is_visible(r.groups, group_hidden) { 1u32 } else { 0u32 }
+        }).collect();
+
         self.gpu_scene.instances.set_data(instances);
         self.gpu_scene.aabbs.set_data(aabbs);
         self.gpu_scene.draw_calls.set_data(draw_calls);
         self.gpu_scene.indirect.set_data(indirect);
-        self.gpu_scene.visibility.set_data(vec![1u32; self.gpu_scene.instances.len()]);
+        self.gpu_scene.visibility.set_data(visibility);
     }
 
 
     pub fn advance_frame(&mut self) {
         self.gpu_scene.frame_count = self.gpu_scene.frame_count.wrapping_add(1);
+    }
+
+    // ── Group membership & visibility ────────────────────────────────────────
+
+    /// Set the complete group membership mask for an object.
+    ///
+    /// The change is reflected in the GPU visibility buffer immediately (without
+    /// triggering a full `rebuild_instance_buffers`).
+    pub fn set_object_groups(&mut self, id: ObjectId, mask: GroupMask) -> Result<()> {
+        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        record.groups = mask;
+        if !self.objects_dirty {
+            let vis = if object_is_visible(mask, self.group_hidden) { 1u32 } else { 0u32 };
+            let slot = record.draw.first_instance as usize;
+            self.gpu_scene.visibility.update(slot, vis);
+        }
+        Ok(())
+    }
+
+    /// Add `group` to an object's membership mask (additive — other groups are kept).
+    pub fn add_object_to_group(&mut self, id: ObjectId, group: GroupId) -> Result<()> {
+        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        let new_mask = record.groups.with(group);
+        record.groups = new_mask;
+        if !self.objects_dirty {
+            let vis = if object_is_visible(new_mask, self.group_hidden) { 1u32 } else { 0u32 };
+            let slot = record.draw.first_instance as usize;
+            self.gpu_scene.visibility.update(slot, vis);
+        }
+        Ok(())
+    }
+
+    /// Remove `group` from an object's membership mask.
+    pub fn remove_object_from_group(&mut self, id: ObjectId, group: GroupId) -> Result<()> {
+        let Some((_, record)) = self.objects.get_mut_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        let new_mask = record.groups.without(group);
+        record.groups = new_mask;
+        if !self.objects_dirty {
+            let vis = if object_is_visible(new_mask, self.group_hidden) { 1u32 } else { 0u32 };
+            let slot = record.draw.first_instance as usize;
+            self.gpu_scene.visibility.update(slot, vis);
+        }
+        Ok(())
+    }
+
+    /// Return the group membership mask for an object.
+    pub fn object_groups(&self, id: ObjectId) -> Result<GroupMask> {
+        let Some((_, record)) = self.objects.get_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        Ok(record.groups)
+    }
+
+    /// Hide all objects that belong to `group`.
+    ///
+    /// Objects in multiple groups are hidden if **any** of their groups is hidden.
+    /// This is O(N) in the number of scene objects when a rebuild is not pending
+    /// (only updates the dirty-tracked visibility u32 per-slot).
+    pub fn hide_group(&mut self, group: GroupId) {
+        if self.group_hidden.contains(group) {
+            return; // already hidden — nothing to do
+        }
+        self.group_hidden = self.group_hidden.with(group);
+        self.flush_group_visibility();
+    }
+
+    /// Show all objects in `group` (unless another one of their groups is hidden).
+    pub fn show_group(&mut self, group: GroupId) {
+        if !self.group_hidden.contains(group) {
+            return; // already visible — nothing to do
+        }
+        self.group_hidden = self.group_hidden.without(group);
+        self.flush_group_visibility();
+    }
+
+    /// Return `true` if `group` is currently hidden.
+    pub fn is_group_hidden(&self, group: GroupId) -> bool {
+        self.group_hidden.contains(group)
+    }
+
+    /// Set a bitmask of groups to hidden/visible in one call.
+    ///
+    /// Only the bits in `mask` are affected; all other groups keep their current state.
+    pub fn set_group_visibility(&mut self, mask: GroupMask, visible: bool) {
+        let new_hidden = if visible {
+            GroupMask(self.group_hidden.0 & !mask.0) // clear bits → visible
+        } else {
+            GroupMask(self.group_hidden.0 | mask.0)  // set bits → hidden
+        };
+        if new_hidden == self.group_hidden {
+            return;
+        }
+        self.group_hidden = new_hidden;
+        self.flush_group_visibility();
+    }
+
+    /// Apply a transform delta to every object in `group`.
+    ///
+    /// `delta` is post-multiplied: `new_model = delta * old_model`.  This lets you
+    /// pass a pure translation/rotation/scale matrix and have it applied uniformly.
+    ///
+    /// The operation is O(N) over the dense object array.
+    pub fn move_group(&mut self, group: GroupId, delta: Mat4) {
+        let n = self.objects.dense_len();
+        for i in 0..n {
+            let Some(r) = self.objects.get_dense_mut(i) else { continue };
+            if !r.groups.contains(group) { continue }
+            let new_transform = delta * Mat4::from_cols_array(&r.instance.model);
+            r.instance.model = new_transform.to_cols_array();
+            r.instance.normal_mat = normal_matrix(new_transform);
+            // Update bounds center (keep radius unchanged).
+            let old_center = Vec3::new(r.instance.bounds[0], r.instance.bounds[1], r.instance.bounds[2]);
+            let new_center = delta.transform_point3(old_center);
+            r.instance.bounds[0] = new_center.x;
+            r.instance.bounds[1] = new_center.y;
+            r.instance.bounds[2] = new_center.z;
+            r.aabb = sphere_to_aabb(r.instance.bounds);
+            if !self.objects_dirty {
+                let slot = r.draw.first_instance as usize;
+                self.gpu_scene.instances.update(slot, r.instance);
+                self.gpu_scene.aabbs.update(slot, r.aabb);
+            }
+        }
+    }
+
+    /// Translate all objects in `group` by `delta` (world-space).
+    ///
+    /// Convenience wrapper around `move_group` using a pure translation matrix.
+    pub fn translate_group(&mut self, group: GroupId, delta: Vec3) {
+        self.move_group(group, Mat4::from_translation(delta));
+    }
+
+    /// Internal: re-evaluate GPU visibility for every object when `group_hidden` changes.
+    ///
+    /// Skipped entirely when a full `rebuild_instance_buffers` is already pending
+    /// (the rebuild will compute fresh visibility from scratch).
+    fn flush_group_visibility(&mut self) {
+        if self.objects_dirty { return; }
+        let group_hidden = self.group_hidden;
+        let n = self.objects.dense_len();
+        for i in 0..n {
+            let Some(r) = self.objects.get_dense(i) else { continue };
+            let vis = if object_is_visible(r.groups, group_hidden) { 1u32 } else { 0u32 };
+            let slot = r.draw.first_instance as usize;
+            self.gpu_scene.visibility.update(slot, vis);
+        }
     }
 
     fn validate_material_textures(&self, textures: &MaterialTextures) -> Result<()> {
@@ -899,7 +1079,7 @@ impl Scene {
             // Patch meshlet offsets to account for their location in the mega-buffer.
             for m in &mut meshlets {
                 m.first_index += slice.first_index;
-                m.vertex_offset += slice.first_vertex;
+                m.vertex_offset += slice.first_vertex as i32;
             }
             // Tag with LOD level so the cull shader can select by distance.
             for m in &mut meshlets {
@@ -955,6 +1135,7 @@ impl Scene {
         };
         let (id, _) = self.vg_objects.insert(VirtualObjectRecord {
             virtual_mesh: desc.virtual_mesh,
+            groups: desc.groups,
             instance,
         });
         self.vg_objects_dirty = true;

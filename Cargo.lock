@@ -912,6 +912,7 @@ dependencies = [
  "helio-pass-transparent",
  "helio-pass-virtual-geometry",
  "helio-v3",
+ "image",
  "libhelio",
  "log",
  "thiserror 2.0.18",

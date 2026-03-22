@@ -81,6 +81,15 @@ impl<T, H: Handle> DenseArena<T, H> {
         self.dense.get_mut(dense_index).map(|value| (dense_index, value))
     }
 
+    pub fn get_with_index(&self, handle: H) -> Option<(usize, &T)> {
+        let meta = *self.slots.get(handle.slot() as usize)?;
+        if !meta.occupied || meta.generation != handle.generation() {
+            return None;
+        }
+        let dense_index = meta.dense_index as usize;
+        self.dense.get(dense_index).map(|value| (dense_index, value))
+    }
+
     pub fn remove(&mut self, handle: H) -> Option<DenseRemove<T, H>> {
         let slot_index = handle.slot() as usize;
         let meta = self.slots.get(slot_index).copied()?;

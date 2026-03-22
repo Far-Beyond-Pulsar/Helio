@@ -7,12 +7,13 @@
 //! Controls:
 //!   WASD / Space / Shift — fly  (4 m/s)
 //!   Mouse drag           — look (click to grab cursor)
+//!   E                    — toggle editor light icons
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
 use v3_demo_common::{box_mesh, make_material, spot_light, point_light, insert_object};
 
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, LightId, Renderer, RendererConfig};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, GroupId, LightId, Renderer, RendererConfig};
 
 use winit::{
     application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop},
@@ -233,6 +234,13 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event: KeyEvent {
                 state: ks, physical_key: PhysicalKey::Code(key), ..
             }, .. } => {
+                if ks == ElementState::Pressed && key == KeyCode::KeyE {
+                    if state.renderer.is_group_hidden(GroupId::EDITOR) {
+                        state.renderer.show_group(GroupId::EDITOR);
+                    } else {
+                        state.renderer.hide_group(GroupId::EDITOR);
+                    }
+                }
                 match ks {
                     ElementState::Pressed  => { state.keys.insert(key); }
                     ElementState::Released => { state.keys.remove(&key); }
