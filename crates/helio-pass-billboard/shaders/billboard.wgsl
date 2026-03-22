@@ -5,10 +5,16 @@
 //!   Slot 1 (per-instance): world_pos_pad (vec4), scale_flags (vec4), color (vec4)
 
 // Group 0: global uniforms (camera + globals)
+// Layout must match GpuCameraUniforms in libhelio/src/camera.rs (368 bytes).
 struct Camera {
-    view_proj: mat4x4<f32>,
-    position: vec3<f32>,
-    time: f32,
+    view:          mat4x4<f32>,   // offset   0 — world→view
+    proj:          mat4x4<f32>,   // offset  64 — view→clip
+    view_proj:     mat4x4<f32>,   // offset 128 — combined VP
+    inv_view_proj: mat4x4<f32>,   // offset 192 — clip→world
+    position_near: vec4<f32>,     // offset 256 — xyz=world pos, w=near
+    forward_far:   vec4<f32>,     // offset 272 — xyz=forward, w=far
+    jitter_frame:  vec4<f32>,     // offset 288
+    prev_view_proj: mat4x4<f32>,  // offset 304
 }
 struct Globals {
     frame: u32,
@@ -56,7 +62,7 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
     let screen_scale = inst.scale_flags.z > 0.5;
 
     // Build camera-facing (billboard) basis vectors
-    let cam_pos = camera.position;
+    let cam_pos = camera.position_near.xyz;
     let to_cam  = normalize(cam_pos - world_pos);
 
     // Right and up vectors perpendicular to the view direction
@@ -68,16 +74,20 @@ fn vs_main(quad: QuadVertex, inst: BillboardInstance) -> VertexOut {
     var offset = right * quad.position.x * scale.x
                + up    * quad.position.y * scale.y;
 
-    // Optional: constant screen-space scaling
+    // Optional: constant screen-space scaling.
+    // We must scale by VIEW-AXIS depth (dot with forward), NOT Euclidean distance.
+    // Perspective division uses view-depth, so: world_size = scale * view_depth
+    // → projected NDC size = scale * view_depth / view_depth = scale (constant).
+    // Using Euclidean distance instead causes off-axis billboards to appear larger.
     if screen_scale {
-        let dist   = length(cam_pos - world_pos);
-        offset    *= dist;
+        let view_depth = max(dot(camera.forward_far.xyz, world_pos - cam_pos), 0.001);
+        offset        *= view_depth;
     }
 
     let final_pos = world_pos + offset;
 
     var out: VertexOut;
-    out.clip_pos = camera.view_proj * vec4<f32>(final_pos, 1.0);
+    out.clip_pos = camera.view_proj * vec4<f32>(final_pos, 1.0); // view_proj at offset 128
     out.uv       = quad.uv;
     out.color    = inst.color;
     return out;

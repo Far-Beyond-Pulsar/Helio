@@ -18,11 +18,17 @@ use helio_pass_transparent::TransparentPass;
 // - SkyPass (needs sky_lut_view from SkyLutPass)
 // - SsaoPass (needs gbuffer views + depth view)
 // - SmaaPass, TaaPass (for higher-quality AA)
+use std::collections::HashMap;
+
+use crate::groups::{GroupId, GroupMask};
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId, VirtualObjectId};
 use crate::material::{MaterialAsset, MAX_TEXTURES, TextureUpload};
 use crate::mesh::{MeshBuffers, MeshUpload};
 use crate::scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene};
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
+
+/// Spotlight icon embedded at compile time — used as the editor billboard sprite.
+static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     let required = wgpu::Features::TEXTURE_BINDING_ARRAY
@@ -133,7 +139,13 @@ pub struct Renderer {
     gi_config: GiConfig,
     shadow_quality: libhelio::ShadowQuality,
     debug_mode: u32,
+    /// User-supplied billboard instances set via `set_billboard_instances()`.
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
+    /// Per-frame scratch buffer: user billboards + auto editor-light icons.
+    billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
+    /// Tracks the last-known GpuLight data for every light currently in the scene,
+    /// used to auto-generate editor billboard icons in the GroupId::EDITOR group.
+    editor_lights: HashMap<LightId, crate::GpuLight>,
 }
 
 /// Which graph is currently active — used by `set_render_size` to rebuild correctly.
@@ -175,6 +187,8 @@ impl Renderer {
             shadow_quality: config.shadow_quality,
             debug_mode: 0,
             billboard_instances: Vec::new(),
+            billboard_scratch: Vec::new(),
+            editor_lights: HashMap::new(),
         }
     }
 
@@ -340,11 +354,66 @@ impl Renderer {
     }
 
     pub fn insert_light(&mut self, light: crate::GpuLight) -> LightId {
-        self.scene.insert_light(light)
+        let id = self.scene.insert_light(light);
+        self.editor_lights.insert(id, light);
+        id
     }
 
     pub fn update_light(&mut self, id: LightId, light: crate::GpuLight) -> SceneResult<()> {
+        self.editor_lights.insert(id, light);
         self.scene.update_light(id, light)
+    }
+
+    pub fn remove_light(&mut self, id: LightId) -> SceneResult<()> {
+        self.editor_lights.remove(&id);
+        self.scene.remove_light(id)
+    }
+
+    // ── Group management ─────────────────────────────────────────────────────
+
+    /// Hide all scene objects (and editor light icons) belonging to `group`.
+    pub fn hide_group(&mut self, group: GroupId) {
+        self.scene.hide_group(group);
+    }
+
+    /// Show all scene objects (and editor light icons) belonging to `group`.
+    pub fn show_group(&mut self, group: GroupId) {
+        self.scene.show_group(group);
+    }
+
+    /// Returns `true` if `group` is currently hidden.
+    pub fn is_group_hidden(&self, group: GroupId) -> bool {
+        self.scene.is_group_hidden(group)
+    }
+
+    /// Batch hide/show multiple groups at once.
+    pub fn set_group_visibility(&mut self, mask: GroupMask, visible: bool) {
+        self.scene.set_group_visibility(mask, visible);
+    }
+
+    /// Replace an object's group membership mask.
+    pub fn set_object_groups(&mut self, id: ObjectId, mask: GroupMask) -> SceneResult<()> {
+        self.scene.set_object_groups(id, mask)
+    }
+
+    /// Add one group to an object's membership mask.
+    pub fn add_object_to_group(&mut self, id: ObjectId, group: GroupId) -> SceneResult<()> {
+        self.scene.add_object_to_group(id, group)
+    }
+
+    /// Remove one group from an object's membership mask.
+    pub fn remove_object_from_group(&mut self, id: ObjectId, group: GroupId) -> SceneResult<()> {
+        self.scene.remove_object_from_group(id, group)
+    }
+
+    /// Apply a transform delta to every object in `group`.
+    pub fn move_group(&mut self, group: GroupId, delta: glam::Mat4) {
+        self.scene.move_group(group, delta);
+    }
+
+    /// Translate every object in `group` by `delta`.
+    pub fn translate_group(&mut self, group: GroupId, delta: glam::Vec3) {
+        self.scene.translate_group(group, delta);
     }
 
     pub fn insert_object(&mut self, desc: ObjectDescriptor) -> SceneResult<ObjectId> {
@@ -409,6 +478,25 @@ impl Renderer {
         self.scene.update_camera(*camera);
         self.scene.flush();
 
+        // Compose final billboard list for this frame:
+        //   1. User-supplied instances (set via set_billboard_instances)
+        //   2. Auto editor-light icons when GroupId::EDITOR is visible
+        self.billboard_scratch.clear();
+        self.billboard_scratch.extend_from_slice(&self.billboard_instances);
+        if !self.scene.is_group_hidden(GroupId::EDITOR) {
+            for (_, light) in &self.editor_lights {
+                let [x, y, z, _] = light.position_range;
+                let [r, g, b, _] = light.color_intensity;
+                self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
+                    world_pos:   [x, y, z, 0.0],
+                    // scale_flags.z = 0.0 → world-space size: the icon is scale.xy metres
+                    // wide/tall regardless of camera distance (normal perspective applies).
+                    scale_flags: [0.25, 0.25, 0.0, 0.0],
+                    color:       [r, g, b, 1.0],
+                });
+            }
+        }
+
         let mut texture_views = ArrayVec::<&wgpu::TextureView, MAX_TEXTURES>::new();
         let mut samplers = ArrayVec::<&wgpu::Sampler, MAX_TEXTURES>::new();
         for slot in 0..MAX_TEXTURES {
@@ -459,12 +547,12 @@ impl Renderer {
                 rc_world_max: rc_max,
             }),
             sky: libhelio::SkyContext::default(),
-            billboards: if self.billboard_instances.is_empty() {
+            billboards: if self.billboard_scratch.is_empty() {
                 None
             } else {
                 Some(libhelio::BillboardFrameData {
-                    instances: bytemuck::cast_slice(&self.billboard_instances),
-                    count: self.billboard_instances.len() as u32,
+                    instances: bytemuck::cast_slice(&self.billboard_scratch),
+                    count: self.billboard_scratch.len() as u32,
                 })
             },
             vg: self.scene.vg_frame_data(),
@@ -569,12 +657,20 @@ fn build_default_graph(
     // - TransparentPass (reads scene depth, writes to scene color with blending)
     // - FxaaPass (reads "pre_aa", writes to final surface)
 
-    // 6. BillboardPass — camera-facing instanced quads (composited after opaque geometry)
-    graph.add_pass(Box::new(BillboardPass::new(
+    // 6. BillboardPass — camera-facing instanced quads (composited after opaque geometry).
+    //    Uses spotlight.png as the editor icon sprite (tinted per-instance by light colour).
+    let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .into_rgba8();
+    let (sw, sh) = spotlight.dimensions();
+    graph.add_pass(Box::new(BillboardPass::new_with_sprite_rgba(
         device,
         queue,
         camera_buf,
         config.surface_format,
+        spotlight.as_raw(),
+        sw,
+        sh,
     )));
 
     // Initialize transient textures from pass declarations

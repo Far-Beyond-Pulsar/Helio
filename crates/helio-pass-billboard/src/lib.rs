@@ -309,6 +309,73 @@ impl BillboardPass {
         }
         self.instance_count = count as u32;
     }
+
+    /// Create the billboard pass with a custom sprite texture decoded from raw RGBA8 bytes.
+    ///
+    /// `rgba` must be `width * height * 4` bytes in row-major order.  If the slice is
+    /// empty or dimensions are zero the pass falls back to the default white texture.
+    ///
+    /// In the standard editor pipeline `rgba` is decoded from `spotlight.png`.
+    pub fn new_with_sprite_rgba(
+        device:        &wgpu::Device,
+        queue:         &wgpu::Queue,
+        camera_buf:    &wgpu::Buffer,
+        target_format: wgpu::TextureFormat,
+        rgba:          &[u8],
+        width:         u32,
+        height:        u32,
+    ) -> Self {
+        let mut pass = Self::new(device, queue, camera_buf, target_format);
+        let expected = (width as usize) * (height as usize) * 4;
+        if expected > 0 && rgba.len() >= expected && width > 0 && height > 0 {
+            let sprite_texture = device.create_texture(&wgpu::TextureDescriptor {
+                label:           Some("Billboard Sprite Texture"),
+                size:            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count:    1,
+                dimension:       wgpu::TextureDimension::D2,
+                format:          wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage:           wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats:    &[],
+            });
+            helio_v3::upload::write_texture(
+                queue,
+                wgpu::ImageCopyTexture {
+                    texture:   &sprite_texture,
+                    mip_level: 0,
+                    origin:    wgpu::Origin3d::ZERO,
+                    aspect:    wgpu::TextureAspect::All,
+                },
+                &rgba[..expected],
+                wgpu::ImageDataLayout {
+                    offset:         0,
+                    bytes_per_row:  Some(4 * width),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            );
+            let sprite_view = sprite_texture.create_view(&wgpu::TextureViewDescriptor::default());
+            // Rebuild bind_group_1 pointing to the new sprite texture.
+            pass.bind_group_1 = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label:   Some("Billboard BG1 (Sprite)"),
+                layout:  &pass.bgl_1,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding:  0,
+                        resource: wgpu::BindingResource::TextureView(&sprite_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  1,
+                        resource: wgpu::BindingResource::Sampler(&pass.sampler),
+                    },
+                ],
+            });
+            // Replace the white texture/view with the sprite so it stays alive.
+            pass.white_texture = sprite_texture;
+            pass.white_view    = sprite_view;
+        }
+        pass
+    }
 }
 
 impl RenderPass for BillboardPass {
