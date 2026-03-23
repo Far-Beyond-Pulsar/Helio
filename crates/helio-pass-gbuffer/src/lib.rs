@@ -104,7 +104,12 @@ impl GBufferPass {
         #[cfg(target_arch = "wasm32")]
         let shader_src = shader_src
             .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
-            .replace("scene_samplers[slot.texture_index]", "scene_samplers");
+            .replace("scene_samplers[slot.texture_index]", "scene_samplers")
+            // textureSample requires uniform control flow on WebGPU; use textureSampleLevel (LOD 0) instead.
+            .replace(
+                "return textureSample(scene_textures[slot.texture_index], scene_samplers, uv);",
+                "return textureSampleLevel(scene_textures[slot.texture_index], scene_samplers, uv, 0.0);",
+            );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("GBuffer Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),

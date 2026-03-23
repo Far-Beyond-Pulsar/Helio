@@ -162,7 +162,21 @@ impl VirtualGeometryPass {
                 #[cfg(target_arch = "wasm32")]
                 let s = s
                     .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
-                    .replace("scene_samplers[slot.texture_index]", "scene_samplers");
+                    .replace("scene_samplers[slot.texture_index]", "scene_samplers")
+                    // textureSample requires uniform control flow on WebGPU; use textureSampleLevel (LOD 0) instead.
+                    .replace(
+                        "return textureSample(scene_textures[slot.texture_index], scene_samplers, uv);",
+                        "return textureSampleLevel(scene_textures[slot.texture_index], scene_samplers, uv, 0.0);",
+                    )
+                    // @builtin(primitive_index) requires SHADER_PRIMITIVE_INDEX which WebGPU may not expose.
+                    .replace(
+                        ", @builtin(primitive_index) prim_id: u32",
+                        "",
+                    )
+                    .replace(
+                        "    var h = prim_id *",
+                        "    let prim_id: u32 = 0u;\n    var h = prim_id *",
+                    );
                 s.into()
             }),
         });
