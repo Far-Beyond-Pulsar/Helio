@@ -1,0 +1,84 @@
+name: Deploy Web Demos to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Trigger only when the helio crate version is bumped
+      - "crates/helio/Cargo.toml"
+  workflow_dispatch:
+
+# Allow only one concurrent deployment; cancel any in-progress run.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build WASM demos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable + wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache Cargo registry & build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: wasm-${{ runner.os }}-
+
+      - name: Install wasm-bindgen-cli
+        # Pin to the same version as the wasm-bindgen dep in Cargo.lock to
+        # avoid "version mismatch" errors at bindgen time.
+        run: |
+          VERSION=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
+            | python3 -c "
+          import sys, json
+          meta = json.load(sys.stdin)
+          for pkg in meta['packages']:
+              if pkg['name'] == 'wasm-bindgen':
+                  print(pkg['version'])
+                  break
+          " 2>/dev/null || echo "")
+          if [ -z "$VERSION" ]; then
+            # Fall back to latest if we couldn't detect it
+            cargo install wasm-bindgen-cli
+          else
+            cargo install wasm-bindgen-cli --version "$VERSION" --locked
+          fi
+
+      - name: Build all demos (release)
+        shell: pwsh
+        run: ./build-wasm.ps1 --release
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: target/wasm-prebuilt
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
