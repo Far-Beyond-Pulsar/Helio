@@ -110,7 +110,7 @@ struct VertexOutput {
     @location(2) tex_coords:     vec2<f32>,
     @location(3) world_tangent:  vec3<f32>,
     @location(4) bitangent_sign: f32,
-    @location(5) material_id:    u32,
+    @location(5) @interpolate(flat) material_id:    u32,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {

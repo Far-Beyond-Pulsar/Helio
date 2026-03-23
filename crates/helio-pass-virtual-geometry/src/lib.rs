@@ -702,7 +702,12 @@ impl RenderPass for VirtualGeometryPass {
             } else {
                 // Fallback: compacted writes fill indirect[0..N_visible]; the rest
                 // were cleared above so instance_count = 0 for the tail.
+                #[cfg(not(target_arch = "wasm32"))]
                 rpass.multi_draw_indexed_indirect(&self.indirect_buf, 0, meshlet_count);
+                #[cfg(target_arch = "wasm32")]
+                for i in 0..meshlet_count {
+                    rpass.draw_indexed_indirect(&self.indirect_buf, i as u64 * 20);
+                }
             }
         }
 

@@ -472,7 +472,12 @@ impl RenderPass for GBufferPass {
             main_scene.mesh_buffers.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
+        #[cfg(not(target_arch = "wasm32"))]
         pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
+        #[cfg(target_arch = "wasm32")]
+        for i in 0..draw_count {
+            pass.draw_indexed_indirect(indirect, i as u64 * 20);
+        }
         Ok(())
     }
 }
