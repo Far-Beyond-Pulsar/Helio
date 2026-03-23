@@ -103,6 +103,7 @@ struct ObjectRecord {
     instance: GpuInstanceData,
     aabb: GpuInstanceAabb,
     draw: GpuDrawCall,
+    gpu_slot: u32,
 }
 
 struct TextureRecord {
@@ -266,6 +267,7 @@ fn object_gpu_data(mesh: MeshId, material_slot: usize, desc: ObjectDescriptor, s
             first_instance: 0,
             instance_count: 0,
         },
+        gpu_slot: 0,
     }
 }
 
@@ -284,6 +286,10 @@ pub struct Scene {
     /// True when the objects list has changed and the GPU instance/draw_call/indirect
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     objects_dirty: bool,
+    /// True when the scene layout has been optimized (sorted by mesh+material for instancing).
+    /// When false, objects use persistent slots (1 draw per object, O(1) add/remove).
+    /// When true, objects are sorted for cache coherency (instanced batching).
+    objects_layout_optimized: bool,
     prev_view_proj: Mat4,
     /// Bitmask of currently hidden groups — bit N = GroupId(N) is hidden.
     /// An object is invisible if any of its groups intersects this mask.
@@ -359,6 +365,7 @@ impl Scene {
             lights: DenseArena::new(),
             objects: DenseArena::new(),
             objects_dirty: true, // rebuild on first flush
+            objects_layout_optimized: false, // start in persistent mode
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
             vg_meshes: HashMap::new(),
@@ -614,10 +621,48 @@ impl Scene {
             .ref_count += 1;
 
         let record = object_gpu_data(desc.mesh, material_slot, desc, mesh_slice);
-        let (id, _) = self.objects.insert(record);
-        // Defer GPU buffer upload to flush() which will sort by (mesh,material)
-        // and build instanced draw calls automatically.
-        self.objects_dirty = true;
+        let (id, dense_index) = self.objects.insert(record);
+
+        if self.objects_layout_optimized {
+            // Optimization active - invalidate and mark for rebuild
+            self.objects_layout_optimized = false;
+            self.objects_dirty = true;
+        } else {
+            // Persistent mode - delta update
+            let record = self.objects.get_dense_mut(dense_index).unwrap();
+            record.gpu_slot = dense_index as u32;
+            record.draw.first_instance = dense_index as u32;
+
+            // Push to GPU buffers (O(1) operations)
+            self.gpu_scene.instances.push(record.instance);
+            self.gpu_scene.aabbs.push(record.aabb);
+
+            let draw_call = GpuDrawCall {
+                index_count: record.draw.index_count,
+                first_index: record.draw.first_index,
+                vertex_offset: record.draw.vertex_offset,
+                first_instance: dense_index as u32,
+                instance_count: 1,
+            };
+            self.gpu_scene.draw_calls.push(draw_call);
+
+            let indirect_args = DrawIndexedIndirectArgs {
+                index_count: record.draw.index_count,
+                instance_count: 1,
+                first_index: record.draw.first_index,
+                base_vertex: record.draw.vertex_offset,
+                first_instance: dense_index as u32,
+            };
+            self.gpu_scene.indirect.push(indirect_args);
+
+            let vis = if object_is_visible(record.groups, self.group_hidden) {
+                1u32
+            } else {
+                0u32
+            };
+            self.gpu_scene.visibility.push(vis);
+        }
+
         Ok(id)
     }
 
@@ -654,8 +699,17 @@ impl Scene {
         if let Some((_, old_material)) = self.materials.get_mut_with_slot(old_material_id) {
             old_material.ref_count = old_material.ref_count.saturating_sub(1);
         }
-        // Material change may move the object to a different instancing group.
-        self.objects_dirty = true;
+
+        if self.objects_layout_optimized {
+            // Material change breaks instancing groups - invalidate
+            self.objects_layout_optimized = false;
+            self.objects_dirty = true;
+        } else {
+            // Persistent mode - update in place
+            let slot = record.gpu_slot as usize;
+            self.gpu_scene.instances.update(slot, record.instance);
+        }
+
         Ok(())
     }
 
@@ -675,18 +729,119 @@ impl Scene {
     }
 
     pub fn remove_object(&mut self, id: ObjectId) -> Result<()> {
-        let DenseRemove { removed, .. } =
-            self.objects.remove(id).ok_or_else(|| invalid("object"))?;
+        if self.objects_layout_optimized {
+            // Optimization active - invalidate and mark for rebuild
+            self.objects_layout_optimized = false;
+            self.objects_dirty = true;
 
-        if let Some(material) = self.materials.get_mut_with_slot(removed.material).map(|(_, m)| m) {
-            material.ref_count = material.ref_count.saturating_sub(1);
+            // Still remove from CPU-side arena
+            let DenseRemove { removed, .. } =
+                self.objects.remove(id).ok_or_else(|| invalid("object"))?;
+
+            // Decrement ref counts
+            if let Some(material) = self.materials.get_mut_with_slot(removed.material).map(|(_, m)| m) {
+                material.ref_count = material.ref_count.saturating_sub(1);
+            }
+            if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
+                mesh.ref_count = mesh.ref_count.saturating_sub(1);
+            }
+        } else {
+            // Persistent mode - swap_remove from GPU buffers
+            let DenseRemove {
+                removed,
+                dense_index,
+                moved,
+            } = self.objects.remove(id).ok_or_else(|| invalid("object"))?;
+
+            // Swap-remove from GPU buffers (O(1) operations)
+            self.gpu_scene.instances.swap_remove(dense_index);
+            self.gpu_scene.aabbs.swap_remove(dense_index);
+            self.gpu_scene.draw_calls.swap_remove(dense_index);
+            self.gpu_scene.indirect.swap_remove(dense_index);
+            self.gpu_scene.visibility.swap_remove(dense_index);
+
+            // Update moved object's GPU slot
+            if let Some((moved_id, new_index)) = moved {
+                if let Some((_, record)) = self.objects.get_mut_with_index(moved_id) {
+                    record.gpu_slot = new_index as u32;
+                    record.draw.first_instance = new_index as u32;
+
+                    // Update draw_call in GPU buffer
+                    let mut draw = record.draw;
+                    draw.first_instance = new_index as u32;
+                    self.gpu_scene.draw_calls.update(new_index, draw);
+
+                    // Update indirect in GPU buffer
+                    let indirect_args = DrawIndexedIndirectArgs {
+                        index_count: draw.index_count,
+                        instance_count: 1,
+                        first_index: draw.first_index,
+                        base_vertex: draw.vertex_offset,
+                        first_instance: new_index as u32,
+                    };
+                    self.gpu_scene.indirect.update(new_index, indirect_args);
+                }
+            }
+
+            // Decrement ref counts
+            if let Some(material) = self.materials.get_mut_with_slot(removed.material).map(|(_, m)| m) {
+                material.ref_count = material.ref_count.saturating_sub(1);
+            }
+            if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
+                mesh.ref_count = mesh.ref_count.saturating_sub(1);
+            }
         }
-        if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
-            mesh.ref_count = mesh.ref_count.saturating_sub(1);
-        }
-        // GPU buffers rebuilt on next flush().
-        self.objects_dirty = true;
+
         Ok(())
+    }
+
+    /// Optimizes the scene layout for cache coherency and GPU instancing.
+    ///
+    /// Sorts objects by (mesh, material) and groups consecutive objects with
+    /// the same key into instanced draw calls. This significantly improves
+    /// rendering performance but disables O(1) add/remove operations until
+    /// the next topology change.
+    ///
+    /// # When to Call
+    ///
+    /// Call this after bulk object insertion (e.g., level load, loading screen)
+    /// when you want maximum rendering performance.
+    ///
+    /// # Performance
+    ///
+    /// - **Cost:** O(N log N) sort + O(N) buffer rebuild (one-time)
+    /// - **Benefit:** Reduced draw calls (instanced batching), better GPU cache utilization
+    /// - **Trade-off:** Next add/remove will revert to persistent mode
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Load level objects
+    /// for object_desc in level.objects {
+    ///     scene.insert_object(object_desc)?;
+    /// }
+    ///
+    /// // Optimize layout once before gameplay
+    /// scene.optimize_scene_layout();
+    ///
+    /// // Now render loop benefits from optimal batching
+    /// loop {
+    ///     scene.render(...);
+    /// }
+    /// ```
+    pub fn optimize_scene_layout(&mut self) {
+        if self.objects.dense_len() == 0 {
+            return;
+        }
+
+        self.rebuild_instance_buffers_optimized();
+        self.objects_layout_optimized = true;
+        self.objects_dirty = false;
+
+        log::info!(
+            "Scene layout optimized: {} objects",
+            self.objects.dense_len()
+        );
     }
 
     pub fn flush(&mut self) {
@@ -734,7 +889,11 @@ impl Scene {
         self.material_textures.flush(&queue);
         // Rebuild instanced draw lists when the object set has changed.
         if self.objects_dirty {
-            self.rebuild_instance_buffers();
+            if self.objects_layout_optimized {
+                self.rebuild_instance_buffers_optimized();
+            } else {
+                self.rebuild_instance_buffers_persistent();
+            }
             self.objects_dirty = false;
         }
         // Rebuild virtual geometry CPU buffers when VG topology or transforms changed.
@@ -745,6 +904,85 @@ impl Scene {
         self.gpu_scene.flush();
     }
 
+    /// Persistent slot path: rebuilds GPU buffers without sorting.
+    /// Each object gets one draw call (instance_count = 1).
+    /// GPU slot = dense_index for O(1) add/remove operations.
+    ///
+    /// Called from `flush()` when `objects_dirty` is true and `objects_layout_optimized` is false.
+    fn rebuild_instance_buffers_persistent(&mut self) {
+        let n = self.objects.dense_len();
+        if n == 0 {
+            self.gpu_scene.instances.set_data(Vec::new());
+            self.gpu_scene.aabbs.set_data(Vec::new());
+            self.gpu_scene.draw_calls.set_data(Vec::new());
+            self.gpu_scene.indirect.set_data(Vec::new());
+            self.gpu_scene.visibility.set_data(Vec::new());
+            return;
+        }
+
+        let mut instances = Vec::with_capacity(n);
+        let mut aabbs = Vec::with_capacity(n);
+        let mut draw_calls = Vec::with_capacity(n);
+        let mut indirect = Vec::with_capacity(n);
+
+        // Linear iteration: each object gets slot = dense_index
+        for i in 0..n {
+            let r = self.objects.get_dense(i).unwrap();
+            instances.push(r.instance);
+            aabbs.push(r.aabb);
+
+            // One draw call per object
+            draw_calls.push(GpuDrawCall {
+                index_count: r.draw.index_count,
+                first_index: r.draw.first_index,
+                vertex_offset: r.draw.vertex_offset,
+                first_instance: i as u32,
+                instance_count: 1,
+            });
+
+            indirect.push(DrawIndexedIndirectArgs {
+                index_count: r.draw.index_count,
+                instance_count: 1,
+                first_index: r.draw.first_index,
+                base_vertex: r.draw.vertex_offset,
+                first_instance: i as u32,
+            });
+        }
+
+        // Build visibility
+        let group_hidden = self.group_hidden;
+        let visibility: Vec<u32> = (0..n)
+            .map(|i| {
+                let r = self.objects.get_dense(i).unwrap();
+                if object_is_visible(r.groups, group_hidden) {
+                    1u32
+                } else {
+                    0u32
+                }
+            })
+            .collect();
+
+        // Update ObjectRecords with GPU slots
+        for i in 0..n {
+            if let Some(r) = self.objects.get_dense_mut(i) {
+                r.gpu_slot = i as u32;
+                r.draw.first_instance = i as u32;
+            }
+        }
+
+        self.gpu_scene.instances.set_data(instances);
+        self.gpu_scene.aabbs.set_data(aabbs);
+        self.gpu_scene.draw_calls.set_data(draw_calls);
+        self.gpu_scene.indirect.set_data(indirect);
+        self.gpu_scene.visibility.set_data(visibility);
+
+        log::debug!(
+            "rebuild_instance_buffers_persistent: {} objects → {} draws",
+            n,
+            n
+        );
+    }
+
     /// Sorts all registered objects by (mesh_id, material_id) and reconstructs the
     /// GPU instance buffer, draw_call buffer, and indirect buffer so that objects with
     /// the same mesh **and** material share a single `DrawIndexedIndirect` command with
@@ -753,7 +991,7 @@ impl Scene {
     /// Called once from `flush()` whenever `objects_dirty` is true.  For a fully static
     /// scene (no additions/removals after the first frame) this path executes exactly
     /// once and is then skipped on every subsequent frame — O(0) steady-state cost.
-    fn rebuild_instance_buffers(&mut self) {
+    fn rebuild_instance_buffers_optimized(&mut self) {
         let n = self.objects.dense_len();
         if n == 0 {
             self.gpu_scene.instances.set_data(Vec::new());

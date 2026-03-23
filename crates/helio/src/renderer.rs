@@ -420,6 +420,13 @@ impl Renderer {
         self.scene.insert_object(desc)
     }
 
+    /// Optimizes the scene layout for cache coherency and GPU instancing.
+    ///
+    /// See [`Scene::optimize_scene_layout`] for details.
+    pub fn optimize_scene_layout(&mut self) {
+        self.scene.optimize_scene_layout();
+    }
+
     // ── Virtual geometry ──────────────────────────────────────────────────────
 
     /// Meshletise a high-resolution mesh and register it for GPU-driven rendering.
