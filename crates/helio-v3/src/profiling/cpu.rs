@@ -29,6 +29,7 @@
 //! } // ScopeGuard drops, timing recorded
 //! ```
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
 /// CPU profiler with scoped timing.
@@ -106,6 +107,7 @@ impl CpuProfiler {
     /// ```
     pub fn scope(&mut self, _name: &'static str) -> ScopeGuard {
         ScopeGuard {
+            #[cfg(not(target_arch = "wasm32"))]
             start: Instant::now(),
             // Future: Pass profiler reference for recording
             // profiler: self,
@@ -148,6 +150,7 @@ impl Default for CpuProfiler {
 /// } // <-- Timing recorded here (automatic via Drop)
 /// ```
 pub struct ScopeGuard {
+    #[cfg(not(target_arch = "wasm32"))]
     start: Instant,
     // Future: Reference to profiler for recording
     // profiler: &'a mut CpuProfiler,
@@ -161,6 +164,7 @@ impl Drop for ScopeGuard {
     ///
     /// - **O(1)**: Calculates elapsed time and records to profiler
     fn drop(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
         let _elapsed = self.start.elapsed();
         // Future: Record to profiler
         // self.profiler.record(self.name, elapsed);

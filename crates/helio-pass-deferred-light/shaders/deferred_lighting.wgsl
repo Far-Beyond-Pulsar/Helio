@@ -723,7 +723,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // ── Indirect specular: environment cubemap ────────────────────────────────
     let R            = reflect(-V, N);
-    let env_sample   = textureSample(env_cube, env_sampler, R).rgb;
+    let env_lod      = roughness * 8.0;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
+    let env_sample   = textureSampleLevel(env_cube, env_sampler, R, env_lod).rgb;
     let spec_scale   = 1.0 - roughness * roughness;
     let spec_ind     = F_ibl * env_sample * spec_scale;
 

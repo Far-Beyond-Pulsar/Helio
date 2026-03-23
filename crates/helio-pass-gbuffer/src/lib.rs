@@ -29,6 +29,13 @@ use bytemuck::{Pod, Zeroable};
 use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
 use std::num::NonZeroU32;
 
+/// Bindless texture array size per shader stage.
+/// Capped at 16 on wasm32 (WebGPU baseline); 256 on native.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_TEXTURES: usize = 256;
+#[cfg(target_arch = "wasm32")]
+const MAX_TEXTURES: usize = 16;
+
 // ── Uniform types ─────────────────────────────────────────────────────────────
 
 /// Per-frame globals uploaded to the GPU each frame (matches `Globals` in gbuffer.wgsl).
@@ -88,11 +95,19 @@ impl GBufferPass {
         height: u32,
     ) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
+        let shader_src = include_str!("../shaders/gbuffer.wgsl")
+            .replace("binding_array<texture_2d<f32>, 256>",
+                     &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"))
+            .replace("binding_array<sampler, 256>",
+                     &format!("binding_array<sampler, {MAX_TEXTURES}>"));
+        // WebGPU does not support binding_array of samplers; use a single sampler.
+        #[cfg(target_arch = "wasm32")]
+        let shader_src = shader_src
+            .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
+            .replace("scene_samplers[slot.texture_index]", "scene_sampler");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("GBuffer Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/gbuffer.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
 
         // ── Globals buffer ────────────────────────────────────────────────────
@@ -382,8 +397,16 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
+                        #[cfg(not(target_arch = "wasm32"))]
                         resource: wgpu::BindingResource::SamplerArray(
                             main_scene.material_textures.samplers,
+                        ),
+                        #[cfg(target_arch = "wasm32")]
+                        resource: wgpu::BindingResource::Sampler(
+                            main_scene.material_textures.samplers
+                                .first()
+                                .copied()
+                                .expect("scene must have at least one sampler"),
                         ),
                     },
                 ],
@@ -506,7 +529,6 @@ fn gbuffer_texture(
 
 /// Build the BGL for group 1 (bindless materials + textures).
 fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    const MAX_TEXTURES: usize = 256;
     let texture_array_count = NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");
 
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -550,7 +572,10 @@ fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 binding: 3,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                #[cfg(not(target_arch = "wasm32"))]
                 count: Some(texture_array_count),
+                #[cfg(target_arch = "wasm32")]
+                count: None,
             },
         ],
     })

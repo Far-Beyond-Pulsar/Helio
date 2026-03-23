@@ -137,7 +137,7 @@ fn demo_html(demo: &Demo) -> String {
 fn index_html(demos: &[Demo]) -> String {
     let cards: String = demos.iter().map(|d| {
         format!(
-            r#"    <a class="card" href="{name}/index.html">
+            r#"    <a class="card" href="{name}/">
       <div class="card-title">{title}</div>
       <div class="card-desc">{description}</div>
     </a>
