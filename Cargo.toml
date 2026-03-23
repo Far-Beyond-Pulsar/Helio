@@ -29,6 +29,10 @@ members = [
     "crates/helio-pass-radiance-cascades",
     "crates/helio-pass-simple-cube",
     "crates/helio-pass-sdf",
+
+    # WASM infrastructure
+    "crates/helio-wasm",
+    "crates/helio-web-demos",
 ]
 resolver = "2"
 
