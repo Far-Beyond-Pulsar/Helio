@@ -162,7 +162,7 @@ impl VirtualGeometryPass {
                 #[cfg(target_arch = "wasm32")]
                 let s = s
                     .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
-                    .replace("scene_samplers[slot.texture_index]", "scene_sampler");
+                    .replace("scene_samplers[slot.texture_index]", "scene_samplers");
                 s.into()
             }),
         });

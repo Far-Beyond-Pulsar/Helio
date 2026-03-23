@@ -104,7 +104,7 @@ impl GBufferPass {
         #[cfg(target_arch = "wasm32")]
         let shader_src = shader_src
             .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
-            .replace("scene_samplers[slot.texture_index]", "scene_sampler");
+            .replace("scene_samplers[slot.texture_index]", "scene_samplers");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("GBuffer Shader"),
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),

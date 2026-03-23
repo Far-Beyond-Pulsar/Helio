@@ -31,8 +31,11 @@ use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
+    #[cfg(not(target_arch = "wasm32"))]
     let required = wgpu::Features::TEXTURE_BINDING_ARRAY
         | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    #[cfg(target_arch = "wasm32")]
+    let required = wgpu::Features::empty();
     let optional = wgpu::Features::MULTI_DRAW_INDIRECT
         | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT // compacted indirect count buffer
         | wgpu::Features::SHADER_PRIMITIVE_INDEX;   // @builtin(primitive_index) in fs
