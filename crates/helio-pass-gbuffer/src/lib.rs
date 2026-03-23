@@ -100,15 +100,17 @@ impl GBufferPass {
                      &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"))
             .replace("binding_array<sampler, 256>",
                      &format!("binding_array<sampler, {MAX_TEXTURES}>"));
-        // WebGPU does not support binding_array of samplers; use a single sampler.
+        // WebGPU does not support binding arrays; collapse to single texture/sampler.
         #[cfg(target_arch = "wasm32")]
         let shader_src = shader_src
             .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
             .replace("scene_samplers[slot.texture_index]", "scene_samplers")
+            .replace(&format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"), "texture_2d<f32>")
+            .replace("scene_textures[slot.texture_index]", "scene_textures")
             // textureSample requires uniform control flow on WebGPU; use textureSampleLevel (LOD 0) instead.
             .replace(
-                "return textureSample(scene_textures[slot.texture_index], scene_samplers, uv);",
-                "return textureSampleLevel(scene_textures[slot.texture_index], scene_samplers, uv, 0.0);",
+                "return textureSample(scene_textures, scene_samplers, uv);",
+                "return textureSampleLevel(scene_textures, scene_samplers, uv, 0.0);",
             );
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("GBuffer Shader"),
@@ -396,8 +398,16 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
+                        #[cfg(not(target_arch = "wasm32"))]
                         resource: wgpu::BindingResource::TextureViewArray(
                             main_scene.material_textures.texture_views,
+                        ),
+                        #[cfg(target_arch = "wasm32")]
+                        resource: wgpu::BindingResource::TextureView(
+                            main_scene.material_textures.texture_views
+                                .first()
+                                .copied()
+                                .expect("scene must have at least one texture view"),
                         ),
                     },
                     wgpu::BindGroupEntry {
@@ -566,7 +576,7 @@ fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                 },
                 count: None,
             },
-            // binding 2: scene_textures (256-slot texture array)
+            // binding 2: scene_textures (texture array; collapsed to 1 on wasm32)
             wgpu::BindGroupLayoutEntry {
                 binding: 2,
                 visibility: wgpu::ShaderStages::FRAGMENT,
@@ -575,7 +585,10 @@ fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
                     view_dimension: wgpu::TextureViewDimension::D2,
                     multisampled: false,
                 },
+                #[cfg(not(target_arch = "wasm32"))]
                 count: Some(texture_array_count),
+                #[cfg(target_arch = "wasm32")]
+                count: None,
             },
             // binding 3: scene_samplers (256-slot sampler array)
             wgpu::BindGroupLayoutEntry {
