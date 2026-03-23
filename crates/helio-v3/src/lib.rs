@@ -387,7 +387,7 @@ pub use libhelio::{
 // Re-export managers
 pub use crate::scene::managers::*;
 // Re-export core types
-pub use traits::{RenderPass, GpuSceneManager, GpuResource};
+pub use traits::{RenderPass, GpuSceneManager, GpuResource, MaybeSend, MaybeSync};
 pub use error::{Error, Result};
 pub use context::{PassContext, PrepareContext};
 pub use profiling::Profiler;

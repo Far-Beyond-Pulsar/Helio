@@ -130,12 +130,12 @@ impl HelioWasmApp for Demo {
         let fwd   = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyW) { self.cam_pos += fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyS) { self.cam_pos -= fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyA) { self.cam_pos -= right * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyD) { self.cam_pos += right * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::Space)     { self.cam_pos.y += FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::ShiftLeft) { self.cam_pos.y -= FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { self.cam_pos += fwd   * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { self.cam_pos -= fwd   * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { self.cam_pos -= right * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { self.cam_pos += right * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::Space)     { self.cam_pos.y += FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) { self.cam_pos.y -= FLY_SPEED * dt; }
 
         // Lava vent pulsing
         let vent_positions: &[[f32;3]] = &[

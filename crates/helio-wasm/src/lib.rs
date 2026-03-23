@@ -39,7 +39,7 @@ mod runner;
 pub use runner::launch;
 
 use std::collections::HashSet;
-use winit::keyboard::KeyCode;
+pub use winit::keyboard::KeyCode;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

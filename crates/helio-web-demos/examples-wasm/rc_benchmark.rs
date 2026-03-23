@@ -79,16 +79,16 @@ impl HelioWasmApp for Demo {
         let fwd   = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyW) { self.cam_pos += fwd   * SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyS) { self.cam_pos -= fwd   * SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::Space)     { self.cam_pos.y += SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::ShiftLeft) { self.cam_pos.y -= SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::Equal) {
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { self.cam_pos += fwd   * SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { self.cam_pos -= fwd   * SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::Space)     { self.cam_pos.y += SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) { self.cam_pos.y -= SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::Equal) {
             self.intensity = (self.intensity + 0.5 * dt).min(5.0);
         }
-        if input.keys.contains(&winit::keyboard::KeyCode::Minus) {
+        if input.keys.contains(&helio_wasm::KeyCode::Minus) {
             self.intensity = (self.intensity - 0.5 * dt).max(0.1);
         }
 

@@ -70,6 +70,33 @@
 //! # unsafe impl bytemuck::Zeroable for MyUniforms {}
 //! ```
 
+// ── Platform-conditional Send + Sync bounds ────────────────────────────────
+// On native targets, wgpu types are Send + Sync, so RenderPass requires them.
+// On wasm32, wgpu's internal dyn-context types are not Send + Sync (WASM is
+// single-threaded), so we relax the bounds via blanket no-op traits.
+
+/// Blanket bound: `Send` on native, nothing on `wasm32`.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSend: Send {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Send> MaybeSend for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSend {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSend for T {}
+
+/// Blanket bound: `Sync` on native, nothing on `wasm32`.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MaybeSync: Sync {}
+#[cfg(not(target_arch = "wasm32"))]
+impl<T: Sync> MaybeSync for T {}
+
+#[cfg(target_arch = "wasm32")]
+pub trait MaybeSync {}
+#[cfg(target_arch = "wasm32")]
+impl<T> MaybeSync for T {}
+
 use crate::{PassContext, PrepareContext, Result};
 use crate::graph::ResourceBuilder;
 
@@ -208,7 +235,7 @@ use crate::graph::ResourceBuilder;
 /// - **Error Handling**: Return `Result<()>` for GPU errors (e.g., shader compilation)
 /// - **Profiling**: Use `ctx.begin_render_pass()` instead of `ctx.encoder.begin_render_pass()`
 ///   to get automatic GPU timestamp injection
-pub trait RenderPass: Send + Sync {
+pub trait RenderPass: MaybeSend + MaybeSync {
     /// Returns a unique name for this pass.
     ///
     /// Used for profiling labels and debugging. Should be a human-readable identifier
@@ -377,7 +404,7 @@ pub trait RenderPass: Send + Sync {
 /// # unsafe impl bytemuck::Pod for GpuLight {}
 /// # unsafe impl bytemuck::Zeroable for GpuLight {}
 /// ```
-pub trait GpuSceneManager: Send + Sync {
+pub trait GpuSceneManager: MaybeSend + MaybeSync {
     /// Flushes dirty data to the GPU.
     ///
     /// Uploads changed data from the CPU mirror to the GPU buffer. Should be a **no-op**

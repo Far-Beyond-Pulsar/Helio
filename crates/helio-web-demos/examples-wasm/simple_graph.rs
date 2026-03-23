@@ -59,12 +59,12 @@ impl HelioWasmApp for Demo {
         let right   = orientation *  Vec3::X;
 
         let mut accel = Vec3::ZERO;
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyW)     { accel += forward; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyS)     { accel -= forward; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyA)     { accel -= right; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyD)     { accel += right; }
-        if input.keys.contains(&winit::keyboard::KeyCode::Space)    { accel.y += 1.0; }
-        if input.keys.contains(&winit::keyboard::KeyCode::ShiftLeft){ accel.y -= 1.0; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW)     { accel += forward; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS)     { accel -= forward; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA)     { accel -= right; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD)     { accel += right; }
+        if input.keys.contains(&helio_wasm::KeyCode::Space)    { accel.y += 1.0; }
+        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft){ accel.y -= 1.0; }
         if accel.length_squared() > 0.0 { accel = accel.normalize(); }
 
         self.velocity += accel * FLY_SPEED * dt;

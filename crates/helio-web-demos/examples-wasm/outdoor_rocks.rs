@@ -123,8 +123,8 @@ impl HelioWasmApp for Demo {
     fn update(&mut self, renderer: &mut Renderer, dt: f32, _elapsed: f32,
               input: &InputState) -> Camera {
         // Sun rotation
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyQ) { self.sun_angle -= dt * 0.7; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyE) { self.sun_angle += dt * 0.7; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyQ) { self.sun_angle -= dt * 0.7; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyE) { self.sun_angle += dt * 0.7; }
         let (s, c) = self.sun_angle.sin_cos();
         let sun_dir = Vec3::new(s * 0.7, -c.abs().max(0.15), s.abs() * 0.3 - 0.5).normalize();
         let sun_col = Vec3::new(1.0, (c * 0.5 + 0.5) * 0.97 + 0.03, (c * 0.5 + 0.5) * 0.85 + 0.03);
@@ -141,12 +141,12 @@ impl HelioWasmApp for Demo {
         let forward = Vec3::new(sy * cp, sp, -cy * cp);
         let right   = Vec3::new(cy, 0.0, sy);
 
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyW)     { self.cam_pos += forward * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyS)     { self.cam_pos -= forward * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyA)     { self.cam_pos -= right   * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyD)     { self.cam_pos += right   * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::Space)    { self.cam_pos.y += FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::ShiftLeft){ self.cam_pos.y -= FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW)     { self.cam_pos += forward * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS)     { self.cam_pos -= forward * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA)     { self.cam_pos -= right   * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD)     { self.cam_pos += right   * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::Space)    { self.cam_pos.y += FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft){ self.cam_pos.y -= FLY_SPEED * dt; }
 
         Camera::perspective_look_at(
             self.cam_pos, self.cam_pos + forward, Vec3::Y,

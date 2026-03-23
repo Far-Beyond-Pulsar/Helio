@@ -125,10 +125,10 @@ impl HelioWasmApp for Demo {
         let right = Vec3::new(cy, 0.0, sy);
         let fwd_flat = Vec3::new(sy, 0.0, -cy);
 
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyW) { self.cam_pos += fwd_flat * WALK_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyS) { self.cam_pos -= fwd_flat * WALK_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyA) { self.cam_pos -= right    * WALK_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyD) { self.cam_pos += right    * WALK_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { self.cam_pos += fwd_flat * WALK_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { self.cam_pos -= fwd_flat * WALK_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { self.cam_pos -= right    * WALK_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { self.cam_pos += right    * WALK_SPEED * dt; }
 
         // Overhead strips: slight hum flicker
         let strip_positions: &[[f32; 3]] = &[

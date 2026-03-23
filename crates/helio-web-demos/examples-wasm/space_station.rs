@@ -132,12 +132,12 @@ impl HelioWasmApp for Demo {
         let right = Vec3::new(cy, 0.0, sy);
         let up    = Vec3::Y;
 
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyW) { self.cam_pos += fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyS) { self.cam_pos -= fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyA) { self.cam_pos -= right * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyD) { self.cam_pos += right * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::Space)     { self.cam_pos += up * FLY_SPEED * dt; }
-        if input.keys.contains(&winit::keyboard::KeyCode::ShiftLeft) { self.cam_pos -= up * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { self.cam_pos += fwd   * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { self.cam_pos -= fwd   * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { self.cam_pos -= right * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { self.cam_pos += right * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::Space)     { self.cam_pos += up * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) { self.cam_pos -= up * FLY_SPEED * dt; }
 
         // Nav light blink (1 Hz)
         let blink = ((elapsed * std::f32::consts::TAU).sin() > 0.0) as u8 as f32;

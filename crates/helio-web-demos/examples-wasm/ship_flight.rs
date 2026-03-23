@@ -251,8 +251,8 @@ impl HelioWasmApp for Demo {
         let pitch = input.mouse_delta.1 * LOOK_SENS;
 
         let mut roll_input = 0.0_f32;
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyQ) { roll_input += ROLL_SPEED; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyE) { roll_input -= ROLL_SPEED; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyQ) { roll_input += ROLL_SPEED; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyE) { roll_input -= ROLL_SPEED; }
 
         self.ship.angular_velocity += Vec3::new(-pitch * PITCH_THRUST, -yaw * YAW_THRUST, roll_input * ROLL_THRUST * dt);
         self.ship.angular_velocity /= 1.0 + ANGULAR_DAMPING * dt;
@@ -269,12 +269,12 @@ impl HelioWasmApp for Demo {
         let mut thrusting = false;
         let ta = self.ship.thrust_accel;
 
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyW) { local_vel.z -= ta * FORWARD_THRUST_SCALE   * dt; thrusting = true; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyS) { local_vel.z += ta * REVERSE_THRUST_SCALE   * dt; thrusting = true; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyA) { local_vel.x -= ta * STRAFE_THRUST_SCALE    * dt; thrusting = true; }
-        if input.keys.contains(&winit::keyboard::KeyCode::KeyD) { local_vel.x += ta * STRAFE_THRUST_SCALE    * dt; thrusting = true; }
-        if input.keys.contains(&winit::keyboard::KeyCode::Space)     { local_vel.y += ta * LIFT_THRUST_SCALE * dt; thrusting = true; }
-        if input.keys.contains(&winit::keyboard::KeyCode::ShiftLeft) { local_vel.y -= ta * LIFT_THRUST_SCALE * dt; thrusting = true; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { local_vel.z -= ta * FORWARD_THRUST_SCALE   * dt; thrusting = true; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { local_vel.z += ta * REVERSE_THRUST_SCALE   * dt; thrusting = true; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { local_vel.x -= ta * STRAFE_THRUST_SCALE    * dt; thrusting = true; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { local_vel.x += ta * STRAFE_THRUST_SCALE    * dt; thrusting = true; }
+        if input.keys.contains(&helio_wasm::KeyCode::Space)     { local_vel.y += ta * LIFT_THRUST_SCALE * dt; thrusting = true; }
+        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) { local_vel.y -= ta * LIFT_THRUST_SCALE * dt; thrusting = true; }
 
         local_vel.x /= 1.0 + LATERAL_DRAG  * dt;
         local_vel.y /= 1.0 + VERTICAL_DRAG * dt;
