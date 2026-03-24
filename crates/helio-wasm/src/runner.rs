@@ -271,12 +271,11 @@ async fn init_wgpu<T: HelioWasmApp>(
                 required_limits: helio::required_wgpu_limits(adapter.limits()),
                 ..Default::default()
             },
-            None,
         )
         .await
         .expect("helio-wasm: failed to create device");
 
-    device.on_uncaptured_error(Box::new(|e| {
+    device.on_uncaptured_error(std::sync::Arc::new(|e: &wgpu::Error| {
         log::error!("[GPU uncaptured error] {:?}", e);
     }));
 
