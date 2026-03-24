@@ -56,7 +56,10 @@ fn luma_pure_blue() {
 #[test]
 fn luma_coefficients_sum_to_one() {
     let sum = 0.299_f32 + 0.587 + 0.114;
-    assert!((sum - 1.0).abs() < 1e-5, "luma coefficients must sum to 1, got {sum}");
+    assert!(
+        (sum - 1.0).abs() < 1e-5,
+        "luma coefficients must sum to 1, got {sum}"
+    );
 }
 
 #[test]
@@ -76,7 +79,12 @@ fn luma_red_dominates_blue() {
 
 #[test]
 fn luma_non_negative_for_valid_inputs() {
-    let samples = [(0.5, 0.5, 0.5), (1.0, 0.0, 0.0), (0.0, 0.0, 0.5), (0.2, 0.8, 0.3)];
+    let samples = [
+        (0.5, 0.5, 0.5),
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 0.5),
+        (0.2, 0.8, 0.3),
+    ];
     for (r, g, b) in samples {
         assert!(luma(r, g, b) >= 0.0, "luma({r},{g},{b}) must be >= 0");
     }
@@ -101,7 +109,10 @@ fn luma_gray_equals_intensity() {
     // For equal R=G=B=v, luma should equal v (coefficients sum to 1).
     let v = 0.6_f32;
     let l = luma(v, v, v);
-    assert!((l - v).abs() < 1e-5, "luma of gray {v} must equal {v}, got {l}");
+    assert!(
+        (l - v).abs() < 1e-5,
+        "luma of gray {v} must equal {v}, got {l}"
+    );
 }
 
 #[test]
@@ -175,3 +186,4 @@ fn fxaa_skips_edge_below_min_threshold() {
         "tiny contrast {tiny_contrast} should be below min threshold"
     );
 }
+

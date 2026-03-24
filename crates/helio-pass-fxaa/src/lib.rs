@@ -7,7 +7,7 @@
 //! ## O(1) guarantee
 //! `execute()` records exactly one `draw(0..3, 0..1)`.
 
-use helio_v3::{RenderPass, PassContext, Result as HelioResult};
+use helio_v3::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct FxaaPass {
     pipeline: wgpu::RenderPipeline,
@@ -22,10 +22,7 @@ impl FxaaPass {
     /// Create the FXAA pass.
     ///
     /// `target_format` — the format of `ctx.target` (e.g. `Bgra8UnormSrgb`).
-    pub fn new(
-        device: &wgpu::Device,
-        target_format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("FXAA Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/fxaa.wgsl").into()),
@@ -41,30 +38,29 @@ impl FxaaPass {
             ..Default::default()
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("FXAA BGL"),
-                entries: &[
-                    // 0: input_tex
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("FXAA BGL"),
+            entries: &[
+                // 0: input_tex
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
-                    // 1: input_sampler
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
+                    count: None,
+                },
+                // 1: input_sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("FXAA PL"),
@@ -117,12 +113,9 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_view = ctx
-            .frame
-            .pre_aa
-            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
-                "FXAA requires published pre_aa input".to_string(),
-            ))?;
+        let input_view = ctx.frame.pre_aa.ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
+        })?;
         let input_key = input_view as *const _ as usize;
         if self.bind_group_key != Some(input_key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -168,3 +161,4 @@ impl RenderPass for FxaaPass {
         Ok(())
     }
 }
+

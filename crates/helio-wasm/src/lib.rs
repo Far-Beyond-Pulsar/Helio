@@ -87,3 +87,4 @@ pub trait HelioWasmApp: Sized + 'static {
     /// Called when the window is resized. Override to update projection state.
     fn on_resize(&mut self, _renderer: &mut helio::Renderer, _width: u32, _height: u32) {}
 }
+

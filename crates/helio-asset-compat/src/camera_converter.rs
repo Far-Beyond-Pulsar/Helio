@@ -18,17 +18,18 @@ pub struct CameraData {
 /// Extract camera data from a SolidRS camera
 pub fn extract_camera_data(camera: &Camera) -> CameraData {
     match &camera.projection {
-        Projection::Perspective(persp) => {
-            CameraData {
-                name: camera.name.clone(),
-                fov_y: Some(persp.fov_y),
-                near: persp.z_near,
-                far: persp.z_far,
-                is_perspective: true,
-            }
-        }
+        Projection::Perspective(persp) => CameraData {
+            name: camera.name.clone(),
+            fov_y: Some(persp.fov_y),
+            near: persp.z_near,
+            far: persp.z_far,
+            is_perspective: true,
+        },
         Projection::Orthographic(ortho) => {
-            log::warn!("Orthographic camera '{}' not directly supported - storing as info only", camera.name);
+            log::warn!(
+                "Orthographic camera '{}' not directly supported - storing as info only",
+                camera.name
+            );
             CameraData {
                 name: camera.name.clone(),
                 fov_y: None,
@@ -39,3 +40,4 @@ pub fn extract_camera_data(camera: &Camera) -> CameraData {
         }
     }
 }
+

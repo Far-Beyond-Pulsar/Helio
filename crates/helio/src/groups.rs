@@ -70,7 +70,11 @@ impl GroupId {
     /// Values above 63 are silently clamped to 63.
     #[inline(always)]
     pub const fn new(index: u8) -> Self {
-        if index > 63 { GroupId(63) } else { GroupId(index) }
+        if index > 63 {
+            GroupId(63)
+        } else {
+            GroupId(index)
+        }
     }
 
     /// The bit-index (0–63) for this group.
@@ -159,23 +163,34 @@ impl From<GroupId> for GroupMask {
 
 impl std::ops::BitOr for GroupMask {
     type Output = Self;
-    fn bitor(self, rhs: Self) -> Self { GroupMask(self.0 | rhs.0) }
+    fn bitor(self, rhs: Self) -> Self {
+        GroupMask(self.0 | rhs.0)
+    }
 }
 
 impl std::ops::BitAnd for GroupMask {
     type Output = Self;
-    fn bitand(self, rhs: Self) -> Self { GroupMask(self.0 & rhs.0) }
+    fn bitand(self, rhs: Self) -> Self {
+        GroupMask(self.0 & rhs.0)
+    }
 }
 
 impl std::ops::BitOrAssign for GroupMask {
-    fn bitor_assign(&mut self, rhs: Self) { self.0 |= rhs.0; }
+    fn bitor_assign(&mut self, rhs: Self) {
+        self.0 |= rhs.0;
+    }
 }
 
 impl std::ops::BitAndAssign for GroupMask {
-    fn bitand_assign(&mut self, rhs: Self) { self.0 &= rhs.0; }
+    fn bitand_assign(&mut self, rhs: Self) {
+        self.0 &= rhs.0;
+    }
 }
 
 impl std::ops::Not for GroupMask {
     type Output = Self;
-    fn not(self) -> Self { GroupMask(!self.0) }
+    fn not(self) -> Self {
+        GroupMask(!self.0)
+    }
 }
+

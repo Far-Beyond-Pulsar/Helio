@@ -4,13 +4,13 @@
 //! When the camera moves, only the newly-visible shell of each level is
 //! reclassified — O(1) CPU work per frame.
 
-use glam::Vec3;
-use bytemuck;
 use crate::brick::BrickMap;
 use crate::edit_bvh::{Aabb, EditBvh};
-use crate::terrain::TerrainConfig;
 use crate::edit_list::GpuSdfEdit;
+use crate::terrain::TerrainConfig;
 use crate::uniforms::{GpuClipLevel, SdfClipMapParams};
+use bytemuck;
+use glam::Vec3;
 
 /// Number of clip-map levels.
 pub const LEVEL_COUNT: usize = 8;
@@ -35,7 +35,11 @@ impl ClipLevel {
         let (world_min, toroidal_origin) = Self::compute_origin(center, voxel_size);
         let mut bm = BrickMap::new(world_min, voxel_size, GRID_DIM, BRICK_SIZE, ATLAS_DIM);
         bm.toroidal_origin = toroidal_origin;
-        ClipLevel { brick_map: bm, center, level_idx }
+        ClipLevel {
+            brick_map: bm,
+            center,
+            level_idx,
+        }
     }
 
     fn compute_origin(center: Vec3, voxel_size: f32) -> (Vec3, [i32; 3]) {
@@ -165,7 +169,9 @@ impl SdfClipMap {
             if dirty_mask & (1 << i) != 0 {
                 let prev = prev_origins[i];
                 let curr = level.brick_map.toroidal_origin;
-                level.brick_map.classify_toroidal(prev, curr, bvh, edits, terrain);
+                level
+                    .brick_map
+                    .classify_toroidal(prev, curr, bvh, edits, terrain);
             }
         }
     }
@@ -183,9 +189,17 @@ impl SdfClipMap {
     pub fn update_cached_indices(&mut self, queue: &wgpu::Queue) {
         self.cached_all_indices.clear();
         for level in &self.levels {
-            let active: Vec<u32> = level.brick_map.states.iter().enumerate()
+            let active: Vec<u32> = level
+                .brick_map
+                .states
+                .iter()
+                .enumerate()
                 .filter_map(|(i, s)| {
-                    if matches!(s, crate::brick::BrickState::Active(_)) { Some(i as u32) } else { None }
+                    if matches!(s, crate::brick::BrickState::Active(_)) {
+                        Some(i as u32)
+                    } else {
+                        None
+                    }
                 })
                 .collect();
             self.cached_all_indices.extend_from_slice(&active);
@@ -234,3 +248,4 @@ impl SdfClipMap {
 }
 
 use bytemuck::Zeroable;
+

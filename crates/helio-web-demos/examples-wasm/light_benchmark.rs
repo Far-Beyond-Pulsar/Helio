@@ -9,7 +9,9 @@ use glam::Vec3;
 use helio::{Camera, LightId, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
 
-use crate::common::{box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, point_light};
+use crate::common::{
+    box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, point_light,
+};
 
 const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 12.0;
@@ -18,19 +20,44 @@ const GRID_W: usize = 16;
 
 pub struct Demo {
     light_ids: Vec<LightId>,
-    cam_pos:   Vec3,
-    cam_yaw:   f32,
+    cam_pos: Vec3,
+    cam_yaw: f32,
     cam_pitch: f32,
 }
 
 impl HelioWasmApp for Demo {
-    fn title() -> &'static str { "Helio — Light Benchmark" }
+    fn title() -> &'static str {
+        "Helio — Light Benchmark"
+    }
 
-    fn init(renderer: &mut Renderer, _device: Arc<wgpu::Device>,
-            _queue: Arc<wgpu::Queue>, _w: u32, _h: u32) -> Self {
-        let ground_m = renderer.insert_material(make_material([0.4, 0.4, 0.4, 1.0], 0.8, 0.05, [0.0;3], 0.0));
-        let box_m    = renderer.insert_material(make_material([0.55, 0.52, 0.48, 1.0], 0.7, 0.0, [0.0;3], 0.0));
-        let light_m  = renderer.insert_material(make_material([1.0, 1.0, 1.0, 1.0], 0.0, 0.0, [2.0, 2.0, 2.0], 5.0));
+    fn init(
+        renderer: &mut Renderer,
+        _device: Arc<wgpu::Device>,
+        _queue: Arc<wgpu::Queue>,
+        _w: u32,
+        _h: u32,
+    ) -> Self {
+        let ground_m = renderer.insert_material(make_material(
+            [0.4, 0.4, 0.4, 1.0],
+            0.8,
+            0.05,
+            [0.0; 3],
+            0.0,
+        ));
+        let box_m = renderer.insert_material(make_material(
+            [0.55, 0.52, 0.48, 1.0],
+            0.7,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let light_m = renderer.insert_material(make_material(
+            [1.0, 1.0, 1.0, 1.0],
+            0.0,
+            0.0,
+            [2.0, 2.0, 2.0],
+            5.0,
+        ));
 
         // Ground plane
         let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 64.0));
@@ -53,8 +80,8 @@ impl HelioWasmApp for Demo {
         for i in 0..LIGHT_COUNT {
             let col = i % GRID_W;
             let row = i / GRID_W;
-            let x   = -28.0 + col as f32 * (56.0 / (GRID_W as f32 - 1.0));
-            let z   = -28.0 + row as f32 * (56.0 / (LIGHT_COUNT / GRID_W - 1).max(1) as f32);
+            let x = -28.0 + col as f32 * (56.0 / (GRID_W as f32 - 1.0));
+            let z = -28.0 + row as f32 * (56.0 / (LIGHT_COUNT / GRID_W - 1).max(1) as f32);
             let hue = i as f32 / LIGHT_COUNT as f32;
             let (r, g, b) = hsv_to_rgb(hue, 0.8, 1.0);
             let bulb = renderer.insert_mesh(cube_mesh([x, 1.8, z], 0.07));
@@ -76,52 +103,79 @@ impl HelioWasmApp for Demo {
         }
     }
 
-    fn update(&mut self, renderer: &mut Renderer, dt: f32, elapsed: f32,
-              input: &InputState) -> Camera {
-        self.cam_yaw   += input.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch  = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.55, 1.55);
+    fn update(
+        &mut self,
+        renderer: &mut Renderer,
+        dt: f32,
+        elapsed: f32,
+        input: &InputState,
+    ) -> Camera {
+        self.cam_yaw += input.mouse_delta.0 * LOOK_SENS;
+        self.cam_pitch = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.55, 1.55);
 
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
-        let fwd   = Vec3::new(sy * cp, sp, -cy * cp);
+        let fwd = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
-        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { self.cam_pos += fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { self.cam_pos -= fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { self.cam_pos -= right * FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { self.cam_pos += right * FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::Space)     { self.cam_pos.y += FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) { self.cam_pos.y -= FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) {
+            self.cam_pos += fwd * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) {
+            self.cam_pos -= fwd * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) {
+            self.cam_pos -= right * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) {
+            self.cam_pos += right * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::Space) {
+            self.cam_pos.y += FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) {
+            self.cam_pos.y -= FLY_SPEED * dt;
+        }
 
         // Animate lights: each drifts up and down at its own phase
         for (i, id) in self.light_ids.iter().enumerate() {
             let col = i % GRID_W;
             let row = i / GRID_W;
-            let x   = -28.0 + col as f32 * (56.0 / (GRID_W as f32 - 1.0));
-            let z   = -28.0 + row as f32 * (56.0 / (LIGHT_COUNT / GRID_W - 1).max(1) as f32);
+            let x = -28.0 + col as f32 * (56.0 / (GRID_W as f32 - 1.0));
+            let z = -28.0 + row as f32 * (56.0 / (LIGHT_COUNT / GRID_W - 1).max(1) as f32);
             let phase = i as f32 * 0.618;
-            let y   = 2.0 + (elapsed * 1.5 + phase).sin() * 1.2;
+            let y = 2.0 + (elapsed * 1.5 + phase).sin() * 1.2;
             let hue = (i as f32 / LIGHT_COUNT as f32 + elapsed * 0.05).fract();
             let (r, g, b) = hsv_to_rgb(hue, 0.8, 1.0);
             let _ = renderer.update_light(*id, point_light([x, y, z], [r, g, b], 10.0, 8.0));
         }
 
         Camera::perspective_look_at(
-            self.cam_pos, self.cam_pos + fwd, Vec3::Y,
-            std::f32::consts::FRAC_PI_4, 1280.0 / 720.0, 0.1, 200.0,
+            self.cam_pos,
+            self.cam_pos + fwd,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            1280.0 / 720.0,
+            0.1,
+            200.0,
         )
     }
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
     let h6 = h * 6.0;
-    let i  = h6.floor() as i32;
-    let f  = h6 - h6.floor();
-    let p  = v * (1.0 - s);
-    let q  = v * (1.0 - s * f);
-    let t  = v * (1.0 - s * (1.0 - f));
+    let i = h6.floor() as i32;
+    let f = h6 - h6.floor();
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
     match i % 6 {
-        0 => (v, t, p), 1 => (q, v, p), 2 => (p, v, t),
-        3 => (p, q, v), 4 => (t, p, v), _ => (v, p, q),
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
     }
 }
+

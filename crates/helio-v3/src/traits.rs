@@ -97,8 +97,8 @@ pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T> MaybeSync for T {}
 
-use crate::{PassContext, PrepareContext, Result};
 use crate::graph::ResourceBuilder;
+use crate::{PassContext, PrepareContext, Result};
 
 /// Core trait for all rendering passes.
 ///
@@ -583,3 +583,4 @@ pub trait GpuResource {
     /// ```
     fn grow(&mut self, device: &wgpu::Device, new_capacity: u32);
 }
+

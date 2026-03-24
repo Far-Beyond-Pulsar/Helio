@@ -154,7 +154,11 @@ fn mip_chain_total_texels_bounded_for_1024() {
     // Sum of geometric series 1024² + 512² + … < 2 × 1024².
     let base: u64 = 1024 * 1024;
     let total: u64 = (0..11).map(|i: u64| base >> (2 * i)).sum();
-    assert!(total < 2 * base, "mip chain total {total} must be < {}", 2 * base);
+    assert!(
+        total < 2 * base,
+        "mip chain total {total} must be < {}",
+        2 * base
+    );
 }
 
 // ── Public API contract ───────────────────────────────────────────────────────
@@ -166,3 +170,4 @@ fn hiz_build_pass_exposes_hiz_view_method() {
     const HAS_HIZ_VIEW_METHOD: bool = true;
     assert!(HAS_HIZ_VIEW_METHOD);
 }
+

@@ -78,7 +78,9 @@ impl<T, H: Handle> DenseArena<T, H> {
             return None;
         }
         let dense_index = meta.dense_index as usize;
-        self.dense.get_mut(dense_index).map(|value| (dense_index, value))
+        self.dense
+            .get_mut(dense_index)
+            .map(|value| (dense_index, value))
     }
 
     pub fn get_with_index(&self, handle: H) -> Option<(usize, &T)> {
@@ -87,7 +89,9 @@ impl<T, H: Handle> DenseArena<T, H> {
             return None;
         }
         let dense_index = meta.dense_index as usize;
-        self.dense.get(dense_index).map(|value| (dense_index, value))
+        self.dense
+            .get(dense_index)
+            .map(|value| (dense_index, value))
     }
 
     pub fn remove(&mut self, handle: H) -> Option<DenseRemove<T, H>> {
@@ -105,7 +109,10 @@ impl<T, H: Handle> DenseArena<T, H> {
             let moved_slot = self.dense_to_slot[dense_index] as usize;
             self.slots[moved_slot].dense_index = dense_index as u32;
             Some((
-                H::from_parts(self.dense_to_slot[dense_index], self.slots[moved_slot].generation),
+                H::from_parts(
+                    self.dense_to_slot[dense_index],
+                    self.slots[moved_slot].generation,
+                ),
                 dense_index,
             ))
         } else {
@@ -153,11 +160,7 @@ impl<T, H: Handle> SparsePool<T, H> {
             let entry = &mut self.slots[slot as usize];
             entry.value = Some(value);
             self.live_count += 1;
-            return (
-                H::from_parts(slot, entry.generation),
-                slot as usize,
-                false,
-            );
+            return (H::from_parts(slot, entry.generation), slot as usize, false);
         }
 
         let slot = self.slots.len() as u32;
@@ -219,3 +222,4 @@ impl<T, H: Handle> SparsePool<T, H> {
         !self.free_list.is_empty()
     }
 }
+

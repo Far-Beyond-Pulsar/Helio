@@ -10,8 +10,8 @@ use helio_pass_gbuffer::GBufferGlobals;
 //  ORM:       Rgba8Unorm   – 4 × 8-bit  = 32 bpp  (Occlusion/Roughness/Metallic)
 //  Emissive:  Rgba16Float  – 4 × 16-bit = 64 bpp  (HDR emissive colour)
 
-const ALBEDO_BYTES_PER_PIXEL: u32 = 4;   // 4 × 8-bit channels
-const NORMAL_BYTES_PER_PIXEL: u32 = 8;   // 4 × 16-bit channels
+const ALBEDO_BYTES_PER_PIXEL: u32 = 4; // 4 × 8-bit channels
+const NORMAL_BYTES_PER_PIXEL: u32 = 8; // 4 × 16-bit channels
 const ORM_BYTES_PER_PIXEL: u32 = 4;
 const EMISSIVE_BYTES_PER_PIXEL: u32 = 8;
 
@@ -199,3 +199,4 @@ fn padding_fields_zeroed_by_default() {
     assert_eq!(g._pad1, 0);
     assert_eq!(g._pad2, 0);
 }
+

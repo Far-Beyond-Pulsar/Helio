@@ -24,6 +24,7 @@
 //! - [`rebuild`]: GPU buffer rebuild for both persistent and optimized modes
 
 mod insert;
-mod update;
-mod remove;
 mod rebuild;
+mod remove;
+mod update;
+

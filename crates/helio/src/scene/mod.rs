@@ -69,17 +69,18 @@
 //! See the [GPU-Driven Pipeline](https://docs.farbeyondpulsar.com/helio/gpu-driven-pipeline)
 //! documentation for complete architectural details.
 
-mod errors;
-mod types;
 mod camera;
-mod helpers;
-mod resources;
-mod objects;
-mod groups;
-mod virtual_geometry;
 mod core;
+mod errors;
+mod groups;
+mod helpers;
+mod objects;
+mod resources;
+mod types;
+mod virtual_geometry;
 
-pub use errors::*;
-pub use types::ObjectDescriptor;
 pub use camera::Camera;
 pub use core::Scene;
+pub use errors::*;
+pub use types::ObjectDescriptor;
+

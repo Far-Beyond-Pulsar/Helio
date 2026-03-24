@@ -14,8 +14,8 @@
 //! intentional O(n) step documented as unavoidable for correct alpha-blending.
 //! A future OIT (Order-Independent Transparency) implementation would eliminate this sort.
 
-use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
 use bytemuck::{Pod, Zeroable};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -50,9 +50,7 @@ impl TransparentPass {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Transparent Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/transparent.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/transparent.wgsl").into()),
         });
 
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -62,45 +60,44 @@ impl TransparentPass {
             mapped_at_creation: false,
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("Transparent BGL"),
-                entries: &[
-                    // 0: camera uniform
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Transparent BGL"),
+            entries: &[
+                // 0: camera uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // 1: globals uniform
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // 1: globals uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // 2: instance_data storage
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // 2: instance_data storage
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Transparent BG"),
@@ -137,11 +134,31 @@ impl TransparentPass {
             array_stride: (3 + 1 + 2) * 4 + 2 * 4, // 32 bytes
             step_mode: wgpu::VertexStepMode::Vertex,
             attributes: &[
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0,  shader_location: 0 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32,   offset: 12, shader_location: 1 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x2, offset: 16, shader_location: 2 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 24, shader_location: 3 },
-                wgpu::VertexAttribute { format: wgpu::VertexFormat::Uint32,    offset: 28, shader_location: 4 },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x3,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32,
+                    offset: 12,
+                    shader_location: 1,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Float32x2,
+                    offset: 16,
+                    shader_location: 2,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 24,
+                    shader_location: 3,
+                },
+                wgpu::VertexAttribute {
+                    format: wgpu::VertexFormat::Uint32,
+                    offset: 28,
+                    shader_location: 4,
+                },
             ],
         };
 
@@ -227,13 +244,11 @@ impl RenderPass for TransparentPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = ctx
-            .frame
-            .main_scene
-            .as_ref()
-            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+        let main_scene = ctx.frame.main_scene.as_ref().ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
                 "TransparentPass requires main_scene mesh buffers".to_string(),
-            ))?;
+            )
+        })?;
         let indirect = ctx.scene.indirect;
 
         // Load existing colour (preserves opaque geometry rendered earlier).
@@ -282,3 +297,4 @@ impl RenderPass for TransparentPass {
         Ok(())
     }
 }
+

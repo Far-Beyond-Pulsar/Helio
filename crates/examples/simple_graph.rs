@@ -25,9 +25,9 @@ use winit::{
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
-const LOOK_SENS:  f32 = 0.002;
-const FLY_SPEED:  f32 = 3.0;
-const DRAG:       f32 = 8.0;
+const LOOK_SENS: f32 = 0.002;
+const FLY_SPEED: f32 = 3.0;
+const DRAG: f32 = 8.0;
 
 // ── app ───────────────────────────────────────────────────────────────────────
 
@@ -36,21 +36,21 @@ struct App {
 }
 
 struct AppState {
-    window:         Arc<Window>,
-    surface:        wgpu::Surface<'static>,
-    device:         Arc<wgpu::Device>,
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
-    renderer:       Renderer,
-    last_frame:     Instant,
+    renderer: Renderer,
+    last_frame: Instant,
     // fly camera state
-    cam_pos:        Vec3,
-    yaw:            f32,
-    pitch:          f32,
-    velocity:       Vec3,
+    cam_pos: Vec3,
+    yaw: f32,
+    pitch: f32,
+    velocity: Vec3,
     // input
-    keys:           HashSet<KeyCode>,
+    keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
-    mouse_delta:    (f32, f32),
+    mouse_delta: (f32, f32),
 }
 
 impl AppState {
@@ -58,27 +58,41 @@ impl AppState {
         // apply mouse look
         let (dx, dy) = self.mouse_delta;
         self.mouse_delta = (0.0, 0.0);
-        self.yaw   -= dx * LOOK_SENS;
-        self.pitch  = (self.pitch - dy * LOOK_SENS).clamp(-1.5, 1.5);
+        self.yaw -= dx * LOOK_SENS;
+        self.pitch = (self.pitch - dy * LOOK_SENS).clamp(-1.5, 1.5);
 
         let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
         let forward = orientation * -Vec3::Z;
-        let right   = orientation *  Vec3::X;
-        let up      = Vec3::Y;
+        let right = orientation * Vec3::X;
+        let up = Vec3::Y;
 
         // accumulate thrust
         let mut accel = Vec3::ZERO;
-        if self.keys.contains(&KeyCode::KeyW)     { accel += forward; }
-        if self.keys.contains(&KeyCode::KeyS)     { accel -= forward; }
-        if self.keys.contains(&KeyCode::KeyA)     { accel -= right; }
-        if self.keys.contains(&KeyCode::KeyD)     { accel += right; }
-        if self.keys.contains(&KeyCode::Space)    { accel += up; }
-        if self.keys.contains(&KeyCode::ShiftLeft){ accel -= up; }
-        if accel.length_squared() > 0.0 { accel = accel.normalize(); }
+        if self.keys.contains(&KeyCode::KeyW) {
+            accel += forward;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            accel -= forward;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            accel -= right;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            accel += right;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            accel += up;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            accel -= up;
+        }
+        if accel.length_squared() > 0.0 {
+            accel = accel.normalize();
+        }
 
         self.velocity += accel * FLY_SPEED * dt;
         self.velocity /= 1.0 + DRAG * dt;
-        self.cam_pos  += self.velocity * dt;
+        self.cam_pos += self.velocity * dt;
 
         // keep the cube loosely in view: soft pull toward a good viewing angle
         // (optional, comment out if pure free-fly is preferred)
@@ -92,7 +106,7 @@ impl AppState {
     fn camera(&self, width: u32, height: u32) -> Camera {
         let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
         let target = self.cam_pos + orientation * -Vec3::Z;
-        let up     = orientation *  Vec3::Y;
+        let up = orientation * Vec3::Y;
         Camera::perspective_look_at(
             self.cam_pos,
             target,
@@ -113,7 +127,9 @@ impl App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.state.is_some() {
+            return;
+        }
 
         // ── window ────────────────────────────────────────────────────────────
         let window = Arc::new(
@@ -128,39 +144,43 @@ impl ApplicationHandler for App {
 
         // ── wgpu ──────────────────────────────────────────────────────────────
         let instance = wgpu::Instance::default();
-        let surface  = instance.create_surface(window.clone()).expect("create surface");
-        let adapter  = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference:       wgpu::PowerPreference::HighPerformance,
-            compatible_surface:     Some(&surface),
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("create surface");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
         .expect("no adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits:   required_wgpu_limits(adapter.limits()),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }))
         .expect("no device");
         let device = Arc::new(device);
-        let queue  = Arc::new(queue);
+        let queue = Arc::new(queue);
 
-        let caps           = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
-        let size           = window.inner_size();
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
+        let size = window.inner_size();
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
-                usage:                          wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format:                         surface_format,
-                width:                          size.width,
-                height:                         size.height,
-                present_mode:                   wgpu::PresentMode::Fifo,
-                alpha_mode:                     caps.alpha_modes[0],
-                view_formats:                   vec![],
-                desired_maximum_frame_latency:  2,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: surface_format,
+                width: size.width,
+                height: size.height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
             },
         );
 
@@ -176,14 +196,14 @@ impl ApplicationHandler for App {
             device,
             surface_format,
             renderer,
-            last_frame:     Instant::now(),
-            cam_pos:        Vec3::new(0.0, 0.8, 4.0),
-            yaw:            0.0,
-            pitch:          -0.18,
-            velocity:       Vec3::ZERO,
-            keys:           HashSet::new(),
+            last_frame: Instant::now(),
+            cam_pos: Vec3::new(0.0, 0.8, 4.0),
+            yaw: 0.0,
+            pitch: -0.18,
+            velocity: Vec3::ZERO,
+            keys: HashSet::new(),
             cursor_grabbed: false,
-            mouse_delta:    (0.0, 0.0),
+            mouse_delta: (0.0, 0.0),
         });
     }
 
@@ -193,11 +213,12 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state:        ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -213,38 +234,45 @@ impl ApplicationHandler for App {
                 state.surface.configure(
                     &state.device,
                     &wgpu::SurfaceConfiguration {
-                        usage:                          wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format:                         state.surface_format,
-                        width:                          size.width,
-                        height:                         size.height,
-                        present_mode:                   wgpu::PresentMode::Fifo,
-                        alpha_mode:                     wgpu::CompositeAlphaMode::Opaque,
-                        view_formats:                   vec![],
-                        desired_maximum_frame_latency:  2,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format: state.surface_format,
+                        width: size.width,
+                        height: size.height,
+                        present_mode: wgpu::PresentMode::Fifo,
+                        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                        view_formats: vec![],
+                        desired_maximum_frame_latency: 2,
                     },
                 );
                 state.renderer.set_render_size(size.width, size.height);
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state:        key_state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
                 ..
             } => match key_state {
-                ElementState::Pressed  => { state.keys.insert(code); }
-                ElementState::Released => { state.keys.remove(&code); }
+                ElementState::Pressed => {
+                    state.keys.insert(code);
+                }
+                ElementState::Released => {
+                    state.keys.remove(&code);
+                }
             },
 
             WindowEvent::MouseInput {
-                state:  ElementState::Pressed,
+                state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let ok = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if ok {
@@ -256,18 +284,23 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
-                let dt  = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
+                let dt = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
                 state.last_frame = now;
                 state.update(dt);
 
-                let size   = state.window.inner_size();
+                let size = state.window.inner_size();
                 let camera = state.camera(size.width, size.height);
 
                 let output = match state.surface.get_current_texture() {
-                    Ok(t)  => t,
-                    Err(e) => { log::warn!("surface error: {:?}", e); return; }
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::warn!("surface error: {:?}", e);
+                        return;
+                    }
                 };
-                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
@@ -303,3 +336,4 @@ fn main() {
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
+

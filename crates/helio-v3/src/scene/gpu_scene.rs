@@ -70,13 +70,12 @@
 //! // let mesh_buffer = resources.meshes.buffer();   // &wgpu::Buffer
 //! ```
 
-use std::sync::Arc;
-use crate::scene::SceneResources;
 use crate::scene::managers::{
-    GpuCameraBuffer, GpuInstanceBuffer, GpuAabbBuffer, GpuDrawCallBuffer,
-    GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
-    GpuIndirectBuffer, GpuVisibilityBuffer,
+    GpuAabbBuffer, GpuCameraBuffer, GpuDrawCallBuffer, GpuIndirectBuffer, GpuInstanceBuffer,
+    GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer, GpuVisibilityBuffer,
 };
+use crate::scene::SceneResources;
+use std::sync::Arc;
 
 /// GPU-native scene container with dirty-tracked state.
 ///
@@ -329,3 +328,4 @@ impl GpuScene {
         self.visibility.flush(&queue);
     }
 }
+

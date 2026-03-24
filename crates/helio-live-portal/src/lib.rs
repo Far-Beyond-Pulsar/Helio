@@ -16,11 +16,12 @@ async fn serve_js(axum::extract::Path(file): axum::extract::Path<String>) -> imp
     match tokio::fs::read(&path).await {
         Ok(data) => (
             [
-                (axum::http::header::CONTENT_TYPE,  "application/javascript"),
+                (axum::http::header::CONTENT_TYPE, "application/javascript"),
                 (axum::http::header::CACHE_CONTROL, "no-store"),
             ],
-            data
-        ).into_response(),
+            data,
+        )
+            .into_response(),
         Err(_) => {
             eprintln!("serve_js missing {}", path.display());
             axum::http::StatusCode::NOT_FOUND.into_response()
@@ -32,18 +33,19 @@ async fn serve_vendor(axum::extract::Path(file): axum::extract::Path<String>) ->
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/vendor");
     let path = base.join(&file);
     let mime = match path.extension().and_then(|e| e.to_str()) {
-        Some("js")  => "application/javascript",
+        Some("js") => "application/javascript",
         Some("css") => "text/css",
-        _           => "application/octet-stream",
+        _ => "application/octet-stream",
     };
     match tokio::fs::read(&path).await {
         Ok(data) => (
             [
-                (axum::http::header::CONTENT_TYPE,  mime),
+                (axum::http::header::CONTENT_TYPE, mime),
                 (axum::http::header::CACHE_CONTROL, "no-store"),
             ],
-            data
-        ).into_response(),
+            data,
+        )
+            .into_response(),
         Err(_) => {
             eprintln!("serve_vendor missing {}", path.display());
             axum::http::StatusCode::NOT_FOUND.into_response()
@@ -57,8 +59,9 @@ async fn serve_static(axum::extract::Path(file): axum::extract::Path<String>) ->
     match tokio::fs::read(&path).await {
         Ok(data) => (
             [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
-            data
-        ).into_response(),
+            data,
+        )
+            .into_response(),
         Err(_) => {
             eprintln!("serve_static missing {}", path.display());
             axum::http::StatusCode::NOT_FOUND.into_response()
@@ -133,17 +136,17 @@ pub struct PortalSceneLayoutDelta {
     pub moved_object_ids: Vec<u32>,
     /// Object IDs to remove (not present in object_changes)
     pub removed_object_ids: Vec<u32>,
-    
+
     /// Lights to add or update
     pub light_changes: Vec<PortalSceneLight>,
     /// Light IDs to remove
     pub removed_light_ids: Vec<u32>,
-    
+
     /// Billboards to add or update
     pub billboard_changes: Vec<PortalSceneBillboard>,
     /// Billboard IDs to remove
     pub removed_billboard_ids: Vec<u32>,
-    
+
     /// Only present if camera changed
     pub camera: Option<Option<PortalSceneCamera>>,
 }
@@ -221,7 +224,10 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
             {
                 Ok(rt) => rt,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())));
+                    let _ = ready_tx.send(Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        e.to_string(),
+                    )));
                     return;
                 }
             };
@@ -233,8 +239,8 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                 let bridge_thread = std::thread::Builder::new()
                     .name("helio-live-portal-bridge".to_string())
                     .spawn(move || {
-                        use std::time::Duration;
                         use std::sync::mpsc::RecvTimeoutError;
+                        use std::time::Duration;
 
                         let mut buffer = Vec::new();
                         loop {
@@ -327,3 +333,4 @@ async fn ws_client(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
 }
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
+

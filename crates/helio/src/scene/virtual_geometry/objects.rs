@@ -9,9 +9,9 @@ use crate::arena::DenseRemove;
 use crate::handles::VirtualObjectId;
 use crate::vg::VirtualObjectDescriptor;
 
-use super::super::errors::{Result, invalid};
-use super::super::types::VirtualObjectRecord;
+use super::super::errors::{invalid, Result};
 use super::super::helpers::normal_matrix;
+use super::super::types::VirtualObjectRecord;
 
 impl super::super::Scene {
     /// Place an instance of a virtual mesh into the scene.
@@ -180,3 +180,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

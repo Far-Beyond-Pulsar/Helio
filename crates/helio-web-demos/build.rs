@@ -16,10 +16,10 @@ use std::path::{Path, PathBuf};
 // ── Demo catalogue ─────────────────────────────────────────────────────────────
 
 struct Demo {
-    name:        &'static str,
-    title:       &'static str,
+    name: &'static str,
+    title: &'static str,
     description: &'static str,
-    controls:    &'static str,
+    controls: &'static str,
 }
 
 const DEMOS: &[Demo] = &[
@@ -129,24 +129,27 @@ fn demo_html(demo: &Demo) -> String {
 </body>
 </html>
 "#,
-        title    = demo.title,
+        title = demo.title,
         controls = demo.controls,
     )
 }
 
 fn index_html(demos: &[Demo]) -> String {
-    let cards: String = demos.iter().map(|d| {
-        format!(
-            r#"    <a class="card" href="{name}/">
+    let cards: String = demos
+        .iter()
+        .map(|d| {
+            format!(
+                r#"    <a class="card" href="{name}/">
       <div class="card-title">{title}</div>
       <div class="card-desc">{description}</div>
     </a>
 "#,
-            name        = d.name,
-            title       = d.title,
-            description = d.description,
-        )
-    }).collect();
+                name = d.name,
+                title = d.title,
+                description = d.description,
+            )
+        })
+        .collect();
 
     format!(
         r#"<!DOCTYPE html>
@@ -192,7 +195,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
-    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set"));
 
     // Derive workspace root (crates/helio-web-demos -> ../../)
     let workspace_root = manifest_dir.join("..").join("..").canonicalize().ok();
@@ -210,7 +214,10 @@ fn main() {
         if let Some(ref root) = workspace_root {
             let prebuilt_dir = root.join("target").join("wasm-prebuilt").join(demo.name);
             if let Err(e) = fs::create_dir_all(&prebuilt_dir) {
-                eprintln!("cargo:warning=could not create {}: {e}", prebuilt_dir.display());
+                eprintln!(
+                    "cargo:warning=could not create {}: {e}",
+                    prebuilt_dir.display()
+                );
             } else {
                 let dest = prebuilt_dir.join("index.html");
                 if let Err(e) = fs::write(&dest, &html) {
@@ -233,3 +240,4 @@ fn main() {
         }
     }
 }
+

@@ -10,8 +10,7 @@
 /// Returns `true` if the sphere is fully or partially inside the half-space
 /// defined by `plane = [nx, ny, nz, d]`.
 fn sphere_vs_plane(plane: [f32; 4], center: [f32; 3], radius: f32) -> bool {
-    let dist =
-        plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
+    let dist = plane[0] * center[0] + plane[1] * center[1] + plane[2] * center[2] + plane[3];
     dist >= -radius
 }
 
@@ -22,15 +21,21 @@ fn sphere_in_frustum(planes: &[[f32; 4]; 6], center: [f32; 3], radius: f32) -> b
 
 // ── Box frustum: x∈[-1,1], y∈[-1,1], z∈[-1,100] ─────────────────────────────
 
-const NEAR_PLANE:   [f32; 4] = [ 0.0,  0.0,  1.0,   1.0]; // z >= -1
-const FAR_PLANE:    [f32; 4] = [ 0.0,  0.0, -1.0, 100.0]; // z <=  100
-const LEFT_PLANE:   [f32; 4] = [ 1.0,  0.0,  0.0,   1.0]; // x >= -1
-const RIGHT_PLANE:  [f32; 4] = [-1.0,  0.0,  0.0,   1.0]; // x <=  1
-const BOTTOM_PLANE: [f32; 4] = [ 0.0,  1.0,  0.0,   1.0]; // y >= -1
-const TOP_PLANE:    [f32; 4] = [ 0.0, -1.0,  0.0,   1.0]; // y <=  1
+const NEAR_PLANE: [f32; 4] = [0.0, 0.0, 1.0, 1.0]; // z >= -1
+const FAR_PLANE: [f32; 4] = [0.0, 0.0, -1.0, 100.0]; // z <=  100
+const LEFT_PLANE: [f32; 4] = [1.0, 0.0, 0.0, 1.0]; // x >= -1
+const RIGHT_PLANE: [f32; 4] = [-1.0, 0.0, 0.0, 1.0]; // x <=  1
+const BOTTOM_PLANE: [f32; 4] = [0.0, 1.0, 0.0, 1.0]; // y >= -1
+const TOP_PLANE: [f32; 4] = [0.0, -1.0, 0.0, 1.0]; // y <=  1
 
-const BOX_FRUSTUM: [[f32; 4]; 6] =
-    [NEAR_PLANE, FAR_PLANE, LEFT_PLANE, RIGHT_PLANE, BOTTOM_PLANE, TOP_PLANE];
+const BOX_FRUSTUM: [[f32; 4]; 6] = [
+    NEAR_PLANE,
+    FAR_PLANE,
+    LEFT_PLANE,
+    RIGHT_PLANE,
+    BOTTOM_PLANE,
+    TOP_PLANE,
+];
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
@@ -121,8 +126,7 @@ fn sphere_near_corner_is_visible() {
 #[test]
 fn all_box_frustum_normals_are_unit_length() {
     for plane in &BOX_FRUSTUM {
-        let len =
-            (plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]).sqrt();
+        let len = (plane[0] * plane[0] + plane[1] * plane[1] + plane[2] * plane[2]).sqrt();
         assert!(
             (len - 1.0).abs() < 1e-6,
             "plane {plane:?} normal length is {len}, expected 1.0"
@@ -166,3 +170,4 @@ fn sphere_just_outside_multiple_planes_is_culled() {
     // Object at (0, 0, 200) with radius 50 is still outside the far plane.
     assert!(!sphere_in_frustum(&BOX_FRUSTUM, [0.0, 0.0, 200.0], 50.0));
 }
+

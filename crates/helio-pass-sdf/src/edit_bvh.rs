@@ -20,14 +20,20 @@ impl Aabb {
 
     pub fn from_point_radius(center: Vec3, radius: f32) -> Self {
         let r = Vec3::splat(radius);
-        Self { min: center - r, max: center + r }
+        Self {
+            min: center - r,
+            max: center + r,
+        }
     }
 
     /// Returns true if this AABB overlaps with `other` (inclusive).
     pub fn overlaps(&self, other: &Aabb) -> bool {
-        self.min.x <= other.max.x && self.max.x >= other.min.x &&
-        self.min.y <= other.max.y && self.max.y >= other.min.y &&
-        self.min.z <= other.max.z && self.max.z >= other.min.z
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
     }
 
     /// Expand to contain `other`.
@@ -47,7 +53,10 @@ impl Aabb {
     /// Expand by `margin` on all sides.
     pub fn expand(&self, margin: f32) -> Aabb {
         let m = Vec3::splat(margin);
-        Aabb { min: self.min - m, max: self.max + m }
+        Aabb {
+            min: self.min - m,
+            max: self.max + m,
+        }
     }
 }
 
@@ -66,11 +75,25 @@ struct Node {
 
 impl Node {
     fn new_leaf(aabb: Aabb, edit_idx: usize) -> Self {
-        Node { aabb, parent: NULL, left: NULL, right: NULL, edit_idx, height: 0 }
+        Node {
+            aabb,
+            parent: NULL,
+            left: NULL,
+            right: NULL,
+            edit_idx,
+            height: 0,
+        }
     }
 
     fn new_internal(aabb: Aabb) -> Self {
-        Node { aabb, parent: NULL, left: NULL, right: NULL, edit_idx: NULL, height: 1 }
+        Node {
+            aabb,
+            parent: NULL,
+            left: NULL,
+            right: NULL,
+            edit_idx: NULL,
+            height: 1,
+        }
     }
 
     fn is_leaf(&self) -> bool {
@@ -143,8 +166,13 @@ impl EditBvh {
             let fat_aabb = new_aabb.expand(self.fat_margin);
             // If new AABB still fits within the existing fat one, no reinsert needed.
             let cur = self.nodes[leaf].aabb;
-            if cur.min.x <= fat_aabb.min.x && cur.min.y <= fat_aabb.min.y && cur.min.z <= fat_aabb.min.z
-            && cur.max.x >= fat_aabb.max.x && cur.max.y >= fat_aabb.max.y && cur.max.z >= fat_aabb.max.z {
+            if cur.min.x <= fat_aabb.min.x
+                && cur.min.y <= fat_aabb.min.y
+                && cur.min.z <= fat_aabb.min.z
+                && cur.max.x >= fat_aabb.max.x
+                && cur.max.y >= fat_aabb.max.y
+                && cur.max.z >= fat_aabb.max.z
+            {
                 return; // Fits within existing fat AABB.
             }
             self.remove_leaf(leaf);
@@ -157,17 +185,25 @@ impl EditBvh {
 
     /// Returns all edit indices whose AABBs overlap `query`.
     pub fn query_aabb(&self, query: &Aabb, results: &mut Vec<usize>) {
-        if self.root == NULL { return; }
+        if self.root == NULL {
+            return;
+        }
         let mut stack = Vec::new();
         stack.push(self.root);
         while let Some(idx) = stack.pop() {
             let node = &self.nodes[idx];
-            if !node.aabb.overlaps(query) { continue; }
+            if !node.aabb.overlaps(query) {
+                continue;
+            }
             if node.is_leaf() {
                 results.push(node.edit_idx);
             } else {
-                if node.left != NULL { stack.push(node.left); }
-                if node.right != NULL { stack.push(node.right); }
+                if node.left != NULL {
+                    stack.push(node.left);
+                }
+                if node.right != NULL {
+                    stack.push(node.right);
+                }
             }
         }
     }
@@ -207,14 +243,16 @@ impl EditBvh {
 
     fn find_best_sibling(&self, aabb: Aabb) -> usize {
         // Greedy best-first search for minimum cost insertion.
-        use std::collections::BinaryHeap;
         use std::cmp::Ordering;
+        use std::collections::BinaryHeap;
 
         #[derive(PartialEq)]
         struct Entry(f32, usize);
         impl Eq for Entry {}
         impl PartialOrd for Entry {
-            fn partial_cmp(&self, other: &Self) -> Option<Ordering> { Some(self.cmp(other)) }
+            fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+                Some(self.cmp(other))
+            }
         }
         impl Ord for Entry {
             fn cmp(&self, other: &Self) -> Ordering {
@@ -241,8 +279,12 @@ impl EditBvh {
                 // Lower bound on child costs.
                 let lower = leaf_area + inherited_cost + node.aabb.half_area();
                 if lower < best_cost {
-                    if node.left != NULL { queue.push(Entry(-lower, node.left)); }
-                    if node.right != NULL { queue.push(Entry(-lower, node.right)); }
+                    if node.left != NULL {
+                        queue.push(Entry(-lower, node.left));
+                    }
+                    if node.right != NULL {
+                        queue.push(Entry(-lower, node.right));
+                    }
                 }
             }
         }
@@ -309,7 +351,11 @@ impl EditBvh {
     }
 
     fn height(&self, idx: usize) -> i32 {
-        if idx == NULL { -1 } else { self.nodes[idx].height }
+        if idx == NULL {
+            -1
+        } else {
+            self.nodes[idx].height
+        }
     }
 
     fn balance(&mut self, a: usize) -> usize {
@@ -350,24 +396,60 @@ impl EditBvh {
         if hf > hg {
             self.nodes[c].right = f;
             self.nodes[a].right = g;
-            if f != NULL { self.nodes[f].parent = c; }
-            if g != NULL { self.nodes[g].parent = a; }
-            let ab = if b != NULL { self.nodes[b].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let gb = if g != NULL { self.nodes[g].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let fb = if f != NULL { self.nodes[f].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            if b != NULL && g != NULL { self.nodes[a].aabb = ab.union(gb); }
+            if f != NULL {
+                self.nodes[f].parent = c;
+            }
+            if g != NULL {
+                self.nodes[g].parent = a;
+            }
+            let ab = if b != NULL {
+                self.nodes[b].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let gb = if g != NULL {
+                self.nodes[g].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let fb = if f != NULL {
+                self.nodes[f].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            if b != NULL && g != NULL {
+                self.nodes[a].aabb = ab.union(gb);
+            }
             self.nodes[a].height = 1 + self.height(b).max(self.height(g));
             self.nodes[c].aabb = self.nodes[a].aabb.union(fb);
             self.nodes[c].height = 1 + self.nodes[a].height.max(self.height(f));
         } else {
             self.nodes[c].right = g;
             self.nodes[a].right = f;
-            if g != NULL { self.nodes[g].parent = c; }
-            if f != NULL { self.nodes[f].parent = a; }
-            let ab = if b != NULL { self.nodes[b].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let fb = if f != NULL { self.nodes[f].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let gb = if g != NULL { self.nodes[g].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            if b != NULL && f != NULL { self.nodes[a].aabb = ab.union(fb); }
+            if g != NULL {
+                self.nodes[g].parent = c;
+            }
+            if f != NULL {
+                self.nodes[f].parent = a;
+            }
+            let ab = if b != NULL {
+                self.nodes[b].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let fb = if f != NULL {
+                self.nodes[f].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let gb = if g != NULL {
+                self.nodes[g].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            if b != NULL && f != NULL {
+                self.nodes[a].aabb = ab.union(fb);
+            }
             self.nodes[a].height = 1 + self.height(b).max(self.height(f));
             self.nodes[c].aabb = self.nodes[a].aabb.union(gb);
             self.nodes[c].height = 1 + self.nodes[a].height.max(self.height(g));
@@ -394,24 +476,60 @@ impl EditBvh {
         if hd > he {
             self.nodes[b].right = d;
             self.nodes[a].left = e;
-            if d != NULL { self.nodes[d].parent = b; }
-            if e != NULL { self.nodes[e].parent = a; }
-            let cb = if c != NULL { self.nodes[c].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let eb = if e != NULL { self.nodes[e].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let db = if d != NULL { self.nodes[d].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            if c != NULL && e != NULL { self.nodes[a].aabb = cb.union(eb); }
+            if d != NULL {
+                self.nodes[d].parent = b;
+            }
+            if e != NULL {
+                self.nodes[e].parent = a;
+            }
+            let cb = if c != NULL {
+                self.nodes[c].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let eb = if e != NULL {
+                self.nodes[e].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let db = if d != NULL {
+                self.nodes[d].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            if c != NULL && e != NULL {
+                self.nodes[a].aabb = cb.union(eb);
+            }
             self.nodes[a].height = 1 + self.height(c).max(self.height(e));
             self.nodes[b].aabb = self.nodes[a].aabb.union(db);
             self.nodes[b].height = 1 + self.nodes[a].height.max(self.height(d));
         } else {
             self.nodes[b].right = e;
             self.nodes[a].left = d;
-            if e != NULL { self.nodes[e].parent = b; }
-            if d != NULL { self.nodes[d].parent = a; }
-            let cb = if c != NULL { self.nodes[c].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let db = if d != NULL { self.nodes[d].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            let eb = if e != NULL { self.nodes[e].aabb } else { Aabb::new(Vec3::ZERO, Vec3::ZERO) };
-            if c != NULL && d != NULL { self.nodes[a].aabb = cb.union(db); }
+            if e != NULL {
+                self.nodes[e].parent = b;
+            }
+            if d != NULL {
+                self.nodes[d].parent = a;
+            }
+            let cb = if c != NULL {
+                self.nodes[c].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let db = if d != NULL {
+                self.nodes[d].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            let eb = if e != NULL {
+                self.nodes[e].aabb
+            } else {
+                Aabb::new(Vec3::ZERO, Vec3::ZERO)
+            };
+            if c != NULL && d != NULL {
+                self.nodes[a].aabb = cb.union(db);
+            }
             self.nodes[a].height = 1 + self.height(c).max(self.height(d));
             self.nodes[b].aabb = self.nodes[a].aabb.union(eb);
             self.nodes[b].height = 1 + self.nodes[a].height.max(self.height(e));
@@ -421,5 +539,8 @@ impl EditBvh {
 }
 
 impl Default for EditBvh {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
+

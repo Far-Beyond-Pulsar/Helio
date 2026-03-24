@@ -18,7 +18,8 @@
 //!
 //! Lights are not reference-counted and can be removed at any time.
 
+mod lights;
+mod materials;
 mod meshes;
 mod textures;
-mod materials;
-mod lights;
+

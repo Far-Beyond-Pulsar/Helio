@@ -3,13 +3,13 @@
 //! Maintains a 3D grid of `BrickState` values; manages GPU atlas allocation
 //! and toroidal scrolling when the camera moves.
 
-use std::collections::HashMap;
-use glam::Vec3;
 use crate::edit_bvh::{Aabb, EditBvh};
-use crate::terrain::TerrainConfig;
-use crate::noise::{terrain_sdf, terrain_height_range};
 use crate::edit_list::GpuSdfEdit;
+use crate::noise::{terrain_height_range, terrain_sdf};
+use crate::terrain::TerrainConfig;
 use crate::uniforms::SdfGridParams;
+use glam::Vec3;
+use std::collections::HashMap;
 
 /// State of one brick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,7 +204,9 @@ impl BrickMap {
                     let wy = new_origin[1] + by;
                     let wz = new_origin[2] + bz;
                     let in_shell = Self::in_scroll_shell(bx, by, bz, delta, gd);
-                    if !in_shell { continue; }
+                    if !in_shell {
+                        continue;
+                    }
                     let tx = ((bx - new_origin[0]).rem_euclid(gd)) as usize;
                     let ty = ((by - new_origin[1]).rem_euclid(gd)) as usize;
                     let tz = ((bz - new_origin[2]).rem_euclid(gd)) as usize;
@@ -219,9 +221,9 @@ impl BrickMap {
     }
 
     fn in_scroll_shell(bx: i32, by: i32, bz: i32, delta: [i32; 3], gd: i32) -> bool {
-        (delta[0] != 0 && (bx == 0 || bx == gd - 1)) ||
-        (delta[1] != 0 && (by == 0 || by == gd - 1)) ||
-        (delta[2] != 0 && (bz == 0 || bz == gd - 1))
+        (delta[0] != 0 && (bx == 0 || bx == gd - 1))
+            || (delta[1] != 0 && (by == 0 || by == gd - 1))
+            || (delta[2] != 0 && (bz == 0 || bz == gd - 1))
     }
 
     fn brick_overlaps_surface(
@@ -323,9 +325,18 @@ impl BrickMap {
     /// Upload all dirty bricks' GPU buffers (active list + brick index).
     pub fn upload(&self, queue: &wgpu::Queue) {
         if let Some(buf) = &self.active_brick_buf {
-            let active: Vec<u32> = self.states.iter().enumerate().filter_map(|(i, s)| {
-                if matches!(s, BrickState::Active(_)) { Some(i as u32) } else { None }
-            }).collect();
+            let active: Vec<u32> = self
+                .states
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    if matches!(s, BrickState::Active(_)) {
+                        Some(i as u32)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             queue.write_buffer(buf, 0, bytemuck::cast_slice(&active));
         }
         if let Some(buf) = &self.brick_index_buf {
@@ -345,12 +356,17 @@ impl BrickMap {
     pub fn upload_dirty(&mut self, queue: &wgpu::Queue) {
         self.upload(queue);
         // Clear dirty flags.
-        for d in &mut self.dirty { *d = false; }
+        for d in &mut self.dirty {
+            *d = false;
+        }
     }
 
     /// How many active bricks this level currently has.
     pub fn active_count(&self) -> u32 {
-        self.states.iter().filter(|s| matches!(s, BrickState::Active(_))).count() as u32
+        self.states
+            .iter()
+            .filter(|s| matches!(s, BrickState::Active(_)))
+            .count() as u32
     }
 
     /// Build SdfGridParams for this level.
@@ -367,3 +383,4 @@ impl BrickMap {
         )
     }
 }
+

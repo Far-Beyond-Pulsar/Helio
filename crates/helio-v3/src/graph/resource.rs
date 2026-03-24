@@ -266,12 +266,7 @@ impl ResourceBuilder {
     ///
     /// - **O(1)**: Pushes to pre-allocated Vec
     /// - **Zero allocations**: Uses `&'static str`
-    pub fn write_color(
-        &mut self,
-        name: &'static str,
-        format: ResourceFormat,
-        size: ResourceSize,
-    ) {
+    pub fn write_color(&mut self, name: &'static str, format: ResourceFormat, size: ResourceSize) {
         self.declarations.push(ResourceDecl {
             name,
             format: Some(format),
@@ -365,3 +360,4 @@ impl ResourceHandle {
         }
     }
 }
+

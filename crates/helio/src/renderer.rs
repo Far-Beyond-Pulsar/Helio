@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use arrayvec::ArrayVec;
-use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 use helio_pass_billboard::BillboardPass;
-use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_depth_prepass::DepthPrepassPass;
 use helio_pass_fxaa::FxaaPass;
@@ -13,6 +11,8 @@ use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_transparent::TransparentPass;
+use helio_pass_virtual_geometry::VirtualGeometryPass;
+use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 
 // TODO: Add these passes once cross-reference issues are resolved:
 // - SkyPass (needs sky_lut_view from SkyLutPass)
@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 use crate::groups::{GroupId, GroupMask};
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId, VirtualObjectId};
-use crate::material::{MaterialAsset, MAX_TEXTURES, TextureUpload};
+use crate::material::{MaterialAsset, TextureUpload, MAX_TEXTURES};
 use crate::mesh::{MeshBuffers, MeshUpload};
 use crate::scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene};
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
@@ -37,7 +37,7 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::empty();
     let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT // compacted indirect count buffer
-        | wgpu::Features::SHADER_PRIMITIVE_INDEX;   // @builtin(primitive_index) in fs
+        | wgpu::Features::SHADER_PRIMITIVE_INDEX; // @builtin(primitive_index) in fs
     required | (adapter_features & optional)
 }
 
@@ -161,11 +161,7 @@ enum GraphKind {
 }
 
 impl Renderer {
-    pub fn new(
-        device: Arc<wgpu::Device>,
-        queue: Arc<wgpu::Queue>,
-        config: RendererConfig,
-    ) -> Self {
+    pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, config: RendererConfig) -> Self {
         let mut scene = Scene::new(device.clone(), queue.clone());
         scene.set_render_size(config.width, config.height);
 
@@ -272,7 +268,10 @@ impl Renderer {
         let config = RendererConfig::new(width, height, self.surface_format)
             .with_gi_config(self.gi_config)
             .with_shadow_quality(self.shadow_quality);
-        let config = RendererConfig { debug_mode: self.debug_mode, ..config };
+        let config = RendererConfig {
+            debug_mode: self.debug_mode,
+            ..config
+        };
         match self.graph_kind {
             GraphKind::Default => {
                 self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
@@ -312,12 +311,12 @@ impl Renderer {
     /// Convenience helper: switch back to the full deferred graph.
     pub fn use_default_graph(&mut self) {
         let config = RendererConfig {
-            width:          self.depth_texture.size().width,
-            height:         self.depth_texture.size().height,
+            width: self.depth_texture.size().width,
+            height: self.depth_texture.size().height,
             surface_format: self.surface_format,
-            gi_config:      self.gi_config,
+            gi_config: self.gi_config,
             shadow_quality: self.shadow_quality,
-            debug_mode:     self.debug_mode,
+            debug_mode: self.debug_mode,
         };
         self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         self.graph_kind = GraphKind::Default;
@@ -474,16 +473,15 @@ impl Renderer {
     /// Call once per frame (or whenever the billboard set changes).
     /// Billboards are camera-facing quads rendered with alpha blending on top of
     /// the opaque scene.  Pass an empty slice to disable billboards entirely.
-    pub fn set_billboard_instances(&mut self, instances: &[helio_pass_billboard::BillboardInstance]) {
+    pub fn set_billboard_instances(
+        &mut self,
+        instances: &[helio_pass_billboard::BillboardInstance],
+    ) {
         self.billboard_instances.clear();
         self.billboard_instances.extend_from_slice(instances);
     }
 
-    pub fn render(
-        &mut self,
-        camera: &Camera,
-        target: &wgpu::TextureView,
-    ) -> HelioResult<()> {
+    pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         self.scene.update_camera(*camera);
         self.scene.flush();
 
@@ -491,18 +489,20 @@ impl Renderer {
         //   1. User-supplied instances (set via set_billboard_instances)
         //   2. Auto editor-light icons when GroupId::EDITOR is visible
         self.billboard_scratch.clear();
-        self.billboard_scratch.extend_from_slice(&self.billboard_instances);
+        self.billboard_scratch
+            .extend_from_slice(&self.billboard_instances);
         if !self.scene.is_group_hidden(GroupId::EDITOR) {
             for (_, light) in &self.editor_lights {
                 let [x, y, z, _] = light.position_range;
                 let [r, g, b, _] = light.color_intensity;
-                self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
-                    world_pos:   [x, y, z, 0.0],
-                    // scale_flags.z = 0.0 → world-space size: the icon is scale.xy metres
-                    // wide/tall regardless of camera distance (normal perspective applies).
-                    scale_flags: [0.25, 0.25, 0.0, 0.0],
-                    color:       [r, g, b, 1.0],
-                });
+                self.billboard_scratch
+                    .push(helio_pass_billboard::BillboardInstance {
+                        world_pos: [x, y, z, 0.0],
+                        // scale_flags.z = 0.0 → world-space size: the icon is scale.xy metres
+                        // wide/tall regardless of camera distance (normal perspective applies).
+                        scale_flags: [0.25, 0.25, 0.0, 0.0],
+                        color: [r, g, b, 1.0],
+                    });
             }
         }
 
@@ -722,3 +722,4 @@ fn create_depth_resources(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
 }
+

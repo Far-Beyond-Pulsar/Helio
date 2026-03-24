@@ -88,8 +88,8 @@
 //! }
 //! ```
 
-use crate::{SceneResources, Profiler};
 use crate::scene::GpuScene;
+use crate::{Profiler, SceneResources};
 
 /// Context passed to `RenderPass::execute()` for recording GPU commands.
 ///
@@ -439,3 +439,4 @@ impl<'a> PrepareContext<'a> {
         crate::upload::write_texture(self.queue, texture, data, data_layout, size);
     }
 }
+

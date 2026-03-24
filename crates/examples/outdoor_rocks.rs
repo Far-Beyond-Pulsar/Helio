@@ -24,12 +24,12 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    BillboardInstance, Camera, LightId, Renderer, RendererConfig,
-    required_wgpu_features, required_wgpu_limits,
-    VirtualMeshUpload, VirtualObjectDescriptor,
+    required_wgpu_features, required_wgpu_limits, BillboardInstance, Camera, LightId, Renderer,
+    RendererConfig, VirtualMeshUpload, VirtualObjectDescriptor,
 };
-use helio_asset_compat::{load_scene_bytes_with_config, load_scene_file_with_config,
-                         upload_scene_materials, LoadConfig};
+use helio_asset_compat::{
+    load_scene_bytes_with_config, load_scene_file_with_config, upload_scene_materials, LoadConfig,
+};
 use v3_demo_common::{cube_mesh, directional_light, make_material, point_light};
 use winit::{
     application::ApplicationHandler,
@@ -48,7 +48,9 @@ const FIELD_RADIUS: f32 = 80.0;
 const BILLBOARD_EVERY_N: usize = 4; // place a billboard above every Nth rock
 
 fn base_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 /// Simple LCG random number generator (identical to ship_flight's).
@@ -64,12 +66,12 @@ fn rand_s(seed: &mut u64) -> f32 {
 
 // ── Marker color palette (RGBA, linear) ──────────────────────────────────────
 const MARKER_COLORS: [[f32; 4]; 6] = [
-    [1.0, 0.8, 0.1, 0.85],  // amber
-    [0.2, 0.8, 1.0, 0.85],  // cyan
-    [1.0, 0.3, 0.3, 0.85],  // red
-    [0.4, 1.0, 0.4, 0.85],  // green
-    [0.9, 0.4, 1.0, 0.85],  // violet
-    [1.0, 1.0, 1.0, 0.85],  // white
+    [1.0, 0.8, 0.1, 0.85], // amber
+    [0.2, 0.8, 1.0, 0.85], // cyan
+    [1.0, 0.3, 0.3, 0.85], // red
+    [0.4, 1.0, 0.4, 0.85], // green
+    [0.9, 0.4, 1.0, 0.85], // violet
+    [1.0, 1.0, 1.0, 0.85], // white
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -105,13 +107,13 @@ struct AppState {
     vg_debug: bool,
 
     // ── CPU-side profiling ───────────────────────────────────────────────
-    frame_count:      u64,
+    frame_count: u64,
     prof_frame_total: f64, // ms
-    prof_update:      f64, // ms: sun, billboards, camera update
-    prof_render:      f64, // ms: renderer.render() call
-    prof_present:     f64, // ms: get_current_texture + present
-    prof_frame_min:   f64,
-    prof_frame_max:   f64,
+    prof_update: f64,      // ms: sun, billboards, camera update
+    prof_render: f64,      // ms: renderer.render() call
+    prof_present: f64,     // ms: get_current_texture + present
+    prof_frame_min: f64,
+    prof_frame_max: f64,
 }
 
 impl App {
@@ -126,21 +128,33 @@ impl AppState {
         const SPEED: f32 = 28.0;
         const LOOK_SENS: f32 = 0.002;
 
-        self.cam_yaw   += self.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch  = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.48, 1.48);
+        self.cam_yaw += self.mouse_delta.0 * LOOK_SENS;
+        self.cam_pitch = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.48, 1.48);
         self.mouse_delta = (0.0, 0.0);
 
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
         let forward = Vec3::new(sy * cp, sp, -cy * cp);
-        let right   = Vec3::new(cy, 0.0, sy);
+        let right = Vec3::new(cy, 0.0, sy);
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space)     { self.cam_pos.y += SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos.y -= SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos.y += SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos.y -= SPEED * dt;
+        }
 
         forward
     }
@@ -175,30 +189,32 @@ impl ApplicationHandler for App {
         }))
         .expect("no adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }))
         .expect("no device");
 
         let device = Arc::new(device);
-        let queue  = Arc::new(queue);
-        let caps   = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        let queue = Arc::new(queue);
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
-                usage:    wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format:   surface_format,
-                width:    size.width,
-                height:   size.height,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: surface_format,
+                width: size.width,
+                height: size.height,
                 present_mode: wgpu::PresentMode::AutoNoVsync,
-                alpha_mode:   caps.alpha_modes[0],
+                alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             },
@@ -227,7 +243,11 @@ impl ApplicationHandler for App {
 
         // ── Ground plane ──────────────────────────────────────────────────
         let ground_mat = renderer.insert_material(make_material(
-            [0.28, 0.23, 0.18, 1.0], 0.92, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.28, 0.23, 0.18, 1.0],
+            0.92,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let ground_mesh = renderer.insert_mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 250.0));
         let _ = v3_demo_common::insert_object(
@@ -250,7 +270,11 @@ impl ApplicationHandler for App {
 
         // Fallback cube material/mesh for any type that failed to load
         let fallback_mat = renderer.insert_material(make_material(
-            [0.35, 0.30, 0.25, 1.0], 0.85, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.35, 0.30, 0.25, 1.0],
+            0.85,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let fallback_mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
@@ -268,7 +292,10 @@ impl ApplicationHandler for App {
                 let mat_ids = match upload_scene_materials(&mut renderer, &scene) {
                     Ok(ids) => ids,
                     Err(e) => {
-                        log::warn!("Could not upload rock materials for '{}': {e}", path.display());
+                        log::warn!(
+                            "Could not upload rock materials for '{}': {e}",
+                            path.display()
+                        );
                         return None;
                     }
                 };
@@ -304,11 +331,11 @@ impl ApplicationHandler for App {
             for _ in 0..ROCK_COUNT_PER_TYPE {
                 // Random position in a disc
                 let angle = lcg(&mut seed) * std::f32::consts::TAU;
-                let dist  = FIELD_RADIUS * lcg(&mut seed).sqrt();
-                let pos   = Vec3::new(angle.cos() * dist, 0.0, angle.sin() * dist);
+                let dist = FIELD_RADIUS * lcg(&mut seed).sqrt();
+                let pos = Vec3::new(angle.cos() * dist, 0.0, angle.sin() * dist);
 
                 // Random scale — small floor rocks, no overlapping giants
-                let base_scale = 0.08 + lcg(&mut seed) * 0.22;  // 0.08..0.30
+                let base_scale = 0.08 + lcg(&mut seed) * 0.22; // 0.08..0.30
                 let scale = Vec3::new(
                     base_scale * (0.8 + lcg(&mut seed) * 0.4),
                     base_scale * (0.5 + lcg(&mut seed) * 0.5),
@@ -329,7 +356,11 @@ impl ApplicationHandler for App {
                 match vg_entries {
                     None => {
                         let _ = v3_demo_common::insert_object(
-                            &mut renderer, fallback_mesh, fallback_mat, transform, base_scale,
+                            &mut renderer,
+                            fallback_mesh,
+                            fallback_mat,
+                            transform,
+                            base_scale,
                         );
                     }
                     Some(entries) => {
@@ -369,10 +400,8 @@ impl ApplicationHandler for App {
                 // Upload meshes + materials in a single traversal.
                 match upload_scene_materials(&mut renderer, &scene) {
                     Ok(mat_ids) => {
-                        let ship_transform = Mat4::from_rotation_translation(
-                            Quat::from_rotation_y(0.4),
-                            ship_pos,
-                        );
+                        let ship_transform =
+                            Mat4::from_rotation_translation(Quat::from_rotation_y(0.4), ship_pos);
                         for mesh in &scene.meshes {
                             let radius = mesh
                                 .vertices
@@ -381,15 +410,20 @@ impl ApplicationHandler for App {
                                 .fold(0.5_f32, f32::max);
                             let mesh_id = renderer.insert_mesh(helio::MeshUpload {
                                 vertices: mesh.vertices.clone(),
-                                indices:  mesh.indices.clone(),
+                                indices: mesh.indices.clone(),
                             });
-                            let mat = mesh.material_index
+                            let mat = mesh
+                                .material_index
                                 .and_then(|idx| mat_ids.get(idx))
                                 .or_else(|| mat_ids.first())
                                 .copied()
                                 .unwrap_or(fallback_mat);
                             let _ = v3_demo_common::insert_object(
-                                &mut renderer, mesh_id, mat, ship_transform, radius,
+                                &mut renderer,
+                                mesh_id,
+                                mat,
+                                ship_transform,
+                                radius,
                             );
                         }
                     }
@@ -399,11 +433,21 @@ impl ApplicationHandler for App {
             Err(e) => {
                 log::warn!("Could not load ship FBX: {e} — placing fallback cube");
                 let ship_mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 1.5));
-                let ship_mat  = renderer.insert_material(make_material(
-                    [0.55, 0.70, 0.90, 1.0], 0.25, 0.75, [0.0, 0.0, 0.0], 0.0,
+                let ship_mat = renderer.insert_material(make_material(
+                    [0.55, 0.70, 0.90, 1.0],
+                    0.25,
+                    0.75,
+                    [0.0, 0.0, 0.0],
+                    0.0,
                 ));
                 let transform = Mat4::from_translation(ship_pos);
-                let _ = v3_demo_common::insert_object(&mut renderer, ship_mesh, ship_mat, transform, 1.5);
+                let _ = v3_demo_common::insert_object(
+                    &mut renderer,
+                    ship_mesh,
+                    ship_mat,
+                    transform,
+                    1.5,
+                );
             }
         }
 
@@ -411,9 +455,9 @@ impl ApplicationHandler for App {
         let bill_instances: Vec<BillboardInstance> = billboard_positions
             .iter()
             .map(|&(pos, color_idx)| BillboardInstance {
-                world_pos:   [pos.x, pos.y, pos.z, 0.0],
+                world_pos: [pos.x, pos.y, pos.z, 0.0],
                 scale_flags: [1.2, 1.2, 0.0, 0.0],
-                color:       MARKER_COLORS[color_idx],
+                color: MARKER_COLORS[color_idx],
             })
             .collect();
         renderer.set_billboard_instances(&bill_instances);
@@ -436,32 +480,28 @@ impl ApplicationHandler for App {
             sun_light_id,
             sun_angle,
             vg_debug: false,
-            frame_count:      0,
+            frame_count: 0,
             prof_frame_total: 0.0,
-            prof_update:      0.0,
-            prof_render:      0.0,
-            prof_present:     0.0,
-            prof_frame_min:   f64::MAX,
-            prof_frame_max:   0.0,
+            prof_update: 0.0,
+            prof_render: 0.0,
+            prof_present: 0.0,
+            prof_frame_min: f64::MAX,
+            prof_frame_max: 0.0,
         });
     }
 
-    fn window_event(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        _: WindowId,
-        event: WindowEvent,
-    ) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -479,10 +519,10 @@ impl ApplicationHandler for App {
                     &wgpu::SurfaceConfiguration {
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                         format: state.surface_format,
-                        width:  size.width,
+                        width: size.width,
                         height: size.height,
                         present_mode: wgpu::PresentMode::AutoNoVsync,
-                        alpha_mode:   wgpu::CompositeAlphaMode::Opaque,
+                        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
                     },
@@ -491,15 +531,18 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(KeyCode::F3),
-                    state: ElementState::Pressed,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::F3),
+                        state: ElementState::Pressed,
+                        ..
+                    },
                 ..
             } => {
                 state.vg_debug = !state.vg_debug;
-                state.renderer.set_debug_mode(if state.vg_debug { 20 } else { 0 });
+                state
+                    .renderer
+                    .set_debug_mode(if state.vg_debug { 20 } else { 0 });
                 state.window.set_title(if state.vg_debug {
                     "Helio — Outdoor Rocks  [VG TRIANGLE DEBUG — F3 to exit]"
                 } else {
@@ -508,15 +551,20 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state: key_state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
                 ..
             } => match key_state {
-                ElementState::Pressed  => { state.keys.insert(code); }
-                ElementState::Released => { state.keys.remove(&code); }
+                ElementState::Pressed => {
+                    state.keys.insert(code);
+                }
+                ElementState::Released => {
+                    state.keys.remove(&code);
+                }
             },
 
             WindowEvent::MouseInput {
@@ -525,7 +573,9 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let ok = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if ok {
@@ -538,21 +588,26 @@ impl ApplicationHandler for App {
             WindowEvent::RedrawRequested => {
                 let frame_start = Instant::now();
                 let now = frame_start;
-                let dt  = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
-                let t   = now.duration_since(state.start_time).as_secs_f32();
+                let dt = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
+                let t = now.duration_since(state.start_time).as_secs_f32();
                 state.last_frame = now;
 
                 // ── Sun rotation ──────────────────────────────────────────
                 let t_update_start = Instant::now();
                 const SUN_SPEED: f32 = 0.6;
-                if state.keys.contains(&KeyCode::KeyQ) { state.sun_angle += SUN_SPEED * dt; }
-                if state.keys.contains(&KeyCode::KeyE) { state.sun_angle -= SUN_SPEED * dt; }
+                if state.keys.contains(&KeyCode::KeyQ) {
+                    state.sun_angle += SUN_SPEED * dt;
+                }
+                if state.keys.contains(&KeyCode::KeyE) {
+                    state.sun_angle -= SUN_SPEED * dt;
+                }
                 state.sun_angle = state.sun_angle.clamp(-1.48, 1.48);
                 let sun_dir = Vec3::new(
                     -state.sun_angle.cos(),
                     -state.sun_angle.sin().abs() - 0.3,
                     -0.6,
-                ).normalize();
+                )
+                .normalize();
                 let _ = state.renderer.update_light(
                     state.sun_light_id,
                     directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
@@ -565,13 +620,18 @@ impl ApplicationHandler for App {
                     .enumerate()
                     .map(|(i, &(base_pos, color_idx))| {
                         let phase = t * 1.4 + i as f32 * 0.43;
-                        let bob   = (phase * 0.9).sin() * 0.35;
+                        let bob = (phase * 0.9).sin() * 0.35;
                         let alpha = 0.55 + 0.35 * (phase * 1.1).sin().abs();
                         let mut color = MARKER_COLORS[color_idx];
                         color[3] = alpha;
                         BillboardInstance {
-                            world_pos:   [base_pos.x, base_pos.y + bob, base_pos.z, 0.0],
-                            scale_flags: [1.1 + 0.15 * (phase * 0.7).cos(), 1.1 + 0.15 * (phase * 0.7).cos(), 0.0, 0.0],
+                            world_pos: [base_pos.x, base_pos.y + bob, base_pos.z, 0.0],
+                            scale_flags: [
+                                1.1 + 0.15 * (phase * 0.7).cos(),
+                                1.1 + 0.15 * (phase * 0.7).cos(),
+                                0.0,
+                                0.0,
+                            ],
                             color,
                         }
                     })
@@ -580,8 +640,8 @@ impl ApplicationHandler for App {
 
                 // ── Camera ────────────────────────────────────────────────
                 let forward = state.update_camera(dt);
-                let size    = state.window.inner_size();
-                let camera  = Camera::perspective_look_at(
+                let size = state.window.inner_size();
+                let camera = Camera::perspective_look_at(
                     state.cam_pos,
                     state.cam_pos + forward,
                     Vec3::Y,
@@ -596,9 +656,14 @@ impl ApplicationHandler for App {
                 let t_render_start = Instant::now();
                 let output = match state.surface.get_current_texture() {
                     Ok(t) => t,
-                    Err(e) => { log::warn!("surface error: {e:?}"); return; }
+                    Err(e) => {
+                        log::warn!("surface error: {e:?}");
+                        return;
+                    }
                 };
-                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {e:?}");
                 }
@@ -611,21 +676,25 @@ impl ApplicationHandler for App {
                 // ── Profiling accumulate + print every 100 frames ─────────
                 let frame_ms = frame_start.elapsed().as_secs_f64() * 1000.0;
                 state.prof_frame_total += frame_ms;
-                state.prof_update      += t_update_ms;
-                state.prof_render      += t_render_ms;
-                state.prof_present     += t_present_ms;
-                if frame_ms < state.prof_frame_min { state.prof_frame_min = frame_ms; }
-                if frame_ms > state.prof_frame_max { state.prof_frame_max = frame_ms; }
+                state.prof_update += t_update_ms;
+                state.prof_render += t_render_ms;
+                state.prof_present += t_present_ms;
+                if frame_ms < state.prof_frame_min {
+                    state.prof_frame_min = frame_ms;
+                }
+                if frame_ms > state.prof_frame_max {
+                    state.prof_frame_max = frame_ms;
+                }
                 state.frame_count += 1;
 
                 const REPORT_EVERY: u64 = 100;
                 if state.frame_count % REPORT_EVERY == 0 {
                     let n = REPORT_EVERY as f64;
-                    let avg   = state.prof_frame_total / n;
-                    let fps   = 1000.0 / avg;
-                    let upd   = state.prof_update  / n;
-                    let rnd   = state.prof_render  / n;
-                    let pres  = state.prof_present / n;
+                    let avg = state.prof_frame_total / n;
+                    let fps = 1000.0 / avg;
+                    let upd = state.prof_update / n;
+                    let rnd = state.prof_render / n;
+                    let pres = state.prof_present / n;
                     let other = avg - upd - rnd - pres;
                     eprintln!(
                         "[PROF #{:>6}] avg {:.2}ms ({:.0} fps) | min {:.2}ms max {:.2}ms",
@@ -636,11 +705,11 @@ impl ApplicationHandler for App {
                         upd, rnd, pres, other
                     );
                     state.prof_frame_total = 0.0;
-                    state.prof_update      = 0.0;
-                    state.prof_render      = 0.0;
-                    state.prof_present     = 0.0;
-                    state.prof_frame_min   = f64::MAX;
-                    state.prof_frame_max   = 0.0;
+                    state.prof_update = 0.0;
+                    state.prof_render = 0.0;
+                    state.prof_present = 0.0;
+                    state.prof_frame_min = f64::MAX;
+                    state.prof_frame_max = 0.0;
                 }
             }
             _ => {}
@@ -672,3 +741,4 @@ fn main() {
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
+

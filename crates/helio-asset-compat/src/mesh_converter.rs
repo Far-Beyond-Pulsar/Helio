@@ -3,9 +3,9 @@
 //! Converts SolidRS's rich vertex format (up to 8 UVs, 4 colors, optional tangents)
 //! to Helio's compact PackedVertex format (32 bytes).
 
-use helio::PackedVertex;
 use crate::Result;
-use solid_rs::geometry::{Vertex, Topology};
+use helio::PackedVertex;
+use solid_rs::geometry::{Topology, Vertex};
 use solid_rs::scene::Mesh;
 
 /// Convert a SolidRS vertex to Helio's PackedVertex format
@@ -24,9 +24,9 @@ pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
     // Extract primary UV channel (default to 0,0 if missing)
     let tex_coords = if let Some(uv) = v.uvs[0] {
         if flip_uv_y {
-            [uv.x, 1.0 - uv.y]  // Flip for DirectX → OpenGL
+            [uv.x, 1.0 - uv.y] // Flip for DirectX → OpenGL
         } else {
-            [uv.x, uv.y]  // Use as-is
+            [uv.x, uv.y] // Use as-is
         }
     } else {
         [0.0, 0.0]
@@ -63,7 +63,8 @@ pub fn convert_vertex(v: &Vertex, flip_uv_y: bool) -> PackedVertex {
         log::warn!("Mesh has vertex colors - not yet supported, will be discarded");
     }
 
-    let mut packed = PackedVertex::from_components(position, normal, tex_coords, tangent, bitangent_sign);
+    let mut packed =
+        PackedVertex::from_components(position, normal, tex_coords, tangent, bitangent_sign);
     packed.tex_coords1 = tex_coords1;
     packed
 }
@@ -90,7 +91,10 @@ pub fn convert_primitive(
     // Check UV coverage for debugging
     let has_uvs = mesh.vertices.iter().any(|v| v.uvs[0].is_some());
     if !has_uvs {
-        log::warn!("Mesh '{}' has NO UV coordinates - textures will not display correctly", mesh.name);
+        log::warn!(
+            "Mesh '{}' has NO UV coordinates - textures will not display correctly",
+            mesh.name
+        );
     } else {
         // Calculate UV bounds to detect issues
         let mut min_u = f32::MAX;
@@ -107,8 +111,10 @@ pub fn convert_primitive(
             }
         }
 
-        println!("━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
-            mesh.name, min_u, max_u, min_v, max_v);
+        println!(
+            "━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
+            mesh.name, min_u, max_u, min_v, max_v
+        );
 
         // Warn if UVs are outside normal range
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
@@ -117,7 +123,9 @@ pub fn convert_primitive(
     }
 
     // Convert all vertices
-    let vertices: Vec<PackedVertex> = mesh.vertices.iter()
+    let vertices: Vec<PackedVertex> = mesh
+        .vertices
+        .iter()
         .map(|v| convert_vertex(v, config.flip_uv_y))
         .collect();
 
@@ -128,15 +136,29 @@ pub fn convert_primitive(
     let max_index = indices.iter().max().copied().unwrap_or(0);
     let vertices_len = vertices.len();
     if max_index >= vertices_len as u32 {
-        println!("⚠️  CRITICAL: Mesh '{}' has indices OUT OF BOUNDS! max_index={}, vertices={}",
-            mesh.name, max_index, vertices_len);
-        println!("    First 10 indices: {:?}", &indices[0..indices.len().min(10)]);
+        println!(
+            "⚠️  CRITICAL: Mesh '{}' has indices OUT OF BOUNDS! max_index={}, vertices={}",
+            mesh.name, max_index, vertices_len
+        );
+        println!(
+            "    First 10 indices: {:?}",
+            &indices[0..indices.len().min(10)]
+        );
     } else {
-        println!("✓ Indices valid: max={}, vertices={}", max_index, vertices_len);
+        println!(
+            "✓ Indices valid: max={}, vertices={}",
+            max_index, vertices_len
+        );
     }
 
-    println!("✓ Converted primitive '{}': {} verts, {} indices, material {:?}, UV flip: {}",
-        mesh.name, vertices.len(), indices.len(), primitive.material_index, config.flip_uv_y);
+    println!(
+        "✓ Converted primitive '{}': {} verts, {} indices, material {:?}, UV flip: {}",
+        mesh.name,
+        vertices.len(),
+        indices.len(),
+        primitive.material_index,
+        config.flip_uv_y
+    );
 
     Ok((vertices, indices))
 }
@@ -146,13 +168,14 @@ pub fn convert_primitive(
 /// DEPRECATED: This merges all primitives together and loses per-primitive material info.
 /// Use convert_primitive instead.
 #[allow(dead_code)]
-pub fn convert_mesh(
-    mesh: &Mesh,
-) -> Result<(Vec<PackedVertex>, Vec<u32>)> {
+pub fn convert_mesh(mesh: &Mesh) -> Result<(Vec<PackedVertex>, Vec<u32>)> {
     // Check UV coverage for debugging
     let has_uvs = mesh.vertices.iter().any(|v| v.uvs[0].is_some());
     if !has_uvs {
-        log::warn!("Mesh '{}' has NO UV coordinates - textures will not display correctly", mesh.name);
+        log::warn!(
+            "Mesh '{}' has NO UV coordinates - textures will not display correctly",
+            mesh.name
+        );
     } else {
         // Calculate UV bounds to detect issues
         let mut min_u = f32::MAX;
@@ -169,8 +192,10 @@ pub fn convert_mesh(
             }
         }
 
-        println!("━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
-            mesh.name, min_u, max_u, min_v, max_v);
+        println!(
+            "━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
+            mesh.name, min_u, max_u, min_v, max_v
+        );
 
         // Warn if UVs are outside normal range
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
@@ -179,7 +204,9 @@ pub fn convert_mesh(
     }
 
     // Convert all vertices (deprecated - uses no UV flip)
-    let vertices: Vec<PackedVertex> = mesh.vertices.iter()
+    let vertices: Vec<PackedVertex> = mesh
+        .vertices
+        .iter()
         .map(|v| convert_vertex(v, false))
         .collect();
 
@@ -204,15 +231,19 @@ pub fn convert_mesh(
 /// Compute a tangent perpendicular to the normal (used when no tangent is provided)
 fn normal_to_tangent(n: [f32; 3]) -> [f32; 3] {
     // Choose the axis least aligned with n to avoid degeneracy
-    let up = if n[1].abs() < 0.9 { [0.0f32, 1.0, 0.0] } else { [1.0f32, 0.0, 0.0] };
+    let up = if n[1].abs() < 0.9 {
+        [0.0f32, 1.0, 0.0]
+    } else {
+        [1.0f32, 0.0, 0.0]
+    };
     // cross(up, n) gives a vector perpendicular to n
     let t = [
-        up[1]*n[2] - up[2]*n[1],
-        up[2]*n[0] - up[0]*n[2],
-        up[0]*n[1] - up[1]*n[0],
+        up[1] * n[2] - up[2] * n[1],
+        up[2] * n[0] - up[0] * n[2],
+        up[0] * n[1] - up[1] * n[0],
     ];
-    let len = (t[0]*t[0] + t[1]*t[1] + t[2]*t[2]).sqrt().max(1e-8);
-    [t[0]/len, t[1]/len, t[2]/len]
+    let len = (t[0] * t[0] + t[1] * t[1] + t[2] * t[2]).sqrt().max(1e-8);
+    [t[0] / len, t[1] / len, t[2] / len]
 }
 
 #[cfg(test)]
@@ -238,3 +269,4 @@ mod tests {
         assert_eq!(packed.tex_coords1, [0.0, 0.0]);
     }
 }
+

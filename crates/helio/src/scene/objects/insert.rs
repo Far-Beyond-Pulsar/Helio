@@ -7,9 +7,9 @@ use helio_v3::{DrawIndexedIndirectArgs, GpuDrawCall};
 
 use crate::handles::ObjectId;
 
-use super::super::errors::{Result, invalid};
-use super::super::types::ObjectDescriptor;
+use super::super::errors::{invalid, Result};
 use super::super::helpers::{object_gpu_data, object_is_visible};
+use super::super::types::ObjectDescriptor;
 
 impl super::super::Scene {
     /// Insert a renderable object into the scene.
@@ -77,7 +77,10 @@ impl super::super::Scene {
     /// decrement reference counts.
     pub fn insert_object(&mut self, desc: ObjectDescriptor) -> Result<ObjectId> {
         let mesh_slice = {
-            let mesh = self.mesh_pool.get(desc.mesh).ok_or_else(|| invalid("mesh"))?;
+            let mesh = self
+                .mesh_pool
+                .get(desc.mesh)
+                .ok_or_else(|| invalid("mesh"))?;
             mesh.slice
         };
         let material_slot = {
@@ -139,3 +142,4 @@ impl super::super::Scene {
         Ok(id)
     }
 }
+

@@ -3,8 +3,8 @@
 //! This module provides animation playback for skeletal meshes.
 //! Animation data from SolidRS is evaluated on the CPU to produce bone matrices.
 
-use solid_rs::scene::{Animation, Skin};
 use glam::Mat4;
+use solid_rs::scene::{Animation, Skin};
 
 /// Animation state for a skinned mesh
 #[derive(Debug, Clone)]
@@ -72,3 +72,4 @@ impl AnimationState {
         &self.bone_matrices
     }
 }
+

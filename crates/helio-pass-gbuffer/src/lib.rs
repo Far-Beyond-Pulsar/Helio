@@ -26,7 +26,7 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::num::NonZeroU32;
 
 /// Bindless texture array size per shader stage.
@@ -42,18 +42,18 @@ const MAX_TEXTURES: usize = 16;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct GBufferGlobals {
-    pub frame:             u32,
-    pub delta_time:        f32,
-    pub light_count:       u32,
+    pub frame: u32,
+    pub delta_time: f32,
+    pub light_count: u32,
     pub ambient_intensity: f32,
-    pub ambient_color:     [f32; 4],
-    pub rc_world_min:      [f32; 4],
-    pub rc_world_max:      [f32; 4],
-    pub csm_splits:        [f32; 4],
-    pub debug_mode:        u32,
-    pub _pad0:             u32,
-    pub _pad1:             u32,
-    pub _pad2:             u32,
+    pub ambient_color: [f32; 4],
+    pub rc_world_min: [f32; 4],
+    pub rc_world_max: [f32; 4],
+    pub csm_splits: [f32; 4],
+    pub debug_mode: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
+    pub _pad2: u32,
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -73,12 +73,12 @@ pub struct GBufferPass {
     /// Per-frame globals uploaded in `prepare()`.
     globals_buf: wgpu::Buffer,
     // ── GBuffer textures (owned; exposed for downstream passes) ───────────────
-    pub albedo_tex:   wgpu::Texture,
-    pub albedo_view:  wgpu::TextureView,
-    pub normal_tex:   wgpu::Texture,
-    pub normal_view:  wgpu::TextureView,
-    pub orm_tex:      wgpu::Texture,
-    pub orm_view:     wgpu::TextureView,
+    pub albedo_tex: wgpu::Texture,
+    pub albedo_view: wgpu::TextureView,
+    pub normal_tex: wgpu::Texture,
+    pub normal_view: wgpu::TextureView,
+    pub orm_tex: wgpu::Texture,
+    pub orm_view: wgpu::TextureView,
     pub emissive_tex: wgpu::Texture,
     pub emissive_view: wgpu::TextureView,
 }
@@ -89,23 +89,29 @@ impl GBufferPass {
     /// * `camera_buf`    – scene camera uniform buffer
     /// * `instances_buf` – per-instance transform storage buffer
     /// * `width/height`  – initial render resolution
-    pub fn new(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader_src = include_str!("../shaders/gbuffer.wgsl")
-            .replace("binding_array<texture_2d<f32>, 256>",
-                     &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"))
-            .replace("binding_array<sampler, 256>",
-                     &format!("binding_array<sampler, {MAX_TEXTURES}>"));
+            .replace(
+                "binding_array<texture_2d<f32>, 256>",
+                &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+            )
+            .replace(
+                "binding_array<sampler, 256>",
+                &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+            );
         // WebGPU does not support binding arrays; collapse to single texture/sampler.
         #[cfg(target_arch = "wasm32")]
         let shader_src = shader_src
-            .replace(&format!("binding_array<sampler, {MAX_TEXTURES}>"), "sampler")
+            .replace(
+                &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+                "sampler",
+            )
             .replace("scene_samplers[slot.texture_index]", "scene_samplers")
-            .replace(&format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"), "texture_2d<f32>")
+            .replace(
+                &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+                "texture_2d<f32>",
+            )
             .replace("scene_textures[slot.texture_index]", "scene_textures")
             // textureSample requires uniform control flow on WebGPU; use textureSampleLevel (LOD 0) instead.
             .replace(
@@ -268,16 +274,32 @@ impl GBufferPass {
 
         // ── GBuffer textures ──────────────────────────────────────────────────
         let (albedo_tex, albedo_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba8Unorm, "GBuffer/Albedo",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "GBuffer/Albedo",
         );
         let (normal_tex, normal_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba16Float, "GBuffer/Normal",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba16Float,
+            "GBuffer/Normal",
         );
         let (orm_tex, orm_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba8Unorm, "GBuffer/ORM",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "GBuffer/ORM",
         );
         let (emissive_tex, emissive_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba16Float, "GBuffer/Emissive",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba16Float,
+            "GBuffer/Emissive",
         );
 
         Self {
@@ -318,15 +340,15 @@ impl RenderPass for GBufferPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Upload per-frame globals (O(1) — fixed-size struct).
         let globals = GBufferGlobals {
-            frame:             ctx.frame as u32,
-            delta_time:        0.016,   // TODO: expose delta_time in PrepareContext
-            light_count:       ctx.scene.lights.len() as u32,
+            frame: ctx.frame as u32,
+            delta_time: 0.016, // TODO: expose delta_time in PrepareContext
+            light_count: ctx.scene.lights.len() as u32,
             ambient_intensity: 0.1,
-            ambient_color:     [0.1, 0.1, 0.15, 1.0],
-            rc_world_min:      [-100.0, -100.0, -100.0, 0.0],
-            rc_world_max:      [100.0, 100.0, 100.0, 0.0],
-            csm_splits:        [5.0, 20.0, 60.0, 200.0],
-            debug_mode:        0,
+            ambient_color: [0.1, 0.1, 0.15, 1.0],
+            rc_world_min: [-100.0, -100.0, -100.0, 0.0],
+            rc_world_max: [100.0, 100.0, 100.0, 0.0],
+            csm_splits: [5.0, 20.0, 60.0, 200.0],
+            debug_mode: 0,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -341,13 +363,11 @@ impl RenderPass for GBufferPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = ctx
-            .frame
-            .main_scene
-            .as_ref()
-            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+        let main_scene = ctx.frame.main_scene.as_ref().ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
                 "GBuffer requires main_scene mesh buffers".to_string(),
-            ))?;
+            )
+        })?;
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
@@ -381,51 +401,57 @@ impl RenderPass for GBufferPass {
             || self.bind_group_1.is_none();
         if needs_rebuild {
             log::debug!("GBuffer: rebuilding bind group 1 (material textures version changed)");
-            self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("GBuffer BG 1"),
-                layout: &self.bind_group_layout_1,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ctx.scene.materials.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: main_scene
-                            .material_textures
-                            .material_textures
-                            .as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        #[cfg(not(target_arch = "wasm32"))]
-                        resource: wgpu::BindingResource::TextureViewArray(
-                            main_scene.material_textures.texture_views,
-                        ),
-                        #[cfg(target_arch = "wasm32")]
-                        resource: wgpu::BindingResource::TextureView(
-                            main_scene.material_textures.texture_views
-                                .first()
-                                .copied()
-                                .expect("scene must have at least one texture view"),
-                        ),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        #[cfg(not(target_arch = "wasm32"))]
-                        resource: wgpu::BindingResource::SamplerArray(
-                            main_scene.material_textures.samplers,
-                        ),
-                        #[cfg(target_arch = "wasm32")]
-                        resource: wgpu::BindingResource::Sampler(
-                            main_scene.material_textures.samplers
-                                .first()
-                                .copied()
-                                .expect("scene must have at least one sampler"),
-                        ),
-                    },
-                ],
-            }));
+            self.bind_group_1 = Some(
+                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("GBuffer BG 1"),
+                    layout: &self.bind_group_layout_1,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ctx.scene.materials.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: main_scene
+                                .material_textures
+                                .material_textures
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            resource: wgpu::BindingResource::TextureViewArray(
+                                main_scene.material_textures.texture_views,
+                            ),
+                            #[cfg(target_arch = "wasm32")]
+                            resource: wgpu::BindingResource::TextureView(
+                                main_scene
+                                    .material_textures
+                                    .texture_views
+                                    .first()
+                                    .copied()
+                                    .expect("scene must have at least one texture view"),
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            #[cfg(not(target_arch = "wasm32"))]
+                            resource: wgpu::BindingResource::SamplerArray(
+                                main_scene.material_textures.samplers,
+                            ),
+                            #[cfg(target_arch = "wasm32")]
+                            resource: wgpu::BindingResource::Sampler(
+                                main_scene
+                                    .material_textures
+                                    .samplers
+                                    .first()
+                                    .copied()
+                                    .expect("scene must have at least one sampler"),
+                            ),
+                        },
+                    ],
+                }),
+            );
             self.bind_group_1_version = Some(main_scene.material_textures.version);
         }
 
@@ -506,16 +532,32 @@ impl GBufferPass {
     /// Recreates GBuffer textures at a new resolution (call on window resize).
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let (albedo_tex, albedo_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba8Unorm, "GBuffer/Albedo",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "GBuffer/Albedo",
         );
         let (normal_tex, normal_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba16Float, "GBuffer/Normal",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba16Float,
+            "GBuffer/Normal",
         );
         let (orm_tex, orm_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba8Unorm, "GBuffer/ORM",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba8Unorm,
+            "GBuffer/ORM",
         );
         let (emissive_tex, emissive_view) = gbuffer_texture(
-            device, width, height, wgpu::TextureFormat::Rgba16Float, "GBuffer/Emissive",
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rgba16Float,
+            "GBuffer/Emissive",
         );
         self.albedo_tex = albedo_tex;
         self.albedo_view = albedo_view;
@@ -540,7 +582,11 @@ fn gbuffer_texture(
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let tex = device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -554,7 +600,8 @@ fn gbuffer_texture(
 
 /// Build the BGL for group 1 (bindless materials + textures).
 fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let texture_array_count = NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");
+    let texture_array_count =
+        NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");
 
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
         label: Some("GBuffer BGL 1"),
@@ -608,3 +655,4 @@ fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         ],
     })
 }
+

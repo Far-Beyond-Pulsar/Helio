@@ -14,23 +14,23 @@
 //! renderer.add_pass(Box::new(sdf));
 //! ```
 
-pub mod primitives;
-pub mod edit_list;
-pub mod terrain;
-pub mod noise;
-pub mod edit_bvh;
-pub mod uniforms;
 pub mod brick;
 pub mod clip_map;
+pub mod edit_bvh;
+pub mod edit_list;
+pub mod noise;
+pub mod primitives;
+pub mod terrain;
+pub mod uniforms;
 
 use bytemuck;
 use glam::Vec3;
-use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-use edit_list::{SdfEdit, GpuSdfEdit, SdfEditList};
-use edit_bvh::{Aabb, EditBvh};
-use terrain::{TerrainConfig, GpuTerrainParams};
 use clip_map::{SdfClipMap, LEVEL_COUNT};
+use edit_bvh::{Aabb, EditBvh};
+use edit_list::{GpuSdfEdit, SdfEdit, SdfEditList};
+use terrain::{GpuTerrainParams, TerrainConfig};
 use uniforms::SdfGridParams;
 
 const MAX_EDITS: usize = 4096;
@@ -41,21 +41,21 @@ fn edit_aabb(edit: &SdfEdit) -> Aabb {
     use primitives::SdfShapeType;
     let p = &edit.params;
     let local_max = match edit.shape {
-        SdfShapeType::Sphere   => Vec3::splat(p.param0),
-        SdfShapeType::Cube     => Vec3::new(p.param0, p.param1, p.param2),
-        SdfShapeType::Capsule  => Vec3::new(p.param0, p.param0 + p.param1, p.param0),
-        SdfShapeType::Torus    => Vec3::new(p.param0 + p.param1, p.param1, p.param0 + p.param1),
+        SdfShapeType::Sphere => Vec3::splat(p.param0),
+        SdfShapeType::Cube => Vec3::new(p.param0, p.param1, p.param2),
+        SdfShapeType::Capsule => Vec3::new(p.param0, p.param0 + p.param1, p.param0),
+        SdfShapeType::Torus => Vec3::new(p.param0 + p.param1, p.param1, p.param0 + p.param1),
         SdfShapeType::Cylinder => Vec3::new(p.param0, p.param1, p.param0),
     };
     let corners = [
         Vec3::new(-local_max.x, -local_max.y, -local_max.z),
-        Vec3::new( local_max.x, -local_max.y, -local_max.z),
-        Vec3::new(-local_max.x,  local_max.y, -local_max.z),
-        Vec3::new( local_max.x,  local_max.y, -local_max.z),
-        Vec3::new(-local_max.x, -local_max.y,  local_max.z),
-        Vec3::new( local_max.x, -local_max.y,  local_max.z),
-        Vec3::new(-local_max.x,  local_max.y,  local_max.z),
-        Vec3::new( local_max.x,  local_max.y,  local_max.z),
+        Vec3::new(local_max.x, -local_max.y, -local_max.z),
+        Vec3::new(-local_max.x, local_max.y, -local_max.z),
+        Vec3::new(local_max.x, local_max.y, -local_max.z),
+        Vec3::new(-local_max.x, -local_max.y, local_max.z),
+        Vec3::new(local_max.x, -local_max.y, local_max.z),
+        Vec3::new(-local_max.x, local_max.y, local_max.z),
+        Vec3::new(local_max.x, local_max.y, local_max.z),
     ];
     let mut wmin = Vec3::splat(f32::INFINITY);
     let mut wmax = Vec3::splat(f32::NEG_INFINITY);
@@ -113,25 +113,25 @@ fn bgl_storage_rw(binding: u32, vis: wgpu::ShaderStages) -> wgpu::BindGroupLayou
 /// Volumetric SDF clipmap pass: sparse brick atlas + fullscreen ray march.
 pub struct SdfClipmapPass {
     // -- CPU state -------------------------------------------------------------
-    edit_list:   SdfEditList,
-    edit_bvh:    EditBvh,
-    terrain:     Option<TerrainConfig>,
-    clip_map:    SdfClipMap,
+    edit_list: SdfEditList,
+    edit_bvh: EditBvh,
+    terrain: Option<TerrainConfig>,
+    clip_map: SdfClipMap,
     first_frame: bool,
     edits_dirty: bool,
 
     // -- Global GPU buffers ----------------------------------------------------
-    edits_buf:   wgpu::Buffer,
+    edits_buf: wgpu::Buffer,
     terrain_buf: wgpu::Buffer,
 
     // -- Compute pipeline ------------------------------------------------------
-    compute_pipeline:  wgpu::ComputePipeline,
+    compute_pipeline: wgpu::ComputePipeline,
     level_compute_bgs: Vec<wgpu::BindGroup>,
 
     // -- Render pipeline -------------------------------------------------------
     render_pipeline: wgpu::RenderPipeline,
-    group0_bg:       wgpu::BindGroup,
-    group1_bg:       wgpu::BindGroup,
+    group0_bg: wgpu::BindGroup,
+    group1_bg: wgpu::BindGroup,
 }
 
 impl SdfClipmapPass {
@@ -195,23 +195,55 @@ impl SdfClipmapPass {
             cache: None,
         });
 
-        let level_compute_bgs: Vec<wgpu::BindGroup> = clip_map.levels.iter().map(|level| {
-            let bm = &level.brick_map;
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("SdfComputeBG"),
-                layout: &compute_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: bm.params_buf.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: edits_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 2, resource: bm.atlas_buffer.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: bm.active_brick_buf.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 4, resource: bm.brick_index_buf.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 5, resource: terrain_buf.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 6, resource: bm.edit_list_offsets_buf.as_ref().unwrap().as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 7, resource: bm.edit_list_data_buf.as_ref().unwrap().as_entire_binding() },
-                ],
+        let level_compute_bgs: Vec<wgpu::BindGroup> = clip_map
+            .levels
+            .iter()
+            .map(|level| {
+                let bm = &level.brick_map;
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("SdfComputeBG"),
+                    layout: &compute_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: bm.params_buf.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: edits_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: bm.atlas_buffer.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: bm.active_brick_buf.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: bm.brick_index_buf.as_ref().unwrap().as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: terrain_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: bm
+                                .edit_list_offsets_buf
+                                .as_ref()
+                                .unwrap()
+                                .as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: bm.edit_list_data_buf.as_ref().unwrap().as_entire_binding(),
+                        },
+                    ],
+                })
             })
-        }).collect();
+            .collect();
 
         // Render pipeline.
         let fs_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -229,7 +261,10 @@ impl SdfClipmapPass {
         for i in 0..(LEVEL_COUNT as u32) {
             g1_entries.push(bgl_storage_r(1 + i, wgpu::ShaderStages::FRAGMENT));
         }
-        g1_entries.push(bgl_storage_r(1 + LEVEL_COUNT as u32, wgpu::ShaderStages::FRAGMENT));
+        g1_entries.push(bgl_storage_r(
+            1 + LEVEL_COUNT as u32,
+            wgpu::ShaderStages::FRAGMENT,
+        ));
         let group1_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("SdfRender G1 BGL"),
             entries: &g1_entries,
@@ -286,17 +321,30 @@ impl SdfClipmapPass {
 
         let mut g1_bg_entries = vec![wgpu::BindGroupEntry {
             binding: 0,
-            resource: clip_map.clip_params_buf.as_ref().unwrap().as_entire_binding(),
+            resource: clip_map
+                .clip_params_buf
+                .as_ref()
+                .unwrap()
+                .as_entire_binding(),
         }];
         for (i, level) in clip_map.levels.iter().enumerate() {
             g1_bg_entries.push(wgpu::BindGroupEntry {
                 binding: 1 + i as u32,
-                resource: level.brick_map.atlas_buffer.as_ref().unwrap().as_entire_binding(),
+                resource: level
+                    .brick_map
+                    .atlas_buffer
+                    .as_ref()
+                    .unwrap()
+                    .as_entire_binding(),
             });
         }
         g1_bg_entries.push(wgpu::BindGroupEntry {
             binding: 1 + LEVEL_COUNT as u32,
-            resource: clip_map.all_brick_indices_buf.as_ref().unwrap().as_entire_binding(),
+            resource: clip_map
+                .all_brick_indices_buf
+                .as_ref()
+                .unwrap()
+                .as_entire_binding(),
         });
         let group1_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SdfRender G1"),
@@ -349,7 +397,9 @@ impl SdfClipmapPass {
 }
 
 impl RenderPass for SdfClipmapPass {
-    fn name(&self) -> &'static str { "SdfClipmapPass" }
+    fn name(&self) -> &'static str {
+        "SdfClipmapPass"
+    }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let cam_pos = Vec3::from(ctx.scene.camera.position());
@@ -374,11 +424,16 @@ impl RenderPass for SdfClipmapPass {
 
         // Classify bricks. Separate field borrows are disjoint — the borrow checker allows this.
         if self.first_frame || self.edits_dirty {
-            self.clip_map.classify_all(&self.edit_bvh, &edits_gpu, terrain);
+            self.clip_map
+                .classify_all(&self.edit_bvh, &edits_gpu, terrain);
             self.first_frame = false;
         } else if dirty_mask != 0 {
             self.clip_map.classify_toroidal_levels(
-                dirty_mask, &prev_origins, &self.edit_bvh, &edits_gpu, terrain,
+                dirty_mask,
+                &prev_origins,
+                &self.edit_bvh,
+                &edits_gpu,
+                terrain,
             );
         }
 
@@ -388,14 +443,19 @@ impl RenderPass for SdfClipmapPass {
         if self.edits_dirty {
             let gpu_data = self.edit_list.flush_gpu_data();
             if !gpu_data.is_empty() {
-                ctx.queue.write_buffer(&self.edits_buf, 0, bytemuck::cast_slice(&gpu_data));
+                ctx.queue
+                    .write_buffer(&self.edits_buf, 0, bytemuck::cast_slice(&gpu_data));
             }
             self.edits_dirty = false;
         }
 
         // Upload terrain.
         if let Some(tc) = &self.terrain {
-            ctx.queue.write_buffer(&self.terrain_buf, 0, bytemuck::bytes_of(&tc.build_gpu_params()));
+            ctx.queue.write_buffer(
+                &self.terrain_buf,
+                0,
+                bytemuck::bytes_of(&tc.build_gpu_params()),
+            );
         }
 
         // Upload per-level grid params.
@@ -423,14 +483,18 @@ impl RenderPass for SdfClipmapPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // -- Compute: bake SDF into brick atlases --
         {
-            let mut cpass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("SdfClipmap Evaluate"),
-                timestamp_writes: None,
-            });
+            let mut cpass = ctx
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SdfClipmap Evaluate"),
+                    timestamp_writes: None,
+                });
             cpass.set_pipeline(&self.compute_pipeline);
             for (i, bg) in self.level_compute_bgs.iter().enumerate() {
                 let active = self.clip_map.levels[i].brick_map.active_count();
-                if active == 0 { continue; }
+                if active == 0 {
+                    continue;
+                }
                 cpass.set_bind_group(0, bg, &[]);
                 cpass.dispatch_workgroups((active + 255) / 256, 1, 1);
             }
@@ -442,7 +506,12 @@ impl RenderPass for SdfClipmapPass {
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }),
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.05,
+                    g: 0.05,
+                    b: 0.1,
+                    a: 1.0,
+                }),
                 store: wgpu::StoreOp::Store,
             },
         })];
@@ -470,3 +539,4 @@ impl RenderPass for SdfClipmapPass {
         Ok(())
     }
 }
+

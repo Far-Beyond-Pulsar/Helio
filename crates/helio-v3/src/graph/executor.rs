@@ -60,8 +60,8 @@
 //! // }
 //! ```
 
-use crate::{RenderPass, GpuScene, PassContext, PrepareContext, Profiler, Result};
-use super::resource::{ResourceBuilder, ResourceDecl, ResourceAccess};
+use super::resource::{ResourceAccess, ResourceBuilder, ResourceDecl};
+use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
 use std::collections::HashMap;
 
 /// Transient texture managed by the render graph.
@@ -218,8 +218,8 @@ impl RenderGraph {
             profiler: Profiler::new(device, queue),
             transient_textures: HashMap::new(),
             device: device.clone(),
-            width: 0,   // Set via set_render_size() before first execute()
-            height: 0,  // Set via set_render_size() before first execute()
+            width: 0,  // Set via set_render_size() before first execute()
+            height: 0, // Set via set_render_size() before first execute()
         }
     }
 
@@ -251,7 +251,7 @@ impl RenderGraph {
     /// ```
     pub fn set_render_size(&mut self, width: u32, height: u32) {
         if self.width == width && self.height == height {
-            return;  // No change, avoid recreation
+            return; // No change, avoid recreation
         }
         self.width = width;
         self.height = height;
@@ -387,9 +387,11 @@ impl RenderGraph {
         depth: &wgpu::TextureView,
         frame_resources: &libhelio::FrameResources<'_>,
     ) -> Result<()> {
-        let mut encoder = scene.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Graph"),
-        });
+        let mut encoder = scene
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Render Graph"),
+            });
         for pass_index in 0..self.passes.len() {
             let (published_passes, pending_passes) = self.passes.split_at_mut(pass_index);
             let (pass, _) = pending_passes
@@ -481,7 +483,9 @@ impl RenderGraph {
 
                     let (width, height) = match size {
                         super::resource::ResourceSize::MatchSurface => (self.width, self.height),
-                        super::resource::ResourceSize::Absolute { width, height } => (width, height),
+                        super::resource::ResourceSize::Absolute { width, height } => {
+                            (width, height)
+                        }
                         super::resource::ResourceSize::Scaled { divisor } => {
                             (self.width / divisor, self.height / divisor)
                         }
@@ -519,3 +523,4 @@ impl RenderGraph {
         }
     }
 }
+

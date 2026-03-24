@@ -135,3 +135,4 @@ pub struct VgFrameData<'a> {
     /// The pass re-uploads GPU buffers only when this advances.
     pub buffer_version: u64,
 }
+

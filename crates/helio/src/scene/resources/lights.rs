@@ -8,7 +8,7 @@ use helio_v3::GpuLight;
 
 use crate::handles::LightId;
 
-use super::super::errors::{Result, invalid};
+use super::super::errors::{invalid, Result};
 use super::super::types::LightRecord;
 
 impl super::super::Scene {
@@ -118,3 +118,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

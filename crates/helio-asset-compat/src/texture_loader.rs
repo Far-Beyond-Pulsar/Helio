@@ -5,7 +5,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use helio::{TextureSamplerDesc, TextureUpload};
-use solid_rs::scene::{FilterMode as SolidFilter, Image, ImageSource, Sampler, Scene, Texture, WrapMode};
+use solid_rs::scene::{
+    FilterMode as SolidFilter, Image, ImageSource, Sampler, Scene, Texture, WrapMode,
+};
 
 use crate::{AssetError, Result};
 
@@ -79,9 +81,15 @@ fn image_path_candidates(path: &str, base_dir: &Path) -> Vec<PathBuf> {
 
     if let Some(file_name) = candidate.file_name() {
         if let Some(parent_name) = candidate.parent().and_then(Path::file_name) {
-            push_unique_path(&mut base_candidates, base_dir.join(parent_name).join(file_name));
+            push_unique_path(
+                &mut base_candidates,
+                base_dir.join(parent_name).join(file_name),
+            );
         }
-        push_unique_path(&mut base_candidates, base_dir.join("textures").join(file_name));
+        push_unique_path(
+            &mut base_candidates,
+            base_dir.join("textures").join(file_name),
+        );
         push_unique_path(&mut base_candidates, base_dir.join(file_name));
     }
 
@@ -155,21 +163,29 @@ fn convert_sampler(sampler: &Sampler) -> TextureSamplerDesc {
     };
 
     let mag_filter = match sampler.mag_filter {
-        SolidFilter::Nearest | SolidFilter::NearestMipmapNearest | SolidFilter::NearestMipmapLinear => {
-            wgpu::FilterMode::Nearest
-        }
-        SolidFilter::Linear | SolidFilter::LinearMipmapNearest | SolidFilter::LinearMipmapLinear => {
-            wgpu::FilterMode::Linear
-        }
+        SolidFilter::Nearest
+        | SolidFilter::NearestMipmapNearest
+        | SolidFilter::NearestMipmapLinear => wgpu::FilterMode::Nearest,
+        SolidFilter::Linear
+        | SolidFilter::LinearMipmapNearest
+        | SolidFilter::LinearMipmapLinear => wgpu::FilterMode::Linear,
     };
 
     let (min_filter, mipmap_filter) = match sampler.min_filter {
         SolidFilter::Nearest => (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest),
         SolidFilter::Linear => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear),
-        SolidFilter::NearestMipmapNearest => (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest),
-        SolidFilter::LinearMipmapNearest => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Nearest),
-        SolidFilter::NearestMipmapLinear => (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Linear),
-        SolidFilter::LinearMipmapLinear => (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear),
+        SolidFilter::NearestMipmapNearest => {
+            (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Nearest)
+        }
+        SolidFilter::LinearMipmapNearest => {
+            (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Nearest)
+        }
+        SolidFilter::NearestMipmapLinear => {
+            (wgpu::FilterMode::Nearest, wgpu::MipmapFilterMode::Linear)
+        }
+        SolidFilter::LinearMipmapLinear => {
+            (wgpu::FilterMode::Linear, wgpu::MipmapFilterMode::Linear)
+        }
     };
 
     TextureSamplerDesc {
@@ -215,7 +231,11 @@ fn load_texture_upload_from_parts(
     let label = if texture.name.is_empty() {
         format!(
             "{} ({})",
-            if image.name.is_empty() { "texture" } else { &image.name },
+            if image.name.is_empty() {
+                "texture"
+            } else {
+                &image.name
+            },
             semantic.suffix()
         )
     } else {
@@ -266,10 +286,12 @@ mod tests {
         let temp = TestDir::new("relative");
         let relative = PathBuf::from("materials").join("albedo.jpg");
         let expected = temp.path().join(&relative);
-        fs::create_dir_all(expected.parent().expect("relative texture parent")).expect("create parent");
+        fs::create_dir_all(expected.parent().expect("relative texture parent"))
+            .expect("create parent");
         fs::write(&expected, b"jpg").expect("write texture");
 
-        let resolved = resolve_image_path(&relative.to_string_lossy(), temp.path()).expect("resolve relative texture");
+        let resolved = resolve_image_path(&relative.to_string_lossy(), temp.path())
+            .expect("resolve relative texture");
 
         assert_eq!(resolved, expected);
     }
@@ -277,7 +299,10 @@ mod tests {
     #[test]
     fn falls_back_to_baked_folder_name_under_base_dir() {
         let temp = TestDir::new("fbm-folder");
-        let expected = temp.path().join("Untitled.fbm").join("Material _1_BaseColor.jpg");
+        let expected = temp
+            .path()
+            .join("Untitled.fbm")
+            .join("Material _1_BaseColor.jpg");
         fs::create_dir_all(expected.parent().expect("fbm parent")).expect("create fbm dir");
         fs::write(&expected, b"jpg").expect("write texture");
 
@@ -286,7 +311,8 @@ mod tests {
             .join("missing-root")
             .join("Untitled.fbm")
             .join("Material _1_BaseColor.jpg");
-        let resolved = resolve_image_path(&baked.to_string_lossy(), temp.path()).expect("resolve baked folder fallback");
+        let resolved = resolve_image_path(&baked.to_string_lossy(), temp.path())
+            .expect("resolve baked folder fallback");
 
         assert_eq!(resolved, expected);
     }
@@ -294,8 +320,12 @@ mod tests {
     #[test]
     fn falls_back_to_textures_directory_for_baked_paths() {
         let temp = TestDir::new("textures-folder");
-        let expected = temp.path().join("textures").join("Material _1_BaseColor.jpg");
-        fs::create_dir_all(expected.parent().expect("textures parent")).expect("create textures dir");
+        let expected = temp
+            .path()
+            .join("textures")
+            .join("Material _1_BaseColor.jpg");
+        fs::create_dir_all(expected.parent().expect("textures parent"))
+            .expect("create textures dir");
         fs::write(&expected, b"jpg").expect("write texture");
 
         let baked = temp
@@ -303,7 +333,8 @@ mod tests {
             .join("missing-root")
             .join("Untitled.fbm")
             .join("Material _1_BaseColor.jpg");
-        let resolved = resolve_image_path(&baked.to_string_lossy(), temp.path()).expect("resolve textures fallback");
+        let resolved = resolve_image_path(&baked.to_string_lossy(), temp.path())
+            .expect("resolve textures fallback");
 
         assert_eq!(resolved, expected);
     }
@@ -311,8 +342,12 @@ mod tests {
     #[test]
     fn falls_back_across_common_image_extensions() {
         let temp = TestDir::new("extension-fallback");
-        let expected = temp.path().join("textures").join("Material _1s_BaseColor.jpeg");
-        fs::create_dir_all(expected.parent().expect("textures parent")).expect("create textures dir");
+        let expected = temp
+            .path()
+            .join("textures")
+            .join("Material _1s_BaseColor.jpeg");
+        fs::create_dir_all(expected.parent().expect("textures parent"))
+            .expect("create textures dir");
         fs::write(&expected, b"jpeg").expect("write texture");
 
         let baked = temp
@@ -320,8 +355,10 @@ mod tests {
             .join("missing-root")
             .join("Untitled.fbm")
             .join("Material _1s_BaseColor.jpg");
-        let resolved = resolve_image_path(&baked.to_string_lossy(), temp.path()).expect("resolve extension fallback");
+        let resolved = resolve_image_path(&baked.to_string_lossy(), temp.path())
+            .expect("resolve extension fallback");
 
         assert_eq!(resolved, expected);
     }
 }
+

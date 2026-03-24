@@ -12,21 +12,22 @@
 
 mod v3_demo_common;
 
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig};
-use v3_demo_common::{box_mesh, cube_mesh, directional_light, make_material, plane_mesh, point_light};
-
+use helio::{
+    required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig,
+};
+use v3_demo_common::{
+    box_mesh, cube_mesh, directional_light, make_material, plane_mesh, point_light,
+};
 
 use winit::{
     application::ApplicationHandler,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId, CursorGrabMode},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
-
 use std::collections::HashSet;
-
 
 use std::sync::Arc;
 
@@ -58,10 +59,10 @@ struct AppState {
     roof: MeshId,
 
     // Free-camera state
-    cam_pos:   glam::Vec3,
-    cam_yaw:   f32,
+    cam_pos: glam::Vec3,
+    cam_yaw: f32,
     cam_pitch: f32,
-    keys:      HashSet<KeyCode>,
+    keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
@@ -73,12 +74,16 @@ struct AppState {
 }
 
 impl App {
-    fn new() -> Self { Self { state: None } }
+    fn new() -> Self {
+        Self { state: None }
+    }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.state.is_some() {
+            return;
+        }
 
         let window = Arc::new(
             event_loop
@@ -92,7 +97,9 @@ impl ApplicationHandler for App {
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION | wgpu::InstanceFlags::DEBUG,
+            flags: wgpu::InstanceFlags::VALIDATION
+                | wgpu::InstanceFlags::GPU_BASED_VALIDATION
+                | wgpu::InstanceFlags::DEBUG,
             ..Default::default()
         });
         let surface = instance
@@ -106,29 +113,29 @@ impl ApplicationHandler for App {
         }))
         .expect("Failed to find adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("Main Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Main Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }))
         .expect("Failed to create device");
 
-
-        device.on_uncaptured_error(Box::new(|e| {
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
         let info = adapter.get_info();
-        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
+        println!(
+            "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
+            info.backend, info.name, info.driver
+        );
         let device = Arc::new(device);
-        let queue  = Arc::new(queue);
+        let queue = Arc::new(queue);
 
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
-            .formats.iter()
+            .formats
+            .iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(surface_caps.formats[0]);
@@ -152,39 +159,58 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, surface_format),
         );
 
-        let mat = renderer.insert_material(make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0));
+        let mat = renderer.insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let cube1  = renderer.insert_mesh(cube_mesh([ 0.0, 0.5,  0.0], 0.5));
-        let cube2  = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
-        let cube3  = renderer.insert_mesh(cube_mesh([ 2.0, 0.3,  0.5], 0.3));
+        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
+        let cube2 = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
+        let cube3 = renderer.insert_mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
         let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
-        let roof   = renderer.insert_mesh(box_mesh([0.0, 2.85, 0.0], [4.5, 0.15, 4.5]));
+        let roof = renderer.insert_mesh(box_mesh([0.0, 2.85, 0.0], [4.5, 0.15, 4.5]));
 
-        let _ = v3_demo_common::insert_object(&mut renderer, cube1,  mat, glam::Mat4::IDENTITY, 0.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube2,  mat, glam::Mat4::IDENTITY, 0.4);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube3,  mat, glam::Mat4::IDENTITY, 0.3);
-        let _ = v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, roof,   mat, glam::Mat4::IDENTITY, 4.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube3, mat, glam::Mat4::IDENTITY, 0.3);
+        let _ =
+            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, roof, mat, glam::Mat4::IDENTITY, 4.5);
 
         // Compute initial sun direction from starting sun_angle=1.0
         let init_sun_dir = glam::Vec3::new(1.0_f32.cos() * 0.3, 1.0_f32.sin(), 0.5).normalize();
         let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
-        let sun_light_id = renderer.insert_light(directional_light(init_light_dir, [1.0, 0.85, 0.7], (init_lux * 0.35).max(0.01)));
-        renderer.insert_light(point_light([ 0.0, 2.5,  0.0], [1.0, 0.85, 0.6],  4.0, 8.0));
-        renderer.insert_light(point_light([-2.5, 2.0, -1.5], [0.4, 0.6,  1.0],  3.5, 7.0));
-        renderer.insert_light(point_light([ 2.5, 1.8,  1.5], [1.0, 0.3,  0.3],  3.0, 6.0));
+        let sun_light_id = renderer.insert_light(directional_light(
+            init_light_dir,
+            [1.0, 0.85, 0.7],
+            (init_lux * 0.35).max(0.01),
+        ));
+        renderer.insert_light(point_light([0.0, 2.5, 0.0], [1.0, 0.85, 0.6], 4.0, 8.0));
+        renderer.insert_light(point_light([-2.5, 2.0, -1.5], [0.4, 0.6, 1.0], 3.5, 7.0));
+        renderer.insert_light(point_light([2.5, 1.8, 1.5], [1.0, 0.3, 0.3], 3.0, 6.0));
         renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
 
         self.state = Some(AppState {
-            window, surface, device, surface_format, renderer,
+            window,
+            surface,
+            device,
+            surface_format,
+            renderer,
             last_frame: std::time::Instant::now(),
-            cube1, cube2, cube3, ground, roof,
-            cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
-            cam_yaw:   0.0,
+            cube1,
+            cube2,
+            cube3,
+            ground,
+            roof,
+            cam_pos: glam::Vec3::new(0.0, 2.5, 7.0),
+            cam_yaw: 0.0,
             cam_pitch: -0.2,
-            keys:      HashSet::new(),
+            keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             // Start at a nice afternoon angle (sun ~50° above horizon)
@@ -197,13 +223,18 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
 
         match event {
-            WindowEvent::CloseRequested => { event_loop.exit(); }
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+            }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape), ..
-                }, ..
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
+                ..
             } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
@@ -215,19 +246,31 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, ..
-            } => {
-                match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
-                    ElementState::Released => { state.keys.remove(&key); }
+                event:
+                    KeyEvent {
+                        state: ks,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
+                ..
+            } => match ks {
+                ElementState::Pressed => {
+                    state.keys.insert(key);
                 }
-            }
+                ElementState::Released => {
+                    state.keys.remove(&key);
+                }
+            },
 
             WindowEvent::MouseInput {
-                state: ElementState::Pressed, button: MouseButton::Left, ..
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
             } => {
                 if !state.cursor_grabbed {
-                    let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let grabbed = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if grabbed {
@@ -241,7 +284,8 @@ impl ApplicationHandler for App {
                 let cfg = wgpu::SurfaceConfiguration {
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                     format: state.surface_format,
-                    width: size.width, height: size.height,
+                    width: size.width,
+                    height: size.height,
                     present_mode: wgpu::PresentMode::Fifo,
                     alpha_mode: wgpu::CompositeAlphaMode::Auto,
                     view_formats: vec![],
@@ -273,7 +317,9 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(s) = &self.state { s.window.request_redraw(); }
+        if let Some(s) = &self.state {
+            s.window.request_redraw();
+        }
     }
 }
 
@@ -284,27 +330,43 @@ impl AppState {
         const SUN_SPEED: f32 = 0.5; // radians/sec
 
         // Sun rotation (Q/E keys)
-        if self.keys.contains(&KeyCode::KeyQ) { self.sun_angle -= SUN_SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyE) { self.sun_angle += SUN_SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyQ) {
+            self.sun_angle -= SUN_SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyE) {
+            self.sun_angle += SUN_SPEED * dt;
+        }
 
         // Camera look
-        self.cam_yaw   += self.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch  = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
+        self.cam_yaw += self.mouse_delta.0 * LOOK_SENS;
+        self.cam_pitch = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
 
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
-        let right   = glam::Vec3::new(cy, 0.0, sy);
+        let right = glam::Vec3::new(cy, 0.0, sy);
 
-        if self.keys.contains(&KeyCode::KeyW)      { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS)      { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA)      { self.cam_pos -= right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD)      { self.cam_pos += right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space)     { self.cam_pos += glam::Vec3::Y * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= glam::Vec3::Y * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += glam::Vec3::Y * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= glam::Vec3::Y * SPEED * dt;
+        }
 
-        let size   = self.window.inner_size();
+        let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
 
         let camera = Camera::perspective_look_at(
@@ -312,35 +374,42 @@ impl AppState {
             self.cam_pos + forward,
             glam::Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            aspect, 0.1, 1000.0,
+            aspect,
+            0.1,
+            1000.0,
         );
 
         // Sun direction: orbits in the XY plane (rotate sun_angle around Z axis)
-        let sun_dir = glam::Vec3::new(
-            self.sun_angle.cos() * 0.3,
-            self.sun_angle.sin(),
-            0.5,
-        ).normalize();
+        let sun_dir =
+            glam::Vec3::new(self.sun_angle.cos() * 0.3, self.sun_angle.sin(), 0.5).normalize();
         // SceneLight direction = "ray direction" (toward scene), so negate the toward-sun vector
         let light_dir = [-sun_dir.x, -sun_dir.y, -sun_dir.z];
 
         // Sun intensity dims at horizon/night
         let sun_elev = sun_dir.y.clamp(-1.0, 1.0);
-        let sun_lux  = (sun_elev * 3.0).clamp(0.0, 1.0);
+        let sun_lux = (sun_elev * 3.0).clamp(0.0, 1.0);
         let sun_color = [
-            1.0_f32.min(1.0 + (1.0 - sun_elev) * 0.3),  // warmer at horizon
+            1.0_f32.min(1.0 + (1.0 - sun_elev) * 0.3), // warmer at horizon
             (0.85 + sun_elev * 0.15).clamp(0.0, 1.0),
-            (0.7  + sun_elev * 0.3 ).clamp(0.0, 1.0),
+            (0.7 + sun_elev * 0.3).clamp(0.0, 1.0),
         ];
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => { log::warn!("Surface error: {:?}", e); return; }
+            Err(e) => {
+                log::warn!("Surface error: {:?}", e);
+                return;
+            }
         };
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Update dynamic sun light
-        let _ = self.renderer.update_light(self.sun_light_id, directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)));
+        let _ = self.renderer.update_light(
+            self.sun_light_id,
+            directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
+        );
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
         }
@@ -348,3 +417,4 @@ impl AppState {
         output.present();
     }
 }
+

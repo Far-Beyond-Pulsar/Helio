@@ -304,3 +304,4 @@ impl super::super::Scene {
         self.gpu_scene.visibility.set_data(visibility);
     }
 }
+

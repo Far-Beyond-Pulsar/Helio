@@ -60,12 +60,24 @@ impl AppState {
         let right = Vec3::new(cy, 0.0, sy);
         let up = Vec3::Y;
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space) { self.cam_pos += up * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= up * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += up * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= up * SPEED * dt;
+        }
 
         forward
     }
@@ -97,17 +109,14 @@ impl ApplicationHandler for App {
             force_fallback_adapter: false,
         }))
         .expect("no adapter");
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: required_wgpu_features(adapter.features()),
-                    required_limits: required_wgpu_limits(adapter.limits()),
-                    ..Default::default()
-                },
-                None,
-            ),
-        )
-            .expect("no device");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            },
+        ))
+        .expect("no device");
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
@@ -141,7 +150,9 @@ impl ApplicationHandler for App {
         renderer.set_clear_color([0.03, 0.03, 0.04, 1.0]);
         renderer.set_ambient([0.06, 0.06, 0.09], 1.0);
 
-        let scene_path = std::env::args().nth(1).unwrap_or_else(|| "test.fbx".to_string());
+        let scene_path = std::env::args()
+            .nth(1)
+            .unwrap_or_else(|| "test.fbx".to_string());
         let config = helio_asset_compat::LoadConfig::default().with_uv_flip(false);
         match load_scene_file_with_config(&scene_path, config) {
             Ok(scene) => {
@@ -166,15 +177,45 @@ impl ApplicationHandler for App {
                     let material = mesh
                         .material_index
                         .and_then(|index| material_ids.get(index).copied())
-                        .unwrap_or_else(|| renderer.insert_material(v3_demo_common::make_material([0.7, 0.7, 0.75, 1.0], 0.6, 0.0, [0.0, 0.0, 0.0], 0.0)));
-                    let _ = v3_demo_common::insert_object(&mut renderer, mesh_id, material, glam::Mat4::IDENTITY, radius);
+                        .unwrap_or_else(|| {
+                            renderer.insert_material(v3_demo_common::make_material(
+                                [0.7, 0.7, 0.75, 1.0],
+                                0.6,
+                                0.0,
+                                [0.0, 0.0, 0.0],
+                                0.0,
+                            ))
+                        });
+                    let _ = v3_demo_common::insert_object(
+                        &mut renderer,
+                        mesh_id,
+                        material,
+                        glam::Mat4::IDENTITY,
+                        radius,
+                    );
                 }
             }
             Err(error) => {
-                log::warn!("Failed to load '{}': {}. Using fallback cube.", scene_path, error);
+                log::warn!(
+                    "Failed to load '{}': {}. Using fallback cube.",
+                    scene_path,
+                    error
+                );
                 let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
-                let material = renderer.insert_material(v3_demo_common::make_material([0.55, 0.68, 0.9, 1.0], 0.35, 0.15, [0.0, 0.0, 0.0], 0.0));
-                let _ = v3_demo_common::insert_object(&mut renderer, mesh, material, glam::Mat4::IDENTITY, 0.9);
+                let material = renderer.insert_material(v3_demo_common::make_material(
+                    [0.55, 0.68, 0.9, 1.0],
+                    0.35,
+                    0.15,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ));
+                let _ = v3_demo_common::insert_object(
+                    &mut renderer,
+                    mesh,
+                    material,
+                    glam::Mat4::IDENTITY,
+                    0.9,
+                );
             }
         }
 
@@ -209,17 +250,20 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
                     state.window.set_cursor_visible(true);
-                    let _ = state.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                    let _ = state
+                        .window
+                        .set_cursor_grab(winit::window::CursorGrabMode::None);
                 } else {
                     event_loop.exit();
                 }
@@ -241,11 +285,12 @@ impl ApplicationHandler for App {
                 state.renderer.set_render_size(size.width, size.height);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state: key_state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
                 ..
             } => match key_state {
                 ElementState::Pressed => {
@@ -261,8 +306,14 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let grabbed = state.window.set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                        .or_else(|_| state.window.set_cursor_grab(winit::window::CursorGrabMode::Locked))
+                    let grabbed = state
+                        .window
+                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                        .or_else(|_| {
+                            state
+                                .window
+                                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                        })
                         .is_ok();
                     if grabbed {
                         state.cursor_grabbed = true;
@@ -277,11 +328,26 @@ impl ApplicationHandler for App {
 
                 let forward = state.update_camera(dt);
                 const LIGHT_SPEED: f32 = 5.0;
-                if state.keys.contains(&KeyCode::KeyI) { state.point_light_pos.z -= LIGHT_SPEED * dt; }
-                if state.keys.contains(&KeyCode::KeyK) { state.point_light_pos.z += LIGHT_SPEED * dt; }
-                if state.keys.contains(&KeyCode::KeyJ) { state.point_light_pos.x -= LIGHT_SPEED * dt; }
-                if state.keys.contains(&KeyCode::KeyL) { state.point_light_pos.x += LIGHT_SPEED * dt; }
-                update_point_light(&mut state.renderer, state.point_light_id, state.point_light_pos, [1.0, 0.95, 0.8], 12.0, 18.0);
+                if state.keys.contains(&KeyCode::KeyI) {
+                    state.point_light_pos.z -= LIGHT_SPEED * dt;
+                }
+                if state.keys.contains(&KeyCode::KeyK) {
+                    state.point_light_pos.z += LIGHT_SPEED * dt;
+                }
+                if state.keys.contains(&KeyCode::KeyJ) {
+                    state.point_light_pos.x -= LIGHT_SPEED * dt;
+                }
+                if state.keys.contains(&KeyCode::KeyL) {
+                    state.point_light_pos.x += LIGHT_SPEED * dt;
+                }
+                update_point_light(
+                    &mut state.renderer,
+                    state.point_light_id,
+                    state.point_light_pos,
+                    [1.0, 0.95, 0.8],
+                    12.0,
+                    18.0,
+                );
 
                 let size = state.window.inner_size();
                 let camera = Camera::perspective_look_at(
@@ -301,7 +367,9 @@ impl ApplicationHandler for App {
                         return;
                     }
                 };
-                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(error) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", error);
                 }
@@ -336,3 +404,4 @@ fn main() {
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
+

@@ -8,8 +8,8 @@
 //!
 //! Total stride: 32 bytes.
 
-use helio_pass_debug::DebugVertex;
 use bytemuck::{bytes_of, Zeroable};
+use helio_pass_debug::DebugVertex;
 use std::mem::{align_of, offset_of, size_of};
 
 // ── Size ─────────────────────────────────────────────────────────────────────
@@ -80,7 +80,10 @@ fn color_offset_equals_four_f32_bytes() {
 
 #[test]
 fn color_plus_its_size_equals_total_struct_size() {
-    assert_eq!(offset_of!(DebugVertex, color) + 4 * size_of::<f32>(), size_of::<DebugVertex>());
+    assert_eq!(
+        offset_of!(DebugVertex, color) + 4 * size_of::<f32>(),
+        size_of::<DebugVertex>()
+    );
 }
 
 // ── Construction ─────────────────────────────────────────────────────────────
@@ -89,8 +92,8 @@ fn color_plus_its_size_equals_total_struct_size() {
 fn can_construct_debug_vertex() {
     let v = DebugVertex {
         position: [1.0, 2.0, 3.0],
-        _pad:     0.0,
-        color:    [1.0, 0.0, 0.0, 1.0],
+        _pad: 0.0,
+        color: [1.0, 0.0, 0.0, 1.0],
     };
     assert_eq!(v.position[0], 1.0);
     assert_eq!(v.position[1], 2.0);
@@ -101,11 +104,11 @@ fn can_construct_debug_vertex() {
 fn color_rgba_accessible_via_index() {
     let v = DebugVertex {
         position: [0.0; 3],
-        _pad:     0.0,
-        color:    [1.0, 0.5, 0.25, 0.75],
+        _pad: 0.0,
+        color: [1.0, 0.5, 0.25, 0.75],
     };
-    assert_eq!(v.color[0], 1.0);  // R
-    assert_eq!(v.color[1], 0.5);  // G
+    assert_eq!(v.color[0], 1.0); // R
+    assert_eq!(v.color[1], 0.5); // G
     assert_eq!(v.color[2], 0.25); // B
     assert_eq!(v.color[3], 0.75); // A
 }
@@ -114,8 +117,8 @@ fn color_rgba_accessible_via_index() {
 fn pad_field_is_accessible_and_mutable() {
     let mut v = DebugVertex {
         position: [0.0; 3],
-        _pad:     0.0,
-        color:    [0.0; 4],
+        _pad: 0.0,
+        color: [0.0; 4],
     };
     v._pad = 1.0;
     assert_eq!(v._pad, 1.0);
@@ -127,8 +130,8 @@ fn pad_field_is_accessible_and_mutable() {
 fn can_mutate_position_components() {
     let mut v = DebugVertex {
         position: [0.0; 3],
-        _pad:     0.0,
-        color:    [1.0; 4],
+        _pad: 0.0,
+        color: [1.0; 4],
     };
     v.position[0] = 5.0;
     v.position[1] = -3.0;
@@ -140,8 +143,8 @@ fn can_mutate_position_components() {
 fn can_mutate_color_alpha() {
     let mut v = DebugVertex {
         position: [0.0; 3],
-        _pad:     0.0,
-        color:    [1.0, 1.0, 1.0, 1.0],
+        _pad: 0.0,
+        color: [1.0, 1.0, 1.0, 1.0],
     };
     v.color[3] = 0.0;
     assert_eq!(v.color[3], 0.0);
@@ -153,8 +156,8 @@ fn can_mutate_color_alpha() {
 fn debug_vertex_is_copy() {
     let a = DebugVertex {
         position: [1.0, 2.0, 3.0],
-        _pad:     0.0,
-        color:    [0.5; 4],
+        _pad: 0.0,
+        color: [0.5; 4],
     };
     let b = a; // copy
     assert_eq!(b.position, a.position);
@@ -165,8 +168,8 @@ fn debug_vertex_is_copy() {
 fn debug_vertex_is_clone() {
     let a = DebugVertex {
         position: [1.0, 2.0, 3.0],
-        _pad:     0.0,
-        color:    [0.5; 4],
+        _pad: 0.0,
+        color: [0.5; 4],
     };
     let b = a.clone();
     assert_eq!(b.position, a.position);
@@ -203,3 +206,4 @@ fn bytes_of_debug_vertex_is_32_bytes() {
     let v: DebugVertex = Zeroable::zeroed();
     assert_eq!(bytes_of(&v).len(), 32);
 }
+

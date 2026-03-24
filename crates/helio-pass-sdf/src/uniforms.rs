@@ -95,3 +95,4 @@ pub struct SdfClipMapParams {
     pub _pad: [u32; 3],
     pub levels: [GpuClipLevel; 8],
 }
+

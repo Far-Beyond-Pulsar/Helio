@@ -127,7 +127,12 @@ fn csm_splits_must_be_ascending() {
     // Splits define cascade boundaries: split[n] < split[n+1].
     let splits: [f32; 4] = [10.0, 30.0, 80.0, 200.0];
     for window in splits.windows(2) {
-        assert!(window[0] < window[1], "split {} must be < {}", window[0], window[1]);
+        assert!(
+            window[0] < window[1],
+            "split {} must be < {}",
+            window[0],
+            window[1]
+        );
     }
 }
 
@@ -183,7 +188,11 @@ fn last_row_three_pad_u32s_fill_16_bytes_with_debug_mode() {
 
 #[test]
 fn globals_96_bytes_leaves_no_trailing_gap_in_16_byte_rows() {
-    assert_eq!(96 % 16, 0, "96 bytes must pack cleanly into 16-byte WGSL rows");
+    assert_eq!(
+        96 % 16,
+        0,
+        "96 bytes must pack cleanly into 16-byte WGSL rows"
+    );
 }
 
 #[test]
@@ -192,3 +201,4 @@ fn no_light_count_means_zero() {
     let no_lights: u32 = 0;
     assert_eq!(no_lights, 0);
 }
+

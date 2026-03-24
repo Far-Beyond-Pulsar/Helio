@@ -8,11 +8,11 @@ use bytemuck::Zeroable;
 use helio_v3::GpuMaterial;
 
 use crate::handles::MaterialId;
-use crate::material::{MaterialAsset, MaterialTextures, MaterialTextureRef};
+use crate::material::{MaterialAsset, MaterialTextureRef, MaterialTextures};
 
-use super::super::errors::{Result, invalid, SceneError};
+use super::super::errors::{invalid, Result, SceneError};
+use super::super::helpers::{each_material_texture_ref, gpu_material_textures};
 use super::super::types::MaterialRecord;
-use super::super::helpers::{gpu_material_textures, each_material_texture_ref};
 
 /// Tombstone material used when a material slot is freed (preserves slot stability).
 fn tombstone_material() -> GpuMaterial {
@@ -194,7 +194,8 @@ impl super::super::Scene {
     /// ```
     pub fn update_material_asset(&mut self, id: MaterialId, material: MaterialAsset) -> Result<()> {
         self.validate_material_textures(&material.textures)?;
-        let Some(old_textures) = self.materials.get(id).map(|record| record.textures.clone()) else {
+        let Some(old_textures) = self.materials.get(id).map(|record| record.textures.clone())
+        else {
             return Err(invalid("material"));
         };
         self.bump_texture_refs(&material.textures, 1)?;
@@ -245,7 +246,10 @@ impl super::super::Scene {
                 resource: "material",
             });
         }
-        let (slot, removed) = self.materials.remove(id).ok_or_else(|| invalid("material"))?;
+        let (slot, removed) = self
+            .materials
+            .remove(id)
+            .ok_or_else(|| invalid("material"))?;
         self.bump_texture_refs(&removed.textures, -1)?;
         let updated_material = self.gpu_scene.materials.update(slot, tombstone_material());
         let updated_textures = self
@@ -271,7 +275,10 @@ impl super::super::Scene {
     /// Validate that all texture references in a material exist.
     ///
     /// Returns an error if any texture ID is invalid.
-    pub(in crate::scene) fn validate_material_textures(&self, textures: &MaterialTextures) -> Result<()> {
+    pub(in crate::scene) fn validate_material_textures(
+        &self,
+        textures: &MaterialTextures,
+    ) -> Result<()> {
         let mut validation = Ok(());
         each_material_texture_ref(textures, |texture| {
             if validation.is_err() {
@@ -287,7 +294,11 @@ impl super::super::Scene {
     /// Increment or decrement reference counts for all textures in a material.
     ///
     /// Used when materials are inserted, updated, or removed to track texture usage.
-    pub(in crate::scene) fn bump_texture_refs(&mut self, textures: &MaterialTextures, delta: i32) -> Result<()> {
+    pub(in crate::scene) fn bump_texture_refs(
+        &mut self,
+        textures: &MaterialTextures,
+        delta: i32,
+    ) -> Result<()> {
         for texture in [
             textures.base_color,
             textures.normal,
@@ -313,3 +324,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

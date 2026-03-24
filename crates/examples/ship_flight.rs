@@ -53,7 +53,9 @@ const MESH_BASE_ROT: Quat = Quat::from_xyzw(
 );
 
 fn base_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -96,8 +98,9 @@ fn load_ship() -> Result<(ConvertedScene, ShipBounds), AssetError> {
         Some(dir.as_path()),
         LoadConfig::default().with_uv_flip(false),
     )?;
-    let bounds = ShipBounds::from_scene(&scene)
-        .ok_or_else(|| AssetError::InvalidData("embedded ship scene did not contain any vertices".to_string()))?;
+    let bounds = ShipBounds::from_scene(&scene).ok_or_else(|| {
+        AssetError::InvalidData("embedded ship scene did not contain any vertices".to_string())
+    })?;
     Ok((scene, bounds))
 }
 
@@ -116,36 +119,54 @@ fn follow_factor(strength: f32, dt: f32) -> f32 {
     1.0 - (-strength * dt).exp()
 }
 
-fn build_asteroid_field(renderer: &mut Renderer, ship_radius: f32, field_radius: f32, min_size: f32) {
-    let rocky = renderer.insert_material(make_material([0.15, 0.12, 0.09, 1.0], 0.90, 0.0, [0.0, 0.0, 0.0], 0.0));
-    let dark = renderer.insert_material(make_material([0.09, 0.09, 0.11, 1.0], 0.70, 0.25, [0.0, 0.0, 0.0], 0.0));
+fn build_asteroid_field(
+    renderer: &mut Renderer,
+    ship_radius: f32,
+    field_radius: f32,
+    min_size: f32,
+) {
+    let rocky = renderer.insert_material(make_material(
+        [0.15, 0.12, 0.09, 1.0],
+        0.90,
+        0.0,
+        [0.0, 0.0, 0.0],
+        0.0,
+    ));
+    let dark = renderer.insert_material(make_material(
+        [0.09, 0.09, 0.11, 1.0],
+        0.70,
+        0.25,
+        [0.0, 0.0, 0.0],
+        0.0,
+    ));
     let cube = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
     let local_radius = (ship_radius * 40.0).clamp(120.0, 420.0);
-    let spawn_asteroid = |renderer: &mut Renderer, seed: &mut u64, i: usize, dist: f32, size_bias: f32| {
-        let theta = lcg(seed) * std::f32::consts::TAU;
-        let phi = rand_s(seed).asin();
-        let pos = Vec3::new(
-            dist * phi.cos() * theta.cos(),
-            dist * phi.sin(),
-            dist * phi.cos() * theta.sin(),
-        );
-        let base = min_size * size_bias * (1.0 + lcg(seed) * 9.0);
-        let scale = Vec3::new(
-            base * (0.6 + lcg(seed) * 0.8),
-            base * (0.5 + lcg(seed) * 0.7),
-            base * (0.6 + lcg(seed) * 0.8),
-        );
-        let rot = Quat::from_euler(
-            EulerRot::XYZ,
-            rand_s(seed) * std::f32::consts::PI,
-            rand_s(seed) * std::f32::consts::PI,
-            rand_s(seed) * std::f32::consts::PI,
-        );
-        let material = if i % 3 == 0 { dark } else { rocky };
-        let transform = Mat4::from_scale_rotation_translation(scale, rot, pos);
-        let _ = v3_demo_common::insert_object(renderer, cube, material, transform, base);
-    };
+    let spawn_asteroid =
+        |renderer: &mut Renderer, seed: &mut u64, i: usize, dist: f32, size_bias: f32| {
+            let theta = lcg(seed) * std::f32::consts::TAU;
+            let phi = rand_s(seed).asin();
+            let pos = Vec3::new(
+                dist * phi.cos() * theta.cos(),
+                dist * phi.sin(),
+                dist * phi.cos() * theta.sin(),
+            );
+            let base = min_size * size_bias * (1.0 + lcg(seed) * 9.0);
+            let scale = Vec3::new(
+                base * (0.6 + lcg(seed) * 0.8),
+                base * (0.5 + lcg(seed) * 0.7),
+                base * (0.6 + lcg(seed) * 0.8),
+            );
+            let rot = Quat::from_euler(
+                EulerRot::XYZ,
+                rand_s(seed) * std::f32::consts::PI,
+                rand_s(seed) * std::f32::consts::PI,
+                rand_s(seed) * std::f32::consts::PI,
+            );
+            let material = if i % 3 == 0 { dark } else { rocky };
+            let transform = Mat4::from_scale_rotation_translation(scale, rot, pos);
+            let _ = v3_demo_common::insert_object(renderer, cube, material, transform, base);
+        };
 
     let mut seed: u64 = 0xCAFE_BABE_1234_5678;
     for i in 0..LOCAL_ASTEROID_COUNT {
@@ -158,15 +179,33 @@ fn build_asteroid_field(renderer: &mut Renderer, ship_radius: f32, field_radius:
     }
 }
 
-fn upload_ship_meshes(renderer: &mut Renderer, scene: &ConvertedScene, ship_bounds: ShipBounds) -> Vec<helio::ObjectId> {
+fn upload_ship_meshes(
+    renderer: &mut Renderer,
+    scene: &ConvertedScene,
+    ship_bounds: ShipBounds,
+) -> Vec<helio::ObjectId> {
     if scene.meshes.is_empty() {
-        let mat = renderer.insert_material(make_material([0.25, 0.40, 0.70, 1.0], 0.25, 0.85, [0.0, 0.0, 0.0], 0.0));
+        let mat = renderer.insert_material(make_material(
+            [0.25, 0.40, 0.70, 1.0],
+            0.25,
+            0.85,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
         let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], ship_bounds.radius));
-        return vec![v3_demo_common::insert_object(renderer, mesh, mat, Mat4::IDENTITY, ship_bounds.radius).expect("fallback object")];
+        return vec![v3_demo_common::insert_object(
+            renderer,
+            mesh,
+            mat,
+            Mat4::IDENTITY,
+            ship_bounds.radius,
+        )
+        .expect("fallback object")];
     }
 
     let material_ids = upload_scene_materials(renderer, scene).expect("upload ship materials");
-    scene.meshes
+    scene
+        .meshes
         .iter()
         .map(|mesh| {
             let mut vertices = mesh.vertices.clone();
@@ -178,8 +217,18 @@ fn upload_ship_meshes(renderer: &mut Renderer, scene: &ConvertedScene, ship_boun
                 vertices,
                 indices: mesh.indices.clone(),
             });
-            let material = mesh.material_index.and_then(|i| material_ids.get(i).copied()).unwrap_or(material_ids[0]);
-            v3_demo_common::insert_object(renderer, mesh_id, material, Mat4::IDENTITY, ship_bounds.radius).expect("ship object")
+            let material = mesh
+                .material_index
+                .and_then(|i| material_ids.get(i).copied())
+                .unwrap_or(material_ids[0]);
+            v3_demo_common::insert_object(
+                renderer,
+                mesh_id,
+                material,
+                Mat4::IDENTITY,
+                ship_bounds.radius,
+            )
+            .expect("ship object")
         })
         .collect()
 }
@@ -206,16 +255,32 @@ struct Ship {
 }
 
 impl Ship {
-    fn forward(&self) -> Vec3 { self.quat * -Vec3::Z }
-    fn right(&self) -> Vec3 { self.quat * Vec3::X }
-    fn up(&self) -> Vec3 { self.quat * Vec3::Y }
-    fn render_forward(&self) -> Vec3 { self.render_quat * -Vec3::Z }
-    fn render_right(&self) -> Vec3 { self.render_quat * Vec3::X }
-    fn render_up(&self) -> Vec3 { self.render_quat * Vec3::Y }
-    fn engine_pos(&self) -> Vec3 { self.render_pos - self.render_forward() * self.radius * 0.8 }
+    fn forward(&self) -> Vec3 {
+        self.quat * -Vec3::Z
+    }
+    fn right(&self) -> Vec3 {
+        self.quat * Vec3::X
+    }
+    fn up(&self) -> Vec3 {
+        self.quat * Vec3::Y
+    }
+    fn render_forward(&self) -> Vec3 {
+        self.render_quat * -Vec3::Z
+    }
+    fn render_right(&self) -> Vec3 {
+        self.render_quat * Vec3::X
+    }
+    fn render_up(&self) -> Vec3 {
+        self.render_quat * Vec3::Y
+    }
+    fn engine_pos(&self) -> Vec3 {
+        self.render_pos - self.render_forward() * self.radius * 0.8
+    }
 
     fn update_visual_follow(&mut self, dt: f32) {
-        self.render_pos = self.render_pos.lerp(self.pos, follow_factor(SHIP_POSITION_LAG, dt));
+        self.render_pos = self
+            .render_pos
+            .lerp(self.pos, follow_factor(SHIP_POSITION_LAG, dt));
         self.render_quat = self
             .render_quat
             .slerp(self.quat, follow_factor(SHIP_ROTATION_LAG, dt))
@@ -223,7 +288,8 @@ impl Ship {
     }
 
     fn push_transforms(&self, renderer: &mut Renderer) {
-        let transform = Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
+        let transform =
+            Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
         for &id in &self.ids {
             let _ = renderer.update_object_transform(id, transform);
         }
@@ -238,7 +304,10 @@ impl Ship {
         let spotlight_range = self.radius * 15.0;
         let spotlight_intensity = 35.0;
 
-        let left_spot_pos = self.render_pos + right * (-self.radius * 0.4) + up * (self.radius * 0.15) + forward * (-self.radius * 0.9);
+        let left_spot_pos = self.render_pos
+            + right * (-self.radius * 0.4)
+            + up * (self.radius * 0.15)
+            + forward * (-self.radius * 0.9);
         let _ = renderer.update_light(
             self.forward_spotlight_left,
             spot_light(
@@ -252,7 +321,10 @@ impl Ship {
             ),
         );
 
-        let right_spot_pos = self.render_pos + right * (self.radius * 0.4) + up * (self.radius * 0.15) + forward * (-self.radius * 0.9);
+        let right_spot_pos = self.render_pos
+            + right * (self.radius * 0.4)
+            + up * (self.radius * 0.15)
+            + forward * (-self.radius * 0.9);
         let _ = renderer.update_light(
             self.forward_spotlight_right,
             spot_light(
@@ -273,25 +345,46 @@ impl Ship {
         let port_pos = self.render_pos + right * (-self.radius * 0.75) + up * (self.radius * 0.2);
         let _ = renderer.update_light(
             self.hull_light_port,
-            point_light(port_pos.to_array(), [1.0, 0.1, 0.1], hull_intensity, hull_range),
+            point_light(
+                port_pos.to_array(),
+                [1.0, 0.1, 0.1],
+                hull_intensity,
+                hull_range,
+            ),
         );
 
-        let starboard_pos = self.render_pos + right * (self.radius * 0.75) + up * (self.radius * 0.2);
+        let starboard_pos =
+            self.render_pos + right * (self.radius * 0.75) + up * (self.radius * 0.2);
         let _ = renderer.update_light(
             self.hull_light_starboard,
-            point_light(starboard_pos.to_array(), [0.1, 1.0, 0.1], hull_intensity, hull_range),
+            point_light(
+                starboard_pos.to_array(),
+                [0.1, 1.0, 0.1],
+                hull_intensity,
+                hull_range,
+            ),
         );
 
         let top_pos = self.render_pos + up * (self.radius * 0.5) + forward * (self.radius * 0.2);
         let _ = renderer.update_light(
             self.hull_light_top,
-            point_light(top_pos.to_array(), [1.0, 1.0, 1.0], hull_intensity * 0.8, hull_range),
+            point_light(
+                top_pos.to_array(),
+                [1.0, 1.0, 1.0],
+                hull_intensity * 0.8,
+                hull_range,
+            ),
         );
 
         let belly_pos = self.render_pos + up * (-self.radius * 0.4) + forward * (self.radius * 0.2);
         let _ = renderer.update_light(
             self.hull_light_belly,
-            point_light(belly_pos.to_array(), [0.4, 0.6, 1.0], hull_intensity * 0.7, hull_range),
+            point_light(
+                belly_pos.to_array(),
+                [0.4, 0.6, 1.0],
+                hull_intensity * 0.7,
+                hull_range,
+            ),
         );
 
         // Update engine light
@@ -299,16 +392,24 @@ impl Ship {
         let engine_pos = self.render_pos - forward * (self.radius * 0.8);
         let _ = renderer.update_light(
             self.engine_light,
-            point_light(engine_pos.to_array(), [0.35, 0.65, 1.0], glow, self.radius * 3.5),
+            point_light(
+                engine_pos.to_array(),
+                [0.35, 0.65, 1.0],
+                glow,
+                self.radius * 3.5,
+            ),
         );
     }
 
     fn desired_cam_pos(&self) -> Vec3 {
-        self.render_pos - self.render_forward() * self.radius * 3.2 + self.render_up() * self.radius * 0.95
+        self.render_pos - self.render_forward() * self.radius * 3.2
+            + self.render_up() * self.radius * 0.95
     }
 
     fn desired_cam_target(&self) -> Vec3 {
-        self.render_pos + self.render_forward() * self.radius * 1.15 + self.render_up() * self.radius * 0.18
+        self.render_pos
+            + self.render_forward() * self.radius * 1.15
+            + self.render_up() * self.radius * 0.18
     }
 }
 
@@ -339,8 +440,12 @@ impl AppState {
         self.mouse_delta = (0.0, 0.0);
 
         let mut roll_input = 0.0;
-        if self.keys.contains(&KeyCode::KeyQ) { roll_input += ROLL_SPEED; }
-        if self.keys.contains(&KeyCode::KeyE) { roll_input -= ROLL_SPEED; }
+        if self.keys.contains(&KeyCode::KeyQ) {
+            roll_input += ROLL_SPEED;
+        }
+        if self.keys.contains(&KeyCode::KeyE) {
+            roll_input -= ROLL_SPEED;
+        }
 
         self.ship.angular_velocity += Vec3::new(
             -pitch_delta * PITCH_THRUST,
@@ -401,12 +506,14 @@ impl AppState {
         self.ship.update_visual_follow(dt);
         self.ship.push_transforms(&mut self.renderer);
         self.ship.update_lights(&mut self.renderer);
-        self.camera_pos = self
-            .camera_pos
-            .lerp(self.ship.desired_cam_pos(), follow_factor(CAMERA_POSITION_LAG, dt));
-        self.camera_target = self
-            .camera_target
-            .lerp(self.ship.desired_cam_target(), follow_factor(CAMERA_TARGET_LAG, dt));
+        self.camera_pos = self.camera_pos.lerp(
+            self.ship.desired_cam_pos(),
+            follow_factor(CAMERA_POSITION_LAG, dt),
+        );
+        self.camera_target = self.camera_target.lerp(
+            self.ship.desired_cam_target(),
+            follow_factor(CAMERA_TARGET_LAG, dt),
+        );
         self.camera_up = self
             .camera_up
             .lerp(self.ship.render_up(), follow_factor(CAMERA_UP_LAG, dt))
@@ -418,7 +525,9 @@ impl AppState {
 }
 
 impl App {
-    fn new() -> Self { Self { state: None } }
+    fn new() -> Self {
+        Self { state: None }
+    }
 }
 
 impl ApplicationHandler for App {
@@ -436,28 +545,32 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone()).expect("failed to create surface");
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("failed to create surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
         .expect("no adapter");
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: required_wgpu_features(adapter.features()),
-                    required_limits: required_wgpu_limits(adapter.limits()),
-                    ..Default::default()
-                },
-                None,
-            ),
-        )
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            },
+        ))
         .expect("no device");
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        let surface_format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
         surface.configure(
             &device,
@@ -473,22 +586,34 @@ impl ApplicationHandler for App {
             },
         );
 
-        let mut renderer = Renderer::new(device.clone(), queue, RendererConfig::new(size.width, size.height, surface_format));
+        let mut renderer = Renderer::new(
+            device.clone(),
+            queue,
+            RendererConfig::new(size.width, size.height, surface_format),
+        );
         renderer.set_clear_color([0.0, 0.0, 0.01, 1.0]);
-        renderer.set_ambient([0.15, 0.15, 0.20], 0.8);  // Increased ambient lighting
-        renderer.insert_light(directional_light([-0.55, -0.38, -0.74], [1.0, 0.97, 0.88], 4.2));
-        renderer.insert_light(directional_light([0.72, 0.18, 0.68], [0.50, 0.70, 1.0], 0.65));
+        renderer.set_ambient([0.15, 0.15, 0.20], 0.8); // Increased ambient lighting
+        renderer.insert_light(directional_light(
+            [-0.55, -0.38, -0.74],
+            [1.0, 0.97, 0.88],
+            4.2,
+        ));
+        renderer.insert_light(directional_light(
+            [0.72, 0.18, 0.68],
+            [0.50, 0.70, 1.0],
+            0.65,
+        ));
 
         // Add scattered point lights throughout the asteroid field
         let light_positions = [
-            ([200.0, 100.0, 150.0], [1.0, 0.8, 0.6], 80.0, 500.0),    // Warm orange
-            ([-180.0, -80.0, 220.0], [0.6, 0.8, 1.0], 60.0, 450.0),   // Cool blue
-            ([150.0, -120.0, -200.0], [1.0, 0.6, 0.7], 70.0, 480.0),  // Pink/magenta
-            ([-220.0, 140.0, -100.0], [0.7, 1.0, 0.6], 65.0, 460.0),  // Green tint
-            ([0.0, 180.0, 250.0], [1.0, 1.0, 0.8], 75.0, 520.0),      // Warm white
-            ([280.0, -60.0, 80.0], [0.8, 0.6, 1.0], 55.0, 440.0),     // Purple
-            ([-150.0, 90.0, 180.0], [1.0, 0.9, 0.7], 68.0, 470.0),    // Warm yellow
-            ([120.0, -150.0, -150.0], [0.6, 0.9, 1.0], 62.0, 450.0),  // Cyan
+            ([200.0, 100.0, 150.0], [1.0, 0.8, 0.6], 80.0, 500.0), // Warm orange
+            ([-180.0, -80.0, 220.0], [0.6, 0.8, 1.0], 60.0, 450.0), // Cool blue
+            ([150.0, -120.0, -200.0], [1.0, 0.6, 0.7], 70.0, 480.0), // Pink/magenta
+            ([-220.0, 140.0, -100.0], [0.7, 1.0, 0.6], 65.0, 460.0), // Green tint
+            ([0.0, 180.0, 250.0], [1.0, 1.0, 0.8], 75.0, 520.0),   // Warm white
+            ([280.0, -60.0, 80.0], [0.8, 0.6, 1.0], 55.0, 440.0),  // Purple
+            ([-150.0, 90.0, 180.0], [1.0, 0.9, 0.7], 68.0, 470.0), // Warm yellow
+            ([120.0, -150.0, -150.0], [0.6, 0.9, 1.0], 62.0, 450.0), // Cyan
         ];
 
         for (position, color, intensity, range) in &light_positions {
@@ -496,12 +621,34 @@ impl ApplicationHandler for App {
         }
 
         let (ship_radius, ship_ids) = match load_ship() {
-            Ok((scene, bounds)) => (bounds.radius, upload_ship_meshes(&mut renderer, &scene, bounds)),
+            Ok((scene, bounds)) => (
+                bounds.radius,
+                upload_ship_meshes(&mut renderer, &scene, bounds),
+            ),
             Err(error) => {
-                log::warn!("failed to load embedded ship: {}. using fallback cube.", error);
-                let material = renderer.insert_material(make_material([0.25, 0.40, 0.70, 1.0], 0.25, 0.85, [0.0, 0.0, 0.0], 0.0));
+                log::warn!(
+                    "failed to load embedded ship: {}. using fallback cube.",
+                    error
+                );
+                let material = renderer.insert_material(make_material(
+                    [0.25, 0.40, 0.70, 1.0],
+                    0.25,
+                    0.85,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ));
                 let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 2.0));
-                (2.0, vec![v3_demo_common::insert_object(&mut renderer, mesh, material, Mat4::IDENTITY, 2.0).expect("fallback ship")])
+                (
+                    2.0,
+                    vec![v3_demo_common::insert_object(
+                        &mut renderer,
+                        mesh,
+                        material,
+                        Mat4::IDENTITY,
+                        2.0,
+                    )
+                    .expect("fallback ship")],
+                )
             }
         };
 
@@ -509,27 +656,37 @@ impl ApplicationHandler for App {
             .clamp(ASTEROID_FIELD_MIN_RADIUS, ASTEROID_FIELD_MAX_RADIUS);
         let thrust_accel = (ship_radius * 4.8).clamp(10.0, 220.0);
         let max_speed = (ship_radius * 22.0).clamp(35.0, 520.0);
-        build_asteroid_field(&mut renderer, ship_radius, field_radius, (ship_radius * 0.3).clamp(0.5, 8.0));
+        build_asteroid_field(
+            &mut renderer,
+            ship_radius,
+            field_radius,
+            (ship_radius * 0.3).clamp(0.5, 8.0),
+        );
 
         // Ship lights - engine thruster
-        let engine_light = renderer.insert_light(point_light([0.0, 0.0, ship_radius * 0.8], [0.35, 0.65, 1.0], 1.8, ship_radius * 3.5));
+        let engine_light = renderer.insert_light(point_light(
+            [0.0, 0.0, ship_radius * 0.8],
+            [0.35, 0.65, 1.0],
+            1.8,
+            ship_radius * 3.5,
+        ));
 
         // Ship lights - forward spotlights (headlights)
         let spotlight_range = ship_radius * 15.0;
         let spotlight_intensity = 35.0;
         let forward_spotlight_left = renderer.insert_light(spot_light(
-            [-ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9],  // Position: left side of nose
-            [0.0, 0.0, -1.0],                                                // Direction: forward
-            [1.0, 1.0, 0.95],                                                // Color: warm white
+            [-ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9], // Position: left side of nose
+            [0.0, 0.0, -1.0],                                             // Direction: forward
+            [1.0, 1.0, 0.95],                                             // Color: warm white
             spotlight_intensity,
             spotlight_range,
-            25_f32.to_radians(),  // Inner angle: 25 degrees
-            35_f32.to_radians(),  // Outer angle: 35 degrees
+            25_f32.to_radians(), // Inner angle: 25 degrees
+            35_f32.to_radians(), // Outer angle: 35 degrees
         ));
         let forward_spotlight_right = renderer.insert_light(spot_light(
-            [ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9],   // Position: right side of nose
-            [0.0, 0.0, -1.0],                                                // Direction: forward
-            [1.0, 1.0, 0.95],                                                // Color: warm white
+            [ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9], // Position: right side of nose
+            [0.0, 0.0, -1.0],                                            // Direction: forward
+            [1.0, 1.0, 0.95],                                            // Color: warm white
             spotlight_intensity,
             spotlight_range,
             25_f32.to_radians(),
@@ -540,26 +697,26 @@ impl ApplicationHandler for App {
         let hull_intensity = 12.0;
         let hull_range = ship_radius * 4.0;
         let hull_light_port = renderer.insert_light(point_light(
-            [-ship_radius * 0.75, ship_radius * 0.2, 0.0],  // Left wing
-            [1.0, 0.1, 0.1],                                 // Red (port)
+            [-ship_radius * 0.75, ship_radius * 0.2, 0.0], // Left wing
+            [1.0, 0.1, 0.1],                               // Red (port)
             hull_intensity,
             hull_range,
         ));
         let hull_light_starboard = renderer.insert_light(point_light(
-            [ship_radius * 0.75, ship_radius * 0.2, 0.0],   // Right wing
-            [0.1, 1.0, 0.1],                                 // Green (starboard)
+            [ship_radius * 0.75, ship_radius * 0.2, 0.0], // Right wing
+            [0.1, 1.0, 0.1],                              // Green (starboard)
             hull_intensity,
             hull_range,
         ));
         let hull_light_top = renderer.insert_light(point_light(
-            [0.0, ship_radius * 0.5, ship_radius * 0.2],    // Top center
-            [1.0, 1.0, 1.0],                                 // White
+            [0.0, ship_radius * 0.5, ship_radius * 0.2], // Top center
+            [1.0, 1.0, 1.0],                             // White
             hull_intensity * 0.8,
             hull_range,
         ));
         let hull_light_belly = renderer.insert_light(point_light(
-            [0.0, -ship_radius * 0.4, ship_radius * 0.2],   // Bottom center
-            [0.4, 0.6, 1.0],                                 // Blue
+            [0.0, -ship_radius * 0.4, ship_radius * 0.2], // Bottom center
+            [0.4, 0.6, 1.0],                              // Blue
             hull_intensity * 0.7,
             hull_range,
         ));
@@ -611,11 +768,12 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -643,15 +801,20 @@ impl ApplicationHandler for App {
                 state.renderer.set_render_size(size.width, size.height);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state: key_state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
                 ..
             } => match key_state {
-                ElementState::Pressed => { state.keys.insert(code); }
-                ElementState::Released => { state.keys.remove(&code); }
+                ElementState::Pressed => {
+                    state.keys.insert(code);
+                }
+                ElementState::Released => {
+                    state.keys.remove(&code);
+                }
             },
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -659,7 +822,9 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let grabbed = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if grabbed {
@@ -691,7 +856,9 @@ impl ApplicationHandler for App {
                         return;
                     }
                 };
-                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(error) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", error);
                 }
@@ -719,8 +886,11 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    env_logger::Builder::from_default_env().filter_level(log::LevelFilter::Info).init();
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
+

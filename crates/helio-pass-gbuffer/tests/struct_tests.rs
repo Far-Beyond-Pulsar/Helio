@@ -88,7 +88,10 @@ fn zeroable_produces_zeroed_array_fields() {
 fn zeroed_bytes_are_all_zero() {
     let g: GBufferGlobals = bytemuck::Zeroable::zeroed();
     let bytes: &[u8] = bytemuck::bytes_of(&g);
-    assert!(bytes.iter().all(|&b| b == 0), "all bytes must be zero after Zeroable::zeroed()");
+    assert!(
+        bytes.iter().all(|&b| b == 0),
+        "all bytes must be zero after Zeroable::zeroed()"
+    );
 }
 
 // ── bytemuck: Pod roundtrip ───────────────────────────────────────────────────
@@ -137,8 +140,7 @@ fn repr_c_frame_and_delta_time_are_contiguous() {
 
 #[test]
 fn repr_c_light_count_and_ambient_intensity_are_contiguous() {
-    let lc_end =
-        std::mem::offset_of!(GBufferGlobals, light_count) + std::mem::size_of::<u32>();
+    let lc_end = std::mem::offset_of!(GBufferGlobals, light_count) + std::mem::size_of::<u32>();
     let ai_start = std::mem::offset_of!(GBufferGlobals, ambient_intensity);
     assert_eq!(lc_end, ai_start);
 }
@@ -177,3 +179,4 @@ fn struct_is_copy() {
     let g2 = g; // Copy
     assert_eq!(g.frame, g2.frame);
 }
+

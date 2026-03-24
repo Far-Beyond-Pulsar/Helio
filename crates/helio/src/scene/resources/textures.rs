@@ -14,7 +14,7 @@ use wgpu::util::DeviceExt;
 use crate::handles::TextureId;
 use crate::material::{TextureUpload, MAX_TEXTURES};
 
-use super::super::errors::{Result, invalid, SceneError};
+use super::super::errors::{invalid, Result, SceneError};
 use super::super::types::TextureRecord;
 
 impl super::super::Scene {
@@ -83,16 +83,19 @@ impl super::super::Scene {
             &texture.data,
         );
         let view = gpu_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let sampler = self.gpu_scene.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: texture.label.as_deref(),
-            address_mode_u: texture.sampler.address_mode_u,
-            address_mode_v: texture.sampler.address_mode_v,
-            address_mode_w: texture.sampler.address_mode_w,
-            mag_filter: texture.sampler.mag_filter,
-            min_filter: texture.sampler.min_filter,
-            mipmap_filter: texture.sampler.mipmap_filter,
-            ..Default::default()
-        });
+        let sampler = self
+            .gpu_scene
+            .device
+            .create_sampler(&wgpu::SamplerDescriptor {
+                label: texture.label.as_deref(),
+                address_mode_u: texture.sampler.address_mode_u,
+                address_mode_v: texture.sampler.address_mode_v,
+                address_mode_w: texture.sampler.address_mode_w,
+                mag_filter: texture.sampler.mag_filter,
+                min_filter: texture.sampler.min_filter,
+                mipmap_filter: texture.sampler.mipmap_filter,
+                ..Default::default()
+            });
         let (id, _, _) = self.textures.insert(TextureRecord {
             _texture: gpu_texture,
             view,
@@ -184,3 +187,4 @@ impl super::super::Scene {
             .unwrap_or(&self.placeholder_sampler)
     }
 }
+

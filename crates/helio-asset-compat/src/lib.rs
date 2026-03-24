@@ -4,25 +4,27 @@
 //! and Helio's GPU-driven rendering pipeline. It handles conversion of CPU-side
 //! scene data to GPU buffers while maintaining AAA performance standards.
 
-mod scene_converter;
-mod mesh_converter;
-mod material_converter;
-mod texture_loader;
-mod light_converter;
-mod camera_converter;
 mod animation_system;
+mod camera_converter;
+mod light_converter;
+mod material_converter;
+mod mesh_converter;
+mod scene_converter;
+mod texture_loader;
 
+use helio::MeshId;
+use helio::{LightId, MaterialId, ObjectId, Renderer, TextureId};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::collections::HashMap;
-use helio::{LightId, MaterialId, ObjectId, Renderer, TextureId};
-use helio::MeshId;
 
-pub use mesh_converter::{convert_vertex, convert_primitive};
-pub use material_converter::{convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef};
-pub use light_converter::convert_light;
 pub use camera_converter::{extract_camera_data, CameraData};
-pub use scene_converter::{convert_scene, ConvertedScene, ConvertedMesh};
+pub use light_converter::convert_light;
+pub use material_converter::{
+    convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef,
+};
+pub use mesh_converter::{convert_primitive, convert_vertex};
+pub use scene_converter::{convert_scene, ConvertedMesh, ConvertedScene};
 
 use std::path::Path;
 
@@ -70,17 +72,23 @@ pub fn load_scene_file<P: AsRef<Path>>(path: P) -> Result<ConvertedScene> {
 }
 
 /// Load with custom configuration (e.g., UV flipping)
-pub fn load_scene_file_with_config<P: AsRef<Path>>(path: P, config: LoadConfig) -> Result<ConvertedScene> {
+pub fn load_scene_file_with_config<P: AsRef<Path>>(
+    path: P,
+    config: LoadConfig,
+) -> Result<ConvertedScene> {
     let path = path.as_ref();
 
     // Detect format from extension
-    let extension = path.extension()
+    let extension = path
+        .extension()
         .and_then(|e| e.to_str())
-        .ok_or_else(|| AssetError::UnsupportedFormat(
-            "File has no extension".to_string()
-        ))?;
+        .ok_or_else(|| AssetError::UnsupportedFormat("File has no extension".to_string()))?;
 
-    log::info!("Loading 3D model: {} (UV flip: {})", path.display(), config.flip_uv_y);
+    log::info!(
+        "Loading 3D model: {} (UV flip: {})",
+        path.display(),
+        config.flip_uv_y
+    );
     log::info!("Detected extension: {}", extension);
 
     // Create SolidRS registry and register loaders
@@ -91,17 +99,19 @@ pub fn load_scene_file_with_config<P: AsRef<Path>>(path: P, config: LoadConfig) 
     registry.register_loader(solid_usd::UsdLoader); // supports usda/usdc/usdz
 
     // Load the scene
-    let solid_scene = registry.load_file(path)
-        .map_err(|e| AssetError::Solid(e))?;
+    let solid_scene = registry.load_file(path).map_err(|e| AssetError::Solid(e))?;
 
-    log::info!("Loaded SolidRS scene '{}' - {} meshes, {} materials, {} lights",
+    log::info!(
+        "Loaded SolidRS scene '{}' - {} meshes, {} materials, {} lights",
         solid_scene.name,
         solid_scene.meshes.len(),
         solid_scene.materials.len(),
-        solid_scene.lights.len());
+        solid_scene.lights.len()
+    );
 
     // Get the directory containing the model file for resolving relative texture paths
-    let base_dir = path.parent()
+    let base_dir = path
+        .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
@@ -178,9 +188,16 @@ impl UploadedScene {
     ///
     /// Falls back to `material_ids[0]` when the mesh has no material index, and
     /// returns `None` when `material_ids` is empty.
-    pub fn mesh_material(&self, mesh_index: usize, converted: &scene_converter::ConvertedMesh) -> Option<MaterialId> {
+    pub fn mesh_material(
+        &self,
+        mesh_index: usize,
+        converted: &scene_converter::ConvertedMesh,
+    ) -> Option<MaterialId> {
         let idx = converted.material_index?;
-        self.material_ids.get(idx).copied().or_else(|| self.material_ids.first().copied())
+        self.material_ids
+            .get(idx)
+            .copied()
+            .or_else(|| self.material_ids.first().copied())
     }
 }
 
@@ -202,10 +219,7 @@ pub fn load_and_upload_scene<P: AsRef<Path>>(
 ///
 /// Prefer this over calling `upload_scene_materials` + a manual mesh loop so
 /// the `ConvertedScene` is only traversed once.
-pub fn upload_scene(
-    renderer: &mut Renderer,
-    scene: &ConvertedScene,
-) -> Result<UploadedScene> {
+pub fn upload_scene(renderer: &mut Renderer, scene: &ConvertedScene) -> Result<UploadedScene> {
     let material_ids = upload_scene_materials(renderer, scene)?;
     let mesh_ids = scene
         .meshes
@@ -213,11 +227,14 @@ pub fn upload_scene(
         .map(|mesh| {
             renderer.insert_mesh(helio::MeshUpload {
                 vertices: mesh.vertices.clone(),
-                indices:  mesh.indices.clone(),
+                indices: mesh.indices.clone(),
             })
         })
         .collect();
-    Ok(UploadedScene { mesh_ids, material_ids })
+    Ok(UploadedScene {
+        mesh_ids,
+        material_ids,
+    })
 }
 
 pub fn upload_scene_materials(
@@ -265,7 +282,6 @@ pub enum AssetError {
 
     #[error("Invalid data: {0}")]
     InvalidData(String),
-
 }
 
 /// Handle to a loaded 3D scene
@@ -327,3 +343,4 @@ impl SceneRegistry {
         self.assets.remove(&handle)
     }
 }
+

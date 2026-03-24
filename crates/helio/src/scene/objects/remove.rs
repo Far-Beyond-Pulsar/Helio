@@ -8,7 +8,7 @@ use helio_v3::{DrawIndexedIndirectArgs, GpuDrawCall};
 use crate::arena::DenseRemove;
 use crate::handles::ObjectId;
 
-use super::super::errors::{Result, invalid};
+use super::super::errors::{invalid, Result};
 
 impl super::super::Scene {
     /// Remove an object from the scene.
@@ -152,3 +152,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

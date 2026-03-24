@@ -8,7 +8,7 @@
 //! shared mesh vertex buffer (slot 0) and index buffer **before** this pass
 //! executes, or the GPU draw will read from undefined memory.
 
-use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
@@ -21,45 +21,39 @@ impl DepthPrepassPass {
     /// Create the depth-prepass pipeline.
     ///
     /// * `depth_format` – format of the depth attachment (e.g. `Depth32Float`)
-    pub fn new(
-        device: &wgpu::Device,
-        depth_format: wgpu::TextureFormat,
-    ) -> Self {
+    pub fn new(device: &wgpu::Device, depth_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("DepthPrepass Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/depth_prepass.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_prepass.wgsl").into()),
         });
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("DepthPrepass BGL"),
-                entries: &[
-                    // binding 0: camera uniform (VERTEX)
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DepthPrepass BGL"),
+            entries: &[
+                // binding 0: camera uniform (VERTEX)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // binding 1: per-instance transforms (VERTEX, read-only storage)
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::VERTEX,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // binding 1: per-instance transforms (VERTEX, read-only storage)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DepthPrepass PL"),
@@ -140,13 +134,11 @@ impl RenderPass for DepthPrepassPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = ctx
-            .frame
-            .main_scene
-            .as_ref()
-            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+        let main_scene = ctx.frame.main_scene.as_ref().ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
                 "DepthPrepass requires main_scene mesh buffers".to_string(),
-            ))?;
+            )
+        })?;
 
         // Extract before the mutable encoder borrow.
         let camera_ptr = ctx.scene.camera as *const _ as usize;
@@ -205,3 +197,4 @@ impl RenderPass for DepthPrepassPass {
         Ok(())
     }
 }
+

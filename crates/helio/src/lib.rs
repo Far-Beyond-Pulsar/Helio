@@ -26,7 +26,10 @@ pub use material::{
     TextureUpload, MAX_TEXTURES,
 };
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex};
-pub use renderer::{required_wgpu_features, required_wgpu_limits, build_simple_graph, GiConfig, Renderer, RendererConfig};
+pub use renderer::{
+    build_simple_graph, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
+    RendererConfig,
+};
 pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError};
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
@@ -35,3 +38,4 @@ pub use helio_v3::{
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
 };
 pub use libhelio::{LightType, ShadowQuality};
+

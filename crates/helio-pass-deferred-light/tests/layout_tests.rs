@@ -69,9 +69,9 @@ fn deferred_globals_last_row_padding_is_16_bytes() {
 
 #[test]
 fn deferred_globals_total_size_is_96_bytes() {
-    let row1      = size_of::<u32>() * 2 + size_of::<f32>() * 2; // 16
-    let vec4_rows = 4 * (4 * size_of::<f32>());                   // 64
-    let last_row  = 4 * size_of::<u32>();                          // 16
+    let row1 = size_of::<u32>() * 2 + size_of::<f32>() * 2; // 16
+    let vec4_rows = 4 * (4 * size_of::<f32>()); // 64
+    let last_row = 4 * size_of::<u32>(); // 16
     assert_eq!(row1 + vec4_rows + last_row, 96);
 }
 
@@ -139,7 +139,7 @@ fn csm_cascade_count_is_four() {
 fn csm_splits_fits_in_one_vec4() {
     // 4 cascades, 4 elements in [f32;4] — exact fit.
     const CSM_CASCADE_COUNT: usize = 4;
-    const VEC4_COMPONENTS: usize   = 4;
+    const VEC4_COMPONENTS: usize = 4;
     assert_eq!(CSM_CASCADE_COUNT, VEC4_COMPONENTS);
 }
 
@@ -151,3 +151,4 @@ fn globals_buf_size_96_satisfies_min_uniform_binding_size_multiple() {
     // and total size to be a multiple of 16 (WGSL vec4 alignment).
     assert_eq!(96 % 16, 0);
 }
+

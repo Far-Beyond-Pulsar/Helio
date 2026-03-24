@@ -175,3 +175,4 @@ pub(crate) struct VirtualObjectRecord {
     /// GPU instance data (model matrix, normal matrix, bounds).
     pub instance: GpuInstanceData,
 }
+

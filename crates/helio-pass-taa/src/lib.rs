@@ -16,8 +16,8 @@
 //! `history_texture` (sampled as temporal history).  After each frame, the output
 //! is GPU-copied into the history so the next frame sees the updated accumulation.
 
-use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
 use bytemuck::{Pod, Zeroable};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Halton(2, 3) sequence, 16 entries, values in (0, 1).
 /// Offset by -0.5 at upload time so jitter is centred on the pixel.
@@ -107,10 +107,14 @@ impl TaaPass {
             ..Default::default()
         });
 
-        let tex_desc = |label: &'static str, extra_usage: wgpu::TextureUsages| {
-            wgpu::TextureDescriptor {
+        let tex_desc =
+            |label: &'static str, extra_usage: wgpu::TextureUsages| wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -119,60 +123,54 @@ impl TaaPass {
                     | wgpu::TextureUsages::RENDER_ATTACHMENT
                     | extra_usage,
                 view_formats: &[],
-            }
-        };
+            };
 
-        let history_texture = device.create_texture(&tex_desc(
-            "TAA History",
-            wgpu::TextureUsages::COPY_DST,
-        ));
+        let history_texture =
+            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
         let history_view = history_texture.create_view(&Default::default());
 
-        let output_texture = device.create_texture(&tex_desc(
-            "TAA Output",
-            wgpu::TextureUsages::COPY_SRC,
-        ));
+        let output_texture =
+            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         let output_view = output_texture.create_view(&Default::default());
 
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("TAA BGL"),
-                entries: &[
-                    // 0: current_frame (filterable float — sampled with linear_sampler)
-                    tex_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
-                    // 1: history_frame (filterable float)
-                    tex_entry(1, wgpu::TextureSampleType::Float { filterable: true }),
-                    // 2: velocity_tex (non-filterable, sampled with point_sampler)
-                    tex_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
-                    // 3: depth_tex (depth texture)
-                    tex_entry(3, wgpu::TextureSampleType::Depth),
-                    // 4: linear_sampler
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("TAA BGL"),
+            entries: &[
+                // 0: current_frame (filterable float — sampled with linear_sampler)
+                tex_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
+                // 1: history_frame (filterable float)
+                tex_entry(1, wgpu::TextureSampleType::Float { filterable: true }),
+                // 2: velocity_tex (non-filterable, sampled with point_sampler)
+                tex_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
+                // 3: depth_tex (depth texture)
+                tex_entry(3, wgpu::TextureSampleType::Depth),
+                // 4: linear_sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // 5: point_sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                // 6: taa uniform
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // 5: point_sampler
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                        count: None,
-                    },
-                    // 6: taa uniform
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 6,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("TAA BG"),
@@ -334,3 +332,4 @@ impl RenderPass for TaaPass {
         Ok(())
     }
 }
+

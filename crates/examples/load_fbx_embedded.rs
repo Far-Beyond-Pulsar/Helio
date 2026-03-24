@@ -79,7 +79,9 @@ impl SceneBounds {
 }
 
 fn embedded_scene_base_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 fn load_embedded_scene() -> Result<(ConvertedScene, SceneBounds), AssetError> {
@@ -90,8 +92,9 @@ fn load_embedded_scene() -> Result<(ConvertedScene, SceneBounds), AssetError> {
         Some(base_dir.as_path()),
         LoadConfig::default().with_uv_flip(false),
     )?;
-    let bounds = SceneBounds::from_scene(&scene)
-        .ok_or_else(|| AssetError::InvalidData("embedded FBX scene did not contain any vertices".to_string()))?;
+    let bounds = SceneBounds::from_scene(&scene).ok_or_else(|| {
+        AssetError::InvalidData("embedded FBX scene did not contain any vertices".to_string())
+    })?;
     Ok((scene, bounds))
 }
 
@@ -101,16 +104,51 @@ fn look_angles(direction: Vec3) -> (f32, f32) {
 }
 
 fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
-    let floor_mesh = renderer.insert_mesh(plane_mesh([bounds.center.x, bounds.floor_y(), bounds.center.z], bounds.stage_extent()));
-    let floor_material = renderer.insert_material(make_material([0.07, 0.08, 0.10, 1.0], 0.16, 0.02, [0.0, 0.0, 0.0], 0.0));
-    let _ = v3_demo_common::insert_object(renderer, floor_mesh, floor_material, glam::Mat4::IDENTITY, bounds.stage_extent());
+    let floor_mesh = renderer.insert_mesh(plane_mesh(
+        [bounds.center.x, bounds.floor_y(), bounds.center.z],
+        bounds.stage_extent(),
+    ));
+    let floor_material = renderer.insert_material(make_material(
+        [0.07, 0.08, 0.10, 1.0],
+        0.16,
+        0.02,
+        [0.0, 0.0, 0.0],
+        0.0,
+    ));
+    let _ = v3_demo_common::insert_object(
+        renderer,
+        floor_mesh,
+        floor_material,
+        glam::Mat4::IDENTITY,
+        bounds.stage_extent(),
+    );
 
     let pedestal_mesh = renderer.insert_mesh(box_mesh(
-        [bounds.center.x, bounds.floor_y() + bounds.radius * 0.05, bounds.center.z],
-        [bounds.radius * 0.62, bounds.radius * 0.05, bounds.radius * 0.62],
+        [
+            bounds.center.x,
+            bounds.floor_y() + bounds.radius * 0.05,
+            bounds.center.z,
+        ],
+        [
+            bounds.radius * 0.62,
+            bounds.radius * 0.05,
+            bounds.radius * 0.62,
+        ],
     ));
-    let pedestal_material = renderer.insert_material(make_material([0.11, 0.12, 0.15, 1.0], 0.28, 0.04, [0.0, 0.0, 0.0], 0.0));
-    let _ = v3_demo_common::insert_object(renderer, pedestal_mesh, pedestal_material, glam::Mat4::IDENTITY, bounds.radius);
+    let pedestal_material = renderer.insert_material(make_material(
+        [0.11, 0.12, 0.15, 1.0],
+        0.28,
+        0.04,
+        [0.0, 0.0, 0.0],
+        0.0,
+    ));
+    let _ = v3_demo_common::insert_object(
+        renderer,
+        pedestal_mesh,
+        pedestal_material,
+        glam::Mat4::IDENTITY,
+        bounds.radius,
+    );
 
     let backdrop_mesh = renderer.insert_mesh(box_mesh(
         [
@@ -118,10 +156,26 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
             bounds.floor_y() + bounds.radius * 0.62,
             bounds.center.z - bounds.radius * 1.35,
         ],
-        [bounds.radius * 1.35, bounds.radius * 0.62, bounds.radius * 0.05],
+        [
+            bounds.radius * 1.35,
+            bounds.radius * 0.62,
+            bounds.radius * 0.05,
+        ],
     ));
-    let backdrop_material = renderer.insert_material(make_material([0.04, 0.05, 0.08, 1.0], 0.82, 0.0, [0.04, 0.06, 0.12], 0.03));
-    let _ = v3_demo_common::insert_object(renderer, backdrop_mesh, backdrop_material, glam::Mat4::IDENTITY, bounds.radius * 1.5);
+    let backdrop_material = renderer.insert_material(make_material(
+        [0.04, 0.05, 0.08, 1.0],
+        0.82,
+        0.0,
+        [0.04, 0.06, 0.12],
+        0.03,
+    ));
+    let _ = v3_demo_common::insert_object(
+        renderer,
+        backdrop_mesh,
+        backdrop_material,
+        glam::Mat4::IDENTITY,
+        bounds.radius * 1.5,
+    );
 }
 
 fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
@@ -132,17 +186,45 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
 
     let key_pos = focus + Vec3::new(radius * 0.22, radius * 0.34, radius * 0.24);
     let key_dir = (elevated_focus - key_pos).normalize_or_zero();
-    renderer.insert_light(spot_light(key_pos.to_array(), key_dir.to_array(), [1.0, 0.80, 0.62], 18.0, radius * 0.62, 0.20, 0.38));
+    renderer.insert_light(spot_light(
+        key_pos.to_array(),
+        key_dir.to_array(),
+        [1.0, 0.80, 0.62],
+        18.0,
+        radius * 0.62,
+        0.20,
+        0.38,
+    ));
 
     let fill_pos = focus + Vec3::new(-radius * 0.26, radius * 0.14, radius * 0.28);
     let fill_dir = (focus - fill_pos).normalize_or_zero();
-    renderer.insert_light(spot_light(fill_pos.to_array(), fill_dir.to_array(), [0.52, 0.66, 1.0], 6.5, radius * 0.59, 0.28, 0.46));
+    renderer.insert_light(spot_light(
+        fill_pos.to_array(),
+        fill_dir.to_array(),
+        [0.52, 0.66, 1.0],
+        6.5,
+        radius * 0.59,
+        0.28,
+        0.46,
+    ));
 
     let rim_pos = focus + Vec3::new(-radius * 0.30, radius * 0.22, -radius * 0.32);
     let rim_dir = (upper_focus - rim_pos).normalize_or_zero();
-    renderer.insert_light(spot_light(rim_pos.to_array(), rim_dir.to_array(), [0.36, 0.55, 1.0], 14.0, radius * 0.57, 0.22, 0.40));
+    renderer.insert_light(spot_light(
+        rim_pos.to_array(),
+        rim_dir.to_array(),
+        [0.36, 0.55, 1.0],
+        14.0,
+        radius * 0.57,
+        0.22,
+        0.40,
+    ));
 
-    renderer.insert_light(directional_light([0.15, -1.0, 0.1], [0.07, 0.09, 0.14], 0.3));
+    renderer.insert_light(directional_light(
+        [0.15, -1.0, 0.1],
+        [0.07, 0.09, 0.14],
+        0.3,
+    ));
     renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
 }
 
@@ -185,12 +267,24 @@ impl AppState {
         let right = Vec3::new(cy, 0.0, sy);
         let up = Vec3::Y;
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * self.movement_speed * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * self.movement_speed * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * self.movement_speed * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * self.movement_speed * dt; }
-        if self.keys.contains(&KeyCode::Space) { self.cam_pos += up * self.movement_speed * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= up * self.movement_speed * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * self.movement_speed * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * self.movement_speed * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * self.movement_speed * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * self.movement_speed * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += up * self.movement_speed * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= up * self.movement_speed * dt;
+        }
         forward
     }
 }
@@ -211,28 +305,32 @@ impl ApplicationHandler for App {
                 .expect("failed to create window"),
         );
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(window.clone()).expect("failed to create surface");
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("failed to create surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
         .expect("no adapter");
-        let (device, queue) = pollster::block_on(
-            adapter.request_device(
-                &wgpu::DeviceDescriptor {
-                    required_features: required_wgpu_features(adapter.features()),
-                    required_limits: required_wgpu_limits(adapter.limits()),
-                    ..Default::default()
-                },
-                None,
-            ),
-        )
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            },
+        ))
         .expect("no device");
         let device = Arc::new(device);
         let queue = Arc::new(queue);
         let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps.formats.iter().find(|f| f.is_srgb()).copied().unwrap_or(caps.formats[0]);
+        let surface_format = caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
         surface.configure(
             &device,
@@ -247,7 +345,11 @@ impl ApplicationHandler for App {
                 desired_maximum_frame_latency: 2,
             },
         );
-        let mut renderer = Renderer::new(device.clone(), queue, RendererConfig::new(size.width, size.height, surface_format));
+        let mut renderer = Renderer::new(
+            device.clone(),
+            queue,
+            RendererConfig::new(size.width, size.height, surface_format),
+        );
         renderer.set_clear_color([0.01, 0.01, 0.02, 1.0]);
 
         let (scene, bounds) = match load_embedded_scene() {
@@ -261,8 +363,20 @@ impl ApplicationHandler for App {
                     radius: 3.0,
                 };
                 let mesh = renderer.insert_mesh(box_mesh([0.0, 0.75, 0.0], [0.75, 0.75, 0.75]));
-                let material = renderer.insert_material(make_material([0.65, 0.72, 0.9, 1.0], 0.35, 0.1, [0.0, 0.0, 0.0], 0.0));
-                let _ = v3_demo_common::insert_object(&mut renderer, mesh, material, glam::Mat4::IDENTITY, 1.5);
+                let material = renderer.insert_material(make_material(
+                    [0.65, 0.72, 0.9, 1.0],
+                    0.35,
+                    0.1,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ));
+                let _ = v3_demo_common::insert_object(
+                    &mut renderer,
+                    mesh,
+                    material,
+                    glam::Mat4::IDENTITY,
+                    1.5,
+                );
                 add_showcase_stage(&mut renderer, fallback_bounds);
                 add_showcase_lighting(&mut renderer, fallback_bounds);
                 let camera_start = fallback_bounds.camera_start();
@@ -290,10 +404,26 @@ impl ApplicationHandler for App {
         let material_ids =
             upload_scene_materials(&mut renderer, &scene).expect("upload scene materials");
         for mesh in scene.meshes {
-            let radius = mesh.vertices.iter().map(|v| Vec3::from_array(v.position).distance(bounds.center)).fold(0.5, f32::max);
-            let mesh_id = renderer.insert_mesh(helio::MeshUpload { vertices: mesh.vertices, indices: mesh.indices });
-            if let Some(material) = mesh.material_index.and_then(|index| material_ids.get(index).copied()) {
-                let _ = v3_demo_common::insert_object(&mut renderer, mesh_id, material, glam::Mat4::IDENTITY, radius);
+            let radius = mesh
+                .vertices
+                .iter()
+                .map(|v| Vec3::from_array(v.position).distance(bounds.center))
+                .fold(0.5, f32::max);
+            let mesh_id = renderer.insert_mesh(helio::MeshUpload {
+                vertices: mesh.vertices,
+                indices: mesh.indices,
+            });
+            if let Some(material) = mesh
+                .material_index
+                .and_then(|index| material_ids.get(index).copied())
+            {
+                let _ = v3_demo_common::insert_object(
+                    &mut renderer,
+                    mesh_id,
+                    material,
+                    glam::Mat4::IDENTITY,
+                    radius,
+                );
             }
         }
         add_showcase_stage(&mut renderer, bounds);
@@ -324,17 +454,20 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
                     state.window.set_cursor_visible(true);
-                    let _ = state.window.set_cursor_grab(winit::window::CursorGrabMode::None);
+                    let _ = state
+                        .window
+                        .set_cursor_grab(winit::window::CursorGrabMode::None);
                 } else {
                     event_loop.exit();
                 }
@@ -356,11 +489,12 @@ impl ApplicationHandler for App {
                 state.renderer.set_render_size(size.width, size.height);
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    physical_key: PhysicalKey::Code(code),
-                    state: key_state,
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(code),
+                        state: key_state,
+                        ..
+                    },
                 ..
             } => match key_state {
                 ElementState::Pressed => {
@@ -376,8 +510,14 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let grabbed = state.window.set_cursor_grab(winit::window::CursorGrabMode::Confined)
-                        .or_else(|_| state.window.set_cursor_grab(winit::window::CursorGrabMode::Locked))
+                    let grabbed = state
+                        .window
+                        .set_cursor_grab(winit::window::CursorGrabMode::Confined)
+                        .or_else(|_| {
+                            state
+                                .window
+                                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
+                        })
                         .is_ok();
                     if grabbed {
                         state.cursor_grabbed = true;
@@ -407,7 +547,9 @@ impl ApplicationHandler for App {
                         return;
                     }
                 };
-                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output
+                    .texture
+                    .create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(error) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", error);
                 }
@@ -435,8 +577,11 @@ impl ApplicationHandler for App {
 }
 
 fn main() {
-    env_logger::Builder::from_default_env().filter_level(log::LevelFilter::Info).init();
+    env_logger::Builder::from_default_env()
+        .filter_level(log::LevelFilter::Info)
+        .init();
     let event_loop = EventLoop::new().expect("failed to create event loop");
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
+

@@ -12,31 +12,53 @@ const LOOK_SENS: f32 = 0.0024;
 const FLY_SPEED: f32 = 4.0;
 
 pub struct Demo {
-    cam_pos:   Vec3,
-    cam_yaw:   f32,
+    cam_pos: Vec3,
+    cam_yaw: f32,
     cam_pitch: f32,
 }
 
 impl HelioWasmApp for Demo {
-    fn title() -> &'static str { "Helio — Indoor Corridor" }
+    fn title() -> &'static str {
+        "Helio — Indoor Corridor"
+    }
 
-    fn init(renderer: &mut Renderer, _device: Arc<wgpu::Device>,
-            _queue: Arc<wgpu::Queue>, _w: u32, _h: u32) -> Self {
-        let concrete  = renderer.insert_material(make_material([0.60, 0.58, 0.55, 1.0], 0.85, 0.0, [0.0;3], 0.0));
-        let tile_mat  = renderer.insert_material(make_material([0.80, 0.78, 0.75, 1.0], 0.6,  0.0, [0.0;3], 0.0));
+    fn init(
+        renderer: &mut Renderer,
+        _device: Arc<wgpu::Device>,
+        _queue: Arc<wgpu::Queue>,
+        _w: u32,
+        _h: u32,
+    ) -> Self {
+        let concrete = renderer.insert_material(make_material(
+            [0.60, 0.58, 0.55, 1.0],
+            0.85,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let tile_mat = renderer.insert_material(make_material(
+            [0.80, 0.78, 0.75, 1.0],
+            0.6,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
 
         // Long corridor: 2.4m wide, 3m tall, 40m long (z: 0..40)
-        let floor   = renderer.insert_mesh(box_mesh([0.0, -0.05, 20.0], [1.2, 0.05, 20.0]));
-        let ceiling  = renderer.insert_mesh(box_mesh([0.0,  3.05, 20.0], [1.2, 0.05, 20.0]));
-        let wall_l   = renderer.insert_mesh(box_mesh([-1.3, 1.5, 20.0], [0.1, 1.5, 20.0]));
-        let wall_r   = renderer.insert_mesh(box_mesh([ 1.3, 1.5, 20.0], [0.1, 1.5, 20.0]));
-        let back_w   = renderer.insert_mesh(box_mesh([0.0, 1.5, 40.1], [1.4, 1.5, 0.1]));
-        let front_w  = renderer.insert_mesh(box_mesh([0.0, 1.5, -0.1], [1.4, 1.5, 0.1]));
+        let floor = renderer.insert_mesh(box_mesh([0.0, -0.05, 20.0], [1.2, 0.05, 20.0]));
+        let ceiling = renderer.insert_mesh(box_mesh([0.0, 3.05, 20.0], [1.2, 0.05, 20.0]));
+        let wall_l = renderer.insert_mesh(box_mesh([-1.3, 1.5, 20.0], [0.1, 1.5, 20.0]));
+        let wall_r = renderer.insert_mesh(box_mesh([1.3, 1.5, 20.0], [0.1, 1.5, 20.0]));
+        let back_w = renderer.insert_mesh(box_mesh([0.0, 1.5, 40.1], [1.4, 1.5, 0.1]));
+        let front_w = renderer.insert_mesh(box_mesh([0.0, 1.5, -0.1], [1.4, 1.5, 0.1]));
 
         for (m, mat, r) in [
-            (floor, tile_mat, 20.0), (ceiling, concrete, 20.0),
-            (wall_l, concrete, 20.0), (wall_r, concrete, 20.0),
-            (back_w, concrete, 5.0),  (front_w, concrete, 5.0),
+            (floor, tile_mat, 20.0),
+            (ceiling, concrete, 20.0),
+            (wall_l, concrete, 20.0),
+            (wall_r, concrete, 20.0),
+            (back_w, concrete, 5.0),
+            (front_w, concrete, 5.0),
         ] {
             let _ = insert_object(renderer, m, mat, glam::Mat4::IDENTITY, r);
         }
@@ -51,28 +73,48 @@ impl HelioWasmApp for Demo {
 
         Self {
             cam_pos: Vec3::new(0.0, 1.7, 2.0),
-            cam_yaw: 0.0, cam_pitch: 0.0,
+            cam_yaw: 0.0,
+            cam_pitch: 0.0,
         }
     }
 
-    fn update(&mut self, _renderer: &mut Renderer, dt: f32, _elapsed: f32,
-              input: &InputState) -> Camera {
-        self.cam_yaw   += input.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch  = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.4, 1.4);
+    fn update(
+        &mut self,
+        _renderer: &mut Renderer,
+        dt: f32,
+        _elapsed: f32,
+        input: &InputState,
+    ) -> Camera {
+        self.cam_yaw += input.mouse_delta.0 * LOOK_SENS;
+        self.cam_pitch = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.4, 1.4);
 
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
-        let fwd   = Vec3::new(sy * cp, sp, -cy * cp);
+        let fwd = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
 
-        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { self.cam_pos += fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { self.cam_pos -= fwd   * FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { self.cam_pos -= right * FLY_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { self.cam_pos += right * FLY_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) {
+            self.cam_pos += fwd * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) {
+            self.cam_pos -= fwd * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) {
+            self.cam_pos -= right * FLY_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) {
+            self.cam_pos += right * FLY_SPEED * dt;
+        }
 
         Camera::perspective_look_at(
-            self.cam_pos, self.cam_pos + fwd, Vec3::Y,
-            std::f32::consts::FRAC_PI_4, 1280.0 / 720.0, 0.1, 60.0,
+            self.cam_pos,
+            self.cam_pos + fwd,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            1280.0 / 720.0,
+            0.1,
+            60.0,
         )
     }
 }
+

@@ -4,8 +4,8 @@
 //! shader expects. Any change to `BillboardInstance` that shifts bytes is a
 //! breaking change for the shader.
 
-use helio_pass_billboard::BillboardInstance;
 use bytemuck::{bytes_of, cast_slice, Zeroable};
+use helio_pass_billboard::BillboardInstance;
 use std::mem::size_of;
 
 // ── Byte-count fundamentals ──────────────────────────────────────────────────
@@ -66,9 +66,9 @@ fn f32_one_encodes_as_known_bytes() {
 #[test]
 fn world_pos_x_bytes_match_f32_encoding() {
     let inst = BillboardInstance {
-        world_pos:   [1.0, 0.0, 0.0, 0.0],
+        world_pos: [1.0, 0.0, 0.0, 0.0],
         scale_flags: [0.0; 4],
-        color:       [0.0; 4],
+        color: [0.0; 4],
     };
     let bytes = bytes_of(&inst);
     // world_pos.x is at offset 0 — first 4 bytes.
@@ -79,9 +79,9 @@ fn world_pos_x_bytes_match_f32_encoding() {
 #[test]
 fn color_r_byte_offset_is_32() {
     let inst = BillboardInstance {
-        world_pos:   [0.0; 4],
+        world_pos: [0.0; 4],
         scale_flags: [0.0; 4],
-        color:       [1.0, 0.0, 0.0, 0.0],
+        color: [1.0, 0.0, 0.0, 0.0],
     };
     let bytes = bytes_of(&inst);
     // color starts at byte 32.
@@ -92,9 +92,9 @@ fn color_r_byte_offset_is_32() {
 #[test]
 fn scale_flags_x_byte_offset_is_16() {
     let inst = BillboardInstance {
-        world_pos:   [0.0; 4],
+        world_pos: [0.0; 4],
         scale_flags: [2.0, 0.0, 0.0, 0.0],
-        color:       [0.0; 4],
+        color: [0.0; 4],
     };
     let bytes = bytes_of(&inst);
     // scale_flags starts at byte 16.
@@ -107,9 +107,9 @@ fn scale_flags_x_byte_offset_is_16() {
 #[test]
 fn bytes_round_trip_preserves_world_pos() {
     let orig = BillboardInstance {
-        world_pos:   [10.0, 20.0, 30.0, 0.0],
+        world_pos: [10.0, 20.0, 30.0, 0.0],
         scale_flags: [1.0, 1.0, 0.0, 0.0],
-        color:       [0.5, 0.5, 0.5, 1.0],
+        color: [0.5, 0.5, 0.5, 1.0],
     };
     let bytes = bytes_of(&orig);
     let recovered: &BillboardInstance = bytemuck::from_bytes(bytes);
@@ -119,9 +119,9 @@ fn bytes_round_trip_preserves_world_pos() {
 #[test]
 fn bytes_round_trip_preserves_scale_flags() {
     let orig = BillboardInstance {
-        world_pos:   [0.0; 4],
+        world_pos: [0.0; 4],
         scale_flags: [3.14, 2.71, 1.0, 0.0],
-        color:       [0.0; 4],
+        color: [0.0; 4],
     };
     let bytes = bytes_of(&orig);
     let recovered: &BillboardInstance = bytemuck::from_bytes(bytes);
@@ -131,9 +131,9 @@ fn bytes_round_trip_preserves_scale_flags() {
 #[test]
 fn bytes_round_trip_preserves_color() {
     let orig = BillboardInstance {
-        world_pos:   [0.0; 4],
+        world_pos: [0.0; 4],
         scale_flags: [0.0; 4],
-        color:       [1.0, 0.5, 0.25, 0.75],
+        color: [1.0, 0.5, 0.25, 0.75],
     };
     let bytes = bytes_of(&orig);
     let recovered: &BillboardInstance = bytemuck::from_bytes(bytes);
@@ -145,9 +145,9 @@ fn bytes_round_trip_preserves_color() {
 #[test]
 fn f32_nan_survives_byte_round_trip() {
     let inst = BillboardInstance {
-        world_pos:   [f32::NAN, 0.0, 0.0, 0.0],
+        world_pos: [f32::NAN, 0.0, 0.0, 0.0],
         scale_flags: [0.0; 4],
-        color:       [0.0; 4],
+        color: [0.0; 4],
     };
     let bytes = bytes_of(&inst);
     let recovered: &BillboardInstance = bytemuck::from_bytes(bytes);
@@ -161,9 +161,9 @@ fn f32_nan_survives_byte_round_trip() {
 #[test]
 fn f32_infinity_survives_byte_round_trip() {
     let inst = BillboardInstance {
-        world_pos:   [f32::INFINITY, f32::NEG_INFINITY, 0.0, 0.0],
+        world_pos: [f32::INFINITY, f32::NEG_INFINITY, 0.0, 0.0],
         scale_flags: [0.0; 4],
-        color:       [0.0; 4],
+        color: [0.0; 4],
     };
     let bytes = bytes_of(&inst);
     let recovered: &BillboardInstance = bytemuck::from_bytes(bytes);
@@ -174,9 +174,9 @@ fn f32_infinity_survives_byte_round_trip() {
 #[test]
 fn negative_f32_survives_byte_round_trip() {
     let inst = BillboardInstance {
-        world_pos:   [-1.0, -2.5, -100.0, 0.0],
+        world_pos: [-1.0, -2.5, -100.0, 0.0],
         scale_flags: [0.0; 4],
-        color:       [0.0; 4],
+        color: [0.0; 4],
     };
     let bytes = bytes_of(&inst);
     let recovered: &BillboardInstance = bytemuck::from_bytes(bytes);
@@ -187,7 +187,8 @@ fn negative_f32_survives_byte_round_trip() {
 
 #[test]
 fn cast_slice_works_for_instance_array() {
-    let instances: [BillboardInstance; 3] = [Zeroable::zeroed(), Zeroable::zeroed(), Zeroable::zeroed()];
+    let instances: [BillboardInstance; 3] =
+        [Zeroable::zeroed(), Zeroable::zeroed(), Zeroable::zeroed()];
     let bytes: &[u8] = cast_slice(&instances);
     assert_eq!(bytes.len(), 3 * 48);
 }
@@ -213,7 +214,16 @@ fn instance_array_size_scales_linearly() {
     for n in 1usize..=8 {
         assert_eq!(
             size_of::<BillboardInstance>() * n,
-            std::mem::size_of_val(&vec![BillboardInstance { world_pos: [0.0;4], scale_flags: [0.0;4], color: [0.0;4] }; n][..])
+            std::mem::size_of_val(
+                &vec![
+                    BillboardInstance {
+                        world_pos: [0.0; 4],
+                        scale_flags: [0.0; 4],
+                        color: [0.0; 4]
+                    };
+                    n
+                ][..]
+            )
         );
     }
 }
@@ -223,9 +233,9 @@ fn instance_array_size_scales_linearly() {
 #[test]
 fn equal_instances_produce_equal_byte_slices() {
     let a = BillboardInstance {
-        world_pos:   [1.0, 2.0, 3.0, 0.0],
+        world_pos: [1.0, 2.0, 3.0, 0.0],
         scale_flags: [1.5, 2.5, 0.0, 0.0],
-        color:       [0.8, 0.2, 0.4, 1.0],
+        color: [0.8, 0.2, 0.4, 1.0],
     };
     let b = a;
     assert_eq!(bytes_of(&a), bytes_of(&b));
@@ -234,12 +244,12 @@ fn equal_instances_produce_equal_byte_slices() {
 #[test]
 fn different_world_pos_produces_different_bytes() {
     let a = BillboardInstance {
-        world_pos:   [1.0, 0.0, 0.0, 0.0],
+        world_pos: [1.0, 0.0, 0.0, 0.0],
         scale_flags: [1.0; 4],
-        color:       [1.0; 4],
+        color: [1.0; 4],
     };
     let b = BillboardInstance {
-        world_pos:   [2.0, 0.0, 0.0, 0.0],
+        world_pos: [2.0, 0.0, 0.0, 0.0],
         ..a
     };
     assert_ne!(bytes_of(&a), bytes_of(&b));
@@ -248,9 +258,9 @@ fn different_world_pos_produces_different_bytes() {
 #[test]
 fn different_colors_produce_different_bytes() {
     let a = BillboardInstance {
-        world_pos:   [0.0; 4],
+        world_pos: [0.0; 4],
         scale_flags: [1.0; 4],
-        color:       [1.0, 0.0, 0.0, 1.0],
+        color: [1.0, 0.0, 0.0, 1.0],
     };
     let b = BillboardInstance {
         color: [0.0, 1.0, 0.0, 1.0],
@@ -258,3 +268,4 @@ fn different_colors_produce_different_bytes() {
     };
     assert_ne!(bytes_of(&a), bytes_of(&b));
 }
+

@@ -7,7 +7,7 @@ use glam::Mat4;
 
 use crate::handles::{MaterialId, ObjectId};
 
-use super::super::errors::{Result, invalid};
+use super::super::errors::{invalid, Result};
 use super::super::helpers::{normal_matrix, sphere_to_aabb};
 
 impl super::super::Scene {
@@ -220,3 +220,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

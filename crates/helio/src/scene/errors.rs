@@ -12,14 +12,14 @@ pub enum SceneError {
     #[error("invalid {resource} handle")]
     InvalidHandle {
         /// The type of resource that was invalid (e.g., "object", "material", "light").
-        resource: &'static str
+        resource: &'static str,
     },
 
     /// A resource cannot be removed because it is still referenced by other resources.
     #[error("{resource} is still in use")]
     ResourceInUse {
         /// The type of resource that is still in use.
-        resource: &'static str
+        resource: &'static str,
     },
 
     /// The scene's texture capacity has been exceeded.
@@ -43,3 +43,4 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 pub(super) fn invalid(resource: &'static str) -> SceneError {
     SceneError::InvalidHandle { resource }
 }
+

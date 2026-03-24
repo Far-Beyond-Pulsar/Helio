@@ -370,26 +370,27 @@
 //! - [`PassContext`] - Zero-copy context passed to `execute()`
 //! - [`Profiler`] - Automatic CPU/GPU profiling system
 
-pub mod traits;
-pub mod error;
 pub mod context;
+pub mod error;
+pub mod graph;
 pub mod profiling;
 pub mod scene;
-pub mod graph;
+pub mod traits;
 pub mod upload;
 
 // Re-export libhelio types for convenience
 pub use libhelio::{
-    GpuCameraUniforms, GpuInstanceData, GpuInstanceAabb, GpuDrawCall,
-    GpuLight, GpuMaterial, GpuShadowMatrix, DrawIndexedIndirectArgs,
-    GBufferViews, FrameResources, SkyContext, SkyUniforms,
+    DrawIndexedIndirectArgs, FrameResources, GBufferViews, GpuCameraUniforms, GpuDrawCall,
+    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix, SkyContext,
+    SkyUniforms,
 };
 // Re-export managers
 pub use crate::scene::managers::*;
 // Re-export core types
-pub use traits::{RenderPass, GpuSceneManager, GpuResource, MaybeSend, MaybeSync};
-pub use error::{Error, Result};
 pub use context::{PassContext, PrepareContext};
+pub use error::{Error, Result};
+pub use graph::RenderGraph;
 pub use profiling::Profiler;
 pub use scene::{GpuScene, SceneResources};
-pub use graph::RenderGraph;
+pub use traits::{GpuResource, GpuSceneManager, MaybeSend, MaybeSync, RenderPass};
+

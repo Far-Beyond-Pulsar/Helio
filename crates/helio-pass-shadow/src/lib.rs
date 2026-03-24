@@ -39,7 +39,7 @@
 //! addressed via a `dynamic_offset` of `face × FACE_BUF_STRIDE` bytes.  There is
 //! no per-frame CPU write to this buffer.
 
-use helio_v3::{RenderPass, PassContext, PrepareContext, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -313,8 +313,8 @@ impl RenderPass for ShadowPass {
         // In steady state (no scene growth) this branch is never taken.
         // O(1) amortised: pointer changes happen at most O(log N) total across the
         // entire lifetime of the scene.
-        let sm_ptr   = ctx.scene.shadow_matrices as *const _ as usize;
-        let inst_ptr = ctx.scene.instances       as *const _ as usize;
+        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+        let inst_ptr = ctx.scene.instances as *const _ as usize;
         let key = (sm_ptr, inst_ptr);
 
         if self.bg_0_key != Some(key) {
@@ -348,14 +348,14 @@ impl RenderPass for ShadowPass {
         // ── Per-face render loop ───────────────────────────────────────────────
         // face_count ≤ MAX_SHADOW_FACES (compile-time constant = 256).
         // Each iteration: O(1) — only constant-size wgpu calls, no allocations.
-        let bg       = self.bg_0.as_ref().unwrap();
+        let bg = self.bg_0.as_ref().unwrap();
         let pipeline = &self.pipeline;
         let vertices = main_scene.mesh_buffers.vertices;
-        let indices  = main_scene.mesh_buffers.indices;
+        let indices = main_scene.mesh_buffers.indices;
         let indirect = ctx.scene.indirect;
 
         for face in 0..face_count {
-            let face_view  = &self.face_views[face];
+            let face_view = &self.face_views[face];
             // Byte offset into face_idx_buf that holds the u32 for this face.
             let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
 
@@ -390,3 +390,4 @@ impl RenderPass for ShadowPass {
         Ok(())
     }
 }
+

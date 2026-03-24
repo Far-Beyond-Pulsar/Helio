@@ -68,8 +68,12 @@ fn ritter_sphere(positions: &[Vec3]) -> (Vec3, f32) {
     // Pick an initial axis: find the points with min/max x.
     let (mut min_pt, mut max_pt) = (positions[0], positions[0]);
     for &p in positions.iter() {
-        if p.x < min_pt.x { min_pt = p; }
-        if p.x > max_pt.x { max_pt = p; }
+        if p.x < min_pt.x {
+            min_pt = p;
+        }
+        if p.x > max_pt.x {
+            max_pt = p;
+        }
     }
     let mut center = (min_pt + max_pt) * 0.5;
     let mut radius = (max_pt - min_pt).length() * 0.5;
@@ -79,7 +83,7 @@ fn ritter_sphere(positions: &[Vec3]) -> (Vec3, f32) {
         let d = (p - center).length();
         if d > radius {
             let overflow = d - radius;
-            radius = (radius + d) * 0.5;  // = old_radius + overflow/2
+            radius = (radius + d) * 0.5; // = old_radius + overflow/2
             center += (p - center).normalize() * (overflow * 0.5);
         }
     }
@@ -142,10 +146,14 @@ fn backface_cone(positions: &[Vec3], indices: &[u32]) -> (Vec3, Vec3, f32) {
         let v2 = positions[i2];
         let n_raw = (v1 - v0).cross(v2 - v0);
         let n_len = n_raw.length();
-        if n_len < 1e-6 { continue; }
+        if n_len < 1e-6 {
+            continue;
+        }
         let n = n_raw / n_len;
         let d = n.dot(axis);
-        if d < min_dot { min_dot = d; }
+        if d < min_dot {
+            min_dot = d;
+        }
     }
 
     // The shader culls when: dot(view_dir, -axis) >= cutoff
@@ -278,7 +286,7 @@ pub fn sort_triangles_spatially(vertices: &[PackedVertex], indices: &[u32]) -> V
     let mut tri_order: Vec<u32> = (0..tri_count as u32).collect();
     tri_order.sort_unstable_by(|&a, &b| {
         let centroid = |ti: u32| -> Vec3 {
-            let i0 = indices[ti as usize * 3    ] as usize;
+            let i0 = indices[ti as usize * 3] as usize;
             let i1 = indices[ti as usize * 3 + 1] as usize;
             let i2 = indices[ti as usize * 3 + 2] as usize;
             let p0 = positions.get(i0).copied().unwrap_or(Vec3::ZERO);
@@ -288,7 +296,8 @@ pub fn sort_triangles_spatially(vertices: &[PackedVertex], indices: &[u32]) -> V
         };
         let ca = centroid(a);
         let cb = centroid(b);
-        ca.x.partial_cmp(&cb.x).unwrap_or(std::cmp::Ordering::Equal)
+        ca.x.partial_cmp(&cb.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
             .then(ca.z.partial_cmp(&cb.z).unwrap_or(std::cmp::Ordering::Equal))
             .then(ca.y.partial_cmp(&cb.y).unwrap_or(std::cmp::Ordering::Equal))
     });
@@ -328,17 +337,14 @@ pub fn meshletize(
     let mut out = Vec::with_capacity(meshlet_count);
 
     // Collect all positions once (cheaper than re-indexing per meshlet).
-    let positions: Vec<Vec3> = vertices
-        .iter()
-        .map(|v| Vec3::from(v.position))
-        .collect();
+    let positions: Vec<Vec3> = vertices.iter().map(|v| Vec3::from(v.position)).collect();
 
     let mut tri = 0;
     while tri < tri_count {
         let tri_end = (tri + max_tri).min(tri_count);
         let local_idx_start = tri * 3;
-        let local_idx_end   = tri_end * 3;
-        let local_indices   = &indices[local_idx_start..local_idx_end];
+        let local_idx_end = tri_end * 3;
+        let local_indices = &indices[local_idx_start..local_idx_end];
 
         // Collect unique vertex positions for bounding sphere.
         let meshlet_positions: Vec<Vec3> = local_indices
@@ -354,13 +360,13 @@ pub fn meshletize(
         out.push(GpuMeshletEntry {
             center: center.to_array(),
             radius,
-            cone_apex:    cone_apex.to_array(),
+            cone_apex: cone_apex.to_array(),
             cone_cutoff,
-            cone_axis:    cone_axis.to_array(),
-            lod_error:    0.0,
+            cone_axis: cone_axis.to_array(),
+            lod_error: 0.0,
             // Global buffer offsets (position in the mega-buffer).
-            first_index:  mesh_first_index + local_idx_start as u32,
-            index_count:  (local_idx_end - local_idx_start) as u32,
+            first_index: mesh_first_index + local_idx_start as u32,
+            index_count: (local_idx_end - local_idx_start) as u32,
             vertex_offset: mesh_first_vertex as i32,
             instance_index: 0, // Patched later during rebuild_vg_buffers.
         });
@@ -370,3 +376,4 @@ pub fn meshletize(
 
     out
 }
+

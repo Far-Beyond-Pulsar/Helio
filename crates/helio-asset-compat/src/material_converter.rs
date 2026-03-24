@@ -4,8 +4,8 @@ use helio::{GpuMaterial, TextureTransform};
 use libhelio::MaterialWorkflow;
 use solid_rs::scene::{AlphaMode, Material as SolidMaterial, TextureRef as SolidTextureRef};
 
-use crate::Result;
 use crate::texture_loader::TextureSemantic;
+use crate::Result;
 
 const MATERIAL_WORKFLOW_EPSILON: f32 = 1.0e-6;
 
@@ -37,10 +37,10 @@ pub struct ConvertedMaterial {
 }
 
 fn uses_explicit_specular_ior_workflow(material: &SolidMaterial) -> bool {
-    let specular_color_is_default =
-        (material.specular_color.x - 1.0).abs() <= MATERIAL_WORKFLOW_EPSILON
-            && (material.specular_color.y - 1.0).abs() <= MATERIAL_WORKFLOW_EPSILON
-            && (material.specular_color.z - 1.0).abs() <= MATERIAL_WORKFLOW_EPSILON;
+    let specular_color_is_default = (material.specular_color.x - 1.0).abs()
+        <= MATERIAL_WORKFLOW_EPSILON
+        && (material.specular_color.y - 1.0).abs() <= MATERIAL_WORKFLOW_EPSILON
+        && (material.specular_color.z - 1.0).abs() <= MATERIAL_WORKFLOW_EPSILON;
     let specular_weight_is_default =
         (material.specular_weight - 1.0).abs() <= MATERIAL_WORKFLOW_EPSILON;
     let ior_is_default = (material.ior - 1.5).abs() <= MATERIAL_WORKFLOW_EPSILON;
@@ -52,7 +52,10 @@ fn uses_explicit_specular_ior_workflow(material: &SolidMaterial) -> bool {
         || !ior_is_default
 }
 
-fn convert_texture_ref(texture: &SolidTextureRef, semantic: TextureSemantic) -> ConvertedTextureRef {
+fn convert_texture_ref(
+    texture: &SolidTextureRef,
+    semantic: TextureSemantic,
+) -> ConvertedTextureRef {
     if texture.uv_channel > 1 {
         log::warn!(
             "Texture semantic {:?} uses UV channel {}, but the current Helio wrapper only carries UV0/UV1; falling back to UV1.",
@@ -61,14 +64,15 @@ fn convert_texture_ref(texture: &SolidTextureRef, semantic: TextureSemantic) -> 
         );
     }
 
-    let transform = texture.transform.as_ref().map_or_else(
-        TextureTransform::default,
-        |transform| TextureTransform {
-            offset: [transform.offset.x, transform.offset.y],
-            scale: [transform.scale.x, transform.scale.y],
-            rotation_radians: transform.rotation,
-        },
-    );
+    let transform =
+        texture
+            .transform
+            .as_ref()
+            .map_or_else(TextureTransform::default, |transform| TextureTransform {
+                offset: [transform.offset.x, transform.offset.y],
+                scale: [transform.scale.x, transform.scale.y],
+                rotation_radians: transform.rotation,
+            });
 
     ConvertedTextureRef {
         texture_index: texture.texture_index,
@@ -77,7 +81,10 @@ fn convert_texture_ref(texture: &SolidTextureRef, semantic: TextureSemantic) -> 
     }
 }
 
-pub fn convert_material<F>(material: &SolidMaterial, mut resolve_texture: F) -> Result<ConvertedMaterial>
+pub fn convert_material<F>(
+    material: &SolidMaterial,
+    mut resolve_texture: F,
+) -> Result<ConvertedMaterial>
 where
     F: FnMut(ConvertedTextureRef, TextureSemantic) -> Result<ConvertedTextureRef>,
 {
@@ -119,15 +126,31 @@ where
     };
 
     let textures = ConvertedMaterialTextures {
-        base_color: convert_slot(&material.base_color_texture, TextureSemantic::BaseColor, &mut resolve_texture)?,
-        normal: convert_slot(&material.normal_texture, TextureSemantic::Normal, &mut resolve_texture)?,
+        base_color: convert_slot(
+            &material.base_color_texture,
+            TextureSemantic::BaseColor,
+            &mut resolve_texture,
+        )?,
+        normal: convert_slot(
+            &material.normal_texture,
+            TextureSemantic::Normal,
+            &mut resolve_texture,
+        )?,
         roughness_metallic: convert_slot(
             &material.metallic_roughness_texture,
             TextureSemantic::MetallicRoughness,
             &mut resolve_texture,
         )?,
-        emissive: convert_slot(&material.emissive_texture, TextureSemantic::Emissive, &mut resolve_texture)?,
-        occlusion: convert_slot(&material.occlusion_texture, TextureSemantic::Occlusion, &mut resolve_texture)?,
+        emissive: convert_slot(
+            &material.emissive_texture,
+            TextureSemantic::Emissive,
+            &mut resolve_texture,
+        )?,
+        occlusion: convert_slot(
+            &material.occlusion_texture,
+            TextureSemantic::Occlusion,
+            &mut resolve_texture,
+        )?,
         specular_color: convert_slot(
             &material.specular_color_texture,
             TextureSemantic::SpecularColor,
@@ -170,3 +193,4 @@ where
         textures,
     })
 }
+

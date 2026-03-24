@@ -6,9 +6,11 @@ use std::collections::HashMap;
 
 use crate::handles::MeshId;
 use crate::mesh::MeshUpload;
-use crate::vg::{VirtualMeshId, VirtualMeshUpload, generate_lod_meshes, meshletize, sort_triangles_spatially};
+use crate::vg::{
+    generate_lod_meshes, meshletize, sort_triangles_spatially, VirtualMeshId, VirtualMeshUpload,
+};
 
-use super::super::errors::{Result, invalid, SceneError};
+use super::super::errors::{invalid, Result, SceneError};
 use super::super::types::VirtualMeshRecord;
 
 impl super::super::Scene {
@@ -164,3 +166,4 @@ impl super::super::Scene {
         Ok(())
     }
 }
+

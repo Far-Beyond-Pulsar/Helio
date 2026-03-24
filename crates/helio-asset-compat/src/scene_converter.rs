@@ -5,9 +5,7 @@ use std::collections::HashMap;
 use helio::{MaterialAsset, MaterialTextureRef, MaterialTextures, PackedVertex, TextureUpload};
 use solid_rs::Scene;
 
-use crate::material_converter::{
-    convert_material, ConvertedMaterial, ConvertedTextureRef,
-};
+use crate::material_converter::{convert_material, ConvertedMaterial, ConvertedTextureRef};
 use crate::texture_loader::{load_texture_upload, TextureSemantic};
 use crate::{camera_converter, light_converter, mesh_converter, CameraData, Result};
 
@@ -52,7 +50,8 @@ pub fn convert_scene(
                 let converted_index = if let Some(&index) = texture_cache.get(&key) {
                     index
                 } else {
-                    let upload = load_texture_upload(scene, texture_ref.texture_index, semantic, base_dir)?;
+                    let upload =
+                        load_texture_upload(scene, texture_ref.texture_index, semantic, base_dir)?;
                     let index = textures.len();
                     textures.push(upload);
                     texture_cache.insert(key, index);
@@ -140,7 +139,10 @@ pub(crate) fn material_asset_from_converted(
         textures: MaterialTextures {
             base_color: remap_texture_slot(material.textures.base_color, texture_ids),
             normal: remap_texture_slot(material.textures.normal, texture_ids),
-            roughness_metallic: remap_texture_slot(material.textures.roughness_metallic, texture_ids),
+            roughness_metallic: remap_texture_slot(
+                material.textures.roughness_metallic,
+                texture_ids,
+            ),
             emissive: remap_texture_slot(material.textures.emissive, texture_ids),
             occlusion: remap_texture_slot(material.textures.occlusion, texture_ids),
             specular_color: remap_texture_slot(material.textures.specular_color, texture_ids),
@@ -151,3 +153,4 @@ pub(crate) fn material_asset_from_converted(
         },
     }
 }
+

@@ -8,35 +8,110 @@ use glam::Vec3;
 use helio::{Camera, LightId, Renderer};
 use helio_wasm::{HelioWasmApp, InputState};
 
-use crate::common::{box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, point_light};
+use crate::common::{
+    box_mesh, cube_mesh, directional_light, insert_object, make_material, plane_mesh, point_light,
+};
 
 const LOOK_SENS: f32 = 0.0024;
 const WALK_SPEED: f32 = 3.0;
 
 pub struct Demo {
-    indicator_ids:  Vec<LightId>,
-    cam_pos:  Vec3,
-    cam_yaw:  f32,
+    indicator_ids: Vec<LightId>,
+    cam_pos: Vec3,
+    cam_yaw: f32,
     cam_pitch: f32,
 }
 
 impl HelioWasmApp for Demo {
-    fn title() -> &'static str { "Helio — Indoor Server Room" }
+    fn title() -> &'static str {
+        "Helio — Indoor Server Room"
+    }
 
-    fn init(renderer: &mut Renderer, _device: Arc<wgpu::Device>,
-            _queue: Arc<wgpu::Queue>, _w: u32, _h: u32) -> Self {
+    fn init(
+        renderer: &mut Renderer,
+        _device: Arc<wgpu::Device>,
+        _queue: Arc<wgpu::Queue>,
+        _w: u32,
+        _h: u32,
+    ) -> Self {
         // Materials
-        let floor_m    = renderer.insert_material(make_material([0.18, 0.18, 0.20, 1.0], 0.6, 0.2, [0.0;3], 0.0));
-        let ceil_m     = renderer.insert_material(make_material([0.22, 0.22, 0.24, 1.0], 0.7, 0.1, [0.0;3], 0.0));
-        let wall_m     = renderer.insert_material(make_material([0.25, 0.25, 0.27, 1.0], 0.8, 0.0, [0.0;3], 0.0));
-        let rack_m     = renderer.insert_material(make_material([0.08, 0.08, 0.10, 1.0], 0.5, 0.3, [0.0;3], 0.0));
-        let blade_m    = renderer.insert_material(make_material([0.12, 0.13, 0.15, 1.0], 0.3, 0.5, [0.0;3], 0.0));
-        let led_green  = renderer.insert_material(make_material([0.0, 0.15, 0.0, 1.0],   1.0, 0.0, [0.0, 1.0, 0.0], 3.5));
-        let led_red    = renderer.insert_material(make_material([0.15, 0.0, 0.0, 1.0],   1.0, 0.0, [1.0, 0.0, 0.0], 3.5));
-        let led_amber  = renderer.insert_material(make_material([0.15, 0.08, 0.0, 1.0],  1.0, 0.0, [1.0, 0.6, 0.0], 3.5));
-        let led_blue   = renderer.insert_material(make_material([0.0, 0.0, 0.15, 1.0],   1.0, 0.0, [0.1, 0.2, 1.0], 3.5));
-        let cable_m    = renderer.insert_material(make_material([0.05, 0.05, 0.06, 1.0], 0.9, 0.0, [0.0;3], 0.0));
-        let strip_m    = renderer.insert_material(make_material([0.8, 0.85, 0.9, 1.0],   0.3, 0.0, [0.6, 0.7, 0.9], 2.0));
+        let floor_m = renderer.insert_material(make_material(
+            [0.18, 0.18, 0.20, 1.0],
+            0.6,
+            0.2,
+            [0.0; 3],
+            0.0,
+        ));
+        let ceil_m = renderer.insert_material(make_material(
+            [0.22, 0.22, 0.24, 1.0],
+            0.7,
+            0.1,
+            [0.0; 3],
+            0.0,
+        ));
+        let wall_m = renderer.insert_material(make_material(
+            [0.25, 0.25, 0.27, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let rack_m = renderer.insert_material(make_material(
+            [0.08, 0.08, 0.10, 1.0],
+            0.5,
+            0.3,
+            [0.0; 3],
+            0.0,
+        ));
+        let blade_m = renderer.insert_material(make_material(
+            [0.12, 0.13, 0.15, 1.0],
+            0.3,
+            0.5,
+            [0.0; 3],
+            0.0,
+        ));
+        let led_green = renderer.insert_material(make_material(
+            [0.0, 0.15, 0.0, 1.0],
+            1.0,
+            0.0,
+            [0.0, 1.0, 0.0],
+            3.5,
+        ));
+        let led_red = renderer.insert_material(make_material(
+            [0.15, 0.0, 0.0, 1.0],
+            1.0,
+            0.0,
+            [1.0, 0.0, 0.0],
+            3.5,
+        ));
+        let led_amber = renderer.insert_material(make_material(
+            [0.15, 0.08, 0.0, 1.0],
+            1.0,
+            0.0,
+            [1.0, 0.6, 0.0],
+            3.5,
+        ));
+        let led_blue = renderer.insert_material(make_material(
+            [0.0, 0.0, 0.15, 1.0],
+            1.0,
+            0.0,
+            [0.1, 0.2, 1.0],
+            3.5,
+        ));
+        let cable_m = renderer.insert_material(make_material(
+            [0.05, 0.05, 0.06, 1.0],
+            0.9,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let strip_m = renderer.insert_material(make_material(
+            [0.8, 0.85, 0.9, 1.0],
+            0.3,
+            0.0,
+            [0.6, 0.7, 0.9],
+            2.0,
+        ));
 
         // Room shell
         let floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 12.0));
@@ -45,9 +120,9 @@ impl HelioWasmApp for Demo {
         insert_object(renderer, ceiling, ceil_m, glam::Mat4::IDENTITY, 12.0).unwrap();
         for (pos, size, rad) in [
             ([-12.0, 1.5, 0.0], [0.1, 3.0, 12.0], 12.0_f32),
-            ([ 12.0, 1.5, 0.0], [0.1, 3.0, 12.0], 12.0),
+            ([12.0, 1.5, 0.0], [0.1, 3.0, 12.0], 12.0),
             ([0.0, 1.5, -12.0], [12.0, 3.0, 0.1], 12.0),
-            ([0.0, 1.5,  12.0], [12.0, 3.0, 0.1], 12.0),
+            ([0.0, 1.5, 12.0], [12.0, 3.0, 0.1], 12.0),
         ] {
             let wm = renderer.insert_mesh(box_mesh(pos, size));
             insert_object(renderer, wm, wall_m, glam::Mat4::IDENTITY, rad).unwrap();
@@ -55,8 +130,16 @@ impl HelioWasmApp for Demo {
 
         // Server racks — two rows
         let rack_positions: &[[f32; 3]] = &[
-            [-8.0, 1.0, -8.0], [-8.0, 1.0, -4.0], [-8.0, 1.0, 0.0], [-8.0, 1.0, 4.0], [-8.0, 1.0, 8.0],
-            [ 8.0, 1.0, -8.0], [ 8.0, 1.0, -4.0], [ 8.0, 1.0, 0.0], [ 8.0, 1.0, 4.0], [ 8.0, 1.0, 8.0],
+            [-8.0, 1.0, -8.0],
+            [-8.0, 1.0, -4.0],
+            [-8.0, 1.0, 0.0],
+            [-8.0, 1.0, 4.0],
+            [-8.0, 1.0, 8.0],
+            [8.0, 1.0, -8.0],
+            [8.0, 1.0, -4.0],
+            [8.0, 1.0, 0.0],
+            [8.0, 1.0, 4.0],
+            [8.0, 1.0, 8.0],
         ];
         for &pos in rack_positions {
             let rack = renderer.insert_mesh(box_mesh(pos, [0.5, 2.0, 0.9]));
@@ -69,24 +152,30 @@ impl HelioWasmApp for Demo {
                 // LEDs
                 let led_x = pos[0] + 0.48;
                 for (k, (led_mat, dz)) in [
-                    (led_green, -0.3), (led_amber, -0.1), (led_red, 0.1), (led_blue, 0.3),
-                ].iter().enumerate() {
+                    (led_green, -0.3),
+                    (led_amber, -0.1),
+                    (led_red, 0.1),
+                    (led_blue, 0.3),
+                ]
+                .iter()
+                .enumerate()
+                {
                     let _ = k;
-                    let led = renderer.insert_mesh(cube_mesh([led_x, blade_pos[1], pos[2] + dz], 0.018));
+                    let led =
+                        renderer.insert_mesh(cube_mesh([led_x, blade_pos[1], pos[2] + dz], 0.018));
                     insert_object(renderer, led, *led_mat, glam::Mat4::IDENTITY, 0.018).unwrap();
                 }
             }
             // Cable bundles at rear
             let cable = renderer.insert_mesh(box_mesh(
-                [pos[0] - 0.55, pos[1] + 0.4, pos[2]], [0.12, 0.4, 0.8],
+                [pos[0] - 0.55, pos[1] + 0.4, pos[2]],
+                [0.12, 0.4, 0.8],
             ));
             insert_object(renderer, cable, cable_m, glam::Mat4::IDENTITY, 0.8).unwrap();
         }
 
         // Overhead LED strips
-        let strip_positions: &[[f32; 3]] = &[
-            [-8.0, 2.95, 0.0], [8.0, 2.95, 0.0], [0.0, 2.95, 0.0],
-        ];
+        let strip_positions: &[[f32; 3]] = &[[-8.0, 2.95, 0.0], [8.0, 2.95, 0.0], [0.0, 2.95, 0.0]];
         let mut indicator_ids = Vec::new();
         for &pos in strip_positions {
             let strip = renderer.insert_mesh(box_mesh(pos, [0.1, 0.05, 10.0]));
@@ -98,7 +187,10 @@ impl HelioWasmApp for Demo {
         // Indicator accent lights per rack row
         for &pos in rack_positions.iter().step_by(2) {
             let id = renderer.insert_light(point_light(
-                [pos[0], 0.8, pos[2]], [0.0, 0.9, 0.3], 3.0, 4.0,
+                [pos[0], 0.8, pos[2]],
+                [0.0, 0.9, 0.3],
+                3.0,
+                4.0,
             ));
             indicator_ids.push(id);
         }
@@ -114,46 +206,78 @@ impl HelioWasmApp for Demo {
         }
     }
 
-    fn update(&mut self, renderer: &mut Renderer, dt: f32, elapsed: f32,
-              input: &InputState) -> Camera {
-        self.cam_yaw   += input.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch  = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.3, 1.3);
+    fn update(
+        &mut self,
+        renderer: &mut Renderer,
+        dt: f32,
+        elapsed: f32,
+        input: &InputState,
+    ) -> Camera {
+        self.cam_yaw += input.mouse_delta.0 * LOOK_SENS;
+        self.cam_pitch = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.3, 1.3);
 
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
-        let fwd   = Vec3::new(sy * cp, sp, -cy * cp);
+        let fwd = Vec3::new(sy * cp, sp, -cy * cp);
         let right = Vec3::new(cy, 0.0, sy);
         let fwd_flat = Vec3::new(sy, 0.0, -cy);
 
-        if input.keys.contains(&helio_wasm::KeyCode::KeyW) { self.cam_pos += fwd_flat * WALK_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyS) { self.cam_pos -= fwd_flat * WALK_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyA) { self.cam_pos -= right    * WALK_SPEED * dt; }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyD) { self.cam_pos += right    * WALK_SPEED * dt; }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyW) {
+            self.cam_pos += fwd_flat * WALK_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyS) {
+            self.cam_pos -= fwd_flat * WALK_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyA) {
+            self.cam_pos -= right * WALK_SPEED * dt;
+        }
+        if input.keys.contains(&helio_wasm::KeyCode::KeyD) {
+            self.cam_pos += right * WALK_SPEED * dt;
+        }
 
         // Overhead strips: slight hum flicker
-        let strip_positions: &[[f32; 3]] = &[
-            [-8.0, 2.95, 0.0], [8.0, 2.95, 0.0], [0.0, 2.95, 0.0],
-        ];
-        for (i, (id, &pos)) in self.indicator_ids[..3].iter().zip(strip_positions.iter()).enumerate() {
+        let strip_positions: &[[f32; 3]] = &[[-8.0, 2.95, 0.0], [8.0, 2.95, 0.0], [0.0, 2.95, 0.0]];
+        for (i, (id, &pos)) in self.indicator_ids[..3]
+            .iter()
+            .zip(strip_positions.iter())
+            .enumerate()
+        {
             let f = 1.0 + (elapsed * 120.0 + i as f32 * 2.1).sin() * 0.005;
-            let _ = renderer.update_light(*id, point_light(pos, [0.65, 0.75, 0.95], 80.0 * f, 12.0));
+            let _ =
+                renderer.update_light(*id, point_light(pos, [0.65, 0.75, 0.95], 80.0 * f, 12.0));
         }
 
         // Rack indicator lights blink
         let rack_positions: &[[f32; 3]] = &[
-            [-8.0, 1.0, -8.0], [-8.0, 1.0, 0.0], [-8.0, 1.0, 8.0],
-            [ 8.0, 1.0, -8.0], [ 8.0, 1.0, 0.0], [ 8.0, 1.0, 8.0],
+            [-8.0, 1.0, -8.0],
+            [-8.0, 1.0, 0.0],
+            [-8.0, 1.0, 8.0],
+            [8.0, 1.0, -8.0],
+            [8.0, 1.0, 0.0],
+            [8.0, 1.0, 8.0],
         ];
-        for (i, (id, &pos)) in self.indicator_ids[3..].iter().zip(rack_positions.iter()).enumerate() {
-            let blink = ((elapsed * (0.9 + i as f32 * 0.15) + i as f32 * 0.7).sin() > 0.0) as u8 as f32;
-            let _ = renderer.update_light(*id, point_light(
-                [pos[0], 0.8, pos[2]], [0.0, 0.9, 0.3], 3.0 * blink, 4.0,
-            ));
+        for (i, (id, &pos)) in self.indicator_ids[3..]
+            .iter()
+            .zip(rack_positions.iter())
+            .enumerate()
+        {
+            let blink =
+                ((elapsed * (0.9 + i as f32 * 0.15) + i as f32 * 0.7).sin() > 0.0) as u8 as f32;
+            let _ = renderer.update_light(
+                *id,
+                point_light([pos[0], 0.8, pos[2]], [0.0, 0.9, 0.3], 3.0 * blink, 4.0),
+            );
         }
 
         Camera::perspective_look_at(
-            self.cam_pos, self.cam_pos + fwd, Vec3::Y,
-            std::f32::consts::FRAC_PI_4, 1280.0 / 720.0, 0.05, 50.0,
+            self.cam_pos,
+            self.cam_pos + fwd,
+            Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            1280.0 / 720.0,
+            0.05,
+            50.0,
         )
     }
 }
+

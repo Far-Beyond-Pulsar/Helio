@@ -256,7 +256,7 @@ impl DeferredLightPass {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            compare: None,  // No comparison - returns actual depth values for PCSS blocker search
+            compare: None, // No comparison - returns actual depth values for PCSS blocker search
             ..Default::default()
         });
         let (fallback_env_texture, fallback_env_view) = black_cube_texture(device, queue);
@@ -270,7 +270,8 @@ impl DeferredLightPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        let (fallback_rc_texture, fallback_rc_view) = black_2d_texture(device, queue, "Deferred Fallback RC");
+        let (fallback_rc_texture, fallback_rc_view) =
+            black_2d_texture(device, queue, "Deferred Fallback RC");
 
         Self {
             pipeline,
@@ -336,7 +337,7 @@ impl RenderPass for DeferredLightPass {
         let (ambient_color, ambient_intensity) = if let Some(main_scene) = main_scene {
             (main_scene.ambient_color, main_scene.ambient_intensity)
         } else {
-            ([0.5, 0.5, 0.6], 1.0)  // Brighter fallback ambient: sky-blue tint
+            ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
         };
         // Get RC bounds from frame resources (AAA dual-tier GI: RC near, ambient far)
         let (rc_min, rc_max) = if let Some(main) = main_scene {
@@ -364,13 +365,11 @@ impl RenderPass for DeferredLightPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = ctx
-            .frame
-            .gbuffer
-            .as_ref()
-            .ok_or_else(|| helio_v3::Error::InvalidPassConfig(
+        let gbuffer = ctx.frame.gbuffer.as_ref().ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
                 "DeferredLight requires published gbuffer resources".to_string(),
-            ))?;
+            )
+        })?;
 
         let gbuffer_key = (
             gbuffer.albedo as *const _ as usize,
@@ -397,10 +396,7 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
-        let shadow_view = ctx
-            .frame
-            .shadow_atlas
-            .unwrap_or(&self.fallback_shadow_view);
+        let shadow_view = ctx.frame.shadow_atlas.unwrap_or(&self.fallback_shadow_view);
         let shadow_sampler = ctx
             .frame
             .shadow_sampler
@@ -646,3 +642,4 @@ fn black_cube_texture(
     });
     (texture, view)
 }
+

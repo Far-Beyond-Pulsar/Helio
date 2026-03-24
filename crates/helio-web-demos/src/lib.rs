@@ -24,53 +24,60 @@ mod common;
 /// Each constant is the full HTML for that demo's landing page.
 /// `INDEX` is the master listing linking to every demo.
 pub mod html {
-    pub const RENDER_V2_BASIC:    &str = include_str!(concat!(env!("OUT_DIR"), "/render_v2_basic.html"));
-    pub const RENDER_V2_SKY:      &str = include_str!(concat!(env!("OUT_DIR"), "/render_v2_sky.html"));
-    pub const DEBUG_SHAPES:       &str = include_str!(concat!(env!("OUT_DIR"), "/debug_shapes.html"));
-    pub const INDOOR_ROOM:        &str = include_str!(concat!(env!("OUT_DIR"), "/indoor_room.html"));
-    pub const INDOOR_CORRIDOR:    &str = include_str!(concat!(env!("OUT_DIR"), "/indoor_corridor.html"));
-    pub const OUTDOOR_NIGHT:      &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_night.html"));
-    pub const OUTDOOR_CANYON:     &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_canyon.html"));
-    pub const INDOOR_CATHEDRAL:   &str = include_str!(concat!(env!("OUT_DIR"), "/indoor_cathedral.html"));
-    pub const INDOOR_SERVER_ROOM: &str = include_str!(concat!(env!("OUT_DIR"), "/indoor_server_room.html"));
-    pub const OUTDOOR_CITY:       &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_city.html"));
-    pub const OUTDOOR_VOLCANO:    &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_volcano.html"));
-    pub const SPACE_STATION:      &str = include_str!(concat!(env!("OUT_DIR"), "/space_station.html"));
-    pub const LIGHT_BENCHMARK:    &str = include_str!(concat!(env!("OUT_DIR"), "/light_benchmark.html"));
-    pub const RC_BENCHMARK:       &str = include_str!(concat!(env!("OUT_DIR"), "/rc_benchmark.html"));
-    pub const SDF_DEMO:           &str = include_str!(concat!(env!("OUT_DIR"), "/sdf_demo.html"));
-    pub const LOAD_FBX:           &str = include_str!(concat!(env!("OUT_DIR"), "/load_fbx.html"));
-    pub const LOAD_FBX_EMBEDDED:  &str = include_str!(concat!(env!("OUT_DIR"), "/load_fbx_embedded.html"));
-    pub const SHIP_FLIGHT:        &str = include_str!(concat!(env!("OUT_DIR"), "/ship_flight.html"));
-    pub const SIMPLE_GRAPH:       &str = include_str!(concat!(env!("OUT_DIR"), "/simple_graph.html"));
-    pub const OUTDOOR_ROCKS:      &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_rocks.html"));
-    pub const INDEX:              &str = include_str!(concat!(env!("OUT_DIR"), "/index.html"));
+    pub const RENDER_V2_BASIC: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/render_v2_basic.html"));
+    pub const RENDER_V2_SKY: &str = include_str!(concat!(env!("OUT_DIR"), "/render_v2_sky.html"));
+    pub const DEBUG_SHAPES: &str = include_str!(concat!(env!("OUT_DIR"), "/debug_shapes.html"));
+    pub const INDOOR_ROOM: &str = include_str!(concat!(env!("OUT_DIR"), "/indoor_room.html"));
+    pub const INDOOR_CORRIDOR: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/indoor_corridor.html"));
+    pub const OUTDOOR_NIGHT: &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_night.html"));
+    pub const OUTDOOR_CANYON: &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_canyon.html"));
+    pub const INDOOR_CATHEDRAL: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/indoor_cathedral.html"));
+    pub const INDOOR_SERVER_ROOM: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/indoor_server_room.html"));
+    pub const OUTDOOR_CITY: &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_city.html"));
+    pub const OUTDOOR_VOLCANO: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/outdoor_volcano.html"));
+    pub const SPACE_STATION: &str = include_str!(concat!(env!("OUT_DIR"), "/space_station.html"));
+    pub const LIGHT_BENCHMARK: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/light_benchmark.html"));
+    pub const RC_BENCHMARK: &str = include_str!(concat!(env!("OUT_DIR"), "/rc_benchmark.html"));
+    pub const SDF_DEMO: &str = include_str!(concat!(env!("OUT_DIR"), "/sdf_demo.html"));
+    pub const LOAD_FBX: &str = include_str!(concat!(env!("OUT_DIR"), "/load_fbx.html"));
+    pub const LOAD_FBX_EMBEDDED: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/load_fbx_embedded.html"));
+    pub const SHIP_FLIGHT: &str = include_str!(concat!(env!("OUT_DIR"), "/ship_flight.html"));
+    pub const SIMPLE_GRAPH: &str = include_str!(concat!(env!("OUT_DIR"), "/simple_graph.html"));
+    pub const OUTDOOR_ROCKS: &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_rocks.html"));
+    pub const INDEX: &str = include_str!(concat!(env!("OUT_DIR"), "/index.html"));
 
     /// Returns the HTML for the demo identified by slug (e.g. `"ship_flight"`).
     /// Returns `None` for unknown slugs.
     pub fn by_name(name: &str) -> Option<&'static str> {
         match name {
-            "render_v2_basic"    => Some(RENDER_V2_BASIC),
-            "render_v2_sky"      => Some(RENDER_V2_SKY),
-            "debug_shapes"       => Some(DEBUG_SHAPES),
-            "indoor_room"        => Some(INDOOR_ROOM),
-            "indoor_corridor"    => Some(INDOOR_CORRIDOR),
-            "outdoor_night"      => Some(OUTDOOR_NIGHT),
-            "outdoor_canyon"     => Some(OUTDOOR_CANYON),
-            "indoor_cathedral"   => Some(INDOOR_CATHEDRAL),
+            "render_v2_basic" => Some(RENDER_V2_BASIC),
+            "render_v2_sky" => Some(RENDER_V2_SKY),
+            "debug_shapes" => Some(DEBUG_SHAPES),
+            "indoor_room" => Some(INDOOR_ROOM),
+            "indoor_corridor" => Some(INDOOR_CORRIDOR),
+            "outdoor_night" => Some(OUTDOOR_NIGHT),
+            "outdoor_canyon" => Some(OUTDOOR_CANYON),
+            "indoor_cathedral" => Some(INDOOR_CATHEDRAL),
             "indoor_server_room" => Some(INDOOR_SERVER_ROOM),
-            "outdoor_city"       => Some(OUTDOOR_CITY),
-            "outdoor_volcano"    => Some(OUTDOOR_VOLCANO),
-            "space_station"      => Some(SPACE_STATION),
-            "light_benchmark"    => Some(LIGHT_BENCHMARK),
-            "rc_benchmark"       => Some(RC_BENCHMARK),
-            "sdf_demo"           => Some(SDF_DEMO),
-            "load_fbx"           => Some(LOAD_FBX),
-            "load_fbx_embedded"  => Some(LOAD_FBX_EMBEDDED),
-            "ship_flight"        => Some(SHIP_FLIGHT),
-            "simple_graph"       => Some(SIMPLE_GRAPH),
-            "outdoor_rocks"      => Some(OUTDOOR_ROCKS),
-            _                    => None,
+            "outdoor_city" => Some(OUTDOOR_CITY),
+            "outdoor_volcano" => Some(OUTDOOR_VOLCANO),
+            "space_station" => Some(SPACE_STATION),
+            "light_benchmark" => Some(LIGHT_BENCHMARK),
+            "rc_benchmark" => Some(RC_BENCHMARK),
+            "sdf_demo" => Some(SDF_DEMO),
+            "load_fbx" => Some(LOAD_FBX),
+            "load_fbx_embedded" => Some(LOAD_FBX_EMBEDDED),
+            "ship_flight" => Some(SHIP_FLIGHT),
+            "simple_graph" => Some(SIMPLE_GRAPH),
+            "outdoor_rocks" => Some(OUTDOOR_ROCKS),
+            _ => None,
         }
     }
 }
@@ -164,45 +171,105 @@ mod outdoor_rocks;
 #[wasm_bindgen::prelude::wasm_bindgen(start)]
 pub fn start() {
     #[cfg(feature = "render_v2_basic")]
-    { helio_wasm::launch::<render_v2_basic::Demo>(); return; }
+    {
+        helio_wasm::launch::<render_v2_basic::Demo>();
+        return;
+    }
     #[cfg(feature = "render_v2_sky")]
-    { helio_wasm::launch::<render_v2_sky::Demo>(); return; }
+    {
+        helio_wasm::launch::<render_v2_sky::Demo>();
+        return;
+    }
     #[cfg(feature = "debug_shapes")]
-    { helio_wasm::launch::<debug_shapes::Demo>(); return; }
+    {
+        helio_wasm::launch::<debug_shapes::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_room")]
-    { helio_wasm::launch::<indoor_room::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_room::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_corridor")]
-    { helio_wasm::launch::<indoor_corridor::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_corridor::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_night")]
-    { helio_wasm::launch::<outdoor_night::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_night::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_canyon")]
-    { helio_wasm::launch::<outdoor_canyon::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_canyon::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_cathedral")]
-    { helio_wasm::launch::<indoor_cathedral::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_cathedral::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_server_room")]
-    { helio_wasm::launch::<indoor_server_room::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_server_room::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_city")]
-    { helio_wasm::launch::<outdoor_city::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_city::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_volcano")]
-    { helio_wasm::launch::<outdoor_volcano::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_volcano::Demo>();
+        return;
+    }
     #[cfg(feature = "space_station")]
-    { helio_wasm::launch::<space_station::Demo>(); return; }
+    {
+        helio_wasm::launch::<space_station::Demo>();
+        return;
+    }
     #[cfg(feature = "light_benchmark")]
-    { helio_wasm::launch::<light_benchmark::Demo>(); return; }
+    {
+        helio_wasm::launch::<light_benchmark::Demo>();
+        return;
+    }
     #[cfg(feature = "rc_benchmark")]
-    { helio_wasm::launch::<rc_benchmark::Demo>(); return; }
+    {
+        helio_wasm::launch::<rc_benchmark::Demo>();
+        return;
+    }
     #[cfg(feature = "sdf_demo")]
-    { helio_wasm::launch::<sdf_demo::Demo>(); return; }
+    {
+        helio_wasm::launch::<sdf_demo::Demo>();
+        return;
+    }
     #[cfg(feature = "load_fbx")]
-    { helio_wasm::launch::<load_fbx::Demo>(); return; }
+    {
+        helio_wasm::launch::<load_fbx::Demo>();
+        return;
+    }
     #[cfg(feature = "load_fbx_embedded")]
-    { helio_wasm::launch::<load_fbx_embedded::Demo>(); return; }
+    {
+        helio_wasm::launch::<load_fbx_embedded::Demo>();
+        return;
+    }
     #[cfg(feature = "ship_flight")]
-    { helio_wasm::launch::<ship_flight::Demo>(); return; }
+    {
+        helio_wasm::launch::<ship_flight::Demo>();
+        return;
+    }
     #[cfg(feature = "simple_graph")]
-    { helio_wasm::launch::<simple_graph::Demo>(); return; }
+    {
+        helio_wasm::launch::<simple_graph::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_rocks")]
-    { helio_wasm::launch::<outdoor_rocks::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_rocks::Demo>();
+        return;
+    }
 }
 
 // ── Native entry (for `cargo run -p helio-web-demos --features <name>`) ───────
@@ -210,45 +277,106 @@ pub fn start() {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn main() {
     #[cfg(feature = "render_v2_basic")]
-    { helio_wasm::launch::<render_v2_basic::Demo>(); return; }
+    {
+        helio_wasm::launch::<render_v2_basic::Demo>();
+        return;
+    }
     #[cfg(feature = "render_v2_sky")]
-    { helio_wasm::launch::<render_v2_sky::Demo>(); return; }
+    {
+        helio_wasm::launch::<render_v2_sky::Demo>();
+        return;
+    }
     #[cfg(feature = "debug_shapes")]
-    { helio_wasm::launch::<debug_shapes::Demo>(); return; }
+    {
+        helio_wasm::launch::<debug_shapes::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_room")]
-    { helio_wasm::launch::<indoor_room::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_room::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_corridor")]
-    { helio_wasm::launch::<indoor_corridor::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_corridor::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_night")]
-    { helio_wasm::launch::<outdoor_night::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_night::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_canyon")]
-    { helio_wasm::launch::<outdoor_canyon::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_canyon::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_cathedral")]
-    { helio_wasm::launch::<indoor_cathedral::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_cathedral::Demo>();
+        return;
+    }
     #[cfg(feature = "indoor_server_room")]
-    { helio_wasm::launch::<indoor_server_room::Demo>(); return; }
+    {
+        helio_wasm::launch::<indoor_server_room::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_city")]
-    { helio_wasm::launch::<outdoor_city::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_city::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_volcano")]
-    { helio_wasm::launch::<outdoor_volcano::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_volcano::Demo>();
+        return;
+    }
     #[cfg(feature = "space_station")]
-    { helio_wasm::launch::<space_station::Demo>(); return; }
+    {
+        helio_wasm::launch::<space_station::Demo>();
+        return;
+    }
     #[cfg(feature = "light_benchmark")]
-    { helio_wasm::launch::<light_benchmark::Demo>(); return; }
+    {
+        helio_wasm::launch::<light_benchmark::Demo>();
+        return;
+    }
     #[cfg(feature = "rc_benchmark")]
-    { helio_wasm::launch::<rc_benchmark::Demo>(); return; }
+    {
+        helio_wasm::launch::<rc_benchmark::Demo>();
+        return;
+    }
     #[cfg(feature = "sdf_demo")]
-    { helio_wasm::launch::<sdf_demo::Demo>(); return; }
+    {
+        helio_wasm::launch::<sdf_demo::Demo>();
+        return;
+    }
     #[cfg(feature = "load_fbx")]
-    { helio_wasm::launch::<load_fbx::Demo>(); return; }
+    {
+        helio_wasm::launch::<load_fbx::Demo>();
+        return;
+    }
     #[cfg(feature = "load_fbx_embedded")]
-    { helio_wasm::launch::<load_fbx_embedded::Demo>(); return; }
+    {
+        helio_wasm::launch::<load_fbx_embedded::Demo>();
+        return;
+    }
     #[cfg(feature = "ship_flight")]
-    { helio_wasm::launch::<ship_flight::Demo>(); return; }
+    {
+        helio_wasm::launch::<ship_flight::Demo>();
+        return;
+    }
     #[cfg(feature = "simple_graph")]
-    { helio_wasm::launch::<simple_graph::Demo>(); return; }
+    {
+        helio_wasm::launch::<simple_graph::Demo>();
+        return;
+    }
     #[cfg(feature = "outdoor_rocks")]
-    { helio_wasm::launch::<outdoor_rocks::Demo>(); return; }
+    {
+        helio_wasm::launch::<outdoor_rocks::Demo>();
+        return;
+    }
 
     eprintln!("helio-web-demos: no feature selected. Pass --features <demo_name>.");
 }
+

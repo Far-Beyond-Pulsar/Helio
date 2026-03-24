@@ -8,16 +8,17 @@
 
 mod v3_demo_common;
 
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig};
+use helio::{
+    required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig,
+};
 use v3_demo_common::{box_mesh, cube_mesh, make_material, plane_mesh, point_light};
-
 
 use winit::{
     application::ApplicationHandler,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId, CursorGrabMode},
+    window::{CursorGrabMode, Window, WindowId},
 };
 
 use std::collections::HashSet;
@@ -51,10 +52,10 @@ struct AppState {
     ground: MeshId,
 
     // Free-camera state
-    cam_pos:   glam::Vec3,
-    cam_yaw:   f32,   // radians, horizontal rotation
-    cam_pitch: f32,   // radians, vertical rotation (clamped)
-    keys:      HashSet<KeyCode>,
+    cam_pos: glam::Vec3,
+    cam_yaw: f32,   // radians, horizontal rotation
+    cam_pitch: f32, // radians, vertical rotation (clamped)
+    keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 
@@ -86,7 +87,9 @@ impl ApplicationHandler for App {
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION | wgpu::InstanceFlags::DEBUG,
+            flags: wgpu::InstanceFlags::VALIDATION
+                | wgpu::InstanceFlags::GPU_BASED_VALIDATION
+                | wgpu::InstanceFlags::DEBUG,
             ..Default::default()
         });
         let surface = instance
@@ -100,22 +103,22 @@ impl ApplicationHandler for App {
         }))
         .expect("Failed to find adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("Main Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                ..Default::default()
-            },
-            None,
-        ))
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Main Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }))
         .expect("Failed to create device");
 
-        device.on_uncaptured_error(Box::new(|e| {
+        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
         let info = adapter.get_info();
-        println!("[WGPU] Backend: {:?}, Device: {}, Driver: {}", info.backend, info.name, info.driver);
+        println!(
+            "[WGPU] Backend: {:?}, Device: {}, Driver: {}",
+            info.backend, info.name, info.driver
+        );
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
@@ -147,17 +150,24 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, surface_format),
         );
 
-        let mat = renderer.insert_material(make_material([0.7, 0.7, 0.72, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0));
+        let mat = renderer.insert_material(make_material(
+            [0.7, 0.7, 0.72, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let cube1  = renderer.insert_mesh(cube_mesh([ 0.0, 0.5,  0.0], 0.5));
-        let cube2  = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
-        let cube3  = renderer.insert_mesh(cube_mesh([ 2.0, 0.3,  0.5], 0.3));
+        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
+        let cube2 = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
+        let cube3 = renderer.insert_mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
         let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
 
-        let _ = v3_demo_common::insert_object(&mut renderer, cube1,  mat, glam::Mat4::IDENTITY, 0.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube2,  mat, glam::Mat4::IDENTITY, 0.4);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube3,  mat, glam::Mat4::IDENTITY, 0.3);
-        let _ = v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube3, mat, glam::Mat4::IDENTITY, 0.3);
+        let _ =
+            v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         // p0 bobs up/down (animated), p1 and p2 are static
         let p0_init = [0.0f32, 2.2, 0.0];
@@ -175,11 +185,14 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: std::time::Instant::now(),
             start_time: std::time::Instant::now(),
-            cube1, cube2, cube3, ground,
-            cam_pos:   glam::Vec3::new(0.0, 2.5, 7.0),
-            cam_yaw:   0.0,         // yaw=0 looks down -Z toward the scene
+            cube1,
+            cube2,
+            cube3,
+            ground,
+            cam_pos: glam::Vec3::new(0.0, 2.5, 7.0),
+            cam_yaw: 0.0, // yaw=0 looks down -Z toward the scene
             cam_pitch: -0.2,
-            keys:      HashSet::new(),
+            keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             light_p0_id,
@@ -196,11 +209,12 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::KeyboardInput {
-                event: KeyEvent {
-                    state: ElementState::Pressed,
-                    physical_key: PhysicalKey::Code(KeyCode::Escape),
-                    ..
-                },
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -215,14 +229,21 @@ impl ApplicationHandler for App {
 
             // ── Keyboard held state ───────────────────────────────────────────
             WindowEvent::KeyboardInput {
-                event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. },
+                event:
+                    KeyEvent {
+                        state: ks,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
                 ..
-            } => {
-                match ks {
-                    ElementState::Pressed  => { state.keys.insert(key); }
-                    ElementState::Released => { state.keys.remove(&key); }
+            } => match ks {
+                ElementState::Pressed => {
+                    state.keys.insert(key);
                 }
-            }
+                ElementState::Released => {
+                    state.keys.remove(&key);
+                }
+            },
 
             // ── Mouse button — grab cursor on click ───────────────────────────
             WindowEvent::MouseInput {
@@ -232,7 +253,9 @@ impl ApplicationHandler for App {
             } => {
                 if !state.cursor_grabbed {
                     // Try confined first, fall back to locked
-                    let grabbed = state.window.set_cursor_grab(CursorGrabMode::Confined)
+                    let grabbed = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if grabbed {
@@ -269,7 +292,12 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _id: winit::event::DeviceId, event: DeviceEvent) {
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _id: winit::event::DeviceId,
+        event: DeviceEvent,
+    ) {
         let Some(state) = &mut self.state else { return };
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
             if state.cursor_grabbed {
@@ -293,23 +321,35 @@ impl AppState {
         const LOOK_SENS: f32 = 0.002;
 
         // Apply mouse look — yaw left/right, pitch up/down (non-inverted)
-        self.cam_yaw   += self.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch  = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
+        self.cam_yaw += self.mouse_delta.0 * LOOK_SENS;
+        self.cam_pitch = (self.cam_pitch - self.mouse_delta.1 * LOOK_SENS).clamp(-1.5, 1.5);
         self.mouse_delta = (0.0, 0.0);
 
         // Standard FPS basis: yaw=0 looks down -Z
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
-        let right   = glam::Vec3::new(cy, 0.0, sy);
-        let up      = glam::Vec3::Y;
+        let right = glam::Vec3::new(cy, 0.0, sy);
+        let up = glam::Vec3::Y;
 
-        if self.keys.contains(&KeyCode::KeyW)      { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS)      { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA)      { self.cam_pos -= right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD)      { self.cam_pos += right   * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space)     { self.cam_pos += up * SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos -= up * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos += up * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos -= up * SPEED * dt;
+        }
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
@@ -328,13 +368,21 @@ impl AppState {
         // ── Acquire surface ────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => { log::warn!("Surface error: {:?}", e); return; }
+            Err(e) => {
+                log::warn!("Surface error: {:?}", e);
+                return;
+            }
         };
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // p0 bobs up/down per-frame
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        let _ = self.renderer.update_light(self.light_p0_id, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
+        let _ = self.renderer.update_light(
+            self.light_p0_id,
+            point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
+        );
 
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
@@ -343,3 +391,4 @@ impl AppState {
         output.present();
     }
 }
+

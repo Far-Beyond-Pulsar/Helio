@@ -6,7 +6,7 @@
 use crate::groups::{GroupId, GroupMask};
 use crate::handles::ObjectId;
 
-use super::super::errors::{Result, invalid};
+use super::super::errors::{invalid, Result};
 use super::super::helpers::object_is_visible;
 
 impl super::super::Scene {
@@ -185,3 +185,4 @@ impl super::super::Scene {
         Ok(record.groups)
     }
 }
+

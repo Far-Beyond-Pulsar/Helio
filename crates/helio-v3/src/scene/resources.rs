@@ -128,3 +128,4 @@ pub struct SceneResources<'a> {
     pub light_count: u32,
     pub shadow_count: u32,
 }
+

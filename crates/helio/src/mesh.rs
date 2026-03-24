@@ -41,10 +41,7 @@ fn pack_snorm4x8(v: [f32; 4]) -> u32 {
         scaled as u8 as u32
     };
 
-    to_i8(v[0])
-        | (to_i8(v[1]) << 8)
-        | (to_i8(v[2]) << 16)
-        | (to_i8(v[3]) << 24)
+    to_i8(v[0]) | (to_i8(v[1]) << 8) | (to_i8(v[2]) << 16) | (to_i8(v[3]) << 24)
 }
 
 #[derive(Debug, Clone)]
@@ -106,7 +103,10 @@ impl MeshPool {
             first_index: index_range.start as u32,
             index_count: (index_range.end - index_range.start) as u32,
         };
-        let (id, _, _) = self.meshes.insert(MeshRecord { slice, ref_count: 0 });
+        let (id, _, _) = self.meshes.insert(MeshRecord {
+            slice,
+            ref_count: 0,
+        });
         id
     }
 
@@ -134,3 +134,4 @@ impl MeshPool {
         self.indices.flush(queue);
     }
 }
+

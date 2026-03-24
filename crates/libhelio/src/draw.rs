@@ -51,7 +51,12 @@ pub struct DrawIndexedIndirectArgs {
 
 impl DrawIndexedIndirectArgs {
     /// Creates a culled (invisible) command — instance_count = 0.
-    pub const fn culled(index_count: u32, first_index: u32, base_vertex: i32, first_instance: u32) -> Self {
+    pub const fn culled(
+        index_count: u32,
+        first_index: u32,
+        base_vertex: i32,
+        first_instance: u32,
+    ) -> Self {
         Self {
             index_count,
             instance_count: 0,
@@ -61,3 +66,4 @@ impl DrawIndexedIndirectArgs {
         }
     }
 }
+

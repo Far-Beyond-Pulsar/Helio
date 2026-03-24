@@ -20,7 +20,10 @@ use crate::mesh::MeshPool;
 use crate::vg::VirtualMeshId;
 
 use super::camera::Camera;
-use super::types::{LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord, VirtualObjectRecord};
+use super::types::{
+    LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord,
+    VirtualObjectRecord,
+};
 
 /// High-level scene management with persistent GPU-driven state.
 ///
@@ -76,7 +79,6 @@ pub struct Scene {
     pub(in crate::scene) group_hidden: GroupMask,
 
     // ── Virtual geometry ──────────────────────────────────────────────────────
-
     /// All uploaded virtual meshes keyed by their handle.
     pub(in crate::scene) vg_meshes: HashMap<VirtualMeshId, VirtualMeshRecord>,
 
@@ -182,7 +184,7 @@ impl Scene {
             materials: SparsePool::new(),
             lights: DenseArena::new(),
             objects: DenseArena::new(),
-            objects_dirty: true, // rebuild on first flush
+            objects_dirty: true,             // rebuild on first flush
             objects_layout_optimized: false, // start in persistent mode
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
@@ -400,3 +402,4 @@ impl Scene {
         self.gpu_scene.frame_count = self.gpu_scene.frame_count.wrapping_add(1);
     }
 }
+

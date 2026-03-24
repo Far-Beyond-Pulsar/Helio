@@ -170,3 +170,4 @@ impl Drop for ScopeGuard {
         // self.profiler.record(self.name, elapsed);
     }
 }
+

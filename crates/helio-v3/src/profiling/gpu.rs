@@ -219,3 +219,4 @@ pub struct GpuTimestamp {
     /// Convert to milliseconds: `duration_ns as f64 / 1_000_000.0`
     pub duration_ns: u64,
 }
+

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::handles::MeshId;
 use crate::mesh::{MeshBuffers, MeshPool, MeshUpload};
 
-use super::super::errors::{Result, invalid, SceneError};
+use super::super::errors::{invalid, Result, SceneError};
 
 impl super::super::Scene {
     /// Insert a mesh into the scene's mesh pool.
@@ -89,3 +89,4 @@ impl super::super::Scene {
         self.mesh_pool.buffers()
     }
 }
+

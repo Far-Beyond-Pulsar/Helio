@@ -10,8 +10,8 @@
 //  Total                          →     112 bytes
 
 const FRUSTUM_PLANES_SIZE: usize = 6 * std::mem::size_of::<[f32; 4]>(); // 96
-const DRAW_COUNT_SIZE: usize = std::mem::size_of::<u32>();               // 4
-const PADDING_SIZE: usize = 3 * std::mem::size_of::<u32>();              // 12
+const DRAW_COUNT_SIZE: usize = std::mem::size_of::<u32>(); // 4
+const PADDING_SIZE: usize = 3 * std::mem::size_of::<u32>(); // 12
 const CULL_UNIFORMS_SIZE: usize = FRUSTUM_PLANES_SIZE + DRAW_COUNT_SIZE + PADDING_SIZE;
 
 /// Number of threads per workgroup in the indirect-dispatch compute shader.
@@ -177,3 +177,4 @@ fn frustum_plane_array_total_bytes() {
     let planes: [[f32; 4]; 6] = [[0.0; 4]; 6];
     assert_eq!(std::mem::size_of_val(&planes), 96);
 }
+

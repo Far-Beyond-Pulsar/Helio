@@ -5,7 +5,9 @@ use helio_v3::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
 
 use crate::groups::GroupMask;
 use crate::handles::MeshId;
-use crate::material::{GpuMaterialTextureSlot, GpuMaterialTextures, MaterialTextureRef, TextureTransform};
+use crate::material::{
+    GpuMaterialTextureSlot, GpuMaterialTextures, MaterialTextureRef, TextureTransform,
+};
 use crate::mesh::MeshSlice;
 
 use super::types::ObjectRecord;
@@ -33,9 +35,8 @@ pub(super) fn normal_matrix(transform: Mat4) -> [f32; 12] {
     let mat3 = Mat3::from_mat4(transform).inverse().transpose();
     let cols = mat3.to_cols_array();
     [
-        cols[0], cols[1], cols[2], 0.0,
-        cols[3], cols[4], cols[5], 0.0,
-        cols[6], cols[7], cols[8], 0.0,
+        cols[0], cols[1], cols[2], 0.0, cols[3], cols[4], cols[5], 0.0, cols[6], cols[7], cols[8],
+        0.0,
     ]
 }
 
@@ -110,7 +111,7 @@ pub(super) fn object_gpu_data(
     mesh: MeshId,
     material_slot: usize,
     desc: ObjectDescriptor,
-    slice: MeshSlice
+    slice: MeshSlice,
 ) -> ObjectRecord {
     ObjectRecord {
         mesh,
@@ -177,7 +178,9 @@ pub(super) fn gpu_texture_slot(texture: Option<MaterialTextureRef>) -> GpuMateri
 ///
 /// # Returns
 /// A GPU material texture descriptor with all texture slots and parameters.
-pub(super) fn gpu_material_textures(textures: &crate::material::MaterialTextures) -> GpuMaterialTextures {
+pub(super) fn gpu_material_textures(
+    textures: &crate::material::MaterialTextures,
+) -> GpuMaterialTextures {
     GpuMaterialTextures {
         base_color: gpu_texture_slot(textures.base_color),
         normal: gpu_texture_slot(textures.normal),
@@ -222,3 +225,4 @@ where
         f(texture);
     }
 }
+

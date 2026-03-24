@@ -158,20 +158,18 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                         ..
                     },
                 ..
-            } => {
-                match elem_state {
-                    ElementState::Pressed => {
-                        state.keys.insert(key);
-                        if key == KeyCode::Escape && state.cursor_grabbed {
-                            state.cursor_grabbed = false;
-                            release_cursor(&state.window);
-                        }
-                    }
-                    ElementState::Released => {
-                        state.keys.remove(&key);
+            } => match elem_state {
+                ElementState::Pressed => {
+                    state.keys.insert(key);
+                    if key == KeyCode::Escape && state.cursor_grabbed {
+                        state.cursor_grabbed = false;
+                        release_cursor(&state.window);
                     }
                 }
-            }
+                ElementState::Released => {
+                    state.keys.remove(&key);
+                }
+            },
 
             WindowEvent::MouseInput {
                 button: MouseButton::Left,
@@ -197,7 +195,9 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                         view_formats: vec![],
                     };
                     state.surface.configure(&state.device, &config);
-                    state.renderer.set_render_size(new_size.width, new_size.height);
+                    state
+                        .renderer
+                        .set_render_size(new_size.width, new_size.height);
                     state
                         .demo
                         .on_resize(&mut state.renderer, new_size.width, new_size.height);
@@ -264,18 +264,16 @@ async fn init_wgpu<T: HelioWasmApp>(
         .expect("helio-wasm: no suitable wgpu adapter");
 
     let (device, queue) = adapter
-        .request_device(
-            &wgpu::DeviceDescriptor {
-                label: Some("helio-wasm device"),
-                required_features: helio::required_wgpu_features(adapter.features()),
-                required_limits: helio::required_wgpu_limits(adapter.limits()),
-                ..Default::default()
-            },
-        )
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("helio-wasm device"),
+            required_features: helio::required_wgpu_features(adapter.features()),
+            required_limits: helio::required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        })
         .await
         .expect("helio-wasm: failed to create device");
 
-    device.on_uncaptured_error(std::sync::Arc::new(|e: &wgpu::Error| {
+    device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
         log::error!("[GPU uncaptured error] {:?}", e);
     }));
 
@@ -445,3 +443,4 @@ pub fn launch<T: HelioWasmApp>() {
         event_loop.spawn_app(runner);
     }
 }
+

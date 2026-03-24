@@ -4,11 +4,11 @@
 //! Dirty tracking ensures `flush()` is a no-op when data hasn't changed.
 
 use crate::upload;
-use libhelio::{
-    GpuCameraUniforms, GpuInstanceData, GpuInstanceAabb, GpuDrawCall,
-    GpuLight, GpuMaterial, GpuShadowMatrix, DrawIndexedIndirectArgs,
-};
 use bytemuck::Zeroable;
+use libhelio::{
+    DrawIndexedIndirectArgs, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb, GpuInstanceData,
+    GpuLight, GpuMaterial, GpuShadowMatrix,
+};
 use std::sync::Arc;
 
 /// A grow-only GPU storage buffer with dirty-tracked CPU mirror.
@@ -27,7 +27,12 @@ pub struct GrowableBuffer<T: bytemuck::Pod> {
 }
 
 impl<T: bytemuck::Pod> GrowableBuffer<T> {
-    pub fn new(device: Arc<wgpu::Device>, initial_capacity: usize, usage: wgpu::BufferUsages, label: &'static str) -> Self {
+    pub fn new(
+        device: Arc<wgpu::Device>,
+        initial_capacity: usize,
+        usage: wgpu::BufferUsages,
+        label: &'static str,
+    ) -> Self {
         let byte_size = (initial_capacity * std::mem::size_of::<T>()).max(64) as u64;
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some(label),
@@ -47,16 +52,24 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
     }
 
     /// Returns a reference to the underlying GPU buffer.
-    pub fn buffer(&self) -> &wgpu::Buffer { &self.buf }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buf
+    }
 
     /// Returns the number of elements currently stored.
-    pub fn len(&self) -> usize { self.data.len() }
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
 
     /// Returns true if there are no elements.
-    pub fn is_empty(&self) -> bool { self.data.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
 
     /// Returns a read-only view of the CPU-side data (mirrors the GPU buffer).
-    pub fn as_slice(&self) -> &[T] { &self.data }
+    pub fn as_slice(&self) -> &[T] {
+        &self.data
+    }
 
     fn mark_dirty_range(&mut self, start: usize, end: usize) {
         if start >= end {
@@ -126,7 +139,9 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
 
     /// Flushes dirty data to GPU. O(1) if clean.
     pub fn flush(&mut self, queue: &wgpu::Queue) {
-        let Some((start, end)) = self.dirty_range else { return; };
+        let Some((start, end)) = self.dirty_range else {
+            return;
+        };
         if self.data.is_empty() {
             self.dirty_range = None;
             return;
@@ -147,12 +162,19 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
             return;
         }
         let byte_offset = (start * std::mem::size_of::<T>()) as u64;
-        upload::write_buffer(queue, &self.buf, byte_offset, bytemuck::cast_slice(&self.data[start..end]));
+        upload::write_buffer(
+            queue,
+            &self.buf,
+            byte_offset,
+            bytemuck::cast_slice(&self.data[start..end]),
+        );
         self.dirty_range = None;
     }
 
     /// Marks clean without flushing (use when buffer was written by GPU).
-    pub fn mark_clean(&mut self) { self.dirty_range = None; }
+    pub fn mark_clean(&mut self) {
+        self.dirty_range = None;
+    }
 }
 
 // ─── Camera buffer ────────────────────────────────────────────────────────────
@@ -179,7 +201,9 @@ impl GpuCameraBuffer {
         }
     }
 
-    pub fn buffer(&self) -> &wgpu::Buffer { &self.buf }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        &self.buf
+    }
 
     /// Returns the camera world-space position as `[x, y, z]`.
     pub fn position(&self) -> [f32; 3] {
@@ -193,7 +217,9 @@ impl GpuCameraBuffer {
     }
 
     pub fn flush(&mut self, queue: &wgpu::Queue) {
-        if !self.dirty { return; }
+        if !self.dirty {
+            return;
+        }
         upload::write_buffer(queue, &self.buf, 0, bytemuck::bytes_of(&self.data));
         self.dirty = false;
     }
@@ -220,80 +246,194 @@ pub struct GpuVisibilityBuffer(pub GrowableBuffer<u32>);
 
 impl GpuInstanceBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(device, 4096, wgpu::BufferUsages::STORAGE, "Instance Buffer"))
+        Self(GrowableBuffer::new(
+            device,
+            4096,
+            wgpu::BufferUsages::STORAGE,
+            "Instance Buffer",
+        ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: GpuInstanceData) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<GpuInstanceData>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: GpuInstanceData) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuInstanceData> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: GpuInstanceData) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<GpuInstanceData>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: GpuInstanceData) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<GpuInstanceData> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
 
 impl GpuAabbBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(device, 4096, wgpu::BufferUsages::STORAGE, "AABB Buffer"))
+        Self(GrowableBuffer::new(
+            device,
+            4096,
+            wgpu::BufferUsages::STORAGE,
+            "AABB Buffer",
+        ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: GpuInstanceAabb) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<GpuInstanceAabb>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: GpuInstanceAabb) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuInstanceAabb> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: GpuInstanceAabb) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<GpuInstanceAabb>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: GpuInstanceAabb) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<GpuInstanceAabb> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
 
 impl GpuDrawCallBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(device, 4096, wgpu::BufferUsages::STORAGE, "DrawCall Buffer"))
+        Self(GrowableBuffer::new(
+            device,
+            4096,
+            wgpu::BufferUsages::STORAGE,
+            "DrawCall Buffer",
+        ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: GpuDrawCall) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<GpuDrawCall>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: GpuDrawCall) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuDrawCall> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: GpuDrawCall) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<GpuDrawCall>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: GpuDrawCall) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<GpuDrawCall> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
 
 impl GpuLightBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(device, 1024, wgpu::BufferUsages::STORAGE, "Light Buffer"))
+        Self(GrowableBuffer::new(
+            device,
+            1024,
+            wgpu::BufferUsages::STORAGE,
+            "Light Buffer",
+        ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: GpuLight) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<GpuLight>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: GpuLight) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuLight> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: GpuLight) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<GpuLight>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: GpuLight) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<GpuLight> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
 
 impl GpuMaterialBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(device, 2048, wgpu::BufferUsages::STORAGE, "Material Buffer"))
+        Self(GrowableBuffer::new(
+            device,
+            2048,
+            wgpu::BufferUsages::STORAGE,
+            "Material Buffer",
+        ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: GpuMaterial) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<GpuMaterial>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: GpuMaterial) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuMaterial> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: GpuMaterial) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<GpuMaterial>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: GpuMaterial) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<GpuMaterial> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
 
 impl GpuShadowMatrixBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(device, 256, wgpu::BufferUsages::STORAGE, "Shadow Matrix Buffer"))
+        Self(GrowableBuffer::new(
+            device,
+            256,
+            wgpu::BufferUsages::STORAGE,
+            "Shadow Matrix Buffer",
+        ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: GpuShadowMatrix) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<GpuShadowMatrix>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: GpuShadowMatrix) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuShadowMatrix> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: GpuShadowMatrix) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<GpuShadowMatrix>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: GpuShadowMatrix) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<GpuShadowMatrix> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
 
 impl GpuIndirectBuffer {
@@ -305,24 +445,58 @@ impl GpuIndirectBuffer {
             "Indirect Draw Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: DrawIndexedIndirectArgs) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<DrawIndexedIndirectArgs>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: DrawIndexedIndirectArgs) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<DrawIndexedIndirectArgs> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: DrawIndexedIndirectArgs) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<DrawIndexedIndirectArgs>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: DrawIndexedIndirectArgs) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<DrawIndexedIndirectArgs> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
 
 impl GpuVisibilityBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
-        Self(GrowableBuffer::new(device, 4096, wgpu::BufferUsages::STORAGE, "Visibility Buffer"))
+        Self(GrowableBuffer::new(
+            device,
+            4096,
+            wgpu::BufferUsages::STORAGE,
+            "Visibility Buffer",
+        ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer { self.0.buffer() }
-    pub fn len(&self) -> usize { self.0.len() }
-    pub fn push(&mut self, item: u32) -> usize { self.0.push(item) }
-    pub fn set_data(&mut self, data: Vec<u32>) { self.0.set_data(data); }
-    pub fn update(&mut self, index: usize, item: u32) -> bool { self.0.update(index, item) }
-    pub fn swap_remove(&mut self, index: usize) -> Option<u32> { self.0.swap_remove(index) }
-    pub fn flush(&mut self, queue: &wgpu::Queue) { self.0.flush(queue); }
+    pub fn buffer(&self) -> &wgpu::Buffer {
+        self.0.buffer()
+    }
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+    pub fn push(&mut self, item: u32) -> usize {
+        self.0.push(item)
+    }
+    pub fn set_data(&mut self, data: Vec<u32>) {
+        self.0.set_data(data);
+    }
+    pub fn update(&mut self, index: usize, item: u32) -> bool {
+        self.0.update(index, item)
+    }
+    pub fn swap_remove(&mut self, index: usize) -> Option<u32> {
+        self.0.swap_remove(index)
+    }
+    pub fn flush(&mut self, queue: &wgpu::Queue) {
+        self.0.flush(queue);
+    }
 }
+

@@ -37,5 +37,6 @@
 //! ```
 
 mod membership;
-mod visibility;
 mod transforms;
+mod visibility;
+

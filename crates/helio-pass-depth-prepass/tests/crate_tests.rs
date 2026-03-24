@@ -71,12 +71,12 @@ fn packed_vertex_tangent_field_is_4_bytes() {
 /// All named components must sum to the expected stride.
 #[test]
 fn all_packed_vertex_components_sum_to_stride() {
-    let pos     = 3 * std::mem::size_of::<f32>(); // 12
-    let bitan   =     std::mem::size_of::<f32>(); //  4
-    let uv0     = 2 * std::mem::size_of::<f32>(); //  8
-    let uv1     = 2 * std::mem::size_of::<f32>(); //  8
-    let normal  =     std::mem::size_of::<u32>(); //  4
-    let tangent =     std::mem::size_of::<u32>(); //  4
+    let pos = 3 * std::mem::size_of::<f32>(); // 12
+    let bitan = std::mem::size_of::<f32>(); //  4
+    let uv0 = 2 * std::mem::size_of::<f32>(); //  8
+    let uv1 = 2 * std::mem::size_of::<f32>(); //  8
+    let normal = std::mem::size_of::<u32>(); //  4
+    let tangent = std::mem::size_of::<u32>(); //  4
     assert_eq!(pos + bitan + uv0 + uv1 + normal + tangent, 40);
 }
 
@@ -143,3 +143,4 @@ fn vertex_stride_expressed_as_u64_fits_in_u32() {
     let stride: u64 = 40;
     assert!(stride <= u32::MAX as u64);
 }
+
