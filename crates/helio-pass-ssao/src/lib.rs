@@ -131,14 +131,14 @@ impl SsaoPass {
         });
         helio_v3::upload::write_texture(
             queue,
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture:   &noise_texture,
                 mip_level: 0,
                 origin:    wgpu::Origin3d::ZERO,
                 aspect:    wgpu::TextureAspect::All,
             },
             &noise_data,
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset:         0,
                 bytes_per_row:  Some(NOISE_DIM * 4),
                 rows_per_image: Some(NOISE_DIM),
@@ -155,7 +155,7 @@ impl SsaoPass {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter:     wgpu::FilterMode::Nearest,
             min_filter:     wgpu::FilterMode::Nearest,
-            mipmap_filter:  wgpu::FilterMode::Nearest,
+            mipmap_filter:  wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -294,8 +294,7 @@ impl SsaoPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("SSAO PL"),
-            bind_group_layouts:   &[&bgl_0, &bgl_1, &bgl_2],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2)],
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -323,7 +322,6 @@ impl SsaoPass {
             },
             depth_stencil: None,
             multisample:   wgpu::MultisampleState::default(),
-            multiview:     None,
             cache:         None,
         });
 
@@ -382,6 +380,7 @@ impl RenderPass for SsaoPass {
         let color_attachment = wgpu::RenderPassColorAttachment {
             view:           &self.ssao_view,
             resolve_target: None,
+            depth_slice:    None,
             ops: wgpu::Operations {
                 load:  wgpu::LoadOp::Clear(wgpu::Color::WHITE),
                 store: wgpu::StoreOp::Store,
@@ -394,6 +393,7 @@ impl RenderPass for SsaoPass {
             depth_stencil_attachment: None,
             timestamp_writes:         None,
             occlusion_query_set:      None,
+            multiview_mask:           0,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);

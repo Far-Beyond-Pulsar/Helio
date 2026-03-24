@@ -204,8 +204,7 @@ impl DeferredLightPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DeferredLight PL"),
-            bind_group_layouts: &[&bgl_0, &bgl_1, &bgl_2],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2)],
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("DeferredLight Pipeline"),
@@ -232,7 +231,6 @@ impl DeferredLightPass {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
             cache: None,
         });
 
@@ -267,7 +265,7 @@ impl DeferredLightPass {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
         let (fallback_rc_texture, fallback_rc_view) = black_2d_texture(device, queue, "Deferred Fallback RC");
@@ -455,6 +453,7 @@ impl RenderPass for DeferredLightPass {
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: color_target,
             resolve_target: None,
+            depth_slice: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                 store: wgpu::StoreOp::Store,
@@ -466,6 +465,7 @@ impl RenderPass for DeferredLightPass {
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: 0,
         };
         let mut pass = ctx.begin_render_pass(&desc);
         pass.set_pipeline(&self.pipeline);
@@ -578,14 +578,14 @@ fn black_2d_texture(
     });
     let zero = [0u8; 8];
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &zero,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(8),
             rows_per_image: Some(1),
@@ -620,14 +620,14 @@ fn black_cube_texture(
     });
     let zero = [0u8; 8 * 6];
     queue.write_texture(
-        wgpu::ImageCopyTexture {
+        wgpu::TexelCopyTextureInfo {
             texture: &texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
         &zero,
-        wgpu::ImageDataLayout {
+        wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(8),
             rows_per_image: Some(1),

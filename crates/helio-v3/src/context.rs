@@ -431,9 +431,9 @@ impl<'a> PrepareContext<'a> {
     /// Upload bytes into a GPU texture while participating in Helio's debug upload accounting.
     pub fn write_texture(
         &self,
-        texture: wgpu::ImageCopyTexture<'_>,
+        texture: wgpu::TexelCopyTextureInfo<'_>,
         data: &[u8],
-        data_layout: wgpu::ImageDataLayout,
+        data_layout: wgpu::TexelCopyBufferLayout,
         size: wgpu::Extent3d,
     ) {
         crate::upload::write_texture(self.queue, texture, data, data_layout, size);

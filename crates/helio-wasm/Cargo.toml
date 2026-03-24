@@ -9,7 +9,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 helio = { path = "../helio" }
-wgpu = "23"
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
 winit = "0.30"
 log = "0.4"
 glam = { version = "0.29", features = ["bytemuck"] }

@@ -39,7 +39,7 @@ helio-wasm          = { path = "../helio-wasm" }
 helio               = { path = "../helio" }
 helio-asset-compat  = { path = "../helio-asset-compat" }
 helio-pass-sdf      = { path = "../helio-pass-sdf" }
-wgpu                = "23"
+wgpu                = { workspace = true }
 glam                = { version = "0.29", features = ["bytemuck"] }
 log                 = "0.4"
 

@@ -137,14 +137,14 @@ impl BillboardPass {
         });
         helio_v3::upload::write_texture(
             queue,
-            wgpu::ImageCopyTexture {
+            wgpu::TexelCopyTextureInfo {
                 texture:   &white_texture,
                 mip_level: 0,
                 origin:    wgpu::Origin3d::ZERO,
                 aspect:    wgpu::TextureAspect::All,
             },
             &[255u8, 255, 255, 255],
-            wgpu::ImageDataLayout {
+            wgpu::TexelCopyBufferLayout {
                 offset:         0,
                 bytes_per_row:  Some(4),
                 rows_per_image: Some(1),
@@ -160,7 +160,7 @@ impl BillboardPass {
             address_mode_w:  wgpu::AddressMode::ClampToEdge,
             mag_filter:      wgpu::FilterMode::Linear,
             min_filter:      wgpu::FilterMode::Linear,
-            mipmap_filter:   wgpu::FilterMode::Nearest,
+            mipmap_filter:   wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -190,8 +190,7 @@ impl BillboardPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("Billboard PL"),
-            bind_group_layouts:   &[&bgl_0, &bgl_1],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&bgl_0), Some(&bgl_1)],
         });
 
         // ── Quad vertex buffer (6 vertices: 2 triangles CCW) ─────────────────
@@ -275,13 +274,12 @@ impl BillboardPass {
             // Depth read-only: billboards depth-test against scene geometry but don't write depth.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format:                wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled:   false,
-                depth_compare:         wgpu::CompareFunction::LessEqual,
+                depth_write_enabled:   Some(false),
+                depth_compare:         Some(wgpu::CompareFunction::LessEqual),
                 stencil:               wgpu::StencilState::default(),
                 bias:                  wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview:   None,
             cache:       None,
         });
 
@@ -340,14 +338,14 @@ impl BillboardPass {
             });
             helio_v3::upload::write_texture(
                 queue,
-                wgpu::ImageCopyTexture {
+                wgpu::TexelCopyTextureInfo {
                     texture:   &sprite_texture,
                     mip_level: 0,
                     origin:    wgpu::Origin3d::ZERO,
                     aspect:    wgpu::TextureAspect::All,
                 },
                 &rgba[..expected],
-                wgpu::ImageDataLayout {
+                wgpu::TexelCopyBufferLayout {
                     offset:         0,
                     bytes_per_row:  Some(4 * width),
                     rows_per_image: Some(height),
@@ -412,6 +410,7 @@ impl RenderPass for BillboardPass {
         let color_attachment = wgpu::RenderPassColorAttachment {
             view:           ctx.target,
             resolve_target: None,
+            depth_slice:    None,
             ops: wgpu::Operations {
                 load:  wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
@@ -433,6 +432,7 @@ impl RenderPass for BillboardPass {
             depth_stencil_attachment: Some(depth_attachment),
             timestamp_writes:         None,
             occlusion_query_set:      None,
+            multiview_mask:           0,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);

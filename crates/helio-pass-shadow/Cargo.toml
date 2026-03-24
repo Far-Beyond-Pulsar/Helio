@@ -8,6 +8,6 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 helio-v3  = { path = "../helio-v3" }
 libhelio  = { path = "../libhelio" }
-wgpu      = "23"
+wgpu      = { workspace = true }
 bytemuck  = { version = "1.14", features = ["derive"] }
 log       = "0.4"

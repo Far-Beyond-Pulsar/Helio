@@ -54,9 +54,9 @@ pub fn write_buffer(queue: &wgpu::Queue, buffer: &wgpu::Buffer, offset: u64, dat
 
 pub fn write_texture(
     queue: &wgpu::Queue,
-    texture: wgpu::ImageCopyTexture<'_>,
+    texture: wgpu::TexelCopyTextureInfo<'_>,
     data: &[u8],
-    data_layout: wgpu::ImageDataLayout,
+    data_layout: wgpu::TexelCopyBufferLayout,
     size: wgpu::Extent3d,
 ) {
     record_upload_bytes(data.len() as u64);

@@ -7,6 +7,6 @@ description = "Shared GPU types and utilities for the Helio renderer"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-wgpu = "23"
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
 bytemuck = { version = "1.14", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
