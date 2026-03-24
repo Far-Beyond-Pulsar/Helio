@@ -201,7 +201,7 @@ impl RenderPass for DebugPass {
             depth_stencil_attachment: Some(depth_attachment),
             timestamp_writes:         None,
             occlusion_query_set:      None,
-            multiview_mask:           0,
+            multiview_mask:           None,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);

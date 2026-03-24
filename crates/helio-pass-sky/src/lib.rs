@@ -267,7 +267,7 @@ impl RenderPass for SkyPass {
             depth_stencil_attachment: None,
             timestamp_writes:         None,
             occlusion_query_set:      None,
-            multiview_mask:           0,
+            multiview_mask:           None,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);

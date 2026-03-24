@@ -231,7 +231,7 @@ impl RenderPass for SimpleCubePass {
             }),
             timestamp_writes:    None,
             occlusion_query_set: None,
-            multiview_mask:      0,
+            multiview_mask:           None,
         });
 
         pass.set_pipeline(&self.pipeline);
