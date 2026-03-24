@@ -123,8 +123,8 @@ impl TransparentPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Transparent PL"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         // Vertex layout must match `Vertex` struct in transparent.wgsl:
@@ -182,13 +182,13 @@ impl TransparentPass {
             // Read-only depth: transparent objects test against opaque depth but don't write it.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: 0,
             cache: None,
         });
 
@@ -241,6 +241,7 @@ impl RenderPass for TransparentPass {
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: ctx.target,
             resolve_target: None,
+            depth_slice: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
@@ -260,6 +261,7 @@ impl RenderPass for TransparentPass {
             depth_stencil_attachment: Some(depth_stencil),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: 0,
         };
         let mut pass = ctx.begin_render_pass(&desc);
 

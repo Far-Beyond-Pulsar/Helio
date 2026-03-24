@@ -278,7 +278,7 @@ impl VirtualGeometryPass {
 
         // ── Cull pipeline ─────────────────────────────────────────────────────
         let cull_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("VG Cull PL"), bind_group_layouts: &[&cull_bgl], push_constant_ranges: &[],
+            label: Some("VG Cull PL"), bind_group_layouts: &[Some(&cull_bgl)], immediate_size: 0,
         });
         let cull_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label:  Some("VG Cull Pipeline"),
@@ -338,8 +338,8 @@ impl VirtualGeometryPass {
         // ── Draw pipeline ─────────────────────────────────────────────────────
         let draw_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("VG Draw PL"),
-            bind_group_layouts:   &[&draw_bgl_0, &draw_bgl_1],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&draw_bgl_0), Some(&draw_bgl_1)],
+            immediate_size:       0,
         });
         let vg_vertex_buffers = &[wgpu::VertexBufferLayout {
             array_stride: 40,
@@ -365,8 +365,8 @@ impl VirtualGeometryPass {
         };
         let draw_depth = Some(wgpu::DepthStencilState {
             format:              wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare:       wgpu::CompareFunction::LessEqual,
+            depth_write_enabled: Some(true),
+            depth_compare:       Some(wgpu::CompareFunction::LessEqual),
             stencil:             wgpu::StencilState::default(),
             bias:                wgpu::DepthBiasState::default(),
         });
@@ -389,7 +389,7 @@ impl VirtualGeometryPass {
             primitive:     draw_primitive,
             depth_stencil: draw_depth.clone(),
             multisample:   wgpu::MultisampleState::default(),
-            multiview:     None,
+            multiview_mask: 0,
             cache:         None,
         });
 
@@ -414,7 +414,7 @@ impl VirtualGeometryPass {
                 primitive:     draw_primitive,
                 depth_stencil: draw_depth,
                 multisample:   wgpu::MultisampleState::default(),
-                multiview:     None,
+                multiview_mask: 0,
                 cache:         None,
             }))
         } else {
@@ -681,18 +681,22 @@ impl RenderPass for VirtualGeometryPass {
                 color_attachments: &[
                     Some(wgpu::RenderPassColorAttachment {
                         view: gbuffer.albedo, resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: gbuffer.normal, resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: gbuffer.orm, resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: gbuffer.emissive, resolve_target: None,
+                        depth_slice: None,
                         ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                     }),
                 ],
@@ -706,6 +710,7 @@ impl RenderPass for VirtualGeometryPass {
                 }),
                 timestamp_writes:    None,
                 occlusion_query_set: None,
+                multiview_mask:      0,
             });
 
             let active_pipeline = if self.debug_mode == 20 {
