@@ -37,7 +37,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl", "dx12", "metal", "vulkan"] }
 blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 bytemuck = { version = "1", features = ["derive"] }

@@ -7,6 +7,8 @@
 // This shader is compiled into `helio-pass-virtual-geometry` and draws only
 // VG meshlets that survived the cull compute shader.
 
+enable primitive_index;
+
 struct Camera {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
