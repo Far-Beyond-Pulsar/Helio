@@ -164,8 +164,8 @@ impl RadianceCascadesPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("RC Fallback PL"),
-            bind_group_layouts:   &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&bgl)],
+            immediate_size:       0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

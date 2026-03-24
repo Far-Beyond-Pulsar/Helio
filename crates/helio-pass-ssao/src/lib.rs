@@ -295,6 +295,7 @@ impl SsaoPass {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("SSAO PL"),
             bind_group_layouts:   &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2)],
+            immediate_size:       0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -322,6 +323,7 @@ impl SsaoPass {
             },
             depth_stencil: None,
             multisample:   wgpu::MultisampleState::default(),
+            multiview_mask: 0,
             cache:         None,
         });
 

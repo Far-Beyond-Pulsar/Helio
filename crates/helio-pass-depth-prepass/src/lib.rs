@@ -63,8 +63,8 @@ impl DepthPrepassPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DepthPrepass PL"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         // Vertex layout matches the shared mesh vertex buffer (stride = 32 bytes).
@@ -106,13 +106,13 @@ impl DepthPrepassPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: depth_format,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: 0,
             cache: None,
         });
 
@@ -186,6 +186,7 @@ impl RenderPass for DepthPrepassPass {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: 0,
         });
 
         pass.set_pipeline(&self.pipeline);

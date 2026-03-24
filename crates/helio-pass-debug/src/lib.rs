@@ -72,8 +72,8 @@ impl DebugPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("Debug Draw PL"),
-            bind_group_layouts:   &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&bgl)],
+            immediate_size:       0,
         });
 
         // Vertex buffer: position (vec3 → Float32x3) + pad + color (vec4 → Float32x4)
@@ -128,13 +128,13 @@ impl DebugPass {
             // Read-only depth: debug lines depth-test but don't write depth.
             depth_stencil: Some(wgpu::DepthStencilState {
                 format:              wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: false,
-                depth_compare:       wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(false),
+                depth_compare:       Some(wgpu::CompareFunction::LessEqual),
                 stencil:             wgpu::StencilState::default(),
                 bias:                wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview:   None,
+            multiview_mask: 0,
             cache:       None,
         });
 
@@ -180,6 +180,7 @@ impl RenderPass for DebugPass {
         let color_attachment = wgpu::RenderPassColorAttachment {
             view:           ctx.target,
             resolve_target: None,
+            depth_slice:    None,
             ops: wgpu::Operations {
                 load:  wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
@@ -200,6 +201,7 @@ impl RenderPass for DebugPass {
             depth_stencil_attachment: Some(depth_attachment),
             timestamp_writes:         None,
             occlusion_query_set:      None,
+            multiview_mask:           0,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);

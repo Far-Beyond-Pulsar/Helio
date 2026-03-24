@@ -191,6 +191,7 @@ impl BillboardPass {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("Billboard PL"),
             bind_group_layouts:   &[Some(&bgl_0), Some(&bgl_1)],
+            immediate_size:       0,
         });
 
         // ── Quad vertex buffer (6 vertices: 2 triangles CCW) ─────────────────
@@ -280,6 +281,7 @@ impl BillboardPass {
                 bias:                  wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
+            multiview_mask: 0,
             cache:       None,
         });
 
