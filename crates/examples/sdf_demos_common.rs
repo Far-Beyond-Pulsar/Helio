@@ -116,7 +116,7 @@ impl<U: SdfUpdater + 'static> ApplicationHandler for DemoApp<U> {
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::VULKAN,
-            flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::GPU_BASED_VALIDATION | wgpu::InstanceFlags::DEBUG,
+            flags: wgpu::InstanceFlags::empty(),
             ..Default::default()
         });
         let surface = instance

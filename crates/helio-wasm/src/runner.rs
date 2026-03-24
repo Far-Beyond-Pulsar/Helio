@@ -247,6 +247,7 @@ async fn init_wgpu<T: HelioWasmApp>(
         backends: wgpu::Backends::all(),
         #[cfg(target_arch = "wasm32")]
         backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+        flags: wgpu::InstanceFlags::empty(),
         ..Default::default()
     });
 

@@ -553,7 +553,8 @@ impl ApplicationHandler for App {
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
-        .expect("no adapter");
+        .expect("failed to find suitable adapter");
+        println!("Using adapter: {}", adapter.get_info().name);
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 required_features: required_wgpu_features(adapter.features()),

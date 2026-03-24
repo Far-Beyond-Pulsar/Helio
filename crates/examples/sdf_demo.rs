@@ -84,6 +84,7 @@ impl ApplicationHandler for App {
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::empty(),
             ..Default::default()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
