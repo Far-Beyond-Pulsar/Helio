@@ -18,6 +18,7 @@ struct RCDynamic {
     sky_color: [f32; 4],
 }
 
+// ── Named constant values ─────────────────────────────────────────────────────
 
 #[test]
 fn probe_dim_is_eight() {
