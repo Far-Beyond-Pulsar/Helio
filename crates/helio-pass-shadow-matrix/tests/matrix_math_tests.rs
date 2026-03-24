@@ -278,7 +278,7 @@ fn identity() -> [[f32; 4]; 4] {
 
 fn det4(m: &[[f32; 4]; 4]) -> f32 {
     // Expand along first row using cofactors.
-    let minor = |r0, r1, r2, c0, c1, c2| -> f32 {
+    let minor = |r0: usize, r1: usize, r2: usize, c0: usize, c1: usize, c2: usize| -> f32 {
         m[r0][c0] * (m[r1][c1] * m[r2][c2] - m[r1][c2] * m[r2][c1])
             - m[r0][c1] * (m[r1][c0] * m[r2][c2] - m[r1][c2] * m[r2][c0])
             + m[r0][c2] * (m[r1][c0] * m[r2][c1] - m[r1][c1] * m[r2][c0])
