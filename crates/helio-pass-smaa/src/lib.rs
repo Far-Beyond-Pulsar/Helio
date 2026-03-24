@@ -62,7 +62,7 @@ impl SmaaPass {
             label: Some("SMAA Linear Sampler"),
             min_filter: wgpu::FilterMode::Linear,
             mag_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
@@ -72,7 +72,7 @@ impl SmaaPass {
             label: Some("SMAA Point Sampler"),
             min_filter: wgpu::FilterMode::Nearest,
             mag_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -168,8 +168,8 @@ impl SmaaPass {
          -> wgpu::RenderPipeline {
             let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some(label),
-                bind_group_layouts: &[layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
@@ -196,7 +196,7 @@ impl SmaaPass {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview: None,
+                multiview_mask: 0,
                 cache: None,
             })
         };
@@ -253,6 +253,7 @@ impl RenderPass for SmaaPass {
             let color = [Some(wgpu::RenderPassColorAttachment {
                 view: &self.edge_view,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
@@ -264,6 +265,7 @@ impl RenderPass for SmaaPass {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: 0,
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.edge_pipeline);
@@ -276,6 +278,7 @@ impl RenderPass for SmaaPass {
             let color = [Some(wgpu::RenderPassColorAttachment {
                 view: &self.blend_view,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                     store: wgpu::StoreOp::Store,
@@ -287,6 +290,7 @@ impl RenderPass for SmaaPass {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: 0,
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.blend_pipeline);
@@ -300,6 +304,7 @@ impl RenderPass for SmaaPass {
             let color = [Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
+                depth_slice: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
@@ -311,6 +316,7 @@ impl RenderPass for SmaaPass {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: 0,
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.neighbor_pipeline);

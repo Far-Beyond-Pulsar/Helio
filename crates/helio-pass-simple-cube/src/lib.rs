@@ -111,8 +111,8 @@ impl SimpleCubePass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("SimpleCube Pipeline Layout"),
-            bind_group_layouts:   &[&bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&bgl)],
+            immediate_size:       0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -150,13 +150,13 @@ impl SimpleCubePass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format:              wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare:       wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare:       Some(wgpu::CompareFunction::Less),
                 stencil:             wgpu::StencilState::default(),
                 bias:                wgpu::DepthBiasState::default(),
             }),
             multisample:  wgpu::MultisampleState::default(),
-            multiview:    None,
+            multiview_mask: 0,
             cache:        None,
         });
 
@@ -215,6 +215,7 @@ impl RenderPass for SimpleCubePass {
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view:           ctx.target,
                 resolve_target: None,
+                depth_slice:    None,
                 ops: wgpu::Operations {
                     load:  wgpu::LoadOp::Clear(wgpu::Color { r: 0.01, g: 0.01, b: 0.02, a: 1.0 }),
                     store: wgpu::StoreOp::Store,
@@ -230,6 +231,7 @@ impl RenderPass for SimpleCubePass {
             }),
             timestamp_writes:    None,
             occlusion_query_set: None,
+            multiview_mask:      0,
         });
 
         pass.set_pipeline(&self.pipeline);

@@ -172,8 +172,8 @@ impl GBufferPass {
         // ── Pipeline ──────────────────────────────────────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("GBuffer PL"),
-            bind_group_layouts: &[&bind_group_layout_0, &bind_group_layout_1],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout_0), Some(&bind_group_layout_1)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -256,13 +256,13 @@ impl GBufferPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual, // allows minor FP precision differences vs prepass
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual), // allows minor FP precision differences vs prepass
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: 0,
             cache: None,
         });
 
@@ -437,6 +437,7 @@ impl RenderPass for GBufferPass {
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.albedo_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -445,6 +446,7 @@ impl RenderPass for GBufferPass {
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.normal_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -453,6 +455,7 @@ impl RenderPass for GBufferPass {
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.orm_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -461,6 +464,7 @@ impl RenderPass for GBufferPass {
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.emissive_view,
                     resolve_target: None,
+                    depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
@@ -477,6 +481,7 @@ impl RenderPass for GBufferPass {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: 0,
         });
 
         pass.set_pipeline(&self.pipeline);

@@ -138,8 +138,8 @@ impl ShadowPass {
         // ── Pipeline ──────────────────────────────────────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Shadow PL"),
-            bind_group_layouts: &[&bgl_0],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bgl_0)],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -174,8 +174,8 @@ impl ShadowPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 // slope_scale compensates for FP depth precision on surfaces at
                 // grazing angles to the light.  Without it the shadow map depth for
@@ -191,7 +191,7 @@ impl ShadowPass {
                 },
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: 0,
             cache: None,
         });
 
@@ -261,7 +261,7 @@ impl ShadowPass {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             compare: Some(wgpu::CompareFunction::LessEqual),
             ..Default::default()
         });
@@ -372,6 +372,7 @@ impl RenderPass for ShadowPass {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: 0,
             });
 
             pass.set_pipeline(pipeline);

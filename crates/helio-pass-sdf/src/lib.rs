@@ -183,8 +183,8 @@ impl SdfClipmapPass {
         });
         let compute_pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SdfCompute PLL"),
-            bind_group_layouts: &[&compute_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&compute_bgl)],
+            immediate_size: 0,
         });
         let compute_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SdfCompute"),
@@ -236,8 +236,8 @@ impl SdfClipmapPass {
         });
         let render_pll = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SdfRender PLL"),
-            bind_group_layouts: &[&group0_bgl, &group1_bgl],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&group0_bgl), Some(&group1_bgl)],
+            immediate_size: 0,
         });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("SdfRayMarch"),
@@ -265,13 +265,13 @@ impl SdfClipmapPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview: None,
+            multiview_mask: 0,
             cache: None,
         });
 
@@ -440,6 +440,7 @@ impl RenderPass for SdfClipmapPass {
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: ctx.target,
             resolve_target: None,
+            depth_slice: None,
             ops: wgpu::Operations {
                 load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.05, g: 0.05, b: 0.1, a: 1.0 }),
                 store: wgpu::StoreOp::Store,
@@ -459,6 +460,7 @@ impl RenderPass for SdfClipmapPass {
             depth_stencil_attachment: depth_stencil,
             timestamp_writes: None,
             occlusion_query_set: None,
+            multiview_mask: 0,
         };
         let mut pass = ctx.begin_render_pass(&rp_desc);
         pass.set_pipeline(&self.render_pipeline);

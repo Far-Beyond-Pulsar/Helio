@@ -157,8 +157,8 @@ impl SkyLutPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("SkyLUT PL"),
-            bind_group_layouts:   &[&bgl_0, &bgl_1],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&bgl_0), Some(&bgl_1)],
+            immediate_size:       0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -186,7 +186,7 @@ impl SkyLutPass {
             },
             depth_stencil: None,
             multisample:   wgpu::MultisampleState::default(),
-            multiview:     None,
+            multiview_mask: 0,
             cache:         None,
         });
 
@@ -225,6 +225,7 @@ impl RenderPass for SkyLutPass {
         let color_attachment = wgpu::RenderPassColorAttachment {
             view:           &self.sky_lut_view,
             resolve_target: None,
+            depth_slice:    None,
             ops: wgpu::Operations {
                 load:  wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                 store: wgpu::StoreOp::Store,
@@ -237,6 +238,7 @@ impl RenderPass for SkyLutPass {
             depth_stencil_attachment: None,
             timestamp_writes:         None,
             occlusion_query_set:      None,
+            multiview_mask:           0,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);

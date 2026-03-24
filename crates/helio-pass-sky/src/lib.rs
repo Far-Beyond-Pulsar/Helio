@@ -109,7 +109,7 @@ impl SkyPass {
             address_mode_w:  wgpu::AddressMode::ClampToEdge,
             mag_filter:      wgpu::FilterMode::Linear,
             min_filter:      wgpu::FilterMode::Linear,
-            mipmap_filter:   wgpu::FilterMode::Nearest,
+            mipmap_filter:   wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -194,8 +194,8 @@ impl SkyPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label:                Some("Sky PL"),
-            bind_group_layouts:   &[&bgl_0, &bgl_1],
-            push_constant_ranges: &[],
+            bind_group_layouts:   &[Some(&bgl_0), Some(&bgl_1)],
+            immediate_size:       0,
         });
 
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -223,7 +223,7 @@ impl SkyPass {
             },
             depth_stencil: None,
             multisample:   wgpu::MultisampleState::default(),
-            multiview:     None,
+            multiview_mask: 0,
             cache:         None,
         });
 
@@ -254,6 +254,7 @@ impl RenderPass for SkyPass {
         let color_attachment = wgpu::RenderPassColorAttachment {
             view:           ctx.target,
             resolve_target: None,
+            depth_slice:    None,
             ops: wgpu::Operations {
                 load:  wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
@@ -266,6 +267,7 @@ impl RenderPass for SkyPass {
             depth_stencil_attachment: None,
             timestamp_writes:         None,
             occlusion_query_set:      None,
+            multiview_mask:           0,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);
