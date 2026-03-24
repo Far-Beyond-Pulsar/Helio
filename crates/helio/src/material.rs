@@ -16,7 +16,7 @@ pub struct TextureSamplerDesc {
     pub address_mode_w: wgpu::AddressMode,
     pub mag_filter: wgpu::FilterMode,
     pub min_filter: wgpu::FilterMode,
-    pub mipmap_filter: wgpu::FilterMode,
+    pub mipmap_filter: wgpu::MipmapFilterMode,
 }
 
 impl Default for TextureSamplerDesc {
@@ -27,7 +27,7 @@ impl Default for TextureSamplerDesc {
             address_mode_w: wgpu::AddressMode::Repeat,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
         }
     }
 }
