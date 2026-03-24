@@ -8,7 +8,7 @@ env:
   # Examples: "crates/engine", "crates/plugin_manager", etc.
   # First crate is used for version checking
   CRATES_TO_BUILD: |
-    crates/helio-render-v2
+    crates/helio
   
   # Crates to build examples for (newline-separated list)
   CRATES_WITH_EXAMPLES: |
