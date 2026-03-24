@@ -389,7 +389,7 @@ impl VirtualGeometryPass {
             primitive:     draw_primitive,
             depth_stencil: draw_depth.clone(),
             multisample:   wgpu::MultisampleState::default(),
-            multiview_mask: 0,
+            multiview_mask: None,
             cache:         None,
         });
 
@@ -414,7 +414,7 @@ impl VirtualGeometryPass {
                 primitive:     draw_primitive,
                 depth_stencil: draw_depth,
                 multisample:   wgpu::MultisampleState::default(),
-                multiview_mask: 0,
+                multiview_mask: None,
                 cache:         None,
             }))
         } else {

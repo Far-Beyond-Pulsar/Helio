@@ -188,7 +188,7 @@ impl TransparentPass {
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview_mask: 0,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -261,7 +261,7 @@ impl RenderPass for TransparentPass {
             depth_stencil_attachment: Some(depth_stencil),
             timestamp_writes: None,
             occlusion_query_set: None,
-            multiview_mask: 0,
+            multiview_mask: None,
         };
         let mut pass = ctx.begin_render_pass(&desc);
 

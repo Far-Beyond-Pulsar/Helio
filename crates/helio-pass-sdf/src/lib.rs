@@ -271,7 +271,7 @@ impl SdfClipmapPass {
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview_mask: 0,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -460,7 +460,7 @@ impl RenderPass for SdfClipmapPass {
             depth_stencil_attachment: depth_stencil,
             timestamp_writes: None,
             occlusion_query_set: None,
-            multiview_mask: 0,
+            multiview_mask: None,
         };
         let mut pass = ctx.begin_render_pass(&rp_desc);
         pass.set_pipeline(&self.render_pipeline);

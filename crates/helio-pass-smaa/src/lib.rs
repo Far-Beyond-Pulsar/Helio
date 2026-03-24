@@ -196,7 +196,7 @@ impl SmaaPass {
                 },
                 depth_stencil: None,
                 multisample: wgpu::MultisampleState::default(),
-                multiview_mask: 0,
+                multiview_mask: None,
                 cache: None,
             })
         };
@@ -265,7 +265,7 @@ impl RenderPass for SmaaPass {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-                multiview_mask: 0,
+                multiview_mask: None,
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.edge_pipeline);
@@ -290,7 +290,7 @@ impl RenderPass for SmaaPass {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-                multiview_mask: 0,
+                multiview_mask: None,
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.blend_pipeline);
@@ -316,7 +316,7 @@ impl RenderPass for SmaaPass {
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
-                multiview_mask: 0,
+                multiview_mask: None,
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.neighbor_pipeline);

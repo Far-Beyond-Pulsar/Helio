@@ -262,7 +262,7 @@ impl GBufferPass {
                 bias: wgpu::DepthBiasState::default(),
             }),
             multisample: wgpu::MultisampleState::default(),
-            multiview_mask: 0,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -481,7 +481,7 @@ impl RenderPass for GBufferPass {
             }),
             timestamp_writes: None,
             occlusion_query_set: None,
-            multiview_mask: 0,
+            multiview_mask: None,
         });
 
         pass.set_pipeline(&self.pipeline);
