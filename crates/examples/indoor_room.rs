@@ -156,29 +156,66 @@ impl ApplicationHandler for App {
 
         let floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 4.0));
         let ceiling = renderer.insert_mesh(plane_mesh([0.0, 3.0, 0.0], 4.0));
-        let wall_n = renderer.insert_mesh(box_mesh([0.0, 1.5, -4.0], [4.0, 1.5, 0.05]));
-        let wall_s = renderer.insert_mesh(box_mesh([0.0, 1.5, 4.0], [4.0, 1.5, 0.05]));
-        let wall_e = renderer.insert_mesh(box_mesh([4.0, 1.5, 0.0], [0.05, 1.5, 4.0]));
-        let wall_w = renderer.insert_mesh(box_mesh([-4.0, 1.5, 0.0], [0.05, 1.5, 4.0]));
-        let table = renderer.insert_mesh(box_mesh([1.5, 0.4, 1.5], [0.8, 0.4, 0.5]));
-        let bookcase = renderer.insert_mesh(box_mesh([-3.4, 1.0, -2.5], [0.3, 1.0, 1.2]));
-        let sofa = renderer.insert_mesh(box_mesh([-1.5, 0.35, 2.5], [1.2, 0.35, 0.5]));
+        let wall_n = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]));
+        let wall_s = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]));
+        let wall_e = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]));
+        let wall_w = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]));
+        let table = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.8, 0.4, 0.5]));
+        let bookcase = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.3, 1.0, 1.2]));
+        let sofa = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.35, 0.5]));
 
         let _ = v3_demo_common::insert_object(&mut renderer, floor, mat, glam::Mat4::IDENTITY, 4.0);
         let _ =
             v3_demo_common::insert_object(&mut renderer, ceiling, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_n, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_s, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_e, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_w, mat, glam::Mat4::IDENTITY, 4.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, table, mat, glam::Mat4::IDENTITY, 0.8);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, bookcase, mat, glam::Mat4::IDENTITY, 1.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, sofa, mat, glam::Mat4::IDENTITY, 1.2);
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_n,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, -4.0)),
+            4.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_s,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, 4.0)),
+            4.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_e,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(4.0, 1.5, 0.0)),
+            4.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_w,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-4.0, 1.5, 0.0)),
+            4.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            table,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(1.5, 0.4, 1.5)),
+            0.8,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            bookcase,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-3.4, 1.0, -2.5)),
+            1.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            sofa,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-1.5, 0.35, 2.5)),
+            1.2,
+        );
 
         let overhead_pos = [0.0f32, 2.85, 0.0];
         let overhead_light_id =

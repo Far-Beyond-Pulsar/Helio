@@ -155,49 +155,79 @@ impl ApplicationHandler for App {
         ));
 
         let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
-        let bld_a = renderer.insert_mesh(box_mesh([8.0, 7.0, -6.0], [2.5, 7.0, 2.5]));
-        let bld_b = renderer.insert_mesh(box_mesh([-7.0, 4.5, -5.0], [3.0, 4.5, 2.0]));
-        let bld_c = renderer.insert_mesh(box_mesh([6.0, 3.0, 6.0], [2.0, 3.0, 3.0]));
-        let bld_d = renderer.insert_mesh(box_mesh([-5.0, 1.5, 5.0], [3.5, 1.5, 2.5]));
-        let bld_e = renderer.insert_mesh(box_mesh([0.0, 9.5, -14.0], [4.0, 9.5, 3.0]));
-        let lamp_pole_a = renderer.insert_mesh(box_mesh([-5.0, 2.5, -5.0], [0.08, 2.5, 0.08]));
-        let lamp_pole_b = renderer.insert_mesh(box_mesh([5.0, 2.5, -5.0], [0.08, 2.5, 0.08]));
-        let lamp_pole_c = renderer.insert_mesh(box_mesh([-5.0, 2.5, 5.0], [0.08, 2.5, 0.08]));
-        let lamp_pole_d = renderer.insert_mesh(box_mesh([5.0, 2.5, 5.0], [0.08, 2.5, 0.08]));
+        let bld_a = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 7.0, 2.5]));
+        let bld_b = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 4.5, 2.0]));
+        let bld_c = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 3.0, 3.0]));
+        let bld_d = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 1.5, 2.5]));
+        let bld_e = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 9.5, 3.0]));
+        let lamp_pole_a = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_b = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_c = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_d = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
 
         let _ =
             v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, bld_a, mat, glam::Mat4::IDENTITY, 7.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, bld_b, mat, glam::Mat4::IDENTITY, 4.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, bld_c, mat, glam::Mat4::IDENTITY, 3.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, bld_d, mat, glam::Mat4::IDENTITY, 3.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, bld_e, mat, glam::Mat4::IDENTITY, 9.5);
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            bld_a,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(8.0, 7.0, -6.0)),
+            7.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            bld_b,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-7.0, 4.5, -5.0)),
+            4.5,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            bld_c,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(6.0, 3.0, 6.0)),
+            3.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            bld_d,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-5.0, 1.5, 5.0)),
+            3.5,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            bld_e,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 9.5, -14.0)),
+            9.5,
+        );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             lamp_pole_a,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(-5.0, 2.5, -5.0)),
             2.5,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             lamp_pole_b,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(5.0, 2.5, -5.0)),
             2.5,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             lamp_pole_c,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(-5.0, 2.5, 5.0)),
             2.5,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             lamp_pole_d,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(5.0, 2.5, 5.0)),
             2.5,
         );
 

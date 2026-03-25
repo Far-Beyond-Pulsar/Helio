@@ -175,21 +175,21 @@ impl ApplicationHandler for App {
         ));
 
         let valley_floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 35.0));
-        let wall_l1 = renderer.insert_mesh(box_mesh([-12.0, 4.0, 0.0], [3.0, 4.0, 30.0]));
-        let wall_l2 = renderer.insert_mesh(box_mesh([-18.0, 8.0, 0.0], [3.0, 8.0, 25.0]));
-        let wall_l3 = renderer.insert_mesh(box_mesh([-24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
-        let wall_r1 = renderer.insert_mesh(box_mesh([12.0, 4.0, 0.0], [3.0, 4.0, 30.0]));
-        let wall_r2 = renderer.insert_mesh(box_mesh([18.0, 8.0, 0.0], [3.0, 8.0, 25.0]));
-        let wall_r3 = renderer.insert_mesh(box_mesh([24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
-        let terrace_l1 = renderer.insert_mesh(box_mesh([-13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
-        let terrace_l2 = renderer.insert_mesh(box_mesh([-19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
-        let terrace_r1 = renderer.insert_mesh(box_mesh([13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
-        let terrace_r2 = renderer.insert_mesh(box_mesh([19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
-        let mesa = renderer.insert_mesh(box_mesh([3.0, 12.0, -38.0], [10.0, 12.0, 8.0]));
-        let tent_a = renderer.insert_mesh(box_mesh([-2.5, 0.6, 8.0], [0.8, 0.6, 1.2]));
-        let tent_b = renderer.insert_mesh(box_mesh([0.0, 0.7, 7.5], [0.9, 0.7, 1.3]));
-        let tent_c = renderer.insert_mesh(box_mesh([2.8, 0.55, 8.5], [0.7, 0.55, 1.1]));
-        let firepit = renderer.insert_mesh(cube_mesh([0.0, 0.15, 9.5], 0.2));
+        let wall_l1 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 4.0, 30.0]));
+        let wall_l2 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 8.0, 25.0]));
+        let wall_l3 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 14.0, 20.0]));
+        let wall_r1 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 4.0, 30.0]));
+        let wall_r2 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 8.0, 25.0]));
+        let wall_r3 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 14.0, 20.0]));
+        let terrace_l1 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.2, 12.0]));
+        let terrace_l2 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.2, 8.0]));
+        let terrace_r1 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.2, 12.0]));
+        let terrace_r2 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.2, 8.0]));
+        let mesa = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [10.0, 12.0, 8.0]));
+        let tent_a = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.8, 0.6, 1.2]));
+        let tent_b = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.9, 0.7, 1.3]));
+        let tent_c = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.7, 0.55, 1.1]));
+        let firepit = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.2));
 
         let _ = v3_demo_common::insert_object(
             &mut renderer,
@@ -199,57 +199,57 @@ impl ApplicationHandler for App {
             35.0,
         );
         let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_l1, mat, glam::Mat4::IDENTITY, 20.0);
+            v3_demo_common::insert_object(&mut renderer, wall_l1, mat, glam::Mat4::from_translation(glam::Vec3::new(-12.0, 4.0, 0.0)), 20.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_l2, mat, glam::Mat4::IDENTITY, 20.0);
+            v3_demo_common::insert_object(&mut renderer, wall_l2, mat, glam::Mat4::from_translation(glam::Vec3::new(-18.0, 8.0, 0.0)), 20.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_l3, mat, glam::Mat4::IDENTITY, 20.0);
+            v3_demo_common::insert_object(&mut renderer, wall_l3, mat, glam::Mat4::from_translation(glam::Vec3::new(-24.0, 14.0, 0.0)), 20.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_r1, mat, glam::Mat4::IDENTITY, 20.0);
+            v3_demo_common::insert_object(&mut renderer, wall_r1, mat, glam::Mat4::from_translation(glam::Vec3::new(12.0, 4.0, 0.0)), 20.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_r2, mat, glam::Mat4::IDENTITY, 20.0);
+            v3_demo_common::insert_object(&mut renderer, wall_r2, mat, glam::Mat4::from_translation(glam::Vec3::new(18.0, 8.0, 0.0)), 20.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_r3, mat, glam::Mat4::IDENTITY, 20.0);
+            v3_demo_common::insert_object(&mut renderer, wall_r3, mat, glam::Mat4::from_translation(glam::Vec3::new(24.0, 14.0, 0.0)), 20.0);
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             terrace_l1,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(-13.5, 8.1, -2.0)),
             10.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             terrace_l2,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(-19.5, 16.1, -4.0)),
             8.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             terrace_r1,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(13.5, 8.1, -2.0)),
             10.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             terrace_r2,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(19.5, 16.1, -4.0)),
             8.0,
         );
-        let _ = v3_demo_common::insert_object(&mut renderer, mesa, mat, glam::Mat4::IDENTITY, 14.0);
+        let _ = v3_demo_common::insert_object(&mut renderer, mesa, mat, glam::Mat4::from_translation(glam::Vec3::new(3.0, 12.0, -38.0)), 14.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, tent_a, mat, glam::Mat4::IDENTITY, 1.0);
+            v3_demo_common::insert_object(&mut renderer, tent_a, mat, glam::Mat4::from_translation(glam::Vec3::new(-2.5, 0.6, 8.0)), 1.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, tent_b, mat, glam::Mat4::IDENTITY, 1.0);
+            v3_demo_common::insert_object(&mut renderer, tent_b, mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.7, 7.5)), 1.0);
         let _ =
-            v3_demo_common::insert_object(&mut renderer, tent_c, mat, glam::Mat4::IDENTITY, 1.0);
+            v3_demo_common::insert_object(&mut renderer, tent_c, mat, glam::Mat4::from_translation(glam::Vec3::new(2.8, 0.55, 8.5)), 1.0);
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             firepit,
             fire_mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.15, 9.5)),
             0.3,
         );
 

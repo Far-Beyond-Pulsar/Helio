@@ -92,10 +92,18 @@ pub fn insert_object(
     })
 }
 
+/// Builds a cube mesh centred at `center` (mesh-local origin offset) with the
+/// given `half_extent`.  The conventional usage is `[0.0, 0.0, 0.0]` with the
+/// world position supplied via the transform passed to `insert_object`; the
+/// `center` parameter exists for backwards compatibility only.
 pub fn cube_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
     box_mesh(center, [half_extent, half_extent, half_extent])
 }
 
+/// Builds a box mesh centred at `center` (mesh-local origin offset) with the
+/// given `half_extents`.  The conventional usage is `[0.0, 0.0, 0.0]` with the
+/// world position supplied via the transform passed to `insert_object`; the
+/// `center` parameter exists for backwards compatibility only.
 pub fn box_mesh(center: [f32; 3], half_extents: [f32; 3]) -> MeshUpload {
     let c = Vec3::from_array(center);
     let e = Vec3::from_array(half_extents);

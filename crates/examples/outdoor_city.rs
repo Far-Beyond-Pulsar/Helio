@@ -215,41 +215,49 @@ impl ApplicationHandler for App {
         let _ =
             v3_demo_common::insert_object(&mut renderer, _ground, mat, glam::Mat4::IDENTITY, 40.0);
 
-        let _road_center = renderer.insert_mesh(box_mesh([0.0, 0.01, 0.0], [4.0, 0.01, 32.0]));
+        let _road_center = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 0.01, 32.0]));
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _road_center,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.01, 0.0)),
             32.0,
         );
 
         let _sidewalks: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([-4.2, 0.04, 0.0], [0.35, 0.04, 32.0])),
-            renderer.insert_mesh(box_mesh([4.2, 0.04, 0.0], [0.35, 0.04, 32.0])),
-            renderer.insert_mesh(box_mesh([0.0, 0.04, -32.0], [32.0, 0.04, 0.35])),
-            renderer.insert_mesh(box_mesh([0.0, 0.04, 32.0], [32.0, 0.04, 0.35])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.35, 0.04, 32.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.35, 0.04, 32.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [32.0, 0.04, 0.35])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [32.0, 0.04, 0.35])),
         ];
-        for &m in &_sidewalks {
+        for (&m, t) in _sidewalks.iter().zip(
+            [
+                glam::Mat4::from_translation(glam::Vec3::new(-4.2, 0.04, 0.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(4.2, 0.04, 0.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.04, -32.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.04, 32.0)),
+            ]
+            .iter(),
+        ) {
             let _ =
-                v3_demo_common::insert_object(&mut renderer, m, mat, glam::Mat4::IDENTITY, 32.0);
+                v3_demo_common::insert_object(&mut renderer, m, mat, *t, 32.0);
         }
 
         let _buildings: Vec<MeshId> = BUILDINGS
             .iter()
-            .map(|&(cx, cz, hw, hd, hh)| renderer.insert_mesh(box_mesh([cx, hh, cz], [hw, hh, hd])))
+            .map(|&(cx, cz, hw, hd, hh)| renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [hw, hh, hd])))
             .collect();
-        for &m in &_buildings {
+        for (&m, &(cx, cz, _hw, _hd, hh)) in _buildings.iter().zip(BUILDINGS.iter()) {
             let _ =
-                v3_demo_common::insert_object(&mut renderer, m, mat, glam::Mat4::IDENTITY, 15.0);
+                v3_demo_common::insert_object(&mut renderer, m, mat, glam::Mat4::from_translation(glam::Vec3::new(cx, hh, cz)), 15.0);
         }
 
         let _lamp_poles: Vec<MeshId> = LAMPS
             .iter()
-            .map(|&(x, z)| renderer.insert_mesh(box_mesh([x, 2.75, z], [0.08, 2.75, 0.08])))
+            .map(|&(_x, _z)| renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.75, 0.08])))
             .collect();
-        for &m in &_lamp_poles {
-            let _ = v3_demo_common::insert_object(&mut renderer, m, mat, glam::Mat4::IDENTITY, 3.0);
+        for (&m, &(x, z)) in _lamp_poles.iter().zip(LAMPS.iter()) {
+            let _ = v3_demo_common::insert_object(&mut renderer, m, mat, glam::Mat4::from_translation(glam::Vec3::new(x, 2.75, z)), 3.0);
         }
 
         let sun_light_id = renderer.insert_light(directional_light(

@@ -153,30 +153,65 @@ impl ApplicationHandler for App {
 
         // Corridor: 4 m wide (X), 3 m tall (Y), 36 m long (Z: -18..+18)
         let floor = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 0.02, 18.0]));
-        let ceiling = renderer.insert_mesh(box_mesh([0.0, 3.0, 0.0], [2.0, 0.02, 18.0]));
-        let wall_l = renderer.insert_mesh(box_mesh([-2.0, 1.5, 0.0], [0.02, 1.5, 18.0]));
-        let wall_r = renderer.insert_mesh(box_mesh([2.0, 1.5, 0.0], [0.02, 1.5, 18.0]));
-        let wall_far = renderer.insert_mesh(box_mesh([0.0, 1.5, -18.0], [2.0, 1.5, 0.02]));
-        let wall_near = renderer.insert_mesh(box_mesh([0.0, 1.5, 18.0], [2.0, 1.5, 0.02]));
-        let sconce_l = renderer.insert_mesh(box_mesh([-1.85, 1.8, 0.0], [0.12, 0.08, 0.25]));
-        let sconce_r = renderer.insert_mesh(box_mesh([1.85, 1.8, 0.0], [0.12, 0.08, 0.25]));
+        let ceiling = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 0.02, 18.0]));
+        let wall_l = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.02, 1.5, 18.0]));
+        let wall_r = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.02, 1.5, 18.0]));
+        let wall_far = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.02]));
+        let wall_near = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 1.5, 0.02]));
+        let sconce_l = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.12, 0.08, 0.25]));
+        let sconce_r = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.12, 0.08, 0.25]));
 
         let _ =
             v3_demo_common::insert_object(&mut renderer, floor, mat, glam::Mat4::IDENTITY, 18.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, ceiling, mat, glam::Mat4::IDENTITY, 18.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_l, mat, glam::Mat4::IDENTITY, 18.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_r, mat, glam::Mat4::IDENTITY, 18.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_far, mat, glam::Mat4::IDENTITY, 2.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, wall_near, mat, glam::Mat4::IDENTITY, 2.0);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, sconce_l, mat, glam::Mat4::IDENTITY, 0.3);
-        let _ =
-            v3_demo_common::insert_object(&mut renderer, sconce_r, mat, glam::Mat4::IDENTITY, 0.3);
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            ceiling,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.0, 0.0)),
+            18.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_l,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-2.0, 1.5, 0.0)),
+            18.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_r,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(2.0, 1.5, 0.0)),
+            18.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_far,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, -18.0)),
+            2.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            wall_near,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 1.5, 18.0)),
+            2.0,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            sconce_l,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-1.85, 1.8, 0.0)),
+            0.3,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            sconce_r,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(1.85, 1.8, 0.0)),
+            0.3,
+        );
 
         let mut light_ids = Vec::new();
         for &z in &[-14.0f32, -7.0, 0.0, 7.0, 14.0] {

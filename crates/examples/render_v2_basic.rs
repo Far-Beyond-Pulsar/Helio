@@ -156,14 +156,14 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
-        let cube2 = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
-        let cube3 = renderer.insert_mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
+        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.3));
         let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
 
-        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube3, mat, glam::Mat4::IDENTITY, 0.3);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::from_translation(glam::Vec3::new( 0.0,  0.5,  0.0)), 0.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::from_translation(glam::Vec3::new(-2.0,  0.4, -1.0)), 0.4);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube3, mat, glam::Mat4::from_translation(glam::Vec3::new( 2.0,  0.3,  0.5)), 0.3);
         let _ =
             v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
 

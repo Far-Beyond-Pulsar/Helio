@@ -225,62 +225,62 @@ impl ApplicationHandler for App {
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         let _floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 11.0));
-        let _nave_ceiling = renderer.insert_mesh(box_mesh([0.0, 21.0, 0.0], [6.0, 0.18, 28.0]));
-        let _aisle_ceil_l = renderer.insert_mesh(box_mesh([-8.5, 11.0, 0.0], [2.5, 0.15, 28.0]));
-        let _aisle_ceil_r = renderer.insert_mesh(box_mesh([8.5, 11.0, 0.0], [2.5, 0.15, 28.0]));
-        let _wall_left_outer = renderer.insert_mesh(box_mesh([-11.0, 7.0, 0.0], [0.25, 7.0, 28.0]));
-        let _wall_right_outer = renderer.insert_mesh(box_mesh([11.0, 7.0, 0.0], [0.25, 7.0, 28.0]));
-        let _wall_front = renderer.insert_mesh(box_mesh([0.0, 10.5, 28.0], [11.0, 10.5, 0.25]));
-        let _wall_back = renderer.insert_mesh(box_mesh([0.0, 10.5, -28.0], [11.0, 10.5, 0.25]));
+        let _nave_ceiling = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]));
+        let _aisle_ceil_l = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
+        let _aisle_ceil_r = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
+        let _wall_left_outer = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
+        let _wall_right_outer = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
+        let _wall_front = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
+        let _wall_back = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
         let _ =
             v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _nave_ceiling,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 21.0, 0.0)),
             28.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _aisle_ceil_l,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(-8.5, 11.0, 0.0)),
             28.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _aisle_ceil_r,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(8.5, 11.0, 0.0)),
             28.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _wall_left_outer,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(-11.0, 7.0, 0.0)),
             28.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _wall_right_outer,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(11.0, 7.0, 0.0)),
             28.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _wall_front,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, 28.0)),
             11.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _wall_back,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, -28.0)),
             11.0,
         );
 
@@ -298,12 +298,12 @@ impl ApplicationHandler for App {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
                 let id = renderer
-                    .insert_mesh(box_mesh([-5.5, 5.5, mid_z], [0.25, 5.5, half_len.max(0.1)]));
+                    .insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
                     mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(-5.5, 5.5, mid_z)),
                     5.5,
                 );
                 id
@@ -315,12 +315,12 @@ impl ApplicationHandler for App {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9;
                 let id = renderer
-                    .insert_mesh(box_mesh([5.5, 5.5, mid_z], [0.25, 5.5, half_len.max(0.1)]));
+                    .insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
                     mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(5.5, 5.5, mid_z)),
                     5.5,
                 );
                 id
@@ -331,20 +331,20 @@ impl ApplicationHandler for App {
         let _columns: Vec<MeshId> = COLUMN_Z
             .iter()
             .flat_map(|&z| {
-                let l = renderer.insert_mesh(box_mesh([-5.5, 10.0, z], [0.65, 10.0, 0.65]));
+                let l = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     l,
                     mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
                     10.0,
                 );
-                let r = renderer.insert_mesh(box_mesh([5.5, 10.0, z], [0.65, 10.0, 0.65]));
+                let r = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     r,
                     mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(5.5, 10.0, z)),
                     10.0,
                 );
                 [l, r]
@@ -352,36 +352,36 @@ impl ApplicationHandler for App {
             .collect();
 
         // Altar: at far end (z = -26)
-        let _altar_step = renderer.insert_mesh(box_mesh([0.0, 0.2, -24.5], [5.5, 0.20, 3.0]));
-        let _altar_plinth = renderer.insert_mesh(box_mesh([0.0, 0.65, -25.5], [3.0, 0.45, 1.5]));
-        let _cross_vert = renderer.insert_mesh(box_mesh([0.0, 3.2, -25.8], [0.18, 2.2, 0.18]));
-        let _cross_horiz = renderer.insert_mesh(box_mesh([0.0, 4.5, -25.8], [1.0, 0.18, 0.18]));
+        let _altar_step = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 0.20, 3.0]));
+        let _altar_plinth = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.45, 1.5]));
+        let _cross_vert = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.18, 2.2, 0.18]));
+        let _cross_horiz = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.18, 0.18]));
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _altar_step,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.2, -24.5)),
             5.5,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _altar_plinth,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.65, -25.5)),
             3.0,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _cross_vert,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.2, -25.8)),
             2.2,
         );
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _cross_horiz,
             mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 4.5, -25.8)),
             1.0,
         );
 
@@ -389,12 +389,12 @@ impl ApplicationHandler for App {
         let _pews_left: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.insert_mesh(box_mesh([-3.2, 0.45, z], [1.5, 0.45, 0.5]));
+                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
                     mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(-3.2, 0.45, z)),
                     1.5,
                 );
                 id
@@ -403,12 +403,12 @@ impl ApplicationHandler for App {
         let _pews_right: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.insert_mesh(box_mesh([3.2, 0.45, z], [1.5, 0.45, 0.5]));
+                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
                     mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(3.2, 0.45, z)),
                     1.5,
                 );
                 id
@@ -426,12 +426,12 @@ impl ApplicationHandler for App {
         let _chandelier_chains: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.insert_mesh(box_mesh([0.0, 17.5, z], [0.06, 2.0, 0.06]));
+                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.06, 2.0, 0.06]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
                     chandelier_mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(0.0, 17.5, z)),
                     2.0,
                 );
                 id
@@ -440,12 +440,12 @@ impl ApplicationHandler for App {
         let _chandelier_rings: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.insert_mesh(box_mesh([0.0, 15.2, z], [1.2, 0.12, 1.2]));
+                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 1.2]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
                     chandelier_mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(0.0, 15.2, z)),
                     1.2,
                 );
                 id

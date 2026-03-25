@@ -212,12 +212,12 @@ impl ApplicationHandler for App {
         // ── Geometry ───────────────────────────────────────────────────────────────
         let mut add =
             |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-                let m = r.insert_mesh(box_mesh([cx, cy, cz], [hx, hy, hz]));
+                let m = r.insert_mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
                 let _ = insert_object(
                     r,
                     m,
                     mat,
-                    glam::Mat4::IDENTITY,
+                    glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
                     (hx * hx + hy * hy + hz * hz).sqrt(),
                 );
             };

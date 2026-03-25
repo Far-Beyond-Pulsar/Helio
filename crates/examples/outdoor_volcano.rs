@@ -215,26 +215,38 @@ impl ApplicationHandler for App {
             55.0,
         );
 
-        let _cone_l1 = renderer.insert_mesh(box_mesh([0.0, 5.0, -10.0], [22.0, 5.0, 20.0]));
-        let _cone_l2 = renderer.insert_mesh(box_mesh([0.0, 11.5, -10.0], [15.5, 6.5, 14.0]));
-        let _cone_l3 = renderer.insert_mesh(box_mesh([0.0, 18.0, -10.0], [10.0, 6.5, 9.5]));
-        let _cone_l4 = renderer.insert_mesh(box_mesh([0.0, 24.0, -10.0], [5.5, 6.0, 5.5]));
-        let _cone_l5 = renderer.insert_mesh(box_mesh([0.0, 28.5, -10.0], [2.8, 4.5, 2.8]));
-        let _crater_rim = renderer.insert_mesh(box_mesh([0.0, 30.5, -10.0], [3.2, 0.4, 3.2]));
-        let _lava_lake = renderer.insert_mesh(box_mesh([0.0, 30.1, -10.0], [2.2, 0.05, 2.2]));
-        for &m in &[
+        let _cone_l1 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [22.0, 5.0, 20.0]));
+        let _cone_l2 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [15.5, 6.5, 14.0]));
+        let _cone_l3 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [10.0, 6.5, 9.5]));
+        let _cone_l4 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 6.0, 5.5]));
+        let _cone_l5 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.8, 4.5, 2.8]));
+        let _crater_rim = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.2, 0.4, 3.2]));
+        let _lava_lake = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.2, 0.05, 2.2]));
+        for (&m, t) in [
             _cone_l1,
             _cone_l2,
             _cone_l3,
             _cone_l4,
             _cone_l5,
             _crater_rim,
-        ] {
+        ]
+        .iter()
+        .zip(
+            [
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 5.0, -10.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 11.5, -10.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 18.0, -10.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 24.0, -10.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 28.5, -10.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 30.5, -10.0)),
+            ]
+            .iter(),
+        ) {
             let _ = v3_demo_common::insert_object(
                 &mut renderer,
                 m,
                 rock_mat,
-                glam::Mat4::IDENTITY,
+                *t,
                 22.0,
             );
         }
@@ -242,74 +254,102 @@ impl ApplicationHandler for App {
             &mut renderer,
             _lava_lake,
             lava_mat,
-            glam::Mat4::IDENTITY,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 30.1, -10.0)),
             3.0,
         );
 
         let _flow_left: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([-5.5, 23.0, -6.0], [1.0, 0.12, 2.5])),
-            renderer.insert_mesh(box_mesh([-9.0, 16.0, -2.0], [1.2, 0.12, 3.5])),
-            renderer.insert_mesh(box_mesh([-13.0, 6.5, 3.0], [1.4, 0.12, 5.0])),
-            renderer.insert_mesh(box_mesh([-17.0, 1.5, 10.0], [1.5, 0.1, 6.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 5.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 6.0])),
         ];
         let _flow_right: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([5.0, 22.0, -7.0], [1.0, 0.12, 2.5])),
-            renderer.insert_mesh(box_mesh([9.0, 15.5, -3.0], [1.2, 0.12, 3.5])),
-            renderer.insert_mesh(box_mesh([13.5, 6.0, 2.0], [1.4, 0.12, 4.5])),
-            renderer.insert_mesh(box_mesh([19.0, 1.5, 8.0], [1.5, 0.1, 5.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 4.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 5.5])),
         ];
-        for &m in _flow_left.iter().chain(_flow_right.iter()) {
+        for (&m, t) in _flow_left.iter().chain(_flow_right.iter()).zip(
+            [
+                glam::Mat4::from_translation(glam::Vec3::new(-5.5, 23.0, -6.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(-9.0, 16.0, -2.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(-13.0, 6.5, 3.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(-17.0, 1.5, 10.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(5.0, 22.0, -7.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(9.0, 15.5, -3.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(13.5, 6.0, 2.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(19.0, 1.5, 8.0)),
+            ]
+            .iter(),
+        ) {
             let _ = v3_demo_common::insert_object(
                 &mut renderer,
                 m,
                 lava_mat,
-                glam::Mat4::IDENTITY,
+                *t,
                 6.0,
             );
         }
 
         let _lava_pools: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([-18.0, 0.06, 16.0], [4.0, 0.06, 3.0])),
-            renderer.insert_mesh(box_mesh([22.0, 0.06, 12.0], [3.5, 0.06, 2.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.06, 22.0], [2.5, 0.06, 2.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 0.06, 3.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.06, 2.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.06, 2.0])),
         ];
-        for &m in &_lava_pools {
+        for (&m, t) in _lava_pools.iter().zip(
+            [
+                glam::Mat4::from_translation(glam::Vec3::new(-18.0, 0.06, 16.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(22.0, 0.06, 12.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.06, 22.0)),
+            ]
+            .iter(),
+        ) {
             let _ = v3_demo_common::insert_object(
                 &mut renderer,
                 m,
                 lava_mat,
-                glam::Mat4::IDENTITY,
+                *t,
                 4.0,
             );
         }
 
         let _boulders: Vec<MeshId> = BOULDERS
             .iter()
-            .map(|&(x, yh, z, hs)| renderer.insert_mesh(cube_mesh([x, yh, z], hs)))
+            .map(|&(_x, _yh, _z, hs)| renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], hs)))
             .collect();
-        for &m in &_boulders {
+        for (&m, &(x, yh, z, _)) in _boulders.iter().zip(BOULDERS.iter()) {
             let _ = v3_demo_common::insert_object(
                 &mut renderer,
                 m,
                 rock_mat,
-                glam::Mat4::IDENTITY,
+                glam::Mat4::from_translation(glam::Vec3::new(x, yh, z)),
                 2.0,
             );
         }
 
         let _scorch_patches: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([-10.0, 0.02, 8.0], [4.5, 0.02, 3.5])),
-            renderer.insert_mesh(box_mesh([12.0, 0.02, 6.0], [3.5, 0.02, 3.0])),
-            renderer.insert_mesh(box_mesh([2.0, 0.02, 16.0], [3.0, 0.02, 4.0])),
-            renderer.insert_mesh(box_mesh([-20.0, 0.02, -2.0], [3.0, 0.02, 2.5])),
-            renderer.insert_mesh(box_mesh([22.0, 0.02, -8.0], [3.5, 0.02, 2.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.5, 0.02, 3.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 3.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 4.0])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 2.5])),
+            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 2.5])),
         ];
-        for &m in &_scorch_patches {
+        for (&m, t) in _scorch_patches.iter().zip(
+            [
+                glam::Mat4::from_translation(glam::Vec3::new(-10.0, 0.02, 8.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(12.0, 0.02, 6.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.02, 16.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(-20.0, 0.02, -2.0)),
+                glam::Mat4::from_translation(glam::Vec3::new(22.0, 0.02, -8.0)),
+            ]
+            .iter(),
+        ) {
             let _ = v3_demo_common::insert_object(
                 &mut renderer,
                 m,
                 rock_mat,
-                glam::Mat4::IDENTITY,
+                *t,
                 4.0,
             );
         }
