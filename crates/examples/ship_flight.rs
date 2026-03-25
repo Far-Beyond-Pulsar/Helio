@@ -255,15 +255,6 @@ struct Ship {
 }
 
 impl Ship {
-    fn forward(&self) -> Vec3 {
-        self.quat * -Vec3::Z
-    }
-    fn right(&self) -> Vec3 {
-        self.quat * Vec3::X
-    }
-    fn up(&self) -> Vec3 {
-        self.quat * Vec3::Y
-    }
     fn render_forward(&self) -> Vec3 {
         self.render_quat * -Vec3::Z
     }
@@ -272,9 +263,6 @@ impl Ship {
     }
     fn render_up(&self) -> Vec3 {
         self.render_quat * Vec3::Y
-    }
-    fn engine_pos(&self) -> Vec3 {
-        self.render_pos - self.render_forward() * self.radius * 0.8
     }
 
     fn update_visual_follow(&mut self, dt: f32) {
@@ -290,8 +278,10 @@ impl Ship {
     fn push_transforms(&self, renderer: &mut Renderer) {
         let transform =
             Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
+        let bounds = [self.render_pos.x, self.render_pos.y, self.render_pos.z, self.radius];
         for &id in &self.ids {
             let _ = renderer.update_object_transform(id, transform);
+            let _ = renderer.update_object_bounds(id, bounds);
         }
     }
 
@@ -722,7 +712,7 @@ impl ApplicationHandler for App {
             hull_range,
         ));
 
-        let mut ship = Ship {
+        let ship = Ship {
             ids: ship_ids,
             radius: ship_radius,
             pos: Vec3::ZERO,

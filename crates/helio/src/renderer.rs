@@ -579,6 +579,10 @@ impl Renderer {
         self.scene.update_object_transform(id, transform)
     }
 
+    pub fn update_object_bounds(&mut self, id: ObjectId, bounds: [f32; 4]) -> SceneResult<()> {
+        self.scene.update_object_bounds(id, bounds)
+    }
+
     /// Replace the billboard instance list for the next frame.
     ///
     /// Call once per frame (or whenever the billboard set changes).
