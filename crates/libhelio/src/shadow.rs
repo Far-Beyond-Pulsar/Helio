@@ -96,7 +96,9 @@ impl ShadowConfig {
                 enable_pcss: 0,
                 pcss_blocker_samples: 4,
                 pcss_filter_samples: 4,
-                pcf_sample_count: 2,
+                // 4 samples minimum: 2 is binary (0/0.5/1.0) which is too noisy
+                // even with TAA. TAA * 16 frames = effective 64 samples.
+                pcf_sample_count: 4,
             },
             ShadowQuality::Medium => Self {
                 cascades: [

@@ -47,9 +47,11 @@ const HALTON_JITTER: [[f32; 2]; 16] = [
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TaaUniform {
-    feedback_min: f32,
-    feedback_max: f32,
+    feedback_min: f32,   // unused — kept for struct-layout compatibility
+    feedback_max: f32,   // unused — kept for struct-layout compatibility
     jitter: [f32; 2],
+    reset: u32,          // 1 on the very first frame so RESET path runs
+    _pad: u32,           // pad to match WGSL struct alignment (vec2 → align-8 → 24 bytes)
 }
 
 /// Post-TAA sharpening blit.
@@ -128,6 +130,9 @@ pub struct TaaPass {
     point_sampler: wgpu::Sampler,
     velocity_fallback_texture: wgpu::Texture,
     velocity_fallback_view: wgpu::TextureView,
+    /// Set to true on construction; cleared after the first prepare() so the
+    /// shader's RESET path runs exactly once to prime the history texture.
+    first_frame: bool,
 }
 
 impl TaaPass {
@@ -353,6 +358,7 @@ impl TaaPass {
             point_sampler,
             velocity_fallback_texture,
             velocity_fallback_view,
+            first_frame: true,
         }
     }
 }
@@ -376,10 +382,14 @@ impl RenderPass for TaaPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let jitter_idx = (ctx.frame % 16) as usize;
         let raw = HALTON_JITTER[jitter_idx];
+        // Consume the first_frame flag so RESET runs on exactly one frame.
+        let reset = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
         let uniforms = TaaUniform {
-            feedback_min: 0.88,
-            feedback_max: 0.97,  // keep conservative — ghosting artefacts at 0.99+
+            feedback_min: 0.88,  // unused but kept for layout
+            feedback_max: 0.97,  // unused but kept for layout
             jitter: [raw[0] - 0.5, raw[1] - 0.5],
+            reset,
+            _pad: 0,
         };
         ctx.queue.write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())

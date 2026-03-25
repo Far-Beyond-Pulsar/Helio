@@ -1,4 +1,15 @@
 // TAA (Temporal Anti-Aliasing) shader
+//
+// References:
+//   https://www.elopezr.com/temporal-aa-and-the-quest-for-the-holy-trail
+//   http://behindthepixels.io/assets/files/TemporalAA.pdf
+//   Playdead clip_towards_aabb_center: https://github.com/playdeadgames/temporal (MIT)
+//   Bevy TAA: https://github.com/bevyengine/bevy (MIT/Apache-2.0)
+
+// How much of the current frame to blend in.
+// Lower = more temporal smoothing, more ghosting risk on fast motion.
+const DEFAULT_HISTORY_BLEND_RATE: f32 = 0.1;   // used when history is uncertain
+const MIN_HISTORY_BLEND_RATE:     f32 = 0.015; // used when history is very confident
 
 @group(0) @binding(0) var current_frame: texture_2d<f32>;
 @group(0) @binding(1) var history_frame: texture_2d<f32>;
@@ -8,9 +19,11 @@
 @group(0) @binding(5) var point_sampler: sampler;
 
 struct TaaUniform {
-    feedback_min: f32,
-    feedback_max: f32,
-    jitter_offset: vec2<f32>,
+    feedback_min:  f32,          // unused — kept for layout compat
+    feedback_max:  f32,          // unused — kept for layout compat
+    jitter_offset: vec2<f32>,    // Halton-0.5 offset for this frame
+    reset:         u32,          // 1 on the very first frame
+    _pad:          u32,
 }
 
 @group(0) @binding(6) var<uniform> taa: TaaUniform;
@@ -83,68 +96,117 @@ fn sample_catmull_rom(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec
     return max(result, vec3<f32>(0.0));
 }
 
+// Clip history_color towards the AABB centre rather than clamping to the AABB surface.
+// From Playdead's temporal reprojection (MIT licence):
+//   https://github.com/playdeadgames/temporal
+// This preserves more valid history than plain clamp while still preventing ghosting.
+fn clip_towards_aabb_center(
+    history_color: vec3<f32>,
+    current_color: vec3<f32>,
+    aabb_min: vec3<f32>,
+    aabb_max: vec3<f32>,
+) -> vec3<f32> {
+    let p_clip = 0.5 * (aabb_max + aabb_min);
+    let e_clip = 0.5 * (aabb_max - aabb_min) + 1e-7;
+    let v_clip = history_color - p_clip;
+    let v_unit = v_clip / e_clip;
+    let a_unit = abs(v_unit);
+    let ma_unit = max(a_unit.x, max(a_unit.y, a_unit.z));
+    if ma_unit > 1.0 {
+        return p_clip + (v_clip / ma_unit);
+    }
+    return history_color;
+}
+
+// Reversible tonemapper — keeps HDR values from dominating temporal accumulation.
+// (Reinhard per-channel max; GPU Open optimised version.)
+fn rcp(x: f32) -> f32 { return 1.0 / x; }
+fn max3(v: vec3<f32>) -> f32 { return max(v.r, max(v.g, v.b)); }
+fn tonemap(c: vec3<f32>)         -> vec3<f32> { return c * rcp(max3(c) + 1.0); }
+fn reverse_tonemap(c: vec3<f32>) -> vec3<f32> { return c * rcp(1.0 - max3(c)); }
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let dimensions = textureDimensions(current_frame);
-    let texel_size = 1.0 / vec2<f32>(dimensions);
-    
-    // Sample current frame
-    let current_color = textureSample(current_frame, linear_sampler, in.uv).rgb;
-    
-    // Sample velocity (use point sampler for non-filterable texture)
-    let velocity = textureSample(velocity_tex, point_sampler, in.uv).xy;
-    
-    // Calculate history UV
-    let history_uv = in.uv - velocity;
-    
-    // Check if history UV is valid
-    if history_uv.x < 0.0 || history_uv.x > 1.0 || history_uv.y < 0.0 || history_uv.y > 1.0 {
-        return vec4<f32>(current_color, 1.0);
+    let in_dims  = vec2<f32>(textureDimensions(current_frame));
+    let in_texel = 1.0 / in_dims;
+
+    // ── Current frame sample ────────────────────────────────────────────────
+    // Use nearest to preserve the jitter-shifted sub-pixel detail; linear would
+    // blur it and defeat the purpose of jitter.
+    let original_color = textureSample(current_frame, point_sampler, in.uv);
+    let current_color  = tonemap(original_color.rgb);
+
+    // ── RESET (first frame) ─────────────────────────────────────────────────
+    // Write the current frame directly, unblended.  Store a high confidence
+    // value in alpha so that the SECOND frame immediately uses the minimum
+    // blend rate instead of the wasteful 100-frame warm-up you'd get starting
+    // from a black history.
+    if taa.reset != 0u {
+        return vec4<f32>(reverse_tonemap(current_color), 1.0 / MIN_HISTORY_BLEND_RATE);
     }
-    
-    // Sample history with high-quality filter
-    let history_color = sample_catmull_rom(history_frame, linear_sampler, history_uv);
-    
-    // Neighborhood clamping - sample 3x3 grid
-    var color_min = vec3<f32>(1e10);
-    var color_max = vec3<f32>(-1e10);
+
+    // ── Jitter & motion ─────────────────────────────────────────────────────
+    // Jitter in UV space: NDC shift = (raw-0.5)*2/W → UV shift = (raw-0.5)/W
+    // Y is flipped because NDC.y+ = up, UV.y+ = down in wgpu.
+    let jitter_uv = taa.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
+
+    let velocity   = textureSample(velocity_tex, point_sampler, in.uv).xy;
+
+    // Subtract jitter so we look up the same world-point in unjittered history,
+    // then subtract the motion vector for camera and object movement.
+    let history_uv = in.uv - jitter_uv - velocity;
+
+    if any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
+        return vec4<f32>(reverse_tonemap(current_color), 1.0);
+    }
+
+    // ── History ─────────────────────────────────────────────────────────────
+    // Confidence counter is stored in the history alpha channel.
+    let raw_confidence = textureSample(history_frame, point_sampler, history_uv).a;
+
+    // Catmull-Rom filter reduces the blurring that bilinear would introduce.
+    // History stores tonemapped values (written by this shader last frame).
+    let history_color = tonemap(sample_catmull_rom(history_frame, linear_sampler, history_uv));
+
+    // ── 3×3 neighbourhood AABB in YCoCg ────────────────────────────────────
     var m1 = vec3<f32>(0.0);
     var m2 = vec3<f32>(0.0);
-    
     for (var x = -1; x <= 1; x = x + 1) {
         for (var y = -1; y <= 1; y = y + 1) {
-            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
-            let neighbor = textureSample(current_frame, linear_sampler, in.uv + offset).rgb;
-            let neighbor_ycocg = rgb_to_ycocg(neighbor);
-            
-            color_min = min(color_min, neighbor_ycocg);
-            color_max = max(color_max, neighbor_ycocg);
-            
-            m1 = m1 + neighbor_ycocg;
-            m2 = m2 + neighbor_ycocg * neighbor_ycocg;
+            let s = rgb_to_ycocg(tonemap(
+                textureSample(current_frame, point_sampler,
+                    in.uv + vec2<f32>(f32(x), f32(y)) * in_texel).rgb));
+            m1 += s;
+            m2 += s * s;
         }
     }
-    
-    // Variance clipping
-    let sample_count = 9.0;
-    let mean = m1 / sample_count;
-    let variance = (m2 / sample_count) - (mean * mean);
-    let std_dev = sqrt(max(variance, vec3<f32>(0.0)));
-    
-    let box_min = mean - 1.25 * std_dev;
-    let box_max = mean + 1.25 * std_dev;
-    
-    // Clamp history color
-    let history_ycocg = rgb_to_ycocg(history_color);
-    let clamped_history_ycocg = clamp(history_ycocg, box_min, box_max);
-    let clamped_history = ycocg_to_rgb(clamped_history_ycocg);
-    
-    // Calculate blend factor based on motion
-    let velocity_len = length(velocity);
-    let blend_factor = mix(taa.feedback_max, taa.feedback_min, saturate(velocity_len * 100.0));
-    
-    // Blend current and history
-    let result = mix(current_color, clamped_history, blend_factor);
-    
-    return vec4<f32>(result, 1.0);
+    let mean    = m1 / 9.0;
+    let std_dev = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+
+    // Clip history towards AABB centre (Playdead method).
+    let clipped_history = ycocg_to_rgb(clip_towards_aabb_center(
+        rgb_to_ycocg(history_color),
+        rgb_to_ycocg(current_color),
+        mean - std_dev,
+        mean + std_dev,
+    ));
+
+    // ── Confidence-based blend rate ─────────────────────────────────────────
+    // Static pixels gain confidence each frame; moving pixels reset to 1.
+    // Blend rate = 1/confidence, clamped between MIN and DEFAULT.
+    let pixel_motion = abs(velocity) * in_dims;
+    var new_confidence: f32;
+    if pixel_motion.x < 0.01 && pixel_motion.y < 0.01 {
+        new_confidence = raw_confidence + 10.0;
+    } else {
+        new_confidence = 1.0;
+    }
+    let blend_rate = clamp(1.0 / new_confidence, MIN_HISTORY_BLEND_RATE, DEFAULT_HISTORY_BLEND_RATE);
+
+    // ── Blend and output ────────────────────────────────────────────────────
+    // Alpha carries the confidence counter into the history texture (via the
+    // copy_texture_to_texture that follows this pass).  The blit shader that
+    // writes to the swapchain ignores alpha and writes 1.0 instead.
+    let result = mix(clipped_history, current_color, blend_rate);
+    return vec4<f32>(reverse_tonemap(result), new_confidence);
 }
