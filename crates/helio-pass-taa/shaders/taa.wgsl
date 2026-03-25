@@ -130,52 +130,54 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let in_dims  = vec2<f32>(textureDimensions(current_frame));
     let in_texel = 1.0 / in_dims;
 
+    // ── Jitter correction ───────────────────────────────────────────────────
+    // The projection was shifted by NDC (raw-0.5)*2/W, which equals UV (raw-0.5)/W.
+    // Output pixel in.uv represents the UNJITTERED world-point at in.uv.
+    // Because jitter shifts all geometry by +jitter_uv, the world-point at in.uv
+    // landed at in.uv + jitter_uv in the rendered current_frame.
+    // So we add jitter_uv when reading current_frame, and do NOT subtract it from
+    // history_uv (since history already stores accumulated unjittered results).
+    let jitter_uv = taa.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
+    let cur_uv    = in.uv + jitter_uv;
+
     // ── Current frame sample ────────────────────────────────────────────────
-    // Use nearest to preserve the jitter-shifted sub-pixel detail; linear would
-    // blur it and defeat the purpose of jitter.
-    let original_color = textureSample(current_frame, point_sampler, in.uv);
+    let original_color = textureSample(current_frame, point_sampler, cur_uv);
     let current_color  = tonemap(original_color.rgb);
 
     // ── RESET (first frame) ─────────────────────────────────────────────────
-    // Write the current frame directly, unblended.  Store a high confidence
-    // value in alpha so that the SECOND frame immediately uses the minimum
-    // blend rate instead of the wasteful 100-frame warm-up you'd get starting
-    // from a black history.
+    // Write current directly and prime history with high confidence so
+    // accumulation starts at MIN_HISTORY_BLEND_RATE from frame 2 onwards.
     if taa.reset != 0u {
-        return vec4<f32>(reverse_tonemap(current_color), 1.0 / MIN_HISTORY_BLEND_RATE);
+        return vec4<f32>(original_color.rgb, 1.0 / MIN_HISTORY_BLEND_RATE);
     }
 
-    // ── Jitter & motion ─────────────────────────────────────────────────────
-    // Jitter in UV space: NDC shift = (raw-0.5)*2/W → UV shift = (raw-0.5)/W
-    // Y is flipped because NDC.y+ = up, UV.y+ = down in wgpu.
-    let jitter_uv = taa.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
-
+    // ── Motion / history UV ─────────────────────────────────────────────────
+    // history_uv = where this world-point was last frame (no jitter, history
+    // is stored in unjittered output space).
     let velocity   = textureSample(velocity_tex, point_sampler, in.uv).xy;
-
-    // Subtract jitter so we look up the same world-point in unjittered history,
-    // then subtract the motion vector for camera and object movement.
-    let history_uv = in.uv - jitter_uv - velocity;
+    let history_uv = in.uv - velocity;
 
     if any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
-        return vec4<f32>(reverse_tonemap(current_color), 1.0);
+        return vec4<f32>(original_color.rgb, 1.0);
     }
 
     // ── History ─────────────────────────────────────────────────────────────
-    // Confidence counter is stored in the history alpha channel.
+    // Read confidence from history alpha (point sampler — no filtering needed).
     let raw_confidence = textureSample(history_frame, point_sampler, history_uv).a;
 
-    // Catmull-Rom filter reduces the blurring that bilinear would introduce.
-    // History stores tonemapped values (written by this shader last frame).
+    // Catmull-Rom reduces blur compared to bilinear.
+    // History was written as original (non-tonemapped) colors; tonemap before blending.
     let history_color = tonemap(sample_catmull_rom(history_frame, linear_sampler, history_uv));
 
     // ── 3×3 neighbourhood AABB in YCoCg ────────────────────────────────────
+    // Sample around the jitter-corrected UV so the box bounds the correct world-point.
     var m1 = vec3<f32>(0.0);
     var m2 = vec3<f32>(0.0);
     for (var x = -1; x <= 1; x = x + 1) {
         for (var y = -1; y <= 1; y = y + 1) {
             let s = rgb_to_ycocg(tonemap(
                 textureSample(current_frame, point_sampler,
-                    in.uv + vec2<f32>(f32(x), f32(y)) * in_texel).rgb));
+                    cur_uv + vec2<f32>(f32(x), f32(y)) * in_texel).rgb));
             m1 += s;
             m2 += s * s;
         }
@@ -192,8 +194,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     ));
 
     // ── Confidence-based blend rate ─────────────────────────────────────────
-    // Static pixels gain confidence each frame; moving pixels reset to 1.
-    // Blend rate = 1/confidence, clamped between MIN and DEFAULT.
+    // Static pixels accumulate confidence → blend rate approaches MIN (0.015).
+    // Moving pixels reset confidence to 1 → blend rate = DEFAULT (0.1).
     let pixel_motion = abs(velocity) * in_dims;
     var new_confidence: f32;
     if pixel_motion.x < 0.01 && pixel_motion.y < 0.01 {
@@ -204,9 +206,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let blend_rate = clamp(1.0 / new_confidence, MIN_HISTORY_BLEND_RATE, DEFAULT_HISTORY_BLEND_RATE);
 
     // ── Blend and output ────────────────────────────────────────────────────
-    // Alpha carries the confidence counter into the history texture (via the
-    // copy_texture_to_texture that follows this pass).  The blit shader that
-    // writes to the swapchain ignores alpha and writes 1.0 instead.
-    let result = mix(clipped_history, current_color, blend_rate);
-    return vec4<f32>(reverse_tonemap(result), new_confidence);
+    // Result is kept in original (non-tonemapped) space for history storage.
+    // Alpha carries the confidence counter for next frame.
+    let result = reverse_tonemap(mix(clipped_history, current_color, blend_rate));
+    return vec4<f32>(result, new_confidence);
 }
