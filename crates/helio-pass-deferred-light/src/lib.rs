@@ -392,7 +392,10 @@ impl RenderPass for DeferredLightPass {
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
             rc_world_max: [rc_max[0], rc_max[1], rc_max[2], 0.0],
-            csm_splits: [5.0, 20.0, 60.0, 200.0],
+            // Must match CSM_SPLITS constant in shadow_matrices.wgsl ([16,80,300,1400]).
+            // The shadow matrices are computed for these distances, so cascade selection
+            // must use the same values or shadow maps will be sampled outside their valid range.
+            csm_splits: [16.0, 80.0, 300.0, 1400.0],
             debug_mode: self.debug_mode,
             _pad0: 0,
             num_tiles_x: self.width.div_ceil(16),

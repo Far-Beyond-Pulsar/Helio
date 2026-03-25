@@ -340,7 +340,7 @@ impl RenderPass for TaaPass {
         let raw = HALTON_JITTER[jitter_idx];
         let uniforms = TaaUniform {
             feedback_min: 0.88,
-            feedback_max: 0.97,
+            feedback_max: 0.97,  // keep conservative — ghosting artefacts at 0.99+
             jitter: [raw[0] - 0.5, raw[1] - 0.5],
         };
         ctx.queue.write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
