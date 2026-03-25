@@ -24,6 +24,15 @@ use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 // - SmaaPass, TaaPass (for higher-quality AA)
 use std::collections::HashMap;
 
+/// Halton (base-2, base-3) jitter table — matches `helio-pass-taa` so geometry
+/// and the TAA resolve shader index the same sub-pixel offset each frame.
+const HALTON_JITTER: [[f32; 2]; 16] = [
+    [0.500000, 0.333333], [0.250000, 0.666667], [0.750000, 0.111111], [0.125000, 0.444444],
+    [0.625000, 0.777778], [0.375000, 0.222222], [0.875000, 0.555556], [0.062500, 0.888889],
+    [0.562500, 0.037037], [0.312500, 0.370370], [0.812500, 0.703704], [0.187500, 0.148148],
+    [0.687500, 0.481481], [0.437500, 0.814815], [0.937500, 0.259259], [0.031250, 0.592593],
+];
+
 use crate::groups::{GroupId, GroupMask};
 use crate::handles::{LightId, MaterialId, MeshId, ObjectId, VirtualObjectId};
 use crate::material::{MaterialAsset, TextureUpload, MAX_TEXTURES};
@@ -564,7 +573,20 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
-        self.scene.update_camera(*camera);
+        // Apply TAA sub-pixel jitter to the projection matrix so geometry shifts
+        // by a different fraction of a pixel each frame.  TaaPass accumulates
+        // these 16 Halton positions into a temporally anti-aliased image.
+        let frame_idx = self.scene.gpu_scene().frame_count;
+        let raw = HALTON_JITTER[(frame_idx % 16) as usize];
+        let internal_w = ((self.output_width as f32 * self.render_scale).ceil() as u32).max(1);
+        let internal_h = ((self.output_height as f32 * self.render_scale).ceil() as u32).max(1);
+        let jx = (raw[0] - 0.5) * 2.0 / internal_w as f32;
+        let jy = (raw[1] - 0.5) * 2.0 / internal_h as f32;
+        let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
+        let mut jittered_camera = *camera;
+        jittered_camera.proj = jitter_mat * camera.proj;
+        jittered_camera.jitter = [jx, jy];
+        self.scene.update_camera(jittered_camera);
         self.scene.flush();
 
         // Compose final billboard list for this frame:

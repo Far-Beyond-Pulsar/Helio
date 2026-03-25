@@ -273,7 +273,13 @@ impl Scene {
             camera.jitter,
             self.prev_view_proj,
         );
-        self.prev_view_proj = camera.proj * camera.view;
+        // Store the UNJITTERED view_proj so next frame's motion-vector
+        // reprojection (prev_view_proj) is not contaminated by this frame's jitter.
+        let inv_jitter = Mat4::from_translation(glam::Vec3::new(
+            -camera.jitter[0], -camera.jitter[1], 0.0,
+        ));
+        let unjittered_proj = inv_jitter * camera.proj;
+        self.prev_view_proj = unjittered_proj * camera.view;
         self.gpu_scene.camera.update(uniforms);
     }
 
