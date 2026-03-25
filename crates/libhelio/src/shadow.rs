@@ -47,8 +47,9 @@ pub struct ShadowConfig {
     pub pcss_blocker_samples: u32,
     /// PCSS filter sample count (16-32 recommended)
     pub pcss_filter_samples: u32,
-    /// Padding for 16-byte alignment
-    pub _pad: u32,
+    /// Standard PCF sample count (non-PCSS path). Quality-driven.
+    /// Low=4, Medium=8, High=12, Ultra=16
+    pub pcf_sample_count: u32,
 }
 
 impl Default for ShadowConfig {
@@ -91,7 +92,7 @@ impl ShadowConfig {
                 enable_pcss: 0,
                 pcss_blocker_samples: 8,
                 pcss_filter_samples: 8,
-                _pad: 0,
+                pcf_sample_count: 4,
             },
             ShadowQuality::Medium => Self {
                 cascades: [
@@ -123,7 +124,7 @@ impl ShadowConfig {
                 enable_pcss: 0,
                 pcss_blocker_samples: 16,
                 pcss_filter_samples: 16,
-                _pad: 0,
+                pcf_sample_count: 8,
             },
             ShadowQuality::High => Self {
                 cascades: [
@@ -155,7 +156,7 @@ impl ShadowConfig {
                 enable_pcss: 1,
                 pcss_blocker_samples: 8,
                 pcss_filter_samples: 16,
-                _pad: 0,
+                pcf_sample_count: 12,
             },
             ShadowQuality::Ultra => Self {
                 cascades: [
@@ -187,7 +188,7 @@ impl ShadowConfig {
                 enable_pcss: 1,
                 pcss_blocker_samples: 16,
                 pcss_filter_samples: 32,
-                _pad: 0,
+                pcf_sample_count: 16,
             },
         }
     }

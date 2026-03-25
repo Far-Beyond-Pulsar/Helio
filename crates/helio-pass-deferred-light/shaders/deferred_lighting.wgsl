@@ -76,7 +76,7 @@ struct ShadowConfig {
     enable_pcss:          u32,                      // Global PCSS toggle
     pcss_blocker_samples: u32,                      // Blocker search samples
     pcss_filter_samples:  u32,                      // PCSS filter samples
-    _pad:                 u32,                      // 16-byte alignment
+    pcf_sample_count:     u32,                      // Standard PCF sample count (4/8/12/16)
 }
 
 @group(0) @binding(0) var <uniform> camera:        Camera;
@@ -126,9 +126,6 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VSOut {
 // ── Shadow helpers ────────────────────────────────────────────────────────────
 
 const ATLAS_SIZE: f32 = 1024.0;
-
-// PCF sample count (override at pipeline creation for quality tiers)
-override PCF_SAMPLE_COUNT: u32 = 16u;
 
 // Vogel disk sampling - blue-noise-like spiral pattern for high-quality PCF
 fn vogel_disk_sample(sample_idx: u32, sample_count: u32, theta: f32) -> vec2<f32> {
@@ -188,9 +185,10 @@ fn sample_cascade_shadow(
     // Per-pixel rotation to break up banding (stable with frame counter)
     let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
 
+    let pcf_count = shadow_config.pcf_sample_count;
     var lit_sum = 0.0;
-    for (var i = 0u; i < PCF_SAMPLE_COUNT; i++) {
-        let offset = vogel_disk_sample(i, PCF_SAMPLE_COUNT, theta) * filter_radius;
+    for (var i = 0u; i < pcf_count; i++) {
+        let offset = vogel_disk_sample(i, pcf_count, theta) * filter_radius;
         lit_sum += textureSampleCompareLevel(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
@@ -198,7 +196,7 @@ fn sample_cascade_shadow(
             biased_depth,
         );
     }
-    return lit_sum / f32(PCF_SAMPLE_COUNT);
+    return lit_sum / f32(pcf_count);
 }
 
 // ── PCSS (Contact-Hardening Shadows) ─────────────────────────────────────────

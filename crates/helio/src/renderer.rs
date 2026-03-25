@@ -4,6 +4,8 @@ use arrayvec::ArrayVec;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_depth_prepass::DepthPrepassPass;
+use helio_pass_hiz::HiZBuildPass;
+use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
@@ -591,7 +593,12 @@ fn build_default_graph(
     let mut graph = RenderGraph::new(device, queue);
 
     let camera_buf = gpu_scene.camera.buffer();
-    let _instances_buf = gpu_scene.instances.buffer();
+
+    // Build the Hi-Z pass first so we can clone its Arc views for OcclusionCullPass.
+    // HiZBuildPass is added to the graph AFTER DepthPrepass (see below).
+    let hiz_pass = HiZBuildPass::new(device, config.width, config.height);
+    let hiz_view    = Arc::clone(&hiz_pass.hiz_view);
+    let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
 
     // 1. ShadowMatrixPass — GPU compute: writes correct view-projection matrices for
     //    every shadow face into the shadow_matrices storage buffer.
@@ -626,11 +633,21 @@ fn build_default_graph(
     // Publishes "sky_lut" resource for SkyPass to consume
     graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
 
+    // 3b. OcclusionCullPass — temporal Hi-Z culling (reads PREVIOUS frame's pyramid).
+    //     Must run BEFORE DepthPrepass so depth isn't overwritten yet.
+    //     Frame 0 is a no-op (the pass guards internally with ctx.frame_num == 0).
+    graph.add_pass(Box::new(OcclusionCullPass::new(device, hiz_view, hiz_sampler)));
+
     // 3. DepthPrepassPass — early depth pass for better GPU culling
     graph.add_pass(Box::new(DepthPrepassPass::new(
         device,
         wgpu::TextureFormat::Depth32Float,
     )));
+
+    // 3c. HiZBuildPass — builds the Hi-Z pyramid from this frame's depth.
+    //     Runs AFTER DepthPrepass so the pyramid is ready for NEXT frame's
+    //     OcclusionCullPass (temporal).
+    graph.add_pass(Box::new(hiz_pass));
 
     // 4. GBufferPass — fills G-buffer (albedo, normal, ORM, emissive)
     graph.add_pass(Box::new(GBufferPass::new(
