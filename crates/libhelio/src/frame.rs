@@ -86,6 +86,11 @@ pub struct FrameResources<'a> {
     pub ssao: Option<&'a wgpu::TextureView>,
     /// Pre-AA HDR color buffer (input to TAA/FXAA/SMAA)
     pub pre_aa: Option<&'a wgpu::TextureView>,
+    /// Tiled light lists buffer (populated by LightCullPass, consumed by DeferredLightPass).
+    /// Layout: `tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i] = light_index`.
+    pub tile_light_lists: Option<&'a wgpu::Buffer>,
+    /// Tiled light counts buffer: one u32 per tile giving the number of lights.
+    pub tile_light_counts: Option<&'a wgpu::Buffer>,
     /// High-level Helio scene resources used by wrapper-owned passes.
     pub main_scene: Option<MainSceneResources<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
@@ -109,6 +114,8 @@ impl<'a> FrameResources<'a> {
             sky_lut_sampler: None,
             ssao: None,
             pre_aa: None,
+            tile_light_lists: None,
+            tile_light_counts: None,
             main_scene: None,
             sky: crate::SkyContext::default(),
             billboards: None,

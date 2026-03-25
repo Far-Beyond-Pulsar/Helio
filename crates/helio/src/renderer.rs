@@ -5,6 +5,7 @@ use helio_pass_billboard::BillboardPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_depth_prepass::DepthPrepassPass;
 use helio_pass_hiz::HiZBuildPass;
+use helio_pass_light_cull::LightCullPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
@@ -12,6 +13,7 @@ use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky_lut::SkyLutPass;
+use helio_pass_taa::TaaPass;
 use helio_pass_transparent::TransparentPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
@@ -557,6 +559,8 @@ impl Renderer {
                 rc_world_min: rc_min,
                 rc_world_max: rc_max,
             }),
+            tile_light_lists: None,
+            tile_light_counts: None,
             sky: libhelio::SkyContext::default(),
             billboards: if self.billboard_scratch.is_empty() {
                 None
@@ -649,6 +653,10 @@ fn build_default_graph(
     //     OcclusionCullPass (temporal).
     graph.add_pass(Box::new(hiz_pass));
 
+    // 3d. LightCullPass — GPU compute: builds per-tile light lists for
+    //     tiled Forward+ shading in DeferredLightPass.
+    graph.add_pass(Box::new(LightCullPass::new(device, config.width, config.height)));
+
     // 4. GBufferPass — fills G-buffer (albedo, normal, ORM, emissive)
     graph.add_pass(Box::new(GBufferPass::new(
         device,
@@ -677,6 +685,16 @@ fn build_default_graph(
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
+
+    // 5b. TaaPass — temporal anti-aliasing: resolves pre_aa into history-blended
+    //     output, then blits the result to ctx.target. BillboardPass then renders
+    //     on top of the TAA output.
+    graph.add_pass(Box::new(TaaPass::new(
+        device,
+        config.width,
+        config.height,
+        config.surface_format,
+    )));
 
     // TODO: Enable these passes once they declare resources properly:
     // - SkyPass (reads "sky_lut", writes to scene color)

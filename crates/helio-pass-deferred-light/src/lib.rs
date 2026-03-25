@@ -14,7 +14,8 @@ struct DeferredGlobals {
     csm_splits: [f32; 4],
     debug_mode: u32,
     _pad0: u32,
-    _pad1: u32,
+    /// Number of tiles in the X dimension for tiled light culling.
+    num_tiles_x: u32,
     _pad2: u32,
 }
 
@@ -25,11 +26,17 @@ pub struct DeferredLightPass {
     bgl_0: wgpu::BindGroupLayout,
     bgl_1: wgpu::BindGroupLayout,
     bgl_2: wgpu::BindGroupLayout,
+    bgl_3: wgpu::BindGroupLayout,
     bind_group_0: wgpu::BindGroup,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_2: Option<wgpu::BindGroup>,
+    bind_group_3: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize, usize, usize)>,
     bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bind_group_3_key: Option<(usize, usize)>,
+    width: u32,
+    fallback_tile_lists: wgpu::Buffer,
+    fallback_tile_counts: wgpu::Buffer,
     pre_aa_texture: wgpu::Texture,
     pre_aa_view: wgpu::TextureView,
     pre_aa_format: wgpu::TextureFormat,
@@ -54,6 +61,21 @@ impl DeferredLightPass {
         height: u32,
         pre_aa_format: wgpu::TextureFormat,
     ) -> Self {
+        let _height = height; // kept for future use (resize)
+
+        // Fallback 1-entry storage buffers used when LightCullPass is absent.
+        let fallback_tile_lists = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Fallback TileLists"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let fallback_tile_counts = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Deferred Fallback TileCounts"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Deferred Lighting Shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -183,6 +205,16 @@ impl DeferredLightPass {
             ],
         });
 
+        // Group 3: tiled light culling results (tile_light_lists, tile_light_counts).
+        // These are storage buffers written by LightCullPass and consumed here.
+        let bgl_3 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("DeferredLight BGL3"),
+            entries: &[
+                storage_entry(0), // tile_light_lists
+                storage_entry(1), // tile_light_counts
+            ],
+        });
+
         let bind_group_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("DeferredLight BG0"),
             layout: &bgl_0,
@@ -204,7 +236,7 @@ impl DeferredLightPass {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("DeferredLight PL"),
-            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2)],
+            bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(&bgl_2), Some(&bgl_3)],
             immediate_size: 0,
         });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -280,11 +312,17 @@ impl DeferredLightPass {
             bgl_0,
             bgl_1,
             bgl_2,
+            bgl_3,
             bind_group_0,
             bind_group_1: None,
             bind_group_2: None,
+            bind_group_3: None,
             bind_group_1_key: None,
             bind_group_2_key: None,
+            bind_group_3_key: None,
+            width,
+            fallback_tile_lists,
+            fallback_tile_counts,
             pre_aa_texture,
             pre_aa_view,
             pre_aa_format,
@@ -357,7 +395,7 @@ impl RenderPass for DeferredLightPass {
             csm_splits: [5.0, 20.0, 60.0, 200.0],
             debug_mode: self.debug_mode,
             _pad0: 0,
-            _pad1: 0,
+            num_tiles_x: self.width.div_ceil(16),
             _pad2: 0,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
@@ -447,9 +485,24 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_2_key = Some(scene_key);
         }
 
-        let color_target = ctx.frame.pre_aa.unwrap_or(ctx.target);
+        // ── Bind group 3: tile light culling results ──────────────────────────
+        let tile_lists   = ctx.frame.tile_light_lists.unwrap_or(&self.fallback_tile_lists);
+        let tile_counts  = ctx.frame.tile_light_counts.unwrap_or(&self.fallback_tile_counts);
+        let tile_key = (tile_lists as *const _ as usize, tile_counts as *const _ as usize);
+        if self.bind_group_3_key != Some(tile_key) {
+            self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("DeferredLight BG3"),
+                layout: &self.bgl_3,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: tile_lists.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: tile_counts.as_entire_binding() },
+                ],
+            }));
+            self.bind_group_3_key = Some(tile_key);
+        }
+
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: color_target,
+            view: &self.pre_aa_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
@@ -470,6 +523,7 @@ impl RenderPass for DeferredLightPass {
         pass.set_bind_group(0, &self.bind_group_0, &[]);
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
+        pass.set_bind_group(3, self.bind_group_3.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
         Ok(())
     }

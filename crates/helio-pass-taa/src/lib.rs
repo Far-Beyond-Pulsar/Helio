@@ -4,8 +4,10 @@
 //! and YCoCg variance-clipped neighbourhood clamping.
 //!
 //! ## O(1) guarantee
-//! `execute()` records exactly one fullscreen `draw(0..3, 0..1)` plus one
-//! `copy_texture_to_texture` call (both are constant-time GPU operations).
+//! `execute()` records exactly one fullscreen `draw(0..3, 0..1)` for the TAA
+//! resolve, one `copy_texture_to_texture` to update history, and one fullscreen
+//! `draw(0..3, 0..1)` blit that writes the resolved image to `ctx.target`.
+//! All three are constant-time GPU operations.
 //!
 //! ## Jitter
 //! A Halton(2, 3) sequence of 16 entries is indexed by `frame_num % 16`.
@@ -13,14 +15,16 @@
 //!
 //! ## History ping-pong
 //! The pass owns two textures: `output_texture` (render target each frame) and
-//! `history_texture` (sampled as temporal history).  After each frame, the output
-//! is GPU-copied into the history so the next frame sees the updated accumulation.
+//! `history_texture` (sampled as temporal history).  After each TAA resolve the
+//! output is GPU-copied into history so the next frame sees the updated accumulation.
+//!
+//! ## Lazy bind group
+//! The TAA bind group is rebuilt lazily when `frame.pre_aa` or `ctx.depth`
+//! pointer changes (i.e. on resize). No views are required at construction time.
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-/// Halton(2, 3) sequence, 16 entries, values in (0, 1).
-/// Offset by -0.5 at upload time so jitter is centred on the pixel.
 const HALTON_JITTER: [[f32; 2]; 16] = [
     [0.500000, 0.333333],
     [0.250000, 0.666667],
@@ -48,16 +52,35 @@ struct TaaUniform {
     jitter: [f32; 2],
 }
 
-/// TAA pass.
-///
-/// `current_view` — the pre-TAA HDR colour buffer (e.g. `FrameResources::pre_aa`).
-/// `velocity_view` — screen-space velocity (GBuffer `velocity` channel).
-/// `depth_view`    — depth-only view of the depth buffer (`TextureAspect::DepthOnly`).
+/// Minimal blit shader: samples a texture and outputs it unchanged.
+const BLIT_WGSL: &str = "
+@group(0) @binding(0) var blit_tex:     texture_2d<f32>;
+@group(0) @binding(1) var blit_sampler: sampler;
+
+struct VertexOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
+
+@vertex fn vs_blit(@builtin(vertex_index) vi: u32) -> VertexOut {
+    let x = f32((vi << 1u) & 2u);
+    let y = f32(vi & 2u);
+    return VertexOut(vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0), vec2<f32>(x, y));
+}
+
+@fragment fn fs_blit(in: VertexOut) -> @location(0) vec4<f32> {
+    return textureSample(blit_tex, blit_sampler, in.uv);
+}
+";
+
 pub struct TaaPass {
     pipeline: wgpu::RenderPipeline,
-    #[allow(dead_code)]
-    bind_group_layout: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
+    blit_pipeline: wgpu::RenderPipeline,
+    bgl: wgpu::BindGroupLayout,
+    blit_bgl: wgpu::BindGroupLayout,
+    /// Lazy TAA bind group (pre_aa + history + velocity_fallback + depth + samplers + uniform).
+    bind_group: Option<wgpu::BindGroup>,
+    /// (pre_aa_ptr, depth_ptr)
+    bind_group_key: Option<(usize, usize)>,
+    /// Static blit bind group: output_view + linear_sampler.
+    blit_bind_group: wgpu::BindGroup,
     taa_uniform_buf: wgpu::Buffer,
     pub history_texture: wgpu::Texture,
     pub history_view: wgpu::TextureView,
@@ -65,21 +88,20 @@ pub struct TaaPass {
     pub output_view: wgpu::TextureView,
     linear_sampler: wgpu::Sampler,
     point_sampler: wgpu::Sampler,
+    velocity_fallback_texture: wgpu::Texture,
+    velocity_fallback_view: wgpu::TextureView,
 }
 
 impl TaaPass {
-    pub fn new(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-        current_view: &wgpu::TextureView,
-        velocity_view: &wgpu::TextureView,
-        depth_view: &wgpu::TextureView,
-        format: wgpu::TextureFormat,
-    ) -> Self {
+    /// Create a new TAA pass. No texture views needed at construction time.
+    pub fn new(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("TAA Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/taa.wgsl").into()),
+        });
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("TAA Blit Shader"),
+            source: wgpu::ShaderSource::Wgsl(BLIT_WGSL.into()),
         });
 
         let taa_uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -98,7 +120,6 @@ impl TaaPass {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
-
         let point_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("TAA Point Sampler"),
             min_filter: wgpu::FilterMode::Nearest,
@@ -107,58 +128,54 @@ impl TaaPass {
             ..Default::default()
         });
 
-        let tex_desc =
-            |label: &'static str, extra_usage: wgpu::TextureUsages| wgpu::TextureDescriptor {
-                label: Some(label),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | extra_usage,
-                view_formats: &[],
-            };
+        let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+            view_formats: &[],
+        };
 
-        let history_texture =
-            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        let history_texture = device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
         let history_view = history_texture.create_view(&Default::default());
-
-        let output_texture =
-            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        let output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         let output_view = output_texture.create_view(&Default::default());
 
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        let velocity_fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TAA Velocity Fallback"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let velocity_fallback_view = velocity_fallback_texture.create_view(&Default::default());
+
+        // ── TAA BGL ────────────────────────────────────────────────────────────
+        let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("TAA BGL"),
             entries: &[
-                // 0: current_frame (filterable float — sampled with linear_sampler)
                 tex_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
-                // 1: history_frame (filterable float)
                 tex_entry(1, wgpu::TextureSampleType::Float { filterable: true }),
-                // 2: velocity_tex (non-filterable, sampled with point_sampler)
                 tex_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
-                // 3: depth_tex (depth texture)
                 tex_entry(3, wgpu::TextureSampleType::Depth),
-                // 4: linear_sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // 5: point_sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
-                // 6: taa uniform
                 wgpu::BindGroupLayoutEntry {
                     binding: 6,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -172,50 +189,44 @@ impl TaaPass {
             ],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("TAA BG"),
-            layout: &bind_group_layout,
+        // ── Blit BGL ───────────────────────────────────────────────────────────
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("TAA Blit BGL"),
             entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(current_view),
-                },
-                wgpu::BindGroupEntry {
+                tex_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
+                wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&history_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(velocity_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(depth_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(&point_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: taa_uniform_buf.as_entire_binding(),
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
                 },
             ],
         });
 
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("TAA PL"),
-            bind_group_layouts: &[Some(&bind_group_layout)],
-            immediate_size: 0,
+        let blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TAA Blit BG"),
+            layout: &blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                },
+            ],
         });
 
+        // ── TAA pipeline ───────────────────────────────────────────────────────
+        let taa_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("TAA PL"),
+            bind_group_layouts: &[Some(&bgl)],
+            immediate_size: 0,
+        });
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("TAA Pipeline"),
-            layout: Some(&pipeline_layout),
+            layout: Some(&taa_pl),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
@@ -232,10 +243,39 @@ impl TaaPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        // ── Blit pipeline ──────────────────────────────────────────────────────
+        let blit_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("TAA Blit PL"),
+            bind_group_layouts: &[Some(&blit_bgl)],
+            immediate_size: 0,
+        });
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("TAA Blit Pipeline"),
+            layout: Some(&blit_pl),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vs_blit"),
+                buffers: &[],
+                compilation_options: Default::default(),
             },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs_blit"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -244,8 +284,12 @@ impl TaaPass {
 
         Self {
             pipeline,
-            bind_group_layout,
-            bind_group,
+            blit_pipeline,
+            bgl,
+            blit_bgl,
+            bind_group: None,
+            bind_group_key: None,
+            blit_bind_group,
             taa_uniform_buf,
             history_texture,
             history_view,
@@ -253,11 +297,12 @@ impl TaaPass {
             output_view,
             linear_sampler,
             point_sampler,
+            velocity_fallback_texture,
+            velocity_fallback_view,
         }
     }
 }
 
-/// Helper: 2-D texture BGL entry for group 0, fragment-visible.
 fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
@@ -272,64 +317,94 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 }
 
 impl RenderPass for TaaPass {
-    fn name(&self) -> &'static str {
-        "TAA"
-    }
+    fn name(&self) -> &'static str { "TAA" }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let jitter_idx = (ctx.frame % 16) as usize;
         let raw = HALTON_JITTER[jitter_idx];
-        // Centre jitter around zero so the sub-pixel offset is symmetric
-        let jitter = [raw[0] - 0.5, raw[1] - 0.5];
         let uniforms = TaaUniform {
             feedback_min: 0.88,
             feedback_max: 0.97,
-            jitter,
+            jitter: [raw[0] - 0.5, raw[1] - 0.5],
         };
-        ctx.queue
-            .write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        ctx.queue.write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // O(1): one fullscreen draw to output_view
+        // ── 1. Lazy bind group ────────────────────────────────────────────────
+        let pre_aa_view = ctx.frame.pre_aa.ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
+                "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
+            )
+        })?;
+        let key = (pre_aa_view as *const _ as usize, ctx.depth as *const _ as usize);
+        if self.bind_group_key != Some(key) {
+            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("TAA BG"),
+                layout: &self.bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.history_view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.velocity_fallback_view) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ctx.depth) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
+                    wgpu::BindGroupEntry { binding: 6, resource: self.taa_uniform_buf.as_entire_binding() },
+                ],
+            }));
+            self.bind_group_key = Some(key);
+        }
+
+        // ── 2. TAA resolve → output_view ─────────────────────────────────────
         {
-            let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &self.output_view,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
             })];
-            let desc = wgpu::RenderPassDescriptor {
-                label: Some("TAA"),
-                color_attachments: &color_attachments,
+            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TAA Resolve"),
+                color_attachments: &attachments,
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
                 multiview_mask: None,
-            };
-            let mut pass = ctx.encoder.begin_render_pass(&desc);
+            });
             pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
 
-        // Copy output → history so the next frame can sample it.
-        // This is a single O(1) GPU blit; no CPU work involved.
+        // ── 3. Copy output → history ──────────────────────────────────────────
         ctx.encoder.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
-            wgpu::Extent3d {
-                width: ctx.width,
-                height: ctx.height,
-                depth_or_array_layers: 1,
-            },
+            wgpu::Extent3d { width: ctx.width, height: ctx.height, depth_or_array_layers: 1 },
         );
+
+        // ── 4. Blit output_view → ctx.target ─────────────────────────────────
+        {
+            let attachments = [Some(wgpu::RenderPassColorAttachment {
+                view: ctx.target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })];
+            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TAA Blit"),
+                color_attachments: &attachments,
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.blit_pipeline);
+            pass.set_bind_group(0, &self.blit_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
 
         Ok(())
     }
 }
-

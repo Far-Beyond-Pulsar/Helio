@@ -45,7 +45,7 @@ struct Globals {
     csm_splits:        vec4<f32>,
     debug_mode:        u32,
     _pad0:             u32,
-    _pad1:             u32,
+    num_tiles_x:       u32,
     _pad2:             u32,
 }
 
@@ -99,6 +99,12 @@ struct ShadowConfig {
 @group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
 @group(2) @binding(7) var shadow_depth_sampler: sampler;  // Non-comparison sampler for PCSS blocker search
+
+// Group 3 – tiled light culling results (written by LightCullPass each frame)
+const TILE_SIZE:          u32 = 16u;
+const MAX_LIGHTS_PER_TILE: u32 = 64u;
+@group(3) @binding(0) var<storage, read> tile_light_lists:  array<u32>;
+@group(3) @binding(1) var<storage, read> tile_light_counts: array<u32>;
 // cluster bindings removed - GPU-driven architecture
 
 // Cluster constants removed - GPU-driven architecture
@@ -700,15 +706,18 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // is handled separately — shadow maps do not occlude it (that is AO's job).
     var Lo = vec3<f32>(0.0);
     if ENABLE_LIGHTING {
-        for (var i = 0u; i < globals.light_count; i++) {
-            let light = lights[i];
-            // Range-cull point/spot lights before the expensive shadow fetch.
-            // Directional lights (type 0) have no position so always pass.
+        let tile_x = u32(in.clip_pos.x) / TILE_SIZE;
+        let tile_y = u32(in.clip_pos.y) / TILE_SIZE;
+        let tile_idx = tile_y * globals.num_tiles_x + tile_x;
+        let tile_light_count = tile_light_counts[tile_idx];
+        for (var i = 0u; i < tile_light_count; i++) {
+            let light_idx = tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i];
+            let light = lights[light_idx];
             if light.light_type != 0u {
                 let dist = length(light.position_range.xyz - world_pos);
                 if dist > light.position_range.w { continue; }
             }
-            let sf = shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame);
+            let sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
             Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf);
         }
     }
