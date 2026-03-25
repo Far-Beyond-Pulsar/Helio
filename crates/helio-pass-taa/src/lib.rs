@@ -52,10 +52,28 @@ struct TaaUniform {
     jitter: [f32; 2],
 }
 
-/// Minimal blit shader: samples a texture and outputs it unchanged.
+/// Post-TAA sharpening blit.
+///
+/// Unreal TSR and Unity HDRP both apply a spatial sharpen **on the output only**,
+/// never on the history buffer.  Sharpening the history would amplify ringing
+/// artefacts over multiple frames; keeping history unsharpened preserves temporal
+/// stability while the sharpened output recovers fine mesh / material detail lost
+/// by the temporal low-pass filter.
+///
+/// Algorithm: contrast-adaptive unsharp mask (5-tap cross kernel).
+///   blur        = (N + S + E + W) / 4
+///   edge        = center - blur
+///   sharpened   = center + edge * strength * (1 - 2 * local_contrast)
+///
+/// The `(1 - 2*contrast)` term reduces sharpening on already-sharp edges and
+/// boosts it on smooth regions that lost detail — the same idea as AMD CAS.
 const BLIT_WGSL: &str = "
 @group(0) @binding(0) var blit_tex:     texture_2d<f32>;
 @group(0) @binding(1) var blit_sampler: sampler;
+
+// Sharpening strength: 0 = disabled, 0.4 = default (matches UE4 TAA sharpening).
+// Increasing this recovers more texture/mesh detail at cost of potential ringing.
+const SHARPEN_STRENGTH: f32 = 0.4;
 
 struct VertexOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32> }
 
@@ -66,7 +84,27 @@ struct VertexOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>
 }
 
 @fragment fn fs_blit(in: VertexOut) -> @location(0) vec4<f32> {
-    return textureSample(blit_tex, blit_sampler, in.uv);
+    let texel = 1.0 / vec2<f32>(textureDimensions(blit_tex));
+    let c  = textureSampleLevel(blit_tex, blit_sampler, in.uv, 0.0).rgb;
+    let n  = textureSampleLevel(blit_tex, blit_sampler, in.uv + vec2<f32>( 0.0, -texel.y), 0.0).rgb;
+    let s  = textureSampleLevel(blit_tex, blit_sampler, in.uv + vec2<f32>( 0.0,  texel.y), 0.0).rgb;
+    let e  = textureSampleLevel(blit_tex, blit_sampler, in.uv + vec2<f32>( texel.x,  0.0), 0.0).rgb;
+    let w  = textureSampleLevel(blit_tex, blit_sampler, in.uv + vec2<f32>(-texel.x,  0.0), 0.0).rgb;
+
+    // Local luminance contrast — reduce sharpening on already-sharp edges
+    let luma = vec3<f32>(0.2126, 0.7152, 0.0722);
+    let lc   = dot(c, luma);
+    let ln   = dot(n, luma); let ls = dot(s, luma);
+    let le   = dot(e, luma); let lw = dot(w, luma);
+    let contrast = max(max(max(max(lc, ln), ls), le), lw)
+                 - min(min(min(min(lc, ln), ls), le), lw);
+
+    // Contrast-adaptive unsharp mask
+    let blur     = (n + s + e + w) * 0.25;
+    let strength = SHARPEN_STRENGTH * saturate(1.0 - 2.0 * contrast);
+    let result   = clamp(c + (c - blur) * strength, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    return vec4<f32>(result, 1.0);
 }
 ";
 
