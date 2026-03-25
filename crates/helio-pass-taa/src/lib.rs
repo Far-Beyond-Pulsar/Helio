@@ -94,7 +94,20 @@ pub struct TaaPass {
 
 impl TaaPass {
     /// Create a new TAA pass. No texture views needed at construction time.
-    pub fn new(device: &wgpu::Device, width: u32, height: u32, format: wgpu::TextureFormat) -> Self {
+    ///
+    /// - `internal_width / internal_height` — geometry (pre-AA) render resolution.
+    ///   When equal to `output_*` this is standard TAA; when smaller this is temporal
+    ///   upscaling (the shader bilinearly upsamples the input to output resolution).
+    /// - `output_width / output_height` — native display resolution; the history
+    ///   and output textures, and the final blit, all run at this size.
+    pub fn new(
+        device: &wgpu::Device,
+        _internal_width: u32,
+        _internal_height: u32,
+        output_width: u32,
+        output_height: u32,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("TAA Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/taa.wgsl").into()),
@@ -128,9 +141,12 @@ impl TaaPass {
             ..Default::default()
         });
 
+        // history and output textures are always at OUTPUT (display) resolution so
+        // temporal accumulation is gathered at full quality even when rendering at
+        // a lower internal resolution.
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,

@@ -472,11 +472,20 @@ impl RenderPass for BillboardPass {
                 store: wgpu::StoreOp::Store,
             },
         };
+        // When render_scale < 1.0 the internal depth buffer (ctx.depth) is smaller than
+        // ctx.target (native resolution).  The renderer provides a native-sized full_res_depth
+        // texture in that case; we clear it to 1.0 so billboards always pass depth test.
+        // At render_scale = 1.0 full_res_depth is None and we use ctx.depth directly.
+        let (depth_view, depth_load_op) = if let Some(frd) = ctx.frame.full_res_depth {
+            (frd, wgpu::LoadOp::Clear(1.0))
+        } else {
+            (ctx.depth, wgpu::LoadOp::Load)
+        };
         let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
-            view: ctx.depth,
+            view: depth_view,
             // Read-only depth: test against opaque scene but do not write.
             depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Load,
+                load: depth_load_op,
                 store: wgpu::StoreOp::Discard,
             }),
             stencil_ops: None,

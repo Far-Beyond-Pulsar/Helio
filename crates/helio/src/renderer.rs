@@ -103,6 +103,10 @@ pub struct RendererConfig {
     pub shadow_quality: libhelio::ShadowQuality,
     /// Debug visualisation mode (0=normal, 10=shadow heatmap, 11=light-space depth).
     pub debug_mode: u32,
+    /// Render scale factor (0.25..=1.0). Geometry (depth, GBuffer, lighting) is
+    /// rendered at `ceil(width*scale) × ceil(height*scale)` and temporally upscaled
+    /// to native output resolution by TaaPass. Default: 1.0 (native resolution).
+    pub render_scale: f32,
 }
 
 impl RendererConfig {
@@ -114,6 +118,7 @@ impl RendererConfig {
             gi_config: GiConfig::default(), // AAA default: RC close, ambient far
             shadow_quality: libhelio::ShadowQuality::Medium, // Default quality
             debug_mode: 0,
+            render_scale: 0.75, // 75% res (~1.78x fewer shaded pixels), upscaled via TAA
         }
     }
 
@@ -128,6 +133,23 @@ impl RendererConfig {
         self.shadow_quality = quality;
         self
     }
+
+    /// Builder: set render scale factor (0.25..=1.0).
+    /// 0.5 renders geometry at half resolution and upscales 2× via TAA temporal accumulation.
+    pub fn with_render_scale(mut self, scale: f32) -> Self {
+        self.render_scale = scale.clamp(0.25, 1.0);
+        self
+    }
+
+    /// Internal (geometry-pass) render width = ceil(width × render_scale).
+    pub fn internal_width(&self) -> u32 {
+        ((self.width as f32 * self.render_scale).ceil() as u32).max(1)
+    }
+
+    /// Internal (geometry-pass) render height = ceil(height × render_scale).
+    pub fn internal_height(&self) -> u32 {
+        ((self.height as f32 * self.render_scale).ceil() as u32).max(1)
+    }
 }
 
 pub struct Renderer {
@@ -138,6 +160,16 @@ pub struct Renderer {
     scene: Scene,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    /// Native output dimensions (separate from depth_texture which may be at internal res).
+    output_width: u32,
+    output_height: u32,
+    /// Current render scale (stored for graph rebuilds).
+    render_scale: f32,
+    /// Full-resolution depth texture — only present when render_scale < 1.0.
+    /// BillboardPass (and other post-upscale passes) use this instead of ctx.depth
+    /// so their render-pass dimensions match the native-resolution colour target.
+    full_res_depth_texture: Option<wgpu::Texture>,
+    full_res_depth_view: Option<wgpu::TextureView>,
     surface_format: wgpu::TextureFormat,
     ambient_color: [f32; 3],
     ambient_intensity: f32,
@@ -171,8 +203,17 @@ impl Renderer {
 
         let graph = build_default_graph(&device, &queue, &scene, config);
 
+        // Depth buffer at INTERNAL resolution (all geometry passes render here).
         let (depth_texture, depth_view) =
-            create_depth_resources(&device, config.width, config.height);
+            create_depth_resources(&device, config.internal_width(), config.internal_height());
+        // Full-res depth only needed when render_scale < 1.0 so post-upscale passes
+        // (BillboardPass) have a depth attachment matching the native-res colour target.
+        let (full_res_depth_texture, full_res_depth_view) = if config.render_scale < 1.0 {
+            let (t, v) = create_depth_resources(&device, config.width, config.height);
+            (Some(t), Some(v))
+        } else {
+            (None, None)
+        };
         Self {
             device,
             queue,
@@ -181,6 +222,11 @@ impl Renderer {
             scene,
             depth_texture,
             depth_view,
+            output_width: config.width,
+            output_height: config.height,
+            render_scale: config.render_scale,
+            full_res_depth_texture,
+            full_res_depth_view,
             surface_format: config.surface_format,
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
@@ -210,12 +256,13 @@ impl Renderer {
         // Rebuild the default graph to apply the new shadow quality
         if matches!(self.graph_kind, GraphKind::Default) {
             let config = RendererConfig {
-                width: self.depth_texture.size().width,
-                height: self.depth_texture.size().height,
+                width: self.output_width,
+                height: self.output_height,
                 surface_format: self.surface_format,
                 gi_config: self.gi_config,
                 shadow_quality: self.shadow_quality,
                 debug_mode: self.debug_mode,
+                render_scale: self.render_scale,
             };
             self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         }
@@ -226,12 +273,13 @@ impl Renderer {
         self.debug_mode = mode;
         if matches!(self.graph_kind, GraphKind::Default) {
             let config = RendererConfig {
-                width: self.depth_texture.size().width,
-                height: self.depth_texture.size().height,
+                width: self.output_width,
+                height: self.output_height,
                 surface_format: self.surface_format,
                 gi_config: self.gi_config,
                 shadow_quality: self.shadow_quality,
                 debug_mode: self.debug_mode,
+                render_scale: self.render_scale,
             };
             self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         }
@@ -265,16 +313,27 @@ impl Renderer {
     }
 
     pub fn set_render_size(&mut self, width: u32, height: u32) {
+        self.output_width = width;
+        self.output_height = height;
         self.scene.set_render_size(width, height);
-        let (depth_texture, depth_view) = create_depth_resources(&self.device, width, height);
+        let config = RendererConfig {
+            width,
+            height,
+            surface_format: self.surface_format,
+            gi_config: self.gi_config,
+            shadow_quality: self.shadow_quality,
+            debug_mode: self.debug_mode,
+            render_scale: self.render_scale,
+        };
+        let (depth_texture, depth_view) =
+            create_depth_resources(&self.device, config.internal_width(), config.internal_height());
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
-        let config = RendererConfig::new(width, height, self.surface_format)
-            .with_gi_config(self.gi_config)
-            .with_shadow_quality(self.shadow_quality);
-        let config = RendererConfig {
-            debug_mode: self.debug_mode,
-            ..config
+        (self.full_res_depth_texture, self.full_res_depth_view) = if self.render_scale < 1.0 {
+            let (t, v) = create_depth_resources(&self.device, width, height);
+            (Some(t), Some(v))
+        } else {
+            (None, None)
         };
         match self.graph_kind {
             GraphKind::Default => {
@@ -287,6 +346,24 @@ impl Renderer {
                 // User-provided graph: do not replace it.
             }
         }
+    }
+
+    /// Set render scale factor (0.25..=1.0) at runtime. Rebuilds the render graph.
+    ///
+    /// - `1.0` = native resolution (default)
+    /// - `0.5` = half-resolution (4× fewer shaded pixels), upscaled 2× via TAA
+    /// - `0.25` = quarter-resolution, upscaled 4× via TAA
+    ///
+    /// Lower values give a large GPU performance gain while TAA temporal accumulation
+    /// reconstructs high-quality detail over multiple frames, similar to Unreal TSR.
+    pub fn set_render_scale(&mut self, scale: f32) {
+        self.render_scale = scale.clamp(0.25, 1.0);
+        self.set_render_size(self.output_width, self.output_height);
+    }
+
+    /// Returns the current render scale factor.
+    pub fn render_scale(&self) -> f32 {
+        self.render_scale
     }
 
     pub fn set_clear_color(&mut self, color: [f32; 4]) {
@@ -315,12 +392,13 @@ impl Renderer {
     /// Convenience helper: switch back to the full deferred graph.
     pub fn use_default_graph(&mut self) {
         let config = RendererConfig {
-            width: self.depth_texture.size().width,
-            height: self.depth_texture.size().height,
+            width: self.output_width,
+            height: self.output_height,
             surface_format: self.surface_format,
             gi_config: self.gi_config,
             shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
+            render_scale: self.render_scale,
         };
         self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
         self.graph_kind = GraphKind::Default;
@@ -561,6 +639,7 @@ impl Renderer {
             }),
             tile_light_lists: None,
             tile_light_counts: None,
+            full_res_depth: self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView),
             sky: libhelio::SkyContext::default(),
             billboards: if self.billboard_scratch.is_empty() {
                 None
@@ -600,7 +679,7 @@ fn build_default_graph(
 
     // Build the Hi-Z pass first so we can clone its Arc views for OcclusionCullPass.
     // HiZBuildPass is added to the graph AFTER DepthPrepass (see below).
-    let hiz_pass = HiZBuildPass::new(device, config.width, config.height);
+    let hiz_pass = HiZBuildPass::new(device, config.internal_width(), config.internal_height());
     let hiz_view    = Arc::clone(&hiz_pass.hiz_view);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
 
@@ -655,13 +734,13 @@ fn build_default_graph(
 
     // 3d. LightCullPass — GPU compute: builds per-tile light lists for
     //     tiled Forward+ shading in DeferredLightPass.
-    graph.add_pass(Box::new(LightCullPass::new(device, config.width, config.height)));
+    graph.add_pass(Box::new(LightCullPass::new(device, config.internal_width(), config.internal_height())));
 
     // 4. GBufferPass — fills G-buffer (albedo, normal, ORM, emissive)
     graph.add_pass(Box::new(GBufferPass::new(
         device,
-        config.width,
-        config.height,
+        config.internal_width(),
+        config.internal_height(),
     )));
 
     // 4b. VirtualGeometryPass — GPU-driven meshlet cull + draw into the same GBuffer
@@ -678,8 +757,8 @@ fn build_default_graph(
         device,
         queue,
         camera_buf,
-        config.width,
-        config.height,
+        config.internal_width(),
+        config.internal_height(),
         config.surface_format,
     );
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
@@ -691,6 +770,8 @@ fn build_default_graph(
     //     on top of the TAA output.
     graph.add_pass(Box::new(TaaPass::new(
         device,
+        config.internal_width(),
+        config.internal_height(),
         config.width,
         config.height,
         config.surface_format,
