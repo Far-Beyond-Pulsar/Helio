@@ -7,16 +7,16 @@ use helio_pass_depth_prepass::DepthPrepassPass;
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
-use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_taa::TaaPass;
+use helio_pass_fxaa::FxaaPass;
 use helio_pass_transparent::TransparentPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
-use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
+use helio_v3::{ RenderGraph, RenderPass, Result as HelioResult };
 
 // TODO: Add these passes once cross-reference issues are resolved:
 // - SkyPass (needs sky_lut_view from SkyLutPass)
@@ -27,30 +27,44 @@ use std::collections::HashMap;
 /// Halton (base-2, base-3) jitter table — matches `helio-pass-taa` so geometry
 /// and the TAA resolve shader index the same sub-pixel offset each frame.
 const HALTON_JITTER: [[f32; 2]; 16] = [
-    [0.500000, 0.333333], [0.250000, 0.666667], [0.750000, 0.111111], [0.125000, 0.444444],
-    [0.625000, 0.777778], [0.375000, 0.222222], [0.875000, 0.555556], [0.062500, 0.888889],
-    [0.562500, 0.037037], [0.312500, 0.370370], [0.812500, 0.703704], [0.187500, 0.148148],
-    [0.687500, 0.481481], [0.437500, 0.814815], [0.937500, 0.259259], [0.031250, 0.592593],
+    [0.5,     0.333333],
+    [0.25,    0.666667],
+    [0.75,    0.111111],
+    [0.125,   0.444444],
+    [0.625,   0.777778],
+    [0.375,   0.222222],
+    [0.875,   0.555556],
+    [0.0625,  0.888889],
+    [0.5625,  0.037037],
+    [0.3125,  0.37037 ],
+    [0.8125,  0.703704],
+    [0.1875,  0.148148],
+    [0.6875,  0.481481],
+    [0.4375,  0.814815],
+    [0.9375,  0.259259],
+    [0.03125, 0.592593],
 ];
 
-use crate::groups::{GroupId, GroupMask};
-use crate::handles::{LightId, MaterialId, MeshId, ObjectId, VirtualObjectId};
-use crate::material::{MaterialAsset, TextureUpload, MAX_TEXTURES};
-use crate::mesh::{MeshBuffers, MeshUpload};
-use crate::scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene};
-use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
+use crate::groups::{ GroupId, GroupMask };
+use crate::handles::{ LightId, MaterialId, MeshId, ObjectId, VirtualObjectId };
+use crate::material::{ MaterialAsset, TextureUpload, MAX_TEXTURES };
+use crate::mesh::{ MeshBuffers, MeshUpload };
+use crate::scene::{ Camera, ObjectDescriptor, Result as SceneResult, Scene };
+use crate::vg::{ VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor };
 
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     #[cfg(not(target_arch = "wasm32"))]
-    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
-        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    let required =
+        wgpu::Features::TEXTURE_BINDING_ARRAY |
+        wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::empty();
-    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT // compacted indirect count buffer
-        | wgpu::Features::SHADER_PRIMITIVE_INDEX; // @builtin(primitive_index) in fs
+    let optional =
+        wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
+        wgpu::Features::SHADER_PRIMITIVE_INDEX; // @builtin(primitive_index) in fs
     required | (adapter_features & optional)
 }
 
@@ -77,7 +91,7 @@ pub struct GiConfig {
 impl Default for GiConfig {
     fn default() -> Self {
         Self {
-            rc_radius: 80.0,      // AAA near-field GI
+            rc_radius: 80.0, // AAA near-field GI
             rc_fade_margin: 20.0, // Smooth transition
         }
     }
@@ -152,12 +166,12 @@ impl RendererConfig {
 
     /// Internal (geometry-pass) render width = ceil(width × render_scale).
     pub fn internal_width(&self) -> u32 {
-        ((self.width as f32 * self.render_scale).ceil() as u32).max(1)
+        (((self.width as f32) * self.render_scale).ceil() as u32).max(1)
     }
 
     /// Internal (geometry-pass) render height = ceil(height × render_scale).
     pub fn internal_height(&self) -> u32 {
-        ((self.height as f32 * self.render_scale).ceil() as u32).max(1)
+        (((self.height as f32) * self.render_scale).ceil() as u32).max(1)
     }
 }
 
@@ -213,8 +227,11 @@ impl Renderer {
         let graph = build_default_graph(&device, &queue, &scene, config);
 
         // Depth buffer at INTERNAL resolution (all geometry passes render here).
-        let (depth_texture, depth_view) =
-            create_depth_resources(&device, config.internal_width(), config.internal_height());
+        let (depth_texture, depth_view) = create_depth_resources(
+            &device,
+            config.internal_width(),
+            config.internal_height()
+        );
         // Full-res depth only needed when render_scale < 1.0 so post-upscale passes
         // (BillboardPass) have a depth attachment matching the native-res colour target.
         let (full_res_depth_texture, full_res_depth_view) = if config.render_scale < 1.0 {
@@ -334,8 +351,11 @@ impl Renderer {
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
         };
-        let (depth_texture, depth_view) =
-            create_depth_resources(&self.device, config.internal_width(), config.internal_height());
+        let (depth_texture, depth_view) = create_depth_resources(
+            &self.device,
+            config.internal_width(),
+            config.internal_height()
+        );
         self.depth_texture = depth_texture;
         self.depth_view = depth_view;
         (self.full_res_depth_texture, self.full_res_depth_view) = if self.render_scale < 1.0 {
@@ -432,7 +452,7 @@ impl Renderer {
     pub fn update_material(
         &mut self,
         id: MaterialId,
-        material: crate::GpuMaterial,
+        material: crate::GpuMaterial
     ) -> SceneResult<()> {
         self.scene.update_material(id, material)
     }
@@ -440,7 +460,7 @@ impl Renderer {
     pub fn update_material_asset(
         &mut self,
         id: MaterialId,
-        material: MaterialAsset,
+        material: MaterialAsset
     ) -> SceneResult<()> {
         self.scene.update_material_asset(id, material)
     }
@@ -534,7 +554,7 @@ impl Renderer {
     /// Place an instance of a virtual mesh into the scene.
     pub fn insert_virtual_object(
         &mut self,
-        desc: VirtualObjectDescriptor,
+        desc: VirtualObjectDescriptor
     ) -> SceneResult<VirtualObjectId> {
         self.scene.insert_virtual_object(desc)
     }
@@ -542,7 +562,7 @@ impl Renderer {
     pub fn update_virtual_object_transform(
         &mut self,
         id: VirtualObjectId,
-        transform: glam::Mat4,
+        transform: glam::Mat4
     ) -> SceneResult<()> {
         self.scene.update_virtual_object_transform(id, transform)
     }
@@ -554,7 +574,7 @@ impl Renderer {
     pub fn update_object_transform(
         &mut self,
         id: ObjectId,
-        transform: glam::Mat4,
+        transform: glam::Mat4
     ) -> SceneResult<()> {
         self.scene.update_object_transform(id, transform)
     }
@@ -566,7 +586,7 @@ impl Renderer {
     /// the opaque scene.  Pass an empty slice to disable billboards entirely.
     pub fn set_billboard_instances(
         &mut self,
-        instances: &[helio_pass_billboard::BillboardInstance],
+        instances: &[helio_pass_billboard::BillboardInstance]
     ) {
         self.billboard_instances.clear();
         self.billboard_instances.extend_from_slice(instances);
@@ -578,10 +598,10 @@ impl Renderer {
         // these 16 Halton positions into a temporally anti-aliased image.
         let frame_idx = self.scene.gpu_scene().frame_count;
         let raw = HALTON_JITTER[(frame_idx % 16) as usize];
-        let internal_w = ((self.output_width as f32 * self.render_scale).ceil() as u32).max(1);
-        let internal_h = ((self.output_height as f32 * self.render_scale).ceil() as u32).max(1);
-        let jx = (raw[0] - 0.5) * 2.0 / internal_w as f32;
-        let jy = (raw[1] - 0.5) * 2.0 / internal_h as f32;
+        let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
+        let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
+        let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
+        let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
         let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
         let mut jittered_camera = *camera;
         jittered_camera.proj = jitter_mat * camera.proj;
@@ -593,20 +613,18 @@ impl Renderer {
         //   1. User-supplied instances (set via set_billboard_instances)
         //   2. Auto editor-light icons when GroupId::EDITOR is visible
         self.billboard_scratch.clear();
-        self.billboard_scratch
-            .extend_from_slice(&self.billboard_instances);
+        self.billboard_scratch.extend_from_slice(&self.billboard_instances);
         if !self.scene.is_group_hidden(GroupId::EDITOR) {
             for (_, light) in &self.editor_lights {
                 let [x, y, z, _] = light.position_range;
                 let [r, g, b, _] = light.color_intensity;
-                self.billboard_scratch
-                    .push(helio_pass_billboard::BillboardInstance {
-                        world_pos: [x, y, z, 0.0],
-                        // scale_flags.z = 0.0 → world-space size: the icon is scale.xy metres
-                        // wide/tall regardless of camera distance (normal perspective applies).
-                        scale_flags: [0.25, 0.25, 0.0, 0.0],
-                        color: [r, g, b, 1.0],
-                    });
+                self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
+                    world_pos: [x, y, z, 0.0],
+                    // scale_flags.z = 0.0 → world-space size: the icon is scale.xy metres
+                    // wide/tall regardless of camera distance (normal perspective applies).
+                    scale_flags: [0.25, 0.25, 0.0, 0.0],
+                    color: [r, g, b, 1.0],
+                });
             }
         }
 
@@ -621,16 +639,8 @@ impl Renderer {
         // Compute RC bounds (AAA dual-tier GI: RC near, ambient far)
         let cam_pos = camera.position; // Camera.position is a field (Vec3), not a method
         let rc_radius = self.gi_config.rc_radius;
-        let rc_min = [
-            cam_pos.x - rc_radius,
-            cam_pos.y - rc_radius,
-            cam_pos.z - rc_radius,
-        ];
-        let rc_max = [
-            cam_pos.x + rc_radius,
-            cam_pos.y + rc_radius,
-            cam_pos.z + rc_radius,
-        ];
+        let rc_min = [cam_pos.x - rc_radius, cam_pos.y - rc_radius, cam_pos.z - rc_radius];
+        let rc_max = [cam_pos.x + rc_radius, cam_pos.y + rc_radius, cam_pos.z + rc_radius];
 
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
@@ -678,7 +688,7 @@ impl Renderer {
             self.scene.gpu_scene(),
             target,
             &self.depth_view,
-            &frame_resources,
+            &frame_resources
         )?;
         // frame_resources is Copy, no need to drop
         drop(texture_views);
@@ -692,7 +702,7 @@ fn build_default_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     scene: &Scene,
-    config: RendererConfig,
+    config: RendererConfig
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);
@@ -702,33 +712,41 @@ fn build_default_graph(
     // Build the Hi-Z pass first so we can clone its Arc views for OcclusionCullPass.
     // HiZBuildPass is added to the graph AFTER DepthPrepass (see below).
     let hiz_pass = HiZBuildPass::new(device, config.internal_width(), config.internal_height());
-    let hiz_view    = Arc::clone(&hiz_pass.hiz_view);
+    let hiz_view = Arc::clone(&hiz_pass.hiz_view);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
 
     // 1. ShadowMatrixPass — GPU compute: writes correct view-projection matrices for
     //    every shadow face into the shadow_matrices storage buffer.
     //    Scene::flush() pre-sizes that buffer to N_lights*6 entries so shadow_count
     //    is nonzero and this binding covers the full range.
-    let shadow_dirty_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Shadow Dirty Flags"),
-        size: 64,
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Shadow Hashes"),
-        size: 64,
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
-    graph.add_pass(Box::new(ShadowMatrixPass::new(
-        device,
-        gpu_scene.lights.buffer(),
-        gpu_scene.shadow_matrices.buffer(),
-        camera_buf,
-        &shadow_dirty_buf,
-        &shadow_hashes_buf,
-    )));
+    let shadow_dirty_buf = device.create_buffer(
+        &(wgpu::BufferDescriptor {
+            label: Some("Shadow Dirty Flags"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    );
+    let shadow_hashes_buf = device.create_buffer(
+        &(wgpu::BufferDescriptor {
+            label: Some("Shadow Hashes"),
+            size: 64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        })
+    );
+    graph.add_pass(
+        Box::new(
+            ShadowMatrixPass::new(
+                device,
+                gpu_scene.lights.buffer(),
+                gpu_scene.shadow_matrices.buffer(),
+                camera_buf,
+                &shadow_dirty_buf,
+                &shadow_hashes_buf
+            )
+        )
+    );
 
     // 2. ShadowPass — renders geometry into the shadow atlas (one face per entry in shadow_matrices)
     // publish()es shadow_atlas + shadow_sampler into FrameResources for DeferredLightPass
@@ -744,10 +762,7 @@ fn build_default_graph(
     graph.add_pass(Box::new(OcclusionCullPass::new(device, hiz_view, hiz_sampler)));
 
     // 3. DepthPrepassPass — early depth pass for better GPU culling
-    graph.add_pass(Box::new(DepthPrepassPass::new(
-        device,
-        wgpu::TextureFormat::Depth32Float,
-    )));
+    graph.add_pass(Box::new(DepthPrepassPass::new(device, wgpu::TextureFormat::Depth32Float)));
 
     // 3c. HiZBuildPass — builds the Hi-Z pyramid from this frame's depth.
     //     Runs AFTER DepthPrepass so the pyramid is ready for NEXT frame's
@@ -756,14 +771,14 @@ fn build_default_graph(
 
     // 3d. LightCullPass — GPU compute: builds per-tile light lists for
     //     tiled Forward+ shading in DeferredLightPass.
-    graph.add_pass(Box::new(LightCullPass::new(device, config.internal_width(), config.internal_height())));
+    graph.add_pass(
+        Box::new(LightCullPass::new(device, config.internal_width(), config.internal_height()))
+    );
 
     // 4. GBufferPass — fills G-buffer (albedo, normal, ORM, emissive)
-    graph.add_pass(Box::new(GBufferPass::new(
-        device,
-        config.internal_width(),
-        config.internal_height(),
-    )));
+    graph.add_pass(
+        Box::new(GBufferPass::new(device, config.internal_width(), config.internal_height()))
+    );
 
     // 4b. VirtualGeometryPass — GPU-driven meshlet cull + draw into the same GBuffer
     let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
@@ -781,7 +796,7 @@ fn build_default_graph(
         camera_buf,
         config.internal_width(),
         config.internal_height(),
-        config.surface_format,
+        config.surface_format
     );
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
@@ -790,14 +805,18 @@ fn build_default_graph(
     // 5b. TaaPass — temporal anti-aliasing: resolves pre_aa into history-blended
     //     output, then blits the result to ctx.target. BillboardPass then renders
     //     on top of the TAA output.
-    graph.add_pass(Box::new(TaaPass::new(
-        device,
-        config.internal_width(),
-        config.internal_height(),
-        config.width,
-        config.height,
-        config.surface_format,
-    )));
+    graph.add_pass(
+        Box::new(
+            TaaPass::new(
+                device,
+                config.internal_width(),
+                config.internal_height(),
+                config.width,
+                config.height,
+                config.surface_format
+            )
+        )
+    );
 
     // TODO: Enable these passes once they declare resources properly:
     // - SkyPass (reads "sky_lut", writes to scene color)
@@ -806,19 +825,24 @@ fn build_default_graph(
 
     // 6. BillboardPass — camera-facing instanced quads (composited after opaque geometry).
     //    Uses spotlight.png as the editor icon sprite (tinted per-instance by light colour).
-    let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
+    let spotlight = image
+        ::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
         .into_rgba8();
     let (sw, sh) = spotlight.dimensions();
-    graph.add_pass(Box::new(BillboardPass::new_with_sprite_rgba(
-        device,
-        queue,
-        camera_buf,
-        config.surface_format,
-        spotlight.as_raw(),
-        sw,
-        sh,
-    )));
+    graph.add_pass(
+        Box::new(
+            BillboardPass::new_with_sprite_rgba(
+                device,
+                queue,
+                camera_buf,
+                config.surface_format,
+                spotlight.as_raw(),
+                sw,
+                sh
+            )
+        )
+    );
 
     // Initialize transient textures from pass declarations
     graph.set_render_size(config.width, config.height);
@@ -831,7 +855,7 @@ fn build_default_graph(
 pub fn build_simple_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
-    surface_format: wgpu::TextureFormat,
+    surface_format: wgpu::TextureFormat
 ) -> RenderGraph {
     let mut graph = RenderGraph::new(device, queue);
     graph.add_pass(Box::new(SimpleCubePass::new(device, surface_format)));
@@ -841,23 +865,24 @@ pub fn build_simple_graph(
 fn create_depth_resources(
     device: &wgpu::Device,
     width: u32,
-    height: u32,
+    height: u32
 ) -> (wgpu::Texture, wgpu::TextureView) {
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Helio Depth Texture"),
-        size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-        view_formats: &[],
-    });
+    let texture = device.create_texture(
+        &(wgpu::TextureDescriptor {
+            label: Some("Helio Depth Texture"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        })
+    );
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
 }
-
