@@ -161,6 +161,11 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
             self.dirty_range = None;
             return;
         }
+        let end = end.min(self.data.len());
+        if start >= end {
+            self.dirty_range = None;
+            return;
+        }
         let byte_offset = (start * std::mem::size_of::<T>()) as u64;
         upload::write_buffer(
             queue,
