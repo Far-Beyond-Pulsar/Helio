@@ -362,33 +362,46 @@ jobs:
         run: |
           BIN_DIR="target/${{ matrix.target }}/release"
           ARCHIVE_NAME="examples${{ matrix.asset_name }}.tar.gz"
-          
+          CARGO_TOML="crates/examples/Cargo.toml"
+
           if [ -d "$BIN_DIR" ]; then
             echo "Found release directory: $BIN_DIR"
             echo "Looking for example binaries..."
-            
-            # Find example binaries (handle both with and without .exe extension)
+
+            # Gather all [[bin]] names from the examples crate, excluding the package main name
             BINARIES=()
-            for pattern in "render_v2_basic" "render_v2_sky"; do
-              if [ -f "$BIN_DIR/$pattern.exe" ]; then
-                BINARIES+=("$pattern.exe")
-              elif [ -f "$BIN_DIR/$pattern" ]; then
-                BINARIES+=("$pattern")
+            IN_BIN=0
+            while IFS= read -r line; do
+              if [[ "$line" =~ ^\[\[bin\]\] ]]; then
+                IN_BIN=1
+                continue
               fi
-            done
-            
+
+              if [[ $IN_BIN -eq 1 && "$line" =~ ^name[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+                BINARY_NAME="${BASH_REMATCH[1]}"
+                if [ -f "$BIN_DIR/$BINARY_NAME.exe" ]; then
+                  BINARIES+=("$BINARY_NAME.exe")
+                elif [ -f "$BIN_DIR/$BINARY_NAME" ]; then
+                  BINARIES+=("$BINARY_NAME")
+                else
+                  echo "⚠️ Example binary missing: $BIN_DIR/$BINARY_NAME*"
+                fi
+                IN_BIN=0
+              fi
+            done < "$CARGO_TOML"
+
             if [ ${#BINARIES[@]} -eq 0 ]; then
               echo "⚠️ No example binaries found!"
               echo "Available files in $BIN_DIR:"
-              ls -lh "$BIN_DIR" | grep -E "render_v2"
+              ls -lh "$BIN_DIR"
               exit 1
             fi
-            
+
             echo "Found binaries: ${BINARIES[@]}"
             cd "$BIN_DIR"
             tar -czf "../../../$ARCHIVE_NAME" "${BINARIES[@]}"
             cd - > /dev/null
-            
+
             if [ -f "$ARCHIVE_NAME" ] && [ -s "$ARCHIVE_NAME" ]; then
               echo "✅ Created archive: $ARCHIVE_NAME"
               ls -lh "$ARCHIVE_NAME"
