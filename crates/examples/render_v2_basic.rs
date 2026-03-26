@@ -147,6 +147,7 @@ impl ApplicationHandler for App {
             queue.clone(),
             RendererConfig::new(size.width, size.height, surface_format),
         );
+        renderer.set_editor_mode(true);
 
         let mat = renderer.insert_material(make_material(
             [0.7, 0.7, 0.72, 1.0],

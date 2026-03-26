@@ -28,7 +28,7 @@ pub struct DebugPass {
     bgl: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
     vertex_buf: wgpu::Buffer,
-    vertex_count: u32,
+    pub vertex_count: u32,
 }
 
 impl DebugPass {
@@ -125,14 +125,9 @@ impl DebugPass {
                 topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
-            // Read-only depth: debug lines depth-test but don't write depth.
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            // Debug lines are rendered on top of final image; no depth buffer mismatch
+            // when render_scale < 1.0 and color target can be full-res.
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -193,19 +188,11 @@ impl RenderPass for DebugPass {
                 store: wgpu::StoreOp::Store,
             },
         };
-        let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
-            view: ctx.depth,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Discard,
-            }),
-            stencil_ops: None,
-        };
         let color_attachments = [Some(color_attachment)];
         let desc = wgpu::RenderPassDescriptor {
             label: Some("DebugDraw"),
             color_attachments: &color_attachments,
-            depth_stencil_attachment: Some(depth_attachment),
+            depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,

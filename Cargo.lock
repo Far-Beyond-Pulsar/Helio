@@ -911,6 +911,7 @@ dependencies = [
  "bytemuck",
  "glam 0.29.3",
  "helio-pass-billboard",
+ "helio-pass-debug",
  "helio-pass-deferred-light",
  "helio-pass-depth-prepass",
  "helio-pass-fxaa",

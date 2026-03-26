@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use arrayvec::ArrayVec;
 use helio_pass_billboard::BillboardPass;
@@ -16,6 +16,7 @@ use helio_pass_taa::TaaPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_transparent::TransparentPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
+use helio_pass_debug::{DebugPass, DebugVertex};
 use helio_v3::{ RenderGraph, RenderPass, Result as HelioResult };
 
 // TODO: Add these passes once cross-reference issues are resolved:
@@ -188,6 +189,8 @@ pub struct Renderer {
     output_height: u32,
     /// Current render scale (stored for graph rebuilds).
     render_scale: f32,
+    /// Camera position used for editor grid and debug world-gizmo (camera-follow).
+    editor_camera_pos: glam::Vec3,
     /// Full-resolution depth texture — only present when render_scale < 1.0.
     /// BillboardPass (and other post-upscale passes) use this instead of ctx.depth
     /// so their render-pass dimensions match the native-resolution colour target.
@@ -200,6 +203,10 @@ pub struct Renderer {
     gi_config: GiConfig,
     shadow_quality: libhelio::ShadowQuality,
     debug_mode: u32,
+    /// Editor mode root flag (scenes with editor helpers like grid and icons).
+    editor_mode: bool,
+    /// Shared debug drawing state (lines, grid toggles).
+    debug_state: Arc<Mutex<DebugDrawState>>,
     /// User-supplied billboard instances set via `set_billboard_instances()`.
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
     /// Per-frame scratch buffer: user billboards + auto editor-light icons.
@@ -219,12 +226,137 @@ enum GraphKind {
     Custom,
 }
 
+struct DebugDrawState {
+    /// Whether editor-mode grid should be rendered.
+    editor_enabled: bool,
+    /// Current camera position used to build camera-following grid in editor mode.
+    camera_position: glam::Vec3,
+    /// User lines to render this frame.
+    user_lines: Vec<DebugVertex>,
+}
+
+impl Default for DebugDrawState {
+    fn default() -> Self {
+        Self {
+            editor_enabled: false,
+            camera_position: glam::Vec3::ZERO,
+            user_lines: Vec::new(),
+        }
+    }
+}
+
+struct DebugDrawPass {
+    pass: DebugPass,
+    state: Arc<Mutex<DebugDrawState>>,
+}
+
+impl DebugDrawPass {
+    fn new(
+        device: &wgpu::Device,
+        camera_buf: &wgpu::Buffer,
+        surface_format: wgpu::TextureFormat,
+        state: Arc<Mutex<DebugDrawState>>,
+    ) -> Self {
+        Self {
+            pass: DebugPass::new(device, camera_buf, surface_format),
+            state,
+        }
+    }
+
+    fn build_frame_vertices(&self) -> Vec<DebugVertex> {
+        let state = self.state.lock().unwrap();
+        let mut output = state.user_lines.clone();
+
+        if state.editor_enabled {
+            let cam = state.camera_position;
+            let cam_dist = cam.length();
+            let grid_step = if cam_dist < 20.0_f32 {
+                1.0_f32
+            } else if cam_dist < 60.0_f32 {
+                2.0_f32
+            } else if cam_dist < 150.0_f32 {
+                5.0_f32
+            } else if cam_dist < 300.0_f32 {
+                10.0_f32
+            } else {
+                20.0_f32
+            };
+
+            let minor_color: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
+            let major_color: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
+            let axis_color_x: [f32; 4] = [1.0, 0.2, 0.2, 1.0];
+            let axis_color_z: [f32; 4] = [0.2, 1.0, 0.2, 1.0];
+
+            let range: f32 = 40.0;
+            let count = (range / grid_step).ceil() as i32;
+            let center_x = (cam.x / grid_step).round() * grid_step;
+            let center_z = (cam.z / grid_step).round() * grid_step;
+
+            for i in -count..=count {
+                let x = center_x + i as f32 * grid_step;
+                let z = center_z + i as f32 * grid_step;
+                let x_color = if i.rem_euclid(5) == 0 { major_color } else { minor_color };
+                let z_color = if i.rem_euclid(5) == 0 { major_color } else { minor_color };
+
+                // Lines parallel to Z at varying X
+                output.push(DebugVertex { position: [x, 0.0, center_z - range], _pad: 0.0, color: if x.abs() < 0.01 { axis_color_x } else { x_color } });
+                output.push(DebugVertex { position: [x, 0.0, center_z + range], _pad: 0.0, color: if x.abs() < 0.01 { axis_color_x } else { x_color } });
+
+                // Lines parallel to X at varying Z
+                output.push(DebugVertex { position: [center_x - range, 0.0, z], _pad: 0.0, color: if z.abs() < 0.01 { axis_color_z } else { z_color } });
+                output.push(DebugVertex { position: [center_x + range, 0.0, z], _pad: 0.0, color: if z.abs() < 0.01 { axis_color_z } else { z_color } });
+            }
+
+            // World origin marker (fixed in place)
+            let origin_color = [1.0, 1.0, 0.0, 1.0];
+            output.push(DebugVertex { position: [-3.0, 0.0, 0.0], _pad: 0.0, color: origin_color });
+            output.push(DebugVertex { position: [3.0, 0.0, 0.0], _pad: 0.0, color: origin_color });
+            output.push(DebugVertex { position: [0.0, 0.0, -3.0], _pad: 0.0, color: origin_color });
+            output.push(DebugVertex { position: [0.0, 0.0, 3.0], _pad: 0.0, color: origin_color });
+
+            // Camera-relative origin marker
+            let camera_marker_color = [0.0, 1.0, 1.0, 1.0];
+            let mark = cam;
+            output.push(DebugVertex { position: [mark.x - 0.3, mark.y, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x + 0.3, mark.y, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y - 0.3, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y + 0.3, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y, mark.z - 0.3], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y, mark.z + 0.3], _pad: 0.0, color: camera_marker_color });
+        }
+
+        output
+    }
+}
+
+impl RenderPass for DebugDrawPass {
+    fn name(&self) -> &'static str {
+        "DebugDraw"
+    }
+
+    fn prepare(&mut self, ctx: &helio_v3::PrepareContext) -> HelioResult<()> {
+        let lines = self.build_frame_vertices();
+        log::debug!("DebugDraw: {} verts", lines.len());
+        self.pass.update_lines(ctx.queue, &lines);
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut helio_v3::PassContext) -> HelioResult<()> {
+        log::debug!("DebugDrawPass execute");
+        let count_before = self.pass.vertex_count;
+        let res = self.pass.execute(ctx);
+        log::debug!("DebugDrawPass executed, count={} err={:?}", count_before, res);
+        res
+    }
+}
+
 impl Renderer {
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, config: RendererConfig) -> Self {
         let mut scene = Scene::new(device.clone(), queue.clone());
         scene.set_render_size(config.width, config.height);
 
-        let graph = build_default_graph(&device, &queue, &scene, config);
+        let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone());
 
         // Depth buffer at INTERNAL resolution (all geometry passes render here).
         let (depth_texture, depth_view) = create_depth_resources(
@@ -251,6 +383,7 @@ impl Renderer {
             output_width: config.width,
             output_height: config.height,
             render_scale: config.render_scale,
+            editor_camera_pos: glam::Vec3::ZERO,
             full_res_depth_texture,
             full_res_depth_view,
             surface_format: config.surface_format,
@@ -260,6 +393,8 @@ impl Renderer {
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
             debug_mode: 0,
+            editor_mode: false,
+            debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
             editor_lights: HashMap::new(),
@@ -290,7 +425,13 @@ impl Renderer {
                 debug_mode: self.debug_mode,
                 render_scale: self.render_scale,
             };
-            self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+            self.graph = build_default_graph(
+                &self.device,
+                &self.queue,
+                &self.scene,
+                config,
+                self.debug_state.clone(),
+            );
         }
     }
 
@@ -307,7 +448,60 @@ impl Renderer {
                 debug_mode: self.debug_mode,
                 render_scale: self.render_scale,
             };
-            self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+            self.graph = build_default_graph(
+                &self.device,
+                &self.queue,
+                &self.scene,
+                config,
+                self.debug_state.clone(),
+            );
+        }
+    }
+
+    /// Enable or disable editor mode.
+    pub fn set_editor_mode(&mut self, enabled: bool) {
+        self.editor_mode = enabled;
+        if enabled {
+            self.scene.show_group(GroupId::EDITOR);
+        } else {
+            self.scene.hide_group(GroupId::EDITOR);
+        }
+        if let Ok(mut s) = self.debug_state.lock() {
+            s.editor_enabled = enabled;
+        }
+    }
+
+    /// Get the current editor-mode state.
+    pub fn is_editor_mode(&self) -> bool {
+        self.editor_mode
+    }
+
+    /// Clear all per-frame debug geometry.
+    pub fn debug_clear(&mut self) {
+        if let Ok(mut s) = self.debug_state.lock() {
+            s.user_lines.clear();
+        }
+    }
+
+    /// Add a one-frame debug line to the debug renderer.
+    pub fn debug_line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
+        if let Ok(mut s) = self.debug_state.lock() {
+            s.user_lines.push(DebugVertex { position: from, _pad: 0.0, color });
+            s.user_lines.push(DebugVertex { position: to, _pad: 0.0, color });
+        }
+    }
+
+    /// Add a one-frame circle (approx) to the debug renderer.
+    pub fn debug_circle(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
+        let (cx, cy, cz) = (center[0], center[1], center[2]);
+        let step = std::f32::consts::TAU / segments as f32;
+        let mut last = (cx + radius, cy, cz);
+        for i in 1..=segments {
+            let theta = i as f32 * step;
+            let next = (cx + radius * theta.cos(), cy, cz + radius * theta.sin());
+            self.debug_line([last.0, last.1, last.2], [next.0, next.1, next.2], color);
+            last = next;
         }
     }
 
@@ -366,7 +560,13 @@ impl Renderer {
         };
         match self.graph_kind {
             GraphKind::Default => {
-                self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+                self.graph = build_default_graph(
+                    &self.device,
+                    &self.queue,
+                    &self.scene,
+                    config,
+                    self.debug_state.clone(),
+                );
             }
             GraphKind::Simple => {
                 self.graph = build_simple_graph(&self.device, &self.queue, self.surface_format);
@@ -429,7 +629,13 @@ impl Renderer {
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
         };
-        self.graph = build_default_graph(&self.device, &self.queue, &self.scene, config);
+        self.graph = build_default_graph(
+            &self.device,
+            &self.queue,
+            &self.scene,
+            config,
+            self.debug_state.clone(),
+        );
         self.graph_kind = GraphKind::Default;
     }
 
@@ -642,6 +848,9 @@ impl Renderer {
         let mesh_buffers = self.scene.mesh_buffers();
         // Compute RC bounds (AAA dual-tier GI: RC near, ambient far)
         let cam_pos = camera.position; // Camera.position is a field (Vec3), not a method
+        if let Ok(mut state) = self.debug_state.lock() {
+            state.camera_position = cam_pos;
+        }
         let rc_radius = self.gi_config.rc_radius;
         let rc_min = [cam_pos.x - rc_radius, cam_pos.y - rc_radius, cam_pos.z - rc_radius];
         let rc_max = [cam_pos.x + rc_radius, cam_pos.y + rc_radius, cam_pos.z + rc_radius];
@@ -706,7 +915,8 @@ fn build_default_graph(
     device: &Arc<wgpu::Device>,
     queue: &Arc<wgpu::Queue>,
     scene: &Scene,
-    config: RendererConfig
+    config: RendererConfig,
+    debug_state: Arc<Mutex<DebugDrawState>>,
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);
@@ -847,6 +1057,14 @@ fn build_default_graph(
             )
         )
     );
+
+    // 7. Debug draw pass — overlays line-based debug visuals, per-editor mode.
+    graph.add_pass(Box::new(DebugDrawPass::new(
+        device,
+        camera_buf,
+        config.surface_format,
+        debug_state,
+    )));
 
     // Initialize transient textures from pass declarations
     graph.set_render_size(config.width, config.height);

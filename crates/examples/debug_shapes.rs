@@ -10,8 +10,6 @@
 //!   Mouse drag           — look (click to grab cursor)
 //!   Escape               — release cursor / exit
 
-mod v3_demo_common;
-use v3_demo_common::{box_mesh, directional_light, insert_object, make_material, point_light};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
 
@@ -50,6 +48,7 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
+    elapsed: f32,
 }
 
 impl ApplicationHandler for App {
@@ -118,134 +117,9 @@ impl ApplicationHandler for App {
             queue.clone(),
             RendererConfig::new(size.width, size.height, format),
         );
-        renderer.set_clear_color([0.05, 0.05, 0.08, 1.0]);
+        renderer.set_clear_color([0.12, 0.12, 0.16, 1.0]);
         renderer.set_ambient([0.20, 0.22, 0.30], 0.18);
-
-        // ── Materials ─────────────────────────────────────────────────────────────
-        let mat_floor = renderer.insert_material(make_material(
-            [0.28, 0.28, 0.28, 1.0],
-            0.90,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_red = renderer.insert_material(make_material(
-            [0.90, 0.15, 0.15, 1.0],
-            0.60,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_green = renderer.insert_material(make_material(
-            [0.15, 0.85, 0.20, 1.0],
-            0.60,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_blue = renderer.insert_material(make_material(
-            [0.15, 0.35, 0.90, 1.0],
-            0.60,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_orange = renderer.insert_material(make_material(
-            [1.00, 0.45, 0.10, 1.0],
-            0.50,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_cyan = renderer.insert_material(make_material(
-            [0.10, 0.80, 0.90, 1.0],
-            0.50,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_magenta = renderer.insert_material(make_material(
-            [0.90, 0.10, 0.80, 1.0],
-            0.50,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_yellow = renderer.insert_material(make_material(
-            [1.00, 0.90, 0.10, 1.0],
-            0.40,
-            0.00,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_metal = renderer.insert_material(make_material(
-            [0.70, 0.70, 0.70, 1.0],
-            0.30,
-            0.85,
-            [0.0; 3],
-            0.0,
-        ));
-        let mat_glow = renderer.insert_material(make_material(
-            [0.05, 0.05, 0.05, 1.0],
-            0.90,
-            0.00,
-            [0.4, 0.8, 1.0],
-            3.5,
-        ));
-
-        // ── Geometry ───────────────────────────────────────────────────────────────
-        let mut add =
-            |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-                let m = r.insert_mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
-                let _ = insert_object(
-                    r,
-                    m,
-                    mat,
-                    glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
-                    (hx * hx + hy * hy + hz * hz).sqrt(),
-                );
-            };
-
-        // Ground
-        add(&mut renderer, 0.0, -0.05, 0.0, 12.0, 0.05, 12.0, mat_floor);
-
-        // Axis-colour columns (representing a coordinate frame)
-        add(&mut renderer, -6.0, 1.5, 0.0, 0.4, 1.5, 0.4, mat_red); // -X
-        add(&mut renderer, 6.0, 1.5, 0.0, 0.4, 1.5, 0.4, mat_orange); // +X
-        add(&mut renderer, 0.0, 1.5, -6.0, 0.4, 1.5, 0.4, mat_green); // -Z
-        add(&mut renderer, 0.0, 1.5, 6.0, 0.4, 1.5, 0.4, mat_cyan); // +Z
-        add(&mut renderer, 0.0, 3.0, 0.0, 0.25, 3.0, 0.25, mat_blue); // Y
-
-        // Gallery row (Z = 3) — various shapes/sizes
-        add(&mut renderer, -4.0, 0.5, 3.0, 0.5, 0.5, 0.5, mat_magenta);
-        add(&mut renderer, -2.0, 0.7, 3.0, 0.4, 0.7, 0.8, mat_yellow);
-        add(&mut renderer, 0.0, 1.2, 3.0, 0.6, 1.2, 0.4, mat_metal);
-        add(&mut renderer, 2.0, 0.5, 3.0, 0.8, 0.5, 0.5, mat_glow);
-        add(&mut renderer, 4.0, 0.9, 3.0, 0.3, 0.9, 0.9, mat_red);
-
-        // Gallery row (Z = -3)
-        add(&mut renderer, -4.0, 0.35, -3.0, 0.6, 0.35, 0.6, mat_green);
-        add(&mut renderer, -2.0, 0.8, -3.0, 0.3, 0.8, 0.6, mat_blue);
-        add(&mut renderer, 0.0, 0.55, -3.0, 1.1, 0.55, 0.4, mat_orange);
-        add(&mut renderer, 2.0, 0.7, -3.0, 0.5, 0.7, 0.5, mat_cyan);
-        add(&mut renderer, 4.0, 0.45, -3.0, 0.7, 0.45, 0.3, mat_metal);
-
-        // AABB corner markers (draw_aabb analogue)
-        draw_aabb_corners(
-            &mut renderer,
-            [-2.5, 0.0, -0.5],
-            [-1.5, 1.5, 0.5],
-            mat_yellow,
-        );
-
-        // ── Lights ──────────────────────────────────────────────────────────────
-        let _ = renderer.insert_light(directional_light(
-            [-0.5, -1.0, -0.5],
-            [1.0, 0.95, 0.88],
-            5.0,
-        ));
-        let _ = renderer.insert_light(point_light([0.0, 6.0, 0.0], [0.60, 0.75, 1.0], 40.0, 20.0));
-        let _ = renderer.insert_light(point_light([5.0, 3.0, -5.0], [1.00, 0.60, 0.3], 20.0, 15.0));
+        renderer.set_editor_mode(true);
 
         self.state = Some(AppState {
             window,
@@ -256,10 +130,11 @@ impl ApplicationHandler for App {
             last_frame: std::time::Instant::now(),
             cam_pos: glam::Vec3::new(0.0, 3.0, 10.0),
             cam_yaw: 0.0,
-            cam_pitch: -0.15,
+            cam_pitch: -0.35,
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
+            elapsed: 0.0,
         });
     }
 
@@ -330,7 +205,7 @@ impl ApplicationHandler for App {
                 let dt = (now - state.last_frame).as_secs_f32();
                 state.last_frame = now;
                 state.update_camera(dt);
-                state.render();
+                state.render(dt);
                 state.window.request_redraw();
             }
             _ => {}
@@ -394,7 +269,47 @@ impl AppState {
         }
     }
 
-    fn render(&mut self) {
+    fn render(&mut self, dt: f32) {
+        self.elapsed += dt;
+        self.renderer.debug_clear();
+
+        // Spinning debug shapes (no scene geometry objects).
+        let t = self.elapsed;
+        let ring_radius = 2.5;
+        self.renderer.debug_circle([0.0, 0.5, 0.0], ring_radius, [1.0, 0.4, 0.1, 1.0], 64);
+
+        // rotating crosses
+        let rot = t * 0.8;
+        let p = glam::Vec3::new(rot.cos() * 2.0, 0.0, rot.sin() * 2.0);
+        let col = [0.2 + 0.8 * ((rot * 1.23).sin() * 0.5 + 0.5), 0.80, 0.2, 1.0];
+        self.renderer.debug_line([p.x, 0.0, p.z], [p.x, 1.2, p.z], col);
+        self.renderer.debug_line([p.x - 0.6, 0.6, p.z], [p.x + 0.6, 0.6, p.z], col);
+        self.renderer.debug_line([p.x, 0.6, p.z - 0.6], [p.x, 0.6, p.z + 0.6], col);
+
+        // Guaranteed major axis lines (must be visible if debug pass is working)
+        self.renderer.debug_line([-40.0, 0.0, 0.0], [40.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
+        self.renderer.debug_line([0.0, 0.0, -40.0], [0.0, 0.0, 40.0], [0.0, 1.0, 0.0, 1.0]);
+        self.renderer.debug_line([0.0, 0.0, 0.0], [0.0, 40.0, 0.0], [0.0, 0.0, 1.0, 1.0]);
+
+        // Always draw a camera-forward debug vector so the line system is visually verifiable.
+        let (sy, cy) = self.cam_yaw.sin_cos();
+        let (sp, cp) = self.cam_pitch.sin_cos();
+        let fwd = glam::Vec3::new(sy * cp, sp, -cy * cp);
+        let debug_origin = self.cam_pos + fwd * 0.2;
+        let debug_target = self.cam_pos + fwd * 6.0;
+        self.renderer.debug_line(
+            debug_origin.to_array(),
+            debug_target.to_array(),
+            [1.0, 1.0, 0.0, 1.0],
+        );
+
+        // Extra near-camera cross marker in world space, absolutely should be visible.
+        let world_cam_mark = self.cam_pos + fwd * 2.0;
+        let cross = 0.5;
+        self.renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + glam::Vec3::new(cross,0.,0.)).to_array(), [1.0,0.5,0.0,1.0]);
+        self.renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + glam::Vec3::new(0.,cross,0.)).to_array(), [1.0,0.5,0.0,1.0]);
+        self.renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + glam::Vec3::new(0.,0.,cross)).to_array(), [1.0,0.5,0.0,1.0]);
+
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => {
@@ -406,9 +321,6 @@ impl AppState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        let (sy, cy) = self.cam_yaw.sin_cos();
-        let (sp, cp) = self.cam_pitch.sin_cos();
-        let fwd = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
         let camera = Camera::perspective_look_at(
@@ -428,21 +340,4 @@ impl AppState {
     }
 }
 
-/// Place one small cube at each corner of an AABB to visualise its extent.
-fn draw_aabb_corners(
-    renderer: &mut Renderer,
-    min: [f32; 3],
-    max: [f32; 3],
-    mat: helio::MaterialId,
-) {
-    let hs = 0.06_f32;
-    for &x in &[min[0], max[0]] {
-        for &y in &[min[1], max[1]] {
-            for &z in &[min[2], max[2]] {
-                let m = renderer.insert_mesh(box_mesh([x, y, z], [hs, hs, hs]));
-                let _ = insert_object(renderer, m, mat, glam::Mat4::IDENTITY, hs * 1.8);
-            }
-        }
-    }
-}
 
