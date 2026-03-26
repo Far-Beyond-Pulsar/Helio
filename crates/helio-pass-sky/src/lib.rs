@@ -247,6 +247,10 @@ impl RenderPass for SkyPass {
         "Sky"
     }
 
+    fn declare_resources(&self, _builder: &mut helio_v3::graph::ResourceBuilder) {
+        // DeferredLightPass declares and owns pre_aa resource.
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let uniforms = ShaderSkyUniforms::earth_like();
         ctx.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
@@ -266,9 +270,7 @@ impl RenderPass for SkyPass {
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
-                // Sky fills entire frame, so no need to clear. Keep Load to preserve
-                // pre-existing contents in case this pass is skipped in some graphs.
-                load: wgpu::LoadOp::Load,
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                 store: wgpu::StoreOp::Store,
             },
         };

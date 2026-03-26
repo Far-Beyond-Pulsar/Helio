@@ -35,6 +35,7 @@ pub struct DeferredLightPass {
     bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
     width: u32,
+    height: u32,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
     pre_aa_texture: wgpu::Texture,
@@ -321,6 +322,7 @@ impl DeferredLightPass {
             bind_group_2_key: None,
             bind_group_3_key: None,
             width,
+            height,
             fallback_tile_lists,
             fallback_tile_counts,
             pre_aa_texture,
@@ -352,6 +354,8 @@ impl DeferredLightPass {
             color_texture(device, width, height, self.pre_aa_format, "Deferred PreAA");
         self.pre_aa_texture = texture;
         self.pre_aa_view = view;
+        self.width = width;
+        self.height = height;
     }
 
     /// Set shadow quality at runtime (zero CPU cost per frame, one-time buffer write).
@@ -366,8 +370,37 @@ impl RenderPass for DeferredLightPass {
         "DeferredLight"
     }
 
+    fn declare_resources(&self, builder: &mut helio_v3::graph::ResourceBuilder) {
+        builder.read("gbuffer_albedo");
+        builder.read("gbuffer_normal");
+        builder.read("gbuffer_orm");
+        builder.read("gbuffer_emissive");
+        builder.read("gbuffer_depth");
+
+        let pre_aa_format = match self.pre_aa_format {
+            wgpu::TextureFormat::Rgba16Float => helio_v3::graph::ResourceFormat::Rgba16Float,
+            wgpu::TextureFormat::Bgra8UnormSrgb => helio_v3::graph::ResourceFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb => helio_v3::graph::ResourceFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::R16Float => helio_v3::graph::ResourceFormat::R16Float,
+            wgpu::TextureFormat::R8Unorm => helio_v3::graph::ResourceFormat::R8Unorm,
+            wgpu::TextureFormat::Depth32Float => helio_v3::graph::ResourceFormat::Depth32Float,
+            other => panic!("Unsupported pre_aa format for render graph: {:?}", other),
+        };
+
+        builder.write_color(
+            "pre_aa",
+            pre_aa_format,
+            helio_v3::graph::ResourceSize::Absolute {
+                width: self.width,
+                height: self.height,
+            },
+        );
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame.pre_aa = Some(&self.pre_aa_view);
+        if frame.pre_aa.is_none() {
+            frame.pre_aa = Some(&self.pre_aa_view);
+        }
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -510,8 +543,9 @@ impl RenderPass for DeferredLightPass {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         };
 
+        let pre_aa_view = ctx.frame.pre_aa.unwrap_or(&self.pre_aa_view);
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: &self.pre_aa_view,
+            view: pre_aa_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
