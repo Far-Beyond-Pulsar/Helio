@@ -217,16 +217,13 @@ impl DebugPass {
     }
 }
 
-impl RenderPass for DebugPass {
-    fn name(&self) -> &'static str {
-        "DebugDraw"
-    }
-
-    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
-        Ok(())
-    }
-
-    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+impl DebugPass {
+    /// Execute applying this debug draw pass to a specific LHS render target.
+    pub fn execute_on_target(
+        &mut self,
+        ctx: &mut PassContext,
+        target: &wgpu::TextureView,
+    ) -> HelioResult<()> {
         // O(1): single draw call — completely skipped when nothing is queued.
         if self.vertex_count == 0 {
             return Ok(());
@@ -266,7 +263,7 @@ impl RenderPass for DebugPass {
         };
 
         let color_attachment = wgpu::RenderPassColorAttachment {
-            view: ctx.target,
+            view: target,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
@@ -294,6 +291,20 @@ impl RenderPass for DebugPass {
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.draw(0..self.vertex_count, 0..1); // O(1) — single draw call
         Ok(())
+    }
+}
+
+impl RenderPass for DebugPass {
+    fn name(&self) -> &'static str {
+        "DebugDraw"
+    }
+
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        self.execute_on_target(ctx, ctx.target)
     }
 }
 

@@ -355,9 +355,26 @@ impl RenderPass for DebugDrawPass {
     }
 
     fn execute(&mut self, ctx: &mut helio_v3::PassContext) -> HelioResult<()> {
-        log::debug!("DebugDrawPass execute");
+        log::debug!("DebugDrawPass execute (editor_mode={}, vertex_count={})", self.editor_mode, self.pass.vertex_count);
+
+        // Editor grid draws into pre_aa buffer as a background layer before geometry resolves.
+        // World-space debug lines draw into final target after all scene passes.
+        let target_view = if self.editor_mode {
+            ctx.frame.pre_aa.unwrap_or(ctx.target)
+        } else {
+            ctx.target
+        };
+
+        // Temporarily swap `ctx.target` for internal pass rendering.
+        let previous_target = ctx.target;
+        ctx.target = target_view;
+
         let count_before = self.pass.vertex_count;
         let res = self.pass.execute(ctx);
+
+        // restore target (ctx is borrowed so reassign after draw)
+        ctx.target = previous_target;
+
         log::debug!("DebugDrawPass executed, count={} err={:?}", count_before, res);
         res
     }
@@ -1157,13 +1174,13 @@ fn build_default_graph(
     );
 
     // 7. World-space debug draw pass (after main geometry and billboards).
-    //  World-space lines are drawn with no depth test so they are always visible.
+    //  World-space lines are rendered without depth test by default (no occlusion).
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
         debug_camera_buf,
         config.surface_format,
         debug_state.clone(),
-        false, // disable geometry occlusion on final world debug lines
+        false, // worldspace debug lines with no occlusion
         false, // worldspace debug mode
     )));
 
