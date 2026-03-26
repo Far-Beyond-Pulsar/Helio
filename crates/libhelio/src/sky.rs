@@ -97,8 +97,12 @@ impl SkyActor {
     }
 
     /// Attach volumetric clouds to this sky actor.
+    ///
+    /// Automatically enables sky rendering when clouds are added.
     pub fn with_clouds(mut self, clouds: VolumetricClouds) -> Self {
         self.context.clouds = Some(clouds);
+        self.context.has_sky = true;
+        self.context.sky_state_changed = true;
         self
     }
 
