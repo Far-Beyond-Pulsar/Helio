@@ -16,7 +16,7 @@ use helio_pass_taa::TaaPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_transparent::TransparentPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
-use helio_pass_debug::{DebugPass, DebugVertex};
+use helio_pass_debug::{DebugPass, DebugVertex, DebugCameraUniform};
 use helio_v3::{ RenderGraph, RenderPass, Result as HelioResult };
 
 // TODO: Add these passes once cross-reference issues are resolved:
@@ -197,6 +197,7 @@ pub struct Renderer {
     full_res_depth_texture: Option<wgpu::Texture>,
     full_res_depth_view: Option<wgpu::TextureView>,
     surface_format: wgpu::TextureFormat,
+    debug_camera_buffer: wgpu::Buffer,
     ambient_color: [f32; 3],
     ambient_intensity: f32,
     clear_color: [f32; 4],
@@ -356,7 +357,15 @@ impl Renderer {
         scene.set_render_size(config.width, config.height);
 
         let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone());
+
+        let debug_camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<helio_pass_debug::DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer);
 
         // Depth buffer at INTERNAL resolution (all geometry passes render here).
         let (depth_texture, depth_view) = create_depth_resources(
@@ -387,6 +396,7 @@ impl Renderer {
             full_res_depth_texture,
             full_res_depth_view,
             surface_format: config.surface_format,
+            debug_camera_buffer,
             ambient_color: [0.05, 0.05, 0.08],
             ambient_intensity: 1.0,
             clear_color: [0.02, 0.02, 0.03, 1.0],
@@ -431,6 +441,7 @@ impl Renderer {
                 &self.scene,
                 config,
                 self.debug_state.clone(),
+                &self.debug_camera_buffer,
             );
         }
     }
@@ -454,6 +465,7 @@ impl Renderer {
                 &self.scene,
                 config,
                 self.debug_state.clone(),
+                &self.debug_camera_buffer,
             );
         }
     }
@@ -566,6 +578,7 @@ impl Renderer {
                     &self.scene,
                     config,
                     self.debug_state.clone(),
+                    &self.debug_camera_buffer,
                 );
             }
             GraphKind::Simple => {
@@ -635,6 +648,7 @@ impl Renderer {
             &self.scene,
             config,
             self.debug_state.clone(),
+            &self.debug_camera_buffer,
         );
         self.graph_kind = GraphKind::Default;
     }
@@ -813,6 +827,22 @@ impl Renderer {
         let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
         let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
         let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
+        let m = camera.proj * camera.view;
+        let col = m.to_cols_array();
+        let debug_camera_uniform = DebugCameraUniform {
+            view_proj: [
+                [col[0], col[1], col[2], col[3]],
+                [col[4], col[5], col[6], col[7]],
+                [col[8], col[9], col[10], col[11]],
+                [col[12], col[13], col[14], col[15]],
+            ],
+        };
+        self.queue.write_buffer(
+            &self.debug_camera_buffer,
+            0,
+            bytemuck::bytes_of(&debug_camera_uniform),
+        );
+
         let mut jittered_camera = *camera;
         jittered_camera.proj = jitter_mat * camera.proj;
         jittered_camera.jitter = [jx, jy];
@@ -917,6 +947,7 @@ fn build_default_graph(
     scene: &Scene,
     config: RendererConfig,
     debug_state: Arc<Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);
@@ -1061,7 +1092,7 @@ fn build_default_graph(
     // 7. Debug draw pass — overlays line-based debug visuals, per-editor mode.
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
-        camera_buf,
+        debug_camera_buf,
         config.surface_format,
         debug_state,
     )));

@@ -214,6 +214,7 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, format)
                 .with_shadow_quality(helio::ShadowQuality::Ultra),
         );
+        renderer.set_editor_mode(true);
 
         let mat = renderer.insert_material(make_material(
             [0.75, 0.72, 0.68, 1.0],

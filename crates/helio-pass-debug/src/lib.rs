@@ -9,6 +9,12 @@ use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const MAX_DEBUG_VERTS: u32 = 65536;
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct DebugCameraUniform {
+    pub view_proj: [[f32; 4]; 4],
+}
+
 /// A single debug vertex — position + colour.
 ///
 /// Matches the vertex input layout in `debug_draw.wgsl`:
