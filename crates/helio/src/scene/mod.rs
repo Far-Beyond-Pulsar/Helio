@@ -79,8 +79,9 @@ mod resources;
 mod types;
 mod virtual_geometry;
 
+pub use actor::{MeshActor, SceneActor};
 pub use camera::Camera;
-pub use core::{Scene, SceneActor};
+pub use core::Scene;
 pub use errors::*;
 pub use types::ObjectDescriptor;
 
