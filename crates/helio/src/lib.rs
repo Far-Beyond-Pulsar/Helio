@@ -37,5 +37,5 @@ pub use helio_v3::{
     DrawIndexedIndirectArgs, Error, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
 };
-pub use libhelio::{LightType, ShadowQuality};
+pub use libhelio::{LightType, ShadowQuality, VolumetricClouds, SkyContext};
 

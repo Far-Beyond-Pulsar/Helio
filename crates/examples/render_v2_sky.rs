@@ -193,6 +193,17 @@ impl ApplicationHandler for App {
         renderer.insert_light(point_light([2.5, 1.8, 1.5], [1.0, 0.3, 0.3], 3.0, 6.0));
         renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
 
+        renderer.spawn_volumetric_clouds(helio::VolumetricClouds {
+            coverage: 0.7,
+            density: 0.8,
+            base: 1200.0,
+            top: 1800.0,
+            wind_x: 0.8,
+            wind_z: 0.2,
+            speed: 1.3,
+            skylight_intensity: 0.25,
+        });
+
         self.state = Some(AppState {
             window,
             surface,

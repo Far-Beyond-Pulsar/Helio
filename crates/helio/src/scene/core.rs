@@ -78,6 +78,9 @@ pub struct Scene {
     /// An object is invisible if any of its groups intersects this mask.
     pub(in crate::scene) group_hidden: GroupMask,
 
+    /// Optional current volumetric cloud actor properties.
+    pub(in crate::scene) volumetric_clouds: Option<libhelio::SkyContext>,
+
     // ── Virtual geometry ──────────────────────────────────────────────────────
     /// All uploaded virtual meshes keyed by their handle.
     pub(in crate::scene) vg_meshes: HashMap<VirtualMeshId, VirtualMeshRecord>,
@@ -188,6 +191,7 @@ impl Scene {
             objects_layout_optimized: false, // start in persistent mode
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
+            volumetric_clouds: None,
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
             vg_objects: DenseArena::new(),
@@ -207,6 +211,31 @@ impl Scene {
     /// A reference to the [`GpuScene`].
     pub fn gpu_scene(&self) -> &GpuScene {
         &self.gpu_scene
+    }
+
+    /// Spawn or update the current volumetric clouds actor in the scene.
+    pub fn set_volumetric_clouds(&mut self, clouds: Option<libhelio::VolumetricClouds>) {
+        self.volumetric_clouds = clouds.map(|c| libhelio::SkyContext {
+            has_sky: true,
+            sky_state_changed: true,
+            sky_color: [0.1, 0.1, 0.15],
+            clouds: Some(c),
+        });
+    }
+
+    /// Remove the volumetric cloud actor from the scene.
+    pub fn clear_volumetric_clouds(&mut self) {
+        self.volumetric_clouds = None;
+    }
+
+    /// Returns a reference to the currently active volumetric clouds, if any.
+    pub fn volumetric_clouds(&self) -> Option<&libhelio::VolumetricClouds> {
+        self.volumetric_clouds.as_ref().and_then(|s| s.clouds.as_ref())
+    }
+
+    /// Returns effective sky context for the current frame.
+    pub fn sky_context(&self) -> libhelio::SkyContext {
+        self.volumetric_clouds.unwrap_or_else(libhelio::SkyContext::default)
     }
 
     /// Set the render target size for camera calculations.

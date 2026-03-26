@@ -803,6 +803,26 @@ impl Renderer {
         self.ambient_intensity = intensity;
     }
 
+    /// Spawn or update volumetric clouds actor in the scene.
+    pub fn spawn_volumetric_clouds(&mut self, clouds: libhelio::VolumetricClouds) {
+        self.scene.set_volumetric_clouds(Some(clouds));
+    }
+
+    /// Set or clear volumetric clouds in the scene.
+    pub fn set_volumetric_clouds(&mut self, clouds: Option<libhelio::VolumetricClouds>) {
+        self.scene.set_volumetric_clouds(clouds)
+    }
+
+    /// Remove volumetric clouds actor from the scene.
+    pub fn clear_volumetric_clouds(&mut self) {
+        self.scene.clear_volumetric_clouds();
+    }
+
+    /// Returns a reference to the current volumetric clouds actor if spawned.
+    pub fn volumetric_clouds(&self) -> Option<&libhelio::VolumetricClouds> {
+        self.scene.volumetric_clouds()
+    }
+
     /// Replace the active render graph. Use [`build_simple_graph`] or
     /// [`build_default_graph`](fn.build_default_graph.html) to construct one.
     /// The graph will NOT be automatically rebuilt on window resize.
@@ -1104,7 +1124,7 @@ impl Renderer {
             tile_light_lists: None,
             tile_light_counts: None,
             full_res_depth: self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView),
-            sky: libhelio::SkyContext::default(),
+            sky: self.scene.sky_context(),
             billboards: if self.billboard_scratch.is_empty() {
                 None
             } else {

@@ -225,7 +225,8 @@ impl ApplicationHandler for App {
         ));
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
-        let _floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 11.0));
+        // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
+        let _floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 32.0));
         let _nave_ceiling = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]));
         let _aisle_ceil_l = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
         let _aisle_ceil_r = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));

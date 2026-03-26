@@ -281,7 +281,21 @@ impl RenderPass for SkyPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let uniforms = ShaderSkyUniforms::earth_like();
+        let mut uniforms = ShaderSkyUniforms::earth_like();
+
+        if let Some(clouds) = ctx.frame_resources.sky.clouds {
+            uniforms.clouds_enabled = 1;
+            uniforms.cloud_coverage = clouds.coverage;
+            uniforms.cloud_density = clouds.density;
+            uniforms.cloud_base = clouds.base;
+            uniforms.cloud_top = clouds.top;
+            uniforms.cloud_wind_x = clouds.wind_x;
+            uniforms.cloud_wind_z = clouds.wind_z;
+            uniforms.cloud_speed = clouds.speed;
+            uniforms.skylight_intensity = clouds.skylight_intensity;
+        }
+
+        uniforms.time_sky = (ctx.frame as f32) * 0.03;
         ctx.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }

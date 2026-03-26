@@ -14,6 +14,42 @@ pub struct SkyUniforms {
     pub rayleigh_mie: [f32; 4],
 }
 
+/// Volumetric cloud properties. This struct is provided by a "volumetric_clouds" actor.
+#[derive(Debug, Clone, Copy)]
+pub struct VolumetricClouds {
+    /// Global cover amount (0.0..1.0)
+    pub coverage: f32,
+    /// Cloud density (thickness)
+    pub density: f32,
+    /// Base altitude (world units)
+    pub base: f32,
+    /// Top altitude (world units)
+    pub top: f32,
+    /// Horizontal wind in world X direction
+    pub wind_x: f32,
+    /// Horizontal wind in world Z direction
+    pub wind_z: f32,
+    /// Global wind speed multiplier
+    pub speed: f32,
+    /// Skylight intensity contribution from clouds
+    pub skylight_intensity: f32,
+}
+
+impl Default for VolumetricClouds {
+    fn default() -> Self {
+        Self {
+            coverage: 0.0,
+            density: 0.0,
+            base: 0.0,
+            top: 0.0,
+            wind_x: 0.0,
+            wind_z: 0.0,
+            speed: 0.0,
+            skylight_intensity: 0.0,
+        }
+    }
+}
+
 /// Sky state passed to passes that need sky information.
 #[derive(Debug, Clone, Copy)]
 pub struct SkyContext {
@@ -23,6 +59,8 @@ pub struct SkyContext {
     pub sky_state_changed: bool,
     /// Ambient sky color (approximation for non-sky areas)
     pub sky_color: [f32; 3],
+    /// Optional volumetric cloud properties from a `volumetric_clouds` actor.
+    pub clouds: Option<VolumetricClouds>,
 }
 
 impl Default for SkyContext {
@@ -31,6 +69,7 @@ impl Default for SkyContext {
             has_sky: false,
             sky_state_changed: false,
             sky_color: [0.1, 0.1, 0.15],
+            clouds: None,
         }
     }
 }
