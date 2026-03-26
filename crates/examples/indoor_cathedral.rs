@@ -228,7 +228,7 @@ impl ApplicationHandler for App {
             helio::SkyActor::indoor([0.05, 0.05, 0.1]),
         ));
 
-        renderer.scene_mut().insert_actor(helio::SceneActor::VolumetricClouds(libhelio::VolumetricClouds {
+        renderer.scene_mut().insert_actor(helio::SceneActor::VolumetricClouds(helio::VolumetricClouds {
             coverage: 0.7,
             density: 0.8,
             base: 1200.0,
