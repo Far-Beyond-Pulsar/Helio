@@ -29,7 +29,9 @@
       "Bash(\"d:\\\\Documents\\\\GitHub\\\\Helio\\\\crates\\\\helio-v3\\\\src\\\\scene\\\\mod.rs\" << 'EOF'\n//! GPU-native scene state\n\nmod gpu_scene;\nmod resources;\n\npub use gpu_scene::GpuScene;\npub use resources::SceneResources;\nEOF)",
       "Bash(\"d:\\\\Documents\\\\GitHub\\\\Helio\\\\crates\\\\helio-v3\\\\src\\\\scene\\\\gpu_scene.rs\" << 'EOF'\n//! Main GPU scene container\n\nuse std::sync::Arc;\nuse crate::scene::SceneResources;\n\n/// GPU-native scene state \\(all data on GPU\\)\npub struct GpuScene {\n    pub device: Arc<wgpu::Device>,\n    pub queue: Arc<wgpu::Queue>,\n    \n    // Frame counter\n    pub frame_count: u64,\n    pub width: u32,\n    pub height: u32,\n    \n    // Stub: Will add GpuLightBuffer, GpuMeshBuffer, etc. later\n}\n\nimpl GpuScene {\n    pub fn new\\(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>\\) -> Self {\n        Self {\n            device,\n            queue,\n            frame_count: 0,\n            width: 1920,\n            height: 1080,\n        }\n    }\n    \n    /// Get zero-copy references to GPU resources\n    pub fn resources\\(&self\\) -> SceneResources {\n        SceneResources {\n            // Stub: Will populate with actual buffers later\n            _marker: std::marker::PhantomData,\n        }\n    }\n    \n    /// Flush all managers \\(zero-cost at steady state\\)\n    pub fn flush\\(&mut self\\) {\n        // Stub: Will call manager.flush\\(\\) for each buffer\n    }\n}\nEOF)",
       "Bash(for f in src/*.rs src/**/*.rs)",
-      "Bash(done)"
+      "Bash(done)",
+      "Bash(cut:*)",
+      "Bash(tr:*)"
     ]
   }
 }

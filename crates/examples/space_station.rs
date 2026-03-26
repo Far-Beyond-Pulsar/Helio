@@ -145,64 +145,64 @@ impl ApplicationHandler for App {
         build_station(&mut renderer, mat);
 
         // Static directional (sunlight)
-        let _ = renderer.scene_mut().insert_light(directional_light(
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
             [0.35, -0.65, 0.25],
             [0.72, 0.82, 1.0],
             0.10,
-        ));
+        )));
 
         let hub_light_ids = [
-            renderer.scene_mut().insert_light(point_light([0.0, 14.0, 0.0], [0.82, 0.90, 1.0], 8.0, 28.0)),
-            renderer.scene_mut().insert_light(point_light([0.0, -9.0, 0.0], [0.70, 0.80, 1.0], 6.0, 22.0)),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 14.0, 0.0], [0.82, 0.90, 1.0], 8.0, 28.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, -9.0, 0.0], [0.70, 0.80, 1.0], 6.0, 22.0))).as_light().unwrap(),
         ];
         let hab_ring_light_ids = [
-            renderer.scene_mut().insert_light(point_light([35.0, 6.0, 0.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
-            renderer.scene_mut().insert_light(point_light([-35.0, 6.0, 0.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
-            renderer.scene_mut().insert_light(point_light([0.0, 6.0, 35.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
-            renderer.scene_mut().insert_light(point_light([0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5, 20.0)),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([35.0, 6.0, 0.0], [0.78, 0.88, 1.0], 5.5, 20.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-35.0, 6.0, 0.0], [0.78, 0.88, 1.0], 5.5, 20.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 6.0, 35.0], [0.78, 0.88, 1.0], 5.5, 20.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5, 20.0))).as_light().unwrap(),
         ];
         let ind_ring_light_ids = [
-            renderer.scene_mut().insert_light(point_light([62.0, -3.0, 0.0], [0.62, 0.76, 1.0], 7.0, 28.0)),
-            renderer.scene_mut().insert_light(point_light(
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([62.0, -3.0, 0.0], [0.62, 0.76, 1.0], 7.0, 28.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
                 [-62.0, -3.0, 0.0],
                 [0.62, 0.76, 1.0],
                 7.0,
                 28.0,
-            )),
-            renderer.scene_mut().insert_light(point_light([0.0, -3.0, 62.0], [0.62, 0.76, 1.0], 7.0, 28.0)),
-            renderer.scene_mut().insert_light(point_light(
+            ))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, -3.0, 62.0], [0.62, 0.76, 1.0], 7.0, 28.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
                 [0.0, -3.0, -62.0],
                 [0.62, 0.76, 1.0],
                 7.0,
                 28.0,
-            )),
+            ))).as_light().unwrap(),
         ];
         let engine_light_ids = [
-            renderer.scene_mut().insert_light(point_light([5.0, 5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0)),
-            renderer.scene_mut().insert_light(point_light(
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([5.0, 5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
                 [-5.0, 5.0, 58.0],
                 [1.0, 0.42, 0.06],
                 10.0,
                 22.0,
-            )),
-            renderer.scene_mut().insert_light(point_light(
+            ))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
                 [5.0, -5.0, 58.0],
                 [1.0, 0.42, 0.06],
                 10.0,
                 22.0,
-            )),
-            renderer.scene_mut().insert_light(point_light(
+            ))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
                 [-5.0, -5.0, 58.0],
                 [1.0, 0.42, 0.06],
                 10.0,
                 22.0,
-            )),
+            ))).as_light().unwrap(),
         ];
         let docking_light_id =
-            renderer.scene_mut().insert_light(point_light([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 0.0, -54.0], [1.0, 1.0, 0.92], 7.5, 26.0))).as_light().unwrap();
         let beacon_light_ids = [
-            renderer.scene_mut().insert_light(point_light([0.0, 6.0, 65.0], [1.0, 0.04, 0.04], 0.0, 14.0)),
-            renderer.scene_mut().insert_light(point_light([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 0.0, 14.0)),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 6.0, 65.0], [1.0, 0.04, 0.04], 0.0, 14.0))).as_light().unwrap(),
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 6.0, -65.0], [1.0, 0.04, 0.04], 0.0, 14.0))).as_light().unwrap(),
         ];
 
         self.state = Some(AppState {
@@ -455,7 +455,7 @@ impl AppState {
 fn build_station(renderer: &mut Renderer, mat: MaterialId) {
     macro_rules! add {
         ($cx:expr, $cy:expr, $cz:expr, $hx:expr, $hy:expr, $hz:expr) => {{
-            let _mesh = renderer.scene_mut().insert_mesh(box_mesh([$cx, $cy, $cz], [$hx, $hy, $hz]));
+            let _mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([$cx, $cy, $cz], [$hx, $hy, $hz]))).as_mesh().unwrap();
             let _ = insert_object(
                 renderer,
                 _mesh,
@@ -759,4 +759,6 @@ fn build_station(renderer: &mut Renderer, mat: MaterialId) {
         add!(vr * a.cos(), obs_y + 0.9, vr * a.sin(), 0.65, 0.55, 0.65);
     }
 }
+
+
 

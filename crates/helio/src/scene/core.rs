@@ -16,23 +16,16 @@ use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{LightId, MaterialId, ObjectId, TextureId, VirtualObjectId};
 use crate::material::MAX_TEXTURES;
-use crate::mesh::MeshPool;
-use crate::vg::VirtualMeshId;
+use crate::mesh::{MeshPool, MeshUpload};
+use crate::vg::{VirtualMeshId, VirtualMeshUpload};
 
-use super::actor::{MeshActor, SceneActor as SceneActorTrait};
+use super::actor::{LightActor, MeshActor, ObjectActor, SceneActor, SceneActorTrait, VirtualMeshActor};
 use super::camera::Camera;
 use super::types::{
     LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord,
     VirtualObjectRecord,
 };
 use libhelio::sky::SkyContext;
-
-/// Legacy scene actor handles world-level helper instances like sky or volumetric clouds.
-#[derive(Debug, Clone, Copy)]
-pub enum LegacySceneActor {
-    Sky(libhelio::SkyActor),
-    VolumetricClouds(libhelio::VolumetricClouds),
-}
 
 /// High-level scene management with persistent GPU-driven state.
 ///
@@ -86,9 +79,6 @@ pub struct Scene {
     /// Bitmask of currently hidden groups — bit N = GroupId(N) is hidden.
     /// An object is invisible if any of its groups intersects this mask.
     pub(in crate::scene) group_hidden: GroupMask,
-
-    /// Active legacy world-level actors (sky, volumetric clouds, etc.).
-    pub(in crate::scene) legacy_actors: Vec<LegacySceneActor>,
 
     /// Per-frame custom trait-based scene actors.
     pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
@@ -203,7 +193,6 @@ impl Scene {
             objects_layout_optimized: false, // start in persistent mode
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
-            legacy_actors: Vec::new(),
             custom_actors: Vec::new(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
@@ -226,94 +215,26 @@ impl Scene {
         &self.gpu_scene
     }
 
-    /// Set or remove the volumetric clouds actor in the scene.
-    ///
-    /// This is kept for compatibility and forwards to `insert_legacy_actor`.
-    pub fn set_volumetric_clouds(&mut self, clouds: Option<libhelio::VolumetricClouds>) {
-        match clouds {
-            Some(clouds) => self.insert_legacy_actor(LegacySceneActor::VolumetricClouds(clouds)),
-            None => self.clear_volumetric_clouds_actor(),
-        }
-    }
-
-    /// Remove the volumetric cloud actor from the scene.
-    pub fn clear_volumetric_clouds(&mut self) {
-        self.clear_volumetric_clouds_actor();
-    }
-
-    /// Insert a legacy scene actor (sky or volumetric clouds).
-    pub fn insert_legacy_actor(&mut self, actor: LegacySceneActor) {
-        match actor {
-            LegacySceneActor::Sky(sky_actor) => {
-                if let Some(slot) = self
-                    .legacy_actors
-                    .iter_mut()
-                    .find(|a| matches!(a, LegacySceneActor::Sky(_)))
-                {
-                    *slot = LegacySceneActor::Sky(sky_actor);
-                } else {
-                    self.legacy_actors.push(LegacySceneActor::Sky(sky_actor));
-                }
-            }
-            LegacySceneActor::VolumetricClouds(clouds) => {
-                if let Some(slot) = self
-                    .legacy_actors
-                    .iter_mut()
-                    .find(|a| matches!(a, LegacySceneActor::VolumetricClouds(_)))
-                {
-                    *slot = LegacySceneActor::VolumetricClouds(clouds);
-                } else {
-                    self.legacy_actors.push(LegacySceneActor::VolumetricClouds(clouds));
-                }
-            }
-        }
-    }
-
     /// Insert a custom trait-based scene actor.
-    pub fn insert_actor<A: SceneActorTrait + 'static>(&mut self, actor: A) {
+    ///
+    /// This can be e.g. `SceneActor::Sky`, `MeshActor`, `LightActor`, or other custom actors.
+    pub fn insert_actor<A: SceneActorTrait + 'static>(&mut self, mut actor: A) -> crate::scene::actor::SceneActorId {
+        actor.on_attach(self);
+        let id = actor.inserted_id();
         self.custom_actors.push(Box::new(actor));
-    }
-
-    /// Remove the explicit sky actor, if present.
-    pub fn clear_sky_actor(&mut self) {
-        self.legacy_actors.retain(|a| !matches!(a, LegacySceneActor::Sky(_)));
-    }
-
-    /// Remove the volumetric clouds actor.
-    pub fn clear_volumetric_clouds_actor(&mut self) {
-        self.legacy_actors
-            .retain(|a| !matches!(a, LegacySceneActor::VolumetricClouds(_)));
-    }
-
-    /// Returns a reference to the currently active volumetric clouds actor, if any.
-    pub fn volumetric_clouds(&self) -> Option<&libhelio::VolumetricClouds> {
-        self.legacy_actors
-            .iter()
-            .find_map(|a| match a {
-                LegacySceneActor::VolumetricClouds(c) => Some(c),
-                _ => None,
-            })
-    }
-
-    /// Returns a reference to the currently active sky actor, if any.
-    pub fn sky_actor(&self) -> Option<&libhelio::SkyActor> {
-        self.legacy_actors.iter().find_map(|a| match a {
-            LegacySceneActor::Sky(s) => Some(s),
-            _ => None,
-        })
+        id
     }
 
     /// Returns effective sky context for the current frame.
     pub fn sky_context(&self) -> SkyContext {
-        if let Some(sky_actor) = self.sky_actor() {
-            let mut context = sky_actor.context();
-            if context.clouds.is_none() {
-                context.clouds = self.volumetric_clouds().cloned();
+        // First preference: explicit sky actor.
+        for actor in self.custom_actors.iter() {
+            if let Some(sky) = actor.sky_context() {
+                return sky;
             }
-            context
-        } else {
-            SkyContext::default()
         }
+
+        SkyContext::default()
     }
 
     /// Set the render target size for camera calculations.
@@ -513,9 +434,10 @@ impl Scene {
     /// ```
     pub fn advance_frame(&mut self) {
         // Tick custom trait-based actors.
+        let scene_ptr: *mut Scene = self;
         for actor in self.custom_actors.iter_mut() {
             if actor.is_active() {
-                actor.on_tick(self);
+                unsafe { actor.on_tick(&mut *scene_ptr) };
             }
         }
 

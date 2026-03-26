@@ -266,7 +266,7 @@ impl HelioWasmApp for Demo {
                         for v in &mut vertices {
                             v.position = (Vec3::from(v.position) - center).to_array();
                         }
-                        let mesh_id = renderer.scene_mut().insert_mesh(helio::MeshUpload {
+                        let mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
                             vertices,
                             indices: mesh.indices.clone(),
                         });
@@ -298,7 +298,7 @@ impl HelioWasmApp for Demo {
                     [0.0; 3],
                     0.0,
                 ));
-                let mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 2.0));
+                let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 2.0));
                 let id = insert_object(renderer, mesh, mat, Mat4::IDENTITY, 2.0).unwrap();
                 (vec![id], 2.0, 240.0)
             }
@@ -319,7 +319,7 @@ impl HelioWasmApp for Demo {
             [0.0; 3],
             0.0,
         ));
-        let cube = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
         let field_radius = 12000.0_f32;
         let local_radius = (ship_radius * 40.0).clamp(120.0, 420.0);
@@ -361,13 +361,13 @@ impl HelioWasmApp for Demo {
         }
 
         // Ship lights
-        let engine_light = renderer.scene_mut().insert_light(point_light(
+        let engine_light = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0; 3],
             [0.35, 0.65, 1.0],
             1.8,
             ship_radius * 3.5,
         ));
-        let spotlight_left = renderer.scene_mut().insert_light(spot_light(
+        let spotlight_left = renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
             [0.0; 3],
             [0.0, 0.0, -1.0],
             [1.0, 1.0, 0.95],
@@ -376,7 +376,7 @@ impl HelioWasmApp for Demo {
             25_f32.to_radians(),
             35_f32.to_radians(),
         ));
-        let spotlight_right = renderer.scene_mut().insert_light(spot_light(
+        let spotlight_right = renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
             [0.0; 3],
             [0.0, 0.0, -1.0],
             [1.0, 1.0, 0.95],
@@ -385,25 +385,25 @@ impl HelioWasmApp for Demo {
             25_f32.to_radians(),
             35_f32.to_radians(),
         ));
-        let hull_port = renderer.scene_mut().insert_light(point_light(
+        let hull_port = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0; 3],
             [1.0, 0.1, 0.1],
             12.0,
             ship_radius * 4.0,
         ));
-        let hull_starboard = renderer.scene_mut().insert_light(point_light(
+        let hull_starboard = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0; 3],
             [0.1, 1.0, 0.1],
             12.0,
             ship_radius * 4.0,
         ));
-        let hull_top = renderer.scene_mut().insert_light(point_light(
+        let hull_top = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0; 3],
             [1.0, 1.0, 1.0],
             9.6,
             ship_radius * 4.0,
         ));
-        let hull_belly = renderer.scene_mut().insert_light(point_light(
+        let hull_belly = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0; 3],
             [0.4, 0.6, 1.0],
             8.4,
@@ -411,8 +411,8 @@ impl HelioWasmApp for Demo {
         ));
 
         // Distant stars (directional)
-        renderer.scene_mut().insert_light(directional_light([-0.5, -0.4, 0.8], [1.0, 0.98, 0.95], 0.8));
-        renderer.scene_mut().insert_light(directional_light([0.6, 0.2, -0.7], [0.2, 0.25, 0.4], 0.04));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.4, 0.8], [1.0, 0.98, 0.95], 0.8));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.6, 0.2, -0.7], [0.2, 0.25, 0.4], 0.04));
         renderer.set_ambient([0.04, 0.05, 0.08], 0.003);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
@@ -552,4 +552,6 @@ impl HelioWasmApp for Demo {
         )
     }
 }
+
+
 

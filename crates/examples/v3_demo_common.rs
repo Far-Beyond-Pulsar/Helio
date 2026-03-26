@@ -77,7 +77,7 @@ pub fn insert_object(
     transform: Mat4,
     radius: f32,
 ) -> helio::SceneResult<helio::ObjectId> {
-    renderer.scene_mut().insert_object(ObjectDescriptor {
+    let object_actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::object(ObjectDescriptor {
         mesh,
         material,
         transform,
@@ -89,7 +89,11 @@ pub fn insert_object(
         ],
         flags: 0,
         groups: helio::GroupMask::NONE,
-    })
+    }));
+
+    object_actor_id
+        .as_object()
+        .ok_or(helio::SceneError::InvalidHandle { resource: "object" })
 }
 
 /// Builds a cube mesh centred at `center` (mesh-local origin offset) with the
@@ -181,4 +185,5 @@ pub fn update_point_light(
         point_light(position.to_array(), color, intensity, range),
     );
 }
+
 

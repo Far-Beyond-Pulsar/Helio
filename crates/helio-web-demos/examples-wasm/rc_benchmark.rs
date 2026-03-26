@@ -54,7 +54,7 @@ impl HelioWasmApp for Demo {
         ));
 
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = renderer.scene_mut().insert_mesh(box_mesh([cx, cy, cz], [hx, hy, hz]));
+            let m = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([cx, cy, cz], [hx, hy, hz]));
             let _ = insert_object(
                 renderer,
                 m,
@@ -77,7 +77,7 @@ impl HelioWasmApp for Demo {
 
         let mut ids_vec: Vec<LightId> = LIGHT_BASE
             .iter()
-            .map(|&(pos, col, int, rng)| renderer.scene_mut().insert_light(point_light(pos, col, int, rng)))
+            .map(|&(pos, col, int, rng)| renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
             .collect();
         let light_ids = [ids_vec.remove(0), ids_vec.remove(0), ids_vec.remove(0)];
 
@@ -147,4 +147,6 @@ impl HelioWasmApp for Demo {
         )
     }
 }
+
+
 

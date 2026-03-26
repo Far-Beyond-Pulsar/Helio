@@ -165,7 +165,7 @@ impl ApplicationHandler for App {
 
         // ── Geometry ───────────────────────────────────────────────────────────────
         let mut add_box = |cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
+            let m = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]))).as_mesh().unwrap();
             let _ = insert_object(
                 &mut renderer,
                 m,
@@ -189,7 +189,7 @@ impl ApplicationHandler for App {
         // ── Lights ───────────────────────────────────────────────────────────────
         let light_ids: [LightId; 3] = LIGHT_BASE
             .iter()
-            .map(|&(pos, col, int, rng)| renderer.scene_mut().insert_light(point_light(pos, col, int, rng)))
+            .map(|&(pos, col, int, rng)| renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng))).as_light().unwrap())
             .collect::<Vec<_>>()
             .try_into()
             .expect("3 lights");
@@ -413,4 +413,6 @@ impl AppState {
         output.present();
     }
 }
+
+
 

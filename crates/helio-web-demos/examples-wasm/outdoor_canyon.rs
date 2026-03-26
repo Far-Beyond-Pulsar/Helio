@@ -52,22 +52,22 @@ impl HelioWasmApp for Demo {
             4.0,
         ));
 
-        let valley_floor = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 35.0));
-        let wall_l1 = renderer.scene_mut().insert_mesh(box_mesh([-12.0, 4.0, 0.0], [3.0, 4.0, 30.0]));
-        let wall_l2 = renderer.scene_mut().insert_mesh(box_mesh([-18.0, 8.0, 0.0], [3.0, 8.0, 25.0]));
-        let wall_l3 = renderer.scene_mut().insert_mesh(box_mesh([-24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
-        let wall_r1 = renderer.scene_mut().insert_mesh(box_mesh([12.0, 4.0, 0.0], [3.0, 4.0, 30.0]));
-        let wall_r2 = renderer.scene_mut().insert_mesh(box_mesh([18.0, 8.0, 0.0], [3.0, 8.0, 25.0]));
-        let wall_r3 = renderer.scene_mut().insert_mesh(box_mesh([24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
-        let terrace_l1 = renderer.scene_mut().insert_mesh(box_mesh([-13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
-        let terrace_l2 = renderer.scene_mut().insert_mesh(box_mesh([-19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
-        let terrace_r1 = renderer.scene_mut().insert_mesh(box_mesh([13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
-        let terrace_r2 = renderer.scene_mut().insert_mesh(box_mesh([19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
-        let mesa = renderer.scene_mut().insert_mesh(box_mesh([3.0, 12.0, -38.0], [10.0, 12.0, 8.0]));
-        let tent_a = renderer.scene_mut().insert_mesh(box_mesh([-2.5, 0.6, 8.0], [0.8, 0.6, 1.2]));
-        let tent_b = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.7, 7.5], [0.9, 0.7, 1.3]));
-        let tent_c = renderer.scene_mut().insert_mesh(box_mesh([2.8, 0.55, 8.5], [0.7, 0.55, 1.1]));
-        let firepit = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.15, 9.5], 0.2));
+        let valley_floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 35.0));
+        let wall_l1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([-12.0, 4.0, 0.0], [3.0, 4.0, 30.0]));
+        let wall_l2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([-18.0, 8.0, 0.0], [3.0, 8.0, 25.0]));
+        let wall_l3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([-24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
+        let wall_r1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([12.0, 4.0, 0.0], [3.0, 4.0, 30.0]));
+        let wall_r2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([18.0, 8.0, 0.0], [3.0, 8.0, 25.0]));
+        let wall_r3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([24.0, 14.0, 0.0], [3.0, 14.0, 20.0]));
+        let terrace_l1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([-13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
+        let terrace_l2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([-19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
+        let terrace_r1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([13.5, 8.1, -2.0], [1.5, 0.2, 12.0]));
+        let terrace_r2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([19.5, 16.1, -4.0], [1.5, 0.2, 8.0]));
+        let mesa = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([3.0, 12.0, -38.0], [10.0, 12.0, 8.0]));
+        let tent_a = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([-2.5, 0.6, 8.0], [0.8, 0.6, 1.2]));
+        let tent_b = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.7, 7.5], [0.9, 0.7, 1.3]));
+        let tent_c = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([2.8, 0.55, 8.5], [0.7, 0.55, 1.1]));
+        let firepit = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.15, 9.5], 0.2));
 
         for (m, mmat, r) in [
             (valley_floor, mat, 35.0),
@@ -90,17 +90,17 @@ impl HelioWasmApp for Demo {
             let _ = insert_object(renderer, m, mmat, glam::Mat4::IDENTITY, r);
         }
 
-        let sun_light = renderer.scene_mut().insert_light(directional_light(
+        let sun_light = renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
             [-0.0, -1.0, -0.5],
             [1.0, 0.9, 0.7],
             0.005,
         ));
         let fire_light =
-            renderer.scene_mut().insert_light(point_light([0.0, 0.5, 9.5], [1.0, 0.45, 0.1], 5.0, 12.0));
-        renderer.scene_mut().insert_light(point_light([-0.4, 0.4, 9.2], [1.0, 0.35, 0.05], 1.5, 5.0));
-        renderer.scene_mut().insert_light(point_light([0.4, 0.4, 9.8], [1.0, 0.35, 0.05], 1.5, 5.0));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 0.5, 9.5], [1.0, 0.45, 0.1], 5.0, 12.0));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-0.4, 0.4, 9.2], [1.0, 0.35, 0.05], 1.5, 5.0));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.4, 0.4, 9.8], [1.0, 0.35, 0.05], 1.5, 5.0));
         let moon_dir = Vec3::new(0.4, -0.7, 0.3).normalize();
-        renderer.scene_mut().insert_light(directional_light(
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
             [moon_dir.x, moon_dir.y, moon_dir.z],
             [0.5, 0.65, 1.0],
             0.05,
@@ -199,4 +199,6 @@ impl HelioWasmApp for Demo {
         )
     }
 }
+
+
 

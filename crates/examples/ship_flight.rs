@@ -139,7 +139,7 @@ fn build_asteroid_field(
         [0.0, 0.0, 0.0],
         0.0,
     ));
-    let cube = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+    let cube = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
 
     let local_radius = (ship_radius * 40.0).clamp(120.0, 420.0);
     let spawn_asteroid =
@@ -192,7 +192,7 @@ fn upload_ship_meshes(
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], ship_bounds.radius));
+        let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], ship_bounds.radius))).as_mesh().unwrap();
         return vec![v3_demo_common::insert_object(
             renderer,
             mesh,
@@ -213,10 +213,10 @@ fn upload_ship_meshes(
                 let centered = Vec3::from_array(vertex.position) - ship_bounds.center;
                 vertex.position = centered.to_array();
             }
-            let mesh_id = renderer.scene_mut().insert_mesh(helio::MeshUpload {
+            let mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
                 vertices,
                 indices: mesh.indices.clone(),
-            });
+            })).as_mesh().unwrap();
             let material = mesh
                 .material_index
                 .and_then(|i| material_ids.get(i).copied())
@@ -584,16 +584,16 @@ impl ApplicationHandler for App {
         );
         renderer.set_clear_color([0.0, 0.0, 0.01, 1.0]);
         renderer.set_ambient([0.15, 0.15, 0.20], 0.8); // Increased ambient lighting
-        renderer.scene_mut().insert_light(directional_light(
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
             [-0.55, -0.38, -0.74],
             [1.0, 0.97, 0.88],
             4.2,
-        ));
-        renderer.scene_mut().insert_light(directional_light(
+        )));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
             [0.72, 0.18, 0.68],
             [0.50, 0.70, 1.0],
             0.65,
-        ));
+        )));
 
         // Add scattered point lights throughout the asteroid field
         let light_positions = [
@@ -608,7 +608,7 @@ impl ApplicationHandler for App {
         ];
 
         for (position, color, intensity, range) in &light_positions {
-            renderer.scene_mut().insert_light(point_light(*position, *color, *intensity, *range));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(*position, *color, *intensity, *range)));
         }
 
         let (ship_radius, ship_ids) = match load_ship() {
@@ -628,7 +628,7 @@ impl ApplicationHandler for App {
                     [0.0, 0.0, 0.0],
                     0.0,
                 ));
-                let mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 2.0));
+                let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 2.0))).as_mesh().unwrap();
                 (
                     2.0,
                     vec![v3_demo_common::insert_object(
@@ -655,17 +655,17 @@ impl ApplicationHandler for App {
         );
 
         // Ship lights - engine thruster
-        let engine_light = renderer.scene_mut().insert_light(point_light(
+        let engine_light = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0, 0.0, ship_radius * 0.8],
             [0.35, 0.65, 1.0],
             1.8,
             ship_radius * 3.5,
-        ));
+        ))).as_light().unwrap();
 
         // Ship lights - forward spotlights (headlights)
         let spotlight_range = ship_radius * 15.0;
         let spotlight_intensity = 35.0;
-        let forward_spotlight_left = renderer.scene_mut().insert_light(spot_light(
+        let forward_spotlight_left = renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
             [-ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9], // Position: left side of nose
             [0.0, 0.0, -1.0],                                             // Direction: forward
             [1.0, 1.0, 0.95],                                             // Color: warm white
@@ -673,8 +673,8 @@ impl ApplicationHandler for App {
             spotlight_range,
             25_f32.to_radians(), // Inner angle: 25 degrees
             35_f32.to_radians(), // Outer angle: 35 degrees
-        ));
-        let forward_spotlight_right = renderer.scene_mut().insert_light(spot_light(
+        ))).as_light().unwrap();
+        let forward_spotlight_right = renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
             [ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9], // Position: right side of nose
             [0.0, 0.0, -1.0],                                            // Direction: forward
             [1.0, 1.0, 0.95],                                            // Color: warm white
@@ -682,35 +682,35 @@ impl ApplicationHandler for App {
             spotlight_range,
             25_f32.to_radians(),
             35_f32.to_radians(),
-        ));
+        ))).as_light().unwrap();
 
         // Ship lights - hull marker lights (navigation lights)
         let hull_intensity = 12.0;
         let hull_range = ship_radius * 4.0;
-        let hull_light_port = renderer.scene_mut().insert_light(point_light(
+        let hull_light_port = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [-ship_radius * 0.75, ship_radius * 0.2, 0.0], // Left wing
             [1.0, 0.1, 0.1],                               // Red (port)
             hull_intensity,
             hull_range,
-        ));
-        let hull_light_starboard = renderer.scene_mut().insert_light(point_light(
+        ))).as_light().unwrap();
+        let hull_light_starboard = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [ship_radius * 0.75, ship_radius * 0.2, 0.0], // Right wing
             [0.1, 1.0, 0.1],                              // Green (starboard)
             hull_intensity,
             hull_range,
-        ));
-        let hull_light_top = renderer.scene_mut().insert_light(point_light(
+        ))).as_light().unwrap();
+        let hull_light_top = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0, ship_radius * 0.5, ship_radius * 0.2], // Top center
             [1.0, 1.0, 1.0],                             // White
             hull_intensity * 0.8,
             hull_range,
-        ));
-        let hull_light_belly = renderer.scene_mut().insert_light(point_light(
+        ))).as_light().unwrap();
+        let hull_light_belly = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
             [0.0, -ship_radius * 0.4, ship_radius * 0.2], // Bottom center
             [0.4, 0.6, 1.0],                              // Blue
             hull_intensity * 0.7,
             hull_range,
-        ));
+        ))).as_light().unwrap();
 
         let ship = Ship {
             ids: ship_ids,
@@ -884,4 +884,6 @@ fn main() {
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
+
+
 

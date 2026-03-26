@@ -224,13 +224,17 @@ pub fn upload_scene(renderer: &mut Renderer, scene: &ConvertedScene) -> Result<U
     let mesh_ids = scene
         .meshes
         .iter()
-        .map(|mesh| {
-            renderer.scene_mut().insert_mesh(helio::MeshUpload {
+        .filter_map(|mesh| {
+            let actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
                 vertices: mesh.vertices.clone(),
                 indices: mesh.indices.clone(),
-            })
+            }));
+            match actor_id {
+                helio::SceneActorId::Mesh(id) => Some(id),
+                _ => None,
+            }
         })
-        .collect();
+        .collect::<Vec<_>>() ;
     Ok(UploadedScene {
         mesh_ids,
         material_ids,
@@ -345,4 +349,6 @@ impl SceneRegistry {
         self.assets.remove(&handle)
     }
 }
+
+
 

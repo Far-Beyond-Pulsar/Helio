@@ -47,7 +47,7 @@ impl super::super::Scene {
     ///     ..Default::default()
     /// });
     /// ```
-    pub fn insert_light(&mut self, light: GpuLight) -> LightId {
+    pub(in crate::scene) fn insert_light(&mut self, light: GpuLight) -> LightId {
         let (id, dense_index) = self.lights.insert(LightRecord { gpu: light });
         let pushed = self.gpu_scene.lights.push(light);
         debug_assert_eq!(pushed, dense_index);

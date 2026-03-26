@@ -69,6 +69,7 @@
 //! See the [GPU-Driven Pipeline](https://docs.farbeyondpulsar.com/helio/gpu-driven-pipeline)
 //! documentation for complete architectural details.
 
+mod actor;
 mod camera;
 mod core;
 mod errors;
@@ -79,7 +80,7 @@ mod resources;
 mod types;
 mod virtual_geometry;
 
-pub use actor::{MeshActor, SceneActor};
+pub use actor::{MeshActor, SceneActor, SceneActorId, SceneActorTrait};
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;

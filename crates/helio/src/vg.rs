@@ -31,6 +31,7 @@ pub struct VirtualMeshId(pub(crate) u32);
 /// The scene splits this into meshlets automatically when you call
 /// `Scene::insert_virtual_mesh()`.  Keep the CPU-side data alive only until
 /// after `Scene::flush()` returns.
+#[derive(Debug, Clone)]
 pub struct VirtualMeshUpload {
     pub vertices: Vec<PackedVertex>,
     pub indices: Vec<u32>,

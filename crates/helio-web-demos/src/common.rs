@@ -76,12 +76,15 @@ pub fn spot_light(
 
 pub fn insert_object(
     renderer: &mut Renderer,
-    mesh: MeshId,
+    mesh: helio::SceneActorId,
     material: MaterialId,
     transform: Mat4,
     radius: f32,
 ) -> helio::SceneResult<helio::ObjectId> {
-    renderer.scene_mut().insert_object(ObjectDescriptor {
+    let mesh = mesh
+        .as_mesh()
+        .ok_or(helio::SceneError::InvalidHandle { resource: "mesh" })?;
+    let object_actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::object(ObjectDescriptor {
         mesh,
         material,
         transform,
@@ -93,7 +96,10 @@ pub fn insert_object(
         ],
         flags: 0,
         groups: helio::GroupMask::NONE,
-    })
+    }));
+    object_actor_id
+        .as_object()
+        .ok_or(helio::SceneError::InvalidHandle { resource: "object" })
 }
 
 pub fn cube_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
@@ -163,4 +169,6 @@ pub fn plane_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
         indices: vec![0, 2, 1, 0, 3, 2],
     }
 }
+
+
 

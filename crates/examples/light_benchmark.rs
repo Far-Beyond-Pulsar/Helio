@@ -205,7 +205,7 @@ impl ApplicationHandler for App {
 
         let mut add =
             |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-                let m = r.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
+                let m = r.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]))).as_mesh().unwrap();
                 let _ = insert_object(
                     r,
                     m,
@@ -257,7 +257,7 @@ impl ApplicationHandler for App {
         let light_ids: Vec<LightId> = base_lights
             .iter()
             .map(|&(pos, col, intensity, range)| {
-                renderer.scene_mut().insert_light(point_light(pos, col, intensity, range))
+                renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, col, intensity, range))).as_light().unwrap()
             })
             .collect();
 
@@ -605,4 +605,6 @@ impl AppState {
         }
     }
 }
+
+
 

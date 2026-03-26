@@ -108,10 +108,6 @@ impl SkyActor {
         self
     }
 
-    pub(crate) fn into_context(self) -> SkyContext {
-        self.context
-    }
-
     /// Get a copy of the internal sky context for renderer use.
     pub fn context(&self) -> SkyContext {
         self.context

@@ -64,7 +64,7 @@ impl HelioWasmApp for Demo {
             [0.0; 3],
             0.0,
         ));
-        let ground = renderer.scene_mut().insert_mesh(crate::common::box_mesh(
+        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(crate::common::box_mesh(
             [0.0, -1.0, 0.0],
             [200.0, 0.4, 200.0],
         ));
@@ -94,7 +94,7 @@ impl HelioWasmApp for Demo {
                 0.0,
             )),
         ];
-        let rock_mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let rock_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
         let mut seed: u64 = 0xB00B1E5_CAFEBABE;
         for i in 0..ROCK_COUNT {
@@ -132,7 +132,7 @@ impl HelioWasmApp for Demo {
             Ok(scene) => {
                 let mat_ids = upload_scene_materials(renderer, &scene).unwrap_or_default();
                 for mesh in &scene.meshes {
-                    let mesh_id = renderer.scene_mut().insert_mesh(helio::MeshUpload {
+                    let mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
                         vertices: mesh.vertices.clone(),
                         indices: mesh.indices.clone(),
                     });
@@ -162,15 +162,15 @@ impl HelioWasmApp for Demo {
 
         // Lighting
         let sun_light_id =
-            renderer.scene_mut().insert_light(directional_light([-0.5, -0.8, 0.3], [1.0, 0.97, 0.88], 2.2));
-        renderer.scene_mut().insert_light(directional_light([0.3, 0.6, -0.8], [0.3, 0.4, 0.6], 0.05));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.8, 0.3], [1.0, 0.97, 0.88], 2.2));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.3, 0.6, -0.8], [0.3, 0.4, 0.6], 0.05));
         // Scatter a few warm rock pool lights
         let mut light_seed: u64 = 0xFEEDFACE;
         for _ in 0..6 {
             let a = lcg(&mut light_seed) * std::f32::consts::TAU;
             let d = 5.0 + lcg(&mut light_seed) * 25.0;
             let p = Vec3::new(a.cos() * d, 1.5, a.sin() * d);
-            renderer.scene_mut().insert_light(point_light(p.to_array(), [1.0, 0.85, 0.60], 4.0, 18.0));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p.to_array(), [1.0, 0.85, 0.60], 4.0, 18.0));
         }
         renderer.set_ambient([0.4, 0.42, 0.48], 0.12);
 
@@ -249,4 +249,6 @@ impl HelioWasmApp for Demo {
         )
     }
 }
+
+
 

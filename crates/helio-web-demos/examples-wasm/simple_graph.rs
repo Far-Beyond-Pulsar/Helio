@@ -45,12 +45,12 @@ impl HelioWasmApp for Demo {
             [0.0; 3],
             0.0,
         ));
-        let mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 1.0));
+        let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 1.0));
         let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, 1.0);
 
         // Simple lighting
-        renderer.scene_mut().insert_light(directional_light([0.4, -0.8, 0.5], [1.0, 1.0, 1.0], 1.2));
-        renderer.scene_mut().insert_light(point_light([3.0, 2.0, 2.0], [0.5, 0.7, 1.0], 6.0, 12.0));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.4, -0.8, 0.5], [1.0, 1.0, 1.0], 1.2));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([3.0, 2.0, 2.0], [0.5, 0.7, 1.0], 6.0, 12.0));
         renderer.set_ambient([0.4, 0.45, 0.5], 0.15);
 
         Self {
@@ -123,4 +123,6 @@ impl HelioWasmApp for Demo {
         )
     }
 }
+
+
 
