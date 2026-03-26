@@ -322,13 +322,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // non-uniform branch/early-return.
     var sky_col = sample_sky_lut(ray_dir);
 
-    // Below horizon: ground + sky fade (remove black band by blending with sampled LUT)
-    if ray_dir.y < -0.01 {
-        let ground     = vec3<f32>(0.12, 0.10, 0.09);
-        let ground_lit = ground * max(sky.sun_direction.y, 0.0) * sky.sun_intensity * 0.02;
-        let fade      = smoothstep(-0.2, -0.01, ray_dir.y); // 0 at horizon, 1 deep down
-        let low_col   = mix(sky_col, ground_lit, fade);
-        return vec4<f32>(aces_approx(low_col * sky.exposure), 1.0);
+    // Below horizon: preserve sunset colors with gradual darkening to night.
+    if ray_dir.y < 0.0 {
+        let t = clamp(-ray_dir.y, 0.0, 1.0); // 0 at horizon, 1 at straight down
+        let dark = vec3<f32>(0.02, 0.01, 0.005);
+        let descent = pow(t, 1.8); // smooth non-linear falloff
+        let sunset_col = mix(sky_col, dark, descent);
+        return vec4<f32>(aces_approx(sunset_col * sky.exposure), 1.0);
     }
 
     // Sun disc — rendered per-pixel so it stays sharp at any resolution
