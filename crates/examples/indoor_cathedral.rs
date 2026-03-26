@@ -224,12 +224,9 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        renderer.scene_mut().insert_actor(helio::SceneActor::Sky(helio::SkyActor::new(libhelio::sky::SkyContext {
-            has_sky: false, // no sky – indoor scene
-            sky_state_changed: false,
-            sky_color: [0.05, 0.05, 0.1], // very dim ambient for deep shadows
-            clouds: None,
-        })));
+        renderer.scene_mut().insert_actor(helio::SceneActor::Sky(
+            helio::SkyActor::indoor([0.05, 0.05, 0.1]),
+        ));
 
         renderer.scene_mut().insert_actor(helio::SceneActor::VolumetricClouds(libhelio::VolumetricClouds {
             coverage: 0.7,

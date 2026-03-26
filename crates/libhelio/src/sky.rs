@@ -66,12 +66,55 @@ pub struct SkyContext {
 /// Scene actor representing a sky system (atmospheric sky + optional clouds).
 #[derive(Debug, Clone, Copy)]
 pub struct SkyActor {
-    pub context: SkyContext,
+    context: SkyContext,
 }
 
 impl SkyActor {
-    pub fn new(context: SkyContext) -> Self {
-        Self { context }
+    /// Create a sky actor in indoors mode (no sky, custom ambient color).
+    pub fn indoor(sky_color: [f32; 3]) -> Self {
+        let mut ctx = SkyContext::default();
+        ctx.sky_color = sky_color;
+        SkyActor { context: ctx }
+    }
+
+    /// Create a default sky actor (no sky, default ambient color).
+    pub fn new() -> Self {
+        SkyActor { context: SkyContext::default() }
+    }
+
+    /// Enable atmospheric sky rendering with this sky color.
+    pub fn with_sky_color(mut self, sky_color: [f32; 3]) -> Self {
+        self.context.has_sky = true;
+        self.context.sky_state_changed = true;
+        self.context.sky_color = sky_color;
+        self
+    }
+
+    /// Set the ambient fallback color when sky is not present.
+    pub fn with_ambient_color(mut self, sky_color: [f32; 3]) -> Self {
+        self.context.sky_color = sky_color;
+        self
+    }
+
+    /// Attach volumetric clouds to this sky actor.
+    pub fn with_clouds(mut self, clouds: VolumetricClouds) -> Self {
+        self.context.clouds = Some(clouds);
+        self
+    }
+
+    /// Clears volumetric clouds from this sky actor.
+    pub fn without_clouds(mut self) -> Self {
+        self.context.clouds = None;
+        self
+    }
+
+    pub(crate) fn into_context(self) -> SkyContext {
+        self.context
+    }
+
+    /// Get a copy of the internal sky context for renderer use.
+    pub fn context(&self) -> SkyContext {
+        self.context
     }
 }
 
@@ -83,6 +126,12 @@ impl Default for SkyContext {
             sky_color: [0.1, 0.1, 0.15],
             clouds: None,
         }
+    }
+}
+
+impl Default for SkyActor {
+    fn default() -> Self {
+        SkyActor::new()
     }
 }
 

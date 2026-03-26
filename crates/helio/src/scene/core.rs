@@ -24,6 +24,7 @@ use super::types::{
     LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord,
     VirtualObjectRecord,
 };
+use libhelio::sky::SkyContext;
 
 /// Scene actor handles inserting world-level helpers like sky or volumetric clouds.
 #[derive(Debug, Clone, Copy)]
@@ -292,15 +293,15 @@ impl Scene {
     }
 
     /// Returns effective sky context for the current frame.
-    pub fn sky_context(&self) -> libhelio::SkyContext {
+    pub fn sky_context(&self) -> SkyContext {
         if let Some(sky_actor) = self.sky_actor() {
-            let mut context = sky_actor.context;
+            let mut context = sky_actor.context();
             if context.clouds.is_none() {
                 context.clouds = self.volumetric_clouds().cloned();
             }
             context
         } else {
-            libhelio::SkyContext::default()
+            SkyContext::default()
         }
     }
 
