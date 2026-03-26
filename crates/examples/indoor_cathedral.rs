@@ -224,6 +224,17 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
+        renderer.scene_mut().set_volumetric_clouds(Some(helio::VolumetricClouds {
+            coverage: 0.7,
+            density: 0.8,
+            base: 1200.0,
+            top: 1800.0,
+            wind_x: 0.8,
+            wind_z: 0.2,
+            speed: 1.3,
+            skylight_intensity: 0.25,
+        }));
+
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
         let _floor = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 32.0));
