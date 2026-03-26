@@ -29,21 +29,21 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let concrete = renderer.insert_material(make_material(
+        let concrete = renderer.scene_mut().insert_material(make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.8,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let glass = renderer.insert_material(make_material(
+        let glass = renderer.scene_mut().insert_material(make_material(
             [0.3, 0.35, 0.4, 0.5],
             0.1,
             0.9,
             [0.0; 3],
             0.0,
         ));
-        let pole_mat = renderer.insert_material(make_material(
+        let pole_mat = renderer.scene_mut().insert_material(make_material(
             [0.2, 0.2, 0.22, 1.0],
             0.3,
             0.8,
@@ -52,7 +52,7 @@ impl HelioWasmApp for Demo {
         ));
 
         // Ground
-        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 30.0));
+        let ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 30.0));
         let _ = insert_object(renderer, ground, concrete, glam::Mat4::IDENTITY, 30.0);
 
         // Buildings arranged around a central plaza
@@ -64,10 +64,10 @@ impl HelioWasmApp for Demo {
             ([0.0, 8.0, -20.0], [6.0, 8.0, 3.0]),
         ];
         for (pos, ext) in bld_data {
-            let m = renderer.insert_mesh(box_mesh(pos, ext));
+            let m = renderer.scene_mut().insert_mesh(box_mesh(pos, ext));
             let _ = insert_object(renderer, m, concrete, glam::Mat4::IDENTITY, 10.0);
             // Glass band near top
-            let gw = renderer.insert_mesh(box_mesh(
+            let gw = renderer.scene_mut().insert_mesh(box_mesh(
                 [pos[0], pos[1] * 2.0 - 1.0, pos[2]],
                 [ext[0], 0.4, ext[2]],
             ));
@@ -77,10 +77,10 @@ impl HelioWasmApp for Demo {
         // Streetlamp poles (4 corners of the plaza)
         let lamp_positions = [[-8.0_f32, -8.0], [8.0, -8.0], [-8.0, 8.0], [8.0, 8.0]];
         for [lx, lz] in lamp_positions {
-            let pole = renderer.insert_mesh(box_mesh([lx, 2.5, lz], [0.08, 2.5, 0.08]));
+            let pole = renderer.scene_mut().insert_mesh(box_mesh([lx, 2.5, lz], [0.08, 2.5, 0.08]));
             let _ = insert_object(renderer, pole, pole_mat, glam::Mat4::IDENTITY, 2.5);
             // Warm streetlight
-            renderer.insert_light(point_light([lx, 5.2, lz], [1.0, 0.85, 0.55], 6.0, 14.0));
+            renderer.scene_mut().insert_light(point_light([lx, 5.2, lz], [1.0, 0.85, 0.55], 6.0, 14.0));
         }
 
         renderer.set_ambient([0.05, 0.08, 0.15], 0.03);

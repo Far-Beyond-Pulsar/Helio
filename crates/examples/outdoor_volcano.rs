@@ -191,14 +191,14 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, format),
         );
 
-        let rock_mat = renderer.insert_material(make_material(
+        let rock_mat = renderer.scene_mut().insert_material(make_material(
             [0.25, 0.2, 0.18, 1.0],
             0.9,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let lava_mat = renderer.insert_material(make_material(
+        let lava_mat = renderer.scene_mut().insert_material(make_material(
             [0.3, 0.08, 0.02, 1.0],
             0.9,
             0.0,
@@ -206,7 +206,7 @@ impl ApplicationHandler for App {
             3.0,
         ));
 
-        let _island_ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 55.0));
+        let _island_ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 55.0));
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _island_ground,
@@ -215,13 +215,13 @@ impl ApplicationHandler for App {
             55.0,
         );
 
-        let _cone_l1 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [22.0, 5.0, 20.0]));
-        let _cone_l2 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [15.5, 6.5, 14.0]));
-        let _cone_l3 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [10.0, 6.5, 9.5]));
-        let _cone_l4 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 6.0, 5.5]));
-        let _cone_l5 = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.8, 4.5, 2.8]));
-        let _crater_rim = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.2, 0.4, 3.2]));
-        let _lava_lake = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.2, 0.05, 2.2]));
+        let _cone_l1 = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [22.0, 5.0, 20.0]));
+        let _cone_l2 = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [15.5, 6.5, 14.0]));
+        let _cone_l3 = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [10.0, 6.5, 9.5]));
+        let _cone_l4 = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 6.0, 5.5]));
+        let _cone_l5 = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.8, 4.5, 2.8]));
+        let _crater_rim = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.2, 0.4, 3.2]));
+        let _lava_lake = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.2, 0.05, 2.2]));
         for (&m, t) in [
             _cone_l1,
             _cone_l2,
@@ -259,16 +259,16 @@ impl ApplicationHandler for App {
         );
 
         let _flow_left: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 5.0])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 6.0])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 5.0])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 6.0])),
         ];
         let _flow_right: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 4.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 5.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.12, 2.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 3.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.4, 0.12, 4.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.1, 5.5])),
         ];
         for (&m, t) in _flow_left.iter().chain(_flow_right.iter()).zip(
             [
@@ -293,9 +293,9 @@ impl ApplicationHandler for App {
         }
 
         let _lava_pools: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 0.06, 3.0])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.06, 2.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.06, 2.0])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 0.06, 3.0])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.06, 2.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.06, 2.0])),
         ];
         for (&m, t) in _lava_pools.iter().zip(
             [
@@ -316,7 +316,7 @@ impl ApplicationHandler for App {
 
         let _boulders: Vec<MeshId> = BOULDERS
             .iter()
-            .map(|&(_x, _yh, _z, hs)| renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], hs)))
+            .map(|&(_x, _yh, _z, hs)| renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], hs)))
             .collect();
         for (&m, &(x, yh, z, _)) in _boulders.iter().zip(BOULDERS.iter()) {
             let _ = v3_demo_common::insert_object(
@@ -329,11 +329,11 @@ impl ApplicationHandler for App {
         }
 
         let _scorch_patches: Vec<MeshId> = vec![
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.5, 0.02, 3.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 3.0])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 4.0])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 2.5])),
-            renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 2.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.5, 0.02, 3.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 3.0])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 4.0])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.02, 2.5])),
+            renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 0.02, 2.5])),
         ];
         for (&m, t) in _scorch_patches.iter().zip(
             [
@@ -355,7 +355,7 @@ impl ApplicationHandler for App {
         }
 
         let ocean_dir = glam::Vec3::new(-0.3, -0.6, 0.2).normalize();
-        let _ocean_light_id = renderer.insert_light(directional_light(
+        let _ocean_light_id = renderer.scene_mut().insert_light(directional_light(
             [ocean_dir.x, ocean_dir.y, ocean_dir.z],
             [0.3, 0.5, 1.0],
             0.04,
@@ -363,7 +363,7 @@ impl ApplicationHandler for App {
         let mut lava_light_ids = Vec::new();
         for &(x, y, z, r, g, b, intensity, range) in LAVA_LIGHTS {
             let p = [x, y, z];
-            lava_light_ids.push(renderer.insert_light(point_light(p, [r, g, b], intensity, range)));
+            lava_light_ids.push(renderer.scene_mut().insert_light(point_light(p, [r, g, b], intensity, range)));
         }
         renderer.set_ambient([0.5, 0.1, 0.02], 0.04);
         renderer.set_clear_color([0.06, 0.01, 0.01, 1.0]);
@@ -563,9 +563,7 @@ impl AppState {
             let phase = i as f32 * 1.37;
             let fi = f(phase, 8.0 + i as f32 * 1.1, 0.06 + (i % 3) as f32 * 0.03);
             let p = [x, y, z];
-            let _ = self
-                .renderer
-                .update_light(id, point_light(p, [r, g, b], intensity * fi, range));
+            let _ = self.renderer.scene_mut().update_light(id, point_light(p, [r, g, b], intensity * fi, range));
         }
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);

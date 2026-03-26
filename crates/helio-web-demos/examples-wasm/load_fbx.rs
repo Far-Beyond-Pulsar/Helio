@@ -36,35 +36,35 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         // Runtime file I/O is not available on WASM.
         // Build a simple showcase stage as a stand-in for the loaded FBX.
-        let floor_m = renderer.insert_material(make_material(
+        let floor_m = renderer.scene_mut().insert_material(make_material(
             [0.07, 0.08, 0.10, 1.0],
             0.16,
             0.02,
             [0.0; 3],
             0.0,
         ));
-        let pedestal_m = renderer.insert_material(make_material(
+        let pedestal_m = renderer.scene_mut().insert_material(make_material(
             [0.11, 0.12, 0.15, 1.0],
             0.28,
             0.04,
             [0.0; 3],
             0.0,
         ));
-        let backdrop_m = renderer.insert_material(make_material(
+        let backdrop_m = renderer.scene_mut().insert_material(make_material(
             [0.04, 0.05, 0.08, 1.0],
             0.82,
             0.0,
             [0.04, 0.06, 0.12],
             0.03,
         ));
-        let cube_mat = renderer.insert_material(make_material(
+        let cube_mat = renderer.scene_mut().insert_material(make_material(
             [0.55, 0.52, 0.5, 1.0],
             0.6,
             0.1,
             [0.0; 3],
             0.0,
         ));
-        let text_m = renderer.insert_material(make_material(
+        let text_m = renderer.scene_mut().insert_material(make_material(
             [0.9, 0.8, 0.2, 1.0],
             0.1,
             0.0,
@@ -73,11 +73,11 @@ impl HelioWasmApp for Demo {
         ));
 
         // Floor
-        let floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let floor = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
         insert_object(renderer, floor, floor_m, glam::Mat4::IDENTITY, 20.0).unwrap();
 
         // Pedestal
-        let ped = renderer.insert_mesh(box_mesh([0.0, 0.3, 0.0], [2.5, 0.3, 2.5]));
+        let ped = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.3, 0.0], [2.5, 0.3, 2.5]));
         insert_object(renderer, ped, pedestal_m, glam::Mat4::IDENTITY, 2.5).unwrap();
 
         // Placeholder "model" — stacked boxes suggesting a figure
@@ -86,16 +86,16 @@ impl HelioWasmApp for Demo {
             ([0.0, 2.1, 0.0], [0.35, 0.35, 0.35]),
             ([0.0, 1.0, 0.0], [1.2, 0.1, 0.5]),
         ] {
-            let m = renderer.insert_mesh(box_mesh(pos, half));
+            let m = renderer.scene_mut().insert_mesh(box_mesh(pos, half));
             insert_object(renderer, m, cube_mat, glam::Mat4::IDENTITY, 1.2).unwrap();
         }
 
         // "FBX N/A" sign (emissive slab)
-        let sign = renderer.insert_mesh(box_mesh([0.0, 2.2, -4.5], [1.8, 0.4, 0.06]));
+        let sign = renderer.scene_mut().insert_mesh(box_mesh([0.0, 2.2, -4.5], [1.8, 0.4, 0.06]));
         insert_object(renderer, sign, text_m, glam::Mat4::IDENTITY, 1.8).unwrap();
 
         // Backdrop
-        let back = renderer.insert_mesh(box_mesh([0.0, 4.0, -9.5], [10.0, 4.0, 0.1]));
+        let back = renderer.scene_mut().insert_mesh(box_mesh([0.0, 4.0, -9.5], [10.0, 4.0, 0.1]));
         insert_object(renderer, back, backdrop_m, glam::Mat4::IDENTITY, 10.0).unwrap();
 
         // Three-point lighting (same as native showcase)
@@ -104,7 +104,7 @@ impl HelioWasmApp for Demo {
         let key = focus + Vec3::new(r * 0.22, r * 0.34, r * 0.24);
         let fill = focus + Vec3::new(-r * 0.26, r * 0.14, r * 0.28);
         let rim = focus + Vec3::new(-r * 0.30, r * 0.22, -r * 0.32);
-        renderer.insert_light(spot_light(
+        renderer.scene_mut().insert_light(spot_light(
             key.to_array(),
             (focus - key).normalize().to_array(),
             [1.0, 0.80, 0.62],
@@ -113,7 +113,7 @@ impl HelioWasmApp for Demo {
             0.20,
             0.38,
         ));
-        renderer.insert_light(spot_light(
+        renderer.scene_mut().insert_light(spot_light(
             fill.to_array(),
             (focus - fill).normalize().to_array(),
             [0.52, 0.66, 1.0],
@@ -122,7 +122,7 @@ impl HelioWasmApp for Demo {
             0.28,
             0.46,
         ));
-        renderer.insert_light(spot_light(
+        renderer.scene_mut().insert_light(spot_light(
             rim.to_array(),
             (focus - rim).normalize().to_array(),
             [0.36, 0.55, 1.0],
@@ -131,7 +131,7 @@ impl HelioWasmApp for Demo {
             0.22,
             0.40,
         ));
-        renderer.insert_light(directional_light(
+        renderer.scene_mut().insert_light(directional_light(
             [0.15, -1.0, 0.1],
             [0.07, 0.09, 0.14],
             0.3,

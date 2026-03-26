@@ -157,7 +157,7 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, surface_format),
         );
 
-        let mat = renderer.insert_material(make_material(
+        let mat = renderer.scene_mut().insert_material(make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.7,
             0.0,
@@ -165,11 +165,11 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
-        let cube2 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.4));
-        let cube3 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.3));
-        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
-        let roof = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.5, 0.15, 4.5]));
+        let cube1 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.3));
+        let ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let roof = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.5, 0.15, 4.5]));
 
         let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::from_translation(glam::Vec3::new( 0.0,  0.5,  0.0)), 0.5);
         let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::from_translation(glam::Vec3::new(-2.0,  0.4, -1.0)), 0.4);
@@ -183,17 +183,17 @@ impl ApplicationHandler for App {
         let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
-        let sun_light_id = renderer.insert_light(directional_light(
+        let sun_light_id = renderer.scene_mut().insert_light(directional_light(
             init_light_dir,
             [1.0, 0.85, 0.7],
             (init_lux * 0.35).max(0.01),
         ));
-        renderer.insert_light(point_light([0.0, 2.5, 0.0], [1.0, 0.85, 0.6], 4.0, 8.0));
-        renderer.insert_light(point_light([-2.5, 2.0, -1.5], [0.4, 0.6, 1.0], 3.5, 7.0));
-        renderer.insert_light(point_light([2.5, 1.8, 1.5], [1.0, 0.3, 0.3], 3.0, 6.0));
+        renderer.scene_mut().insert_light(point_light([0.0, 2.5, 0.0], [1.0, 0.85, 0.6], 4.0, 8.0));
+        renderer.scene_mut().insert_light(point_light([-2.5, 2.0, -1.5], [0.4, 0.6, 1.0], 3.5, 7.0));
+        renderer.scene_mut().insert_light(point_light([2.5, 1.8, 1.5], [1.0, 0.3, 0.3], 3.0, 6.0));
         renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
 
-        renderer.spawn_volumetric_clouds(helio::VolumetricClouds {
+        renderer.scene_mut().set_volumetric_clouds(Some(helio::VolumetricClouds {
             coverage: 0.7,
             density: 0.8,
             base: 1200.0,
@@ -202,7 +202,7 @@ impl ApplicationHandler for App {
             wind_z: 0.2,
             speed: 1.3,
             skylight_intensity: 0.25,
-        });
+        }));
 
         self.state = Some(AppState {
             window,
@@ -415,7 +415,7 @@ impl AppState {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Update dynamic sun light
-        let _ = self.renderer.update_light(
+        let _ = self.renderer.scene_mut().update_light(
             self.sun_light_id,
             directional_light(light_dir, sun_color, (sun_lux * 0.35).max(0.01)),
         );

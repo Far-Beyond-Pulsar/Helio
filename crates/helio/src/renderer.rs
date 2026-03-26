@@ -803,26 +803,6 @@ impl Renderer {
         self.ambient_intensity = intensity;
     }
 
-    /// Spawn or update volumetric clouds actor in the scene.
-    pub fn spawn_volumetric_clouds(&mut self, clouds: libhelio::VolumetricClouds) {
-        self.scene.set_volumetric_clouds(Some(clouds));
-    }
-
-    /// Set or clear volumetric clouds in the scene.
-    pub fn set_volumetric_clouds(&mut self, clouds: Option<libhelio::VolumetricClouds>) {
-        self.scene.set_volumetric_clouds(clouds)
-    }
-
-    /// Remove volumetric clouds actor from the scene.
-    pub fn clear_volumetric_clouds(&mut self) {
-        self.scene.clear_volumetric_clouds();
-    }
-
-    /// Returns a reference to the current volumetric clouds actor if spawned.
-    pub fn volumetric_clouds(&self) -> Option<&libhelio::VolumetricClouds> {
-        self.scene.volumetric_clouds()
-    }
-
     /// Replace the active render graph. Use [`build_simple_graph`] or
     /// [`build_default_graph`](fn.build_default_graph.html) to construct one.
     /// The graph will NOT be automatically rebuilt on window resize.
@@ -860,154 +840,11 @@ impl Renderer {
         self.graph_kind = GraphKind::Default;
     }
 
-    pub fn insert_mesh(&mut self, mesh: MeshUpload) -> MeshId {
-        self.scene.insert_mesh(mesh)
-    }
-
-    pub fn insert_texture(&mut self, texture: TextureUpload) -> SceneResult<crate::TextureId> {
-        self.scene.insert_texture(texture)
-    }
-
-    pub fn insert_material(&mut self, material: crate::GpuMaterial) -> MaterialId {
-        self.scene.insert_material(material)
-    }
-
-    pub fn insert_material_asset(&mut self, material: MaterialAsset) -> SceneResult<MaterialId> {
-        self.scene.insert_material_asset(material)
-    }
-
-    pub fn update_material(
-        &mut self,
-        id: MaterialId,
-        material: crate::GpuMaterial
-    ) -> SceneResult<()> {
-        self.scene.update_material(id, material)
-    }
-
-    pub fn update_material_asset(
-        &mut self,
-        id: MaterialId,
-        material: MaterialAsset
-    ) -> SceneResult<()> {
-        self.scene.update_material_asset(id, material)
-    }
-
-    pub fn insert_light(&mut self, light: crate::GpuLight) -> LightId {
-        let id = self.scene.insert_light(light);
-        self.editor_lights.insert(id, light);
-        id
-    }
-
-    pub fn update_light(&mut self, id: LightId, light: crate::GpuLight) -> SceneResult<()> {
-        self.editor_lights.insert(id, light);
-        self.scene.update_light(id, light)
-    }
-
-    pub fn remove_light(&mut self, id: LightId) -> SceneResult<()> {
-        self.editor_lights.remove(&id);
-        self.scene.remove_light(id)
-    }
-
-    // ── Group management ─────────────────────────────────────────────────────
-
-    /// Hide all scene objects (and editor light icons) belonging to `group`.
-    pub fn hide_group(&mut self, group: GroupId) {
-        self.scene.hide_group(group);
-    }
-
-    /// Show all scene objects (and editor light icons) belonging to `group`.
-    pub fn show_group(&mut self, group: GroupId) {
-        self.scene.show_group(group);
-    }
-
-    /// Returns `true` if `group` is currently hidden.
-    pub fn is_group_hidden(&self, group: GroupId) -> bool {
-        self.scene.is_group_hidden(group)
-    }
-
-    /// Batch hide/show multiple groups at once.
-    pub fn set_group_visibility(&mut self, mask: GroupMask, visible: bool) {
-        self.scene.set_group_visibility(mask, visible);
-    }
-
-    /// Replace an object's group membership mask.
-    pub fn set_object_groups(&mut self, id: ObjectId, mask: GroupMask) -> SceneResult<()> {
-        self.scene.set_object_groups(id, mask)
-    }
-
-    /// Add one group to an object's membership mask.
-    pub fn add_object_to_group(&mut self, id: ObjectId, group: GroupId) -> SceneResult<()> {
-        self.scene.add_object_to_group(id, group)
-    }
-
-    /// Remove one group from an object's membership mask.
-    pub fn remove_object_from_group(&mut self, id: ObjectId, group: GroupId) -> SceneResult<()> {
-        self.scene.remove_object_from_group(id, group)
-    }
-
-    /// Apply a transform delta to every object in `group`.
-    pub fn move_group(&mut self, group: GroupId, delta: glam::Mat4) {
-        self.scene.move_group(group, delta);
-    }
-
-    /// Translate every object in `group` by `delta`.
-    pub fn translate_group(&mut self, group: GroupId, delta: glam::Vec3) {
-        self.scene.translate_group(group, delta);
-    }
-
-    pub fn insert_object(&mut self, desc: ObjectDescriptor) -> SceneResult<ObjectId> {
-        self.scene.insert_object(desc)
-    }
-
     /// Optimizes the scene layout for cache coherency and GPU instancing.
     ///
     /// See [`Scene::optimize_scene_layout`] for details.
     pub fn optimize_scene_layout(&mut self) {
         self.scene.optimize_scene_layout();
-    }
-
-    // ── Virtual geometry ──────────────────────────────────────────────────────
-
-    /// Meshletise a high-resolution mesh and register it for GPU-driven rendering.
-    /// Returns a `VirtualMeshId` to pass to `insert_virtual_object`.
-    pub fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
-        self.scene.insert_virtual_mesh(upload)
-    }
-
-    pub fn remove_virtual_mesh(&mut self, id: VirtualMeshId) -> SceneResult<()> {
-        self.scene.remove_virtual_mesh(id)
-    }
-
-    /// Place an instance of a virtual mesh into the scene.
-    pub fn insert_virtual_object(
-        &mut self,
-        desc: VirtualObjectDescriptor
-    ) -> SceneResult<VirtualObjectId> {
-        self.scene.insert_virtual_object(desc)
-    }
-
-    pub fn update_virtual_object_transform(
-        &mut self,
-        id: VirtualObjectId,
-        transform: glam::Mat4
-    ) -> SceneResult<()> {
-        self.scene.update_virtual_object_transform(id, transform)
-    }
-
-    pub fn remove_virtual_object(&mut self, id: VirtualObjectId) -> SceneResult<()> {
-        self.scene.remove_virtual_object(id)
-    }
-
-    pub fn update_object_transform(
-        &mut self,
-        id: ObjectId,
-        transform: glam::Mat4
-    ) -> SceneResult<()> {
-        self.scene.update_object_transform(id, transform)
-    }
-
-    pub fn update_object_bounds(&mut self, id: ObjectId, bounds: [f32; 4]) -> SceneResult<()> {
-        self.scene.update_object_bounds(id, bounds)
     }
 
     /// Replace the billboard instance list for the next frame.

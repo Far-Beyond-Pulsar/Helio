@@ -435,7 +435,7 @@ impl<U: SdfUpdater> DemoState<U> {
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        self.renderer.update_light(self.light_p0_id, SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
+        self.renderer.scene_mut().update_light(self.light_p0_id, SceneLight::point(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
         if !self.probe_vis && !self.billboard_ids.is_empty() {
             self.renderer.update_billboard(self.billboard_ids[0], BillboardInstance::new(p0, [0.35, 0.35]).with_color([1.0, 0.55, 0.15, 1.0]));
         }

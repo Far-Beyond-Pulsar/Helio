@@ -125,21 +125,21 @@ fn build_asteroid_field(
     field_radius: f32,
     min_size: f32,
 ) {
-    let rocky = renderer.insert_material(make_material(
+    let rocky = renderer.scene_mut().insert_material(make_material(
         [0.15, 0.12, 0.09, 1.0],
         0.90,
         0.0,
         [0.0, 0.0, 0.0],
         0.0,
     ));
-    let dark = renderer.insert_material(make_material(
+    let dark = renderer.scene_mut().insert_material(make_material(
         [0.09, 0.09, 0.11, 1.0],
         0.70,
         0.25,
         [0.0, 0.0, 0.0],
         0.0,
     ));
-    let cube = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+    let cube = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
     let local_radius = (ship_radius * 40.0).clamp(120.0, 420.0);
     let spawn_asteroid =
@@ -185,14 +185,14 @@ fn upload_ship_meshes(
     ship_bounds: ShipBounds,
 ) -> Vec<helio::ObjectId> {
     if scene.meshes.is_empty() {
-        let mat = renderer.insert_material(make_material(
+        let mat = renderer.scene_mut().insert_material(make_material(
             [0.25, 0.40, 0.70, 1.0],
             0.25,
             0.85,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], ship_bounds.radius));
+        let mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], ship_bounds.radius));
         return vec![v3_demo_common::insert_object(
             renderer,
             mesh,
@@ -213,7 +213,7 @@ fn upload_ship_meshes(
                 let centered = Vec3::from_array(vertex.position) - ship_bounds.center;
                 vertex.position = centered.to_array();
             }
-            let mesh_id = renderer.insert_mesh(helio::MeshUpload {
+            let mesh_id = renderer.scene_mut().insert_mesh(helio::MeshUpload {
                 vertices,
                 indices: mesh.indices.clone(),
             });
@@ -280,8 +280,8 @@ impl Ship {
             Mat4::from_rotation_translation(self.render_quat * MESH_BASE_ROT, self.render_pos);
         let bounds = [self.render_pos.x, self.render_pos.y, self.render_pos.z, self.radius];
         for &id in &self.ids {
-            let _ = renderer.update_object_transform(id, transform);
-            let _ = renderer.update_object_bounds(id, bounds);
+            let _ = renderer.scene_mut().update_object_transform(id, transform);
+            let _ = renderer.scene_mut().update_object_bounds(id, bounds);
         }
     }
 
@@ -298,7 +298,7 @@ impl Ship {
             + right * (-self.radius * 0.4)
             + up * (self.radius * 0.15)
             + forward * (-self.radius * 0.9);
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.forward_spotlight_left,
             spot_light(
                 left_spot_pos.to_array(),
@@ -315,7 +315,7 @@ impl Ship {
             + right * (self.radius * 0.4)
             + up * (self.radius * 0.15)
             + forward * (-self.radius * 0.9);
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.forward_spotlight_right,
             spot_light(
                 right_spot_pos.to_array(),
@@ -333,7 +333,7 @@ impl Ship {
         let hull_range = self.radius * 4.0;
 
         let port_pos = self.render_pos + right * (-self.radius * 0.75) + up * (self.radius * 0.2);
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.hull_light_port,
             point_light(
                 port_pos.to_array(),
@@ -345,7 +345,7 @@ impl Ship {
 
         let starboard_pos =
             self.render_pos + right * (self.radius * 0.75) + up * (self.radius * 0.2);
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.hull_light_starboard,
             point_light(
                 starboard_pos.to_array(),
@@ -356,7 +356,7 @@ impl Ship {
         );
 
         let top_pos = self.render_pos + up * (self.radius * 0.5) + forward * (self.radius * 0.2);
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.hull_light_top,
             point_light(
                 top_pos.to_array(),
@@ -367,7 +367,7 @@ impl Ship {
         );
 
         let belly_pos = self.render_pos + up * (-self.radius * 0.4) + forward * (self.radius * 0.2);
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.hull_light_belly,
             point_light(
                 belly_pos.to_array(),
@@ -380,7 +380,7 @@ impl Ship {
         // Update engine light
         let glow = if self.thrusting { 9.0 } else { 1.8 };
         let engine_pos = self.render_pos - forward * (self.radius * 0.8);
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.engine_light,
             point_light(
                 engine_pos.to_array(),
@@ -584,12 +584,12 @@ impl ApplicationHandler for App {
         );
         renderer.set_clear_color([0.0, 0.0, 0.01, 1.0]);
         renderer.set_ambient([0.15, 0.15, 0.20], 0.8); // Increased ambient lighting
-        renderer.insert_light(directional_light(
+        renderer.scene_mut().insert_light(directional_light(
             [-0.55, -0.38, -0.74],
             [1.0, 0.97, 0.88],
             4.2,
         ));
-        renderer.insert_light(directional_light(
+        renderer.scene_mut().insert_light(directional_light(
             [0.72, 0.18, 0.68],
             [0.50, 0.70, 1.0],
             0.65,
@@ -608,7 +608,7 @@ impl ApplicationHandler for App {
         ];
 
         for (position, color, intensity, range) in &light_positions {
-            renderer.insert_light(point_light(*position, *color, *intensity, *range));
+            renderer.scene_mut().insert_light(point_light(*position, *color, *intensity, *range));
         }
 
         let (ship_radius, ship_ids) = match load_ship() {
@@ -621,14 +621,14 @@ impl ApplicationHandler for App {
                     "failed to load embedded ship: {}. using fallback cube.",
                     error
                 );
-                let material = renderer.insert_material(make_material(
+                let material = renderer.scene_mut().insert_material(make_material(
                     [0.25, 0.40, 0.70, 1.0],
                     0.25,
                     0.85,
                     [0.0, 0.0, 0.0],
                     0.0,
                 ));
-                let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 2.0));
+                let mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 2.0));
                 (
                     2.0,
                     vec![v3_demo_common::insert_object(
@@ -655,7 +655,7 @@ impl ApplicationHandler for App {
         );
 
         // Ship lights - engine thruster
-        let engine_light = renderer.insert_light(point_light(
+        let engine_light = renderer.scene_mut().insert_light(point_light(
             [0.0, 0.0, ship_radius * 0.8],
             [0.35, 0.65, 1.0],
             1.8,
@@ -665,7 +665,7 @@ impl ApplicationHandler for App {
         // Ship lights - forward spotlights (headlights)
         let spotlight_range = ship_radius * 15.0;
         let spotlight_intensity = 35.0;
-        let forward_spotlight_left = renderer.insert_light(spot_light(
+        let forward_spotlight_left = renderer.scene_mut().insert_light(spot_light(
             [-ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9], // Position: left side of nose
             [0.0, 0.0, -1.0],                                             // Direction: forward
             [1.0, 1.0, 0.95],                                             // Color: warm white
@@ -674,7 +674,7 @@ impl ApplicationHandler for App {
             25_f32.to_radians(), // Inner angle: 25 degrees
             35_f32.to_radians(), // Outer angle: 35 degrees
         ));
-        let forward_spotlight_right = renderer.insert_light(spot_light(
+        let forward_spotlight_right = renderer.scene_mut().insert_light(spot_light(
             [ship_radius * 0.4, ship_radius * 0.15, -ship_radius * 0.9], // Position: right side of nose
             [0.0, 0.0, -1.0],                                            // Direction: forward
             [1.0, 1.0, 0.95],                                            // Color: warm white
@@ -687,25 +687,25 @@ impl ApplicationHandler for App {
         // Ship lights - hull marker lights (navigation lights)
         let hull_intensity = 12.0;
         let hull_range = ship_radius * 4.0;
-        let hull_light_port = renderer.insert_light(point_light(
+        let hull_light_port = renderer.scene_mut().insert_light(point_light(
             [-ship_radius * 0.75, ship_radius * 0.2, 0.0], // Left wing
             [1.0, 0.1, 0.1],                               // Red (port)
             hull_intensity,
             hull_range,
         ));
-        let hull_light_starboard = renderer.insert_light(point_light(
+        let hull_light_starboard = renderer.scene_mut().insert_light(point_light(
             [ship_radius * 0.75, ship_radius * 0.2, 0.0], // Right wing
             [0.1, 1.0, 0.1],                              // Green (starboard)
             hull_intensity,
             hull_range,
         ));
-        let hull_light_top = renderer.insert_light(point_light(
+        let hull_light_top = renderer.scene_mut().insert_light(point_light(
             [0.0, ship_radius * 0.5, ship_radius * 0.2], // Top center
             [1.0, 1.0, 1.0],                             // White
             hull_intensity * 0.8,
             hull_range,
         ));
-        let hull_light_belly = renderer.insert_light(point_light(
+        let hull_light_belly = renderer.scene_mut().insert_light(point_light(
             [0.0, -ship_radius * 0.4, ship_radius * 0.2], // Bottom center
             [0.4, 0.6, 1.0],                              // Blue
             hull_intensity * 0.7,

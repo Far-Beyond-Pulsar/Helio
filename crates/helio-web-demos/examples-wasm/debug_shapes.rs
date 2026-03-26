@@ -31,20 +31,20 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         // Materials
         let red =
-            renderer.insert_material(make_material([0.9, 0.2, 0.2, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
+            renderer.scene_mut().insert_material(make_material([0.9, 0.2, 0.2, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
         let green =
-            renderer.insert_material(make_material([0.2, 0.8, 0.3, 1.0], 0.6, 0.0, [0.0; 3], 0.0));
+            renderer.scene_mut().insert_material(make_material([0.2, 0.8, 0.3, 1.0], 0.6, 0.0, [0.0; 3], 0.0));
         let blue =
-            renderer.insert_material(make_material([0.2, 0.4, 0.9, 1.0], 0.4, 0.2, [0.0; 3], 0.0));
+            renderer.scene_mut().insert_material(make_material([0.2, 0.4, 0.9, 1.0], 0.4, 0.2, [0.0; 3], 0.0));
         let yellow =
-            renderer.insert_material(make_material([0.9, 0.8, 0.1, 1.0], 0.7, 0.0, [0.0; 3], 0.0));
+            renderer.scene_mut().insert_material(make_material([0.9, 0.8, 0.1, 1.0], 0.7, 0.0, [0.0; 3], 0.0));
         let cyan =
-            renderer.insert_material(make_material([0.1, 0.8, 0.9, 1.0], 0.3, 0.5, [0.0; 3], 0.0));
+            renderer.scene_mut().insert_material(make_material([0.1, 0.8, 0.9, 1.0], 0.3, 0.5, [0.0; 3], 0.0));
         let magenta =
-            renderer.insert_material(make_material([0.9, 0.1, 0.7, 1.0], 0.5, 0.1, [0.0; 3], 0.0));
+            renderer.scene_mut().insert_material(make_material([0.9, 0.1, 0.7, 1.0], 0.5, 0.1, [0.0; 3], 0.0));
         let white =
-            renderer.insert_material(make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
-        let glow = renderer.insert_material(make_material(
+            renderer.scene_mut().insert_material(make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
+        let glow = renderer.scene_mut().insert_material(make_material(
             [0.1, 0.1, 0.1, 1.0],
             0.9,
             0.0,
@@ -52,10 +52,10 @@ impl HelioWasmApp for Demo {
             3.0,
         ));
         let metal =
-            renderer.insert_material(make_material([0.8, 0.8, 0.9, 1.0], 0.2, 1.0, [0.0; 3], 0.0));
+            renderer.scene_mut().insert_material(make_material([0.8, 0.8, 0.9, 1.0], 0.2, 1.0, [0.0; 3], 0.0));
 
         // Floor
-        let floor = renderer.insert_mesh(box_mesh([0.0, -0.1, 0.0], [10.0, 0.1, 10.0]));
+        let floor = renderer.scene_mut().insert_mesh(box_mesh([0.0, -0.1, 0.0], [10.0, 0.1, 10.0]));
         let _ = insert_object(renderer, floor, white, glam::Mat4::IDENTITY, 12.0);
 
         // Gallery of shapes arranged in a grid
@@ -72,18 +72,18 @@ impl HelioWasmApp for Demo {
             ([6.0, 0.5, 0.0], [0.5, 0.5, 0.5], red),
         ];
         for (pos, ext, mat) in shapes_data {
-            let mesh = renderer.insert_mesh(box_mesh(pos, ext));
+            let mesh = renderer.scene_mut().insert_mesh(box_mesh(pos, ext));
             let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, 2.0);
         }
 
         // Lights
-        renderer.insert_light(directional_light(
+        renderer.scene_mut().insert_light(directional_light(
             [-0.3, -0.8, -0.5],
             [1.0, 0.95, 0.85],
             1.5,
         ));
-        renderer.insert_light(point_light([-6.0, 4.0, -6.0], [1.0, 0.2, 0.1], 8.0, 12.0));
-        renderer.insert_light(point_light([6.0, 4.0, 0.0], [0.2, 0.5, 1.0], 8.0, 12.0));
+        renderer.scene_mut().insert_light(point_light([-6.0, 4.0, -6.0], [1.0, 0.2, 0.1], 8.0, 12.0));
+        renderer.scene_mut().insert_light(point_light([6.0, 4.0, 0.0], [0.2, 0.5, 1.0], 8.0, 12.0));
         renderer.set_ambient([0.25, 0.28, 0.35], 0.1);
 
         Self {

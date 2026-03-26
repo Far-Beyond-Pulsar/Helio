@@ -231,25 +231,25 @@ impl ApplicationHandler for App {
         // ── Sun light ─────────────────────────────────────────────────────
         let sun_angle: f32 = 0.62; // radians above horizon
         let sun_dir = Vec3::new(-sun_angle.cos(), -sun_angle.sin(), -0.6).normalize();
-        let sun_light_id = renderer.insert_light(directional_light(
+        let sun_light_id = renderer.scene_mut().insert_light(directional_light(
             sun_dir.to_array(),
             [1.0, 0.93, 0.75],
             4.2,
         ));
 
         // Small fill lights to break up flatness
-        let _ = renderer.insert_light(point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0));
-        let _ = renderer.insert_light(point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0));
+        let _ = renderer.scene_mut().insert_light(point_light([0.0, 8.0, 0.0], [0.6, 0.7, 1.0], 12.0, 50.0));
+        let _ = renderer.scene_mut().insert_light(point_light([60.0, 4.0, -40.0], [1.0, 0.85, 0.5], 8.0, 30.0));
 
         // ── Ground plane ──────────────────────────────────────────────────
-        let ground_mat = renderer.insert_material(make_material(
+        let ground_mat = renderer.scene_mut().insert_material(make_material(
             [0.28, 0.23, 0.18, 1.0],
             0.92,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let ground_mesh = renderer.insert_mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 250.0));
+        let ground_mesh = renderer.scene_mut().insert_mesh(v3_demo_common::plane_mesh([0.0, 0.0, 0.0], 250.0));
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             ground_mesh,
@@ -269,14 +269,14 @@ impl ApplicationHandler for App {
         ];
 
         // Fallback cube material/mesh for any type that failed to load
-        let fallback_mat = renderer.insert_material(make_material(
+        let fallback_mat = renderer.scene_mut().insert_material(make_material(
             [0.35, 0.30, 0.25, 1.0],
             0.85,
             0.0,
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let fallback_mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let fallback_mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
 
         // rock_vg[type] = Some(vec of (VirtualMeshId, material_slot_u32))
         let rock_vg: Vec<Option<Vec<(helio::VirtualMeshId, u32)>>> = rock_paths
@@ -303,7 +303,7 @@ impl ApplicationHandler for App {
                     .meshes
                     .iter()
                     .map(|mesh| {
-                        let vm_id = renderer.insert_virtual_mesh(VirtualMeshUpload {
+                        let vm_id = renderer.scene_mut().insert_virtual_mesh(VirtualMeshUpload {
                             vertices: mesh.vertices.clone(),
                             indices: mesh.indices.clone(),
                         });
@@ -365,7 +365,7 @@ impl ApplicationHandler for App {
                     }
                     Some(entries) => {
                         for &(vm_id, mat_slot) in entries {
-                            let _ = renderer.insert_virtual_object(VirtualObjectDescriptor {
+                            let _ = renderer.scene_mut().insert_virtual_object(VirtualObjectDescriptor {
                                 virtual_mesh: vm_id,
                                 material_id: mat_slot,
                                 transform,
@@ -408,7 +408,7 @@ impl ApplicationHandler for App {
                                 .iter()
                                 .map(|v| Vec3::from_array(v.position).length())
                                 .fold(0.5_f32, f32::max);
-                            let mesh_id = renderer.insert_mesh(helio::MeshUpload {
+                            let mesh_id = renderer.scene_mut().insert_mesh(helio::MeshUpload {
                                 vertices: mesh.vertices.clone(),
                                 indices: mesh.indices.clone(),
                             });
@@ -432,8 +432,8 @@ impl ApplicationHandler for App {
             }
             Err(e) => {
                 log::warn!("Could not load ship FBX: {e} — placing fallback cube");
-                let ship_mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 1.5));
-                let ship_mat = renderer.insert_material(make_material(
+                let ship_mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 1.5));
+                let ship_mat = renderer.scene_mut().insert_material(make_material(
                     [0.55, 0.70, 0.90, 1.0],
                     0.25,
                     0.75,
@@ -608,7 +608,7 @@ impl ApplicationHandler for App {
                     -0.6,
                 )
                 .normalize();
-                let _ = state.renderer.update_light(
+                let _ = state.renderer.scene_mut().update_light(
                     state.sun_light_id,
                     directional_light(sun_dir.to_array(), [1.0, 0.93, 0.75], 4.2),
                 );

@@ -152,56 +152,56 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.6, 0.72, 1.0], 0.06);
 
         // ── Materials ─────────────────────────────────────────────────────────────
-        let mat_floor = renderer.insert_material(make_material(
+        let mat_floor = renderer.scene_mut().insert_material(make_material(
             [0.18, 0.20, 0.18, 1.0],
             0.90,
             0.00,
             [0.0; 3],
             0.0,
         ));
-        let mat_ceiling = renderer.insert_material(make_material(
+        let mat_ceiling = renderer.scene_mut().insert_material(make_material(
             [0.85, 0.90, 0.95, 1.0],
             0.80,
             0.00,
             [0.0; 3],
             0.0,
         ));
-        let mat_wall = renderer.insert_material(make_material(
+        let mat_wall = renderer.scene_mut().insert_material(make_material(
             [0.82, 0.86, 0.90, 1.0],
             0.85,
             0.00,
             [0.0; 3],
             0.0,
         ));
-        let mat_rack = renderer.insert_material(make_material(
+        let mat_rack = renderer.scene_mut().insert_material(make_material(
             [0.10, 0.10, 0.12, 1.0],
             0.40,
             0.70,
             [0.0; 3],
             0.0,
         ));
-        let mat_panel = renderer.insert_material(make_material(
+        let mat_panel = renderer.scene_mut().insert_material(make_material(
             [0.88, 0.93, 1.00, 1.0],
             0.90,
             0.00,
             [0.5, 0.6, 0.8],
             3.0,
         ));
-        let mat_cooling = renderer.insert_material(make_material(
+        let mat_cooling = renderer.scene_mut().insert_material(make_material(
             [0.40, 0.50, 0.60, 1.0],
             0.50,
             0.60,
             [0.0; 3],
             0.0,
         ));
-        let mat_door = renderer.insert_material(make_material(
+        let mat_door = renderer.scene_mut().insert_material(make_material(
             [0.40, 0.45, 0.50, 1.0],
             0.60,
             0.30,
             [0.0; 3],
             0.0,
         ));
-        let mat_tray = renderer.insert_material(make_material(
+        let mat_tray = renderer.scene_mut().insert_material(make_material(
             [0.30, 0.30, 0.35, 1.0],
             0.40,
             0.80,
@@ -212,7 +212,7 @@ impl ApplicationHandler for App {
         // ── Geometry ───────────────────────────────────────────────────────────────
         let mut add =
             |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-                let m = r.insert_mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
+                let m = r.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]));
                 let _ = insert_object(
                     r,
                     m,
@@ -281,7 +281,7 @@ impl ApplicationHandler for App {
 
         // Overhead fluorescent panel spots (8)
         for &(px, pz) in CEILING_PANEL_XZ {
-            light_ids.push(renderer.insert_light(spot_light(
+            light_ids.push(renderer.scene_mut().insert_light(spot_light(
                 [px, 3.78, pz],
                 [0.0, -1.0, 0.0],
                 [0.88, 0.93, 1.0],
@@ -295,9 +295,9 @@ impl ApplicationHandler for App {
         // Per-row status LED strips
         for &(rx, tag) in RACK_ROWS {
             let col = row_color(tag);
-            light_ids.push(renderer.insert_light(point_light([rx, 2.1, 0.0], col, 2.5, 6.0)));
-            light_ids.push(renderer.insert_light(point_light([rx, 2.1, -4.5], col, 1.0, 3.5)));
-            light_ids.push(renderer.insert_light(point_light([rx, 2.1, 4.5], col, 1.0, 3.5)));
+            light_ids.push(renderer.scene_mut().insert_light(point_light([rx, 2.1, 0.0], col, 2.5, 6.0)));
+            light_ids.push(renderer.scene_mut().insert_light(point_light([rx, 2.1, -4.5], col, 1.0, 3.5)));
+            light_ids.push(renderer.scene_mut().insert_light(point_light([rx, 2.1, 4.5], col, 1.0, 3.5)));
         }
 
         // Cooling unit indicators
@@ -307,7 +307,7 @@ impl ApplicationHandler for App {
             } else {
                 [0.0, 0.6, 1.0]
             };
-            light_ids.push(renderer.insert_light(point_light([cx, 2.8, -5.6], col, 0.8, 3.0)));
+            light_ids.push(renderer.scene_mut().insert_light(point_light([cx, 2.8, -5.6], col, 0.8, 3.0)));
         }
 
         self.state = Some(AppState {
@@ -358,10 +358,10 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if ks == ElementState::Pressed && key == KeyCode::KeyE {
-                    if state.renderer.is_group_hidden(GroupId::EDITOR) {
-                        state.renderer.show_group(GroupId::EDITOR);
+                    if state.renderer.scene_mut().is_group_hidden(GroupId::EDITOR) {
+                        state.renderer.scene_mut().show_group(GroupId::EDITOR);
                     } else {
-                        state.renderer.hide_group(GroupId::EDITOR);
+                        state.renderer.scene_mut().hide_group(GroupId::EDITOR);
                     }
                 }
                 match ks {

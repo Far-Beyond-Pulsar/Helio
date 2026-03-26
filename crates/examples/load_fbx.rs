@@ -170,7 +170,7 @@ impl ApplicationHandler for App {
                         .iter()
                         .map(|v| Vec3::from_array(v.position).length())
                         .fold(0.5, f32::max);
-                    let mesh_id = renderer.insert_mesh(helio::MeshUpload {
+                    let mesh_id = renderer.scene_mut().insert_mesh(helio::MeshUpload {
                         vertices: mesh.vertices,
                         indices: mesh.indices,
                     });
@@ -178,7 +178,7 @@ impl ApplicationHandler for App {
                         .material_index
                         .and_then(|index| material_ids.get(index).copied())
                         .unwrap_or_else(|| {
-                            renderer.insert_material(v3_demo_common::make_material(
+                            renderer.scene_mut().insert_material(v3_demo_common::make_material(
                                 [0.7, 0.7, 0.75, 1.0],
                                 0.6,
                                 0.0,
@@ -201,8 +201,8 @@ impl ApplicationHandler for App {
                     scene_path,
                     error
                 );
-                let mesh = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
-                let material = renderer.insert_material(v3_demo_common::make_material(
+                let mesh = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+                let material = renderer.scene_mut().insert_material(v3_demo_common::make_material(
                     [0.55, 0.68, 0.9, 1.0],
                     0.35,
                     0.15,
@@ -220,7 +220,7 @@ impl ApplicationHandler for App {
         }
 
         let point_light_pos = Vec3::new(0.0, 3.0, 0.0);
-        let point_light_id = renderer.insert_light(point_light(
+        let point_light_id = renderer.scene_mut().insert_light(point_light(
             point_light_pos.to_array(),
             [1.0, 0.95, 0.8],
             12.0,

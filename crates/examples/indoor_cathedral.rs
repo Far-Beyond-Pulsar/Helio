@@ -216,7 +216,7 @@ impl ApplicationHandler for App {
         );
         renderer.set_editor_mode(true);
 
-        let mat = renderer.insert_material(make_material(
+        let mat = renderer.scene_mut().insert_material(make_material(
             [0.75, 0.72, 0.68, 1.0],
             0.85,
             0.0,
@@ -226,14 +226,14 @@ impl ApplicationHandler for App {
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
-        let _floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 32.0));
-        let _nave_ceiling = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]));
-        let _aisle_ceil_l = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
-        let _aisle_ceil_r = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
-        let _wall_left_outer = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
-        let _wall_right_outer = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
-        let _wall_front = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
-        let _wall_back = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
+        let _floor = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 32.0));
+        let _nave_ceiling = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]));
+        let _aisle_ceil_l = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
+        let _aisle_ceil_r = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
+        let _wall_left_outer = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
+        let _wall_right_outer = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
+        let _wall_front = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
+        let _wall_back = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
         let _ =
             v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
         let _ = v3_demo_common::insert_object(
@@ -299,7 +299,7 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
-                let id = renderer
+                let id = renderer.scene_mut()
                     .insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
@@ -316,7 +316,7 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-                let id = renderer
+                let id = renderer.scene_mut()
                     .insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
@@ -333,7 +333,7 @@ impl ApplicationHandler for App {
         let _columns: Vec<MeshId> = COLUMN_Z
             .iter()
             .flat_map(|&z| {
-                let l = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]));
+                let l = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     l,
@@ -341,7 +341,7 @@ impl ApplicationHandler for App {
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
                     10.0,
                 );
-                let r = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]));
+                let r = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     r,
@@ -354,10 +354,10 @@ impl ApplicationHandler for App {
             .collect();
 
         // Altar: at far end (z = -26)
-        let _altar_step = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 0.20, 3.0]));
-        let _altar_plinth = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.45, 1.5]));
-        let _cross_vert = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.18, 2.2, 0.18]));
-        let _cross_horiz = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.18, 0.18]));
+        let _altar_step = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 0.20, 3.0]));
+        let _altar_plinth = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.45, 1.5]));
+        let _cross_vert = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.18, 2.2, 0.18]));
+        let _cross_horiz = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.18, 0.18]));
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _altar_step,
@@ -391,7 +391,7 @@ impl ApplicationHandler for App {
         let _pews_left: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]));
+                let id = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -405,7 +405,7 @@ impl ApplicationHandler for App {
         let _pews_right: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]));
+                let id = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -418,7 +418,7 @@ impl ApplicationHandler for App {
             .collect();
 
         // Chandeliers: vertical chain + horizontal ring at each Z
-        let chandelier_mat = renderer.insert_material(make_material(
+        let chandelier_mat = renderer.scene_mut().insert_material(make_material(
             [0.3, 0.28, 0.25, 1.0],
             0.5,
             0.8,
@@ -428,7 +428,7 @@ impl ApplicationHandler for App {
         let _chandelier_chains: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.06, 2.0, 0.06]));
+                let id = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.06, 2.0, 0.06]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -442,7 +442,7 @@ impl ApplicationHandler for App {
         let _chandelier_rings: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 1.2]));
+                let id = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 1.2]));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -457,7 +457,7 @@ impl ApplicationHandler for App {
         // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
         let mut chandelier_light_ids = Vec::new();
         for &z in CHANDELIER_Z {
-            chandelier_light_ids.push(renderer.insert_light(point_light(
+            chandelier_light_ids.push(renderer.scene_mut().insert_light(point_light(
                 [0.0_f32, 15.0, z],
                 [1.0, 0.92, 0.78],
                 8.0,
@@ -466,11 +466,11 @@ impl ApplicationHandler for App {
         }
         // Stained glass shafts — static, no need to store ids
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let _ = renderer.insert_light(point_light([x, y, z], [r, g, b], 1.8, 8.0));
+            let _ = renderer.scene_mut().insert_light(point_light([x, y, z], [r, g, b], 1.8, 8.0));
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {
-            candle_light_ids.push(renderer.insert_light(point_light(
+            candle_light_ids.push(renderer.scene_mut().insert_light(point_light(
                 [x, y, z],
                 [1.0, 0.6, 0.15],
                 1.2,
@@ -693,7 +693,7 @@ impl AppState {
         // Update flickering chandelier intensities
         for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
             let z = CHANDELIER_Z[i];
-            let _ = self.renderer.update_light(
+            let _ = self.renderer.scene_mut().update_light(
                 id,
                 point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0 * flicker, 22.0),
             );
@@ -701,7 +701,7 @@ impl AppState {
         // Update flickering candle intensities
         for (i, &id) in self.candle_light_ids.iter().enumerate() {
             let (x, y, z) = CANDLES[i];
-            let _ = self.renderer.update_light(
+            let _ = self.renderer.scene_mut().update_light(
                 id,
                 point_light([x, y, z], [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0),
             );

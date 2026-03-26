@@ -81,7 +81,7 @@ pub fn insert_object(
     transform: Mat4,
     radius: f32,
 ) -> helio::SceneResult<helio::ObjectId> {
-    renderer.insert_object(ObjectDescriptor {
+    renderer.scene_mut().insert_object(ObjectDescriptor {
         mesh,
         material,
         transform,

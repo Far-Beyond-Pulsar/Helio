@@ -34,28 +34,28 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let road_m = renderer.insert_material(make_material(
+        let road_m = renderer.scene_mut().insert_material(make_material(
             [0.11, 0.11, 0.12, 1.0],
             0.9,
             0.1,
             [0.0; 3],
             0.0,
         ));
-        let concrete_m = renderer.insert_material(make_material(
+        let concrete_m = renderer.scene_mut().insert_material(make_material(
             [0.55, 0.55, 0.56, 1.0],
             0.8,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let glass_m = renderer.insert_material(make_material(
+        let glass_m = renderer.scene_mut().insert_material(make_material(
             [0.1, 0.12, 0.2, 1.0],
             0.1,
             0.9,
             [0.08, 0.1, 0.15],
             0.5,
         ));
-        let lit_window_m = renderer.insert_material(make_material(
+        let lit_window_m = renderer.scene_mut().insert_material(make_material(
             [0.6, 0.55, 0.35, 1.0],
             0.5,
             0.0,
@@ -63,8 +63,8 @@ impl HelioWasmApp for Demo {
             4.0,
         ));
         let street_pole_m =
-            renderer.insert_material(make_material([0.3, 0.3, 0.3, 1.0], 0.4, 0.4, [0.0; 3], 0.0));
-        let lamp_m = renderer.insert_material(make_material(
+            renderer.scene_mut().insert_material(make_material([0.3, 0.3, 0.3, 1.0], 0.4, 0.4, [0.0; 3], 0.0));
+        let lamp_m = renderer.scene_mut().insert_material(make_material(
             [0.9, 0.85, 0.7, 1.0],
             0.2,
             0.0,
@@ -73,7 +73,7 @@ impl HelioWasmApp for Demo {
         ));
 
         // City ground plane
-        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 100.0));
+        let ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 100.0));
         insert_object(renderer, ground, road_m, glam::Mat4::IDENTITY, 100.0).unwrap();
 
         // Buildings on a grid: 7x7 blocks
@@ -107,16 +107,16 @@ impl HelioWasmApp for Demo {
 
         for (bx, bz, half, rad) in building_data.iter() {
             let h = half[1];
-            let bm = renderer.insert_mesh(box_mesh([*bx, h / 2.0, *bz], *half));
+            let bm = renderer.scene_mut().insert_mesh(box_mesh([*bx, h / 2.0, *bz], *half));
             insert_object(renderer, bm, concrete_m, glam::Mat4::IDENTITY, *rad).unwrap();
             // Glass facade panels
-            let gm = renderer.insert_mesh(box_mesh(
+            let gm = renderer.scene_mut().insert_mesh(box_mesh(
                 [*bx, h / 2.0, *bz],
                 [half[0] - 0.1, h - 0.2, half[2] - 0.1],
             ));
             insert_object(renderer, gm, glass_m, glam::Mat4::IDENTITY, *rad).unwrap();
             // Random lit windows strip
-            let wm = renderer.insert_mesh(box_mesh(
+            let wm = renderer.scene_mut().insert_mesh(box_mesh(
                 [*bx, h * 0.6, *bz],
                 [half[0] - 0.15, h * 0.25, half[2] - 0.05],
             ));
@@ -136,13 +136,13 @@ impl HelioWasmApp for Demo {
         let mut window_ids = Vec::new();
         for &lx in lamp_xs {
             for &lz in lamp_zs {
-                let pole = renderer.insert_mesh(box_mesh([lx, 5.0, lz], [0.08, 5.0, 0.08]));
+                let pole = renderer.scene_mut().insert_mesh(box_mesh([lx, 5.0, lz], [0.08, 5.0, 0.08]));
                 insert_object(renderer, pole, street_pole_m, glam::Mat4::IDENTITY, 5.0).unwrap();
-                let arm = renderer.insert_mesh(box_mesh([lx + 0.5, 9.8, lz], [0.5, 0.06, 0.06]));
+                let arm = renderer.scene_mut().insert_mesh(box_mesh([lx + 0.5, 9.8, lz], [0.5, 0.06, 0.06]));
                 insert_object(renderer, arm, street_pole_m, glam::Mat4::IDENTITY, 0.5).unwrap();
-                let lamp = renderer.insert_mesh(box_mesh([lx + 0.9, 9.75, lz], [0.12, 0.12, 0.12]));
+                let lamp = renderer.scene_mut().insert_mesh(box_mesh([lx + 0.9, 9.75, lz], [0.12, 0.12, 0.12]));
                 insert_object(renderer, lamp, lamp_m, glam::Mat4::IDENTITY, 0.12).unwrap();
-                let id = renderer.insert_light(point_light(
+                let id = renderer.scene_mut().insert_light(point_light(
                     [lx + 0.9, 9.5, lz],
                     [1.0, 0.92, 0.72],
                     80.0,
@@ -154,7 +154,7 @@ impl HelioWasmApp for Demo {
 
         // Rooftop lights on tallest buildings
         for (bx, bz, _, _) in building_data.iter().filter(|(_, _, h, _)| h[1] > 35.0) {
-            let id = renderer.insert_light(point_light(
+            let id = renderer.scene_mut().insert_light(point_light(
                 [*bx, 0.0 /* set dynamically */ + 2.0, *bz],
                 [1.0, 0.1, 0.05],
                 5.0,
@@ -165,7 +165,7 @@ impl HelioWasmApp for Demo {
 
         // Moonlight
         let moon = Vec3::new(-0.3, -0.8, 0.5).normalize();
-        renderer.insert_light(directional_light(
+        renderer.scene_mut().insert_light(directional_light(
             [moon.x, moon.y, moon.z],
             [0.4, 0.5, 0.9],
             0.003,
@@ -218,7 +218,7 @@ impl HelioWasmApp for Demo {
         // Rooftop beacon lights blink
         for (i, id) in self.window_ids[16..].iter().enumerate() {
             let on = ((elapsed * 1.2 + i as f32 * 0.5).sin() > 0.0) as u8 as f32;
-            let _ = renderer.update_light(
+            let _ = renderer.scene_mut().update_light(
                 *id,
                 point_light([0.0, 0.1, 0.0], [1.0, 0.1, 0.05], 5.0 * on, 8.0),
             );

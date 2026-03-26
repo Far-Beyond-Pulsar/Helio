@@ -32,21 +32,21 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let wall_mat = renderer.insert_material(make_material(
+        let wall_mat = renderer.scene_mut().insert_material(make_material(
             [0.7, 0.68, 0.62, 1.0],
             0.8,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let floor_mat = renderer.insert_material(make_material(
+        let floor_mat = renderer.scene_mut().insert_material(make_material(
             [0.55, 0.45, 0.35, 1.0],
             0.9,
             0.0,
             [0.0; 3],
             0.0,
         ));
-        let wood_mat = renderer.insert_material(make_material(
+        let wood_mat = renderer.scene_mut().insert_material(make_material(
             [0.50, 0.35, 0.20, 1.0],
             0.7,
             0.0,
@@ -57,16 +57,16 @@ impl HelioWasmApp for Demo {
         let mut meshes = Vec::new();
 
         // Room shell
-        let floor = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
-        let ceiling = renderer.insert_mesh(box_mesh([0.0, 3.0, 0.0], [5.0, 0.05, 5.0]));
-        let wall_n = renderer.insert_mesh(box_mesh([0.0, 1.5, -5.0], [5.0, 1.5, 0.1]));
-        let wall_s = renderer.insert_mesh(box_mesh([0.0, 1.5, 5.0], [5.0, 1.5, 0.1]));
-        let wall_e = renderer.insert_mesh(box_mesh([5.0, 1.5, 0.0], [0.1, 1.5, 5.0]));
-        let wall_w = renderer.insert_mesh(box_mesh([-5.0, 1.5, 0.0], [0.1, 1.5, 5.0]));
+        let floor = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
+        let ceiling = renderer.scene_mut().insert_mesh(box_mesh([0.0, 3.0, 0.0], [5.0, 0.05, 5.0]));
+        let wall_n = renderer.scene_mut().insert_mesh(box_mesh([0.0, 1.5, -5.0], [5.0, 1.5, 0.1]));
+        let wall_s = renderer.scene_mut().insert_mesh(box_mesh([0.0, 1.5, 5.0], [5.0, 1.5, 0.1]));
+        let wall_e = renderer.scene_mut().insert_mesh(box_mesh([5.0, 1.5, 0.0], [0.1, 1.5, 5.0]));
+        let wall_w = renderer.scene_mut().insert_mesh(box_mesh([-5.0, 1.5, 0.0], [0.1, 1.5, 5.0]));
         // Furniture
-        let table = renderer.insert_mesh(box_mesh([0.0, 0.4, 0.0], [1.2, 0.05, 0.7]));
-        let bookcase = renderer.insert_mesh(box_mesh([-3.5, 1.0, -4.0], [0.3, 1.0, 1.5]));
-        let sofa = renderer.insert_mesh(box_mesh([3.0, 0.45, -2.5], [1.5, 0.45, 0.6]));
+        let table = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.4, 0.0], [1.2, 0.05, 0.7]));
+        let bookcase = renderer.scene_mut().insert_mesh(box_mesh([-3.5, 1.0, -4.0], [0.3, 1.0, 1.5]));
+        let sofa = renderer.scene_mut().insert_mesh(box_mesh([3.0, 0.45, -2.5], [1.5, 0.45, 0.6]));
 
         for (mesh, mat, r) in [
             (floor, floor_mat, 7.0),
@@ -84,7 +84,7 @@ impl HelioWasmApp for Demo {
         }
 
         let overhead_light =
-            renderer.insert_light(point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0, 7.0));
+            renderer.scene_mut().insert_light(point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0, 7.0));
         renderer.set_ambient([0.4, 0.35, 0.3], 0.05);
         renderer.set_clear_color([0.05, 0.05, 0.08, 1.0]);
 
@@ -127,7 +127,7 @@ impl HelioWasmApp for Demo {
 
         // Subtle flicker
         let flicker = 1.0 + (elapsed * 11.3).sin() * 0.04 + (elapsed * 7.7).cos() * 0.02;
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.overhead_light,
             point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0 * flicker, 7.0),
         );

@@ -35,7 +35,7 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat = renderer.insert_material(make_material(
+        let mat = renderer.scene_mut().insert_material(make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.7,
             0.0,
@@ -43,10 +43,10 @@ impl HelioWasmApp for Demo {
             0.0,
         ));
 
-        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
-        let cube2 = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
-        let cube3 = renderer.insert_mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
-        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
+        let cube1 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
+        let cube2 = renderer.scene_mut().insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
+        let cube3 = renderer.scene_mut().insert_mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
+        let ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
 
         let _ = insert_object(renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
         let _ = insert_object(renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
@@ -54,9 +54,9 @@ impl HelioWasmApp for Demo {
         let _ = insert_object(renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
         let light_p0 =
-            renderer.insert_light(point_light([0.0, 2.2, 0.0], [1.0, 0.55, 0.15], 6.0, 5.0));
-        renderer.insert_light(point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0));
-        renderer.insert_light(point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0));
+            renderer.scene_mut().insert_light(point_light([0.0, 2.2, 0.0], [1.0, 0.55, 0.15], 6.0, 5.0));
+        renderer.scene_mut().insert_light(point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0));
+        renderer.scene_mut().insert_light(point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0));
 
         Self {
             cube1,
@@ -107,7 +107,7 @@ impl HelioWasmApp for Demo {
 
         // Animate light p0
         let p0 = [0.0_f32, 2.2 + (elapsed * 0.7).sin() * 0.3, 0.0];
-        let _ = renderer.update_light(self.light_p0, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
+        let _ = renderer.scene_mut().update_light(self.light_p0, point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0));
 
         Camera::perspective_look_at(
             self.cam_pos,

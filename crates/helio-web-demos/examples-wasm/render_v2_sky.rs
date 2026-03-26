@@ -41,7 +41,7 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        let mat = renderer.insert_material(make_material(
+        let mat = renderer.scene_mut().insert_material(make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.7,
             0.0,
@@ -49,11 +49,11 @@ impl HelioWasmApp for Demo {
             0.0,
         ));
 
-        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
-        let cube2 = renderer.insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
-        let cube3 = renderer.insert_mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
-        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
-        let roof = renderer.insert_mesh(box_mesh([0.0, 1.2, 0.0], [2.5, 0.1, 2.5]));
+        let cube1 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
+        let cube2 = renderer.scene_mut().insert_mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
+        let cube3 = renderer.scene_mut().insert_mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
+        let ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
+        let roof = renderer.scene_mut().insert_mesh(box_mesh([0.0, 1.2, 0.0], [2.5, 0.1, 2.5]));
 
         let _ = insert_object(renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
         let _ = insert_object(renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
@@ -61,11 +61,11 @@ impl HelioWasmApp for Demo {
         let _ = insert_object(renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
         let _ = insert_object(renderer, roof, mat, glam::Mat4::IDENTITY, 2.5);
 
-        renderer.insert_light(point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0));
-        renderer.insert_light(point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0));
+        renderer.scene_mut().insert_light(point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0));
+        renderer.scene_mut().insert_light(point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0));
 
         let sun_light =
-            renderer.insert_light(directional_light([-0.5, -0.8, -0.3], [1.0, 0.9, 0.7], 1.0));
+            renderer.scene_mut().insert_light(directional_light([-0.5, -0.8, -0.3], [1.0, 0.9, 0.7], 1.0));
         renderer.set_ambient([0.2, 0.25, 0.35], 0.15);
         renderer.set_clear_color([0.53, 0.81, 0.98, 1.0]);
 
@@ -141,7 +141,7 @@ impl HelioWasmApp for Demo {
             [0.2 + sun_elev * 0.1, 0.25 + sun_elev * 0.05, 0.35],
             0.1 + sun_elev * 0.1,
         );
-        let _ = renderer.update_light(
+        let _ = renderer.scene_mut().update_light(
             self.sun_light,
             directional_light([sun_dir.x, sun_dir.y, sun_dir.z], sun_color, sun_intensity),
         );

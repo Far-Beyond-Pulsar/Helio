@@ -104,11 +104,11 @@ fn look_angles(direction: Vec3) -> (f32, f32) {
 }
 
 fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
-    let floor_mesh = renderer.insert_mesh(plane_mesh(
+    let floor_mesh = renderer.scene_mut().insert_mesh(plane_mesh(
         [bounds.center.x, bounds.floor_y(), bounds.center.z],
         bounds.stage_extent(),
     ));
-    let floor_material = renderer.insert_material(make_material(
+    let floor_material = renderer.scene_mut().insert_material(make_material(
         [0.07, 0.08, 0.10, 1.0],
         0.16,
         0.02,
@@ -123,7 +123,7 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
         bounds.stage_extent(),
     );
 
-    let pedestal_mesh = renderer.insert_mesh(box_mesh(
+    let pedestal_mesh = renderer.scene_mut().insert_mesh(box_mesh(
         [
             bounds.center.x,
             bounds.floor_y() + bounds.radius * 0.05,
@@ -135,7 +135,7 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
             bounds.radius * 0.62,
         ],
     ));
-    let pedestal_material = renderer.insert_material(make_material(
+    let pedestal_material = renderer.scene_mut().insert_material(make_material(
         [0.11, 0.12, 0.15, 1.0],
         0.28,
         0.04,
@@ -150,7 +150,7 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
         bounds.radius,
     );
 
-    let backdrop_mesh = renderer.insert_mesh(box_mesh(
+    let backdrop_mesh = renderer.scene_mut().insert_mesh(box_mesh(
         [
             bounds.center.x,
             bounds.floor_y() + bounds.radius * 0.62,
@@ -162,7 +162,7 @@ fn add_showcase_stage(renderer: &mut Renderer, bounds: SceneBounds) {
             bounds.radius * 0.05,
         ],
     ));
-    let backdrop_material = renderer.insert_material(make_material(
+    let backdrop_material = renderer.scene_mut().insert_material(make_material(
         [0.04, 0.05, 0.08, 1.0],
         0.82,
         0.0,
@@ -186,7 +186,7 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
 
     let key_pos = focus + Vec3::new(radius * 0.22, radius * 0.34, radius * 0.24);
     let key_dir = (elevated_focus - key_pos).normalize_or_zero();
-    renderer.insert_light(spot_light(
+    renderer.scene_mut().insert_light(spot_light(
         key_pos.to_array(),
         key_dir.to_array(),
         [1.0, 0.80, 0.62],
@@ -198,7 +198,7 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
 
     let fill_pos = focus + Vec3::new(-radius * 0.26, radius * 0.14, radius * 0.28);
     let fill_dir = (focus - fill_pos).normalize_or_zero();
-    renderer.insert_light(spot_light(
+    renderer.scene_mut().insert_light(spot_light(
         fill_pos.to_array(),
         fill_dir.to_array(),
         [0.52, 0.66, 1.0],
@@ -210,7 +210,7 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
 
     let rim_pos = focus + Vec3::new(-radius * 0.30, radius * 0.22, -radius * 0.32);
     let rim_dir = (upper_focus - rim_pos).normalize_or_zero();
-    renderer.insert_light(spot_light(
+    renderer.scene_mut().insert_light(spot_light(
         rim_pos.to_array(),
         rim_dir.to_array(),
         [0.36, 0.55, 1.0],
@@ -220,7 +220,7 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
         0.40,
     ));
 
-    renderer.insert_light(directional_light(
+    renderer.scene_mut().insert_light(directional_light(
         [0.15, -1.0, 0.1],
         [0.07, 0.09, 0.14],
         0.3,
@@ -362,8 +362,8 @@ impl ApplicationHandler for App {
                     center: Vec3::new(0.0, 0.75, 0.0),
                     radius: 3.0,
                 };
-                let mesh = renderer.insert_mesh(box_mesh([0.0, 0.75, 0.0], [0.75, 0.75, 0.75]));
-                let material = renderer.insert_material(make_material(
+                let mesh = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.75, 0.0], [0.75, 0.75, 0.75]));
+                let material = renderer.scene_mut().insert_material(make_material(
                     [0.65, 0.72, 0.9, 1.0],
                     0.35,
                     0.1,
@@ -409,7 +409,7 @@ impl ApplicationHandler for App {
                 .iter()
                 .map(|v| Vec3::from_array(v.position).distance(bounds.center))
                 .fold(0.5, f32::max);
-            let mesh_id = renderer.insert_mesh(helio::MeshUpload {
+            let mesh_id = renderer.scene_mut().insert_mesh(helio::MeshUpload {
                 vertices: mesh.vertices,
                 indices: mesh.indices,
             });

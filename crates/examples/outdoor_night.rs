@@ -146,7 +146,7 @@ impl ApplicationHandler for App {
             RendererConfig::new(size.width, size.height, format),
         );
 
-        let mat = renderer.insert_material(make_material(
+        let mat = renderer.scene_mut().insert_material(make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.8,
             0.0,
@@ -154,16 +154,16 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
-        let bld_a = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 7.0, 2.5]));
-        let bld_b = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 4.5, 2.0]));
-        let bld_c = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 3.0, 3.0]));
-        let bld_d = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 1.5, 2.5]));
-        let bld_e = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 9.5, 3.0]));
-        let lamp_pole_a = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
-        let lamp_pole_b = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
-        let lamp_pole_c = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
-        let lamp_pole_d = renderer.insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
+        let ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let bld_a = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 7.0, 2.5]));
+        let bld_b = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 4.5, 2.0]));
+        let bld_c = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.0, 3.0, 3.0]));
+        let bld_d = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [3.5, 1.5, 2.5]));
+        let bld_e = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 9.5, 3.0]));
+        let lamp_pole_a = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_b = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_c = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
+        let lamp_pole_d = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.5, 0.08]));
 
         let _ =
             v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
@@ -232,37 +232,37 @@ impl ApplicationHandler for App {
         );
 
         let mut _light_ids: Vec<LightId> = Vec::new();
-        _light_ids.push(renderer.insert_light(point_light(
+        _light_ids.push(renderer.scene_mut().insert_light(point_light(
             [-5.0, 5.1, -5.0],
             [1.0, 0.72, 0.3],
             6.0,
             14.0,
         )));
-        _light_ids.push(renderer.insert_light(point_light(
+        _light_ids.push(renderer.scene_mut().insert_light(point_light(
             [5.0, 5.1, -5.0],
             [1.0, 0.72, 0.3],
             6.0,
             14.0,
         )));
-        _light_ids.push(renderer.insert_light(point_light(
+        _light_ids.push(renderer.scene_mut().insert_light(point_light(
             [-5.0, 5.1, 5.0],
             [1.0, 0.72, 0.3],
             6.0,
             14.0,
         )));
-        _light_ids.push(renderer.insert_light(point_light(
+        _light_ids.push(renderer.scene_mut().insert_light(point_light(
             [5.0, 5.1, 5.0],
             [1.0, 0.72, 0.3],
             6.0,
             14.0,
         )));
-        _light_ids.push(renderer.insert_light(point_light(
+        _light_ids.push(renderer.scene_mut().insert_light(point_light(
             [8.0, 12.0, -5.8],
             [1.0, 0.05, 0.8],
             5.0,
             12.0,
         )));
-        _light_ids.push(renderer.insert_light(point_light(
+        _light_ids.push(renderer.scene_mut().insert_light(point_light(
             [0.0, 16.5, -14.0],
             [0.05, 0.9, 1.0],
             4.0,

@@ -77,7 +77,7 @@ pub fn insert_object(
     transform: Mat4,
     radius: f32,
 ) -> helio::SceneResult<helio::ObjectId> {
-    renderer.insert_object(ObjectDescriptor {
+    renderer.scene_mut().insert_object(ObjectDescriptor {
         mesh,
         material,
         transform,
@@ -176,7 +176,7 @@ pub fn update_point_light(
     intensity: f32,
     range: f32,
 ) {
-    let _ = renderer.update_light(
+    let _ = renderer.scene_mut().update_light(
         id,
         point_light(position.to_array(), color, intensity, range),
     );

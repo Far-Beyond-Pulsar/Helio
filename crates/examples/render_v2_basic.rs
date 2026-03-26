@@ -149,7 +149,7 @@ impl ApplicationHandler for App {
         );
         renderer.set_editor_mode(true);
 
-        let mat = renderer.insert_material(make_material(
+        let mat = renderer.scene_mut().insert_material(make_material(
             [0.7, 0.7, 0.72, 1.0],
             0.7,
             0.0,
@@ -157,10 +157,10 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
-        let cube2 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.4));
-        let cube3 = renderer.insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.3));
-        let ground = renderer.insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
+        let cube1 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.5));
+        let cube2 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.4));
+        let cube3 = renderer.scene_mut().insert_mesh(cube_mesh([0.0, 0.0, 0.0], 0.3));
+        let ground = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
 
         let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::from_translation(glam::Vec3::new( 0.0,  0.5,  0.0)), 0.5);
         let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::from_translation(glam::Vec3::new(-2.0,  0.4, -1.0)), 0.4);
@@ -172,9 +172,9 @@ impl ApplicationHandler for App {
         let p0_init = [0.0f32, 2.2, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
-        let light_p0_id = renderer.insert_light(point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0));
-        renderer.insert_light(point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
-        renderer.insert_light(point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
+        let light_p0_id = renderer.scene_mut().insert_light(point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0));
+        renderer.scene_mut().insert_light(point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0));
+        renderer.scene_mut().insert_light(point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0));
 
         self.state = Some(AppState {
             window,
@@ -378,7 +378,7 @@ impl AppState {
 
         // p0 bobs up/down per-frame
         let p0 = [0.0f32, 2.2 + (time * 0.7).sin() * 0.3, 0.0];
-        let _ = self.renderer.update_light(
+        let _ = self.renderer.scene_mut().update_light(
             self.light_p0_id,
             point_light(p0, [1.0, 0.55, 0.15], 6.0, 5.0),
         );

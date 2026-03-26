@@ -225,7 +225,7 @@ pub fn upload_scene(renderer: &mut Renderer, scene: &ConvertedScene) -> Result<U
         .meshes
         .iter()
         .map(|mesh| {
-            renderer.insert_mesh(helio::MeshUpload {
+            renderer.scene_mut().insert_mesh(helio::MeshUpload {
                 vertices: mesh.vertices.clone(),
                 indices: mesh.indices.clone(),
             })
@@ -247,8 +247,9 @@ pub fn upload_scene_materials(
         .cloned()
         .map(|texture| {
             renderer
+                .scene_mut()
                 .insert_texture(texture)
-                .map_err(|err| AssetError::InvalidData(err.to_string()))
+                .map_err(|err: helio::SceneError| AssetError::InvalidData(err.to_string()))
         })
         .collect();
     let texture_ids = texture_ids?;
@@ -259,8 +260,9 @@ pub fn upload_scene_materials(
         .map(|material| {
             let asset = scene_converter::material_asset_from_converted(material, &texture_ids);
             renderer
+                .scene_mut()
                 .insert_material_asset(asset)
-                .map_err(|err| AssetError::InvalidData(err.to_string()))
+                .map_err(|err: helio::SceneError| AssetError::InvalidData(err.to_string()))
         })
         .collect()
 }
