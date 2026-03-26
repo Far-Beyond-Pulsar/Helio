@@ -168,12 +168,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let cam_atm = vec3<f32>(0.0, sky.earth_radius + 0.001, 0.0);
 
-    // Below horizon → store black (main pass handles ground)
-    if sin_elev < -0.01 {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    // Below horizon: keep colour from horizon moving smoothly to night.
+    // This ensures the whole lower hemisphere keeps sunset gradation.
+    var out_col = atmosphere(cam_atm, ray_dir);
+    if sin_elev < 0.0 {
+        let horizon_dir = vec3<f32>(cos(azimuth), 0.0, sin(azimuth));
+        let horizon_col = atmosphere(cam_atm, horizon_dir);
+        let falloff = clamp(-sin_elev, 0.0, 1.0);
+        let night = vec3<f32>(0.01, 0.005, 0.002);
+        let shifted = mix(horizon_col, night, pow(falloff, 1.8));
+        out_col = mix(out_col, shifted, 0.4);
     }
 
-    let col = atmosphere(cam_atm, ray_dir);
     // Store pre-exposed HDR value; main pass tone-maps on read
-    return vec4<f32>(col, 1.0);
+    return vec4<f32>(out_col, 1.0);
 }
