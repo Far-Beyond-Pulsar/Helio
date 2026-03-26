@@ -31,7 +31,8 @@
       "Bash(for f in src/*.rs src/**/*.rs)",
       "Bash(done)",
       "Bash(cut:*)",
-      "Bash(tr:*)"
+      "Bash(tr:*)",
+      "Bash(cargo test:*)"
     ]
   }
 }

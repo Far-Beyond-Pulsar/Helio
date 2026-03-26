@@ -359,7 +359,7 @@ impl ApplicationHandler for App {
             [ocean_dir.x, ocean_dir.y, ocean_dir.z],
             [0.3, 0.5, 1.0],
             0.04,
-        )));
+        ))).as_light().unwrap();
         let mut lava_light_ids = Vec::new();
         for &(x, y, z, r, g, b, intensity, range) in LAVA_LIGHTS {
             let p = [x, y, z];

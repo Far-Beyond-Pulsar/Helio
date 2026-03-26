@@ -206,7 +206,7 @@ fn add_showcase_lighting(renderer: &mut Renderer, bounds: SceneBounds) {
         radius * 0.59,
         0.28,
         0.46,
-    ));
+    )));
 
     let rim_pos = focus + Vec3::new(-radius * 0.30, radius * 0.22, -radius * 0.32);
     let rim_dir = (upper_focus - rim_pos).normalize_or_zero();
