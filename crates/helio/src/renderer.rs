@@ -280,9 +280,10 @@ impl DebugDrawPass {
             state.user_lines.clone()
         };
 
+        let cam = state.camera_position;
+        let cam_dist = cam.length();
+
         if self.editor_mode && state.editor_enabled {
-            let cam = state.camera_position;
-            let cam_dist = cam.length();
             let grid_step = if cam_dist < 20.0_f32 {
                 1.0_f32
             } else if cam_dist < 60.0_f32 {
@@ -571,6 +572,136 @@ impl Renderer {
             let next = (cx + radius * theta.cos(), cy, cz + radius * theta.sin());
             self.debug_line([last.0, last.1, last.2], [next.0, next.1, next.2], color);
             last = next;
+        }
+    }
+
+    /// Add a one-frame sphere approximation to the debug renderer.
+    pub fn debug_sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 4 { return; }
+        for plane in 0..3 {
+            let mut prev = glam::Vec3::ZERO;
+            for i in 0..=segments {
+                let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+                let pos = match plane {
+                    0 => glam::Vec3::new(radius * theta.cos(), radius * theta.sin(), 0.0),
+                    1 => glam::Vec3::new(radius * theta.cos(), 0.0, radius * theta.sin()),
+                    _ => glam::Vec3::new(0.0, radius * theta.cos(), radius * theta.sin()),
+                } + glam::Vec3::from(center);
+                if i > 0 {
+                    self.debug_line(prev.to_array(), pos.to_array(), color);
+                }
+                prev = pos;
+            }
+        }
+    }
+
+    /// Add a one-frame torus approximation.
+    pub fn debug_torus(&mut self, center: [f32; 3], normal: [f32; 3], major_radius: f32, minor_radius: f32, color: [f32; 4], major_segments: u32, minor_segments: u32) {
+        if major_segments < 3 || minor_segments < 3 { return; }
+        let c = glam::Vec3::from(center);
+        let n = glam::Vec3::from(normal).normalize_or_zero();
+        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-6) { glam::Vec3::X } else { glam::Vec3::Y };
+        let tangent = n.cross(up).normalize_or_zero();
+        let bitangent = n.cross(tangent).normalize_or_zero();
+
+        for j in 0..major_segments {
+            let theta0 = 2.0 * std::f32::consts::TAU * (j as f32) / (major_segments as f32);
+            let theta1 = 2.0 * std::f32::consts::TAU * ((j + 1) as f32) / (major_segments as f32);
+            let center0 = c + (tangent * theta0.cos() + bitangent * theta0.sin()) * major_radius;
+            let center1 = c + (tangent * theta1.cos() + bitangent * theta1.sin()) * major_radius;
+
+            let mut pprev0 = center0 + (n * minor_radius);
+            let mut pprev1 = center1 + (n * minor_radius);
+            for i in 1..=minor_segments {
+                let phi = 2.0 * std::f32::consts::TAU * (i as f32) / (minor_segments as f32);
+                let offset = (n * phi.cos() + (tangent * theta0.cos() + bitangent * theta0.sin()) * phi.sin()).normalize_or_zero() * minor_radius;
+                let cur0 = center0 + offset;
+                let offset1 = (n * phi.cos() + (tangent * theta1.cos() + bitangent * theta1.sin()) * phi.sin()).normalize_or_zero() * minor_radius;
+                let cur1 = center1 + offset1;
+
+                self.debug_line(pprev0.to_array(), cur0.to_array(), color);
+                self.debug_line(pprev1.to_array(), cur1.to_array(), color);
+                self.debug_line(pprev0.to_array(), pprev1.to_array(), color);
+
+                pprev0 = cur0;
+                pprev1 = cur1;
+            }
+        }
+    }
+
+    /// Add a one-frame cylinder outline.
+    pub fn debug_cylinder(&mut self, base_center: [f32; 3], axis: [f32; 3], height: f32, radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
+        let base = glam::Vec3::from(base_center);
+        let dir = glam::Vec3::from(axis).normalize_or_zero();
+        let top = base + dir * height;
+        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
+        let tangent = dir.cross(up).normalize_or_zero();
+        let bitangent = dir.cross(tangent).normalize_or_zero();
+        let mut prev_base = base + tangent * radius;
+        let mut prev_top = top + tangent * radius;
+        for i in 1..=segments {
+            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let dir_circle = tangent * theta.cos() + bitangent * theta.sin();
+            let cur_base = base + dir_circle * radius;
+            let cur_top = top + dir_circle * radius;
+            self.debug_line(prev_base.to_array(), cur_base.to_array(), color);
+            self.debug_line(prev_top.to_array(), cur_top.to_array(), color);
+            self.debug_line(prev_base.to_array(), prev_top.to_array(), color);
+            prev_base = cur_base;
+            prev_top = cur_top;
+        }
+    }
+
+    /// Add a one-frame cone outline.
+    pub fn debug_cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
+        let apex_v = glam::Vec3::from(apex);
+        let dir = glam::Vec3::from(axis).normalize_or_zero();
+        let base = apex_v + dir * height;
+        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
+        let tangent = dir.cross(up).normalize_or_zero();
+        let bitangent = dir.cross(tangent).normalize_or_zero();
+        let mut prev = base + tangent * base_radius;
+        for i in 1..=segments {
+            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
+            self.debug_line(prev.to_array(), cur.to_array(), color);
+            self.debug_line(cur.to_array(), apex_v.to_array(), color);
+            prev = cur;
+        }
+    }
+
+    /// Add a one-frame frustum outline.
+    pub fn debug_frustum(&mut self, origin: [f32; 3], forward: [f32; 3], up: [f32; 3], fov_y: f32, aspect: f32, near: f32, far: f32, color: [f32; 4]) {
+        let o = glam::Vec3::from(origin);
+        let fwd = glam::Vec3::from(forward).normalize_or_zero();
+        let upv = glam::Vec3::from(up).normalize_or_zero();
+        let rightv = fwd.cross(upv).normalize_or_zero();
+        let n_center = o + fwd * near;
+        let f_center = o + fwd * far;
+        let nh = (fov_y*0.5).tan() * near;
+        let nw = nh * aspect;
+        let fh = (fov_y*0.5).tan() * far;
+        let fw = fh * aspect;
+
+        let n = [
+            n_center + upv*nh - rightv*nw,
+            n_center + upv*nh + rightv*nw,
+            n_center - upv*nh + rightv*nw,
+            n_center - upv*nh - rightv*nw,
+        ];
+        let f = [
+            f_center + upv*fh - rightv*fw,
+            f_center + upv*fh + rightv*fw,
+            f_center - upv*fh + rightv*fw,
+            f_center - upv*fh - rightv*fw,
+        ];
+
+        for i in 0..4 {
+            self.debug_line(n[i].to_array(), n[(i+1)%4].to_array(), color);
+            self.debug_line(f[i].to_array(), f[(i+1)%4].to_array(), color);
+            self.debug_line(n[i].to_array(), f[i].to_array(), color);
         }
     }
 
