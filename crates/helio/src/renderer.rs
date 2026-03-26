@@ -350,13 +350,11 @@ impl RenderPass for DebugDrawPass {
 
     fn prepare(&mut self, ctx: &helio_v3::PrepareContext) -> HelioResult<()> {
         let lines = self.build_frame_vertices();
-        log::debug!("DebugDraw: {} verts", lines.len());
         self.pass.update_lines(ctx.queue, &lines);
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut helio_v3::PassContext) -> HelioResult<()> {
-        log::debug!("DebugDrawPass execute (editor_mode={}, vertex_count={})", self.editor_mode, self.pass.vertex_count);
 
         // Editor grid draws into pre_aa buffer as a background layer before geometry resolves.
         // World-space debug lines draw into final target after all scene passes.
@@ -376,7 +374,6 @@ impl RenderPass for DebugDrawPass {
         // restore target (ctx is borrowed so reassign after draw)
         ctx.target = previous_target;
 
-        log::debug!("DebugDrawPass executed, count={} err={:?}", count_before, res);
         res
     }
 }
