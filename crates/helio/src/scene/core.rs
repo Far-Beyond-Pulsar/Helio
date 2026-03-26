@@ -445,3 +445,89 @@ impl Scene {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libhelio::{SkyActor, VolumetricClouds};
+
+    fn create_test_device() -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .expect("No adapter found");
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                ..Default::default()
+            },
+        ))
+        .expect("Failed to create device");
+
+        (Arc::new(device), Arc::new(queue))
+    }
+
+    #[test]
+    fn test_sky_actor_detection_default() {
+        let (device, queue) = create_test_device();
+        let scene = Scene::new(device, queue);
+
+        let sky_ctx = scene.sky_context();
+        assert!(!sky_ctx.has_sky, "Default scene should have no sky");
+        assert!(sky_ctx.clouds.is_none(), "Default scene should have no clouds");
+    }
+
+    #[test]
+    fn test_sky_actor_detection_with_clouds() {
+        let (device, queue) = create_test_device();
+        let mut scene = Scene::new(device, queue);
+
+        // Insert sky actor with clouds
+        scene.insert_actor(SceneActor::Sky(
+            SkyActor::new()
+                .with_sky_color([0.5, 0.7, 1.0])
+                .with_clouds(VolumetricClouds {
+                    coverage: 0.6,
+                    density: 0.8,
+                    ..Default::default()
+                })
+        ));
+
+        let sky_ctx = scene.sky_context();
+        assert!(sky_ctx.has_sky, "Sky actor should be detected");
+        assert!(sky_ctx.clouds.is_some(), "Cloud settings should be detected");
+
+        if let Some(clouds) = sky_ctx.clouds {
+            assert!((clouds.coverage - 0.6).abs() < 0.01, "Coverage should match");
+            assert!((clouds.density - 0.8).abs() < 0.01, "Density should match");
+        }
+    }
+
+    #[test]
+    fn test_multiple_sky_actors_first_wins() {
+        let (device, queue) = create_test_device();
+        let mut scene = Scene::new(device, queue);
+
+        // Insert first sky actor
+        scene.insert_actor(SceneActor::Sky(
+            SkyActor::new().with_sky_color([1.0, 0.0, 0.0])
+        ));
+
+        // Insert second sky actor (should be ignored)
+        scene.insert_actor(SceneActor::Sky(
+            SkyActor::new().with_sky_color([0.0, 1.0, 0.0])
+        ));
+
+        let sky_ctx = scene.sky_context();
+        // First actor wins
+        assert!((sky_ctx.sky_color[0] - 1.0).abs() < 0.01, "Should use first actor's color");
+    }
+}
+

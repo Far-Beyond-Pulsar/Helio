@@ -32,7 +32,8 @@
       "Bash(done)",
       "Bash(cut:*)",
       "Bash(tr:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(rustc:*)"
     ]
   }
 }
