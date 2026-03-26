@@ -24,7 +24,6 @@ use helio_v3::{ RenderGraph, RenderPass, Result as HelioResult };
 // - SkyPass (needs sky_lut_view from SkyLutPass)
 // - SsaoPass (needs gbuffer views + depth view)
 // - SmaaPass, TaaPass (for higher-quality AA)
-use std::collections::HashMap;
 
 /// Halton (base-2, base-3) jitter table — matches `helio-pass-taa` so geometry
 /// and the TAA resolve shader index the same sub-pixel offset each frame.
@@ -47,12 +46,10 @@ const HALTON_JITTER: [[f32; 2]; 16] = [
     [0.03125, 0.592593],
 ];
 
-use crate::groups::{ GroupId, GroupMask };
-use crate::handles::{ LightId, MaterialId, MeshId, ObjectId, VirtualObjectId };
-use crate::material::{ MaterialAsset, TextureUpload, MAX_TEXTURES };
-use crate::mesh::{ MeshBuffers, MeshUpload };
-use crate::scene::{ Camera, ObjectDescriptor, Result as SceneResult, Scene };
-use crate::vg::{ VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor };
+use crate::groups::GroupId;
+use crate::material::MAX_TEXTURES;
+use crate::mesh::MeshBuffers;
+use crate::scene::{Camera, Scene};
 
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../spotlight.png");
@@ -215,9 +212,6 @@ pub struct Renderer {
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
     /// Per-frame scratch buffer: user billboards + auto editor-light icons.
     billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
-    /// Tracks the last-known GpuLight data for every light currently in the scene,
-    /// used to auto-generate editor billboard icons in the GroupId::EDITOR group.
-    editor_lights: HashMap<LightId, crate::GpuLight>,
 }
 
 /// Which graph is currently active — used by `set_render_size` to rebuild correctly.
@@ -435,7 +429,6 @@ impl Renderer {
             debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
-            editor_lights: HashMap::new(),
         }
     }
 
@@ -901,16 +894,21 @@ impl Renderer {
         self.billboard_scratch.clear();
         self.billboard_scratch.extend_from_slice(&self.billboard_instances);
         if !self.scene.is_group_hidden(GroupId::EDITOR) {
-            for (_, light) in &self.editor_lights {
-                let [x, y, z, _] = light.position_range;
-                let [r, g, b, _] = light.color_intensity;
-                self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
-                    world_pos: [x, y, z, 0.0],
-                    // scale_flags.z = 0.0 → world-space size: the icon is scale.xy metres
-                    // wide/tall regardless of camera distance (normal perspective applies).
-                    scale_flags: [0.25, 0.25, 0.0, 0.0],
-                    color: [r, g, b, 1.0],
-                });
+            for light in self.scene.gpu_scene().lights.as_slice() {
+                // Show editor icons for point/spot lights (world-space position).
+                if light.light_type == libhelio::LightType::Point as u32
+                    || light.light_type == libhelio::LightType::Spot as u32
+                {
+                    let [x, y, z, _] = light.position_range;
+                    let [r, g, b, _] = light.color_intensity;
+                    self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
+                        world_pos: [x, y, z, 0.0],
+                        // scale_flags.z = 0.0 → world-space size: the icon is scale.xy metres
+                        // wide/tall regardless of camera distance (normal perspective applies).
+                        scale_flags: [0.25, 0.25, 0.0, 0.0],
+                        color: [r, g, b, 1.0],
+                    });
+                }
             }
         }
 
