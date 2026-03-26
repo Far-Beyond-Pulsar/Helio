@@ -537,3 +537,64 @@ fn generate_noise() -> [u8; (NOISE_DIM * NOISE_DIM * 4) as usize] {
     data
 }
 
+#[cfg(test)]
+mod test_utils {
+    use super::*;
+
+    #[test]
+    fn generate_noise_has_correct_size_and_format() {
+        let noise = generate_noise();
+        assert_eq!(noise.len(), (NOISE_DIM * NOISE_DIM * 4) as usize);
+
+        for i in 0..(NOISE_DIM * NOISE_DIM) as usize {
+            let base = i * 4;
+            let r = noise[base];
+            let g = noise[base + 1];
+            let b = noise[base + 2];
+            let a = noise[base + 3];
+
+            assert_ne!(r, 0, "R channel should be pseudo-random and non-zero in deterministic stream");
+            assert_ne!(g, 0, "G channel should be pseudo-random and non-zero in deterministic stream");
+            assert_eq!(b, 128, "B channel must be fixed at 128");
+            assert_eq!(a, 255, "A channel must be fixed at 255");
+        }
+    }
+
+    #[test]
+    fn generate_noise_is_deterministic() {
+        let first = generate_noise();
+        let second = generate_noise();
+        assert_eq!(first, second, "generate_noise() should be deterministic across calls");
+    }
+
+    #[test]
+    fn generate_kernel_has_valid_hemisphere_samples() {
+        let kernel = generate_kernel();
+        assert_eq!(kernel.len(), KERNEL_SIZE);
+
+        let mut has_nonzero = false;
+        for sample in kernel.iter() {
+            let x = sample[0];
+            let y = sample[1];
+            let z = sample[2];
+            assert!(z >= -1e-6f32, "kernel sample z should be non-negative (hemisphere), got {z}");
+
+            let length = (x * x + y * y + z * z).sqrt();
+            assert!(length <= 1.01f32, "kernel sample length must be <= 1.0, got {length}");
+            if length > 0.001f32 {
+                has_nonzero = true;
+            }
+        }
+
+        assert!(has_nonzero, "kernel should contain non-zero samples");
+    }
+
+    #[test]
+    fn generate_kernel_is_deterministic() {
+        let a = generate_kernel();
+        let b = generate_kernel();
+        assert_eq!(a, b, "generate_kernel() must be deterministic");
+    }
+}
+
+

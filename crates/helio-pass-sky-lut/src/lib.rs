@@ -221,6 +221,11 @@ impl RenderPass for SkyLutPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // If sky is disabled, keep LUT black and skip all sky parameters.
+        if !ctx.frame_resources.sky.has_sky {
+            return Ok(());
+        }
+
         // Upload Nishita atmosphere and optional volumetric cloud parameters.
         // A real engine would derive these from a SkySystem component.
         let mut uniforms = ShaderSkyUniforms::earth_like();
@@ -264,10 +269,12 @@ impl RenderPass for SkyLutPass {
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group_0, &[]);
-        pass.set_bind_group(1, &self.bind_group_1, &[]);
-        pass.draw(0..3, 0..1);
+        if ctx.frame.sky.has_sky {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group_0, &[]);
+            pass.set_bind_group(1, &self.bind_group_1, &[]);
+            pass.draw(0..3, 0..1);
+        }
         Ok(())
     }
 }

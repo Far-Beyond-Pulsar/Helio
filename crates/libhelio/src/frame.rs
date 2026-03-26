@@ -99,7 +99,7 @@ pub struct FrameResources<'a> {
     /// High-level Helio scene resources used by wrapper-owned passes.
     pub main_scene: Option<MainSceneResources<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
-    pub sky: crate::SkyContext,
+    pub sky: crate::sky::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
     pub billboards: Option<BillboardFrameData<'a>>,
     /// Virtual geometry meshlet + instance data for this frame.
@@ -123,7 +123,7 @@ impl<'a> FrameResources<'a> {
             tile_light_counts: None,
             full_res_depth: None,
             main_scene: None,
-            sky: crate::SkyContext::default(),
+            sky: crate::sky::SkyContext::default(),
             billboards: None,
             vg: None,
         }

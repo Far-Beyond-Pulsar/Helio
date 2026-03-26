@@ -281,6 +281,11 @@ impl RenderPass for SkyPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        if !ctx.frame_resources.sky.has_sky {
+            // Keep the sky LUT buffer unchanged; pre_aa clears to black in execute.
+            return Ok(());
+        }
+
         let mut uniforms = ShaderSkyUniforms::earth_like();
 
         if let Some(clouds) = ctx.frame_resources.sky.clouds {
@@ -328,10 +333,12 @@ impl RenderPass for SkyPass {
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group_0, &[]);
-        pass.set_bind_group(1, &self.bind_group_1, &[]);
-        pass.draw(0..3, 0..1);
+        if ctx.frame.sky.has_sky {
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group_0, &[]);
+            pass.set_bind_group(1, &self.bind_group_1, &[]);
+            pass.draw(0..3, 0..1);
+        }
         Ok(())
     }
 }

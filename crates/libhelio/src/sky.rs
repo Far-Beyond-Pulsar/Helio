@@ -63,6 +63,18 @@ pub struct SkyContext {
     pub clouds: Option<VolumetricClouds>,
 }
 
+/// Scene actor representing a sky system (atmospheric sky + optional clouds).
+#[derive(Debug, Clone, Copy)]
+pub struct SkyActor {
+    pub context: SkyContext,
+}
+
+impl SkyActor {
+    pub fn new(context: SkyContext) -> Self {
+        Self { context }
+    }
+}
+
 impl Default for SkyContext {
     fn default() -> Self {
         Self {
@@ -71,6 +83,30 @@ impl Default for SkyContext {
             sky_color: [0.1, 0.1, 0.15],
             clouds: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sky_context_default_is_no_sky() {
+        let ctx = SkyContext::default();
+        assert!(!ctx.has_sky);
+        assert!(ctx.clouds.is_none());
+    }
+
+    #[test]
+    fn sky_context_has_sky_flag_respected() {
+        let ctx = SkyContext {
+            has_sky: true,
+            sky_state_changed: true,
+            sky_color: [0.3, 0.4, 0.5],
+            clouds: None,
+        };
+        assert!(ctx.has_sky);
+        assert_eq!(ctx.sky_color, [0.3, 0.4, 0.5]);
     }
 }
 

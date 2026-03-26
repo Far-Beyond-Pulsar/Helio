@@ -80,7 +80,7 @@ mod types;
 mod virtual_geometry;
 
 pub use camera::Camera;
-pub use core::Scene;
+pub use core::{Scene, SceneActor};
 pub use errors::*;
 pub use types::ObjectDescriptor;
 

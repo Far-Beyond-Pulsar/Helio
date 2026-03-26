@@ -224,7 +224,14 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        renderer.scene_mut().set_volumetric_clouds(Some(helio::VolumetricClouds {
+        renderer.scene_mut().insert_actor(helio::SceneActor::Sky(helio::SkyActor::new(libhelio::sky::SkyContext {
+            has_sky: false, // no sky – indoor scene
+            sky_state_changed: false,
+            sky_color: [0.05, 0.05, 0.1], // very dim ambient for deep shadows
+            clouds: None,
+        })));
+
+        renderer.scene_mut().insert_actor(helio::SceneActor::VolumetricClouds(libhelio::VolumetricClouds {
             coverage: 0.7,
             density: 0.8,
             base: 1200.0,
@@ -237,14 +244,14 @@ impl ApplicationHandler for App {
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
-        let _floor = renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 32.0));
-        let _nave_ceiling = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]));
-        let _aisle_ceil_l = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
-        let _aisle_ceil_r = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
-        let _wall_left_outer = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
+        let _floor =            renderer.scene_mut().insert_mesh(plane_mesh([0.0, 0.0, 0.0], 32.0));
+        let _wall_back =        renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
+        let _wall_front =       renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
+        let _aisle_ceil_l =     renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
+        let _nave_ceiling =     renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]));
+        let _aisle_ceil_r =     renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]));
+        let _wall_left_outer =  renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
         let _wall_right_outer = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]));
-        let _wall_front = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
-        let _wall_back = renderer.scene_mut().insert_mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]));
         let _ =
             v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
         let _ = v3_demo_common::insert_object(

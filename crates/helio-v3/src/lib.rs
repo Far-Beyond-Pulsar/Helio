@@ -381,9 +381,10 @@ pub mod upload;
 // Re-export libhelio types for convenience
 pub use libhelio::{
     DrawIndexedIndirectArgs, FrameResources, GBufferViews, GpuCameraUniforms, GpuDrawCall,
-    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix, SkyContext,
-    SkyUniforms,
+    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuShadowMatrix,
 };
+
+pub use libhelio::sky::{SkyContext, SkyUniforms};
 // Re-export managers
 pub use crate::scene::managers::*;
 // Re-export core types

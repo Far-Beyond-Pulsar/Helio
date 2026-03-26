@@ -29,5 +29,5 @@ pub use light::*;
 pub use material::*;
 pub use meshlet::*;
 pub use shadow::*;
-pub use sky::*;
+pub use sky::{SkyActor, VolumetricClouds};
 

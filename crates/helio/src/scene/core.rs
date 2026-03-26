@@ -25,6 +25,13 @@ use super::types::{
     VirtualObjectRecord,
 };
 
+/// Scene actor handles inserting world-level helpers like sky or volumetric clouds.
+#[derive(Debug, Clone, Copy)]
+pub enum SceneActor {
+    Sky(libhelio::SkyActor),
+    VolumetricClouds(libhelio::VolumetricClouds),
+}
+
 /// High-level scene management with persistent GPU-driven state.
 ///
 /// See the [module-level documentation](crate::scene) for architecture details and usage examples.
@@ -78,8 +85,8 @@ pub struct Scene {
     /// An object is invisible if any of its groups intersects this mask.
     pub(in crate::scene) group_hidden: GroupMask,
 
-    /// Optional current volumetric cloud actor properties.
-    pub(in crate::scene) volumetric_clouds: Option<libhelio::SkyContext>,
+    /// Active world-level actors (sky, volumetric clouds, etc.).
+    pub(in crate::scene) actors: Vec<SceneActor>,
 
     // ── Virtual geometry ──────────────────────────────────────────────────────
     /// All uploaded virtual meshes keyed by their handle.
@@ -191,7 +198,7 @@ impl Scene {
             objects_layout_optimized: false, // start in persistent mode
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
-            volumetric_clouds: None,
+            actors: Vec::new(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
             vg_objects: DenseArena::new(),
@@ -213,29 +220,88 @@ impl Scene {
         &self.gpu_scene
     }
 
-    /// Spawn or update the current volumetric clouds actor in the scene.
+    /// Set or remove the volumetric clouds actor in the scene.
+    ///
+    /// This is kept for compatibility and forwards to `insert_actor`.
     pub fn set_volumetric_clouds(&mut self, clouds: Option<libhelio::VolumetricClouds>) {
-        self.volumetric_clouds = clouds.map(|c| libhelio::SkyContext {
-            has_sky: true,
-            sky_state_changed: true,
-            sky_color: [0.1, 0.1, 0.15],
-            clouds: Some(c),
-        });
+        match clouds {
+            Some(clouds) => self.insert_actor(SceneActor::VolumetricClouds(clouds)),
+            None => self.clear_volumetric_clouds_actor(),
+        }
     }
 
     /// Remove the volumetric cloud actor from the scene.
     pub fn clear_volumetric_clouds(&mut self) {
-        self.volumetric_clouds = None;
+        self.clear_volumetric_clouds_actor();
+    }
+
+    /// Insert a generic scene actor (sky or volumetric clouds) in a unified way.
+    pub fn insert_actor(&mut self, actor: SceneActor) {
+        match actor {
+            SceneActor::Sky(sky_actor) => {
+                if let Some(slot) = self
+                    .actors
+                    .iter_mut()
+                    .find(|a| matches!(a, SceneActor::Sky(_)))
+                {
+                    *slot = SceneActor::Sky(sky_actor);
+                } else {
+                    self.actors.push(SceneActor::Sky(sky_actor));
+                }
+            }
+            SceneActor::VolumetricClouds(clouds) => {
+                if let Some(slot) = self
+                    .actors
+                    .iter_mut()
+                    .find(|a| matches!(a, SceneActor::VolumetricClouds(_)))
+                {
+                    *slot = SceneActor::VolumetricClouds(clouds);
+                } else {
+                    self.actors.push(SceneActor::VolumetricClouds(clouds));
+                }
+            }
+        }
+    }
+
+    /// Remove the explicit sky actor, if present.
+    pub fn clear_sky_actor(&mut self) {
+        self.actors.retain(|a| !matches!(a, SceneActor::Sky(_)));
+    }
+
+    /// Remove the volumetric clouds actor.
+    pub fn clear_volumetric_clouds_actor(&mut self) {
+        self.actors.retain(|a| !matches!(a, SceneActor::VolumetricClouds(_)));
     }
 
     /// Returns a reference to the currently active volumetric clouds, if any.
     pub fn volumetric_clouds(&self) -> Option<&libhelio::VolumetricClouds> {
-        self.volumetric_clouds.as_ref().and_then(|s| s.clouds.as_ref())
+        self.actors
+            .iter()
+            .find_map(|a| match a {
+                SceneActor::VolumetricClouds(c) => Some(c),
+                _ => None,
+            })
+    }
+
+    /// Returns a reference to the currently active sky actor, if any.
+    pub fn sky_actor(&self) -> Option<&libhelio::SkyActor> {
+        self.actors.iter().find_map(|a| match a {
+            SceneActor::Sky(s) => Some(s),
+            _ => None,
+        })
     }
 
     /// Returns effective sky context for the current frame.
     pub fn sky_context(&self) -> libhelio::SkyContext {
-        self.volumetric_clouds.unwrap_or_else(libhelio::SkyContext::default)
+        if let Some(sky_actor) = self.sky_actor() {
+            let mut context = sky_actor.context;
+            if context.clouds.is_none() {
+                context.clouds = self.volumetric_clouds().cloned();
+            }
+            context
+        } else {
+            libhelio::SkyContext::default()
+        }
     }
 
     /// Set the render target size for camera calculations.

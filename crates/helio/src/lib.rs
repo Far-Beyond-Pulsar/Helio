@@ -30,12 +30,12 @@ pub use renderer::{
     build_simple_graph, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
     RendererConfig,
 };
-pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError};
+pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError, SceneActor};
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 pub use helio_v3::{
     DrawIndexedIndirectArgs, Error, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
 };
-pub use libhelio::{LightType, ShadowQuality, VolumetricClouds, SkyContext};
+pub use libhelio::{LightType, ShadowQuality, VolumetricClouds, SkyActor};
 

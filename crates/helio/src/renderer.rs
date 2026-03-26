@@ -1044,21 +1044,24 @@ fn build_default_graph(
     // publish()es shadow_atlas + shadow_sampler into FrameResources for DeferredLightPass
     graph.add_pass(Box::new(ShadowPass::new(device)));
 
-    // 3. SkyLutPass — generates atmospheric sky lookup texture
-    // Publishes "sky_lut" resource for SkyPass to consume
-    let sky_lut_pass = SkyLutPass::new(device, camera_buf);
-    let sky_lut_view = sky_lut_pass.sky_lut_view.clone();
-    graph.add_pass(Box::new(sky_lut_pass));
+    // 3. Optional sky pass sequence (SkyLut + SkyPass)
+    let has_sky = scene.sky_context().has_sky;
+    if has_sky {
+        // SkyLutPass generates atmospheric sky lookup texture and publishes "sky_lut".
+        let sky_lut_pass = SkyLutPass::new(device, camera_buf);
+        let sky_lut_view = sky_lut_pass.sky_lut_view.clone();
+        graph.add_pass(Box::new(sky_lut_pass));
 
-    // 3a. SkyPass — full-screen sky dome into pre_aa before DeferredLight.
-    graph.add_pass(Box::new(SkyPass::new(
-        device,
-        camera_buf,
-        &sky_lut_view,
-        config.internal_width(),
-        config.internal_height(),
-        config.surface_format,
-    )));
+        // SkyPass draws the sky dome using the sky LUT.
+        graph.add_pass(Box::new(SkyPass::new(
+            device,
+            camera_buf,
+            &sky_lut_view,
+            config.internal_width(),
+            config.internal_height(),
+            config.surface_format,
+        )));
+    }
 
     // 3a.5. Editor-grid debug draw pass — render world grid lines before geometry.
     graph.add_pass(Box::new(DebugDrawPass::new(
