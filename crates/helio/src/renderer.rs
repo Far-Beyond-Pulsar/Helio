@@ -252,6 +252,7 @@ impl Default for DebugDrawState {
 struct DebugDrawPass {
     pass: DebugPass,
     state: Arc<Mutex<DebugDrawState>>,
+    editor_mode: bool,
 }
 
 impl DebugDrawPass {
@@ -261,18 +262,25 @@ impl DebugDrawPass {
         surface_format: wgpu::TextureFormat,
         state: Arc<Mutex<DebugDrawState>>,
         depth_test: bool,
+        editor_mode: bool,
     ) -> Self {
         Self {
             pass: DebugPass::new(device, camera_buf, surface_format, depth_test),
             state,
+            editor_mode,
         }
     }
 
     fn build_frame_vertices(&self) -> Vec<DebugVertex> {
         let state = self.state.lock().unwrap();
-        let mut output = state.user_lines.clone();
 
-        if state.editor_enabled {
+        let mut output = if self.editor_mode {
+            Vec::new()
+        } else {
+            state.user_lines.clone()
+        };
+
+        if self.editor_mode && state.editor_enabled {
             let cam = state.camera_position;
             let cam_dist = cam.length();
             let grid_step = if cam_dist < 20.0_f32 {
@@ -1050,6 +1058,16 @@ fn build_default_graph(
         config.surface_format,
     )));
 
+    // 3a.5. Editor-grid debug draw pass — render world grid lines before geometry.
+    graph.add_pass(Box::new(DebugDrawPass::new(
+        device,
+        debug_camera_buf,
+        config.surface_format,
+        debug_state.clone(),
+        false, // no depth test for editor grid (non-occluded)
+        true,  // editor mode (grid only)
+    )));
+
     // 3b. OcclusionCullPass — temporal Hi-Z culling (reads PREVIOUS frame's pyramid).
     //     Must run BEFORE DepthPrepass so depth isn't overwritten yet.
     //     Frame 0 is a no-op (the pass guards internally with ctx.frame_num == 0).
@@ -1138,13 +1156,15 @@ fn build_default_graph(
         )
     );
 
-    // 7. Debug draw pass — overlays line-based debug visuals, per-editor mode.
+    // 7. World-space debug draw pass (after main geometry and billboards).
+    //  World-space lines are drawn with no depth test so they are always visible.
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
         debug_camera_buf,
         config.surface_format,
-        debug_state,
-        debug_depth_test,
+        debug_state.clone(),
+        false, // disable geometry occlusion on final world debug lines
+        false, // worldspace debug mode
     )));
 
     // Initialize transient textures from pass declarations
