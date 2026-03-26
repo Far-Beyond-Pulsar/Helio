@@ -159,7 +159,8 @@ pub fn plane_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
         .collect();
     MeshUpload {
         vertices,
-        indices: vec![0, 1, 2, 0, 2, 3],
+        // Reverse triangle winding so the top-facing plane is front-facing (visible from above).
+        indices: vec![0, 2, 1, 0, 3, 2],
     }
 }
 
