@@ -255,11 +255,19 @@ impl RenderPass for SkyPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): single fullscreen draw — GPU samples LUT and composites sky.
+        let target_view = if let Some(pre_aa) = ctx.frame.pre_aa {
+            pre_aa
+        } else {
+            ctx.target
+        };
+
         let color_attachment = wgpu::RenderPassColorAttachment {
-            view: ctx.target,
+            view: target_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
+                // Sky fills entire frame, so no need to clear. Keep Load to preserve
+                // pre-existing contents in case this pass is skipped in some graphs.
                 load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             },

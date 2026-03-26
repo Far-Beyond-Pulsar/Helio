@@ -12,6 +12,7 @@ use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky_lut::SkyLutPass;
+use helio_pass_sky::SkyPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_transparent::TransparentPass;
@@ -204,6 +205,8 @@ pub struct Renderer {
     gi_config: GiConfig,
     shadow_quality: libhelio::ShadowQuality,
     debug_mode: u32,
+    /// Depth-test mode for debug drawable lines
+    debug_depth_test: bool,
     /// Editor mode root flag (scenes with editor helpers like grid and icons).
     editor_mode: bool,
     /// Shared debug drawing state (lines, grid toggles).
@@ -257,9 +260,10 @@ impl DebugDrawPass {
         camera_buf: &wgpu::Buffer,
         surface_format: wgpu::TextureFormat,
         state: Arc<Mutex<DebugDrawState>>,
+        depth_test: bool,
     ) -> Self {
         Self {
-            pass: DebugPass::new(device, camera_buf, surface_format),
+            pass: DebugPass::new(device, camera_buf, surface_format, depth_test),
             state,
         }
     }
@@ -365,7 +369,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer);
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer, true);
 
         // Depth buffer at INTERNAL resolution (all geometry passes render here).
         let (depth_texture, depth_view) = create_depth_resources(
@@ -403,6 +407,7 @@ impl Renderer {
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
             debug_mode: 0,
+            debug_depth_test: true,
             editor_mode: false,
             debug_state,
             billboard_instances: Vec::new(),
@@ -442,6 +447,7 @@ impl Renderer {
                 config,
                 self.debug_state.clone(),
                 &self.debug_camera_buffer,
+                self.debug_depth_test,
             );
         }
     }
@@ -466,6 +472,32 @@ impl Renderer {
                 config,
                 self.debug_state.clone(),
                 &self.debug_camera_buffer,
+                self.debug_depth_test,
+            );
+        }
+    }
+
+    /// Enable or disable debug depth testing (geometry occlusion of debug lines).
+    pub fn set_debug_depth_test(&mut self, enabled: bool) {
+        self.debug_depth_test = enabled;
+        if matches!(self.graph_kind, GraphKind::Default) {
+            let config = RendererConfig {
+                width: self.output_width,
+                height: self.output_height,
+                surface_format: self.surface_format,
+                gi_config: self.gi_config,
+                shadow_quality: self.shadow_quality,
+                debug_mode: self.debug_mode,
+                render_scale: self.render_scale,
+            };
+            self.graph = build_default_graph(
+                &self.device,
+                &self.queue,
+                &self.scene,
+                config,
+                self.debug_state.clone(),
+                &self.debug_camera_buffer,
+                self.debug_depth_test,
             );
         }
     }
@@ -579,6 +611,7 @@ impl Renderer {
                     config,
                     self.debug_state.clone(),
                     &self.debug_camera_buffer,
+                    self.debug_depth_test,
                 );
             }
             GraphKind::Simple => {
@@ -649,6 +682,7 @@ impl Renderer {
             config,
             self.debug_state.clone(),
             &self.debug_camera_buffer,
+            self.debug_depth_test,
         );
         self.graph_kind = GraphKind::Default;
     }
@@ -827,8 +861,10 @@ impl Renderer {
         let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
         let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
         let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
-        let m = camera.proj * camera.view;
-        let col = m.to_cols_array();
+        let jittered_m = jitter_mat * camera.proj * camera.view;
+        let col = jittered_m.to_cols_array();
+        // Use jittered view_proj at the same time as geometry depth buffer in this frame,
+        // so debug lines can be occluded by geometry.
         let debug_camera_uniform = DebugCameraUniform {
             view_proj: [
                 [col[0], col[1], col[2], col[3]],
@@ -931,7 +967,7 @@ impl Renderer {
             self.scene.gpu_scene(),
             target,
             &self.depth_view,
-            &frame_resources
+            &frame_resources,
         )?;
         // frame_resources is Copy, no need to drop
         drop(texture_views);
@@ -948,6 +984,7 @@ fn build_default_graph(
     config: RendererConfig,
     debug_state: Arc<Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    debug_depth_test: bool,
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);
@@ -999,7 +1036,17 @@ fn build_default_graph(
 
     // 3. SkyLutPass — generates atmospheric sky lookup texture
     // Publishes "sky_lut" resource for SkyPass to consume
-    graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
+    let sky_lut_pass = SkyLutPass::new(device, camera_buf);
+    let sky_lut_view = sky_lut_pass.sky_lut_view.clone();
+    graph.add_pass(Box::new(sky_lut_pass));
+
+    // 3a. SkyPass — full-screen sky dome into pre_aa before DeferredLight.
+    graph.add_pass(Box::new(SkyPass::new(
+        device,
+        camera_buf,
+        &sky_lut_view,
+        config.surface_format,
+    )));
 
     // 3b. OcclusionCullPass — temporal Hi-Z culling (reads PREVIOUS frame's pyramid).
     //     Must run BEFORE DepthPrepass so depth isn't overwritten yet.
@@ -1095,6 +1142,7 @@ fn build_default_graph(
         debug_camera_buf,
         config.surface_format,
         debug_state,
+        debug_depth_test,
     )));
 
     // Initialize transient textures from pass declarations

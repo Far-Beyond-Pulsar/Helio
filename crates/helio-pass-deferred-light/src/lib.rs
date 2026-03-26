@@ -504,12 +504,18 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_3_key = Some(tile_key);
         }
 
+        let load_op = if ctx.frame.sky_lut.is_some() {
+            wgpu::LoadOp::Load
+        } else {
+            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+        };
+
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: &self.pre_aa_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                load: load_op,
                 store: wgpu::StoreOp::Store,
             },
         })];

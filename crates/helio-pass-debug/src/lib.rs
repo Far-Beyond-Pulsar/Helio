@@ -29,12 +29,16 @@ pub struct DebugVertex {
 }
 
 pub struct DebugPass {
-    pipeline: wgpu::RenderPipeline,
+    pipeline_depth: wgpu::RenderPipeline,
+    pipeline_no_depth: wgpu::RenderPipeline,
     #[allow(dead_code)]
     bgl: wgpu::BindGroupLayout,
-    bind_group: wgpu::BindGroup,
+    camera_buf: wgpu::Buffer,
+    bind_group: Option<wgpu::BindGroup>,
+    bind_group_key: Option<usize>,
     vertex_buf: wgpu::Buffer,
     pub vertex_count: u32,
+    depth_test_enabled: bool,
 }
 
 impl DebugPass {
@@ -42,10 +46,12 @@ impl DebugPass {
     ///
     /// - `camera_buf`    — camera uniform (must match `Camera` struct in debug_draw.wgsl)
     /// - `target_format` — colour attachment format
+    /// - `depth_test`    — whether to reject fragments behind scene depth
     pub fn new(
         device: &wgpu::Device,
         camera_buf: &wgpu::Buffer,
         target_format: wgpu::TextureFormat,
+        depth_test: bool,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Debug Draw Shader"),
@@ -67,15 +73,6 @@ impl DebugPass {
             }],
         });
 
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Debug Draw BG"),
-            layout: &bgl,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: camera_buf.as_entire_binding(),
-            }],
-        });
-
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Debug Draw PL"),
             bind_group_layouts: &[Some(&bgl)],
@@ -91,8 +88,8 @@ impl DebugPass {
             mapped_at_creation: false,
         });
 
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Debug Draw Pipeline"),
+        let pipeline_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug Draw Pipeline Depth"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -102,13 +99,11 @@ impl DebugPass {
                     array_stride: std::mem::size_of::<DebugVertex>() as u64, // 32
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
-                        // location(0) position: vec3<f32>  — offset 0
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x3,
                             offset: 0,
                             shader_location: 0,
                         },
-                        // location(1) color: vec4<f32>  — offset 16 (after pad)
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Float32x4,
                             offset: 16,
@@ -131,8 +126,56 @@ impl DebugPass {
                 topology: wgpu::PrimitiveTopology::LineList,
                 ..Default::default()
             },
-            // Debug lines are rendered on top of final image; no depth buffer mismatch
-            // when render_scale < 1.0 and color target can be full-res.
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let pipeline_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug Draw Pipeline NoDepth"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<DebugVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x3,
+                            offset: 0,
+                            shader_location: 0,
+                        },
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x4,
+                            offset: 16,
+                            shader_location: 1,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::LineList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -140,11 +183,15 @@ impl DebugPass {
         });
 
         Self {
-            pipeline,
+            pipeline_depth,
+            pipeline_no_depth,
             bgl,
-            bind_group,
+            camera_buf: camera_buf.clone(),
+            bind_group: None,
+            bind_group_key: None,
             vertex_buf,
             vertex_count: 0,
+            depth_test_enabled: depth_test,
         }
     }
 
@@ -185,6 +232,39 @@ impl RenderPass for DebugPass {
             return Ok(());
         }
 
+        // Always sample from the internal depth buffer (ctx.depth) so debug lines
+        // are occluded by scene geometry, not by post-upscale sky proxies.
+        let camera_key = &self.camera_buf as *const _ as usize;
+        if self.bind_group_key != Some(camera_key) {
+            self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Debug Draw BG"),
+                layout: &self.bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.camera_buf.as_entire_binding(),
+                }],
+            }));
+            self.bind_group_key = Some(camera_key);
+        }
+
+        let depth_attachment = if self.depth_test_enabled {
+            let depth_view = if let Some(frd) = ctx.frame.full_res_depth {
+                frd
+            } else {
+                ctx.depth
+            };
+            Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            })
+        } else {
+            None
+        };
+
         let color_attachment = wgpu::RenderPassColorAttachment {
             view: ctx.target,
             resolve_target: None,
@@ -198,15 +278,19 @@ impl RenderPass for DebugPass {
         let desc = wgpu::RenderPassDescriptor {
             label: Some("DebugDraw"),
             color_attachments: &color_attachments,
-            depth_stencil_attachment: None,
+            depth_stencil_attachment: depth_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group, &[]);
+        if self.depth_test_enabled {
+            pass.set_pipeline(&self.pipeline_depth);
+        } else {
+            pass.set_pipeline(&self.pipeline_no_depth);
+        }
+        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
         pass.draw(0..self.vertex_count, 0..1); // O(1) — single draw call
         Ok(())
