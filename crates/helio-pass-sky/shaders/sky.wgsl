@@ -9,10 +9,14 @@
 // ──────────────────────────────────────────────────────────────────────────────
 
 struct Camera {
-    view_proj:     mat4x4<f32>,
-    position:      vec3<f32>,
-    time:          f32,
-    view_proj_inv: mat4x4<f32>,
+    view:           mat4x4<f32>,
+    proj:           mat4x4<f32>,
+    view_proj:      mat4x4<f32>,
+    view_proj_inv:  mat4x4<f32>,
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
 }
 
 // Layout must match SkyUniform in renderer.rs (112 bytes, 16-byte aligned)
@@ -308,9 +312,10 @@ fn aces_approx(v: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Reconstruct world-space ray direction from the inverse VP matrix
-    let clip    = vec4<f32>(in.ndc_xy, 1.0, 1.0);
-    let world   = camera.view_proj_inv * clip;
-    let ray_dir = normalize(world.xyz / world.w - camera.position);
+    let clip      = vec4<f32>(in.ndc_xy, 1.0, 1.0);
+    let world     = camera.view_proj_inv * clip;
+    let camera_pos = camera.position_near.xyz;
+    let ray_dir   = normalize(world.xyz / world.w - camera_pos);
 
     // Atmosphere: sample the pre-baked sky-view LUT immediately.  sampling
     // must occur under uniform control flow, so we do it before any
@@ -332,7 +337,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // Volumetric clouds: still full-res but atmosphere sampling is now free
-    sky_col = trace_clouds(camera.position, ray_dir, sky_col);
+    sky_col = trace_clouds(camera.position_near.xyz, ray_dir, sky_col);
 
     let final_col = aces_approx(sky_col * sky.exposure);
     return vec4<f32>(final_col, 1.0);

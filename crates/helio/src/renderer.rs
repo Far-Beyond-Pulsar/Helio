@@ -1045,6 +1045,8 @@ fn build_default_graph(
         device,
         camera_buf,
         &sky_lut_view,
+        config.internal_width(),
+        config.internal_height(),
         config.surface_format,
     )));
 

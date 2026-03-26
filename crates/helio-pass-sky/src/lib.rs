@@ -79,6 +79,9 @@ pub struct SkyPass {
     bind_group_0: wgpu::BindGroup,
     bind_group_1: wgpu::BindGroup,
     sky_uniform_buf: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    target_format: wgpu::TextureFormat,
 }
 
 impl SkyPass {
@@ -87,10 +90,13 @@ impl SkyPass {
     /// - `camera_buf`: buffer whose first bytes match the sky.wgsl Camera struct
     /// - `sky_lut_view`: the Rgba16Float sky LUT produced by `SkyLutPass`
     /// - `target_format`: format of the HDR render target
+    /// - `width/height`: render target size (internal scaled resolution)
     pub fn new(
         device: &wgpu::Device,
         camera_buf: &wgpu::Buffer,
         sky_lut_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
         target_format: wgpu::TextureFormat,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -238,6 +244,21 @@ impl SkyPass {
             bind_group_0,
             bind_group_1,
             sky_uniform_buf,
+            width,
+            height,
+            target_format,
+        }
+    }
+
+    fn format_to_resource(format: wgpu::TextureFormat) -> helio_v3::graph::ResourceFormat {
+        match format {
+            wgpu::TextureFormat::Rgba16Float => helio_v3::graph::ResourceFormat::Rgba16Float,
+            wgpu::TextureFormat::Bgra8UnormSrgb => helio_v3::graph::ResourceFormat::Bgra8UnormSrgb,
+            wgpu::TextureFormat::Rgba8UnormSrgb => helio_v3::graph::ResourceFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::R16Float => helio_v3::graph::ResourceFormat::R16Float,
+            wgpu::TextureFormat::R8Unorm => helio_v3::graph::ResourceFormat::R8Unorm,
+            wgpu::TextureFormat::Depth32Float => helio_v3::graph::ResourceFormat::Depth32Float,
+            _ => panic!("Unsupported SkyPass target format: {:?}", format),
         }
     }
 }
@@ -247,8 +268,16 @@ impl RenderPass for SkyPass {
         "Sky"
     }
 
-    fn declare_resources(&self, _builder: &mut helio_v3::graph::ResourceBuilder) {
-        // DeferredLightPass declares and owns pre_aa resource.
+    fn declare_resources(&self, builder: &mut helio_v3::graph::ResourceBuilder) {
+        builder.read("sky_lut");
+        builder.write_color(
+            "pre_aa",
+            Self::format_to_resource(self.target_format),
+            helio_v3::graph::ResourceSize::Absolute {
+                width: self.width,
+                height: self.height,
+            },
+        );
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
