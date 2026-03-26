@@ -1132,8 +1132,27 @@ fn build_default_graph(
     graph.add_pass(Box::new(deferred_light_pass));
 
     // 5b. TaaPass — temporal anti-aliasing: resolves pre_aa into history-blended
-    //     output, then blits the result to ctx.target. BillboardPass then renders
-    //     on top of the TAA output.
+    //     output, then blits the result to ctx.target.
+    //
+    // 6. BillboardPass — camera-facing instanced quads (rendered into pre_aa so that
+    //     they are depth-tested against geometry and participate in the TAA pipeline).
+    let spotlight = image
+        ::load_from_memory(SPOTLIGHT_PNG)
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .into_rgba8();
+    let (sw, sh) = spotlight.dimensions();
+    let mut billboard_pass = BillboardPass::new_with_sprite_rgba(
+        device,
+        queue,
+        camera_buf,
+        config.surface_format,
+        spotlight.as_raw(),
+        sw,
+        sh,
+    );
+    billboard_pass.set_occluded_by_geometry(true);
+    graph.add_pass(Box::new(billboard_pass));
+
     graph.add_pass(
         Box::new(
             TaaPass::new(
@@ -1142,7 +1161,7 @@ fn build_default_graph(
                 config.internal_height(),
                 config.width,
                 config.height,
-                config.surface_format
+                config.surface_format,
             )
         )
     );
@@ -1151,27 +1170,6 @@ fn build_default_graph(
     // - SkyPass (reads "sky_lut", writes to scene color)
     // - TransparentPass (reads scene depth, writes to scene color with blending)
     // - FxaaPass (reads "pre_aa", writes to final surface)
-
-    // 6. BillboardPass — camera-facing instanced quads (composited after opaque geometry).
-    //    Uses spotlight.png as the editor icon sprite (tinted per-instance by light colour).
-    let spotlight = image
-        ::load_from_memory(SPOTLIGHT_PNG)
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (sw, sh) = spotlight.dimensions();
-    graph.add_pass(
-        Box::new(
-            BillboardPass::new_with_sprite_rgba(
-                device,
-                queue,
-                camera_buf,
-                config.surface_format,
-                spotlight.as_raw(),
-                sw,
-                sh
-            )
-        )
-    );
 
     // 7. World-space debug draw pass (after main geometry and billboards).
     //  World-space lines are rendered without depth test by default (no occlusion).

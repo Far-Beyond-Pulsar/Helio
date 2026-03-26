@@ -43,6 +43,7 @@ pub struct BillboardPass {
     pub instance_buf: wgpu::Buffer,
     quad_vertex_buf: wgpu::Buffer,
     pub instance_count: u32,
+    occluded_by_geometry: bool,
     #[allow(dead_code)]
     white_texture: wgpu::Texture,
     #[allow(dead_code)]
@@ -334,6 +335,7 @@ impl BillboardPass {
             instance_buf,
             quad_vertex_buf,
             instance_count: 0,
+            occluded_by_geometry: true,
             white_texture,
             white_view,
             sampler,
@@ -341,6 +343,10 @@ impl BillboardPass {
     }
 
     /// Upload billboard instances. Call once per frame (or when the set changes).
+    pub fn set_occluded_by_geometry(&mut self, value: bool) {
+        self.occluded_by_geometry = value;
+    }
+
     pub fn update_instances(&mut self, queue: &wgpu::Queue, instances: &[BillboardInstance]) {
         let count = instances.len().min(MAX_BILLBOARDS as usize);
         if count > 0 {
@@ -463,8 +469,14 @@ impl RenderPass for BillboardPass {
             return Ok(());
         }
 
+        let target_view = if self.occluded_by_geometry {
+            ctx.frame.pre_aa.unwrap_or(ctx.target)
+        } else {
+            ctx.target
+        };
+
         let color_attachment = wgpu::RenderPassColorAttachment {
-            view: ctx.target,
+            view: target_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
@@ -474,10 +486,13 @@ impl RenderPass for BillboardPass {
         };
         // When render_scale < 1.0 the internal depth buffer (ctx.depth) is smaller than
         // ctx.target (native resolution).  The renderer provides a native-sized full_res_depth
-        // texture in that case; we clear it to 1.0 so billboards always pass depth test.
+        // texture in that case; use it for proper depth testing (geometry occlusion).
         // At render_scale = 1.0 full_res_depth is None and we use ctx.depth directly.
-        let (depth_view, depth_load_op) = if let Some(frd) = ctx.frame.full_res_depth {
-            (frd, wgpu::LoadOp::Clear(1.0))
+
+        let (depth_view, depth_load_op) = if self.occluded_by_geometry {
+            (ctx.depth, wgpu::LoadOp::Load)
+        } else if let Some(frd) = ctx.frame.full_res_depth {
+            (frd, wgpu::LoadOp::Load)
         } else {
             (ctx.depth, wgpu::LoadOp::Load)
         };
