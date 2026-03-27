@@ -21,9 +21,13 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig,
+    required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge, LightId, MeshId, Renderer, RendererConfig,
 };
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
+
+use std::io::{self, BufRead};
+use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 
 use winit::{
     application::ApplicationHandler,
@@ -34,8 +38,6 @@ use winit::{
 };
 
 use std::collections::HashSet;
-
-use std::sync::Arc;
 
 // ── Scene data ────────────────────────────────────────────────────────────────
 
@@ -94,7 +96,9 @@ struct AppState {
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
-    renderer: Renderer,
+    renderer: Arc<Mutex<Renderer>>,
+    command_bridge: Arc<HelioCommandBridge>,
+    action_rx: Receiver<HelioAction>,
     last_frame: std::time::Instant,
 
     // Major structural surfaces
@@ -497,12 +501,37 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
+        let renderer = Arc::new(Mutex::new(renderer));
+        let (bridge, action_rx) = HelioCommandBridge::new();
+        let command_bridge = Arc::new(bridge);
+
+        // REPL thread to drive commands from stdin
+        {
+            let bridge = command_bridge.clone();
+            std::thread::spawn(move || {
+                let stdin = io::stdin();
+                for line in stdin.lock().lines() {
+                    match line {
+                        Ok(cmd) if !cmd.trim().is_empty() => {
+                            match bridge.run(&cmd) {
+                                Ok(()) => println!("OK: {}", cmd),
+                                Err(e) => println!("ERR: {} -> {}", cmd, e),
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        }
+
         self.state = Some(AppState {
             window,
             surface,
             device,
             surface_format: format,
             renderer,
+            command_bridge,
+            action_rx,
             last_frame: std::time::Instant::now(),
             _floor,
             _nave_ceiling,
@@ -574,7 +603,9 @@ impl ApplicationHandler for App {
                     10 => 11,
                     _ => 0,
                 };
-                state.renderer.set_debug_mode(state.debug_mode);
+                if let Ok(mut renderer) = state.renderer.lock() {
+                    renderer.set_debug_mode(state.debug_mode);
+                }
                 println!("[debug] shadow debug mode = {}", state.debug_mode);
             }
 
@@ -625,7 +656,9 @@ impl ApplicationHandler for App {
                         desired_maximum_frame_latency: 2,
                     },
                 );
-                state.renderer.set_render_size(s.width, s.height);
+                if let Ok(mut renderer) = state.renderer.lock() {
+                    renderer.set_render_size(s.width, s.height);
+                }
             }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
@@ -702,6 +735,17 @@ impl AppState {
             200.0,
         );
 
+        // Apply commands from REPL / quark to renderer
+        let mut renderer = self.renderer.lock().unwrap();
+        while let Ok(action) = self.action_rx.try_recv() {
+            match action {
+                HelioAction::SetDebugMode(mode) => renderer.set_debug_mode(mode),
+                HelioAction::SetEditorMode(enabled) => renderer.set_editor_mode(enabled),
+                HelioAction::SetDebugDepthTest(enabled) => renderer.set_debug_depth_test(enabled),
+                HelioAction::DebugClear => renderer.debug_clear(),
+            }
+        }
+
         // Chandeliers flicker slightly
         let flicker = 1.0 + (time * 9.1).sin() * 0.03 + (time * 5.7).cos() * 0.02;
         // Candle flicker — more pronounced
@@ -710,7 +754,7 @@ impl AppState {
         // Update flickering chandelier intensities
         for (i, &id) in self.chandelier_light_ids.iter().enumerate() {
             let z = CHANDELIER_Z[i];
-            let _ = self.renderer.scene_mut().update_light(
+            let _ = renderer.scene_mut().update_light(
                 id,
                 point_light([0.0_f32, 15.0, z], [1.0, 0.92, 0.78], 8.0 * flicker, 22.0),
             );
@@ -718,7 +762,7 @@ impl AppState {
         // Update flickering candle intensities
         for (i, &id) in self.candle_light_ids.iter().enumerate() {
             let (x, y, z) = CANDLES[i];
-            let _ = self.renderer.scene_mut().update_light(
+            let _ = renderer.scene_mut().update_light(
                 id,
                 point_light([x, y, z], [1.0, 0.6, 0.15], 1.2 * cflicker, 4.0),
             );
@@ -735,7 +779,7 @@ impl AppState {
         };
         let view = output.texture.create_view(&Default::default());
 
-        if let Err(e) = self.renderer.render(&camera, &view) {
+        if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
         output.present();

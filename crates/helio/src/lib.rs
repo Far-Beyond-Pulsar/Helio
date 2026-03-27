@@ -14,6 +14,7 @@ mod groups;
 mod handles;
 mod material;
 mod mesh;
+mod quark_commands;
 mod renderer;
 mod scene;
 mod vg;
@@ -26,6 +27,7 @@ pub use material::{
     TextureUpload, MAX_TEXTURES,
 };
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex};
+pub use quark_commands::{HelioAction, HelioCommandBridge, register_helio_commands};
 pub use renderer::{
     build_simple_graph, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
     RendererConfig,

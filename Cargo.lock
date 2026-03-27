@@ -934,6 +934,7 @@ dependencies = [
  "libhelio",
  "log",
  "pollster 0.3.0",
+ "quark",
  "thiserror 2.0.18",
  "wgpu",
 ]
@@ -962,6 +963,7 @@ name = "helio-live-portal"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "quark",
  "serde",
  "serde_json",
  "tokio",
@@ -2132,6 +2134,25 @@ name = "pxfm"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b5a041e753da8b807c9255f28de81879c78c876392ff2469cde94799b2896b9d"
+
+[[package]]
+name = "quark"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Quark#8ed5c18ec1a02cf1b20ee34b9cec22b773dac136"
+dependencies = [
+ "quark-macros",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "quark-macros"
+version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Quark#8ed5c18ec1a02cf1b20ee34b9cec22b773dac136"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "quick-xml"

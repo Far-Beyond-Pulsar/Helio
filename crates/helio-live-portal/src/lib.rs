@@ -1,12 +1,19 @@
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
 use axum::response::{Html, IntoResponse};
 use axum::routing::get;
 use axum::Router;
+use quark::Quark;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
+
+#[derive(Clone)]
+struct PortalState {
+    broadcast_tx: broadcast::Sender<String>,
+    command_registry: Option<Arc<Mutex<Quark>>>,
+}
 
 // helper to serve javascript modules from assets/js
 async fn serve_js(axum::extract::Path(file): axum::extract::Path<String>) -> impl IntoResponse {
@@ -208,6 +215,13 @@ impl LivePortalHandle {
 }
 
 pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
+    start_live_portal_with_quark(bind_addr, None)
+}
+
+pub fn start_live_portal_with_quark(
+    bind_addr: &str,
+    command_registry: Option<Arc<Mutex<Quark>>>,
+) -> std::io::Result<LivePortalHandle> {
     let bind_addr = bind_addr.to_string();
     let url = format!("http://{}", bind_addr);
 
@@ -263,6 +277,11 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                         }
                     });
 
+                let state = PortalState {
+                    broadcast_tx: broadcast_tx.clone(),
+                    command_registry: command_registry.clone(),
+                };
+
                 let app = Router::new()
                     .route("/", get(index))
                     .route("/favicon.ico", get(favicon))
@@ -271,7 +290,7 @@ pub fn start_live_portal(bind_addr: &str) -> std::io::Result<LivePortalHandle> {
                     .route("/vendor/{*file}", get(serve_vendor))
                     .route("/assets/{*file}", get(serve_static))
                     .route("/ws", get(ws_upgrade))
-                    .with_state(broadcast_tx);
+                    .with_state(state);
 
                 match tokio::net::TcpListener::bind(&server_bind).await {
                     Ok(listener) => {
@@ -317,17 +336,47 @@ async fn favicon() -> impl IntoResponse {
     axum::http::StatusCode::NO_CONTENT
 }
 
-async fn ws_upgrade(
-    ws: WebSocketUpgrade,
-    State(tx): State<broadcast::Sender<String>>,
-) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws_client(socket, tx.subscribe()))
+async fn ws_upgrade(ws: WebSocketUpgrade, State(state): State<PortalState>) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| ws_client(socket, state))
 }
 
-async fn ws_client(mut socket: WebSocket, mut rx: broadcast::Receiver<String>) {
-    while let Ok(msg) = rx.recv().await {
-        if socket.send(Message::Text(msg.into())).await.is_err() {
-            break;
+async fn ws_client(mut socket: WebSocket, state: PortalState) {
+    let mut rx = state.broadcast_tx.subscribe();
+
+    loop {
+        tokio::select! {
+            biased;
+
+            res = rx.recv() => {
+                match res {
+                    Ok(msg) => {
+                        if socket.send(Message::Text(msg)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            client_msg = socket.recv() => {
+                match client_msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Some(registry) = &state.command_registry {
+                            let reply = match registry.lock() {
+                                Ok(mut reg) => match reg.run(&text) {
+                                    Ok(()) => format!("OK: {}", text),
+                                    Err(e) => format!("ERROR: {}", e),
+                                },
+                                Err(e) => format!("ERROR: command registry mutex poisoned: {}", e),
+                            };
+                            let _ = socket.send(Message::Text(reply)).await;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(_)) => {},
+                    Some(Err(_)) => break,
+                }
+            }
         }
     }
 }
