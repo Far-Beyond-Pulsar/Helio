@@ -62,6 +62,7 @@ pub fn register_helio_commands(registry: &mut Quark, sender: Sender<HelioAction>
         sender: sender.clone(),
     });
     registry.register_command(DebugClearCommand { sender });
+    registry.register_command(HelpCommand {});
 }
 
 struct SetDebugModeCommand {
@@ -222,6 +223,44 @@ impl Command for DebugClearCommand {
         self.sender
             .send(HelioAction::DebugClear)
             .map_err(|e| CommandError::ExecutionError(format!("Channel send failed: {}", e)))?;
+
+        Ok(())
+    }
+}
+
+struct HelpCommand;
+
+impl Command for HelpCommand {
+    fn name(&self) -> &str {
+        "help"
+    }
+
+    fn syntax(&self) -> &str {
+        "help"
+    }
+
+    fn short(&self) -> &str {
+        "Display available commands"
+    }
+
+    fn docs(&self) -> &str {
+        "Usage: help\nPrints command list and usage."
+    }
+
+    fn execute(&self, args: Vec<String>) -> QuarkResult<()> {
+        if !args.is_empty() {
+            return Err(CommandError::ArgumentCountMismatch {
+                expected: 0,
+                got: args.len(),
+            });
+        }
+
+        println!("Available commands:");
+        println!("  set_debug_mode <0|10|11> - Set renderer debug mode");
+        println!("  set_editor_mode <true|false> - Enable/disable editor helpers");
+        println!("  set_debug_depth_test <true|false> - Toggle debug depth test");
+        println!("  debug_clear - Clear debug lines");
+        println!("  help - Show this list");
 
         Ok(())
     }
