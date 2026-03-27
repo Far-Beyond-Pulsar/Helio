@@ -70,44 +70,68 @@ crates/examples        ← native example binaries
 
 ## Quick Start
 
+### 1) Verify with a production example
+
+The current Helio workflow has moved to explicit per-binary examples in `crates/examples`. Running an example is now the most reliable and fastest way to confirm the code works locally.
+
+```sh
+cargo run -p examples --bin indoor_cathedral --release
+cargo run -p examples --bin indoor_server_room --release
+cargo run -p examples --bin ship_flight --release
+cargo run -p examples --bin load_fbx --release -- path/to/model.fbx
+```
+
+### 2) Add Helio as a dependency
+
 ```toml
-# Cargo.toml
 [dependencies]
 helio = { path = "crates/helio" }
-wgpu  = "23"
+helio-asset-compat = { path = "crates/helio-asset-compat" }
+wgpu = "0.13"
 winit = "0.30"
 ```
 
+### 3) Create and configure a renderer
+
 ```rust
-use helio::{
-    required_wgpu_features, required_wgpu_limits,
-    Camera, GroupMask, Renderer, RendererConfig, ShadowQuality,
-    GpuLight, GpuMaterial,
-};
+use std::sync::Arc;
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, GroupMask, Renderer, RendererConfig, ShadowQuality};
 
-// Device + surface setup (standard wgpu boilerplate) …
+// setup wgpu `device`, `queue`, `surface`, `surface_format`, etc.
 
-let mut renderer = Renderer::new(
-    device.clone(), queue.clone(),
-    RendererConfig::new(width, height, surface_format)
-        .with_shadow_quality(ShadowQuality::High),
-);
+let config = RendererConfig::new(width, height, surface_format)
+    .with_shadow_quality(ShadowQuality::High);
+let mut renderer = Renderer::new(device.clone(), queue.clone(), config);
 
 renderer.set_ambient([0.3, 0.4, 0.6], 0.04);
+renderer.use_default_graph(); // or `renderer.use_simple_graph()` for lightweight demo mode
+```
 
-let mesh_id  = renderer.insert_mesh(mesh_upload);
-let mat_id   = renderer.insert_material(material);
-let light_id = renderer.insert_light(point_light([0.0, 3.0, 0.0], [1.0, 0.9, 0.8], 10.0, 15.0));
-let obj_id   = renderer.insert_object(ObjectDescriptor {
-    mesh: mesh_id, material: mat_id,
-    transform: Mat4::IDENTITY,
-    bounds: [0.0, 0.0, 0.0, 2.0],
-    flags: 0,
-    groups: GroupMask::NONE,
-})?;
+### 4) Populate scene and render (actor-based API)
 
-// Per-frame render loop
-let camera = Camera::perspective_look_at(eye, target, Vec3::Y, FOVY, aspect, 0.1, 1000.0);
+```rust
+let floor_mesh = renderer
+    .scene_mut()
+    .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 32.0)))
+    .as_mesh()
+    .unwrap();
+let wall_material = renderer.scene_mut().insert_material(material);
+
+let light_id = renderer
+    .scene_mut()
+    .insert_actor(helio::SceneActor::light(point_light([0.0, 10.0, 0.0], [1.0, 0.9, 0.8], 8.0, 14.0)))
+    .as_light()
+    .unwrap();
+
+let object_id = v3_demo_common::insert_object(
+    &mut renderer,
+    floor_mesh,
+    wall_material,
+    Mat4::IDENTITY,
+    32.0,
+)?;
+
+let camera = Camera::perspective_look_at(eye, target, Vec3::Y, fov, aspect, 0.1, 1000.0);
 renderer.render(&camera, &surface_view)?;
 ```
 
