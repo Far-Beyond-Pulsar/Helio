@@ -52,7 +52,10 @@ struct LightSample {
 @group(0) @binding(1) var<uniform> globals:   HlfsGlobals;
 @group(0) @binding(2) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(3) var<storage, read_write> samples: array<LightSample>;
-@group(0) @binding(4) var clip_stack_level0: texture_storage_3d<rgba16float, write>;
+@group(0) @binding(4) var clip_stack_level0: texture_3d<f32>;
+@group(0) @binding(5) var gbuf_normal: texture_2d<f32>;
+@group(0) @binding(6) var gbuf_depth: texture_depth_2d;
+@group(0) @binding(7) var clip_stack_sampler: sampler;
 
 // Simple hash function for random sampling
 fn hash13(p3: vec3<f32>) -> f32 {
@@ -61,32 +64,77 @@ fn hash13(p3: vec3<f32>) -> f32 {
     return fract((p.x + p.y) * p.z);
 }
 
+fn reconstruct_world_pos(pixel_pos: vec2<u32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(
+        (f32(pixel_pos.x) + 0.5) / f32(globals.screen_width) * 2.0 - 1.0,
+        1.0 - (f32(pixel_pos.y) + 0.5) / f32(globals.screen_height) * 2.0,
+        depth * 2.0 - 1.0,
+        1.0,
+    );
+    let world_h = camera.view_proj_inv * ndc;
+    return world_h.xyz / world_h.w;
+}
+
+fn world_to_clipstack_uv(world_pos: vec3<f32>, level: u32) -> vec3<f32> {
+    let half_extent = globals.near_field_size * 0.5 * pow(globals.cascade_scale, f32(level));
+    let local = world_pos - globals.camera_position;
+    let uv = (local / (2.0 * half_extent)) + vec3<f32>(0.5);
+    return clamp(uv, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn evaluate_light_sample(world_pos: vec3<f32>, normal: vec3<f32>, light: GpuLight) -> vec3<f32> {
+    let light_pos = light.position_range.xyz;
+    let delta = light_pos - world_pos;
+    let dist = max(length(delta), 0.001);
+    let dir = normalize(delta);
+    let ndotl = max(dot(normal, dir), 0.0);
+    let attenuation = light.position_range.w / (dist * dist + 1.0);
+    let light_color = light.color_intensity.xyz;
+    let intensity = light.color_intensity.w;
+    return light_color * intensity * ndotl * attenuation;
+}
+
 // Sample light using importance from clip-stack
 fn importance_sample_light(pixel_pos: vec2<u32>, sample_idx: u32) -> LightSample {
+    var sample: LightSample;
+
+    if (globals.light_count == 0u) {
+        sample.position = camera.position_near.xyz;
+        sample.direction = camera.forward_far.xyz;
+        sample.radiance = vec4<f32>(0.0);
+        return sample;
+    }
+
+    let depth = textureLoad(gbuf_depth, vec2<i32>(pixel_pos), 0);
+    let world_pos = reconstruct_world_pos(pixel_pos, depth);
+    let surf_normal = normalize(textureLoad(gbuf_normal, vec2<i32>(pixel_pos), 0).xyz * 2.0 - 1.0);
+
     let pixel_coord = vec2<f32>(pixel_pos);
     let seed = vec3<f32>(pixel_coord, f32(sample_idx + globals.frame));
     let rnd = hash13(seed);
 
-    // Simple uniform light selection (in production: use clip-stack PDF)
-    let light_idx = u32(rnd * f32(globals.light_count)) % globals.light_count;
-    let light = lights[light_idx];
+    // Choose a light with importance sampling based on geometry + intensity
+    var best_radiance = vec3<f32>(0.0);
+    var best_weight: f32 = 0.0;
+    let max_trials = min(globals.light_count, 8u);
+    for (var i = 0u; i < max_trials; i = i + 1u) {
+        let local_rnd = hash13(seed + vec3<f32>(f32(i), f32(i * 3u), f32(i * 7u)));
+        let candidate = lights[(u32(local_rnd * f32(globals.light_count))) % globals.light_count];
+        let radiance = evaluate_light_sample(world_pos, surf_normal, candidate);
+        let weight = length(radiance);
+        if (weight > best_weight) {
+            best_weight = weight;
+            best_radiance = radiance;
+            sample.position = world_pos;
+            sample.direction = normalize(candidate.position_range.xyz - world_pos);
+        }
+    }
 
-    // Reconstruct world position from pixel
-    let ndc = vec2<f32>(
-        (pixel_coord.x / f32(globals.screen_width)) * 2.0 - 1.0,
-        1.0 - (pixel_coord.y / f32(globals.screen_height)) * 2.0
-    );
+    // Add clip-stack indirect contribution from nearest level
+    let field_uv = world_to_clipstack_uv(world_pos, 0u);
+    let field_radiance = textureSampleLevel(clip_stack_level0, clip_stack_sampler, field_uv, 0).rgb;
 
-    // Sample light contribution
-    let light_pos = light.position_range.xyz;
-    let light_color = light.color_intensity.xyz;
-    let light_intensity = light.color_intensity.w;
-
-    var sample: LightSample;
-    sample.position = light_pos;
-    sample.direction = normalize(light_pos - camera.position_near.xyz);
-    sample.radiance = vec4<f32>(light_color * light_intensity, 1.0);
-
+    sample.radiance = vec4<f32>(best_radiance + field_radiance * 0.4, 1.0);
     return sample;
 }
 

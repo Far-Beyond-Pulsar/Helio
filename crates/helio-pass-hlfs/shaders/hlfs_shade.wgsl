@@ -30,8 +30,61 @@ struct HlfsGlobals {
 }
 
 @group(0) @binding(0) var clip_stack_level0: texture_3d<f32>;
-@group(0) @binding(1) var clip_stack_sampler: sampler;
-@group(0) @binding(2) var pre_aa_texture: texture_2d<f32>;  // Sky + debug layers
+@group(0) @binding(1) var clip_stack_level1: texture_3d<f32>;
+@group(0) @binding(2) var clip_stack_level2: texture_3d<f32>;
+@group(0) @binding(3) var clip_stack_level3: texture_3d<f32>;
+@group(0) @binding(4) var clip_stack_sampler: sampler;
+@group(0) @binding(5) var pre_aa_texture: texture_2d<f32>;  // Sky + debug layers
+@group(0) @binding(6) var<uniform> globals: HlfsGlobals;
+@group(0) @binding(7) var<uniform> camera: Camera;
+@group(0) @binding(8) var<storage, read> lights: array<GpuLight>;
+
+struct GpuLight {
+    position_range: vec4<f32>,
+    direction_outer: vec4<f32>,
+    color_intensity: vec4<f32>,
+    shadow_index: u32,
+    light_type: u32,
+    inner_angle: f32,
+    _pad: u32,
+}
+
+fn reconstruct_world_pos(ndc_uv: vec2<f32>, depth: f32) -> vec3<f32> {
+    let ndc = vec4<f32>(ndc_uv * 2.0 - vec2<f32>(1.0), depth * 2.0 - 1.0, 1.0);
+    let world_h = camera.view_proj_inv * ndc;
+    return world_h.xyz / world_h.w;
+}
+
+fn evaluate_light(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    let light_color = light.color_intensity.xyz;
+    let intensity = light.color_intensity.w;
+    if (light.light_type == 0u) {
+        // Directional light
+        let dir = normalize(light.direction_outer.xyz);
+        let ndotl = max(dot(normal, dir), 0.0);
+        return light_color * intensity * ndotl;
+    } else {
+        let delta = light.position_range.xyz - world_pos;
+        let dist = max(length(delta), 0.001);
+        let dir = normalize(delta);
+        let ndotl = max(dot(normal, dir), 0.0);
+        let range = max(light.position_range.w, 1.0);
+        let attenuation = max(0.0, 1.0 - dist / range) / (dist * dist * 0.2 + 1.0);
+
+        if (light.light_type == 2u) {
+            // Spot attack
+            let spot_dir = normalize(light.direction_outer.xyz);
+            let cos_angle = dot(spot_dir, -dir);
+            let outer = light.direction_outer.w;
+            let inner = light.inner_angle;
+            let spot = smoothstep(outer, inner, cos_angle);
+            return light_color * intensity * ndotl * attenuation * spot;
+        }
+
+        // point/other
+        return light_color * intensity * ndotl * attenuation;
+    }
+}
 
 // Group 1: GBuffer inputs
 @group(1) @binding(0) var gbuf_albedo:   texture_2d<f32>;
@@ -70,8 +123,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let pixel_coord = vec2<i32>(in.clip_pos.xy);
 
     // Read from GBuffer
-    let albedo = textureLoad(gbuf_albedo, pixel_coord, 0);
-    let normal = textureLoad(gbuf_normal, pixel_coord, 0).xyz;
+    let albedo = textureLoad(gbuf_albedo, pixel_coord, 0).rgb;
+    let normal = normalize(textureLoad(gbuf_normal, pixel_coord, 0).xyz * 2.0 - 1.0);
+    let orm = textureLoad(gbuf_orm, pixel_coord, 0).rgb;
+    let emissive = textureLoad(gbuf_emissive, pixel_coord, 0).rgb;
     let depth = textureLoad(gbuf_depth, pixel_coord, 0);
 
     // Sky/background pixels: sample from pre_aa (sky + debug layers)
@@ -79,13 +134,39 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return textureLoad(pre_aa_texture, pixel_coord, 0);
     }
 
-    // Simple directional lighting
-    let light_dir = normalize(vec3<f32>(0.5, 1.0, 0.3));
-    let ndotl = max(dot(normal, light_dir), 0.0);
-    let ambient = vec3<f32>(0.1);
+    // Sample hierarchical radiance field
+    let uv = clamp(in.uv * 0.5 + vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(1.0));
+    let field_coord = vec3<f32>(uv, depth);
 
-    // Basic lighting: albedo * (directional + ambient)
-    let lit_color = albedo.rgb * (ndotl * vec3<f32>(1.0, 0.95, 0.9) + ambient);
+    let field0 = textureSampleLevel(clip_stack_level0, clip_stack_sampler, field_coord, 0).rgb;
+    let field1 = textureSampleLevel(clip_stack_level1, clip_stack_sampler, field_coord, 0).rgb;
+    let field2 = textureSampleLevel(clip_stack_level2, clip_stack_sampler, field_coord, 0).rgb;
+    let field3 = textureSampleLevel(clip_stack_level3, clip_stack_sampler, field_coord, 0).rgb;
 
-    return vec4<f32>(lit_color, 1.0);
+    let indirect = field0 * 0.6 + field1 * 0.25 + field2 * 0.1 + field3 * 0.05;
+
+    let roughness = clamp(orm.g, 0.02, 1.0);
+    let metallic = orm.b;
+    let base_albedo = albedo * (1.0 - metallic);
+
+    // Direct per-light accumulation (actual scene lights)
+    var direct_lighting = vec3<f32>(0.0);
+    let world_pos = reconstruct_world_pos(in.uv, depth);
+    let max_lights = min(globals.light_count, 64u);
+    for (var i: u32 = 0u; i < max_lights; i = i + 1u) {
+        direct_lighting = direct_lighting + evaluate_light(lights[i], world_pos, normal);
+    }
+
+    let ambient = vec3<f32>(0.03);
+    let specular_strength = 0.04;
+    var specular = vec3<f32>(0.0);
+    if (length(direct_lighting) > 0.0) {
+        let phong = pow(max(dot(normal, normalize(direct_lighting)), 0.0), (1.0 / max(roughness, 0.001)) * 64.0);
+        specular = vec3<f32>(specular_strength) * phong;
+    }
+
+    let base = base_albedo * (direct_lighting + ambient);
+    let final_color = base + specular + indirect + emissive;
+
+    return vec4<f32>(final_color, 1.0);
 }
