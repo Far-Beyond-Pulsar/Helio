@@ -49,12 +49,6 @@ struct GpuLight {
     _pad: u32,
 }
 
-fn reconstruct_world_pos(ndc_uv: vec2<f32>, depth: f32) -> vec3<f32> {
-    let ndc = vec4<f32>(ndc_uv * 2.0 - vec2<f32>(1.0), depth * 2.0 - 1.0, 1.0);
-    let world_h = camera.view_proj_inv * ndc;
-    return world_h.xyz / world_h.w;
-}
-
 fn evaluate_light(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     let light_color = light.color_intensity.xyz;
     let intensity = light.color_intensity.w;
@@ -149,9 +143,15 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let metallic = orm.b;
     let base_albedo = albedo * (1.0 - metallic);
 
+    // Reconstruct accurate world position from depth and camera inverse view-proj.
+    let screen_size = vec2<f32>(textureDimensions(gbuf_albedo));
+    let uv_01 = in.clip_pos.xy / screen_size;
+    let ndc_xy = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
+    let world_h = camera.view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
+    let world_pos = world_h.xyz / world_h.w;
+
     // Direct per-light accumulation (actual scene lights)
     var direct_lighting = vec3<f32>(0.0);
-    let world_pos = reconstruct_world_pos(in.uv, depth);
     let max_lights = min(globals.light_count, 64u);
     for (var i: u32 = 0u; i < max_lights; i = i + 1u) {
         direct_lighting = direct_lighting + evaluate_light(lights[i], world_pos, normal);
