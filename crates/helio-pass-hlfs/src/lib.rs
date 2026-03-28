@@ -47,6 +47,7 @@ pub struct HlfsPass {
     // Clip-stack: 4 levels of 3D textures (128^3 RGBA16F each)
     clip_stack_textures: Vec<wgpu::Texture>,
     clip_stack_views: Vec<wgpu::TextureView>,
+    clip_stack_sampler: wgpu::Sampler,
 
     // Intermediate buffers
     sample_buffer: wgpu::Buffer,  // Stores K samples per pixel
@@ -198,7 +199,7 @@ impl HlfsPass {
         let bgl_shade = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("HLFS Shade BGL"),
             entries: &[
-                // GBuffer inputs + clip-stack textures for sampling
+                // Clip-stack texture
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -207,6 +208,13 @@ impl HlfsPass {
                         view_dimension: wgpu::TextureViewDimension::D3,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                // Sampler for clip-stack
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -283,6 +291,18 @@ impl HlfsPass {
 
         let (output_texture, output_view) = create_output_texture(device, width, height, output_format);
 
+        // Create sampler for clip-stack sampling
+        let clip_stack_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HLFS Clip-Stack Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
         Self {
             importance_sample_pipeline,
             radiance_inject_pipeline,
@@ -291,6 +311,7 @@ impl HlfsPass {
             globals_buf,
             clip_stack_textures,
             clip_stack_views,
+            clip_stack_sampler,
             sample_buffer,
             bgl_compute,
             bgl_shade,
@@ -370,8 +391,55 @@ impl RenderPass for HlfsPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // Create compute bind group if needed (simplified - uses first clip-stack level)
+        if self.bind_group_compute.is_none() {
+            self.bind_group_compute = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HLFS Compute BG"),
+                layout: &self.bgl_compute,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.globals_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ctx.scene.lights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.sample_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                    },
+                ],
+            }));
+        }
+
+        // Create shade bind group if needed
+        if self.bind_group_shade.is_none() {
+            self.bind_group_shade = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HLFS Shade BG"),
+                layout: &self.bgl_shade,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler),
+                    },
+                ],
+            }));
+        }
+
         // Step 1: Importance sampling (compute)
-        // Generates K samples per pixel using light importance from clip-stack
         let workgroups_x = self.width.div_ceil(8);
         let workgroups_y = self.height.div_ceil(8);
 
@@ -381,35 +449,34 @@ impl RenderPass for HlfsPass {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.importance_sample_pipeline);
-            // Bind groups would go here (omitted for brevity - needs scene lights, camera, etc.)
+            pass.set_bind_group(0, self.bind_group_compute.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
         }
 
         // Step 2: Radiance injection (compute)
-        // Injects sampled radiance into clip-stack voxels
         {
             let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HLFS Radiance Injection"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.radiance_inject_pipeline);
+            pass.set_bind_group(0, self.bind_group_compute.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(workgroups_x, workgroups_y, 1);
         }
 
         // Step 3: Hierarchical propagation (compute)
-        // Propagates energy from fine to coarse levels
         {
             let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("HLFS Hierarchical Propagation"),
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.hierarchical_propagate_pipeline);
+            pass.set_bind_group(0, self.bind_group_compute.as_ref().unwrap(), &[]);
             let workgroups = VOXEL_RESOLUTION.div_ceil(8);
             pass.dispatch_workgroups(workgroups, workgroups, workgroups);
         }
 
         // Step 4: Final shading (render pass)
-        // Combines direct samples + field query for final color
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: &self.output_view,
             resolve_target: None,
@@ -420,7 +487,7 @@ impl RenderPass for HlfsPass {
             },
         })];
 
-        let binding = wgpu::RenderPassDescriptor {
+        let render_pass_desc = wgpu::RenderPassDescriptor {
             label: Some("HLFS Final Shading"),
             color_attachments: &color_attachments,
             depth_stencil_attachment: None,
@@ -428,10 +495,11 @@ impl RenderPass for HlfsPass {
             occlusion_query_set: None,
             multiview_mask: None,
         };
-        let mut pass = ctx.begin_render_pass(&binding);
 
+        let mut pass = ctx.begin_render_pass(&render_pass_desc);
         pass.set_pipeline(&self.final_shade_pipeline);
-        pass.draw(0..3, 0..1); // Fullscreen triangle
+        pass.set_bind_group(0, self.bind_group_shade.as_ref().unwrap(), &[]);
+        pass.draw(0..3, 0..1);
 
         Ok(())
     }
