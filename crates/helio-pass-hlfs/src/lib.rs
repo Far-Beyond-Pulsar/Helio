@@ -219,6 +219,17 @@ impl HlfsPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // pre_aa texture (sky + debug layers)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -411,6 +422,9 @@ impl RenderPass for HlfsPass {
         builder.read("gbuffer_orm");
         builder.read("gbuffer_depth");
 
+        // Read and write pre_aa (to preserve sky and debug layers)
+        builder.read("pre_aa");
+
         // Write final output
         let format = match self.output_format {
             wgpu::TextureFormat::Rgba16Float => helio_v3::graph::ResourceFormat::Rgba16Float,
@@ -484,23 +498,31 @@ impl RenderPass for HlfsPass {
             }));
         }
 
-        // Create shade bind group 0 (clip-stack) if needed
-        if self.bind_group_shade_group0.is_none() {
-            self.bind_group_shade_group0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("HLFS Shade BG Group 0"),
-                layout: &self.bgl_shade_group0,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler),
-                    },
-                ],
-            }));
-        }
+        // Create shade bind group 0 (clip-stack + pre_aa) - must be recreated each frame for pre_aa
+        let pre_aa = ctx.frame.pre_aa.ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
+                "HLFS requires pre_aa (sky + debug layers)".to_string(),
+            )
+        })?;
+
+        let bind_group_shade_group0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("HLFS Shade BG Group 0"),
+            layout: &self.bgl_shade_group0,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(pre_aa),
+                },
+            ],
+        });
 
         // Create shade bind group 1 (GBuffer) - must be recreated each frame
         let gbuffer = ctx.frame.gbuffer.as_ref().ok_or_else(|| {
@@ -595,7 +617,7 @@ impl RenderPass for HlfsPass {
 
         let mut pass = ctx.begin_render_pass(&render_pass_desc);
         pass.set_pipeline(&self.final_shade_pipeline);
-        pass.set_bind_group(0, self.bind_group_shade_group0.as_ref().unwrap(), &[]);
+        pass.set_bind_group(0, &bind_group_shade_group0, &[]);
         pass.set_bind_group(1, &bind_group_shade_group1, &[]);
         pass.draw(0..3, 0..1);
 

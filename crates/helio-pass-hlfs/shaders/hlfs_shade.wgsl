@@ -31,6 +31,7 @@ struct HlfsGlobals {
 
 @group(0) @binding(0) var clip_stack_level0: texture_3d<f32>;
 @group(0) @binding(1) var clip_stack_sampler: sampler;
+@group(0) @binding(2) var pre_aa_texture: texture_2d<f32>;  // Sky + debug layers
 
 // Group 1: GBuffer inputs
 @group(1) @binding(0) var gbuf_albedo:   texture_2d<f32>;
@@ -73,9 +74,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let normal = textureLoad(gbuf_normal, pixel_coord, 0).xyz;
     let depth = textureLoad(gbuf_depth, pixel_coord, 0);
 
-    // Sky/background gets dark blue color
+    // Sky/background pixels: sample from pre_aa (sky + debug layers)
     if (depth >= 1.0) {
-        return vec4<f32>(0.05, 0.05, 0.15, 1.0);
+        return textureLoad(pre_aa_texture, pixel_coord, 0);
     }
 
     // Simple directional lighting
