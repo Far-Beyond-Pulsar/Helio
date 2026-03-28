@@ -29,7 +29,7 @@ pub use material::{
 pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex};
 pub use quark_commands::{HelioAction, HelioCommandBridge, register_helio_commands};
 pub use renderer::{
-    build_simple_graph, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
+    build_simple_graph, build_hlfs_graph, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
     RendererConfig,
 };
 pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError, SceneActor, SceneActorId};

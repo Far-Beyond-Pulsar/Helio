@@ -917,6 +917,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-hiz",
+ "helio-pass-hlfs",
  "helio-pass-light-cull",
  "helio-pass-occlusion-cull",
  "helio-pass-shadow",
@@ -1037,6 +1038,17 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-v3",
+ "wgpu",
+]
+
+[[package]]
+name = "helio-pass-hlfs"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.29.3",
+ "helio-v3",
+ "libhelio",
  "wgpu",
 ]
 

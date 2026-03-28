@@ -386,6 +386,14 @@ impl Renderer {
         &mut self.scene
     }
 
+    pub fn debug_state(&self) -> Arc<Mutex<DebugDrawState>> {
+        self.debug_state.clone()
+    }
+
+    pub fn debug_camera_buf(&self) -> &wgpu::Buffer {
+        &self.debug_camera_buffer
+    }
+
     pub fn camera_buffer(&self) -> &wgpu::Buffer {
         self.scene.gpu_scene().camera.buffer()
     }
