@@ -54,9 +54,11 @@ pub struct HlfsPass {
 
     // Bind groups
     bgl_compute: wgpu::BindGroupLayout,
-    bgl_shade: wgpu::BindGroupLayout,
+    bgl_shade_group0: wgpu::BindGroupLayout,
+    bgl_shade_group1: wgpu::BindGroupLayout,
     bind_group_compute: Option<wgpu::BindGroup>,
-    bind_group_shade: Option<wgpu::BindGroup>,
+    bind_group_shade_group0: Option<wgpu::BindGroup>,
+    bind_group_shade_group1: Option<wgpu::BindGroup>,
 
     width: u32,
     height: u32,
@@ -196,8 +198,8 @@ impl HlfsPass {
             ],
         });
 
-        let bgl_shade = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("HLFS Shade BGL"),
+        let bgl_shade_group0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("HLFS Shade BGL Group 0"),
             entries: &[
                 // Clip-stack texture
                 wgpu::BindGroupLayoutEntry {
@@ -215,6 +217,67 @@ impl HlfsPass {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let bgl_shade_group1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("HLFS Shade BGL Group 1 (GBuffer)"),
+            entries: &[
+                // gbuf_albedo
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_normal
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_orm
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_emissive
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // gbuf_depth
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -256,7 +319,7 @@ impl HlfsPass {
 
         let shade_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("HLFS Shade PL"),
-            bind_group_layouts: &[Some(&bgl_shade)],
+            bind_group_layouts: &[Some(&bgl_shade_group0), Some(&bgl_shade_group1)],
             immediate_size: 0,
         });
 
@@ -314,9 +377,11 @@ impl HlfsPass {
             clip_stack_sampler,
             sample_buffer,
             bgl_compute,
-            bgl_shade,
+            bgl_shade_group0,
+            bgl_shade_group1,
             bind_group_compute: None,
-            bind_group_shade: None,
+            bind_group_shade_group0: None,
+            bind_group_shade_group1: None,
             width,
             height,
             output_texture,
@@ -365,10 +430,8 @@ impl RenderPass for HlfsPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        // Publish output as pre_aa for downstream passes
-        if frame.pre_aa.is_none() {
-            frame.pre_aa = Some(&self.output_view);
-        }
+        // Publish output as pre_aa for downstream passes (always overwrite)
+        frame.pre_aa = Some(&self.output_view);
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -421,11 +484,11 @@ impl RenderPass for HlfsPass {
             }));
         }
 
-        // Create shade bind group if needed
-        if self.bind_group_shade.is_none() {
-            self.bind_group_shade = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("HLFS Shade BG"),
-                layout: &self.bgl_shade,
+        // Create shade bind group 0 (clip-stack) if needed
+        if self.bind_group_shade_group0.is_none() {
+            self.bind_group_shade_group0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HLFS Shade BG Group 0"),
+                layout: &self.bgl_shade_group0,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -438,6 +501,40 @@ impl RenderPass for HlfsPass {
                 ],
             }));
         }
+
+        // Create shade bind group 1 (GBuffer) - must be recreated each frame
+        let gbuffer = ctx.frame.gbuffer.as_ref().ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
+                "HLFS requires published gbuffer resources".to_string(),
+            )
+        })?;
+
+        let bind_group_shade_group1 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("HLFS Shade BG Group 1 (GBuffer)"),
+            layout: &self.bgl_shade_group1,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(gbuffer.albedo),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(gbuffer.normal),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(gbuffer.orm),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(gbuffer.emissive),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(ctx.depth),
+                },
+            ],
+        });
 
         // Step 1: Importance sampling (compute)
         let workgroups_x = self.width.div_ceil(8);
@@ -498,7 +595,8 @@ impl RenderPass for HlfsPass {
 
         let mut pass = ctx.begin_render_pass(&render_pass_desc);
         pass.set_pipeline(&self.final_shade_pipeline);
-        pass.set_bind_group(0, self.bind_group_shade.as_ref().unwrap(), &[]);
+        pass.set_bind_group(0, self.bind_group_shade_group0.as_ref().unwrap(), &[]);
+        pass.set_bind_group(1, &bind_group_shade_group1, &[]);
         pass.draw(0..3, 0..1);
 
         Ok(())
