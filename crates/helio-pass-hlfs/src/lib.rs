@@ -181,12 +181,12 @@ impl HlfsPass {
                     },
                     count: None,
                 },
-                // 4-7: clip-stack storage textures (write)
+                // 4-7: clip-stack storage textures (write-only)
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::StorageTexture {
-                        access: wgpu::StorageTextureAccess::ReadWrite,
+                        access: wgpu::StorageTextureAccess::WriteOnly,
                         format: wgpu::TextureFormat::Rgba16Float,
                         view_dimension: wgpu::TextureViewDimension::D3,
                     },

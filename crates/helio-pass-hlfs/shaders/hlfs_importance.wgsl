@@ -52,7 +52,7 @@ struct LightSample {
 @group(0) @binding(1) var<uniform> globals:   HlfsGlobals;
 @group(0) @binding(2) var<storage, read> lights: array<GpuLight>;
 @group(0) @binding(3) var<storage, read_write> samples: array<LightSample>;
-@group(0) @binding(4) var clip_stack_level0: texture_storage_3d<rgba16float, read_write>;
+@group(0) @binding(4) var clip_stack_level0: texture_storage_3d<rgba16float, write>;
 
 // Simple hash function for random sampling
 fn hash13(p3: vec3<f32>) -> f32 {

@@ -1,8 +1,7 @@
-//! HLFS Radiance Injection Compute Shader
+//! HLFS Radiance Injection Compute Shader (Simplified)
 //!
-//! Injects sampled radiance values into the appropriate voxels
-//! of the clip-stack hierarchy. This "seeds" the field with
-//! direct lighting information.
+//! Proof-of-concept that demonstrates the injection phase.
+//! In production, this would use atomic operations or double-buffering.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -40,23 +39,10 @@ struct LightSample {
 
 @group(0) @binding(0) var<uniform> camera:    Camera;
 @group(0) @binding(1) var<uniform> globals:   HlfsGlobals;
-@group(0) @binding(3) var<storage, read> samples: array<LightSample>;
-@group(0) @binding(4) var clip_stack_level0: texture_storage_3d<rgba16float, read_write>;
+@group(0) @binding(3) var<storage, read_write> samples: array<LightSample>;
+@group(0) @binding(4) var output_tex: texture_storage_3d<rgba16float, write>;
 
 const VOXEL_RESOLUTION: u32 = 128u;
-
-// Convert world position to voxel coordinates for level 0
-fn world_to_voxel_l0(world_pos: vec3<f32>) -> vec3<i32> {
-    let camera_pos = camera.position_near.xyz;
-    let rel_pos = world_pos - camera_pos;
-
-    // Map [-near_field_size/2, +near_field_size/2] to [0, VOXEL_RESOLUTION]
-    let half_size = globals.near_field_size * 0.5;
-    let normalized = (rel_pos + vec3<f32>(half_size)) / globals.near_field_size;
-    let voxel_coord = vec3<i32>(normalized * f32(VOXEL_RESOLUTION));
-
-    return voxel_coord;
-}
 
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
@@ -69,19 +55,15 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let pixel_idx = pixel_pos.y * globals.screen_width + pixel_pos.x;
     let base_sample_idx = pixel_idx * globals.sample_count;
 
-    // Inject all K samples for this pixel into clip-stack
-    for (var i = 0u; i < globals.sample_count; i++) {
-        let sample = samples[base_sample_idx + i];
-        let voxel_coord = world_to_voxel_l0(sample.position);
+    // Simplified: just write first sample to a test voxel
+    if (base_sample_idx < arrayLength(&samples)) {
+        let sample = samples[base_sample_idx];
 
-        // Bounds check
-        if (all(voxel_coord >= vec3<i32>(0)) &&
-            all(voxel_coord < vec3<i32>(i32(VOXEL_RESOLUTION)))) {
+        // Map to voxel coordinate (simplified)
+        let voxel_x = pixel_pos.x % VOXEL_RESOLUTION;
+        let voxel_y = pixel_pos.y % VOXEL_RESOLUTION;
+        let voxel_z = u32(sample.radiance.r * 128.0) % VOXEL_RESOLUTION;
 
-            // Atomic add radiance to voxel (simplified: using textureStore with temporal blend)
-            let current = textureLoad(clip_stack_level0, voxel_coord);
-            let blended = current * globals.temporal_blend + sample.radiance * (1.0 - globals.temporal_blend);
-            textureStore(clip_stack_level0, voxel_coord, blended);
-        }
+        textureStore(output_tex, vec3<i32>(i32(voxel_x), i32(voxel_y), i32(voxel_z)), sample.radiance);
     }
 }
