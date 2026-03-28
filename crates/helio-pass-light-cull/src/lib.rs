@@ -212,6 +212,13 @@ impl RenderPass for LightCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if ctx.scene.light_count == 0 {
+            // No active lights: clear light lists/counts to avoid stale data usage.
+            ctx.encoder.clear_buffer(&self.tile_light_lists, 0, None);
+            ctx.encoder.clear_buffer(&self.tile_light_counts, 0, None);
+            return Ok(());
+        }
+
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let lights_ptr = ctx.scene.lights as *const _ as usize;
         let key = (camera_ptr, lights_ptr);

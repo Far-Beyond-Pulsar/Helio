@@ -184,6 +184,11 @@ impl RenderPass for OcclusionCullPass {
             return Ok(());
         }
 
+        if ctx.scene.draw_count == 0 {
+            // No draw commands this frame; skip expensive occlusion compute.
+            return Ok(());
+        }
+
         let count = ctx.scene.instance_count;
         if count == 0 {
             return Ok(());

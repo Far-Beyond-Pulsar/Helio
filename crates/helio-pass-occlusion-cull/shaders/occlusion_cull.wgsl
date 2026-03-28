@@ -117,15 +117,29 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // UV in [0,1]² for texture sampling.
     let uv = ndc_to_uv(ndc.xy);
 
-    // If the sphere center projects outside the viewport it is at least
-    // partially on screen — treat as visible (conservative).
-    let margin = radius / clip.w; // approximate NDC margin for sphere edge
-    if uv.x < -margin || uv.x > 1.0 + margin ||
-       uv.y < -margin || uv.y > 1.0 + margin {
+    // Frustum culling by projecting the sphere center into clip space and
+    // conservatively considering a radius margin.
+    let clip_center = camera.view_proj * vec4<f32>(center, 1.0);
+
+    if clip_center.w <= 0.0 {
         indirect[idx * 5u + 1u] = 1u;
         return;
     }
-    // Clamp UV to valid range for the sample.
+
+    let ndc_center = clip_center.xyz / clip_center.w;
+    // Rough sphere radius in NDC units. Keep conservative by taking max of x/y.
+    let ndc_radius = max(
+        abs(radius * camera.proj[0][0] / clip_center.w),
+        abs(radius * camera.proj[1][1] / clip_center.w),
+    );
+
+    if ndc_center.x < -1.0 - ndc_radius || ndc_center.x > 1.0 + ndc_radius ||
+       ndc_center.y < -1.0 - ndc_radius || ndc_center.y > 1.0 + ndc_radius ||
+       ndc_center.z < 0.0 - ndc_radius || ndc_center.z > 1.0 + ndc_radius {
+        indirect[idx * 5u + 1u] = 1u;
+        return;
+    }
+
     let sample_uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
 
     // Conservative sphere near depth in NDC:
