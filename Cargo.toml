@@ -20,6 +20,7 @@ members = [
     "crates/helio-pass-gbuffer",
     "crates/helio-pass-ssao",
     "crates/helio-pass-deferred-light",
+    "crates/helio-pass-hlfs",
     "crates/helio-pass-transparent",
     "crates/helio-pass-billboard",
     "crates/helio-pass-virtual-geometry",

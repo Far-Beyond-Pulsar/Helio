@@ -350,7 +350,7 @@ async fn ws_client(mut socket: WebSocket, state: PortalState) {
             res = rx.recv() => {
                 match res {
                     Ok(msg) => {
-                        if socket.send(Message::Text(msg)).await.is_err() {
+                        if socket.send(Message::Text(msg.into())).await.is_err() {
                             break;
                         }
                     }
@@ -369,7 +369,7 @@ async fn ws_client(mut socket: WebSocket, state: PortalState) {
                                 },
                                 Err(e) => format!("ERROR: command registry mutex poisoned: {}", e),
                             };
-                            let _ = socket.send(Message::Text(reply)).await;
+                            let _ = socket.send(Message::Text(reply.into())).await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,

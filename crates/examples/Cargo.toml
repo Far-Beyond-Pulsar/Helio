@@ -36,6 +36,10 @@ name = "indoor_cathedral"
 path = "indoor_cathedral.rs"
 
 [[bin]]
+name = "indoor_cathedral_hlfs"
+path = "indoor_cathedral_hlfs.rs"
+
+[[bin]]
 name = "indoor_server_room"
 path = "indoor_server_room.rs"
 
