@@ -172,6 +172,43 @@ pub fn plane_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
     MeshUpload { vertices, indices }
 }
 
+pub fn sphere_mesh(center: [f32; 3], radius: f32) -> MeshUpload {
+    let center = Vec3::from_array(center);
+    let lat_steps = 16;
+    let lon_steps = 32;
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    for i in 0..=lat_steps {
+        let phi = std::f32::consts::PI * (i as f32 / lat_steps as f32);
+        let y = phi.cos();
+        let sin_phi = phi.sin();
+        for j in 0..=lon_steps {
+            let theta = 2.0 * std::f32::consts::PI * (j as f32 / lon_steps as f32);
+            let x = sin_phi * theta.cos();
+            let z = sin_phi * theta.sin();
+
+            let position = center + Vec3::new(x, y, z) * radius;
+            let normal = [x, y, z];
+            let uv = [j as f32 / lon_steps as f32, i as f32 / lat_steps as f32];
+            let tangent_vec = Vec3::new(-z, 0.0, x).normalize_or_zero();
+            let tangent = tangent_vec.to_array();
+            vertices.push(PackedVertex::from_components(position.to_array(), normal, uv, tangent, 1.0));
+        }
+    }
+
+    for i in 0..lat_steps {
+        for j in 0..lon_steps {
+            let a = (i * (lon_steps + 1) + j) as u32;
+            let b = a + (lon_steps + 1) as u32;
+            indices.extend_from_slice(&[a, b, a + 1]);
+            indices.extend_from_slice(&[b, b + 1, a + 1]);
+        }
+    }
+
+    MeshUpload { vertices, indices }
+}
+
 pub fn update_point_light(
     renderer: &mut Renderer,
     id: LightId,

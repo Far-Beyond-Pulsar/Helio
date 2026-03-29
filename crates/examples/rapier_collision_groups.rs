@@ -8,7 +8,7 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light};
+use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light, sphere_mesh};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -228,8 +228,12 @@ impl AppState {
     }
 
     fn spawn_groups(&mut self, a_mat: MaterialId, b_mat: MaterialId) {
-        let g_a = InteractionGroups::new(0b0001u32.into(), 0b0010u32.into());
+        // Group A collides with group B and ground.
+        let g_a = InteractionGroups::new(0b0001u32.into(), (0b0010u32 | 0b0100u32).into());
+        // Group B collides with group A only, so it will fall through the ground.
         let g_b = InteractionGroups::new(0b0010u32.into(), 0b0001u32.into());
+        // Ground is group 0b0100 and only collides with group A.
+        let g_ground = InteractionGroups::new(0b0100u32.into(), 0b0001u32.into());
 
         let ball_mesh = sphere_mesh([0.0,0.0,0.0], 0.6);
         for i in 0..64 {
@@ -256,14 +260,15 @@ impl AppState {
 
         let ground_body = RigidBodyBuilder::fixed().translation([0.0, -0.2, 0.0].into()).build();
         let ground_handle = self.physics_bodies.insert(ground_body);
-        let ground_collider = ColliderBuilder::cuboid(30.0, 0.5, 30.0).friction(0.9).build();
+        let ground_collider = ColliderBuilder::cuboid(30.0, 0.5, 30.0).friction(0.9).collision_groups(g_ground).build();
         self.physics_colliders.insert_with_parent(ground_collider, ground_handle, &mut self.physics_bodies);
     }
 
     fn step_physics(&mut self, dt: f32) {
         self.physics_integration.dt = dt;
+        let gravity = Vector::new(0.0, -9.81, 0.0);
         PhysicsPipeline::new().step(
-            &Vector::y_axis(),
+            &gravity,
             &self.physics_integration,
             &mut self.physics_forces,
             &mut self.physics_broad_phase,

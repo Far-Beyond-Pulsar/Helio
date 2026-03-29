@@ -224,7 +224,7 @@ impl AppState {
     fn reset_chain(&mut self, sphere_mat: MaterialId) {
         self.clear_chain();
 
-        let pivot_body = RigidBodyBuilder::fixed().translation([0.0, 12.0, 0.0].into()).build();
+        let pivot_body = RigidBodyBuilder::fixed().translation([0.0, 18.0, 0.0].into()).build();
         let pivot_handle = self.physics_bodies.insert(pivot_body);
         let pivot_collider = ColliderBuilder::ball(0.25).build();
         self.physics_colliders.insert_with_parent(pivot_collider, pivot_handle, &mut self.physics_bodies);
@@ -236,18 +236,21 @@ impl AppState {
         let mut last_body_handle = pivot_handle;
 
         for i in 0..chain_length {
-            let y = 12.0 - (i as f32 + 1.0) * seg_length;
+            // Start horizontal at height 18.0 and extend along +X, so gravity will swing the chain.
+            let x = (i as f32 + 1.0) * seg_length;
+            let y = 18.0;
             let sphere_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.4, 0.4, 0.4]))).as_mesh().unwrap();
-            let obj = insert_object(&mut self.renderer, sphere_mesh_id, sphere_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, y, 0.0)) * glam::Mat4::from_scale(glam::Vec3::splat(0.8)), 0.9).expect("insert sphere");
+            let obj = insert_object(&mut self.renderer, sphere_mesh_id, sphere_mat, glam::Mat4::from_translation(glam::Vec3::new(x, y, 0.0)) * glam::Mat4::from_scale(glam::Vec3::splat(0.8)), 0.9).expect("insert sphere");
 
-            let body = RigidBodyBuilder::dynamic().translation([0.0,y,0.0].into()).build();
+            let body = RigidBodyBuilder::dynamic().translation([x, y, 0.0].into()).build();
             let body_handle = self.physics_bodies.insert(body);
             let collider = ColliderBuilder::ball(0.4).restitution(0.2).friction(0.4).build();
             let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
 
             let mut joint = SphericalJoint::new();
-            joint.set_local_anchor1(Point::new(0.0, 0.0, 0.0));
-            joint.set_local_anchor2(Point::new(0.0, seg_length, 0.0));
+            // Connect each segment along X axis (horizontal chain) using mid-point anchors.
+            joint.set_local_anchor1(Point::new(seg_length * 0.5, 0.0, 0.0));
+            joint.set_local_anchor2(Point::new(-seg_length * 0.5, 0.0, 0.0));
             self.physics_impulse_joints.insert(parent_handle, body_handle, joint, true);
 
             self.segments.push(PendulumSegment { id: obj, body_handle, collider_handle });
@@ -263,8 +266,9 @@ impl AppState {
 
     fn step_physics(&mut self, dt: f32) {
         self.physics_integration.dt = dt;
+        let gravity = Vector::new(0.0, -9.81, 0.0);
         PhysicsPipeline::new().step(
-            &Vector::y_axis(),
+            &gravity,
             &self.physics_integration,
             &mut self.physics_forces,
             &mut self.physics_broad_phase,

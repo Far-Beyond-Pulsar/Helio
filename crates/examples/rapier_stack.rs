@@ -251,8 +251,9 @@ impl AppState {
 
     fn step_physics(&mut self, dt: f32) {
         self.physics_integration.dt = dt;
+        let gravity = Vector::new(0.0, -9.81, 0.0);
         PhysicsPipeline::new().step(
-            &Vector::y_axis(),
+            &gravity,
             &self.physics_integration,
             &mut self.physics_forces,
             &mut self.physics_broad_phase,
