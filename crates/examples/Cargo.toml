@@ -76,6 +76,18 @@ name = "rapier_collision_groups"
 path = "rapier_collision_groups.rs"
 
 [[bin]]
+name = "rapier_cloth"
+path = "rapier_cloth.rs"
+
+[[bin]]
+name = "rapier_pendulum_line"
+path = "rapier_pendulum_line.rs"
+
+[[bin]]
+name = "rapier_pendulum_cloth"
+path = "rapier_pendulum_cloth.rs"
+
+[[bin]]
 name = "light_benchmark"
 path = "light_benchmark.rs"
 
