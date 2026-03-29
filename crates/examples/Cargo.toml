@@ -119,6 +119,12 @@ path = "simple_graph.rs"
 name = "outdoor_rocks"
 path = "outdoor_rocks.rs"
 
+[[bin]]
+name = "rapier_pendulum_bigcloth"
+path = "rapier_pendulum_bigcloth.rs"
+
+
+
 [dependencies]
 helio = { path = "../helio" }
 helio-asset-compat = { path = "../helio-asset-compat" }
