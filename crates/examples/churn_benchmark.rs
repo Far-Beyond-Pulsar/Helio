@@ -14,6 +14,7 @@ use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, point_li
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, MeshId, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
 
+use crate::nalgebra::UnitQuaternion;
 use std::collections::HashSet;
 use std::sync::Arc;
 use winit::{application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::{CursorGrabMode, Window, WindowId}};
@@ -322,45 +323,61 @@ impl AppState {
 
     fn animate_objects(&mut self) {
         let t = (self.frame_count as f32) * 0.01;
-        let mut positions = Vec::with_capacity(self.dynamic_objects.len());
-        let mut phases = Vec::with_capacity(self.dynamic_objects.len());
 
-        for variant in &self.dynamic_objects {
+        for variant in &mut self.dynamic_objects {
             let phase = variant.seed + t * variant.speed;
             let radius = 8.0 + (phase * 0.25).sin() * 2.0;
             let x = phase.cos() * radius;
             let z = phase.sin() * radius;
             let y = 0.5 + (phase * 1.3).sin() * 0.8;
-            positions.push(glam::Vec3::new(x, y, z));
-            phases.push(phase);
-        }
-
-        if self.collisions_enabled {
-            let n = positions.len();
-            for i in 0..n {
-                for j in 0..i {
-                    let delta = positions[i] - positions[j];
-                    let dist = delta.length();
-                    let min_dist = (self.dynamic_objects[i].scale + self.dynamic_objects[j].scale) * 0.45;
-                    if dist > 0.0001 && dist < min_dist {
-                        let push = (min_dist - dist) * 0.5;
-                        let dir = delta / dist;
-                        positions[i] += dir * push;
-                        positions[j] -= dir * push;
-                    } else if dist <= 0.0001 {
-                        let jitter = glam::Vec3::new(0.01, 0.0, 0.01);
-                        positions[i] += jitter;
-                        positions[j] -= jitter;
-                    }
-                }
-            }
-        }
-
-        for ((variant, pos), phase) in self.dynamic_objects.iter_mut().zip(positions.iter()).zip(phases.iter()) {
-            let transform = glam::Mat4::from_translation(*pos)
-                * glam::Mat4::from_rotation_y(*phase * 1.37)
+            let pos = glam::Vec3::new(x, y, z);
+            let transform = glam::Mat4::from_translation(pos)
+                * glam::Mat4::from_rotation_y(phase * 1.37)
                 * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
             let _ = self.renderer.scene_mut().update_object_transform(variant.id, transform);
+
+            if let Some(body) = self.physics_bodies.get_mut(variant.body_handle) {
+                body.set_position(
+                    Isometry::from_parts(
+                        Translation::from(Vector::new(pos.x, pos.y, pos.z)),
+                        UnitQuaternion::from_euler_angles(0.0, phase * 1.37, 0.0),
+                    ),
+                    true,
+                );
+                body.set_linvel(Vector::zeros(), true);
+                body.set_angvel(Vector::zeros(), true);
+            }
+        }
+    }
+
+    fn step_physics(&mut self, dt: f32) {
+        self.physics_integration.dt = dt;
+        PhysicsPipeline::new().step(
+            &Vector::y_axis(),
+            &self.physics_integration,
+            &mut self.physics_forces,
+            &mut self.physics_broad_phase,
+            &mut self.physics_narrow_phase,
+            &mut self.physics_bodies,
+            &mut self.physics_colliders,
+            &mut self.physics_impulse_joints,
+            &mut self.physics_multibody_joint_set,
+            &mut self.physics_ccd_solver,
+            None,
+            &(),
+            &(),
+        );
+    }
+
+    fn sync_transforms_from_physics(&mut self) {
+        for variant in &self.dynamic_objects {
+            if let Some(body) = self.physics_bodies.get(variant.body_handle) {
+                let pos = body.position();
+                let translation = glam::Vec3::new(pos.translation.vector.x, pos.translation.vector.y, pos.translation.vector.z);
+                let rotation = glam::Quat::from_xyzw(pos.rotation.i, pos.rotation.j, pos.rotation.k, pos.rotation.w);
+                let transform = glam::Mat4::from_translation(translation) * glam::Mat4::from_quat(rotation) * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
+                let _ = self.renderer.scene_mut().update_object_transform(variant.id, transform);
+            }
         }
     }
 
@@ -390,7 +407,13 @@ impl AppState {
         if self.frame_count % 2 == 0 {
             self.spawn_objects();
         }
-        self.animate_objects();
+
+        if self.collisions_enabled {
+            self.step_physics(dt);
+            self.sync_transforms_from_physics();
+        } else {
+            self.animate_objects();
+        }
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
