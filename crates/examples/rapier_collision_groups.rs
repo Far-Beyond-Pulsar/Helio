@@ -8,7 +8,7 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{sphere_mesh, insert_object, make_material, plane_mesh, point_light};
+use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -228,8 +228,8 @@ impl AppState {
     }
 
     fn spawn_groups(&mut self, a_mat: MaterialId, b_mat: MaterialId) {
-        let g_a = InteractionGroups::new(0b0001, 0b0010);
-        let g_b = InteractionGroups::new(0b0010, 0b0001);
+        let g_a = InteractionGroups::new(0b0001u32.into(), 0b0010u32.into());
+        let g_b = InteractionGroups::new(0b0010u32.into(), 0b0001u32.into());
 
         let ball_mesh = sphere_mesh([0.0,0.0,0.0], 0.6);
         for i in 0..64 {
@@ -240,7 +240,7 @@ impl AppState {
             let group = if (i % 2) == 0 { g_a } else { g_b };
             let y = 6.0 + (i / 16) as f32 * 1.5;
 
-            let id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(ball_mesh)).as_mesh().unwrap();
+            let id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0],[0.6,0.6,0.6]))).as_mesh().unwrap();
             let obj = insert_object(&mut self.renderer, id, mat, glam::Mat4::from_translation(glam::Vec3::new(x,y,z)), 1.0).expect("insert");
 
             let body = RigidBodyBuilder::dynamic().translation([x,y,z].into()).linvel(Vector::new(0.0,-1.0,0.0)).build();

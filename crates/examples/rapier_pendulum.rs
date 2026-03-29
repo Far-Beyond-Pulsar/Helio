@@ -8,7 +8,7 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, point_light, sphere_mesh};
+use v3_demo_common::{box_mesh, insert_object, make_material, point_light, plane_mesh};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -237,7 +237,7 @@ impl AppState {
 
         for i in 0..chain_length {
             let y = 12.0 - (i as f32 + 1.0) * seg_length;
-            let sphere_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0,0.0,0.0], 0.4))).as_mesh().unwrap();
+            let sphere_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.4, 0.4, 0.4]))).as_mesh().unwrap();
             let obj = insert_object(&mut self.renderer, sphere_mesh_id, sphere_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, y, 0.0)) * glam::Mat4::from_scale(glam::Vec3::splat(0.8)), 0.9).expect("insert sphere");
 
             let body = RigidBodyBuilder::dynamic().translation([0.0,y,0.0].into()).build();
@@ -245,7 +245,9 @@ impl AppState {
             let collider = ColliderBuilder::ball(0.4).restitution(0.2).friction(0.4).build();
             let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
 
-            let joint = BallJoint::new(Point3::new(0.0, 0.0, 0.0), Point3::new(0.0, seg_length, 0.0));
+            let mut joint = SphericalJoint::new();
+            joint.set_local_anchor1(Point::new(0.0, 0.0, 0.0));
+            joint.set_local_anchor2(Point::new(0.0, seg_length, 0.0));
             self.physics_impulse_joints.insert(parent_handle, body_handle, joint, true);
 
             self.segments.push(PendulumSegment { id: obj, body_handle, collider_handle });
