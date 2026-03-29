@@ -22,6 +22,11 @@ struct PendulumSegment {
     collider_handle: ColliderHandle,
 }
 
+const CHAIN_COUNT: usize = 14;
+const CHAIN_LENGTH: usize = 24;
+const CHAIN_SPACING: f32 = 1.35;
+const SEG_LENGTH: f32 = 1.0;
+
 struct AppState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -224,38 +229,55 @@ impl AppState {
     fn reset_chain(&mut self, sphere_mat: MaterialId) {
         self.clear_chain();
 
-        let pivot_body = RigidBodyBuilder::fixed().translation([0.0, 18.0, 0.0].into()).build();
-        let pivot_handle = self.physics_bodies.insert(pivot_body);
-        let pivot_collider = ColliderBuilder::ball(0.25).build();
-        self.physics_colliders.insert_with_parent(pivot_collider, pivot_handle, &mut self.physics_bodies);
+        let chain_count = CHAIN_COUNT;
+        let chain_spacing = CHAIN_SPACING;
+        let chain_length = CHAIN_LENGTH;
+        let seg_length = SEG_LENGTH;
 
-        let chain_length = 13;
-        let seg_length = 1.0;
+        for c in 0..chain_count {
+            let z_offset = (c as f32 - (chain_count - 1) as f32 * 0.5) * chain_spacing;
+            let pivot_body = RigidBodyBuilder::fixed().translation([0.0, 18.0, z_offset].into()).build();
+            let pivot_handle = self.physics_bodies.insert(pivot_body);
+            let pivot_collider = ColliderBuilder::ball(0.25).build();
+            self.physics_colliders.insert_with_parent(pivot_collider, pivot_handle, &mut self.physics_bodies);
 
-        let mut parent_handle = pivot_handle;
-        let mut last_body_handle = pivot_handle;
+            let mut parent_handle = pivot_handle;
 
-        for i in 0..chain_length {
-            // Start horizontal at height 18.0 and extend along +X, so gravity will swing the chain.
-            let x = (i as f32 + 1.0) * seg_length;
-            let y = 18.0;
-            let sphere_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.4, 0.4, 0.4]))).as_mesh().unwrap();
-            let obj = insert_object(&mut self.renderer, sphere_mesh_id, sphere_mat, glam::Mat4::from_translation(glam::Vec3::new(x, y, 0.0)) * glam::Mat4::from_scale(glam::Vec3::splat(0.8)), 0.9).expect("insert sphere");
+            for i in 0..chain_length {
+                let x = (i as f32 + 1.0) * seg_length;
+                let y = 18.0;
+                let z = z_offset;
 
-            let body = RigidBodyBuilder::dynamic().translation([x, y, 0.0].into()).build();
-            let body_handle = self.physics_bodies.insert(body);
-            let collider = ColliderBuilder::ball(0.4).restitution(0.2).friction(0.4).build();
-            let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
+                let sphere_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.4, 0.4, 0.4]))).as_mesh().unwrap();
+                let obj = insert_object(&mut self.renderer, sphere_mesh_id, sphere_mat, glam::Mat4::from_translation(glam::Vec3::new(x, y, z)) * glam::Mat4::from_scale(glam::Vec3::splat(0.8)), 0.9).expect("insert sphere");
 
-            let mut joint = SphericalJoint::new();
-            // Connect each segment along X axis (horizontal chain) using mid-point anchors.
-            joint.set_local_anchor1(Point::new(seg_length * 0.5, 0.0, 0.0));
-            joint.set_local_anchor2(Point::new(-seg_length * 0.5, 0.0, 0.0));
-            self.physics_impulse_joints.insert(parent_handle, body_handle, joint, true);
+                let body = RigidBodyBuilder::dynamic().translation([x, y, z].into()).build();
+                let body_handle = self.physics_bodies.insert(body);
+                let collider = ColliderBuilder::ball(0.4).restitution(0.2).friction(0.4).build();
+                let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
 
-            self.segments.push(PendulumSegment { id: obj, body_handle, collider_handle });
-            parent_handle = body_handle;
-            last_body_handle = body_handle;
+                let mut joint = SphericalJoint::new();
+                joint.set_local_anchor1(Point::new(seg_length * 0.5, 0.0, 0.0));
+                joint.set_local_anchor2(Point::new(-seg_length * 0.5, 0.0, 0.0));
+                self.physics_impulse_joints.insert(parent_handle, body_handle, joint, true);
+
+                self.segments.push(PendulumSegment { id: obj, body_handle, collider_handle });
+                parent_handle = body_handle;
+            }
+        }
+
+        // Cross-link neighboring chains to form a cloth.
+        for row in 0..CHAIN_LENGTH {
+            for chain_idx in 0..(CHAIN_COUNT - 1) {
+                let a_index = chain_idx * CHAIN_LENGTH + row;
+                let b_index = (chain_idx + 1) * CHAIN_LENGTH + row;
+                let a_handle = self.segments[a_index].body_handle;
+                let b_handle = self.segments[b_index].body_handle;
+                let mut side_joint = SphericalJoint::new();
+                side_joint.set_local_anchor1(Point::new(0.0, 0.0, CHAIN_SPACING * 0.5));
+                side_joint.set_local_anchor2(Point::new(0.0, 0.0, -CHAIN_SPACING * 0.5));
+                self.physics_impulse_joints.insert(a_handle, b_handle, side_joint, true);
+            }
         }
 
         let ground_body = RigidBodyBuilder::fixed().translation([0.0, -0.2, 0.0].into()).build();
