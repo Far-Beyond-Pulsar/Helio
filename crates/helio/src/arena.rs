@@ -1,5 +1,4 @@
 use std::marker::PhantomData;
-
 use crate::handles::Handle;
 
 #[derive(Clone, Copy, Debug)]

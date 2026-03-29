@@ -5,7 +5,6 @@
 use glam::Mat4;
 use helio_v3::GpuInstanceData;
 
-use crate::arena::DenseRemove;
 use crate::handles::VirtualObjectId;
 use crate::vg::VirtualObjectDescriptor;
 

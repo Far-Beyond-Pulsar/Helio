@@ -80,7 +80,7 @@ mod resources;
 mod types;
 mod virtual_geometry;
 
-pub use actor::{MeshActor, SceneActor, SceneActorId, SceneActorTrait};
+pub use actor::{SceneActor, SceneActorId, SceneActorTrait};
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;

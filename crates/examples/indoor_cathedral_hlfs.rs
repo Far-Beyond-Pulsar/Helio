@@ -484,7 +484,13 @@ impl ApplicationHandler for App {
             renderer.debug_camera_buf(),
             false,
         );
-        renderer.set_graph(hlfs_graph);
+        renderer.set_graph_custom(
+            hlfs_graph,
+            config,
+            Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf, debug_depth_test| {
+                build_hlfs_graph(device, queue, scene, cfg, debug_state, debug_camera_buf, debug_depth_test)
+            }),
+        );
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();

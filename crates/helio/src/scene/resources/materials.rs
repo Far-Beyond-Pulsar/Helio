@@ -8,7 +8,7 @@ use bytemuck::Zeroable;
 use helio_v3::GpuMaterial;
 
 use crate::handles::MaterialId;
-use crate::material::{MaterialAsset, MaterialTextureRef, MaterialTextures};
+use crate::material::{MaterialAsset, MaterialTextures};
 
 use super::super::errors::{invalid, Result, SceneError};
 use super::super::helpers::{each_material_texture_ref, gpu_material_textures};

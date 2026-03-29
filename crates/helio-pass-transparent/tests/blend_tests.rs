@@ -173,7 +173,6 @@ fn read_only_depth_prevents_transparent_write_to_opaque() {
     // In read-only depth mode, transparent fragments don't update depth buffer.
     // Verify modelling: a closer transparent object doesn't occlude a farther opaque.
     let opaque_depth = 0.3f32;
-    let transparent_depth = 0.2f32; // closer
     // Read-only: depth test passes (0.2 < 0.3) but depth buffer unchanged
     let depth_after = opaque_depth; // NOT transparent_depth
     assert!((depth_after - opaque_depth).abs() < 1e-6f32);

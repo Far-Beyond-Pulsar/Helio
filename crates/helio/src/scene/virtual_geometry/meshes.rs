@@ -2,8 +2,6 @@
 //!
 //! Handles meshletization, LOD generation, and virtual mesh lifecycle.
 
-use std::collections::HashMap;
-
 use crate::handles::MeshId;
 use crate::mesh::MeshUpload;
 use crate::vg::{

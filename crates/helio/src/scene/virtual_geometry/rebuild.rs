@@ -2,8 +2,7 @@
 //!
 //! Handles CPU-side buffer reconstruction and provides frame data views for the renderer.
 
-use helio_v3::GpuInstanceData;
-use libhelio::{GpuMeshletEntry, VgFrameData};
+use libhelio::VgFrameData;
 
 impl super::super::Scene {
     /// Returns a view into the CPU-side meshlet/instance buffers for VG rendering.

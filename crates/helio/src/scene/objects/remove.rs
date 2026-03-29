@@ -3,7 +3,7 @@
 //! Provides the [`Scene::remove_object`](crate::Scene::remove_object) method for removing
 //! renderable objects from the scene with O(1) performance in persistent mode.
 
-use helio_v3::{DrawIndexedIndirectArgs, GpuDrawCall};
+use helio_v3::DrawIndexedIndirectArgs;
 
 use crate::arena::DenseRemove;
 use crate::handles::ObjectId;

@@ -11,7 +11,7 @@
 //!      wasm-bindgen output without extra scripting.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 // ── Demo catalogue ─────────────────────────────────────────────────────────────
 

@@ -33,7 +33,7 @@ impl HelioCommandBridge {
 
     /// Execute a command string synchronously.
     pub fn run(&self, input: &str) -> QuarkResult<()> {
-        let mut guard = self
+        let guard = self
             .registry
             .lock()
             .map_err(|e| CommandError::ExecutionError(format!("Mutex poisoned: {}", e)))?;

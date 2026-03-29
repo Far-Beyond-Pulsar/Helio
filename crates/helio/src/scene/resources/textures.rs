@@ -8,7 +8,6 @@
 //! The scene supports a maximum of [`MAX_TEXTURES`](crate::material::MAX_TEXTURES) (16384)
 //! concurrent textures due to bindless array limits.
 
-use std::sync::Arc;
 use wgpu::util::DeviceExt;
 
 use crate::handles::TextureId;

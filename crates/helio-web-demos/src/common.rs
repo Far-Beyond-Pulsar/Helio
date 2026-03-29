@@ -169,6 +169,3 @@ pub fn plane_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
         indices: vec![0, 2, 1, 0, 3, 2],
     }
 }
-
-
-

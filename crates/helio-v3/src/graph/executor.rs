@@ -60,7 +60,7 @@
 //! // }
 //! ```
 
-use super::resource::{ResourceAccess, ResourceBuilder, ResourceDecl};
+use super::resource::{ResourceAccess, ResourceBuilder};
 use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
 use std::collections::HashMap;
 
