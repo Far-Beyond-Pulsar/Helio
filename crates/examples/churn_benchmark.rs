@@ -5,12 +5,14 @@
 //! Controls:
 //!   WASD / Space / Shift — fly
 //!   +/-                  — open/close spawn pressure (number of objects added each frame)
+//!   C                    — toggle object-object collisions on/off
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
 use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, point_light, plane_mesh};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, MeshId, ObjectId, Renderer, RendererConfig};
+use rapier3d::prelude::*;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -28,6 +30,8 @@ struct SpawnedObject {
     scale: f32,
     mesh: MeshId,
     material: MaterialId,
+    body_handle: RigidBodyHandle,
+    collider_handle: ColliderHandle,
 }
 
 struct SimpleRng(u64);
@@ -75,9 +79,21 @@ struct AppState {
     meshes: Vec<MeshId>,
     materials: Vec<MaterialId>,
     rng: SimpleRng,
+    collisions_enabled: bool,
 
     time_render_end: Option<std::time::Instant>,
     time_about_to_wait_start: Option<std::time::Instant>,
+
+    physics_integration: IntegrationParameters,
+    physics_bodies: RigidBodySet,
+    physics_colliders: ColliderSet,
+    physics_forces: IslandManager,
+    physics_broad_phase: DefaultBroadPhase,
+    physics_narrow_phase: NarrowPhase,
+    physics_impulse_joints: ImpulseJointSet,
+    physics_multibody_joint_set: MultibodyJointSet,
+    physics_ccd_solver: CCDSolver,
+
     time_redraw_requested: Option<std::time::Instant>,
 }
 
@@ -146,9 +162,19 @@ impl ApplicationHandler for App {
             meshes: mesh_list,
             materials: vec![mat_red, mat_green, mat_blue, mat_steel],
             rng: SimpleRng::new(0x59A0_D3E4_B2CA_1897),
+            collisions_enabled: false,
             time_render_end: None,
             time_about_to_wait_start: None,
             time_redraw_requested: None,
+            physics_integration: IntegrationParameters::default(),
+            physics_bodies: RigidBodySet::new(),
+            physics_colliders: ColliderSet::new(),
+            physics_forces: IslandManager::new(),
+            physics_broad_phase: DefaultBroadPhase::new(),
+            physics_narrow_phase: NarrowPhase::new(),
+            physics_impulse_joints: ImpulseJointSet::new(),
+            physics_multibody_joint_set: MultibodyJointSet::new(),
+            physics_ccd_solver: CCDSolver::new(),
         });
     }
 
@@ -172,6 +198,10 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Minus), .. }, .. } => {
                 state.spawn_rate = state.spawn_rate.saturating_sub(1).max(MIN_SPAWN_RATE);
                 eprintln!("spawn_rate={}", state.spawn_rate);
+            }
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::KeyC), .. }, .. } => {
+                state.collisions_enabled = !state.collisions_enabled;
+                eprintln!("collisions={}", state.collisions_enabled);
             }
             WindowEvent::KeyboardInput { event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, .. } => match ks {
                 ElementState::Pressed => { state.keys.insert(key); }
@@ -258,12 +288,32 @@ impl AppState {
             let scale = self.rng.next_f32(0.25, 1.0);
             let pos = glam::Vec3::new(angle.cos() * radius, height, angle.sin() * radius);
             let transform = glam::Mat4::from_translation(pos) * glam::Mat4::from_scale(glam::Vec3::splat(scale));
+
+            let body = RigidBodyBuilder::dynamic()
+                .translation([pos.x, pos.y, pos.z].into())
+                .linvel(Vector::new(self.rng.next_f32(-4.0, 4.0), self.rng.next_f32(-1.0, 1.0), self.rng.next_f32(-4.0, 4.0)))
+                .angvel(Vector::new(self.rng.next_f32(-2.0, 2.0), self.rng.next_f32(-2.0, 2.0), self.rng.next_f32(-2.0, 2.0)))
+                .build();
+            let body_handle = self.physics_bodies.insert(body);
+
+            let collider = ColliderBuilder::ball((scale * 0.35).max(0.2))
+                .restitution(0.3)
+                .friction(0.2)
+                .build();
+            let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
+
             if let Ok(obj_id) = insert_object(&mut self.renderer, mesh, material, transform, (scale * 1.3).max(0.15)) {
-                self.dynamic_objects.push(SpawnedObject { id: obj_id, seed: self.rng.next_f32(0.0, std::f32::consts::TAU), speed: self.rng.next_f32(0.4, 1.6), scale, mesh, material });
+                self.dynamic_objects.push(SpawnedObject { id: obj_id, seed: self.rng.next_f32(0.0, std::f32::consts::TAU), speed: self.rng.next_f32(0.4, 1.6), scale, mesh, material, body_handle, collider_handle });
+            } else {
+                self.physics_colliders.remove(collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);
+                self.physics_bodies.remove(body_handle, &mut self.physics_forces, &mut self.physics_colliders, &mut self.physics_impulse_joints, &mut self.physics_multibody_joint_set, true);
             }
+
             if self.dynamic_objects.len() > max_count {
                 if let Some(dead) = self.dynamic_objects.first() {
                     let _ = self.renderer.scene_mut().remove_object(dead.id);
+                    self.physics_colliders.remove(dead.collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);
+                    self.physics_bodies.remove(dead.body_handle, &mut self.physics_forces, &mut self.physics_colliders, &mut self.physics_impulse_joints, &mut self.physics_multibody_joint_set, true);
                 }
                 self.dynamic_objects.remove(0);
             }
@@ -272,14 +322,43 @@ impl AppState {
 
     fn animate_objects(&mut self) {
         let t = (self.frame_count as f32) * 0.01;
-        for variant in &mut self.dynamic_objects {
+        let mut positions = Vec::with_capacity(self.dynamic_objects.len());
+        let mut phases = Vec::with_capacity(self.dynamic_objects.len());
+
+        for variant in &self.dynamic_objects {
             let phase = variant.seed + t * variant.speed;
             let radius = 8.0 + (phase * 0.25).sin() * 2.0;
             let x = phase.cos() * radius;
             let z = phase.sin() * radius;
             let y = 0.5 + (phase * 1.3).sin() * 0.8;
-            let transform = glam::Mat4::from_translation(glam::Vec3::new(x, y, z))
-                * glam::Mat4::from_rotation_y(phase * 1.37)
+            positions.push(glam::Vec3::new(x, y, z));
+            phases.push(phase);
+        }
+
+        if self.collisions_enabled {
+            let n = positions.len();
+            for i in 0..n {
+                for j in 0..i {
+                    let delta = positions[i] - positions[j];
+                    let dist = delta.length();
+                    let min_dist = (self.dynamic_objects[i].scale + self.dynamic_objects[j].scale) * 0.45;
+                    if dist > 0.0001 && dist < min_dist {
+                        let push = (min_dist - dist) * 0.5;
+                        let dir = delta / dist;
+                        positions[i] += dir * push;
+                        positions[j] -= dir * push;
+                    } else if dist <= 0.0001 {
+                        let jitter = glam::Vec3::new(0.01, 0.0, 0.01);
+                        positions[i] += jitter;
+                        positions[j] -= jitter;
+                    }
+                }
+            }
+        }
+
+        for ((variant, pos), phase) in self.dynamic_objects.iter_mut().zip(positions.iter()).zip(phases.iter()) {
+            let transform = glam::Mat4::from_translation(*pos)
+                * glam::Mat4::from_rotation_y(*phase * 1.37)
                 * glam::Mat4::from_scale(glam::Vec3::splat(variant.scale));
             let _ = self.renderer.scene_mut().update_object_transform(variant.id, transform);
         }
