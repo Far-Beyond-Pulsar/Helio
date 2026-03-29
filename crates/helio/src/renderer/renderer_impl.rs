@@ -14,6 +14,8 @@ use super::config::{GiConfig, RendererConfig};
 use super::debug::{DebugDrawState};
 use super::graph::{build_default_graph, build_simple_graph, create_depth_resources};
 
+type CustomGraphBuilder = Arc<dyn Fn(&Arc<wgpu::Device>, &Arc<wgpu::Queue>, &Scene, RendererConfig, Arc<Mutex<DebugDrawState>>, &wgpu::Buffer, bool) -> RenderGraph + Send + Sync>;
+
 const HALTON_JITTER: [[f32; 2]; 16] = [
     [0.5,     0.333333],
     [0.25,    0.666667],
@@ -56,6 +58,8 @@ pub struct Renderer {
     debug_mode: u32,
     debug_depth_test: bool,
     editor_mode: bool,
+    custom_graph_builder: Option<CustomGraphBuilder>,
+    custom_graph_config: Option<RendererConfig>,
     debug_state: Arc<Mutex<DebugDrawState>>,
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
     billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
@@ -119,6 +123,8 @@ impl Renderer {
             debug_mode: 0,
             debug_depth_test: true,
             editor_mode: false,
+            custom_graph_builder: None,
+            custom_graph_config: None,
             debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
@@ -448,7 +454,31 @@ impl Renderer {
             GraphKind::Simple => {
                 self.graph = build_simple_graph(&self.device, &self.queue, self.surface_format);
             }
-            GraphKind::Custom => {}
+            GraphKind::Custom => {
+                if let Some(builder) = &self.custom_graph_builder {
+                    if let Some(prev_config) = self.custom_graph_config {
+                        let new_cfg = RendererConfig {
+                            width,
+                            height,
+                            ..prev_config
+                        };
+                        self.graph = builder(
+                            &self.device,
+                            &self.queue,
+                            &self.scene,
+                            new_cfg,
+                            self.debug_state.clone(),
+                            &self.debug_camera_buffer,
+                            self.debug_depth_test,
+                        );
+                        self.custom_graph_config = Some(new_cfg);
+                    } else {
+                        self.graph.set_render_size(width, height);
+                    }
+                } else {
+                    self.graph.set_render_size(width, height);
+                }
+            }
         }
     }
 
@@ -473,6 +503,20 @@ impl Renderer {
     pub fn set_graph(&mut self, graph: RenderGraph) {
         self.graph = graph;
         self.graph_kind = GraphKind::Custom;
+        self.custom_graph_builder = None;
+        self.custom_graph_config = None;
+    }
+
+    pub fn set_graph_custom(
+        &mut self,
+        graph: RenderGraph,
+        config: RendererConfig,
+        builder: CustomGraphBuilder,
+    ) {
+        self.graph = graph;
+        self.graph_kind = GraphKind::Custom;
+        self.custom_graph_builder = Some(builder);
+        self.custom_graph_config = Some(config);
     }
 
     pub fn use_simple_graph(&mut self) {
