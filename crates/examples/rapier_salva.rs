@@ -3,6 +3,12 @@
 //! An angled faucet emits SPH water particles into a container box.
 //! Particles fall, pool on the floor, and collide with boundary particles.
 //!
+//! Architecture: Direct shared state (no message passing!)
+//! - Physics thread: checks shared state directly every loop (2ms sleep for 500Hz rate)
+//! - Positions: double-buffered with atomic swap (zero contention!)
+//! - Commands: direct mutex-protected state (no channel latency!)
+//! - Main thread: writes commands directly to shared state
+//!
 //! Note: This uses salva3d for fluid simulation with manual boundaries.
 //! We avoid rapier integration due to version conflicts (salva3d 0.9 uses rapier 0.18).
 //!
@@ -24,11 +30,75 @@ use salva3d::{
     LiquidWorld,
 };
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
 use winit::{application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::{CursorGrabMode, Window, WindowId}};
 
 struct FluidParticle {
     id: ObjectId,
+}
+
+// Direct shared state (no message passing!)
+struct PhysicsSharedState {
+    // Double-buffered positions for rendering
+    position_buffers: [Mutex<Vec<salva3d::math::Point<f32>>>; 2],
+    read_index: AtomicUsize,
+
+    // Timing: track when physics last updated (for latency measurement)
+    last_physics_update: Mutex<std::time::Instant>,
+
+    // Command state (checked directly by physics thread)
+    pending_spawns: Mutex<Vec<(Vec<salva3d::math::Point<f32>>, Vec<salva3d::math::Vector<f32>>, std::time::Instant)>>,
+    reset_requested: std::sync::atomic::AtomicBool,
+    exit_requested: std::sync::atomic::AtomicBool,
+}
+
+impl PhysicsSharedState {
+    fn new() -> Self {
+        Self {
+            position_buffers: [
+                Mutex::new(Vec::new()),
+                Mutex::new(Vec::new()),
+            ],
+            read_index: AtomicUsize::new(0),
+            last_physics_update: Mutex::new(std::time::Instant::now()),
+            pending_spawns: Mutex::new(Vec::new()),
+            reset_requested: std::sync::atomic::AtomicBool::new(false),
+            exit_requested: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    // Called by physics thread: write positions to write buffer, then atomically swap
+    fn write_positions(&self, positions: Vec<salva3d::math::Point<f32>>) {
+        let now = std::time::Instant::now();
+        let write_idx = 1 - self.read_index.load(Ordering::Acquire);
+        *self.position_buffers[write_idx].lock().unwrap() = positions;
+        *self.last_physics_update.lock().unwrap() = now;
+        self.read_index.store(write_idx, Ordering::Release);
+    }
+
+    // Called by render thread: read from read buffer (no contention!)
+    fn read_positions(&self) -> Vec<salva3d::math::Point<f32>> {
+        let read_idx = self.read_index.load(Ordering::Acquire);
+        self.position_buffers[read_idx].lock().unwrap().clone()
+    }
+
+    // Get latency: time between physics write and render read
+    fn get_physics_latency(&self) -> std::time::Duration {
+        let last_update = *self.last_physics_update.lock().unwrap();
+        std::time::Instant::now() - last_update
+    }
+
+    // Main thread: request spawn (timestamp for latency tracking)
+    fn request_spawn(&self, positions: Vec<salva3d::math::Point<f32>>, velocities: Vec<salva3d::math::Vector<f32>>) {
+        self.pending_spawns.lock().unwrap().push((positions, velocities, std::time::Instant::now()));
+    }
+
+    // Physics thread: drain pending spawns
+    fn take_pending_spawns(&self) -> Vec<(Vec<salva3d::math::Point<f32>>, Vec<salva3d::math::Vector<f32>>, std::time::Instant)> {
+        std::mem::take(&mut *self.pending_spawns.lock().unwrap())
+    }
 }
 
 struct AppState {
@@ -49,11 +119,14 @@ struct AppState {
 
     physics_enabled: bool,
 
-    liquid_world: LiquidWorld,
+    // Physics thread communication (direct shared state - no channels!)
+    physics_state: Arc<PhysicsSharedState>,
+
     particle_radius: f32,
     fluid_density: f32,
 
     fluid_particles: Vec<FluidParticle>,
+    pending_spawn_count: usize,
     water_material: MaterialId,
     sphere_mesh: MeshId,
 
@@ -67,6 +140,183 @@ struct AppState {
 }
 
 struct App { state: Option<AppState> }
+
+// Physics thread function - direct shared state, no message passing
+fn physics_thread(
+    shared_state: Arc<PhysicsSharedState>,
+    particle_radius: f32,
+) {
+    let smoothing_factor = 2.0;
+    let mut liquid_world = LiquidWorld::new(
+        DFSPHSolver::<CubicSplineKernel>::new(),
+        particle_radius,
+        smoothing_factor,
+    );
+
+    // Create boundaries
+    let mut boundary_positions = Vec::new();
+    let container_size = 20.0;
+    let wall_height = 6.0;
+    let spacing = particle_radius * 2.0;
+
+    // Floor boundary particles
+    for x in (-100..=100).map(|i| i as f32 * spacing) {
+        for z in (-100..=100).map(|i| i as f32 * spacing) {
+            if x.abs() <= container_size && z.abs() <= container_size {
+                boundary_positions.push(salva3d::math::Point::new(x, 0.0, z));
+            }
+        }
+    }
+
+    // Wall boundary particles
+    for y in (0..=30).map(|i| i as f32 * spacing) {
+        if y > wall_height { break; }
+        for z in (-100..=100).map(|i| i as f32 * spacing) {
+            if z.abs() <= container_size {
+                boundary_positions.push(salva3d::math::Point::new(-container_size, y, z));
+                boundary_positions.push(salva3d::math::Point::new(container_size, y, z));
+            }
+        }
+        for x in (-100..=100).map(|i| i as f32 * spacing) {
+            if x.abs() <= container_size {
+                boundary_positions.push(salva3d::math::Point::new(x, y, -container_size));
+                boundary_positions.push(salva3d::math::Point::new(x, y, container_size));
+            }
+        }
+    }
+
+    let boundary = Boundary::new(boundary_positions);
+    liquid_world.add_boundary(boundary);
+
+    let gravity = salva3d::math::Vector::new(0.0, -9.81, 0.0);
+    let fixed_dt = 1.0 / 120.0; // Physics timestep
+    let mut accumulator = 0.0;
+    let mut last_time = std::time::Instant::now();
+
+    eprintln!("[Physics] Thread started with double buffering (Unreal-style)");
+
+    let mut loop_count = 0u64;
+    let mut total_steps = 0u64;
+
+    loop {
+        loop_count += 1;
+        let current_time = std::time::Instant::now();
+        let frame_time = (current_time - last_time).as_secs_f32();
+        last_time = current_time;
+
+        // Clamp frame time to prevent spiral of death
+        let frame_time = frame_time.min(0.25);
+        accumulator += frame_time;
+
+        // Check for exit first
+        if shared_state.exit_requested.load(Ordering::Relaxed) {
+            eprintln!("[Physics] Thread exiting");
+            return;
+        }
+
+        // Check for reset
+        if shared_state.reset_requested.swap(false, Ordering::Relaxed) {
+            liquid_world = LiquidWorld::new(
+                DFSPHSolver::<CubicSplineKernel>::new(),
+                particle_radius,
+                smoothing_factor,
+            );
+
+            // Recreate boundaries
+            let mut boundary_positions = Vec::new();
+            for x in (-100..=100).map(|i| i as f32 * spacing) {
+                for z in (-100..=100).map(|i| i as f32 * spacing) {
+                    if x.abs() <= container_size && z.abs() <= container_size {
+                        boundary_positions.push(salva3d::math::Point::new(x, 0.0, z));
+                    }
+                }
+            }
+            for y in (0..=30).map(|i| i as f32 * spacing) {
+                if y > wall_height { break; }
+                for z in (-100..=100).map(|i| i as f32 * spacing) {
+                    if z.abs() <= container_size {
+                        boundary_positions.push(salva3d::math::Point::new(-container_size, y, z));
+                        boundary_positions.push(salva3d::math::Point::new(container_size, y, z));
+                    }
+                }
+                for x in (-100..=100).map(|i| i as f32 * spacing) {
+                    if x.abs() <= container_size {
+                        boundary_positions.push(salva3d::math::Point::new(x, y, -container_size));
+                        boundary_positions.push(salva3d::math::Point::new(x, y, container_size));
+                    }
+                }
+            }
+            let boundary = Boundary::new(boundary_positions);
+            liquid_world.add_boundary(boundary);
+            accumulator = 0.0;
+            eprintln!("[Physics] Reset complete");
+        }
+
+        // Process pending spawns (direct state access - measure command latency!)
+        let spawns = shared_state.take_pending_spawns();
+        for (positions, velocities, request_time) in spawns {
+            let spawn_latency = current_time - request_time;
+            eprintln!("[Physics] Spawning {} particles | Command latency: {:?}", positions.len(), spawn_latency);
+
+            let mut fluid = Fluid::new(positions, particle_radius, 1000.0);
+            fluid.nonpressure_forces.push(Box::new(XSPHViscosity::new(0.5, 0.0)));
+            fluid.nonpressure_forces.push(Box::new(Akinci2013SurfaceTension::new(0.5, 0.0)));
+
+            let fluid_handle = liquid_world.add_fluid(fluid);
+
+            // Set velocities
+            if let Some(fluid_obj) = liquid_world.fluids_mut().get_mut(fluid_handle) {
+                for (i, vel) in velocities.iter().enumerate() {
+                    if i < fluid_obj.velocities.len() {
+                        fluid_obj.velocities[i] = *vel;
+                    }
+                }
+            }
+
+            let total_particles: usize = liquid_world.fluids().iter().map(|(_, f)| f.positions.len()).sum();
+            eprintln!("[Physics] After spawn - total particles: {}", total_particles);
+        }
+
+        // Fixed timestep accumulator pattern
+        let mut steps_this_frame = 0;
+        while accumulator >= fixed_dt {
+            liquid_world.step(fixed_dt, &gravity);
+            accumulator -= fixed_dt;
+            steps_this_frame += 1;
+            total_steps += 1;
+        }
+
+        // Debug: Log physics steps
+        if steps_this_frame > 0 {
+            let particle_count = liquid_world.fluids().iter().map(|(_, f)| f.positions.len()).sum::<usize>();
+            if loop_count % 60 == 0 {
+                eprintln!("[Physics] Stepped {} times | Total steps: {} | Particles: {}",
+                    steps_this_frame, total_steps, particle_count);
+            }
+        }
+
+        // Update shared state (direct write - no channel latency!)
+        let write_start = std::time::Instant::now();
+        let mut positions = Vec::new();
+        for (_, fluid) in liquid_world.fluids().iter() {
+            positions.extend(fluid.positions.iter().copied());
+        }
+        let particle_count = positions.len();
+
+        shared_state.write_positions(positions);
+        let write_duration = write_start.elapsed();
+
+        // Log write timing periodically
+        if loop_count % 60 == 0 && particle_count > 0 {
+            eprintln!("[Physics] Wrote {} positions in {:?} | Loop: {}",
+                particle_count, write_duration, loop_count);
+        }
+
+        // Sleep briefly to accumulate time (yield_now is too fast!)
+        // Target ~500Hz loop rate, giving plenty of headroom for 120Hz physics
+        std::thread::sleep(std::time::Duration::from_micros(2000)); // 2ms sleep = 500Hz
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -107,61 +357,24 @@ impl ApplicationHandler for App {
 
         let particle_radius = 0.2;
         let fluid_density = 1000.0;
-        let smoothing_factor = 2.0;
 
-        // Create liquid world with DFSPH solver
-        let mut liquid_world = LiquidWorld::new(DFSPHSolver::<CubicSplineKernel>::new(), particle_radius, smoothing_factor);
+        // Create shared physics state (direct access - no channels!)
+        let physics_state = Arc::new(PhysicsSharedState::new());
 
-        // Create boundary particles for container walls and floor
-        let mut boundary_positions = Vec::new();
+        // Spawn physics thread (direct shared state access)
+        let pr = particle_radius;
+        let state_clone = Arc::clone(&physics_state);
+        thread::Builder::new()
+            .name("physics".to_string())
+            .spawn(move || physics_thread(state_clone, pr))
+            .expect("Failed to spawn physics thread");
+
+        eprintln!("[Main] Physics thread started (direct shared state)");
+
+        // Visual representation constants
         let container_size = 20.0;
         let wall_height = 6.0;
-        let spacing = particle_radius * 2.0;
-
-        // Floor boundary particles (y = 0)
-        for x in (-100..=100).map(|i| i as f32 * spacing) {
-            for z in (-100..=100).map(|i| i as f32 * spacing) {
-                if x.abs() <= container_size && z.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(x, 0.0, z));
-                }
-            }
-        }
-
-        // Wall boundary particles
-        for y in (0..=30).map(|i| i as f32 * spacing) {
-            if y > wall_height { break; }
-
-            // Left wall (x = -20)
-            for z in (-100..=100).map(|i| i as f32 * spacing) {
-                if z.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(-container_size, y, z));
-                }
-            }
-
-            // Right wall (x = 20)
-            for z in (-100..=100).map(|i| i as f32 * spacing) {
-                if z.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(container_size, y, z));
-                }
-            }
-
-            // Front wall (z = -20)
-            for x in (-100..=100).map(|i| i as f32 * spacing) {
-                if x.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(x, y, -container_size));
-                }
-            }
-
-            // Back wall (z = 20)
-            for x in (-100..=100).map(|i| i as f32 * spacing) {
-                if x.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(x, y, container_size));
-                }
-            }
-        }
-
-        let boundary = Boundary::new(boundary_positions);
-        liquid_world.add_boundary(boundary);
+        let wall_thickness = 0.5;
 
         // Render container floor
         let floor_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [20.0, 0.5, 20.0]))).as_mesh().unwrap();
@@ -205,15 +418,16 @@ impl ApplicationHandler for App {
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             physics_enabled: true,
-            liquid_world,
+            physics_state,
             particle_radius,
             fluid_density,
             fluid_particles: Vec::new(),
+            pending_spawn_count: 0,
             water_material,
             sphere_mesh,
             spawn_timer: 0.0,
-            spawn_interval: 0.04,
-            max_particles: 2000,
+            spawn_interval: 0.06,
+            max_particles: 1000,
             tap_active: false,
             tap_timer: 0.0,
             tap_duration: 5.0,
@@ -294,6 +508,13 @@ impl ApplicationHandler for App {
     }
 }
 
+impl Drop for AppState {
+    fn drop(&mut self) {
+        // Tell physics thread to exit (direct state access)
+        self.physics_state.exit_requested.store(true, Ordering::Relaxed);
+    }
+}
+
 impl AppState {
     fn reset_scene(&mut self) {
         eprintln!("Resetting scene...");
@@ -303,49 +524,15 @@ impl AppState {
             let _ = self.renderer.scene_mut().remove_object(particle.id);
         }
 
-        // Reset liquid world
-        self.liquid_world = LiquidWorld::new(DFSPHSolver::<CubicSplineKernel>::new(), self.particle_radius, 2.0);
+        // Request reset (direct state access)
+        self.physics_state.reset_requested.store(true, Ordering::Relaxed);
 
-        // Recreate boundaries
-        let mut boundary_positions = Vec::new();
-        let container_size = 20.0;
-        let wall_height = 6.0;
-        let spacing = self.particle_radius * 2.0;
-
-        // Floor
-        for x in (-100..=100).map(|i| i as f32 * spacing) {
-            for z in (-100..=100).map(|i| i as f32 * spacing) {
-                if x.abs() <= container_size && z.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(x, 0.0, z));
-                }
-            }
-        }
-
-        // Walls
-        for y in (0..=30).map(|i| i as f32 * spacing) {
-            if y > wall_height { break; }
-            for z in (-100..=100).map(|i| i as f32 * spacing) {
-                if z.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(-container_size, y, z));
-                    boundary_positions.push(salva3d::math::Point::new(container_size, y, z));
-                }
-            }
-            for x in (-100..=100).map(|i| i as f32 * spacing) {
-                if x.abs() <= container_size {
-                    boundary_positions.push(salva3d::math::Point::new(x, y, -container_size));
-                    boundary_positions.push(salva3d::math::Point::new(x, y, container_size));
-                }
-            }
-        }
-
-        let boundary = Boundary::new(boundary_positions);
-        self.liquid_world.add_boundary(boundary);
-
+        self.pending_spawn_count = 0;
         self.spawn_timer = 0.0;
     }
 
     fn spawn_fluid_parcel(&mut self) {
-        if self.fluid_particles.len() >= self.max_particles {
+        if self.fluid_particles.len() + self.pending_spawn_count >= self.max_particles {
             if self.tap_active {
                 eprintln!("Max particles ({}) reached! Press R to reset.", self.max_particles);
                 self.tap_active = false; // Stop trying to spawn
@@ -368,7 +555,7 @@ impl AppState {
 
         for x in 0..horizontal_size {
             for z in 0..horizontal_size {
-                if self.fluid_particles.len() + positions.len() >= self.max_particles {
+                if self.fluid_particles.len() + self.pending_spawn_count + positions.len() >= self.max_particles {
                     break;
                 }
 
@@ -389,53 +576,79 @@ impl AppState {
 
         let particle_count = positions.len();
 
-        // Create fluid and add to liquid world
-        let mut fluid = Fluid::new(positions, self.particle_radius, self.fluid_density);
-        fluid.nonpressure_forces.push(Box::new(XSPHViscosity::new(0.5, 0.0)));
-        fluid.nonpressure_forces.push(Box::new(Akinci2013SurfaceTension::new(0.5, 0.0)));
+        eprintln!("[Main] Spawning {} particles at tap position | Total visual: {} | Pending: {}",
+            particle_count,
+            self.fluid_particles.len(),
+            self.pending_spawn_count);
 
-        let fluid_handle = self.liquid_world.add_fluid(fluid);
+        // Request spawn (direct state access - no channel latency!)
+        self.physics_state.request_spawn(positions, velocities);
 
-        // Set initial velocities
-        if let Some(fluid_obj) = self.liquid_world.fluids_mut().get_mut(fluid_handle) {
-            for (i, vel) in velocities.iter().enumerate() {
-                if i < fluid_obj.velocities.len() {
-                    fluid_obj.velocities[i] = *vel;
-                }
-            }
+        // Track pending particles (will be created when we receive position updates)
+        self.pending_spawn_count += particle_count;
+    }
+
+    fn update_from_physics(&mut self) {
+        let read_start = std::time::Instant::now();
+
+        // Measure latency: time since physics last wrote data
+        let physics_latency = self.physics_state.get_physics_latency();
+
+        // Read positions from read buffer (single atomic snapshot - no race condition!)
+        let positions = self.physics_state.read_positions();
+        let physics_particle_count = positions.len();
+
+        let read_duration = read_start.elapsed();
+
+        // Log every 60 frames
+        if self.frame_count % 60 == 0 {
+            eprintln!("[Render] Latency: {:?} | Read {} positions in {:?} | Visual: {} | First pos: {:?}",
+                physics_latency,
+                physics_particle_count,
+                read_duration,
+                self.fluid_particles.len(),
+                positions.first().map(|p| (p.x, p.y, p.z)));
         }
 
-        // Create visual representation for each particle
-        for _ in 0..particle_count {
+        // Create visual particles for new physics particles
+        let initial_visual_count = self.fluid_particles.len();
+        while self.fluid_particles.len() < physics_particle_count {
             let transform = glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
-            let obj = insert_object(&mut self.renderer, self.sphere_mesh, self.water_material, transform, self.particle_radius).expect("insert particle");
+            let obj = insert_object(&mut self.renderer, self.sphere_mesh, self.water_material, transform, self.particle_radius)
+                .expect("insert particle");
             self.fluid_particles.push(FluidParticle { id: obj });
-        }
-    }
 
-    fn step_physics(&mut self, dt: f32) {
-        let gravity = salva3d::math::Vector::new(0.0, -9.81, 0.0);
-        self.liquid_world.step(dt, &gravity);
-    }
-
-    fn sync_fluid_particles(&mut self) {
-        let mut particle_idx = 0;
-
-        for (_, fluid) in self.liquid_world.fluids().iter() {
-            for pos in fluid.positions.iter() {
-                if particle_idx >= self.fluid_particles.len() {
-                    return;
-                }
-
-                let transform = glam::Mat4::from_translation(glam::Vec3::new(pos.x, pos.y, pos.z))
-                    * glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
-                let _ = self.renderer.scene_mut().update_object_transform(
-                    self.fluid_particles[particle_idx].id,
-                    transform
-                );
-
-                particle_idx += 1;
+            if self.pending_spawn_count > 0 {
+                self.pending_spawn_count -= 1;
             }
+        }
+
+        if self.fluid_particles.len() != initial_visual_count {
+            eprintln!("[Render] Created {} new visual particles (total: {})",
+                self.fluid_particles.len() - initial_visual_count,
+                self.fluid_particles.len());
+        }
+
+        // Update transforms using the same positions snapshot (consistent data!)
+        let update_start = std::time::Instant::now();
+        for (i, pos) in positions.iter().enumerate() {
+            if i >= self.fluid_particles.len() {
+                eprintln!("[Render] WARNING: Position index {} >= visual particles {}", i, self.fluid_particles.len());
+                break;
+            }
+
+            let transform = glam::Mat4::from_translation(glam::Vec3::new(pos.x, pos.y, pos.z))
+                * glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
+            let _ = self.renderer.scene_mut().update_object_transform(
+                self.fluid_particles[i].id,
+                transform
+            );
+        }
+
+        if self.frame_count % 60 == 0 {
+            eprintln!("[Render] Updated {} transforms in {:?}",
+                positions.len().min(self.fluid_particles.len()),
+                update_start.elapsed());
         }
     }
 
@@ -486,10 +699,10 @@ impl AppState {
                     }
                 }
             }
-
-            self.step_physics(dt);
-            self.sync_fluid_particles();
         }
+
+        // Update visual particles from physics thread (runs independently)
+        self.update_from_physics();
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
@@ -509,9 +722,11 @@ impl AppState {
         self.frame_count += 1;
 
         if self.frame_count % 120 == 0 {
-            eprintln!("Frame {} | Particles: {} | Physics: {}",
+            let fps = 120.0 / (std::time::Instant::now() - self.last_frame + std::time::Duration::from_secs_f32(dt * 119.0)).as_secs_f32();
+            eprintln!("[Render] Frame {} | Particles: {} | FPS: {:.1} | Physics: {}",
                 self.frame_count,
                 self.fluid_particles.len(),
+                fps,
                 self.physics_enabled
             );
         }
