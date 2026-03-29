@@ -33,7 +33,10 @@
       "Bash(cut:*)",
       "Bash(tr:*)",
       "Bash(cargo test:*)",
-      "Bash(rustc:*)"
+      "Bash(rustc:*)",
+      "Bash(cargo tree:*)",
+      "WebFetch(domain:crates.io)",
+      "Bash(cargo search:*)"
     ]
   }
 }
