@@ -64,6 +64,18 @@ name = "shape_battle_royale"
 path = "shape_battle_royale.rs"
 
 [[bin]]
+name = "rapier_stack"
+path = "rapier_stack.rs"
+
+[[bin]]
+name = "rapier_pendulum"
+path = "rapier_pendulum.rs"
+
+[[bin]]
+name = "rapier_collision_groups"
+path = "rapier_collision_groups.rs"
+
+[[bin]]
 name = "light_benchmark"
 path = "light_benchmark.rs"
 
