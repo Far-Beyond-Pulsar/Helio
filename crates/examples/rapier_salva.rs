@@ -254,45 +254,60 @@ fn physics_thread(
 
         // Process pending spawns (direct state access - measure command latency!)
         let spawns = shared_state.take_pending_spawns();
-        for (positions, velocities, request_time) in spawns {
-            let spawn_latency = current_time - request_time;
-            eprintln!("[Physics] Spawning {} particles | Command latency: {:?}", positions.len(), spawn_latency);
+        if !spawns.is_empty() {
+            let mut total_spawned = 0;
+            let mut max_latency = std::time::Duration::from_secs(0);
 
-            let mut fluid = Fluid::new(positions, particle_radius, 1000.0);
-            fluid.nonpressure_forces.push(Box::new(XSPHViscosity::new(0.5, 0.0)));
-            fluid.nonpressure_forces.push(Box::new(Akinci2013SurfaceTension::new(0.5, 0.0)));
+            for (positions, velocities, request_time) in spawns {
+                let spawn_latency = current_time - request_time;
+                max_latency = max_latency.max(spawn_latency);
+                total_spawned += positions.len();
 
-            let fluid_handle = liquid_world.add_fluid(fluid);
+                let mut fluid = Fluid::new(positions, particle_radius, 1000.0);
+                fluid.nonpressure_forces.push(Box::new(XSPHViscosity::new(0.5, 0.0)));
+                fluid.nonpressure_forces.push(Box::new(Akinci2013SurfaceTension::new(0.5, 0.0)));
 
-            // Set velocities
-            if let Some(fluid_obj) = liquid_world.fluids_mut().get_mut(fluid_handle) {
-                for (i, vel) in velocities.iter().enumerate() {
-                    if i < fluid_obj.velocities.len() {
-                        fluid_obj.velocities[i] = *vel;
+                let fluid_handle = liquid_world.add_fluid(fluid);
+
+                // Set velocities
+                if let Some(fluid_obj) = liquid_world.fluids_mut().get_mut(fluid_handle) {
+                    for (i, vel) in velocities.iter().enumerate() {
+                        if i < fluid_obj.velocities.len() {
+                            fluid_obj.velocities[i] = *vel;
+                        }
                     }
                 }
             }
 
             let total_particles: usize = liquid_world.fluids().iter().map(|(_, f)| f.positions.len()).sum();
-            eprintln!("[Physics] After spawn - total particles: {}", total_particles);
+            eprintln!("[Physics] Spawned {} particles | Max latency: {:?} | Total: {}",
+                total_spawned, max_latency, total_particles);
         }
 
-        // Fixed timestep accumulator pattern
+        // Fixed timestep accumulator pattern (limit to 2 steps max to prevent bursts)
         let mut steps_this_frame = 0;
-        while accumulator >= fixed_dt {
+        let step_start = std::time::Instant::now();
+        while accumulator >= fixed_dt && steps_this_frame < 2 {
             liquid_world.step(fixed_dt, &gravity);
             accumulator -= fixed_dt;
             steps_this_frame += 1;
             total_steps += 1;
         }
 
-        // Debug: Log physics steps
-        if steps_this_frame > 0 {
+        // If we're falling behind, just drop the accumulated time
+        if accumulator > fixed_dt * 3.0 {
+            eprintln!("[Physics] WARNING: Dropping accumulated time ({:.3}s) - physics too slow!", accumulator);
+            accumulator = 0.0;
+        }
+
+        let step_duration = step_start.elapsed();
+
+        // Debug: Log physics steps with timing (less frequently)
+        if steps_this_frame > 0 && total_steps % 120 == 0 {
             let particle_count = liquid_world.fluids().iter().map(|(_, f)| f.positions.len()).sum::<usize>();
-            if loop_count % 60 == 0 {
-                eprintln!("[Physics] Stepped {} times | Total steps: {} | Particles: {}",
-                    steps_this_frame, total_steps, particle_count);
-            }
+            eprintln!("[Physics] Stepped {} times in {:?} | Total steps: {} | Particles: {} | Per-step: {:?}",
+                steps_this_frame, step_duration, total_steps, particle_count,
+                step_duration / steps_this_frame.max(1) as u32);
         }
 
         // Update shared state (direct write - no channel latency!)
@@ -312,9 +327,8 @@ fn physics_thread(
                 particle_count, write_duration, loop_count);
         }
 
-        // Sleep briefly to accumulate time (yield_now is too fast!)
-        // Target ~500Hz loop rate, giving plenty of headroom for 120Hz physics
-        std::thread::sleep(std::time::Duration::from_micros(2000)); // 2ms sleep = 500Hz
+        // Yield to prevent CPU starvation, but keep loop running fast
+        std::thread::yield_now();
     }
 }
 
