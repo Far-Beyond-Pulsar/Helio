@@ -203,7 +203,7 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let mut add =
+        let add =
             |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
                 let m = r.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]))).as_mesh().unwrap();
                 let _ = insert_object(
@@ -387,41 +387,6 @@ impl ApplicationHandler for App {
                     },
                 );
                 state.renderer.set_render_size(s.width, s.height);
-            }
-
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ks,
-                        physical_key: PhysicalKey::Code(key),
-                        ..
-                    },
-                ..
-            } => match ks {
-                ElementState::Pressed => {
-                    state.keys.insert(key);
-                }
-                ElementState::Released => {
-                    state.keys.remove(&key);
-                }
-            },
-
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
-                if !state.cursor_grabbed {
-                    let ok = state
-                        .window
-                        .set_cursor_grab(CursorGrabMode::Confined)
-                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
-                        .is_ok();
-                    if ok {
-                        state.window.set_cursor_visible(false);
-                        state.cursor_grabbed = true;
-                    }
-                }
             }
 
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {

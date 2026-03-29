@@ -236,8 +236,6 @@ pub fn build_hlfs_graph(
     // ── HLFS Pass: Replaces traditional deferred lighting ──
     let hlfs_pass = HlfsPass::new(
         device,
-        queue,
-        camera_buf,
         config.internal_width(),
         config.internal_height(),
         config.surface_format,

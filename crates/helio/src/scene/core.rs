@@ -15,11 +15,10 @@ use wgpu::util::DeviceExt;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{LightId, MaterialId, ObjectId, TextureId, VirtualObjectId};
-use crate::material::MAX_TEXTURES;
-use crate::mesh::{MeshPool, MeshUpload};
-use crate::vg::{VirtualMeshId, VirtualMeshUpload};
+use crate::mesh::MeshPool;
+use crate::scene::SceneActorTrait;
+use crate::vg::VirtualMeshId;
 
-use super::actor::{LightActor, MeshActor, ObjectActor, SceneActor, SceneActorTrait, VirtualMeshActor};
 use super::camera::Camera;
 use super::types::{
     LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord,
@@ -447,6 +446,8 @@ impl Scene {
 
 #[cfg(test)]
 mod tests {
+    use crate::SceneActor;
+
     use super::*;
     use libhelio::{SkyActor, VolumetricClouds};
 

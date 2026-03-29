@@ -3,10 +3,8 @@
 //! Meshes are stored in a shared `MeshPool` and reference-counted. Multiple objects
 //! can reference the same mesh. Meshes cannot be removed while objects are using them.
 
-use std::sync::Arc;
-
 use crate::handles::MeshId;
-use crate::mesh::{MeshBuffers, MeshPool, MeshUpload};
+use crate::mesh::{MeshBuffers, MeshUpload};
 
 use super::super::errors::{invalid, Result, SceneError};
 

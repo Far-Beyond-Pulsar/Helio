@@ -9,7 +9,7 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, LightId, MeshId, Renderer, RendererConfig,
+    required_wgpu_features, required_wgpu_limits, Camera, LightId, Renderer, RendererConfig,
 };
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
 
@@ -43,16 +43,6 @@ struct AppState {
     renderer: Renderer,
     last_frame: std::time::Instant,
     start_time: std::time::Instant,
-
-    floor: MeshId,
-    ceiling: MeshId,
-    wall_n: MeshId,
-    wall_s: MeshId,
-    wall_e: MeshId,
-    wall_w: MeshId,
-    table: MeshId,
-    bookcase: MeshId,
-    sofa: MeshId,
 
     cam_pos: glam::Vec3,
     cam_yaw: f32,
@@ -233,15 +223,6 @@ impl ApplicationHandler for App {
             renderer,
             last_frame: std::time::Instant::now(),
             start_time: std::time::Instant::now(),
-            floor,
-            ceiling,
-            wall_n,
-            wall_s,
-            wall_e,
-            wall_w,
-            table,
-            bookcase,
-            sofa,
             cam_pos: glam::Vec3::new(0.0, 1.6, 2.0),
             cam_yaw: std::f32::consts::PI,
             cam_pitch: 0.0,

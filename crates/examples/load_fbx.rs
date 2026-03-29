@@ -9,7 +9,7 @@ use std::time::Instant;
 use glam::Vec3;
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
 use helio_asset_compat::{load_scene_file_with_config, upload_scene_materials};
-use v3_demo_common::{cube_mesh, point_light, update_point_light};
+use v3_demo_common::{point_light, update_point_light};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -17,6 +17,8 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
+
+use crate::v3_demo_common::cube_mesh;
 
 struct App {
     state: Option<AppState>,

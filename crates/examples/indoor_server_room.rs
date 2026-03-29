@@ -210,7 +210,7 @@ impl ApplicationHandler for App {
         ));
 
         // ── Geometry ───────────────────────────────────────────────────────────────
-        let mut add =
+        let add =
             |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
                 let m = r.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]))).as_mesh().unwrap();
                 let _ = insert_object(

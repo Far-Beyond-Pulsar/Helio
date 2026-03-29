@@ -45,7 +45,6 @@ pub struct HlfsPass {
     globals_buf: wgpu::Buffer,
 
     // Clip-stack: 4 levels of 3D textures (128^3 RGBA16F each)
-    clip_stack_textures: Vec<wgpu::Texture>,
     clip_stack_views: Vec<wgpu::TextureView>,
     clip_stack_sampler: wgpu::Sampler,
 
@@ -61,8 +60,6 @@ pub struct HlfsPass {
     bind_group_compute_importance: Option<wgpu::BindGroup>,
     bind_group_compute_inject: Option<wgpu::BindGroup>,
     bind_group_compute_propagate: Option<wgpu::BindGroup>,
-    bind_group_shade_group0: Option<wgpu::BindGroup>,
-    bind_group_shade_group1: Option<wgpu::BindGroup>,
 
     width: u32,
     height: u32,
@@ -76,8 +73,6 @@ pub struct HlfsPass {
 impl HlfsPass {
     pub fn new(
         device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        camera_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
         output_format: wgpu::TextureFormat,
@@ -446,7 +441,6 @@ impl HlfsPass {
             hierarchical_propagate_pipeline,
             final_shade_pipeline,
             globals_buf,
-            clip_stack_textures,
             clip_stack_views,
             clip_stack_sampler,
             sample_buffer,
@@ -458,8 +452,6 @@ impl HlfsPass {
             bind_group_compute_importance: None,
             bind_group_compute_inject: None,
             bind_group_compute_propagate: None,
-            bind_group_shade_group0: None,
-            bind_group_shade_group1: None,
             width,
             height,
             output_texture,

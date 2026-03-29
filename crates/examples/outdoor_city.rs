@@ -251,7 +251,7 @@ impl ApplicationHandler for App {
 
         let _buildings: Vec<MeshId> = BUILDINGS
             .iter()
-            .map(|&(cx, cz, hw, hd, hh)| renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hw, hh, hd]))).as_mesh().unwrap())
+            .map(|&(_, _, hw, hd, hh)| renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hw, hh, hd]))).as_mesh().unwrap())
             .collect();
         for (&m, &(cx, cz, _hw, _hd, hh)) in _buildings.iter().zip(BUILDINGS.iter()) {
             let _ =

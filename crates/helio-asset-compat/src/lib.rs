@@ -190,7 +190,6 @@ impl UploadedScene {
     /// returns `None` when `material_ids` is empty.
     pub fn mesh_material(
         &self,
-        mesh_index: usize,
         converted: &scene_converter::ConvertedMesh,
     ) -> Option<MaterialId> {
         let idx = converted.material_index?;
@@ -316,39 +315,3 @@ pub struct SceneAsset {
     /// Available animation clip names
     pub animation_names: Vec<String>,
 }
-
-/// Internal registry of loaded scenes
-pub(crate) struct SceneRegistry {
-    assets: HashMap<SceneHandle, SceneAsset>,
-    next_handle: u64,
-}
-
-impl SceneRegistry {
-    pub fn new() -> Self {
-        Self {
-            assets: HashMap::new(),
-            next_handle: 1, // 0 reserved for invalid handle
-        }
-    }
-
-    pub fn allocate_handle(&mut self) -> SceneHandle {
-        let handle = SceneHandle(self.next_handle);
-        self.next_handle += 1;
-        handle
-    }
-
-    pub fn register(&mut self, handle: SceneHandle, asset: SceneAsset) {
-        self.assets.insert(handle, asset);
-    }
-
-    pub fn get(&self, handle: SceneHandle) -> Option<&SceneAsset> {
-        self.assets.get(&handle)
-    }
-
-    pub fn remove(&mut self, handle: SceneHandle) -> Option<SceneAsset> {
-        self.assets.remove(&handle)
-    }
-}
-
-
-

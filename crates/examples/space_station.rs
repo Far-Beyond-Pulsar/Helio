@@ -59,7 +59,6 @@ struct AppState {
     // animated lights
     hub_light_ids: [LightId; 2],
     hab_ring_light_ids: [LightId; 4],
-    ind_ring_light_ids: [LightId; 4],
     engine_light_ids: [LightId; 4],
     docking_light_id: LightId,
     beacon_light_ids: [LightId; 2],
@@ -161,22 +160,6 @@ impl ApplicationHandler for App {
             renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 6.0, 35.0], [0.78, 0.88, 1.0], 5.5, 20.0))).as_light().unwrap(),
             renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 6.0, -35.0], [0.78, 0.88, 1.0], 5.5, 20.0))).as_light().unwrap(),
         ];
-        let ind_ring_light_ids = [
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([62.0, -3.0, 0.0], [0.62, 0.76, 1.0], 7.0, 28.0))).as_light().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [-62.0, -3.0, 0.0],
-                [0.62, 0.76, 1.0],
-                7.0,
-                28.0,
-            ))).as_light().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, -3.0, 62.0], [0.62, 0.76, 1.0], 7.0, 28.0))).as_light().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [0.0, -3.0, -62.0],
-                [0.62, 0.76, 1.0],
-                7.0,
-                28.0,
-            ))).as_light().unwrap(),
-        ];
         let engine_light_ids = [
             renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([5.0, 5.0, 58.0], [1.0, 0.42, 0.06], 10.0, 22.0))).as_light().unwrap(),
             renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
@@ -221,7 +204,6 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             hub_light_ids,
             hab_ring_light_ids,
-            ind_ring_light_ids,
             engine_light_ids,
             docking_light_id,
             beacon_light_ids,

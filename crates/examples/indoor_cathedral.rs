@@ -97,7 +97,6 @@ struct AppState {
     device: Arc<wgpu::Device>,
     surface_format: wgpu::TextureFormat,
     renderer: Arc<Mutex<Renderer>>,
-    command_bridge: Arc<HelioCommandBridge>,
     action_rx: Receiver<HelioAction>,
     last_frame: std::time::Instant,
 
@@ -530,7 +529,6 @@ impl ApplicationHandler for App {
             device,
             surface_format: format,
             renderer,
-            command_bridge,
             action_rx,
             last_frame: std::time::Instant::now(),
             _floor,
