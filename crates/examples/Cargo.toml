@@ -56,6 +56,14 @@ name = "space_station"
 path = "space_station.rs"
 
 [[bin]]
+name = "churn_benchmark"
+path = "churn_benchmark.rs"
+
+[[bin]]
+name = "shape_battle_royale"
+path = "shape_battle_royale.rs"
+
+[[bin]]
 name = "light_benchmark"
 path = "light_benchmark.rs"
 
@@ -91,6 +99,7 @@ path = "outdoor_rocks.rs"
 helio = { path = "../helio" }
 helio-asset-compat = { path = "../helio-asset-compat" }
 helio-pass-sdf = { path = "../helio-pass-sdf" }
+rapier3d = "0.24"
 image = { version = "0.25", default-features = false, features = ["png"] }
 bytemuck = { workspace = true }
 glam = { workspace = true }

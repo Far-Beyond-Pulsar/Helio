@@ -40,4 +40,3 @@ pub use helio_v3::{
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
 };
 pub use libhelio::{LightType, ShadowQuality, VolumetricClouds, SkyActor};
-
