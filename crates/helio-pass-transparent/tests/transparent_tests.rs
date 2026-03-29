@@ -121,14 +121,15 @@ fn blend_result_stays_in_0_1_for_valid_inputs() {
 }
 
 #[test]
-fn blend_commutative_when_alpha_0_dot_5() {
-    // Over is NOT commutative; verify different order gives different result
-    let a = [1.0f32, 0.0, 0.0, 0.5]; // red
-    let b = [0.0f32, 0.0, 1.0, 0.5]; // blue
+fn blend_not_commutative_for_different_alpha() {
+    // Over is NOT commutative in general; choose different source alpha values.
+    let a = [1.0f32, 0.0, 0.0, 0.5]; // red, 50% alpha
+    let b = [0.0f32, 0.0, 1.0, 0.25]; // blue, 25% alpha
     let ab = blend_over(a, [b[0], b[1], b[2]]);
     let ba = blend_over(b, [a[0], a[1], a[2]]);
-    // Red channel should differ: a-over-b vs b-over-a
-    assert!((ab[0] - ba[0]).abs() > 0.1f32, "blend should be order-dependent");
+    // Color channels should differ due asymmetric alpha.
+    assert!((ab[0] - ba[0]).abs() > 0.1f32, "red channel should differ for order-dependent blend");
+    assert!((ab[2] - ba[2]).abs() > 0.1f32, "blue channel should differ for order-dependent blend");
 }
 
 #[test]
