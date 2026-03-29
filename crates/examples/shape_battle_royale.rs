@@ -10,7 +10,7 @@
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, plane_mesh};
+use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, plane_mesh, point_light};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -36,6 +36,8 @@ struct BattleShape {
 struct BlastParticle {
     object_id: ObjectId,
     birth: Instant,
+    position: glam::Vec3,
+    velocity: glam::Vec3,
 }
 
 struct App {
@@ -62,9 +64,10 @@ struct AppState {
     physics_bodies: RigidBodySet,
     physics_colliders: ColliderSet,
     physics_forces: IslandManager,
-    physics_broad_phase: BroadPhase,
+    physics_broad_phase: DefaultBroadPhase,
     physics_narrow_phase: NarrowPhase,
-    physics_joint_set: JointSet,
+    physics_impulse_joints: ImpulseJointSet,
+    physics_multibody_joint_set: MultibodyJointSet,
     physics_ccd_solver: CCDSolver,
 
     battle_shapes: Vec<BattleShape>,
@@ -119,11 +122,16 @@ impl ApplicationHandler for App {
         let floor_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0,0.0,0.0], ARENA_RADIUS))).as_mesh().unwrap();
         let _ = insert_object(&mut renderer, floor_mesh, flooring, glam::Mat4::from_translation(glam::Vec3::new(0.0,0.0,0.0)), ARENA_RADIUS);
 
-        let cube_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0,0.0,0.0], 1.0))).as_mesh().unwrap();
-        let small_cube_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0,0.0,0.0], 0.2))).as_mesh().unwrap();
+        // add lights to avoid TileLightLists COPY_DST validation failure
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([ 7.0, 6.0,  6.0], [0.9, 0.8, 0.7], 10.0, 20.0))).as_light().unwrap();
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-7.0, 6.0, -6.0], [0.7, 0.9, 1.0], 10.0, 20.0))).as_light().unwrap();
 
-        let meshes = [cube_mesh_id, cube_mesh_id, cube_mesh_id, cube_mesh_id];
-        let materials = [red, green, blue, yellow];
+        let sphere_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.4,0.4,0.4]))).as_mesh().unwrap();
+        let cuboid_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.35,0.55,0.25]))).as_mesh().unwrap();
+        let capsule_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.35,0.55,0.35]))).as_mesh().unwrap();
+        let cylinder_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.3,0.6,0.3]))).as_mesh().unwrap();
+
+        let meshes = [sphere_mesh_id, cuboid_mesh_id, capsule_mesh_id, cylinder_mesh_id];
 
         let mut state = AppState {
             window,
@@ -143,9 +151,10 @@ impl ApplicationHandler for App {
             physics_bodies: RigidBodySet::new(),
             physics_colliders: ColliderSet::new(),
             physics_forces: IslandManager::new(),
-            physics_broad_phase: BroadPhase::new(),
+            physics_broad_phase: DefaultBroadPhase::new(),
             physics_narrow_phase: NarrowPhase::new(),
-            physics_joint_set: JointSet::new(),
+            physics_impulse_joints: ImpulseJointSet::new(),
+            physics_multibody_joint_set: MultibodyJointSet::new(),
             physics_ccd_solver: CCDSolver::new(),
             battle_shapes: Vec::new(),
             explosion_particles: Vec::new(),
@@ -179,21 +188,25 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Plus), ..}, .. } => {
-                state.shape_count = (state.shape_count + 1).min(MAX_SHAPES);
-                eprintln!("shape_count={}", state.shape_count);
-                state.start_new_round();
-            }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Minus), ..}, .. } => {
-                state.shape_count = (state.shape_count.saturating_sub(1)).max(MIN_SHAPES);
-                eprintln!("shape_count={}", state.shape_count);
-                state.start_new_round();
-            }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), .. }, .. } => {
-                match ks {
-                    ElementState::Pressed => { state.keys.insert(key); }
-                    ElementState::Released => { state.keys.remove(&key); }
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(key), ..}, .. } => {
+                match key {
+                    KeyCode::Equal | KeyCode::NumpadAdd => {
+                        state.shape_count = (state.shape_count + 1).min(MAX_SHAPES);
+                        eprintln!("shape_count={}", state.shape_count);
+                        state.start_new_round();
+                    }
+                    KeyCode::Minus | KeyCode::NumpadSubtract => {
+                        state.shape_count = (state.shape_count.saturating_sub(1)).max(MIN_SHAPES);
+                        eprintln!("shape_count={}", state.shape_count);
+                        state.start_new_round();
+                    }
+                    _ => {
+                        state.keys.insert(key);
+                    }
                 }
+            }
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Released, physical_key: PhysicalKey::Code(key), .. }, .. } => {
+                state.keys.remove(&key);
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if !state.cursor_grabbed {
@@ -253,32 +266,55 @@ impl ApplicationHandler for App {
 impl AppState {
     fn spawn_arena_walls(&mut self) {
         let wall_material = self.mats[0];
-        let wall_mesh = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0],[ARENA_RADIUS, WALL_HEIGHT, WALL_THICKNESS]))).as_mesh().unwrap();
 
-        let positions = [
-            (0.0, WALL_HEIGHT/2.0, ARENA_RADIUS),
-            (0.0, WALL_HEIGHT/2.0, -ARENA_RADIUS),
-            (ARENA_RADIUS, WALL_HEIGHT/2.0, 0.0),
-            (-ARENA_RADIUS, WALL_HEIGHT/2.0, 0.0),
+        // Wall mesh is reused for visual objects; physics walls are separate colliders.
+        let wall_mesh_x = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0],[WALL_THICKNESS / 2.0, WALL_HEIGHT / 2.0, ARENA_RADIUS]))).as_mesh().unwrap();
+        let wall_mesh_z = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0],[ARENA_RADIUS, WALL_HEIGHT / 2.0, WALL_THICKNESS / 2.0]))).as_mesh().unwrap();
+
+        let wall_poses = [
+            (0.0, WALL_HEIGHT/2.0, ARENA_RADIUS + WALL_THICKNESS/2.0, wall_mesh_z),
+            (0.0, WALL_HEIGHT/2.0, -ARENA_RADIUS - WALL_THICKNESS/2.0, wall_mesh_z),
+            (ARENA_RADIUS + WALL_THICKNESS/2.0, WALL_HEIGHT/2.0, 0.0, wall_mesh_x),
+            (-ARENA_RADIUS - WALL_THICKNESS/2.0, WALL_HEIGHT/2.0, 0.0, wall_mesh_x),
         ];
-        for (x, y, z) in positions {
-            let transform = glam::Mat4::from_translation(glam::Vec3::new(x, y, z));
-            let _ = insert_object(&mut self.renderer, wall_mesh, wall_material, transform, ARENA_RADIUS);
-        }
 
-        let static_body = RigidBodyBuilder::fixed().build();
-        let body_handle = self.physics_bodies.insert(static_body);
-        let wall_collider = ColliderBuilder::cuboid(ARENA_RADIUS + WALL_THICKNESS, WALL_HEIGHT, ARENA_RADIUS + WALL_THICKNESS)
-            .friction(0.0).restitution(0.95).build();
-        self.physics_colliders.insert_with_parent(wall_collider, body_handle, &mut self.physics_bodies);
+        for (x, y, z, mesh_id) in wall_poses.iter() {
+            let transform = glam::Mat4::from_translation(glam::Vec3::new(*x, *y, *z));
+            let _ = insert_object(&mut self.renderer, *mesh_id, wall_material, transform, ARENA_RADIUS);
+
+            let wall_body = RigidBodyBuilder::fixed().translation([*x, *y, *z].into()).build();
+            let body_handle = self.physics_bodies.insert(wall_body);
+
+            let half_extents = if (*x).abs() > 0.0 {
+                // X wall: thickness in X, radius in Z
+                [WALL_THICKNESS/2.0, WALL_HEIGHT/2.0, ARENA_RADIUS]
+            } else {
+                // Z wall: radius in X, thickness in Z
+                [ARENA_RADIUS, WALL_HEIGHT/2.0, WALL_THICKNESS/2.0]
+            };
+
+            let wall_collider = ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
+                .friction(0.0)
+                .restitution(0.95)
+                .build();
+
+            self.physics_colliders.insert_with_parent(wall_collider, body_handle, &mut self.physics_bodies);
+        }
     }
 
     fn start_new_round(&mut self) {
         // clear old objects
         for shape in self.battle_shapes.drain(..) {
             let _ = self.renderer.scene_mut().remove_object(shape.object_id);
-            self.physics_colliders.remove(shape.collider_handle, &mut self.physics_bodies, false);
-            self.physics_bodies.remove(shape.body_handle, &mut self.physics_forces, &mut self.physics_colliders, &mut self.physics_joint_set);
+            self.physics_colliders.remove(shape.collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);
+            self.physics_bodies.remove(
+                shape.body_handle,
+                &mut self.physics_forces,
+                &mut self.physics_colliders,
+                &mut self.physics_impulse_joints,
+                &mut self.physics_multibody_joint_set,
+                true,
+            );
         }
         for part in self.explosion_particles.drain(..) {
             let _ = self.renderer.scene_mut().remove_object(part.object_id);
@@ -293,20 +329,38 @@ impl AppState {
             let floor = glam::Vec3::new(angle.cos() * radius, 1.0, angle.sin() * radius);
             let direction = (center - floor).normalize();
             let velocity = direction * 16.0 + glam::Vec3::new(0.0, 2.0, 0.0);
-            let body = RigidBodyBuilder::dynamic().translation(floor.into()).linvel(velocity.into()).angvel([0.0, 5.0, 0.0].into()).build();
+            let shape_variant = i % 4;
+
+            let mesh_id = self.meshes[shape_variant];
+            let scale = match shape_variant {
+                0 => glam::Vec3::splat(1.0),
+                1 => glam::Vec3::new(1.2, 1.5, 0.8),
+                2 => glam::Vec3::new(0.8, 1.4, 0.8),
+                _ => glam::Vec3::new(0.9, 1.1, 0.9),
+            };
+
+            let collider = match shape_variant {
+                0 => ColliderBuilder::ball(0.45),
+                1 => ColliderBuilder::cuboid(0.4, 0.5, 0.3),
+                2 => ColliderBuilder::capsule_y(0.5, 0.25),
+                _ => ColliderBuilder::cylinder(0.6, 0.28),
+            }
+            .restitution(0.95)
+            .friction(0.0)
+            .build();
+
+            let body = RigidBodyBuilder::dynamic()
+                .translation(Vector::new(floor.x, floor.y, floor.z))
+                .linvel(Vector::new(velocity.x, velocity.y, velocity.z))
+                .angvel(Vector::new(0.0, 5.0, 0.0))
+                .build();
             let body_handle = self.physics_bodies.insert(body);
 
             let size = 1.0 + (i as f32 * 0.05);
-            let collider = if i % 2 == 0 {
-                ColliderBuilder::ball(size * 0.45)
-            } else {
-                ColliderBuilder::cuboid(size*0.4, size*0.4, size*0.4)
-            }.restitution(0.95).friction(0.0).build();
             let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
 
-            let mesh_id = self.meshes[i % self.meshes.len()];
             let mat_id = self.mats[i % self.mats.len()];
-            let transform = glam::Mat4::from_translation(floor) * glam::Mat4::from_scale(glam::Vec3::splat(size * 0.8));
+            let transform = glam::Mat4::from_translation(floor) * glam::Mat4::from_scale(scale * size);
             let obj = insert_object(&mut self.renderer, mesh_id, mat_id, transform, size * 1.2).expect("insert object");
 
             self.battle_shapes.push(BattleShape { body_handle, collider_handle, object_id: obj, eliminated: false });
@@ -316,12 +370,20 @@ impl AppState {
     fn create_explosion(&mut self, position: glam::Vec3) {
         for i in 0..16 {
             let angle = i as f32 * 2.0 * std::f32::consts::PI / 16.0;
-            let offset = glam::Vec3::new(angle.cos(), 0.4, angle.sin()) * 0.4;
+            let dir = glam::Vec3::new(angle.cos(), 0.3, angle.sin()).normalize();
+            let speed = 4.0 + (i as f32 * 0.15);
+            let velocity = dir * speed;
+            let offset = dir * 0.2;
             let pos = position + offset;
             let mesh = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0,0.0,0.0],0.12))).as_mesh().unwrap();
             let mat = self.mats[(i % self.mats.len())];
             let obj = insert_object(&mut self.renderer, mesh, mat, glam::Mat4::from_translation(pos), 0.2).expect("insert explosion");
-            self.explosion_particles.push(BlastParticle { object_id: obj, birth: Instant::now() });
+            self.explosion_particles.push(BlastParticle {
+                object_id: obj,
+                birth: Instant::now(),
+                position: pos,
+                velocity,
+            });
         }
     }
 
@@ -336,8 +398,10 @@ impl AppState {
             &mut self.physics_narrow_phase,
             &mut self.physics_bodies,
             &mut self.physics_colliders,
-            &mut self.physics_joint_set,
+            &mut self.physics_impulse_joints,
+            &mut self.physics_multibody_joint_set,
             &mut self.physics_ccd_solver,
+            None,
             &(),
             &(),
         );
@@ -346,29 +410,54 @@ impl AppState {
     fn update_battle_state(&mut self) {
         let mut alive = 0;
         let mut last_alive_i = None;
+        let mut eliminated = Vec::new();
 
         for i in 0..self.battle_shapes.len() {
             let shape = &mut self.battle_shapes[i];
-            if shape.eliminated { continue; }
+            if shape.eliminated {
+                continue;
+            }
+
             if let Some(body) = self.physics_bodies.get(shape.body_handle) {
-                let pos = body.position().translation;
-                let trans = glam::Mat4::from_cols_array(&body.position().to_homogeneous().to_cols_array());
+                // Convert rigibody pose to glam mat4 for rendering.
+                let m = body.position().to_homogeneous();
+                let mat: [f32; 16] = m.as_slice().try_into().unwrap();
+                let trans = glam::Mat4::from_cols_array(&mat);
                 let _ = self.renderer.scene_mut().update_object_transform(shape.object_id, trans);
 
+                let pos = body.position().translation.vector;
                 let radial_dist = glam::Vec3::new(pos.x, 0.0, pos.z).length();
-                let speed = body.linvel.norm();
+                let speed = body.linvel().norm();
+
                 if radial_dist > ARENA_RADIUS || speed < 0.8 {
                     shape.eliminated = true;
-                    self.create_explosion(glam::Vec3::new(pos.x, pos.y, pos.z));
-                    let _ = self.renderer.scene_mut().remove_object(shape.object_id);
-                    self.physics_colliders.remove(shape.collider_handle, &mut self.physics_bodies, false);
-                    self.physics_bodies.remove(shape.body_handle, &mut self.physics_forces, &mut self.physics_colliders, &mut self.physics_joint_set);
+                    eliminated.push((
+                        i,
+                        glam::Vec3::new(pos.x, pos.y, pos.z),
+                        shape.object_id,
+                        shape.collider_handle,
+                        shape.body_handle,
+                    ));
                     continue;
                 }
 
                 alive += 1;
                 last_alive_i = Some(i);
             }
+        }
+
+        for (_i, explosion_pos, object_id, collider_handle, body_handle) in eliminated {
+            self.create_explosion(explosion_pos);
+            let _ = self.renderer.scene_mut().remove_object(object_id);
+            self.physics_colliders.remove(collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);
+            self.physics_bodies.remove(
+                body_handle,
+                &mut self.physics_forces,
+                &mut self.physics_colliders,
+                &mut self.physics_impulse_joints,
+                &mut self.physics_multibody_joint_set,
+                true,
+            );
         }
 
         if alive <= 1 {
@@ -383,9 +472,18 @@ impl AppState {
             }
         }
 
-        self.explosion_particles.retain(|p| {
-            let alive = p.birth.elapsed() < Duration::from_millis(700);
-            if !alive {
+        let now = Instant::now();
+        self.explosion_particles.retain_mut(|p| {
+            let age = now.duration_since(p.birth);
+            let alive = age < Duration::from_millis(700);
+            if alive {
+                let dt = age.as_secs_f32().min(0.1);
+                // Smooth velocity decay for realistic fall-off.
+                p.velocity *= 0.94;
+                p.position += p.velocity * dt;
+                let new_transform = glam::Mat4::from_translation(p.position);
+                let _ = self.renderer.scene_mut().update_object_transform(p.object_id, new_transform);
+            } else {
                 let _ = self.renderer.scene_mut().remove_object(p.object_id);
             }
             alive
