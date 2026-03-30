@@ -76,10 +76,6 @@ name = "rapier_collision_groups"
 path = "rapier_collision_groups.rs"
 
 [[bin]]
-name = "rapier_cloth"
-path = "rapier_cloth.rs"
-
-[[bin]]
 name = "rapier_pendulum_line"
 path = "rapier_pendulum_line.rs"
 
@@ -106,10 +102,6 @@ path = "load_fbx.rs"
 [[bin]]
 name = "load_fbx_embedded"
 path = "load_fbx_embedded.rs"
-
-[[bin]]
-name = "ship_flight"
-path = "ship_flight.rs"
 
 [[bin]]
 name = "simple_graph"
