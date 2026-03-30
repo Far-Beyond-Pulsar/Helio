@@ -118,7 +118,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // Read from GBuffer
     let albedo = textureLoad(gbuf_albedo, pixel_coord, 0).rgb;
-    let normal = normalize(textureLoad(gbuf_normal, pixel_coord, 0).xyz * 2.0 - 1.0);
+    let normal = normalize(textureLoad(gbuf_normal, pixel_coord, 0).xyz);
     let orm = textureLoad(gbuf_orm, pixel_coord, 0).rgb;
     let emissive = textureLoad(gbuf_emissive, pixel_coord, 0).rgb;
     let depth = textureLoad(gbuf_depth, pixel_coord, 0);
