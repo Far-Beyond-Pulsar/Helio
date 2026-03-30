@@ -234,12 +234,13 @@ pub fn build_hlfs_graph(
     graph.add_pass(Box::new(vg_pass));
 
     // ── HLFS Pass: Replaces traditional deferred lighting ──
-    let hlfs_pass = HlfsPass::new(
+    let mut hlfs_pass = HlfsPass::new(
         device,
         config.internal_width(),
         config.internal_height(),
         config.surface_format,
     );
+    hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)

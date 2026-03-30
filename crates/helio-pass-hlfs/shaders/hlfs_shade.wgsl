@@ -27,6 +27,7 @@ struct HlfsGlobals {
     _pad0:            u32,
     camera_forward:   vec3<f32>,
     _pad1:            u32,
+    csm_splits:      vec4<f32>,
 }
 
 @group(0) @binding(0) var clip_stack_level0: texture_3d<f32>;
@@ -47,6 +48,242 @@ struct GpuLight {
     light_type: u32,
     inner_angle: f32,
     _pad: u32,
+}
+
+const ENABLE_SHADOWS: bool = true;
+const MAX_SHADOW_LIGHTS: u32 = 42u;
+const ATLAS_SIZE: f32 = 1024.0;
+const NORMAL_OFFSET_SCALE: f32 = 0.05;
+
+struct LightMatrix {
+    mat: mat4x4<f32>,
+}
+
+struct CascadeConfig {
+    split_distance: f32,
+    depth_bias: f32,
+    filter_radius: f32,
+    pcss_light_size: f32,
+}
+
+struct ShadowConfig {
+    cascades: array<CascadeConfig, 4>,
+    enable_pcss: u32,
+    pcss_blocker_samples: u32,
+    pcss_filter_samples: u32,
+    pcf_sample_count: u32,
+}
+
+@group(0) @binding(9) var<uniform> shadow_config: ShadowConfig;
+@group(0) @binding(10) var shadow_atlas: texture_depth_2d_array;
+@group(0) @binding(11) var shadow_sampler: sampler_comparison;
+@group(0) @binding(12) var <storage, read> shadow_matrices: array<LightMatrix>;
+
+// Vogel disk sampling - blue-noise-like spiral pattern for high-quality PCF
+fn vogel_disk_sample(sample_idx: u32, sample_count: u32, theta: f32) -> vec2<f32> {
+    let GOLDEN_ANGLE = 2.39996323;
+    let r = sqrt(f32(sample_idx) + 0.5) / sqrt(f32(sample_count));
+    let angle = f32(sample_idx) * GOLDEN_ANGLE + theta;
+    return vec2<f32>(cos(angle), sin(angle)) * r;
+}
+
+// Per-pixel hash for PCF rotation (reduces banding artifacts)
+fn hash22(p: vec2<f32>) -> f32 {
+    let p3 = fract(vec3<f32>(p.x, p.y, p.x) * 0.1031);
+    let d = dot(p3, vec3<f32>(p3.y + 33.33, p3.z + 33.33, p3.x + 33.33));
+    return fract((p3.x + p3.y) * d);
+}
+
+fn point_light_face(dir: vec3<f32>) -> u32 {
+    let a = abs(dir);
+    if a.x >= a.y && a.x >= a.z {
+        return select(0u, 1u, dir.x < 0.0);
+    } else if a.y >= a.x && a.y >= a.z {
+        return select(2u, 3u, dir.y < 0.0);
+    } else {
+        return select(4u, 5u, dir.z < 0.0);
+    }
+}
+
+fn pcss_blocker_search(
+    layer: u32,
+    shadow_uv: vec2<f32>,
+    receiver_depth: f32,
+    search_radius: f32,
+    blocker_samples: u32,
+    theta: f32
+) -> vec2<f32> {
+    var blocker_sum = 0.0;
+    var blocker_count = 0.0;
+
+    for (var i = 0u; i < blocker_samples; i++) {
+        let offset = vogel_disk_sample(i, blocker_samples, theta) * search_radius;
+        let sample_uv = shadow_uv + offset;
+        let pixel_coord = vec2<i32>(sample_uv * ATLAS_SIZE);
+
+        if any(pixel_coord < vec2<i32>(0)) || any(pixel_coord >= vec2<i32>(i32(ATLAS_SIZE))) {
+            continue;
+        }
+
+        let occluder_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
+        if occluder_depth < receiver_depth - 0.0001 {
+            blocker_sum += occluder_depth;
+            blocker_count += 1.0;
+        }
+    }
+
+    if blocker_count < 0.5 {
+        return vec2<f32>(0.0, 0.0);
+    }
+
+    return vec2<f32>(blocker_sum / blocker_count, blocker_count);
+}
+
+fn pcss_penumbra_size(receiver_depth: f32, avg_blocker_depth: f32, light_size: f32) -> f32 {
+    return (receiver_depth - avg_blocker_depth) / max(avg_blocker_depth, 0.001) * light_size;
+}
+
+fn sample_cascade_shadow(layer: u32, cascade_scale: f32, world_pos: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
+    if light_clip.w <= 0.0 { return 1.0; }
+
+    let ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+
+    if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+
+    let receiver_depth = ndc.z;
+    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+    var lit_sum = 0.0;
+
+    for (var i = 0u; i < shadow_config.pcf_sample_count; i++) {
+        let offset = vogel_disk_sample(i, shadow_config.pcf_sample_count, theta) * (cascade_scale / ATLAS_SIZE);
+        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), receiver_depth);
+    }
+
+    return lit_sum / f32(shadow_config.pcf_sample_count);
+}
+
+fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+    let config = shadow_config.cascades[cascade_idx];
+    let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
+    if light_clip.w <= 0.0 { return 1.0; }
+
+    let ndc = light_clip.xyz / light_clip.w;
+    let shadow_uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
+
+    if any(shadow_uv < vec2<f32>(0.0)) || any(shadow_uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
+        return 1.0;
+    }
+
+    let receiver_depth = ndc.z;
+    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+
+    let search_radius = config.pcss_light_size / ATLAS_SIZE;
+    let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius, shadow_config.pcss_blocker_samples, theta);
+
+    if blocker.y < 0.5 {
+        return 1.0;
+    }
+
+    let penumbra = pcss_penumbra_size(receiver_depth, blocker.x, config.pcss_light_size);
+    let filter_radius = clamp(penumbra / ATLAS_SIZE, config.filter_radius / ATLAS_SIZE, config.filter_radius * 3.0 / ATLAS_SIZE);
+    var lit_sum = 0.0;
+
+    for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
+        let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
+        lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), receiver_depth);
+    }
+
+    return lit_sum / f32(shadow_config.pcss_filter_samples);
+}
+
+fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+    if !ENABLE_SHADOWS { return 1.0; }
+    if light_idx >= MAX_SHADOW_LIGHTS { return 1.0; }
+
+    let light = lights[light_idx];
+    if light.shadow_index == 4294967295u { return 1.0; }
+
+    var light_dir: vec3<f32>;
+    if light.light_type == 0u {
+        light_dir = normalize(-light.direction_outer.xyz);
+    } else {
+        light_dir = normalize(light.position_range.xyz - world_pos);
+    }
+    let NdotL = max(dot(N, light_dir), 0.0);
+    let normal_offset = N * NORMAL_OFFSET_SCALE * (1.0 - NdotL);
+    let biased_pos = world_pos + normal_offset;
+
+    var layer: u32;
+    if light.light_type > 0u && light.light_type < 2u {
+        let to_frag = biased_pos - light.position_range.xyz;
+        layer = light.shadow_index + point_light_face(to_frag);
+        return sample_cascade_shadow(layer, 1.0, biased_pos, frag_coord, frame);
+    } else if light.light_type == 0u {
+        let dist = length(world_pos - camera.position_near.xyz);
+        let splits = globals.csm_splits;
+
+        var cascade_a = 3u;
+        var cascade_b = 3u;
+        var blend = 0.0;
+        const BLEND_ZONE = 0.1;
+
+        if dist < splits.x * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 0u;
+        } else if dist < splits.x * (1.0 + BLEND_ZONE / 2.0) {
+            cascade_a = 0u;
+            cascade_b = 1u;
+            blend = smoothstep(splits.x * (1.0 - BLEND_ZONE / 2.0), splits.x * (1.0 + BLEND_ZONE / 2.0), dist);
+        } else if dist < splits.y * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 1u;
+        } else if dist < splits.y * (1.0 + BLEND_ZONE / 2.0) {
+            cascade_a = 1u;
+            cascade_b = 2u;
+            blend = smoothstep(splits.y * (1.0 - BLEND_ZONE / 2.0), splits.y * (1.0 + BLEND_ZONE / 2.0), dist);
+        } else if dist < splits.z * (1.0 - BLEND_ZONE / 2.0) {
+            cascade_a = 2u;
+        } else if dist < splits.z * (1.0 + BLEND_ZONE / 2.0) {
+            cascade_a = 2u;
+            cascade_b = 3u;
+            blend = smoothstep(splits.z * (1.0 - BLEND_ZONE / 2.0), splits.z * (1.0 + BLEND_ZONE / 2.0), dist);
+        } else {
+            cascade_a = 3u;
+        }
+
+        let use_pcss = shadow_config.enable_pcss != 0u && shadow_config.cascades[cascade_a].pcss_light_size > 0.0;
+
+        let layer_a = light.shadow_index + cascade_a;
+        var shadow_a: f32;
+        if use_pcss {
+            shadow_a = sample_cascade_shadow_pcss(layer_a, cascade_a, biased_pos, frag_coord, frame);
+        } else {
+            let cascade_scale_a = 1.0 + f32(cascade_a) * 1.5;
+            shadow_a = sample_cascade_shadow(layer_a, cascade_scale_a, biased_pos, frag_coord, frame);
+        }
+
+        if blend <= 0.001 { return shadow_a; }
+
+        if cascade_b != cascade_a && blend > 0.001 {
+            let use_pcss_b = shadow_config.enable_pcss != 0u && shadow_config.cascades[cascade_b].pcss_light_size > 0.0;
+            let layer_b = light.shadow_index + cascade_b;
+            var shadow_b: f32;
+            if use_pcss_b {
+                shadow_b = sample_cascade_shadow_pcss(layer_b, cascade_b, biased_pos, frag_coord, frame);
+            } else {
+                let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
+                shadow_b = sample_cascade_shadow(layer_b, cascade_scale_b, biased_pos, frag_coord, frame);
+            }
+            return mix(shadow_a, shadow_b, blend);
+        }
+
+        return shadow_a;
+    } else {
+        layer = light.shadow_index;
+        return sample_cascade_shadow(layer, 1.0, biased_pos, frag_coord, frame);
+    }
 }
 
 fn evaluate_light(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
@@ -154,7 +391,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var direct_lighting = vec3<f32>(0.0);
     let max_lights = min(globals.light_count, 64u);
     for (var i: u32 = 0u; i < max_lights; i = i + 1u) {
-        direct_lighting = direct_lighting + evaluate_light(lights[i], world_pos, normal);
+        let vis = shadow_factor(i, world_pos, normal, in.clip_pos.xy, globals.frame);
+        direct_lighting = direct_lighting + evaluate_light(lights[i], world_pos, normal) * vis;
     }
 
     let ambient = vec3<f32>(0.03);

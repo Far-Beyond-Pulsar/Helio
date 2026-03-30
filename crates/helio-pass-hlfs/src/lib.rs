@@ -32,6 +32,7 @@ struct HlfsGlobals {
     _pad0: u32,
     camera_forward: [f32; 3],
     _pad1: u32,
+    csm_splits: [f32; 4],
 }
 
 pub struct HlfsPass {
@@ -68,6 +69,9 @@ pub struct HlfsPass {
     output_texture: wgpu::Texture,
     output_view: wgpu::TextureView,
     output_format: wgpu::TextureFormat,
+
+    shadow_config_buf: wgpu::Buffer,
+    shadow_quality: libhelio::ShadowQuality,
 }
 
 impl HlfsPass {
@@ -80,6 +84,13 @@ impl HlfsPass {
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("HLFS Globals"),
             size: std::mem::size_of::<HlfsGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let shadow_config_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("HLFS Shadow Config"),
+            size: std::mem::size_of::<libhelio::ShadowConfig>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -278,6 +289,13 @@ impl HlfsPass {
                 wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 // light list (GPU-side)
                 wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                // shadow config
+                wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                // shadow atlas + sampler
+                wgpu::BindGroupLayoutEntry { binding: 10, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Depth, view_dimension: wgpu::TextureViewDimension::D2Array, multisampled: false }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 11, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison), count: None },
+                // shadow matrices (light-space matrices for atlas layers)
+                wgpu::BindGroupLayoutEntry { binding: 12, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -457,7 +475,15 @@ impl HlfsPass {
             output_texture,
             output_view,
             output_format,
+            shadow_config_buf,
+            shadow_quality: libhelio::ShadowQuality::High,
         }
+    }
+
+    pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality, queue: &wgpu::Queue) {
+        self.shadow_quality = quality;
+        let config = libhelio::ShadowConfig::from_quality(quality);
+        queue.write_buffer(&self.shadow_config_buf, 0, bytemuck::bytes_of(&config));
     }
 
     pub fn resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -524,8 +550,13 @@ impl RenderPass for HlfsPass {
             _pad0: 0,
             camera_forward: cam_forward,
             _pad1: 0,
+            csm_splits: [16.0, 80.0, 300.0, 1400.0],
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+
+        let shadow_config = libhelio::ShadowConfig::from_quality(self.shadow_quality);
+        ctx.write_buffer(&self.shadow_config_buf, 0, bytemuck::bytes_of(&shadow_config));
+
         Ok(())
     }
 
@@ -536,6 +567,13 @@ impl RenderPass for HlfsPass {
             helio_v3::Error::InvalidPassConfig(
                 "HLFS requires pre_aa (sky + debug layers)".to_string(),
             )
+        })?;
+
+        let shadow_view = ctx.frame.shadow_atlas.ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig("HLFS requires shadow_atlas (shadow pass must run first)".to_string())
+        })?;
+        let shadow_sampler = ctx.frame.shadow_sampler.ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig("HLFS requires shadow_sampler (shadow pass must run first)".to_string())
         })?;
 
         let bind_group_shade_group0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -551,6 +589,10 @@ impl RenderPass for HlfsPass {
                 wgpu::BindGroupEntry { binding: 6, resource: self.globals_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: ctx.scene.camera.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: ctx.scene.lights.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: self.shadow_config_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(shadow_view) },
+                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(shadow_sampler) },
+                wgpu::BindGroupEntry { binding: 12, resource: ctx.scene.shadow_matrices.as_entire_binding() },
             ],
         });
 
