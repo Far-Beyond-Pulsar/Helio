@@ -2,7 +2,7 @@
 
 use glam::Mat4;
 use helio_v3::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial};
-use libhelio::{GpuMeshletEntry, GpuWaterVolume};
+use libhelio::{GpuMeshletEntry, GpuWaterHitbox, GpuWaterVolume};
 
 use crate::groups::GroupMask;
 use crate::handles::{MaterialId, MeshId};
@@ -183,5 +183,15 @@ pub(crate) struct VirtualObjectRecord {
 pub(crate) struct WaterVolumeRecord {
     /// GPU water volume descriptor with all rendering parameters.
     pub gpu: GpuWaterVolume,
+}
+
+/// Internal record for a water hitbox.
+///
+/// Stores the previous and current AABB extents used by the heightfield
+/// simulation to produce realistic wave displacement on object entry/exit.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WaterHitboxRecord {
+    /// GPU hitbox data (old bounds, new bounds, displacement params).
+    pub gpu: GpuWaterHitbox,
 }
 

@@ -114,6 +114,20 @@ pub struct FrameResources<'a> {
     /// Number of water volumes in the buffer
     pub water_volume_count: u32,
 
+    /// Water heightfield simulation texture (Rgba16Float 256×256, ping-pong current)
+    /// R=height, G=velocity, B=normal.x, A=normal.z
+    /// Populated by `WaterSimPass::publish()`.
+    pub water_sim_texture: Option<&'a wgpu::TextureView>,
+
+    /// Linear clamp sampler for water_sim_texture (set by WaterSimPass)
+    pub water_sim_sampler: Option<&'a wgpu::Sampler>,
+
+    /// Water hitboxes storage buffer (populated by Renderer each frame)
+    pub water_hitboxes: Option<&'a wgpu::Buffer>,
+
+    /// Number of hitboxes in water_hitboxes
+    pub water_hitbox_count: u32,
+
     /// Main depth texture (for passes that need to copy/sample it)
     pub depth_texture: Option<&'a wgpu::Texture>,
 }
@@ -141,6 +155,10 @@ impl<'a> FrameResources<'a> {
             water_caustics: None,
             water_volumes: None,
             water_volume_count: 0,
+            water_sim_texture: None,
+            water_sim_sampler: None,
+            water_hitboxes: None,
+            water_hitbox_count: 0,
             depth_texture: None,
         }
     }

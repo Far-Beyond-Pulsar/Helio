@@ -49,4 +49,5 @@ define_handle!(LightId);
 define_handle!(ObjectId);
 define_handle!(VirtualObjectId);
 define_handle!(WaterVolumeId);
+define_handle!(WaterHitboxId);
 

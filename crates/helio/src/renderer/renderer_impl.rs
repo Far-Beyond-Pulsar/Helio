@@ -64,6 +64,7 @@ pub struct Renderer {
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
     billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
     water_volumes_buffer: wgpu::Buffer,
+    water_hitboxes_buffer: wgpu::Buffer,
 }
 
 enum GraphKind {
@@ -109,6 +110,14 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Water hitboxes buffer (256 max hitboxes * 80 bytes each ≈ 20KB)
+        let water_hitboxes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water Hitboxes Buffer"),
+            size: 256 * 80,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             device,
             queue,
@@ -138,6 +147,7 @@ impl Renderer {
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
             water_volumes_buffer,
+            water_hitboxes_buffer,
         }
     }
 
@@ -639,6 +649,17 @@ impl Renderer {
             );
         }
 
+        // Upload water hitboxes to GPU if any exist
+        let water_hitbox_count = self.scene.water_hitboxes_count();
+        if water_hitbox_count > 0 {
+            let water_hitboxes = self.scene.get_water_hitboxes_gpu();
+            self.queue.write_buffer(
+                &self.water_hitboxes_buffer,
+                0,
+                bytemuck::cast_slice(&water_hitboxes),
+            );
+        }
+
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
             shadow_atlas: None,
@@ -686,6 +707,14 @@ impl Renderer {
                 None
             },
             water_volume_count,
+            water_sim_texture: None,
+            water_sim_sampler: None,
+            water_hitboxes: if water_hitbox_count > 0 {
+                Some(&self.water_hitboxes_buffer)
+            } else {
+                None
+            },
+            water_hitbox_count,
             depth_texture: Some(&self.depth_texture),
         };
 

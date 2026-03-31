@@ -20,7 +20,7 @@ mod scene;
 mod vg;
 
 pub use groups::{GroupId, GroupMask};
-pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId};
+pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 pub use helio_pass_billboard::BillboardInstance;
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
@@ -32,7 +32,12 @@ pub use renderer::{
     build_simple_graph, build_hlfs_graph, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
     RendererConfig,
 };
-pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError, SceneActor, SceneActorId, WaterVolumeDescriptor};
+pub use scene::{
+    Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError,
+    SceneActor, SceneActorId, SceneActorTrait,
+    WaterHitboxActor, WaterHitboxDescriptor,
+    WaterVolumeActor, WaterVolumeDescriptor,
+};
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 pub use helio_v3::{
