@@ -62,21 +62,22 @@ struct GpuWaterVolume {
 
 struct VertexOut {
     @builtin(position) clip_pos: vec4<f32>,
-    @location(0) world_pos: vec3<f32>,
-    @location(1) view_ray: vec3<f32>,
-    @location(2) @interpolate(flat) volume_idx: u32,
+    @location(0) world_pos_xz: vec2<f32>,
+    @location(1) @interpolate(flat) volume_idx: u32,
 }
 
 // Constants
 const PI = 3.14159265359;
 
-/// Generate fullscreen quad vertices
+/// Generate top-face quad vertices for water volume
 @vertex
 fn vs_main(
     @builtin(vertex_index) vid: u32,
     @builtin(instance_index) inst: u32
 ) -> VertexOut {
-    // Fullscreen quad vertices (NDC)
+    let vol = water_volumes[inst];
+
+    // Top face quad vertices (XZ plane) - just render the water surface from above
     var positions = array<vec2<f32>, 6>(
         vec2<f32>(-1.0, -1.0),
         vec2<f32>(1.0, -1.0),
@@ -86,20 +87,24 @@ fn vs_main(
         vec2<f32>(-1.0, 1.0),
     );
 
-    let pos = positions[vid];
-    let clip_pos = vec4<f32>(pos, 0.0, 1.0);
+    let local_xz = positions[vid];
 
-    // Reconstruct world ray from NDC
-    let far_ndc = vec4<f32>(pos.x, pos.y, 1.0, 1.0);
-    let far_world_h = camera.inv_view_proj * far_ndc;
-    let far_world = far_world_h.xyz / far_world_h.w;
-    let cam_pos = camera.position_near.xyz;
-    let view_ray = far_world - cam_pos;
+    // Transform from [-1,1] quad to world XZ bounds
+    let bounds_min = vol.bounds_min.xyz;
+    let bounds_max = vol.bounds_max.xyz;
+    let center_xz = (bounds_min.xz + bounds_max.xz) * 0.5;
+    let extents_xz = (bounds_max.xz - bounds_min.xz) * 0.5;
+
+    let world_xz = center_xz + local_xz * extents_xz;
+
+    // Use surface height for Y coordinate
+    let surface_y = vol.bounds_max.w;
+    let world_pos = vec3<f32>(world_xz.x, surface_y, world_xz.y);
+    let clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
 
     var out: VertexOut;
     out.clip_pos = clip_pos;
-    out.world_pos = cam_pos + view_ray;
-    out.view_ray = normalize(view_ray);
+    out.world_pos_xz = world_xz;
     out.volume_idx = inst;
     return out;
 }
@@ -213,17 +218,9 @@ fn compute_foam(steepness: f32, threshold: f32, amount: f32) -> f32 {
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let vol = water_volumes[in.volume_idx];
 
-    // Ray-march to find water surface intersection
-    // For simplicity, use constant surface height (can enhance with ray-marching)
+    // We're already on the water surface XZ plane from the vertex shader
+    let world_xz = in.world_pos_xz;
     let surface_y = vol.bounds_max.w;
-    let t = (surface_y - camera.position_near.xyz.y) / in.view_ray.y;
-
-    if t < 0.0 {
-        discard; // Camera above water, ray pointing up
-    }
-
-    let surface_pos_flat = camera.position_near.xyz + in.view_ray * t;
-    let world_xz = surface_pos_flat.xz;
 
     // Calculate Gerstner wave displacement
     let wave_result = gerstner_waves(world_xz, params.time, vol);
