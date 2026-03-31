@@ -224,30 +224,86 @@ fn world_to_screen_uv(world_pos: vec3<f32>) -> vec2<f32> {
     return ndc * 0.5 + 0.5;
 }
 
-/// Simplified screen-space reflection (without depth buffer)
+/// Enhanced screen-space reflection with ray marching
 fn screen_space_reflection(
     origin: vec3<f32>,
     reflect_dir: vec3<f32>,
     max_steps: u32,
     step_size: f32
 ) -> vec4<f32> {
-    // Simple reflection: offset screen UV based on reflection direction
+    // Project reflection direction to screen space for ray marching
     let view_space_reflect = (camera.view * vec4<f32>(reflect_dir, 0.0)).xyz;
-    let reflect_offset = view_space_reflect.xy * 0.1; // Scale for subtle distortion
 
+    // Start at surface position
+    var ray_pos = origin;
     let base_uv = world_to_screen_uv(origin);
-    let reflect_uv = clamp(base_uv + reflect_offset, vec2<f32>(0.0), vec2<f32>(1.0));
 
-    // Sample scene color at reflected UV
-    let color = textureSample(scene_color, linear_sampler, reflect_uv);
+    // Ray march in world space, checking screen-space position
+    var best_uv = base_uv;
+    var confidence = 0.0;
 
-    // Return with full confidence (always hit)
-    return vec4<f32>(color.rgb, 1.0);
+    for (var i = 0u; i < max_steps; i++) {
+        ray_pos += reflect_dir * step_size;
+
+        let test_uv = world_to_screen_uv(ray_pos);
+
+        // Check if ray is still on screen
+        if test_uv.x < 0.0 || test_uv.x > 1.0 || test_uv.y < 0.0 || test_uv.y > 1.0 {
+            break;
+        }
+
+        best_uv = test_uv;
+        confidence = 1.0 - (f32(i) / f32(max_steps)); // Fade with distance
+    }
+
+    // Sample scene color at best reflection point
+    let color = textureSample(scene_color, linear_sampler, best_uv);
+
+    // Edge fade for screen boundaries
+    let edge_fade = smoothstep(0.0, 0.1, best_uv.x) * smoothstep(0.0, 0.1, best_uv.y) *
+                    smoothstep(1.0, 0.9, best_uv.x) * smoothstep(1.0, 0.9, best_uv.y);
+
+    return vec4<f32>(color.rgb, confidence * edge_fade);
 }
 
-/// Fresnel-Schlick approximation
+/// Fresnel-Schlick approximation (physically-based)
 fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
-    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+    let cos_clamped = clamp(cos_theta, 0.0, 1.0);
+    return f0 + (1.0 - f0) * pow(1.0 - cos_clamped, 5.0);
+}
+
+/// Detail normal generation for fine ripples
+fn generate_detail_normals(pos: vec2<f32>, time: f32, scale: f32) -> vec3<f32> {
+    let offset = 0.01;
+
+    // Sample multiple noise octaves for fine detail
+    let h0 = sin(pos.x * scale + time * 0.5) * cos(pos.y * scale * 1.3 + time * 0.7) * 0.5 +
+             sin(pos.x * scale * 2.3 - time * 0.8) * cos(pos.y * scale * 1.7 - time * 0.6) * 0.25;
+
+    let h1 = sin((pos.x + offset) * scale + time * 0.5) * cos((pos.y) * scale * 1.3 + time * 0.7) * 0.5 +
+             sin((pos.x + offset) * scale * 2.3 - time * 0.8) * cos((pos.y) * scale * 1.7 - time * 0.6) * 0.25;
+
+    let h2 = sin((pos.x) * scale + time * 0.5) * cos((pos.y + offset) * scale * 1.3 + time * 0.7) * 0.5 +
+             sin((pos.x) * scale * 2.3 - time * 0.8) * cos((pos.y + offset) * scale * 1.7 - time * 0.6) * 0.25;
+
+    let dx = h1 - h0;
+    let dy = h2 - h0;
+
+    return normalize(vec3<f32>(-dx * 10.0, 1.0, -dy * 10.0));
+}
+
+/// Specular highlight (Blinn-Phong)
+fn calculate_specular(view_dir: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>, shininess: f32) -> f32 {
+    let halfway = normalize(view_dir + light_dir);
+    let spec = pow(max(dot(normal, halfway), 0.0), shininess);
+    return spec;
+}
+
+/// Subsurface scattering approximation
+fn subsurface_scattering(view_dir: vec3<f32>, light_dir: vec3<f32>, normal: vec3<f32>, thickness: f32) -> f32 {
+    let scatter_dir = light_dir + normal * 0.3;
+    let scatter = pow(clamp(dot(view_dir, -scatter_dir), 0.0, 1.0), 4.0) * thickness;
+    return scatter;
 }
 
 /// Compute foam based on wave steepness
@@ -303,60 +359,119 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     var alpha: f32;
 
     if in.face_id == 0u {
-        // Top face: Water surface with reflection and refraction
+        // === AAA QUALITY WATER SURFACE ===
 
-        // Calculate fresnel for reflection/refraction mix
-        let cos_theta = max(dot(view_dir, surface_normal), 0.0);
-        let fresnel = fresnel_schlick(cos_theta, 0.02);
+        // 1. ENHANCED NORMALS: Combine Gerstner waves with detail ripples
+        let world_xz = in.world_pos.xz;
+        let wave_result = gerstner_waves(world_xz, params.time, vol);
+        let detail_normal = generate_detail_normals(world_xz, params.time, 15.0);
 
-        // 1. Refraction - distort UV based on surface normal
-        let normal_distortion = surface_normal.xz * vol.reflection_refraction.y * 0.03;
-        let refract_uv = clamp(screen_uv + normal_distortion, vec2<f32>(0.0), vec2<f32>(1.0));
-        let refract_color = textureSample(scene_color, linear_sampler, refract_uv).rgb;
+        // Blend wave normal with detail normals
+        let blended_normal = normalize(surface_normal * 0.7 + detail_normal * 0.3);
 
-        // 2. Reflection - sample scene in reflection direction
-        let reflect_dir = reflect(-view_dir, surface_normal);
+        // 2. PHYSICALLY-BASED FRESNEL (water IOR ~1.333)
+        let cos_theta = max(dot(view_dir, blended_normal), 0.0);
+        let fresnel = fresnel_schlick(cos_theta, 0.02); // F0 for water
+
+        // 3. CHROMATIC ABERRATION REFRACTION
+        // Slightly different distortion per RGB channel for realistic dispersion
+        let refract_strength = vol.reflection_refraction.y * 0.05;
+        let distortion_base = blended_normal.xz * refract_strength;
+
+        let refract_uv_r = clamp(screen_uv + distortion_base * 1.02, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refract_uv_g = clamp(screen_uv + distortion_base * 1.00, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refract_uv_b = clamp(screen_uv + distortion_base * 0.98, vec2<f32>(0.0), vec2<f32>(1.0));
+
+        let refract_color = vec3<f32>(
+            textureSample(scene_color, linear_sampler, refract_uv_r).r,
+            textureSample(scene_color, linear_sampler, refract_uv_g).g,
+            textureSample(scene_color, linear_sampler, refract_uv_b).b
+        );
+
+        // 4. HIGH-QUALITY SCREEN-SPACE REFLECTIONS
+        let reflect_dir = reflect(-view_dir, blended_normal);
         let ssr_result = screen_space_reflection(
             surface_pos,
             reflect_dir,
-            params.ssr_steps,
-            params.ssr_step_size
+            params.ssr_steps * 2u, // Double the steps for quality
+            params.ssr_step_size * 0.5
         );
 
-        // 3. Mix refraction and reflection based on fresnel
-        // At grazing angles (fresnel high): more reflection
-        // Looking straight down (fresnel low): more refraction
+        // 5. SUBSURFACE SCATTERING (simulated)
+        // Fake sun direction - you can expose this in params
+        let sun_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
+        let scatter = subsurface_scattering(view_dir, sun_dir, blended_normal, 0.3);
+        let scatter_color = vol.water_color.rgb * scatter * 0.5;
+
+        // 6. SPECULAR HIGHLIGHTS (sun reflection on waves)
+        let specular = calculate_specular(view_dir, blended_normal, sun_dir, 256.0);
+        let specular_color = vec3<f32>(1.0, 0.98, 0.95) * specular * 0.8;
+
+        // 7. MIX REFRACTION AND REFLECTION
+        // Use physically-based fresnel for mixing
         var water_color = mix(refract_color, ssr_result.rgb, fresnel * ssr_result.a);
 
-        // 4. Add subtle water tint (less intense than before)
-        water_color = mix(water_color, vol.water_color.rgb, 0.1);
+        // Add subsurface scattering
+        water_color += scatter_color;
 
-        // 5. Foam - only on steep wave crests, subtle white highlights
-        let world_xz = in.world_pos.xz;
-        let wave_result = gerstner_waves(world_xz, params.time, vol);
+        // Add specular highlights
+        water_color += specular_color;
+
+        // 8. WATER COLOR TINT (absorption)
+        // Stronger tint at grazing angles (more water to look through)
+        let absorption_factor = mix(0.15, 0.35, 1.0 - cos_theta);
+        water_color = mix(water_color, vol.water_color.rgb, absorption_factor);
+
+        // 9. ENHANCED FOAM
         let steepness = length(vec2<f32>(wave_result.y, wave_result.z));
-        let foam = compute_foam(steepness, vol.water_color.w, vol.extinction.w);
+        let foam_base = compute_foam(steepness, vol.water_color.w, vol.extinction.w);
 
-        // Mix foam as a subtle highlight, not pure white
-        final_color = mix(water_color, vec3<f32>(0.9, 0.95, 1.0), foam * 0.2);
+        // Add detail foam (fine bubbles)
+        let foam_detail = max(sin(world_xz.x * 25.0 + params.time * 2.0) *
+                             cos(world_xz.y * 25.0 - params.time * 1.8) * 0.5 + 0.5, 0.0);
+        let foam = foam_base + foam_detail * foam_base * 0.3;
 
-        // More transparent for better see-through
-        alpha = 0.7;
+        // Foam color with slight blue tint
+        let foam_color = vec3<f32>(0.95, 0.97, 1.0);
+        final_color = mix(water_color, foam_color, clamp(foam * 0.5, 0.0, 0.8));
+
+        // 10. ALPHA with fresnel-based transparency
+        alpha = mix(0.85, 0.98, fresnel);
     } else {
-        // Side/bottom faces: Transparent water with refraction only
+        // === SIDE/BOTTOM FACES: UNDERWATER VIEW ===
 
-        // Simple refraction for side faces
-        let refract_offset = (surface_normal.xy * vol.reflection_refraction.y * 0.015);
-        let refract_uv = clamp(screen_uv + refract_offset, vec2<f32>(0.0), vec2<f32>(1.0));
-        let refract_color = textureSample(scene_color, linear_sampler, refract_uv).rgb;
+        // Add subtle detail normals even to flat faces
+        let detail = generate_detail_normals(in.world_pos.xz, params.time, 20.0);
+        let perturbed_normal = normalize(surface_normal + detail * 0.1);
 
-        // Apply water color tint based on depth
-        let depth_in_water = abs(surface_pos.y - surface_y);
-        let absorption = exp(-vol.extinction.rgb * depth_in_water);
-        final_color = refract_color * absorption + vol.water_color.rgb * (1.0 - absorption.r) * 0.3;
+        // Chromatic aberration refraction for underwater view
+        let refract_strength = vol.reflection_refraction.y * 0.04;
+        let distortion_base = perturbed_normal.xy * refract_strength;
 
-        // More transparent for side faces
-        alpha = 0.4;
+        let refract_uv_r = clamp(screen_uv + distortion_base * 1.02, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refract_uv_g = clamp(screen_uv + distortion_base * 1.00, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refract_uv_b = clamp(screen_uv + distortion_base * 0.98, vec2<f32>(0.0), vec2<f32>(1.0));
+
+        let refract_color = vec3<f32>(
+            textureSample(scene_color, linear_sampler, refract_uv_r).r,
+            textureSample(scene_color, linear_sampler, refract_uv_g).g,
+            textureSample(scene_color, linear_sampler, refract_uv_b).b
+        );
+
+        // Depth-based absorption (Beer's law)
+        let depth_in_water = abs(surface_pos.y - surface_y) + 0.1;
+        let absorption = exp(-vol.extinction.rgb * depth_in_water * 0.8);
+
+        // Apply absorption and add water color
+        final_color = refract_color * absorption + vol.water_color.rgb * (1.0 - absorption.r) * 0.6;
+
+        // Subtle subsurface glow
+        let sun_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
+        let scatter = subsurface_scattering(view_dir, sun_dir, perturbed_normal, 0.2);
+        final_color += vol.water_color.rgb * scatter * 0.3;
+
+        // Transparency based on depth
+        alpha = mix(0.75, 0.92, clamp(depth_in_water * 0.5, 0.0, 1.0));
     }
 
     return vec4<f32>(final_color, alpha);

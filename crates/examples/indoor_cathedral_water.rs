@@ -240,29 +240,42 @@ impl ApplicationHandler for App {
             }),
         ));
 
-        // Add a small water pool in the center of the cathedral (raised above floor)
+        // === AAA QUALITY WATER POOL ===
+        // Realistic oceanographic parameters for stunning photorealistic water
         let pool = helio::WaterVolumeDescriptor {
-            bounds_min: [-5.0, 0.5, -5.0],  // 10x10 meter pool, raised 0.5m above floor
-            bounds_max: [5.0, 2.0, 5.0],    // 1.5m tall pool container
-            surface_height: 1.5,  // Water surface at 1.5m above floor
-            wave_amplitude: 0.3,
-            wave_frequency: 0.4,
-            wave_speed: 0.8,
-            wave_direction: [1.0, 0.3],
-            wave_steepness: 0.4,
-            water_color: [0.0, 0.3, 0.5],
-            extinction: [0.2, 0.05, 0.02],
-            foam_threshold: 0.75,
-            foam_amount: 0.45,
-            reflection_strength: 0.95,
-            refraction_strength: 0.35,
-            fresnel_power: 6.0,
+            bounds_min: [-6.0, 0.3, -6.0],  // 12x12 meter pool, slightly raised
+            bounds_max: [6.0, 2.5, 6.0],    // 2.2m deep pool
+            surface_height: 1.8,  // Water surface at 1.8m above floor
+
+            // GERSTNER WAVE PARAMETERS (realistic ocean physics)
+            wave_amplitude: 0.12,      // Realistic wave height (12cm primary waves)
+            wave_frequency: 1.2,       // Higher frequency for detailed ripples
+            wave_speed: 1.5,           // Natural wave propagation speed
+            wave_direction: [0.7, 0.4], // Diagonal wave direction for natural look
+            wave_steepness: 0.65,      // Sharp, realistic wave peaks (0.6-0.7 is physically accurate)
+
+            // WATER OPTICAL PROPERTIES (clear tropical/pool water)
+            water_color: [0.02, 0.15, 0.25],  // Deep blue-green (realistic ocean color)
+            extinction: [0.18, 0.08, 0.04],   // Red absorbs fastest, then green, blue penetrates deepest (Beer's law)
+
+            // FOAM PARAMETERS (white caps on wave crests)
+            foam_threshold: 0.68,      // Foam appears on steeper waves
+            foam_amount: 0.75,         // Generous foam coverage for realism
+
+            // REFLECTION & REFRACTION (physically accurate)
+            reflection_strength: 1.0,  // Full reflectivity (water is ~100% reflective at grazing angles)
+            refraction_strength: 1.0,  // Full refraction strength for chromatic aberration
+            fresnel_power: 5.0,        // Physically-based fresnel (water IOR ~1.333)
+
+            // CAUSTICS (underwater light patterns)
             caustics_enabled: true,
-            caustics_intensity: 2.0,
-            caustics_scale: 7.0,
-            caustics_speed: 0.9,
-            fog_density: 0.04,
-            god_rays_intensity: 1.2,
+            caustics_intensity: 3.5,   // Dramatic caustics for AAA quality
+            caustics_scale: 5.0,       // Fine caustic patterns
+            caustics_speed: 1.2,       // Animated caustics
+
+            // VOLUMETRIC EFFECTS
+            fog_density: 0.06,         // Subtle underwater fog
+            god_rays_intensity: 2.0,   // Dramatic god rays through water
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
 

@@ -413,11 +413,11 @@ impl RenderPass for WaterSurfacePass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Update parameters
+        // Update parameters (AAA quality settings)
         let params = WaterParams {
             time: ctx.frame as f32 * 0.016, // 60 FPS
-            ssr_steps: 8,                    // SSR quality
-            ssr_step_size: 0.5,              // World units per step
+            ssr_steps: 32,                   // AAA SSR quality (4x more samples)
+            ssr_step_size: 0.25,             // Finer step size for accuracy
             debug_flags: 0,
         };
         ctx.queue
