@@ -54,6 +54,10 @@ pub struct WaterSurfacePass {
     scene_copy: wgpu::Texture,
     scene_copy_view: wgpu::TextureView,
 
+    // Copy of depth buffer for sampling (to avoid read-write conflict)
+    depth_copy: wgpu::Texture,
+    depth_copy_view: wgpu::TextureView,
+
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_2: Option<wgpu::BindGroup>,
@@ -80,7 +84,7 @@ impl WaterSurfacePass {
     /// A new `WaterSurfacePass` ready to be added to the render graph.
     pub fn new(
         device: &wgpu::Device,
-        camera_buf: &wgpu::Buffer,
+        _camera_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
         target_format: wgpu::TextureFormat,
@@ -156,7 +160,7 @@ impl WaterSurfacePass {
             ],
         });
 
-        // Bind group layout 1: GBuffer + scene color
+        // Bind group layout 1: GBuffer + scene color + depth
         let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water Surface BGL 1"),
             entries: &[
@@ -182,9 +186,20 @@ impl WaterSurfacePass {
                     },
                     count: None,
                 },
-                // @binding(2) linear sampler
+                // @binding(2) scene depth
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // @binding(3) linear sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -385,6 +400,24 @@ impl WaterSurfacePass {
 
         let scene_copy_view = scene_copy.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // Depth buffer copy texture (for sampling while writing to original)
+        let depth_copy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Depth Copy"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let depth_copy_view = depth_copy.create_view(&wgpu::TextureViewDescriptor::default());
+
         Self {
             pipeline,
             blit_pipeline,
@@ -395,6 +428,8 @@ impl WaterSurfacePass {
             params_buf,
             scene_copy,
             scene_copy_view,
+            depth_copy,
+            depth_copy_view,
             bind_group_0: None,
             bind_group_1: None,
             bind_group_2: None,
@@ -517,6 +552,19 @@ impl RenderPass for WaterSurfacePass {
             blit_pass.draw(0..6, 0..1);
         }
 
+        // Copy depth buffer (to avoid read-write conflict)
+        if let Some(depth_texture) = ctx.frame.depth_texture {
+            ctx.encoder.copy_texture_to_texture(
+                depth_texture.as_image_copy(),
+                self.depth_copy.as_image_copy(),
+                wgpu::Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
         // Rebuild bind group 1 if gbuffer changed
         let gbuffer_ptr = gbuffer.albedo as *const _ as usize;
         if self.gbuffer_key != Some(gbuffer_ptr) {
@@ -546,6 +594,10 @@ impl RenderPass for WaterSurfacePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.depth_copy_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
                         resource: wgpu::BindingResource::Sampler(&sampler),
                     },
                 ],

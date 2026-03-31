@@ -113,6 +113,9 @@ pub struct FrameResources<'a> {
 
     /// Number of water volumes in the buffer
     pub water_volume_count: u32,
+
+    /// Main depth texture (for passes that need to copy/sample it)
+    pub depth_texture: Option<&'a wgpu::Texture>,
 }
 
 impl<'a> FrameResources<'a> {
@@ -138,6 +141,7 @@ impl<'a> FrameResources<'a> {
             water_caustics: None,
             water_volumes: None,
             water_volume_count: 0,
+            depth_texture: None,
         }
     }
 }

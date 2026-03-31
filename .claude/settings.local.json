@@ -36,7 +36,9 @@
       "Bash(rustc:*)",
       "Bash(cargo tree:*)",
       "WebFetch(domain:crates.io)",
-      "Bash(cargo search:*)"
+      "Bash(cargo search:*)",
+      "WebFetch(domain:lettier.github.io)",
+      "WebFetch(domain:zznewclear13.github.io)"
     ]
   }
 }

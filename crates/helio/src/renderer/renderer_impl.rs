@@ -686,6 +686,7 @@ impl Renderer {
                 None
             },
             water_volume_count,
+            depth_texture: Some(&self.depth_texture),
         };
 
         self.graph.execute_with_frame_resources(

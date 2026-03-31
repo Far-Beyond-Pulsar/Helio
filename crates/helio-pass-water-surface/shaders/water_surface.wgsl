@@ -52,7 +52,8 @@ struct GpuWaterVolume {
 // Bind group 1
 @group(1) @binding(0) var gbuffer_normal: texture_2d<f32>;
 @group(1) @binding(1) var scene_color: texture_2d<f32>;
-@group(1) @binding(2) var linear_sampler: sampler;
+@group(1) @binding(2) var scene_depth: texture_depth_2d;
+@group(1) @binding(3) var linear_sampler: sampler;
 
 // Bind group 2
 @group(2) @binding(0) var<storage, read> water_volumes: array<GpuWaterVolume>;
@@ -224,46 +225,59 @@ fn world_to_screen_uv(world_pos: vec3<f32>) -> vec2<f32> {
     return ndc * 0.5 + 0.5;
 }
 
-/// Enhanced screen-space reflection with ray marching
+/// Simple procedural sky color based on direction
+fn get_sky_color(direction: vec3<f32>) -> vec3<f32> {
+    // Gradient from horizon to zenith
+    let up_amount = max(direction.y, 0.0);
+
+    // Horizon color (lighter, more whitish)
+    let horizon = vec3<f32>(0.6, 0.7, 0.9);
+
+    // Zenith color (deeper blue)
+    let zenith = vec3<f32>(0.2, 0.4, 0.8);
+
+    // Smooth gradient
+    return mix(horizon, zenith, pow(up_amount, 0.5));
+}
+
+/// DEBUG SSR - systematic testing
 fn screen_space_reflection(
-    origin: vec3<f32>,
-    reflect_dir: vec3<f32>,
+    world_pos: vec3<f32>,
+    world_normal: vec3<f32>,
     max_steps: u32,
     step_size: f32
 ) -> vec4<f32> {
-    // Project reflection direction to screen space for ray marching
-    let view_space_reflect = (camera.view * vec4<f32>(reflect_dir, 0.0)).xyz;
+    // Calculate view direction (from surface to camera)
+    let view_dir = normalize(camera.position_near.xyz - world_pos);
 
-    // Start at surface position
-    var ray_pos = origin;
-    let base_uv = world_to_screen_uv(origin);
+    // Calculate reflection direction in world space
+    let reflect_dir = reflect(-view_dir, world_normal);
 
-    // Ray march in world space, checking screen-space position
-    var best_uv = base_uv;
-    var confidence = 0.0;
+    // Cast a ray in the reflection direction
+    let ray_length = 5.0; // Fixed distance for simple test
+    let reflect_world_pos = world_pos + reflect_dir * ray_length;
 
-    for (var i = 0u; i < max_steps; i++) {
-        ray_pos += reflect_dir * step_size;
+    // Project reflected position to screen space
+    let reflect_uv = world_to_screen_uv(reflect_world_pos);
 
-        let test_uv = world_to_screen_uv(ray_pos);
+    // Clamp to screen bounds
+    let clamped_uv = clamp(reflect_uv, vec2<f32>(0.0), vec2<f32>(1.0));
 
-        // Check if ray is still on screen
-        if test_uv.x < 0.0 || test_uv.x > 1.0 || test_uv.y < 0.0 || test_uv.y > 1.0 {
-            break;
-        }
+    // Sample the scene at reflected position
+    let reflected_color = textureSample(scene_color, linear_sampler, clamped_uv);
+    return vec4<f32>(reflected_color.rgb, 1.0);
 
-        best_uv = test_uv;
-        confidence = 1.0 - (f32(i) / f32(max_steps)); // Fade with distance
-    }
+    // DEBUG MODE 4: Show reflected UV as color to see what we're sampling
+    // return vec4<f32>(reflect_uv.x, reflect_uv.y, 0.0, 0.8);
 
-    // Sample scene color at best reflection point
-    let color = textureSample(scene_color, linear_sampler, best_uv);
+    // Sample with Y-flipped UV
+    // let reflected_color = textureSample(scene_color, linear_sampler, reflect_uv);
 
-    // Edge fade for screen boundaries
-    let edge_fade = smoothstep(0.0, 0.1, best_uv.x) * smoothstep(0.0, 0.1, best_uv.y) *
-                    smoothstep(1.0, 0.9, best_uv.x) * smoothstep(1.0, 0.9, best_uv.y);
+    // View direction and Fresnel
+    // let view_dir = normalize(camera.position_near.xyz - world_pos);
+    // let fresnel = pow(1.0 - max(dot(view_dir, world_normal), 0.0), 3.0);
 
-    return vec4<f32>(color.rgb, confidence * edge_fade);
+    // return vec4<f32>(reflected_color.rgb, mix(0.4, 0.8, fresnel));
 }
 
 /// Fresnel-Schlick approximation (physically-based)
@@ -388,14 +402,16 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
             textureSample(scene_color, linear_sampler, refract_uv_b).b
         );
 
-        // 4. HIGH-QUALITY SCREEN-SPACE REFLECTIONS
-        let reflect_dir = reflect(-view_dir, blended_normal);
+        // 4. HIGH-QUALITY SCREEN-SPACE REFLECTIONS (View-space ray marching)
         let ssr_result = screen_space_reflection(
             surface_pos,
-            reflect_dir,
+            blended_normal,
             params.ssr_steps * 2u, // Double the steps for quality
             params.ssr_step_size * 0.5
         );
+
+        // DEBUG: Return SSR result directly (bypass all mixing)
+        return ssr_result;
 
         // 5. SUBSURFACE SCATTERING (simulated)
         // Fake sun direction - you can expose this in params
