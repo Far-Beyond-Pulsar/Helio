@@ -62,6 +62,26 @@ struct GpuLight {
 
 struct LightMatrix { mat: mat4x4<f32> }
 
+// Water volume descriptor (simplified, matches libhelio::GpuWaterVolume layout)
+struct GpuWaterVolume {
+    bounds_min: vec4<f32>,
+    bounds_max: vec4<f32>,
+    wave_params: vec4<f32>,
+    wave_direction: vec4<f32>,
+    water_color: vec4<f32>,
+    extinction: vec4<f32>,
+    reflection_refraction: vec4<f32>,
+    caustics_params: vec4<f32>,  // x=enabled, y=intensity, z=scale, w=speed
+    fog_params: vec4<f32>,
+    _pad0: vec4<f32>,
+    _pad1: vec4<f32>,
+    _pad2: vec4<f32>,
+    _pad3: vec4<f32>,
+    _pad4: vec4<f32>,
+    _pad5: vec4<f32>,
+    _pad6: vec4<f32>,
+}
+
 /// Per-cascade shadow configuration (16 bytes, matches libhelio::CascadeConfig)
 struct CascadeConfig {
     split_distance:   f32,  // Far plane distance (meters)
@@ -99,6 +119,9 @@ struct ShadowConfig {
 @group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
 @group(2) @binding(7) var shadow_depth_sampler: sampler;  // Non-comparison sampler for PCSS blocker search
+@group(2) @binding(8) var water_caustics: texture_2d<f32>;  // Caustics texture from WaterCausticsPass
+@group(2) @binding(9) var caustics_sampler: sampler;  // Sampler for caustics
+@group(2) @binding(10) var<storage, read> water_volumes: array<GpuWaterVolume>;  // Water volumes
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -759,6 +782,31 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let indirect  = (ambient_fallback + spec_ind) * ao;
     var color     = Lo + indirect;
     color        += emissive;               // emissive from G-buffer
+
+    // ── Water caustics ────────────────────────────────────────────────────────
+    // Add caustics to surfaces below water
+    if arrayLength(&water_volumes) > 0u {
+        let vol = water_volumes[0]; // Use first water volume
+
+        // Check if this surface is below the water surface
+        if world_pos.y < vol.bounds_max.w {
+            // Check if caustics are enabled
+            if vol.caustics_params.x > 0.5 {
+                // Sample caustics texture based on world XZ position
+                let caustics_scale = vol.caustics_params.z;
+                let caustics_uv = world_pos.xz / caustics_scale;
+                let caustic_value = textureSample(water_caustics, caustics_sampler, caustics_uv).r;
+
+                // Apply caustics intensity
+                let caustics_intensity = vol.caustics_params.y;
+                let caustics_color = vec3<f32>(0.7, 0.9, 1.0) * caustic_value * caustics_intensity;
+
+                // Add caustics to the final color
+                color += caustics_color;
+            }
+        }
+    }
+
     color         = apply_bloom(color);
     color         = aces_tonemap(color);
 

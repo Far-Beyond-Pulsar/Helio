@@ -47,6 +47,9 @@ pub struct DeferredLightPass {
     fallback_env_view: wgpu::TextureView,
     fallback_env_sampler: wgpu::Sampler,
     fallback_rc_view: wgpu::TextureView,
+    fallback_caustics_view: wgpu::TextureView,
+    caustics_sampler: wgpu::Sampler,
+    fallback_water_volumes: wgpu::Buffer,
     pub debug_mode: u32,
 }
 
@@ -200,6 +203,17 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // Water caustics texture
+                texture_entry(8, wgpu::TextureSampleType::Float { filterable: true }),
+                // Caustics sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // Water volumes buffer
+                storage_entry(10),
             ],
         });
 
@@ -303,6 +317,30 @@ impl DeferredLightPass {
         let (fallback_rc_texture, fallback_rc_view) =
             black_2d_texture(device, queue, "Deferred Fallback RC");
 
+        // Fallback caustics texture (black 1x1 RGBA16Float)
+        let (fallback_caustics_texture, fallback_caustics_view) =
+            black_2d_texture(device, queue, "Deferred Fallback Caustics");
+
+        // Caustics sampler
+        let caustics_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Caustics Sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Fallback water volumes buffer (empty)
+        let fallback_water_volumes = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Fallback Water Volumes"),
+            size: 256, // Minimum size for empty buffer
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
             globals_buf,
@@ -331,6 +369,9 @@ impl DeferredLightPass {
             fallback_env_view,
             fallback_env_sampler,
             fallback_rc_view,
+            fallback_caustics_view,
+            caustics_sampler,
+            fallback_water_volumes,
             debug_mode: 0,
         }
     }
@@ -509,6 +550,18 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 7,
                         resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
+                    },
+                    // Water caustics texture (binding 8)
+                    texture_view_entry(8, ctx.frame.water_caustics.unwrap_or(&self.fallback_caustics_view)),
+                    // Caustics sampler (binding 9)
+                    wgpu::BindGroupEntry {
+                        binding: 9,
+                        resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
+                    },
+                    // Water volumes buffer (binding 10)
+                    wgpu::BindGroupEntry {
+                        binding: 10,
+                        resource: ctx.frame.water_volumes.unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
                     },
                 ],
             }));

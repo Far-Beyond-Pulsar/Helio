@@ -267,11 +267,11 @@ impl ApplicationHandler for App {
             refraction_strength: 1.0,  // Full refraction strength for chromatic aberration
             fresnel_power: 5.0,        // Physically-based fresnel (water IOR ~1.333)
 
-            // CAUSTICS (underwater light patterns)
+            // CAUSTICS (underwater light patterns - VISIBLE)
             caustics_enabled: true,
-            caustics_intensity: 1.5,   // Subtle caustics (reduced from 3.5)
-            caustics_scale: 5.0,       // Fine caustic patterns
-            caustics_speed: 1.2,       // Animated caustics
+            caustics_intensity: 4.0,   // Strong visible caustics
+            caustics_scale: 8.0,       // Larger, more visible patterns
+            caustics_speed: 1.5,       // Faster animation for visibility
 
             // VOLUMETRIC EFFECTS (subtle for clear visibility)
             fog_density: 0.015,        // Very subtle underwater fog (reduced from 0.06)
