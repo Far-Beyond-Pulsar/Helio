@@ -123,6 +123,10 @@ path = "rapier_salva.rs"
 name = "indoor_cathedral_water"
 path = "indoor_cathedral_water.rs"
 
+[[bin]]
+name = "oil_rig_night"
+path = "oil_rig_night.rs"
+
 
 
 [dependencies]
