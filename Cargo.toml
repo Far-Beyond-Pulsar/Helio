@@ -32,9 +32,6 @@ members = [
     "crates/helio-pass-simple-cube",
     "crates/helio-pass-sdf",
     "crates/helio-pass-water-sim",
-    "crates/helio-pass-water-caustics",
-    "crates/helio-pass-water-surface",
-    "crates/helio-pass-underwater",
 
     # WASM infrastructure
     "crates/helio-wasm",

@@ -280,6 +280,8 @@ impl ApplicationHandler for App {
             // VOLUMETRIC EFFECTS (subtle for clear visibility)
             fog_density: 0.015,        // Very subtle underwater fog (reduced from 0.06)
             god_rays_intensity: 0.2,   // Subtle god rays through water (reduced from 2.0)
+            // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)
+            ..Default::default()
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
 

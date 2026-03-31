@@ -166,6 +166,8 @@ impl ApplicationHandler for App {
             caustics_speed: 1.8,
             fog_density: 0.035,
             god_rays_intensity: 0.4,
+            // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)
+            ..Default::default()
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(ocean));
 

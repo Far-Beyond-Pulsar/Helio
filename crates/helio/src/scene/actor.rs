@@ -428,6 +428,12 @@ impl WaterVolumeDescriptor {
     }
 }
 
+impl Default for WaterVolumeDescriptor {
+    fn default() -> Self {
+        Self::ocean()
+    }
+}
+
 /// A water volume actor (descriptor + optional volume handle).
 #[derive(Debug, Clone, Copy)]
 pub struct WaterVolumeActor {
