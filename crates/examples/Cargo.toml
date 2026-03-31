@@ -126,7 +126,7 @@ path = "indoor_cathedral_water.rs"
 
 
 [dependencies]
-helio = { path = "../helio" }
+helio = { path = "../helio", features = ["live-portal"] }
 helio-asset-compat = { path = "../helio-asset-compat" }
 helio-pass-sdf = { path = "../helio-pass-sdf" }
 rapier3d = "0.24"

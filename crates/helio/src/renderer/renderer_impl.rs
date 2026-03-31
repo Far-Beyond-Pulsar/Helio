@@ -700,4 +700,14 @@ impl Renderer {
         self.scene.advance_frame();
         Ok(())
     }
+
+    /// Start the live performance portal web dashboard on http://127.0.0.1:3030
+    /// Returns the URL on success.
+    #[cfg(feature = "live-portal")]
+    pub fn start_live_portal_default(&mut self) -> std::io::Result<String> {
+        let handle = helio_live_portal::start_live_portal("127.0.0.1:3030")?;
+        let url = handle.url.clone();
+        // TODO: Store handle and integrate frame snapshots
+        Ok(url)
+    }
 }

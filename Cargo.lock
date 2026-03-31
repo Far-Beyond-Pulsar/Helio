@@ -2629,6 +2629,7 @@ dependencies = [
  "arrayvec",
  "bytemuck",
  "glam 0.29.3",
+ "helio-live-portal",
  "helio-pass-billboard",
  "helio-pass-debug",
  "helio-pass-deferred-light",

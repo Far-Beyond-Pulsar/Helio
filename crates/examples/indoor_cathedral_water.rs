@@ -19,6 +19,7 @@
 //!   Escape      — release cursor / exit
 
 mod v3_demo_common;
+mod demo_portal;
 
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge, LightId, MeshId, Renderer, RendererConfig,
@@ -218,6 +219,9 @@ impl ApplicationHandler for App {
                 .with_shadow_quality(helio::ShadowQuality::Ultra),
         );
         renderer.set_editor_mode(true);
+
+        // Start live performance portal
+        demo_portal::enable_live_dashboard(&mut renderer);
 
         let mat = renderer.scene_mut().insert_material(make_material(
             [0.75, 0.72, 0.68, 1.0],
