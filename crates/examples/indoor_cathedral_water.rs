@@ -254,9 +254,9 @@ impl ApplicationHandler for App {
             wave_direction: [0.7, 0.4], // Diagonal wave direction for natural look
             wave_steepness: 0.65,      // Sharp, realistic wave peaks (0.6-0.7 is physically accurate)
 
-            // WATER OPTICAL PROPERTIES (clear tropical/pool water)
-            water_color: [0.02, 0.15, 0.25],  // Deep blue-green (realistic ocean color)
-            extinction: [0.18, 0.08, 0.04],   // Red absorbs fastest, then green, blue penetrates deepest (Beer's law)
+            // WATER OPTICAL PROPERTIES (crystal clear pool water)
+            water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
+            extinction: [0.08, 0.04, 0.02],   // Very low absorption for crystal clear water (reduced by ~55%)
 
             // FOAM PARAMETERS (white caps on wave crests)
             foam_threshold: 0.68,      // Foam appears on steeper waves
@@ -269,13 +269,13 @@ impl ApplicationHandler for App {
 
             // CAUSTICS (underwater light patterns)
             caustics_enabled: true,
-            caustics_intensity: 3.5,   // Dramatic caustics for AAA quality
+            caustics_intensity: 1.5,   // Subtle caustics (reduced from 3.5)
             caustics_scale: 5.0,       // Fine caustic patterns
             caustics_speed: 1.2,       // Animated caustics
 
-            // VOLUMETRIC EFFECTS
-            fog_density: 0.06,         // Subtle underwater fog
-            god_rays_intensity: 2.0,   // Dramatic god rays through water
+            // VOLUMETRIC EFFECTS (subtle for clear visibility)
+            fog_density: 0.015,        // Very subtle underwater fog (reduced from 0.06)
+            god_rays_intensity: 0.2,   // Subtle god rays through water (reduced from 2.0)
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
 

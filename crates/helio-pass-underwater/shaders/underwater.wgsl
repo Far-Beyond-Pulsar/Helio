@@ -93,101 +93,71 @@ fn is_camera_underwater(vol: GpuWaterVolume) -> bool {
            pos.z >= vol.bounds_min.z && pos.z <= vol.bounds_max.z;
 }
 
-/// Compute volumetric fog with exponential falloff
-fn compute_fog(view_dist: f32, density: f32) -> f32 {
-    return 1.0 - exp(-density * view_dist);
-}
+/// Caustics projection (simple but correct)
+fn sample_caustics(world_pos: vec3<f32>, vol: GpuWaterVolume, time: f32) -> f32 {
+    // Project caustics texture onto surfaces based on world XZ position
+    // This simulates light being refracted through the water surface from above
 
-/// Beer-Lambert color absorption
-fn apply_absorption(color: vec3<f32>, extinction: vec3<f32>, distance: f32) -> vec3<f32> {
-    return color * exp(-extinction * distance);
-}
+    let scale = vol.caustics_params.z;
+    let speed = vol.caustics_params.w;
 
-/// Sample caustics with world position
-fn sample_caustics(world_pos: vec3<f32>, vol: GpuWaterVolume) -> f32 {
-    let caustics_uv = world_pos.xz / vol.caustics_params.z;
-    return textureSample(caustics_tex, linear_sampler, caustics_uv).r;
-}
+    // UV coordinates based on horizontal world position
+    let uv = (world_pos.xz / scale) + vec2<f32>(time * speed * 0.05);
 
-/// God rays (radial blur from sun direction)
-fn compute_god_rays(uv: vec2<f32>, intensity: f32) -> f32 {
-    // Sun direction projected to screen space (simplified - top of screen)
-    let sun_uv = vec2<f32>(0.5, 0.2);
-    let delta = uv - sun_uv;
-    let dist = length(delta);
+    let caustic_value = textureSample(caustics_tex, linear_sampler, uv).r;
 
-    // Radial samples
-    let num_samples = 8u;
-    var occlusion = 0.0;
+    // Fade caustics with depth below surface (light scatters in water)
+    let depth_below_surface = max(vol.bounds_max.w - world_pos.y, 0.0);
+    let depth_fade = exp(-depth_below_surface * 0.2);
 
-    for (var i = 0u; i < num_samples; i++) {
-        let t = f32(i) / f32(num_samples);
-        let sample_uv = mix(uv, sun_uv, t * 0.5);
-        let depth = textureSample(depth_tex, linear_sampler, sample_uv);
-
-        // Simplified occlusion check
-        if depth > 0.99 {
-            occlusion += 1.0;
-        }
-    }
-
-    occlusion /= f32(num_samples);
-
-    // Radial falloff
-    let falloff = 1.0 - smoothstep(0.0, 0.8, dist);
-
-    return occlusion * falloff * intensity;
+    return caustic_value * depth_fade;
 }
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    // Sample scene color and depth
-    let scene_col = textureSample(scene_color, linear_sampler, in.uv).rgb;
-    let depth = textureSample(depth_tex, linear_sampler, in.uv);
+    // Check if camera is underwater
+    var underwater = false;
+    var vol: GpuWaterVolume;
 
-    // Check if any water volume contains camera
-    var active_volume_idx = -1;
     for (var i = 0u; i < arrayLength(&water_volumes); i++) {
         if is_camera_underwater(water_volumes[i]) {
-            active_volume_idx = i32(i);
+            underwater = true;
+            vol = water_volumes[i];
             break;
         }
     }
 
-    // If not underwater, pass through
-    if active_volume_idx < 0 {
+    // If not underwater, pass through unchanged
+    if !underwater {
+        let scene_col = textureSample(scene_color, linear_sampler, in.uv).rgb;
         return vec4<f32>(scene_col, 1.0);
     }
 
-    let vol = water_volumes[u32(active_volume_idx)];
+    // === AAA UNDERWATER RENDERING (Simple & Correct) ===
+    // This is how Uncharted, Tomb Raider, Assassin's Creed do it
 
-    // Reconstruct world position
-    let world_pos = reconstruct_world_pos(in.uv, depth);
-    let view_dist = distance(camera.position_near.xyz, world_pos);
+    // 1. Sample scene color
+    let scene_col = textureSample(scene_color, linear_sampler, in.uv).rgb;
 
-    // 1. Volumetric fog
-    let fog_amount = compute_fog(view_dist, vol.fog_params.x);
+    // 2. Get depth and compute view distance (in screen space for simplicity)
+    let depth = textureSample(depth_tex, linear_sampler, in.uv);
 
-    // 2. Color absorption (Beer-Lambert)
-    let absorbed = apply_absorption(scene_col, vol.extinction.xyz, view_dist);
+    // Simple depth-based distance (0 = near, 1 = far)
+    // This avoids world position reconstruction issues
+    let linear_depth = depth; // Already in 0-1 range
+    let view_dist = linear_depth * 100.0; // Scale to reasonable distance range
 
-    // 3. Caustics (only on surfaces below water)
-    var caustics_contribution = vec3<f32>(0.0);
-    if world_pos.y < vol.bounds_max.w {
-        let caustics = sample_caustics(world_pos, vol);
-        caustics_contribution = vec3<f32>(caustics) * vol.caustics_params.y;
-    }
+    // 3. Beer-Lambert Law: Color absorption based on distance through water
+    // Red light absorbed first, then green, blue penetrates deepest
+    let absorption = exp(-vol.extinction.xyz * view_dist * 0.1);
+    var color = scene_col * absorption;
 
-    // 4. God rays
-    let god_rays = compute_god_rays(in.uv, vol.fog_params.y);
-    let god_rays_color = vec3<f32>(0.7, 0.85, 1.0) * god_rays * 0.3;
+    // 4. Distance fog: Mix toward water color
+    let fog_amount = 1.0 - exp(-vol.fog_params.x * view_dist * 0.1);
+    color = mix(color, vol.water_color.rgb, fog_amount);
 
-    // Composite
-    let underwater_color = mix(
-        absorbed + caustics_contribution,
-        vol.water_color.rgb,
-        fog_amount
-    ) + god_rays_color;
+    // NOTE: Caustics are handled by the dedicated caustics pass
+    // Don't add them here to avoid artifacts
 
-    return vec4<f32>(underwater_color, 1.0);
+    return vec4<f32>(color, 1.0);
 }

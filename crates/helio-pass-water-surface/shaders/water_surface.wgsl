@@ -438,40 +438,32 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         // 10. ALPHA with fresnel-based transparency
         alpha = mix(0.85, 0.98, fresnel);
     } else {
-        // === SIDE/BOTTOM FACES: UNDERWATER VIEW ===
+        // === SIDE/BOTTOM FACES: VISIBLE WATER VOLUME ===
 
-        // Add subtle detail normals even to flat faces
+        // Simple refraction with subtle distortion
         let detail = generate_detail_normals(in.world_pos.xz, params.time, 20.0);
-        let perturbed_normal = normalize(surface_normal + detail * 0.1);
+        let perturbed_normal = normalize(surface_normal + detail * 0.05);
 
-        // Chromatic aberration refraction for underwater view
-        let refract_strength = vol.reflection_refraction.y * 0.04;
-        let distortion_base = perturbed_normal.xy * refract_strength;
+        let refract_strength = vol.reflection_refraction.y * 0.03;
+        let distortion = perturbed_normal.xy * refract_strength;
+        let refract_uv = clamp(screen_uv + distortion, vec2<f32>(0.0), vec2<f32>(1.0));
 
-        let refract_uv_r = clamp(screen_uv + distortion_base * 1.02, vec2<f32>(0.0), vec2<f32>(1.0));
-        let refract_uv_g = clamp(screen_uv + distortion_base * 1.00, vec2<f32>(0.0), vec2<f32>(1.0));
-        let refract_uv_b = clamp(screen_uv + distortion_base * 0.98, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refract_color = textureSample(scene_color, linear_sampler, refract_uv).rgb;
 
-        let refract_color = vec3<f32>(
-            textureSample(scene_color, linear_sampler, refract_uv_r).r,
-            textureSample(scene_color, linear_sampler, refract_uv_g).g,
-            textureSample(scene_color, linear_sampler, refract_uv_b).b
-        );
+        // Water color with visible tint
+        let depth_in_water = abs(surface_pos.y - surface_y) + 0.2;
+        let absorption = exp(-vol.extinction.rgb * depth_in_water * 0.3); // Less aggressive absorption
 
-        // Depth-based absorption (Beer's law)
-        let depth_in_water = abs(surface_pos.y - surface_y) + 0.1;
-        let absorption = exp(-vol.extinction.rgb * depth_in_water * 0.8);
+        // Strong water color tint for visibility
+        final_color = mix(refract_color * absorption, vol.water_color.rgb, 0.4); // 40% water color
 
-        // Apply absorption and add water color
-        final_color = refract_color * absorption + vol.water_color.rgb * (1.0 - absorption.r) * 0.6;
-
-        // Subtle subsurface glow
+        // Subsurface scattering for depth
         let sun_dir = normalize(vec3<f32>(0.5, 0.8, 0.3));
-        let scatter = subsurface_scattering(view_dir, sun_dir, perturbed_normal, 0.2);
-        final_color += vol.water_color.rgb * scatter * 0.3;
+        let scatter = subsurface_scattering(view_dir, sun_dir, perturbed_normal, 0.3);
+        final_color += vol.water_color.rgb * scatter * 0.4;
 
-        // Transparency based on depth
-        alpha = mix(0.75, 0.92, clamp(depth_in_water * 0.5, 0.0, 1.0));
+        // Higher alpha for visibility
+        alpha = 0.90; // More opaque
     }
 
     return vec4<f32>(final_color, alpha);
