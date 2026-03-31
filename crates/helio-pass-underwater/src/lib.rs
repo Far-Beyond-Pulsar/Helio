@@ -51,10 +51,11 @@ impl UnderwaterPass {
     /// # Parameters
     /// - `device`: GPU device
     /// - `camera_buf`: Camera uniform buffer
+    /// - `target_format`: Format of the render target
     ///
     /// # Returns
     /// A new `UnderwaterPass` ready to be added to the render graph.
-    pub fn new(device: &wgpu::Device, camera_buf: &wgpu::Buffer) -> Self {
+    pub fn new(device: &wgpu::Device, camera_buf: &wgpu::Buffer, target_format: wgpu::TextureFormat) -> Self {
         // Load shader
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Underwater Shader"),
@@ -178,7 +179,7 @@ impl UnderwaterPass {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float,
+                    format: target_format,
                     blend: None, // Replace (not blend)
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

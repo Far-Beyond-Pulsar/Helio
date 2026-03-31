@@ -127,8 +127,10 @@ pub fn build_default_graph(
         camera_buf,
         config.internal_width(),
         config.internal_height(),
+        config.surface_format,
     )));
-    graph.add_pass(Box::new(UnderwaterPass::new(device, camera_buf)));
+    // TODO: Fix underwater pass - it has the same read-write conflict with pre_aa
+    // graph.add_pass(Box::new(UnderwaterPass::new(device, camera_buf, config.surface_format)));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
@@ -264,8 +266,10 @@ pub fn build_hlfs_graph(
         camera_buf,
         config.internal_width(),
         config.internal_height(),
+        config.surface_format,
     )));
-    graph.add_pass(Box::new(UnderwaterPass::new(device, camera_buf)));
+    // TODO: Fix underwater pass - it has the same read-write conflict with pre_aa
+    // graph.add_pass(Box::new(UnderwaterPass::new(device, camera_buf, config.surface_format)));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))

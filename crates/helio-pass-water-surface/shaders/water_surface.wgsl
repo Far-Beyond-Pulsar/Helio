@@ -12,11 +12,10 @@ struct Camera {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
     view_proj: mat4x4<f32>,
-    inv_view: mat4x4<f32>,
-    inv_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
-    position: vec3<f32>,
-    _pad0: f32,
+    position_near: vec4<f32>,
+    forward_far: vec4<f32>,
+    jitter_frame: vec4<f32>,
     prev_view_proj: mat4x4<f32>,
 }
 
@@ -90,14 +89,16 @@ fn vs_main(
     let pos = positions[vid];
     let clip_pos = vec4<f32>(pos, 0.0, 1.0);
 
-    // Reconstruct view ray for ray-marching
-    let ndc = vec4<f32>(pos.x, pos.y, 1.0, 1.0);
-    let view_pos = camera.inv_proj * ndc;
-    let view_ray = (camera.inv_view * vec4<f32>(view_pos.xyz / view_pos.w, 0.0)).xyz;
+    // Reconstruct world ray from NDC
+    let far_ndc = vec4<f32>(pos.x, pos.y, 1.0, 1.0);
+    let far_world_h = camera.inv_view_proj * far_ndc;
+    let far_world = far_world_h.xyz / far_world_h.w;
+    let cam_pos = camera.position_near.xyz;
+    let view_ray = far_world - cam_pos;
 
     var out: VertexOut;
     out.clip_pos = clip_pos;
-    out.world_pos = camera.position + view_ray;
+    out.world_pos = cam_pos + view_ray;
     out.view_ray = normalize(view_ray);
     out.volume_idx = inst;
     return out;
@@ -156,9 +157,8 @@ fn world_to_screen_uv(world_pos: vec3<f32>) -> vec2<f32> {
 fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
     let clip_pos = vec4<f32>(ndc, depth, 1.0);
-    let view_pos = camera.inv_proj * clip_pos;
-    let world_pos = camera.inv_view * vec4<f32>(view_pos.xyz / view_pos.w, 1.0);
-    return world_pos.xyz;
+    let world_pos_h = camera.inv_view_proj * clip_pos;
+    return world_pos_h.xyz / world_pos_h.w;
 }
 
 /// Screen-space reflection ray-marching
@@ -181,8 +181,8 @@ fn screen_space_reflection(
 
         let scene_depth = textureSample(depth_tex, linear_sampler, uv);
         let scene_world = reconstruct_world_pos(uv, scene_depth);
-        let ray_depth = distance(camera.position, ray_pos);
-        let scene_depth_dist = distance(camera.position, scene_world);
+        let ray_depth = distance(camera.position_near.xyz, ray_pos);
+        let scene_depth_dist = distance(camera.position_near.xyz, scene_world);
 
         if ray_depth > scene_depth_dist && ray_depth - scene_depth_dist < step_size * 2.0 {
             // Hit! Sample scene color
@@ -216,13 +216,13 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Ray-march to find water surface intersection
     // For simplicity, use constant surface height (can enhance with ray-marching)
     let surface_y = vol.bounds_max.w;
-    let t = (surface_y - camera.position.y) / in.view_ray.y;
+    let t = (surface_y - camera.position_near.xyz.y) / in.view_ray.y;
 
     if t < 0.0 {
         discard; // Camera above water, ray pointing up
     }
 
-    let surface_pos_flat = camera.position + in.view_ray * t;
+    let surface_pos_flat = camera.position_near.xyz + in.view_ray * t;
     let world_xz = surface_pos_flat.xz;
 
     // Calculate Gerstner wave displacement
@@ -239,15 +239,15 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Depth test: check if water surface is in front of scene geometry
     let scene_depth = textureSample(depth_tex, linear_sampler, screen_uv);
     let scene_world = reconstruct_world_pos(screen_uv, scene_depth);
-    let water_depth = distance(camera.position, surface_pos);
-    let scene_depth_dist = distance(camera.position, scene_world);
+    let water_depth = distance(camera.position_near.xyz, surface_pos);
+    let scene_depth_dist = distance(camera.position_near.xyz, scene_world);
 
     if water_depth > scene_depth_dist {
         discard; // Water behind scene geometry
     }
 
     // View direction
-    let view_dir = normalize(camera.position - surface_pos);
+    let view_dir = normalize(camera.position_near.xyz - surface_pos);
 
     // 1. Screen-space reflection
     let reflect_dir = reflect(-view_dir, surface_normal);

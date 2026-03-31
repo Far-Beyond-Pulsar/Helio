@@ -42,11 +42,17 @@ struct WaterParams {
 /// reflections, refraction, and foam.
 pub struct WaterSurfacePass {
     pipeline: wgpu::RenderPipeline,
+    blit_pipeline: wgpu::RenderPipeline,
     bgl_0: wgpu::BindGroupLayout, // Camera, params
     bgl_1: wgpu::BindGroupLayout, // GBuffer, depth, scene color
     bgl_2: wgpu::BindGroupLayout, // Water volumes, caustics
+    bgl_blit: wgpu::BindGroupLayout, // Blit texture + sampler
 
     params_buf: wgpu::Buffer,
+
+    // Copy of scene color for sampling (to avoid read-write conflict)
+    scene_copy: wgpu::Texture,
+    scene_copy_view: wgpu::TextureView,
 
     bind_group_0: Option<wgpu::BindGroup>,
     bind_group_1: Option<wgpu::BindGroup>,
@@ -56,6 +62,9 @@ pub struct WaterSurfacePass {
     camera_key: Option<usize>,
     gbuffer_key: Option<usize>,
     volumes_key: Option<usize>,
+
+    width: u32,
+    height: u32,
 }
 
 impl WaterSurfacePass {
@@ -74,11 +83,48 @@ impl WaterSurfacePass {
         camera_buf: &wgpu::Buffer,
         width: u32,
         height: u32,
+        target_format: wgpu::TextureFormat,
     ) -> Self {
-        // Load shader
+        // Load shaders
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Surface Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/water_surface.wgsl").into()),
+        });
+
+        // Simple blit shader for copying scene
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Water Blit Shader"),
+            source: wgpu::ShaderSource::Wgsl(r#"
+                @group(0) @binding(0) var src_texture: texture_2d<f32>;
+                @group(0) @binding(1) var src_sampler: sampler;
+
+                struct VertexOutput {
+                    @builtin(position) position: vec4<f32>,
+                    @location(0) uv: vec2<f32>,
+                }
+
+                @vertex
+                fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOutput {
+                    var positions = array<vec2<f32>, 6>(
+                        vec2<f32>(-1.0, -1.0),
+                        vec2<f32>(1.0, -1.0),
+                        vec2<f32>(1.0, 1.0),
+                        vec2<f32>(-1.0, -1.0),
+                        vec2<f32>(1.0, 1.0),
+                        vec2<f32>(-1.0, 1.0),
+                    );
+                    let pos = positions[vid];
+                    var out: VertexOutput;
+                    out.position = vec4<f32>(pos, 0.0, 1.0);
+                    out.uv = pos * 0.5 + 0.5;
+                    return out;
+                }
+
+                @fragment
+                fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+                    return textureSample(src_texture, src_sampler, in.uv);
+                }
+            "#.into()),
         });
 
         // Bind group layout 0: Camera + params
@@ -193,6 +239,29 @@ impl WaterSurfacePass {
             ],
         });
 
+        // Bind group layout for blit
+        let bgl_blit = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Water Blit BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
         // Pipeline layout
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Surface Pipeline Layout"),
@@ -219,13 +288,7 @@ impl WaterSurfacePass {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false), // Don't write depth (transparent)
-                depth_compare: Some(wgpu::CompareFunction::LessEqual), // Test against scene depth
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
+            depth_stencil: None, // Manual depth testing in shader
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -236,7 +299,7 @@ impl WaterSurfacePass {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: wgpu::TextureFormat::Rgba16Float, // HDR format (pre_aa)
+                    format: target_format,
                     blend: Some(wgpu::BlendState {
                         color: wgpu::BlendComponent {
                             src_factor: wgpu::BlendFactor::SrcAlpha,
@@ -256,6 +319,51 @@ impl WaterSurfacePass {
             cache: None,
         });
 
+        // Blit pipeline for copying scene
+        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Water Blit Pipeline Layout"),
+            bind_group_layouts: &[Some(&bgl_blit)],
+            immediate_size: 0,
+        });
+
+        let blit_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Water Blit Pipeline"),
+            layout: Some(&blit_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &blit_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &blit_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // Uniform buffer for parameters
         let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Water Surface Params"),
@@ -264,18 +372,42 @@ impl WaterSurfacePass {
             mapped_at_creation: false,
         });
 
+        // Scene color copy texture (for sampling while writing to original)
+        let scene_copy = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Scene Copy"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: target_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let scene_copy_view = scene_copy.create_view(&wgpu::TextureViewDescriptor::default());
+
         Self {
             pipeline,
+            blit_pipeline,
             bgl_0,
             bgl_1,
             bgl_2,
+            bgl_blit,
             params_buf,
+            scene_copy,
+            scene_copy_view,
             bind_group_0: None,
             bind_group_1: None,
             bind_group_2: None,
             camera_key: None,
             gbuffer_key: None,
             volumes_key: None,
+            width,
+            height,
         }
     }
 }
@@ -340,6 +472,56 @@ impl RenderPass for WaterSurfacePass {
             self.camera_key = Some(camera_ptr);
         }
 
+        // Create blit bind group every frame (pre_aa view changes)
+        let blit_sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Water Blit Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        let blit_bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Water Blit BG"),
+            layout: &self.bgl_blit,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(pre_aa),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&blit_sampler),
+                },
+            ],
+        });
+
+        // Blit pre_aa to scene_copy (to avoid read-write conflict)
+        {
+            let mut blit_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Water Scene Copy"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.scene_copy_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            blit_pass.set_pipeline(&self.blit_pipeline);
+            blit_pass.set_bind_group(0, &blit_bind_group, &[]);
+            blit_pass.draw(0..6, 0..1);
+        }
+
         // Rebuild bind group 1 if gbuffer changed
         let gbuffer_ptr = gbuffer.albedo as *const _ as usize;
         if self.gbuffer_key != Some(gbuffer_ptr) {
@@ -369,7 +551,7 @@ impl RenderPass for WaterSurfacePass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(pre_aa),
+                        resource: wgpu::BindingResource::TextureView(&self.scene_copy_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -420,6 +602,8 @@ impl RenderPass for WaterSurfacePass {
         let volume_count = ctx.frame.water_volume_count;
 
         // Render water surfaces
+        // Note: No depth attachment because we sample from depth texture in shader
+        // Manual depth testing is done in fragment shader (lines 239-247 in water_surface.wgsl)
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("WaterSurface"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -431,14 +615,7 @@ impl RenderPass for WaterSurfacePass {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: ctx.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load, // Test against scene depth
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
+            depth_stencil_attachment: None, // Can't use depth attachment while sampling depth texture
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,

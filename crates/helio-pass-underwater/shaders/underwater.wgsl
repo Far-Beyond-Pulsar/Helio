@@ -10,11 +10,10 @@ struct Camera {
     view: mat4x4<f32>,
     proj: mat4x4<f32>,
     view_proj: mat4x4<f32>,
-    inv_view: mat4x4<f32>,
-    inv_proj: mat4x4<f32>,
     inv_view_proj: mat4x4<f32>,
-    position: vec3<f32>,
-    _pad0: f32,
+    position_near: vec4<f32>,
+    forward_far: vec4<f32>,
+    jitter_frame: vec4<f32>,
     prev_view_proj: mat4x4<f32>,
 }
 
@@ -80,14 +79,13 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VertexOut {
 fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
     let ndc = vec2<f32>(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
     let clip_pos = vec4<f32>(ndc, depth, 1.0);
-    let view_pos = camera.inv_proj * clip_pos;
-    let world_pos = camera.inv_view * vec4<f32>(view_pos.xyz / view_pos.w, 1.0);
-    return world_pos.xyz;
+    let world_pos_h = camera.inv_view_proj * clip_pos;
+    return world_pos_h.xyz / world_pos_h.w;
 }
 
 /// Check if camera is inside water volume
 fn is_camera_underwater(vol: GpuWaterVolume) -> bool {
-    let pos = camera.position;
+    let pos = camera.position_near.xyz;
     let surface_y = vol.bounds_max.w;
 
     return pos.x >= vol.bounds_min.x && pos.x <= vol.bounds_max.x &&
@@ -165,7 +163,7 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
 
     // Reconstruct world position
     let world_pos = reconstruct_world_pos(in.uv, depth);
-    let view_dist = distance(camera.position, world_pos);
+    let view_dist = distance(camera.position_near.xyz, world_pos);
 
     // 1. Volumetric fog
     let fog_amount = compute_fog(view_dist, vol.fog_params.x);

@@ -63,6 +63,7 @@ pub struct Renderer {
     debug_state: Arc<Mutex<DebugDrawState>>,
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
     billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
+    water_volumes_buffer: wgpu::Buffer,
 }
 
 enum GraphKind {
@@ -100,6 +101,14 @@ impl Renderer {
             (None, None)
         };
 
+        // Water volumes buffer (256 max volumes * 256 bytes each = 64KB)
+        let water_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water Volumes Buffer"),
+            size: 256 * 256, // Max 256 volumes, 256 bytes each
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             device,
             queue,
@@ -128,6 +137,7 @@ impl Renderer {
             debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
+            water_volumes_buffer,
         }
     }
 
@@ -618,6 +628,17 @@ impl Renderer {
         let rc_min = [camera.position.x - rc_radius, camera.position.y - rc_radius, camera.position.z - rc_radius];
         let rc_max = [camera.position.x + rc_radius, camera.position.y + rc_radius, camera.position.z + rc_radius];
 
+        // Upload water volumes to GPU if any exist
+        let water_volume_count = self.scene.water_volumes_count();
+        if water_volume_count > 0 {
+            let water_volumes = self.scene.get_water_volumes_gpu();
+            self.queue.write_buffer(
+                &self.water_volumes_buffer,
+                0,
+                bytemuck::cast_slice(&water_volumes),
+            );
+        }
+
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
             shadow_atlas: None,
@@ -659,8 +680,12 @@ impl Renderer {
             },
             vg: self.scene.vg_frame_data(),
             water_caustics: None,
-            water_volumes: None,
-            water_volume_count: 0,
+            water_volumes: if water_volume_count > 0 {
+                Some(&self.water_volumes_buffer)
+            } else {
+                None
+            },
+            water_volume_count,
         };
 
         self.graph.execute_with_frame_resources(
