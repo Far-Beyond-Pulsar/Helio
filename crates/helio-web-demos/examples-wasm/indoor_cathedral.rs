@@ -183,6 +183,38 @@ impl HelioWasmApp for Demo {
         renderer.set_ambient([0.4, 0.45, 0.65], 0.015);
         renderer.set_clear_color([0.02, 0.01, 0.04, 1.0]);
 
+        // Add high-quality water volume
+        let pool = helio::WaterVolumeDescriptor {
+            bounds_min: [-6.0, 0.3, -6.0],
+            bounds_max: [6.0, 2.5, 6.0],
+            surface_height: 1.8,
+
+            wave_amplitude: 0.12,
+            wave_frequency: 1.2,
+            wave_speed: 1.5,
+            wave_direction: [0.7, 0.4],
+            wave_steepness: 0.65,
+
+            water_color: [0.05, 0.20, 0.30],
+            extinction: [0.08, 0.04, 0.02],
+
+            foam_threshold: 0.68,
+            foam_amount: 0.75,
+
+            reflection_strength: 1.0,
+            refraction_strength: 1.0,
+            fresnel_power: 5.0,
+
+            caustics_enabled: true,
+            caustics_intensity: 4.0,
+            caustics_scale: 8.0,
+            caustics_speed: 1.5,
+
+            fog_density: 0.015,
+            god_rays_intensity: 0.2,
+        };
+        renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
+
         Self {
             candle_ids,
             cam_pos: Vec3::new(0.0, 1.7, 25.0),
