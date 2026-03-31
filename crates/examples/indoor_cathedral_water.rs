@@ -240,16 +240,16 @@ impl ApplicationHandler for App {
             }),
         ));
 
-        // Add a high quality water volume
-        let ocean = helio::WaterVolumeDescriptor {
-            bounds_min: [-100.0, -10.0, -100.0],
-            bounds_max: [100.0, 50.0, 100.0],
-            surface_height: 0.0,
-            wave_amplitude: 0.8,
-            wave_frequency: 0.2,
-            wave_speed: 1.2,
+        // Add a small water pool in the center of the cathedral
+        let pool = helio::WaterVolumeDescriptor {
+            bounds_min: [-5.0, -3.0, -5.0],  // 10x10 meter pool, 3 meters deep
+            bounds_max: [5.0, 3.0, 5.0],
+            surface_height: 0.0,  // Surface at Y=0
+            wave_amplitude: 0.3,
+            wave_frequency: 0.4,
+            wave_speed: 0.8,
             wave_direction: [1.0, 0.3],
-            wave_steepness: 0.6,
+            wave_steepness: 0.4,
             water_color: [0.0, 0.3, 0.5],
             extinction: [0.2, 0.05, 0.02],
             foam_threshold: 0.75,
@@ -264,7 +264,7 @@ impl ApplicationHandler for App {
             fog_density: 0.04,
             god_rays_intensity: 1.2,
         };
-        renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(ocean));
+        renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.

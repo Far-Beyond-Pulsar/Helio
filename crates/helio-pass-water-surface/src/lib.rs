@@ -626,9 +626,9 @@ impl RenderPass for WaterSurfacePass {
         pass.set_bind_group(1, self.bind_group_1.as_ref().unwrap(), &[]);
         pass.set_bind_group(2, self.bind_group_2.as_ref().unwrap(), &[]);
 
-        // Draw fullscreen quad for each water volume (instanced)
-        // 6 vertices per quad, instanced by volume count
-        pass.draw(0..6, 0..volume_count);
+        // Draw full cube for each water volume (instanced)
+        // 36 vertices per cube (6 faces × 6 vertices per quad), instanced by volume count
+        pass.draw(0..36, 0..volume_count);
 
         Ok(())
     }

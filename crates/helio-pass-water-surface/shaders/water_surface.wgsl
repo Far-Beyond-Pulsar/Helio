@@ -62,50 +62,117 @@ struct GpuWaterVolume {
 
 struct VertexOut {
     @builtin(position) clip_pos: vec4<f32>,
-    @location(0) world_pos_xz: vec2<f32>,
+    @location(0) world_pos: vec3<f32>,
     @location(1) @interpolate(flat) volume_idx: u32,
+    @location(2) @interpolate(flat) face_id: u32,
 }
 
 // Constants
 const PI = 3.14159265359;
 
-/// Generate top-face quad vertices for water volume
+/// Generate box vertices for water volume (36 vertices = 6 faces * 6 vertices per quad)
 @vertex
 fn vs_main(
     @builtin(vertex_index) vid: u32,
     @builtin(instance_index) inst: u32
 ) -> VertexOut {
     let vol = water_volumes[inst];
-
-    // Top face quad vertices (XZ plane) - just render the water surface from above
-    var positions = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, -1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(-1.0, 1.0),
-    );
-
-    let local_xz = positions[vid];
-
-    // Transform from [-1,1] quad to world XZ bounds
     let bounds_min = vol.bounds_min.xyz;
     let bounds_max = vol.bounds_max.xyz;
-    let center_xz = (bounds_min.xz + bounds_max.xz) * 0.5;
-    let extents_xz = (bounds_max.xz - bounds_min.xz) * 0.5;
-
-    let world_xz = center_xz + local_xz * extents_xz;
-
-    // Use surface height for Y coordinate
     let surface_y = vol.bounds_max.w;
-    let world_pos = vec3<f32>(world_xz.x, surface_y, world_xz.y);
-    let clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
+
+    // Override bounds_max.y with surface height
+    let adjusted_max = vec3<f32>(bounds_max.x, surface_y, bounds_max.z);
+
+    // 6 vertices per face, 6 faces = 36 vertices
+    let face_id = vid / 6u;
+    let vert_id = vid % 6u;
+
+    // Quad vertex pattern (2 triangles)
+    var local_pos: vec3<f32>;
+
+    // Define vertices for each face
+    if face_id == 0u {
+        // Top face (water surface with waves)
+        let quad_verts = array<vec2<f32>, 6>(
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0)
+        );
+        let uv = quad_verts[vert_id];
+        local_pos = vec3<f32>(
+            mix(bounds_min.x, adjusted_max.x, uv.x),
+            adjusted_max.y,
+            mix(bounds_min.z, adjusted_max.z, uv.y)
+        );
+    } else if face_id == 1u {
+        // Bottom face
+        let quad_verts = array<vec2<f32>, 6>(
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+            vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0)
+        );
+        let uv = quad_verts[vert_id];
+        local_pos = vec3<f32>(
+            mix(bounds_min.x, adjusted_max.x, uv.x),
+            bounds_min.y,
+            mix(bounds_min.z, adjusted_max.z, uv.y)
+        );
+    } else if face_id == 2u {
+        // Front face (+Z)
+        let quad_verts = array<vec2<f32>, 6>(
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0)
+        );
+        let uv = quad_verts[vert_id];
+        local_pos = vec3<f32>(
+            mix(bounds_min.x, adjusted_max.x, uv.x),
+            mix(bounds_min.y, adjusted_max.y, uv.y),
+            adjusted_max.z
+        );
+    } else if face_id == 3u {
+        // Back face (-Z)
+        let quad_verts = array<vec2<f32>, 6>(
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+            vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0)
+        );
+        let uv = quad_verts[vert_id];
+        local_pos = vec3<f32>(
+            mix(bounds_min.x, adjusted_max.x, uv.x),
+            mix(bounds_min.y, adjusted_max.y, uv.y),
+            bounds_min.z
+        );
+    } else if face_id == 4u {
+        // Right face (+X)
+        let quad_verts = array<vec2<f32>, 6>(
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(0.0, 1.0)
+        );
+        let uv = quad_verts[vert_id];
+        local_pos = vec3<f32>(
+            adjusted_max.x,
+            mix(bounds_min.y, adjusted_max.y, uv.y),
+            mix(bounds_min.z, adjusted_max.z, uv.x)
+        );
+    } else {
+        // Left face (-X)
+        let quad_verts = array<vec2<f32>, 6>(
+            vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 1.0), vec2<f32>(1.0, 0.0),
+            vec2<f32>(0.0, 0.0), vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 1.0)
+        );
+        let uv = quad_verts[vert_id];
+        local_pos = vec3<f32>(
+            bounds_min.x,
+            mix(bounds_min.y, adjusted_max.y, uv.y),
+            mix(bounds_min.z, adjusted_max.z, uv.x)
+        );
+    }
+
+    let clip_pos = camera.view_proj * vec4<f32>(local_pos, 1.0);
 
     var out: VertexOut;
     out.clip_pos = clip_pos;
-    out.world_pos_xz = world_xz;
+    out.world_pos = local_pos;
     out.volume_idx = inst;
+    out.face_id = face_id;
     return out;
 }
 
@@ -217,23 +284,40 @@ fn compute_foam(steepness: f32, threshold: f32, amount: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     let vol = water_volumes[in.volume_idx];
-
-    // We're already on the water surface XZ plane from the vertex shader
-    let world_xz = in.world_pos_xz;
     let surface_y = vol.bounds_max.w;
 
-    // Calculate Gerstner wave displacement
-    let wave_result = gerstner_waves(world_xz, params.time, vol);
-    let wave_height = wave_result.x;
-    let surface_pos = vec3<f32>(world_xz.x, surface_y + wave_height, world_xz.y);
+    var surface_pos: vec3<f32>;
+    var surface_normal: vec3<f32>;
 
-    // Surface normal
-    let surface_normal = calculate_normal(wave_result);
+    // Top face (face_id == 0): Apply Gerstner waves
+    if in.face_id == 0u {
+        let world_xz = in.world_pos.xz;
+        let wave_result = gerstner_waves(world_xz, params.time, vol);
+        let wave_height = wave_result.x;
+        surface_pos = vec3<f32>(world_xz.x, surface_y + wave_height, world_xz.y);
+        surface_normal = calculate_normal(wave_result);
+    } else {
+        // Other faces: flat geometry, compute geometric normal
+        surface_pos = in.world_pos;
+
+        // Compute face normal based on face_id
+        if in.face_id == 1u {
+            surface_normal = vec3<f32>(0.0, -1.0, 0.0); // Bottom
+        } else if in.face_id == 2u {
+            surface_normal = vec3<f32>(0.0, 0.0, 1.0); // Front
+        } else if in.face_id == 3u {
+            surface_normal = vec3<f32>(0.0, 0.0, -1.0); // Back
+        } else if in.face_id == 4u {
+            surface_normal = vec3<f32>(1.0, 0.0, 0.0); // Right
+        } else {
+            surface_normal = vec3<f32>(-1.0, 0.0, 0.0); // Left
+        }
+    }
 
     // Screen UV of this fragment
     let screen_uv = world_to_screen_uv(surface_pos);
 
-    // Depth test: check if water surface is in front of scene geometry
+    // Depth test: check if water is in front of scene geometry
     let scene_depth = textureSample(depth_tex, linear_sampler, screen_uv);
     let scene_world = reconstruct_world_pos(screen_uv, scene_depth);
     let water_depth = distance(camera.position_near.xyz, surface_pos);
@@ -246,53 +330,66 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // View direction
     let view_dir = normalize(camera.position_near.xyz - surface_pos);
 
-    // 1. Screen-space reflection
-    let reflect_dir = reflect(-view_dir, surface_normal);
-    let ssr_result = screen_space_reflection(
-        surface_pos,
-        reflect_dir,
-        params.ssr_steps,
-        params.ssr_step_size
-    );
+    // Different rendering for top face vs side/bottom faces
+    var final_color: vec3<f32>;
+    var alpha: f32;
 
-    // 2. Screen-space refraction (sample scene with distorted UV)
-    let refract_dir = refract(-view_dir, surface_normal, 1.0 / 1.33);
-    let refract_offset = surface_normal.xz * vol.reflection_refraction.y * 0.05;
-    let refract_uv = clamp(screen_uv + refract_offset, vec2<f32>(0.0), vec2<f32>(1.0));
-    let refract_color = textureSample(scene_color, linear_sampler, refract_uv).rgb;
+    if in.face_id == 0u {
+        // Top face: Water surface with reflection and refraction
 
-    // 3. Fresnel blend
-    let fresnel_power = vol.reflection_refraction.z;
-    let cos_theta = max(dot(view_dir, surface_normal), 0.0);
-    let fresnel = fresnel_schlick(cos_theta, 0.02);
-    let reflection_strength = vol.reflection_refraction.x;
+        // Calculate fresnel for reflection/refraction mix
+        let cos_theta = max(dot(view_dir, surface_normal), 0.0);
+        let fresnel = fresnel_schlick(cos_theta, 0.02);
 
-    let water_surface = mix(
-        refract_color,
-        ssr_result.rgb,
-        fresnel * reflection_strength * ssr_result.a
-    );
+        // 1. Refraction - distort UV based on surface normal
+        let normal_distortion = surface_normal.xz * vol.reflection_refraction.y * 0.03;
+        let refract_uv = clamp(screen_uv + normal_distortion, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refract_color = textureSample(scene_color, linear_sampler, refract_uv).rgb;
 
-    // 4. Caustics (sample from tiled caustics texture)
-    let caustics_uv = world_xz / vol.caustics_params.z;
-    let caustics = textureSample(caustics_tex, caustics_sampler, caustics_uv).r;
-    let caustics_contribution = caustics * vol.caustics_params.y * (1.0 - fresnel);
+        // 2. Reflection - sample scene in reflection direction
+        let reflect_dir = reflect(-view_dir, surface_normal);
+        let ssr_result = screen_space_reflection(
+            surface_pos,
+            reflect_dir,
+            params.ssr_steps,
+            params.ssr_step_size
+        );
 
-    // 5. Foam
-    let steepness = length(vec2<f32>(wave_result.y, wave_result.z));
-    let foam = compute_foam(steepness, vol.water_color.w, vol.extinction.w);
+        // 3. Mix refraction and reflection based on fresnel
+        // At grazing angles (fresnel high): more reflection
+        // Looking straight down (fresnel low): more refraction
+        var water_color = mix(refract_color, ssr_result.rgb, fresnel * ssr_result.a);
 
-    // 6. Depth fade (smooth edges)
-    let depth_diff = scene_depth_dist - water_depth;
-    let depth_fade = smoothstep(0.0, 2.0, depth_diff);
+        // 4. Add subtle water tint (less intense than before)
+        water_color = mix(water_color, vol.water_color.rgb, 0.1);
 
-    // Final color
-    let base_color = vol.water_color.rgb;
-    var final_color = mix(base_color, water_surface + caustics_contribution, depth_fade);
-    final_color = mix(final_color, vec3<f32>(1.0), foam);
+        // 5. Foam - only on steep wave crests, subtle white highlights
+        let world_xz = in.world_pos.xz;
+        let wave_result = gerstner_waves(world_xz, params.time, vol);
+        let steepness = length(vec2<f32>(wave_result.y, wave_result.z));
+        let foam = compute_foam(steepness, vol.water_color.w, vol.extinction.w);
 
-    // Alpha based on depth fade
-    let alpha = depth_fade * (1.0 - foam * 0.5);
+        // Mix foam as a subtle highlight, not pure white
+        final_color = mix(water_color, vec3<f32>(0.9, 0.95, 1.0), foam * 0.2);
+
+        // More transparent for better see-through
+        alpha = 0.7;
+    } else {
+        // Side/bottom faces: Transparent water with refraction only
+
+        // Simple refraction for side faces
+        let refract_offset = (surface_normal.xy * vol.reflection_refraction.y * 0.015);
+        let refract_uv = clamp(screen_uv + refract_offset, vec2<f32>(0.0), vec2<f32>(1.0));
+        let refract_color = textureSample(scene_color, linear_sampler, refract_uv).rgb;
+
+        // Apply water color tint based on depth
+        let depth_in_water = abs(surface_pos.y - surface_y);
+        let absorption = exp(-vol.extinction.rgb * depth_in_water);
+        final_color = refract_color * absorption + vol.water_color.rgb * (1.0 - absorption.r) * 0.3;
+
+        // More transparent for side faces
+        alpha = 0.4;
+    }
 
     return vec4<f32>(final_color, alpha);
 }
