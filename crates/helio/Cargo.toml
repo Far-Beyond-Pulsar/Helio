@@ -32,6 +32,9 @@ helio-pass-ssao = { path = "../helio-pass-ssao" }
 helio-pass-taa = { path = "../helio-pass-taa" }
 helio-pass-transparent = { path = "../helio-pass-transparent" }
 helio-pass-debug = { path = "../helio-pass-debug" }
+helio-pass-water-caustics = { path = "../helio-pass-water-caustics" }
+helio-pass-water-surface = { path = "../helio-pass-water-surface" }
+helio-pass-underwater = { path = "../helio-pass-underwater" }
 libhelio = { path = "../libhelio" }
 log = "0.4"
 thiserror = "2.0"

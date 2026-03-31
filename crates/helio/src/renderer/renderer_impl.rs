@@ -658,6 +658,9 @@ impl Renderer {
                 })
             },
             vg: self.scene.vg_frame_data(),
+            water_caustics: None,
+            water_volumes: None,
+            water_volume_count: 0,
         };
 
         self.graph.execute_with_frame_resources(

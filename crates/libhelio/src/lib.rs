@@ -20,6 +20,7 @@ pub mod material;
 pub mod meshlet;
 pub mod shadow;
 pub mod sky;
+pub mod water;
 
 pub use camera::*;
 pub use draw::*;
@@ -30,4 +31,5 @@ pub use material::*;
 pub use meshlet::*;
 pub use shadow::*;
 pub use sky::{SkyActor, VolumetricClouds};
+pub use water::*;
 

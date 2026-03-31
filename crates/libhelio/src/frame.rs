@@ -104,6 +104,15 @@ pub struct FrameResources<'a> {
     pub billboards: Option<BillboardFrameData<'a>>,
     /// Virtual geometry meshlet + instance data for this frame.
     pub vg: Option<VgFrameData<'a>>,
+
+    /// Water caustics texture (populated by WaterCausticsPass)
+    pub water_caustics: Option<&'a wgpu::TextureView>,
+
+    /// Water volumes buffer (populated by Scene)
+    pub water_volumes: Option<&'a wgpu::Buffer>,
+
+    /// Number of water volumes in the buffer
+    pub water_volume_count: u32,
 }
 
 impl<'a> FrameResources<'a> {
@@ -126,6 +135,9 @@ impl<'a> FrameResources<'a> {
             sky: crate::sky::SkyContext::default(),
             billboards: None,
             vg: None,
+            water_caustics: None,
+            water_volumes: None,
+            water_volume_count: 0,
         }
     }
 }

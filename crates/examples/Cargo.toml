@@ -119,6 +119,10 @@ path = "rapier_pendulum_bigcloth.rs"
 name = "rapier_salva"
 path = "rapier_salva.rs"
 
+[[bin]]
+name = "indoor_cathedral_water"
+path = "indoor_cathedral_water.rs"
+
 
 
 [dependencies]

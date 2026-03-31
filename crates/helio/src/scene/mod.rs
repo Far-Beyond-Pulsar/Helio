@@ -79,8 +79,9 @@ mod objects;
 mod resources;
 mod types;
 mod virtual_geometry;
+mod water;
 
-pub use actor::{SceneActor, SceneActorId, SceneActorTrait};
+pub use actor::{SceneActor, SceneActorId, SceneActorTrait, WaterVolumeDescriptor};
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;

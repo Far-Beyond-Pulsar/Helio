@@ -2,7 +2,7 @@
 
 use glam::Mat4;
 use helio_v3::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial};
-use libhelio::GpuMeshletEntry;
+use libhelio::{GpuMeshletEntry, GpuWaterVolume};
 
 use crate::groups::GroupMask;
 use crate::handles::{MaterialId, MeshId};
@@ -174,5 +174,14 @@ pub(crate) struct VirtualObjectRecord {
 
     /// GPU instance data (model matrix, normal matrix, bounds).
     pub instance: GpuInstanceData,
+}
+
+/// Internal record for a water volume.
+///
+/// Stores GPU-side water volume parameters for water rendering passes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct WaterVolumeRecord {
+    /// GPU water volume descriptor with all rendering parameters.
+    pub gpu: GpuWaterVolume,
 }
 

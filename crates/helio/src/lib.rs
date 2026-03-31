@@ -32,7 +32,7 @@ pub use renderer::{
     build_simple_graph, build_hlfs_graph, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
     RendererConfig,
 };
-pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError, SceneActor, SceneActorId};
+pub use scene::{Camera, ObjectDescriptor, Result as SceneResult, Scene, SceneError, SceneActor, SceneActorId, WaterVolumeDescriptor};
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 pub use helio_v3::{
