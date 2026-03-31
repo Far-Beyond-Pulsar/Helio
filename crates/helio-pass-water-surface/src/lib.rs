@@ -156,22 +156,22 @@ impl WaterSurfacePass {
             ],
         });
 
-        // Bind group layout 1: GBuffer + depth + scene color
+        // Bind group layout 1: GBuffer + scene color
         let bgl_1 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water Surface BGL 1"),
             entries: &[
-                // @binding(0) depth texture
+                // @binding(0) gbuffer normal
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Depth,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
                     count: None,
                 },
-                // @binding(1) gbuffer normal
+                // @binding(1) scene color (pre_aa)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -182,20 +182,9 @@ impl WaterSurfacePass {
                     },
                     count: None,
                 },
-                // @binding(2) scene color (pre_aa)
+                // @binding(2) linear sampler
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                // @binding(3) linear sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -288,7 +277,13 @@ impl WaterSurfacePass {
                 polygon_mode: wgpu::PolygonMode::Fill,
                 conservative: false,
             },
-            depth_stencil: None, // Manual depth testing in shader
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false), // Don't write depth, just test
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState {
                 count: 1,
                 mask: !0,
@@ -543,18 +538,14 @@ impl RenderPass for WaterSurfacePass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(ctx.depth),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
                         resource: wgpu::BindingResource::TextureView(gbuffer.normal),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 2,
+                        binding: 1,
                         resource: wgpu::BindingResource::TextureView(&self.scene_copy_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 3,
+                        binding: 2,
                         resource: wgpu::BindingResource::Sampler(&sampler),
                     },
                 ],
@@ -601,9 +592,7 @@ impl RenderPass for WaterSurfacePass {
         // Store volume count before creating render pass
         let volume_count = ctx.frame.water_volume_count;
 
-        // Render water surfaces
-        // Note: No depth attachment because we sample from depth texture in shader
-        // Manual depth testing is done in fragment shader (lines 239-247 in water_surface.wgsl)
+        // Render water surfaces with depth testing (but no depth writes)
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("WaterSurface"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -615,7 +604,14 @@ impl RenderPass for WaterSurfacePass {
                     store: wgpu::StoreOp::Store,
                 },
             })],
-            depth_stencil_attachment: None, // Can't use depth attachment while sampling depth texture
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: ctx.depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Load, // Load existing depth
+                    store: wgpu::StoreOp::Store, // Keep depth unchanged (we don't write)
+                }),
+                stencil_ops: None,
+            }),
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,

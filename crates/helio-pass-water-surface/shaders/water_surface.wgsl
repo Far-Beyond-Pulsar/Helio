@@ -50,10 +50,9 @@ struct GpuWaterVolume {
 @group(0) @binding(1) var<uniform> params: WaterParams;
 
 // Bind group 1
-@group(1) @binding(0) var depth_tex: texture_depth_2d;
-@group(1) @binding(1) var gbuffer_normal: texture_2d<f32>;
-@group(1) @binding(2) var scene_color: texture_2d<f32>;
-@group(1) @binding(3) var linear_sampler: sampler;
+@group(1) @binding(0) var gbuffer_normal: texture_2d<f32>;
+@group(1) @binding(1) var scene_color: texture_2d<f32>;
+@group(1) @binding(2) var linear_sampler: sampler;
 
 // Bind group 2
 @group(2) @binding(0) var<storage, read> water_volumes: array<GpuWaterVolume>;
@@ -225,46 +224,25 @@ fn world_to_screen_uv(world_pos: vec3<f32>) -> vec2<f32> {
     return ndc * 0.5 + 0.5;
 }
 
-/// Reconstruct world position from screen UV and depth
-fn reconstruct_world_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
-    let ndc = vec2<f32>(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
-    let clip_pos = vec4<f32>(ndc, depth, 1.0);
-    let world_pos_h = camera.inv_view_proj * clip_pos;
-    return world_pos_h.xyz / world_pos_h.w;
-}
-
-/// Screen-space reflection ray-marching
+/// Simplified screen-space reflection (without depth buffer)
 fn screen_space_reflection(
     origin: vec3<f32>,
     reflect_dir: vec3<f32>,
     max_steps: u32,
     step_size: f32
 ) -> vec4<f32> {
-    var ray_pos = origin;
-    let ray_step = reflect_dir * step_size;
+    // Simple reflection: offset screen UV based on reflection direction
+    let view_space_reflect = (camera.view * vec4<f32>(reflect_dir, 0.0)).xyz;
+    let reflect_offset = view_space_reflect.xy * 0.1; // Scale for subtle distortion
 
-    for (var i = 0u; i < max_steps; i++) {
-        ray_pos += ray_step;
+    let base_uv = world_to_screen_uv(origin);
+    let reflect_uv = clamp(base_uv + reflect_offset, vec2<f32>(0.0), vec2<f32>(1.0));
 
-        let uv = world_to_screen_uv(ray_pos);
-        if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
-            break; // Ray left screen
-        }
+    // Sample scene color at reflected UV
+    let color = textureSample(scene_color, linear_sampler, reflect_uv);
 
-        let scene_depth = textureSample(depth_tex, linear_sampler, uv);
-        let scene_world = reconstruct_world_pos(uv, scene_depth);
-        let ray_depth = distance(camera.position_near.xyz, ray_pos);
-        let scene_depth_dist = distance(camera.position_near.xyz, scene_world);
-
-        if ray_depth > scene_depth_dist && ray_depth - scene_depth_dist < step_size * 2.0 {
-            // Hit! Sample scene color
-            let color = textureSample(scene_color, linear_sampler, uv);
-            return vec4<f32>(color.rgb, 1.0);
-        }
-    }
-
-    // Miss: return sky color
-    return vec4<f32>(0.5, 0.7, 1.0, 0.0);
+    // Return with full confidence (always hit)
+    return vec4<f32>(color.rgb, 1.0);
 }
 
 /// Fresnel-Schlick approximation
@@ -314,18 +292,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         }
     }
 
-    // Screen UV of this fragment
-    let screen_uv = world_to_screen_uv(surface_pos);
-
-    // Depth test: check if water is in front of scene geometry
-    let scene_depth = textureSample(depth_tex, linear_sampler, screen_uv);
-    let scene_world = reconstruct_world_pos(screen_uv, scene_depth);
-    let water_depth = distance(camera.position_near.xyz, surface_pos);
-    let scene_depth_dist = distance(camera.position_near.xyz, scene_world);
-
-    if water_depth > scene_depth_dist {
-        discard; // Water behind scene geometry
-    }
+    // Screen UV for sampling scene color/effects
+    let screen_uv = world_to_screen_uv(in.world_pos);
 
     // View direction
     let view_dir = normalize(camera.position_near.xyz - surface_pos);

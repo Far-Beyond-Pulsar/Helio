@@ -240,11 +240,11 @@ impl ApplicationHandler for App {
             }),
         ));
 
-        // Add a small water pool in the center of the cathedral
+        // Add a small water pool in the center of the cathedral (raised above floor)
         let pool = helio::WaterVolumeDescriptor {
-            bounds_min: [-5.0, -3.0, -5.0],  // 10x10 meter pool, 3 meters deep
-            bounds_max: [5.0, 3.0, 5.0],
-            surface_height: 0.0,  // Surface at Y=0
+            bounds_min: [-5.0, 0.5, -5.0],  // 10x10 meter pool, raised 0.5m above floor
+            bounds_max: [5.0, 2.0, 5.0],    // 1.5m tall pool container
+            surface_height: 1.5,  // Water surface at 1.5m above floor
             wave_amplitude: 0.3,
             wave_frequency: 0.4,
             wave_speed: 0.8,
