@@ -59,18 +59,23 @@ struct WaterVolume {
 struct VertexOutput {
     @builtin(position) position: vec4f,
     @location(0) worldPos: vec3f,
-    @location(1) depth: f32,
+    @location(1) simUV: vec2f,      // UV for sampling heightfield
+    @location(2) fadeAlpha: f32,    // Fade factor for vertices above water
+}
+
+// Helper to convert world XZ to simulation UV
+fn worldToSimUV(worldXZ: vec2f, bmin: vec3f, bmax: vec3f) -> vec2f {
+    return vec2f(
+        (worldXZ.x - bmin.x) / (bmax.x - bmin.x),
+        (worldXZ.y - bmin.z) / (bmax.z - bmin.z)
+    );
 }
 
 // Transform unit box vertex to water volume bounds
 fn boxToWorld(boxPos: vec3f, bmin: vec3f, bmax: vec3f, surface_h: f32) -> vec3f {
-    // Box vertices are in [-1, 1] range
-    // For X and Z: map to full water volume bounds
-    // For Y: map from bounds_min.y to surface_height (NOT bounds_max.y)
-    //        The surface shader handles the displaced top surface
     return vec3f(
         mix(bmin.x, bmax.x, (boxPos.x + 1.0) * 0.5),
-        mix(bmin.y, surface_h, (boxPos.y + 1.0) * 0.5),  // Stop at undisplaced surface
+        mix(bmin.y, surface_h, (boxPos.y + 1.0) * 0.5),
         mix(bmin.z, bmax.z, (boxPos.z + 1.0) * 0.5),
     );
 }
@@ -80,76 +85,128 @@ fn vs_main(@location(0) position: vec3f) -> VertexOutput {
     let vol = volumes[0];
     let bmin = vol.bounds_min.xyz;
     let bmax = vol.bounds_max.xyz;
-    let surface_h = vol.bounds_max.w;  // Undisplaced water surface level
+    let surface_h = vol.bounds_max.w;
     
     let worldPos = boxToWorld(position, bmin, bmax, surface_h);
+    
+    // Sample heightfield to get displaced water surface at this XZ position
+    let simUV = worldToSimUV(worldPos.xz, bmin, bmax);
+    let heightfield_sample = textureSampleLevel(water_sim, water_samp, simUV, 0.0);
+    let displaced_height = surface_h + heightfield_sample.r * (surface_h - bmin.y);
+    
+    // Fade out vertices that are above the displaced water surface
+    let height_diff = displaced_height - worldPos.y;
+    let fadeAlpha = smoothstep(-0.2, 0.5, height_diff);  // Fade zone
+    
     let clipPos = camera.view_proj * vec4f(worldPos, 1.0);
 
     var out: VertexOutput;
     out.position = clipPos;
     out.worldPos = worldPos;
-    out.depth = clipPos.z / clipPos.w;
+    out.simUV = simUV;
+    out.fadeAlpha = fadeAlpha;
     return out;
+}
+
+// Reconstruct world position from screen UV + depth
+fn reconstruct_world_pos(uv: vec2f, depth: f32) -> vec3f {
+    let ndc_xy = vec2f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let world_h = camera.inv_view_proj * vec4f(ndc_xy, depth, 1.0);
+    return world_h.xyz / world_h.w;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    // Discard fragments above water surface
+    if in.fadeAlpha < 0.01 {
+        discard;
+    }
+    
     let vol = volumes[0];
     let camera_pos = camera.position_near.xyz;
     let bmin = vol.bounds_min.xyz;
     let bmax = vol.bounds_max.xyz;
     let surface_h = vol.bounds_max.w;
     
-    // Calculate viewing angle (to make walls more transparent when viewed edge-on)
-    let view_dir = normalize(camera_pos - in.worldPos);
-    let surface_normal_approx = vec3f(0.0, 1.0, 0.0);  // Approximate up direction
-    let view_angle = abs(dot(view_dir, surface_normal_approx));
+    // Determine if floor or wall
+    let is_floor = abs(in.worldPos.y - bmin.y) < 0.05;
     
-    // Distance from camera for fog/absorption
+    // Calculate geometric normal (what direction this face is facing)
+    var geom_normal: vec3f;
+    if is_floor {
+        geom_normal = vec3f(0.0, 1.0, 0.0);
+    } else {
+        // For walls, normal points away from water center horizontally
+        let center_xz = (bmin.xz + bmax.xz) * 0.5;
+        let to_center = vec3f(center_xz.x - in.worldPos.x, 0.0, center_xz.y - in.worldPos.z);
+        geom_normal = normalize(-to_center);
+    }
+    
+    // For floor, get detailed water normal from heightfield
+    // For walls, use geometric normal with subtle wave perturbation
+    var water_normal: vec3f;
+    if is_floor {
+        // Floor uses full water surface normal (5 iterations like surface shader)
+        var uv = in.simUV;
+        var info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
+        for (var i = 0; i < 5; i++) {
+            uv += info.ba * 0.005;
+            info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
+        }
+        let ba = vec2f(info.b, info.a);
+        water_normal = vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
+    } else {
+        // Walls use geometric normal with subtle wave influence
+        let info = textureSampleLevel(water_sim, water_samp, in.simUV, 0.0);
+        let wave_perturb = vec2f(info.b, info.a) * 0.2;  // Reduced influence
+        water_normal = normalize(geom_normal + vec3f(wave_perturb.x, 0.0, wave_perturb.y));
+    }
+    
+    // Screen-space refraction using appropriate normal
+    let screen_uv = in.position.xy * viewport.zw;
+    let refract_str = vol.reflection_refraction.y;
+    let refract_uv = clamp(screen_uv + water_normal.xz * refract_str,
+                          vec2f(0.001), vec2f(0.999));
+    
+    // Sample background scene through water
+    var refracted = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
+    
+    // Calculate water depth for absorption
+    let info = textureSampleLevel(water_sim, water_samp, in.simUV, 0.0);
+    let water_surface_y = surface_h + info.r * (surface_h - bmin.y);
+    let depth_below_surface = max(0.0, water_surface_y - in.worldPos.y);
+    
+    // Beer-Lambert absorption - apply water color tint
+    refracted *= vol.water_color.rgb;
+    
+    // Additional depth-based absorption
+    let extinction = vol.extinction.rgb;
+    let absorption = exp(-extinction * depth_below_surface * 0.5);
+    refracted *= absorption;
+    
+    // Sample and apply caustics
+    let caustics_sample = textureSampleLevel(caustics_tex, shared_samp, in.simUV, 0.0);
+    let caustics_intensity = caustics_sample.r * vol.sim_params.y;
+    let caustic_strength = select(0.5, 1.0, is_floor);
+    refracted += vec3f(caustics_intensity) * caustic_strength * 0.5;
+    
+    // Calculate alpha with Fresnel-like effect
+    let view_dir = normalize(in.worldPos - camera_pos);
+    let view_angle = abs(dot(-view_dir, geom_normal));
+    let fresnel_factor = pow(1.0 - view_angle, 2.0);
+    
+    // Base alpha - walls and floor both fairly opaque now
+    var alpha = select(0.85, 0.9, is_floor);
+    
+    // Apply Fresnel - more opaque at grazing angles
+    alpha = mix(alpha, 1.0, fresnel_factor * 0.3);
+    
+    // Apply height-based fade from vertex shader
+    alpha *= in.fadeAlpha;
+    
+    // Distance fade for far geometry
     let view_dist = length(in.worldPos - camera_pos);
+    alpha *= smoothstep(50.0, 5.0, view_dist);
     
-    // Normalize position within volume [0,1]
-    let normPos = (in.worldPos - bmin) / (bmax - bmin);
-    
-    // Check if we're looking at a vertical wall (X or Z aligned)
-    let is_vertical = abs(in.worldPos.y - bmin.y) > 0.01 && abs(in.worldPos.y - surface_h) > 0.01;
-    
-    // Sample caustics - project from above onto floor and walls
-    let caustics_uv = normPos.xz;
-    let caustics_sample = textureSample(caustics_tex, shared_samp, caustics_uv);
-    let caustics_intensity = caustics_sample.r;
-    
-    // Base underwater color with depth
-    let depth_ratio = normPos.y;  // 0 at bottom, 1 at surface
-    let shallow_color = vec3f(0.3, 0.5, 0.6);  // Lighter blue-green near surface
-    let deep_color = vec3f(0.05, 0.15, 0.25);   // Darker blue in depths
-    var color = mix(deep_color, shallow_color, depth_ratio);
-    
-    // Apply caustics (stronger on floor, subtle on walls)
-    let caustic_strength = select(0.3, 1.0, !is_vertical);  // Weaker on walls
-    let caustic_color = vec3f(0.7, 0.85, 1.0) * caustics_intensity * vol.sim_params.y;
-    color += caustic_color * caustic_strength;
-    
-    // Ambient light scattered from surface (more at shallow depths)
-    let scatter = vec3f(0.2, 0.3, 0.4) * depth_ratio * 0.5;
-    color += scatter;
-    
-    // Distance fog for depth perception
-    let fog_factor = exp(-view_dist * 0.08);
-    color *= fog_factor;
-    
-    // Make walls very transparent - they're just for volumetric effect
-    // The surface shader handles the main refraction
-    var alpha = 0.15;  // Very subtle
-    
-    // Increase opacity for bottom floor (more visible)
-    alpha = select(alpha, 0.35, !is_vertical);
-    
-    // Fade out at edges when viewed from grazing angles
-    alpha *= smoothstep(0.0, 0.3, view_angle);
-    
-    // Reduce opacity with distance (distant walls fade away)
-    alpha *= smoothstep(30.0, 5.0, view_dist);
-    
-    return vec4f(color, alpha);
+    return vec4f(refracted, alpha);
 }
