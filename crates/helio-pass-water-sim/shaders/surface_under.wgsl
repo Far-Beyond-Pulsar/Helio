@@ -193,14 +193,38 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     }
     // else: total internal reflection — above_color stays black (only reflected)
 
-    // ── Reflected ray — sample real underwater scene ──────────────────────────
+    // ── Reflected ray — SSR for real underwater scene ─────────────────────────
     let reflected_ray = reflect(incoming, normal);
     let screen_uv     = in.position.xy * viewport.zw;
-    let distort_str   = vol.reflection_refraction.y;
-    let reflect_uv    = clamp(screen_uv + normal.xz * distort_str,
-                              vec2f(0.001), vec2f(0.999));
-    let below_color   = textureSampleLevel(scene_color, shared_samp, reflect_uv, 0.0).rgb
-                        * vec3f(0.4, 0.9, 1.0);  // UNDERwaterColor tint (reference)
+    var below_color   = vec3f(0.0);
+
+    // Check if SSR is enabled for this water volume
+    let ssr_enabled = vol.ssr_params.x > 0.5;
+
+    if ssr_enabled {
+        // Convert sim-space to world-space for SSR
+        let surface_h = vol.bounds_max.w;
+        let world_pos = simToWorld(in.simPos, vol.bounds_min.xyz, vol.bounds_max.xyz, surface_h);
+
+        // Extract SSR parameters from volume
+        let max_steps = u32(vol.ssr_params.y);
+        let step_size = vol.ssr_params.z;
+        let thickness = vol.ssr_params.w;
+
+        // Trace SSR - returns (0,0,0) if no hit
+        below_color = trace_ssr(world_pos, reflected_ray, screen_uv, max_steps, step_size, thickness);
+    }
+
+    // Fallback to screen-space distortion if SSR disabled or missed
+    if dot(below_color, below_color) < 0.001 {
+        let distort_str = vol.reflection_refraction.y;
+        let reflect_uv  = clamp(screen_uv + normal.xz * distort_str,
+                                vec2f(0.001), vec2f(0.999));
+        below_color = textureSampleLevel(scene_color, shared_samp, reflect_uv, 0.0).rgb;
+    }
+
+    // Apply underwater color tint
+    below_color *= vec3f(0.4, 0.9, 1.0);  // UNDERwaterColor tint (reference)
 
     // ── Blend — exact reference formula for underwater view ───────────────────
     let final_color = mix(below_color, above_color,
