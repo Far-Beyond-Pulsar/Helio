@@ -10,6 +10,7 @@ struct Camera {
     view_proj:      mat4x4f,
     inv_view_proj:  mat4x4f,
     position_near:  vec4f,   // xyz=eye world position, w=near plane
+    forward_far:    vec4f,
     jitter_frame:   vec4f,
     prev_view_proj: mat4x4f,
 }
