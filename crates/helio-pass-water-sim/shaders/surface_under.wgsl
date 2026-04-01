@@ -41,7 +41,6 @@ struct WaterVolume {
 @group(0) @binding(5) var shared_samp:   sampler;
 @group(0) @binding(6) var scene_color:   texture_2d<f32>;
 @group(0) @binding(7) var<uniform>       viewport:    vec4f;
-@group(0) @binding(8) var depth_tex:     texture_depth_2d;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -96,11 +95,7 @@ fn sky_color(ray: vec3f, light_dir: vec3f) -> vec3f {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    // Manual depth test (same as surface_above).
-    let depth_dims  = vec2f(textureDimensions(depth_tex));
-    let depth_coord = vec2<i32>(in.position.xy * depth_dims * viewport.zw);
-    let scene_depth = textureLoad(depth_tex, depth_coord, 0);
-    if in.position.z >= scene_depth { discard; }
+
 
     let vol       = volumes[0];
     let IOR_AIR   = 1.0;
