@@ -1,9 +1,19 @@
 // Water surface — above-water view.
-// Exact port of webgpu-water surface.vert + surface-above.frag.wgsl.
 //
-// VS displaces the grid mesh by the sim heightfield.
-// FS: iterative UV refinement, Fresnel blend of reflected / refracted rays,
-//     procedural tile texture for pool walls, procedural sky + sun specular.
+// Vertex:   Displaces the 128×128 grid by the sim heightfield (identical to reference).
+// Fragment: Screen-space refraction of the real opaque scene behind/below the surface,
+//           Fresnel-blended with a procedural sky reflection + sun specular.
+//           No pool geometry — integrates cleanly with any scene.
+//
+// Bindings
+//   0  camera           uniform
+//   1  water_volumes    storage read
+//   2  water_sim        texture_2d<f32>  (RGBA16F: R=height B/A=normal.xz)
+//   3  water_samp       sampler          (linear, repeat  — for sim)
+//   4  caustics_tex     texture_2d<f32>  (unused here, kept for layout compatibility)
+//   5  shared_samp      sampler          (linear, clamp   — for scene color)
+//   6  scene_color      texture_2d<f32>  (opaque scene rendered before this pass)
+//   7  viewport         uniform vec4f    (xy=px size, zw=1/size)
 
 struct Camera {
     view:           mat4x4f,
@@ -17,205 +27,135 @@ struct Camera {
 }
 
 struct WaterVolume {
-    bounds_min:            vec4f,  // xyz=min, w=unused
-    bounds_max:            vec4f,  // xyz=max, w=surface_height
+    bounds_min:            vec4f,  // xyz=min corner
+    bounds_max:            vec4f,  // xyz=max corner, w=surface_height
     wave_params:           vec4f,
     wave_direction:        vec4f,
-    water_color:           vec4f,
+    water_color:           vec4f,  // xyz=tint applied to refracted scene (Beer–Lambert)
     extinction:            vec4f,
-    reflection_refraction: vec4f,
+    reflection_refraction: vec4f,  // x=reflection_str, y=refraction_distortion_strength
     caustics_params:       vec4f,
     fog_params:            vec4f,
     sim_params:            vec4f,  // x=ior, y=causticIntensity, z=fresnelMin, w=density
-    shadow_params:         vec4f,  // x=rim, y=hitbox, z=ao
+    shadow_params:         vec4f,
     sun_direction:         vec4f,
     pad0: vec4f, pad1: vec4f, pad2: vec4f, pad3: vec4f,
 }
 
-@group(0) @binding(0) var<uniform>       camera:        Camera;
-@group(0) @binding(1) var<storage, read> water_volumes: array<WaterVolume>;
+@group(0) @binding(0) var<uniform>       camera:      Camera;
+@group(0) @binding(1) var<storage, read> volumes:     array<WaterVolume>;
 @group(0) @binding(2) var water_sim:     texture_2d<f32>;
 @group(0) @binding(3) var water_samp:    sampler;
 @group(0) @binding(4) var caustics_tex:  texture_2d<f32>;
-@group(0) @binding(5) var caustics_samp: sampler;
+@group(0) @binding(5) var shared_samp:   sampler;
+@group(0) @binding(6) var scene_color:   texture_2d<f32>;
+@group(0) @binding(7) var<uniform>       viewport:    vec4f;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
-    @location(0) worldPos: vec3f,  // sim-space position (identical to reference worldPos)
+    @location(0) simPos: vec3f,
 }
 
-// ── Coordinate helpers ────────────────────────────────────────────────────
-// sim Y=0 ↔ world surface_height,  sim Y=-1 ↔ world bmin.y
+// ── Coordinate helpers (identical to previous port) ───────────────────────────
 
 fn simToWorld(sim: vec3f, bmin: vec3f, bmax: vec3f, surface_h: f32) -> vec3f {
-    let pool_depth = surface_h - bmin.y;
+    let d = surface_h - bmin.y;
     return vec3f(
         bmin.x + (sim.x * 0.5 + 0.5) * (bmax.x - bmin.x),
-        surface_h + sim.y * pool_depth,
+        surface_h + sim.y * d,
         bmin.z + (sim.z * 0.5 + 0.5) * (bmax.z - bmin.z),
     );
 }
 
 fn worldToSim(world: vec3f, bmin: vec3f, bmax: vec3f, surface_h: f32) -> vec3f {
-    let pool_depth = surface_h - bmin.y;
+    let d = surface_h - bmin.y;
     return vec3f(
         (world.x - bmin.x) / (bmax.x - bmin.x) * 2.0 - 1.0,
-        (world.y - surface_h) / pool_depth,
+        (world.y - surface_h) / d,
         (world.z - bmin.z) / (bmax.z - bmin.z) * 2.0 - 1.0,
     );
 }
 
-// ── Vertex shader (exact port of surface.vert.wgsl) ───────────────────────
+// ── Vertex shader (identical to reference surface.vert) ───────────────────────
+
 @vertex
 fn vs_main(@location(0) position: vec3f) -> VertexOutput {
-    let vol  = water_volumes[0];
-    let bmin = vol.bounds_min.xyz;
-    let bmax = vol.bounds_max.xyz;
+    let vol      = volumes[0];
+    let bmin     = vol.bounds_min.xyz;
+    let bmax     = vol.bounds_max.xyz;
     let surface_h = vol.bounds_max.w;
 
     let uv   = position.xy * 0.5 + 0.5;
     let info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
 
-    // XY grid → XZ sim plane, Y = wave height (reference: pos = position.xzy; pos.y = info.r)
-    var simPos = vec3f(position.x, info.r, position.y);
-
-    // Transform to world for clip-space only; fragment works in sim space
+    var simPos   = vec3f(position.x, info.r, position.y);
     let worldPos = simToWorld(simPos, bmin, bmax, surface_h);
 
     var out: VertexOutput;
     out.position = camera.view_proj * vec4f(worldPos, 1.0);
-    out.worldPos = simPos;  // pass sim-space coords as "worldPos" matching reference naming
+    out.simPos   = simPos;
     return out;
 }
 
-// ── Fragment helpers ──────────────────────────────────────────────────────
+// ── Procedural sky + sun for reflected rays ───────────────────────────────────
+// Matches the reference's sky appearance without requiring a cubemap.
 
-fn intersectCube(origin: vec3f, ray: vec3f, cubeMin: vec3f, cubeMax: vec3f) -> vec2f {
-    let tMin  = (cubeMin - origin) / ray;
-    let tMax  = (cubeMax - origin) / ray;
-    let t1    = min(tMin, tMax);
-    let t2    = max(tMin, tMax);
-    let tNear = max(max(t1.x, t1.y), t1.z);
-    let tFar  = min(min(t2.x, t2.y), t2.z);
-    return vec2f(tNear, tFar);
+fn sky_color(ray: vec3f, light_dir: vec3f) -> vec3f {
+    let up     = clamp(ray.y, 0.0, 1.0);
+    let horizon = vec3f(0.80, 0.90, 1.00);
+    let zenith  = vec3f(0.10, 0.30, 0.80);
+    let sky     = mix(horizon, zenith, up * up);
+    // Sun disc — same exponent and colour as the reference (5000, 10/8/6)
+    let spec    = pow(max(0.0, dot(normalize(light_dir), ray)), 5000.0);
+    return sky + vec3f(spec) * vec3f(10.0, 8.0, 6.0);
 }
 
-// Procedural pool tile (replaces watertiles.jpg)
-fn tile_color(uv: vec2f) -> vec3f {
-    let t     = fract(uv * 8.0);
-    let grout = max(step(0.93, t.x), step(0.93, t.y));
-    return mix(vec3f(0.82, 0.84, 0.86), vec3f(0.58, 0.60, 0.62), grout);
-}
+// ── Fragment shader ───────────────────────────────────────────────────────────
 
-// getWallColor — exact port of functions.wgsl getWallColor (sphere removed)
-fn getWallColor(point: vec3f, IOR_WATER: f32, poolHeight: f32, lightDir: vec3f,
-                rimShadow: f32) -> vec3f {
-    // Tile colour matching reference UV formulas
-    var wallColor: vec3f;
-    var normal = vec3f(0.0, 1.0, 0.0);
-    if abs(point.x) > 0.999 {
-        wallColor = tile_color(point.yz * 0.5 + vec2f(1.0, 0.5));
-        normal    = vec3f(-point.x, 0.0, 0.0);
-    } else if abs(point.z) > 0.999 {
-        wallColor = tile_color(point.yx * 0.5 + vec2f(1.0, 0.5));
-        normal    = vec3f(0.0, 0.0, -point.z);
-    } else {
-        wallColor = tile_color(point.xz * 0.5 + 0.5);
-    }
-
-    // Ambient occlusion (reference: scale = 0.5 / length(point))
-    var scale = 0.5 / max(0.001, length(point));
-
-    // Refracted sunlight
-    let refractedLight = -refract(-lightDir, vec3f(0.0, 1.0, 0.0), 1.0 / IOR_WATER);
-    let diffuse        = max(0.0, dot(refractedLight, normal));
-
-    let info = textureSampleLevel(water_sim, water_samp, point.xz * 0.5 + 0.5, 0.0);
-    if point.y < info.r {
-        let causticUV = 0.75 * (point.xz - point.y * refractedLight.xz / refractedLight.y) * 0.5 + 0.5;
-        let caustic   = textureSampleLevel(caustics_tex, caustics_samp, causticUV, 0.0);
-        scale += diffuse * caustic.r * 2.0 * caustic.g;
-    } else {
-        let t = intersectCube(point, refractedLight,
-                              vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-        let s = 1.0 / (1.0 + exp(
-            -200.0 / (1.0 + 10.0 * (t.y - t.x)) *
-            (point.y + refractedLight.y * t.y - 2.0 / 12.0)
-        ));
-        scale += diffuse * s * 0.5;
-    }
-    return wallColor * scale;
-}
-
-// getSurfaceRayColor — exact port of surface-above.frag getSurfaceRayColor
-fn getSurfaceRayColor(origin: vec3f, ray: vec3f, waterColor: vec3f, IOR_WATER: f32,
-                      poolHeight: f32, lightDir: vec3f, rimShadow: f32,
-                      pool_rim_sim_y: f32) -> vec3f {
-    if ray.y < 0.0 {
-        // Ray going down — hits pool floor / lower walls
-        let t     = intersectCube(origin, ray, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-        var color = getWallColor(origin + ray * t.y, IOR_WATER, poolHeight, lightDir, rimShadow);
-        return color * waterColor;
-    } else {
-        // Ray going up — may hit upper walls or escape to sky
-        let t   = intersectCube(origin, ray, vec3f(-1.0, -poolHeight, -1.0), vec3f(1.0, 2.0, 1.0));
-        let hit = origin + ray * t.y;
-        if hit.y < pool_rim_sim_y {
-            return getWallColor(hit, IOR_WATER, poolHeight, lightDir, rimShadow);
-        } else {
-            // Procedural sky + sun specular (replaces reference skybox cubemap)
-            let sunDir = normalize(lightDir);
-            let spec   = pow(max(0.0, dot(sunDir, ray)), 5000.0);
-            let sky    = mix(vec3f(0.7, 0.8, 1.0), vec3f(0.2, 0.4, 0.8), max(0.0, ray.y));
-            return sky + vec3f(spec) * vec3f(10.0, 8.0, 6.0);
-        }
-    }
-}
-
-// ── Fragment shader (exact port of surface-above.frag.wgsl) ──────────────
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4f {
-    let vol        = water_volumes[0];
-    let IOR_AIR    = 1.0;
-    let IOR_WATER  = vol.sim_params.x;
-    let poolHeight = 1.0;
-    let lightDir   = normalize(vol.sun_direction.xyz);
+    let vol       = volumes[0];
+    let IOR_AIR   = 1.0;
+    let IOR_WATER = vol.sim_params.x;
+    let light_dir = normalize(vol.sun_direction.xyz);
 
-    // Dynamic pool rim sim-Y for sky threshold
-    let pool_depth    = vol.bounds_max.w - vol.bounds_min.y;
-    let pool_rim_sim_y = (vol.bounds_max.y - vol.bounds_max.w) / pool_depth;
-
-    // Iterative UV refinement (5 iterations, reference: info.ba * 0.005)
-    var uv   = in.worldPos.xz * 0.5 + 0.5;
+    // ── Normal from sim — 5-iteration UV refinement (identical to reference) ──
+    var uv   = in.simPos.xz * 0.5 + 0.5;
     var info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
     for (var i = 0; i < 5; i++) {
         uv  += info.ba * 0.005;
         info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
     }
-
-    // Normal from BA channels (exactly as reference)
     let ba     = vec2f(info.b, info.a);
     let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
 
-    // Camera eye position in sim space (inverse of simToWorld)
-    let surface_h  = vol.bounds_max.w;
-    let eyeSim     = worldToSim(camera.position_near.xyz, vol.bounds_min.xyz, vol.bounds_max.xyz, surface_h);
+    // ── Camera ray in sim space (identical to reference) ──────────────────────
+    let surface_h = vol.bounds_max.w;
+    let eye_sim   = worldToSim(camera.position_near.xyz,
+                                vol.bounds_min.xyz, vol.bounds_max.xyz, surface_h);
+    let incoming  = normalize(in.simPos - eye_sim);
 
-    // Ray from camera to surface point — all in sim space (reference: worldPos - eyePosition)
-    let incomingRay  = normalize(in.worldPos - eyeSim);
-    let reflectedRay = reflect(incomingRay, normal);
-    let refractedRay = refract(incomingRay, normal, IOR_AIR / IOR_WATER);
-    let fresnel      = mix(vol.sim_params.z, 1.0, pow(1.0 - max(0.0, dot(normal, -incomingRay)), 3.0));
+    // ── Fresnel (identical to reference formula) ──────────────────────────────
+    let fresnel = mix(vol.sim_params.z, 1.0,
+                      pow(1.0 - max(0.0, dot(normal, -incoming)), 3.0));
 
-    let ABOVEwaterColor = vec3f(0.25, 1.0, 1.25);
+    // ── Screen-space refraction ───────────────────────────────────────────────
+    // Perturb screen UV by the water normal's horizontal components to
+    // distort the real scene behind/below the surface.
+    let screen_uv   = in.position.xy * viewport.zw;
+    let refract_str = vol.reflection_refraction.y;
+    let refract_uv  = clamp(screen_uv + normal.xz * refract_str,
+                            vec2f(0.001), vec2f(0.999));
+    var refracted   = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
 
-    let reflectedColor = getSurfaceRayColor(in.worldPos, reflectedRay, ABOVEwaterColor,
-                                            IOR_WATER, poolHeight, lightDir,
-                                            vol.shadow_params.x, pool_rim_sim_y);
-    let refractedColor = getSurfaceRayColor(in.worldPos, refractedRay, ABOVEwaterColor,
-                                            IOR_WATER, poolHeight, lightDir,
-                                            vol.shadow_params.x, pool_rim_sim_y);
+    // Beer–Lambert water colour absorption
+    refracted *= vol.water_color.rgb;
 
-    let finalColor = mix(refractedColor, reflectedColor, fresnel);
-    return vec4f(finalColor, 1.0);
+    // ── Reflection: real sky + sun specular ───────────────────────────────────
+    let reflected_ray = reflect(incoming, normal);
+    let reflected     = sky_color(reflected_ray, light_dir);
+
+    // ── Fresnel blend ─────────────────────────────────────────────────────────
+    return vec4f(mix(refracted, reflected, fresnel), 1.0);
 }
+

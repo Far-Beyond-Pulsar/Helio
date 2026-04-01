@@ -3,8 +3,11 @@
 //! This single pass bundles:
 //!  - The 256x256 `Rgba16Float` shallow-water wave simulation (ping-pong)
 //!  - Caustics projection onto a `Rgba16Float` accumulation texture
-//!  - Pool walls/floor rendering with caustics and rim shadows
 //!  - Water surface rendering (above-water Fresnel + below-water view)
+//!
+//! Pool walls/floor are NOT rendered as explicit geometry — the surface shaders
+//! ray-march to the pool interior for reflections and refractions internally,
+//! giving an identical visual result without separate pool draw calls.
 //!
 //! Execute order each frame:
 //!   1. (optional) AABB hitbox displacement
@@ -12,8 +15,7 @@
 //!   3. 2x wave-propagation update steps
 //!   4. Normal recomputation
 //!   5. Caustics projection -> caustics texture
-//!   6. Pool walls/floor render -> ctx.target
-//!   7. Water surface render (above + below faces) -> ctx.target
+//!   6. Water surface render (above + below faces) -> ctx.target
 
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
@@ -83,39 +85,6 @@ fn make_surface_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32)
     (vbuf, ibuf, indices.len() as u32)
 }
 
-fn make_pool_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
-    let verts: &[[f32; 3]] = &[
-        // Floor (y = -1)
-        [-1.0, -1.0, -1.0], [1.0, -1.0, -1.0], [1.0, -1.0, 1.0], [-1.0, -1.0, 1.0],
-        // +X wall
-        [1.0, -1.0, -1.0], [1.0, 1.0, -1.0], [1.0, 1.0, 1.0], [1.0, -1.0, 1.0],
-        // -X wall
-        [-1.0, -1.0, 1.0], [-1.0, 1.0, 1.0], [-1.0, 1.0, -1.0], [-1.0, -1.0, -1.0],
-        // +Z wall
-        [-1.0, -1.0, 1.0], [1.0, -1.0, 1.0], [1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
-        // -Z wall
-        [1.0, -1.0, -1.0], [-1.0, -1.0, -1.0], [-1.0, 1.0, -1.0], [1.0, 1.0, -1.0],
-    ];
-    let indices: &[u32] = &[
-        0, 1, 2,   0, 2, 3,    // floor
-        4, 5, 6,   4, 6, 7,    // +X wall
-        8, 9, 10,  8, 10, 11,  // -X wall
-        12, 13, 14, 12, 14, 15, // +Z wall
-        16, 17, 18, 16, 18, 19, // -Z wall
-    ];
-    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Water Pool VB"),
-        contents: bytemuck::cast_slice(verts),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Water Pool IB"),
-        contents: bytemuck::cast_slice(indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    (vbuf, ibuf, indices.len() as u32)
-}
-
 // ---- Pass struct ----------------------------------------------------------------
 
 pub struct WaterSimPass {
@@ -153,10 +122,6 @@ pub struct WaterSimPass {
     surface_ibuf: wgpu::Buffer,
     surface_index_count: u32,
 
-    pool_vbuf: wgpu::Buffer,
-    pool_ibuf: wgpu::Buffer,
-    pool_index_count: u32,
-
     _caustics_tex: wgpu::Texture,
     caustics_view: wgpu::TextureView,
     caustics_sampler: wgpu::Sampler,
@@ -167,15 +132,16 @@ pub struct WaterSimPass {
 
     // Rendering pipelines
     caustics_pipeline: wgpu::RenderPipeline,
-    pool_pipeline: wgpu::RenderPipeline,
     surface_above_pipeline: wgpu::RenderPipeline,
     surface_under_pipeline: wgpu::RenderPipeline,
+
+    // Fallback 1×1 black texture used when pre_aa is not yet available
+    _pre_aa_fallback_tex: wgpu::Texture,
+    pre_aa_fallback_view: wgpu::TextureView,
 
     // Cached bind groups (invalidated when key pointer changes)
     caustics_bg_key: Option<(usize, usize)>,
     caustics_bg: Option<wgpu::BindGroup>,
-    render_bg_key: Option<(usize, usize, usize)>,
-    render_bg: Option<wgpu::BindGroup>,
 }
 
 // Shared vertex buffer layout: packed [f32; 3] positions, location 0
@@ -480,6 +446,28 @@ impl WaterSimPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // scene_color: opaque scene rendered before this pass (for screen-space refraction)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // viewport: vec4f(px_w, px_h, 1/px_w, 1/px_h)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -504,6 +492,20 @@ impl WaterSimPass {
             ..Default::default()
         });
 
+        // --------------------------------------------------------- pre_aa fallback (1×1 black)
+        // Used when the opaque scene hasn't been rendered yet (e.g. water is the first pass).
+        let pre_aa_fallback_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water PreAA Fallback"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let pre_aa_fallback_view = pre_aa_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         // --------------------------------------------------------- rendering pipelines
         let caustics_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Caustics PL"),
@@ -519,10 +521,6 @@ impl WaterSimPass {
         let caustics_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Caustics Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/caustics.wgsl").into()),
-        });
-        let pool_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Pool Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/pool.wgsl").into()),
         });
         let surface_above_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Surface Above Shader"),
@@ -564,36 +562,6 @@ impl WaterSimPass {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let pool_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Water Pool Pipeline"),
-            layout: Some(&render_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &pool_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vbl.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &pool_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Front), // render inside of pool
                 ..Default::default()
             },
             depth_stencil: None,
@@ -664,7 +632,6 @@ impl WaterSimPass {
 
         // --------------------------------------------------------- meshes
         let (surface_vbuf, surface_ibuf, surface_index_count) = make_surface_mesh(device);
-        let (pool_vbuf, pool_ibuf, pool_index_count) = make_pool_mesh(device);
 
         Self {
             sim_bgl,
@@ -689,22 +656,18 @@ impl WaterSimPass {
             surface_vbuf,
             surface_ibuf,
             surface_index_count,
-            pool_vbuf,
-            pool_ibuf,
-            pool_index_count,
             _caustics_tex: caustics_tex,
             caustics_view,
             caustics_sampler,
             caustics_render_bgl,
             render_bgl,
             caustics_pipeline,
-            pool_pipeline,
             surface_above_pipeline,
             surface_under_pipeline,
+            _pre_aa_fallback_tex: pre_aa_fallback_tex,
+            pre_aa_fallback_view,
             caustics_bg_key: None,
             caustics_bg: None,
-            render_bg_key: None,
-            render_bg: None,
         }
     }
 
@@ -980,7 +943,7 @@ impl RenderPass for WaterSimPass {
             }
         }
 
-        // ---- 6 & 7. Pool + surface rendering --------------------------------
+        // ---- 6 & 7. Surface rendering -----------------------------------------------
         // NOTE: use self.caustics_view directly — it was filled in stage 5 this
         // same frame. ctx.frame.water_caustics is None during execute() because
         // publish() hasn't run yet, so we must NOT guard on it here.
@@ -988,52 +951,35 @@ impl RenderPass for WaterSimPass {
             if let Some(vols_buf) = ctx.frame.water_volumes {
                 let sim_view = if self.front { &self.view_a } else { &self.view_b };
 
-                let cam_key = ctx.scene.camera as *const wgpu::Buffer as usize;
-                let vol_key = vols_buf as *const wgpu::Buffer as usize;
-                let sim_ptr = sim_view as *const wgpu::TextureView as usize;
-                let new_key = (cam_key, vol_key, sim_ptr);
+                // Resolve the opaque scene color; fall back to black if not yet published.
+                let scene_view: &wgpu::TextureView = ctx.frame.pre_aa
+                    .unwrap_or(&self.pre_aa_fallback_view);
 
-                if self.render_bg_key != Some(new_key) {
-                    self.render_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Water Render BG"),
-                        layout: &self.render_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: vols_buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(sim_view) },
-                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
-                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.caustics_view) },
-                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.caustics_sampler) },
-                        ],
-                    }));
-                    self.render_bg_key = Some(new_key);
-                }
+                // Per-frame viewport uniform: (w, h, 1/w, 1/h)
+                let vp = [
+                    ctx.width  as f32, ctx.height as f32,
+                    1.0 / ctx.width  as f32, 1.0 / ctx.height as f32,
+                ];
+                let viewport_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Water Viewport"),
+                    contents: bytemuck::cast_slice(&vp),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
 
-                let render_bg = self.render_bg.as_ref().unwrap();
-
-                // -- Pool walls/floor --
-                let pool_attachments = [Some(wgpu::RenderPassColorAttachment {
-                    view: ctx.target,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                })];
-                let desc = wgpu::RenderPassDescriptor {
-                    label: Some("Water Pool"),
-                    color_attachments: &pool_attachments,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                };
-                {
-                    let mut pass = ctx.begin_render_pass(&desc);
-                    pass.set_pipeline(&self.pool_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
-                    pass.set_vertex_buffer(0, self.pool_vbuf.slice(..));
-                    pass.set_index_buffer(self.pool_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..self.pool_index_count, 0, 0..1);
-                }
+                let render_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Water Render BG"),
+                    layout: &self.render_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: vols_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(sim_view) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.caustics_view) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.caustics_sampler) },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(scene_view) },
+                        wgpu::BindGroupEntry { binding: 7, resource: viewport_buf.as_entire_binding() },
+                    ],
+                });
 
                 // -- Water surface (above-water front faces) --
                 let surf_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -1053,7 +999,7 @@ impl RenderPass for WaterSimPass {
                 {
                     let mut pass = ctx.begin_render_pass(&desc);
                     pass.set_pipeline(&self.surface_above_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
+                    pass.set_bind_group(0, &render_bg, &[]);
                     pass.set_vertex_buffer(0, self.surface_vbuf.slice(..));
                     pass.set_index_buffer(self.surface_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
@@ -1077,7 +1023,7 @@ impl RenderPass for WaterSimPass {
                 {
                     let mut pass = ctx.begin_render_pass(&desc);
                     pass.set_pipeline(&self.surface_under_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
+                    pass.set_bind_group(0, &render_bg, &[]);
                     pass.set_vertex_buffer(0, self.surface_vbuf.slice(..));
                     pass.set_index_buffer(self.surface_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
