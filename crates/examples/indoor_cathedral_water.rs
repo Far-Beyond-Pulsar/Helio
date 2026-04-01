@@ -22,9 +22,10 @@ mod v3_demo_common;
 mod demo_portal;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge, LightId, MeshId, Renderer, RendererConfig,
+    required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge,
+    LightId, MeshId, ObjectId, Renderer, RendererConfig, WaterHitboxDescriptor, WaterHitboxId,
 };
-use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
+use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light, sphere_mesh};
 
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
@@ -81,6 +82,35 @@ const PEW_COUNT: usize = 6;
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Build a WaterHitboxDescriptor for a sphere at `new_pos` (previously at `old_pos`).
+///
+/// The hitbox coordinate system is: X/Z normalized to [-1,1] over the pool half-extent,
+/// Y is relative to the water surface (0 = surface, negative = submerged).
+fn ball_aabb(
+    old_pos: glam::Vec3,
+    new_pos: glam::Vec3,
+    radius: f32,
+    surface_y: f32,
+    pool_half_xz: f32,
+) -> WaterHitboxDescriptor {
+    let to_sim = |p: glam::Vec3| -> ([f32; 3], [f32; 3]) {
+        let mn = [
+            (p.x - radius) / pool_half_xz,
+            (p.y - radius) - surface_y,
+            (p.z - radius) / pool_half_xz,
+        ];
+        let mx = [
+            (p.x + radius) / pool_half_xz,
+            (p.y + radius) - surface_y,
+            (p.z + radius) / pool_half_xz,
+        ];
+        (mn, mx)
+    };
+    let (old_min, old_max) = to_sim(old_pos);
+    let (new_min, new_max) = to_sim(new_pos);
+    WaterHitboxDescriptor { old_min, old_max, new_min, new_max, edge_softness: 0.15, strength: 1.2 }
+}
+
 fn main() {
     env_logger::init();
     let event_loop = EventLoop::new().expect("event loop");
@@ -126,6 +156,13 @@ struct AppState {
     // Chandelier bodies (chain + ring)
     _chandelier_chains: Vec<MeshId>,
     _chandelier_rings: Vec<MeshId>,
+
+    // Ball physics
+    ball_obj_id: ObjectId,
+    ball_hitbox_id: WaterHitboxId,
+    ball_pos: glam::Vec3,
+    ball_vel: glam::Vec3,
+    ball_prev_pos: glam::Vec3,
 
     cam_pos: glam::Vec3,
     cam_yaw: f32,
@@ -284,6 +321,39 @@ impl ApplicationHandler for App {
             ..Default::default()
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
+
+        // === BOUNCING BALL ===
+        // A shiny sphere that bounces on the water surface, creating ripple waves.
+        const BALL_RADIUS: f32 = 0.5;
+        const WATER_SURFACE: f32 = 1.8;
+        // Pool X/Z world half-extent for normalising to hitbox [-1,1] sim space
+        const POOL_HALF_XZ: f32 = 6.0;
+
+        let ball_start = glam::Vec3::new(0.0, WATER_SURFACE + 4.0, 0.0);
+        let ball_mesh_id = renderer.scene_mut()
+            .insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], BALL_RADIUS)))
+            .as_mesh()
+            .unwrap();
+        let ball_mat = renderer.scene_mut().insert_material(make_material(
+            [0.9, 0.15, 0.1, 1.0], // red
+            0.2,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let ball_obj_id = insert_object(
+            &mut renderer,
+            ball_mesh_id,
+            ball_mat,
+            glam::Mat4::from_translation(ball_start),
+            BALL_RADIUS,
+        )
+        .expect("ball object");
+
+        let ball_hitbox_id = renderer
+            .scene_mut()
+            .insert_water_hitbox(ball_aabb(ball_start, ball_start, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ))
+            .expect("ball hitbox");
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
@@ -595,6 +665,11 @@ impl ApplicationHandler for App {
             _pews_right,
             _chandelier_chains,
             _chandelier_rings,
+            ball_obj_id,
+            ball_hitbox_id,
+            ball_pos: ball_start,
+            ball_vel: glam::Vec3::ZERO,
+            ball_prev_pos: ball_start,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
             cam_yaw: std::f32::consts::PI,
@@ -812,6 +887,48 @@ impl AppState {
         }
 
         // Scene state is persistent — no per-frame setup needed.
+
+        // ---- Bouncing ball physics -------------------------------------------
+        const GRAVITY: f32 = -9.8;
+        const BALL_RADIUS: f32 = 0.5;
+        const WATER_SURFACE: f32 = 1.8;
+        const POOL_HALF_XZ: f32 = 6.0;
+        const RESTITUTION: f32 = 0.65;
+
+        let prev_pos = self.ball_pos;
+        self.ball_vel.y += GRAVITY * dt;
+        self.ball_pos += self.ball_vel * dt;
+
+        let floor_y = WATER_SURFACE + BALL_RADIUS;
+        if self.ball_pos.y < floor_y {
+            self.ball_pos.y = floor_y;
+            self.ball_vel.y = self.ball_vel.y.abs() * RESTITUTION;
+            // Damp horizontal drift slightly on each bounce
+            self.ball_vel.x *= 0.92;
+            self.ball_vel.z *= 0.92;
+        }
+
+        // Keep ball inside the pool X/Z bounds
+        let limit = POOL_HALF_XZ - BALL_RADIUS;
+        if self.ball_pos.x.abs() > limit {
+            self.ball_pos.x = self.ball_pos.x.signum() * limit;
+            self.ball_vel.x = -self.ball_vel.x * RESTITUTION;
+        }
+        if self.ball_pos.z.abs() > limit {
+            self.ball_pos.z = self.ball_pos.z.signum() * limit;
+            self.ball_vel.z = -self.ball_vel.z * RESTITUTION;
+        }
+
+        let _ = renderer.scene_mut().update_object_transform(
+            self.ball_obj_id,
+            glam::Mat4::from_translation(self.ball_pos),
+        );
+        let _ = renderer.scene_mut().update_water_hitbox(
+            self.ball_hitbox_id,
+            ball_aabb(prev_pos, self.ball_pos, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ),
+        );
+        self.ball_prev_pos = prev_pos;
+        // ---------------------------------------------------------------------
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
