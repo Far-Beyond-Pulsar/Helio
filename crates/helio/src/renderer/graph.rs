@@ -117,10 +117,6 @@ pub fn build_default_graph(
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
 
-    // Water rendering passes (sim → caustics → surface → underwater)
-    // Add passes unconditionally so water appears when water volumes are inserted at runtime.
-    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
-
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
         .into_rgba8();
@@ -145,6 +141,11 @@ pub fn build_default_graph(
         config.height,
         config.surface_format,
     )));
+
+    // Water renders post-TAA: composited on top of the upscaled scene.
+    // This avoids TAA overwriting the water surface, and is standard AAA practice
+    // for transparent/animated water effects.
+    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
 
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
@@ -248,9 +249,6 @@ pub fn build_hlfs_graph(
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
-    // Always include water passes in HLFS pipeline, enabling runtime insertion of water volumes.
-    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
-
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
         .into_rgba8();
@@ -275,6 +273,9 @@ pub fn build_hlfs_graph(
         config.height,
         config.surface_format,
     )));
+
+    // Water renders post-TAA: composited on top of the upscaled scene.
+    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
 
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
