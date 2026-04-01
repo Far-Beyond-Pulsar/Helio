@@ -38,7 +38,8 @@
       "WebFetch(domain:crates.io)",
       "Bash(cargo search:*)",
       "WebFetch(domain:lettier.github.io)",
-      "WebFetch(domain:zznewclear13.github.io)"
+      "WebFetch(domain:zznewclear13.github.io)",
+      "Bash(git show:*)"
     ]
   }
 }

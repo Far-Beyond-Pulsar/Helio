@@ -18,7 +18,8 @@ struct WaterVolume {
     sim_params:            vec4f,  // x=ior, y=causticIntensity, z=fresnelMin, w=density
     shadow_params:         vec4f,  // x=rim, y=hitbox, z=ao
     sun_direction:         vec4f,
-    pad0: vec4f, pad1: vec4f, pad2: vec4f, pad3: vec4f,
+    ssr_params:            vec4f,  // x=enable, y=max_steps, z=step_size, w=thickness
+    pad1: vec4f, pad2: vec4f, pad3: vec4f,
 }
 
 @group(0) @binding(0) var<storage, read> water_volumes: array<WaterVolume>;

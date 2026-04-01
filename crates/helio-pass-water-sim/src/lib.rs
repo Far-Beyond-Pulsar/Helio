@@ -129,6 +129,7 @@ pub struct WaterSimPass {
 
     sampler: wgpu::Sampler,
     output_sampler: wgpu::Sampler,
+    depth_sampler: wgpu::Sampler,
 
     // Sim uniform buffers
     drop_buf: wgpu::Buffer,
@@ -161,6 +162,10 @@ pub struct WaterSimPass {
     // Fallback 1×1 black texture used when pre_aa is not yet available
     _pre_aa_fallback_tex: wgpu::Texture,
     pre_aa_fallback_view: wgpu::TextureView,
+
+    // Fallback 1×1 black texture used when GBuffer is not available
+    _gbuffer_fallback_tex: wgpu::Texture,
+    gbuffer_fallback_view: wgpu::TextureView,
 
     // Pre-TAA water composite intermediary (internal resolution, surface_format)
     _water_output_tex: wgpu::Texture,
@@ -380,6 +385,14 @@ impl WaterSimPass {
             address_mode_v: wgpu::AddressMode::Repeat,
             ..Default::default()
         });
+        let depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Water Depth Sampler"),
+            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
 
         let make_ubuf = |label, size: usize| {
             device.create_buffer(&wgpu::BufferDescriptor {
@@ -506,6 +519,35 @@ impl WaterSimPass {
                     },
                     count: None,
                 },
+                // depth_texture: scene depth for SSR ray marching
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                // depth_sampler: linear clamp sampler for depth
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                // gbuffer_normal: scene normals for SSR quality (optional)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -543,6 +585,20 @@ impl WaterSimPass {
             view_formats: &[],
         });
         let pre_aa_fallback_view = pre_aa_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --------------------------------------------------------- gbuffer fallback (1×1 black)
+        // Used when GBuffer is not available (e.g. water renders before GBuffer pass).
+        let gbuffer_fallback_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water GBuffer Fallback"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let gbuffer_fallback_view = gbuffer_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // --------------------------------------------------------- water output intermediary
         // Owned render target at internal resolution. Water composites onto a copy
@@ -776,6 +832,7 @@ impl WaterSimPass {
             front: true,
             sampler,
             output_sampler,
+            depth_sampler,
             drop_buf,
             update_buf,
             normal_buf,
@@ -795,6 +852,8 @@ impl WaterSimPass {
             surface_under_pipeline,
             _pre_aa_fallback_tex: pre_aa_fallback_tex,
             pre_aa_fallback_view,
+            _gbuffer_fallback_tex: gbuffer_fallback_tex,
+            gbuffer_fallback_view,
             _water_output_tex: water_output_tex,
             water_output_view,
             internal_width,
@@ -1146,6 +1205,14 @@ impl RenderPass for WaterSimPass {
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
 
+                // Get depth texture (use ctx.depth, fallback to 1×1 black if not available)
+                let depth_view = ctx.depth;
+
+                // Get GBuffer normal texture (fallback to 1×1 black if not available)
+                let gbuffer_normal_view = ctx.frame.gbuffer
+                    .map(|gb| gb.normal)
+                    .unwrap_or(&self.gbuffer_fallback_view);
+
                 let render_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Water Render BG"),
                     layout: &self.render_bgl,
@@ -1158,6 +1225,9 @@ impl RenderPass for WaterSimPass {
                         wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.caustics_sampler) },
                         wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(scene_view) },
                         wgpu::BindGroupEntry { binding: 7, resource: viewport_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(depth_view) },
+                        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.depth_sampler) },
+                        wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(gbuffer_normal_view) },
                     ],
                 });
 

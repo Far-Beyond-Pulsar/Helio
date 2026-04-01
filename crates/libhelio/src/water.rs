@@ -29,7 +29,8 @@ use bytemuck::{Pod, Zeroable};
 /// 9  sim_params              → (ior, caustic_intensity, fresnel_min, density)
 /// 10 shadow_params           → (rim, hitbox_shadow, ao, _)
 /// 11 sun_direction           → (dx, dy, dz, _)
-/// 12..15  _pad3.._pad6       → reserved
+/// 12 ssr_params              → (enable, max_steps, step_size, thickness)
+/// 13..15  _pad4.._pad6       → reserved
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuWaterVolume {
@@ -69,7 +70,8 @@ pub struct GpuWaterVolume {
     /// Sun/dominant light direction (dx, dy, dz) + padding
     pub sun_direction: [f32; 4],
 
-    pub _pad3: [f32; 4],
+    /// SSR parameters: (enable 0/1, max_steps, step_size, thickness)
+    pub ssr_params: [f32; 4],
     pub _pad4: [f32; 4],
     pub _pad5: [f32; 4],
     pub _pad6: [f32; 4],
@@ -94,7 +96,8 @@ impl GpuWaterVolume {
             shadow_params: [1.0, 0.0, 1.0, 0.0],
             // normalized sun direction
             sun_direction: [0.408_248_3, 0.816_496_6, 0.408_248_3, 0.0],
-            _pad3: [0.0; 4],
+            // SSR: enabled, 32 steps, 0.05 world-space step size, 0.02 thickness
+            ssr_params: [1.0, 32.0, 0.05, 0.02],
             _pad4: [0.0; 4],
             _pad5: [0.0; 4],
             _pad6: [0.0; 4],
@@ -116,7 +119,8 @@ impl GpuWaterVolume {
             sim_params: [1.333, 1.2, 0.1, 0.05],
             shadow_params: [1.0, 0.0, 1.0, 0.0],
             sun_direction: [0.408_248_3, 0.816_496_6, 0.408_248_3, 0.0],
-            _pad3: [0.0; 4],
+            // SSR: enabled, 32 steps, 0.05 world-space step size, 0.02 thickness
+            ssr_params: [1.0, 32.0, 0.05, 0.02],
             _pad4: [0.0; 4],
             _pad5: [0.0; 4],
             _pad6: [0.0; 4],
