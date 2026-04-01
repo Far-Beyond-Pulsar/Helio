@@ -329,6 +329,24 @@ pub struct WaterVolumeDescriptor {
     /// Sun / dominant directional light direction (world space, need not be normalized —
     /// will be normalised in `to_gpu()`). Default: [0.5, 1.0, 0.5] (upper-right).
     pub sun_direction: [f32; 3],
+
+    // Heightfield simulation physics
+    /// Wave spring constant: restoring force toward the mean height.
+    /// Range [0.5, 2.0]. Lower (~1.0) feels fluid; higher (~2.0) feels jelly-like.
+    /// Pass to `WaterSimPass::set_sim_dynamics()` after updating the volume.
+    pub wave_spring: f32,
+    /// Per-step energy damping multiplier (0.0..1.0).
+    /// Closer to 1.0 = waves linger; closer to 0.9 = waves die quickly.
+    /// Pass to `WaterSimPass::set_sim_dynamics()` after updating the volume.
+    pub wave_damping: f32,
+
+    // Wind
+    /// Wind direction in world XZ space. Does not need to be normalised.
+    /// Set [0, 0] for calm water. Pass to `WaterSimPass::set_wind()`.
+    pub wind_direction: [f32; 2],
+    /// Wind strength. 0 = calm, ~1 = gentle ripples, ~5 = choppy.
+    /// Pass to `WaterSimPass::set_wind()` after updating the volume.
+    pub wind_strength: f32,
 }
 
 impl WaterVolumeDescriptor {
@@ -353,8 +371,8 @@ impl WaterVolumeDescriptor {
             shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
             sun_direction: sun,
             ssr_params: [1.0, 32.0, 0.05, 0.02],  // Default SSR: enabled, 32 steps
-            _pad4: [0.0; 4],
-            _pad5: [0.0; 4],
+            sim_dynamics: [self.wave_spring, self.wave_damping, 0.0, 0.0],
+            wind_params: [self.wind_direction[0], self.wind_direction[1], self.wind_strength, 0.0],
             _pad6: [0.0; 4],
         }
     }
@@ -390,6 +408,10 @@ impl WaterVolumeDescriptor {
             shadow_hitbox: 0.0,
             shadow_ao: 1.0,
             sun_direction: [0.5, 1.0, 0.5],
+            wave_spring: 1.2,
+            wave_damping: 0.985,
+            wind_direction: [0.0, 0.0],
+            wind_strength: 0.0,
         }
     }
 
@@ -424,6 +446,10 @@ impl WaterVolumeDescriptor {
             shadow_hitbox: 0.0,
             shadow_ao: 1.0,
             sun_direction: [0.5, 1.0, 0.5],
+            wave_spring: 1.0,
+            wave_damping: 0.980,
+            wind_direction: [0.0, 0.0],
+            wind_strength: 0.0,
         }
     }
 }

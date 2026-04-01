@@ -121,7 +121,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     // Camera is not inside any water volume — pass scene through unchanged.
     if vol_idx < 0 {
-        return textureSample(scene_tex, scene_samp, in.uv);
+        return textureSampleLevel(scene_tex, scene_samp, in.uv, 0.);
     }
 
     let vol       = volumes[u32(vol_idx)];
@@ -149,21 +149,27 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let dist_strength  = clamp(wave_amplitude * (0.25 + cam_depth * 0.35), 0.015, 1.5);
 
     let warp_uv      = in.uv + dist_raw * dist_strength;
-    // Keep UVs on-screen so we never sample outside the texture.
-    let safe_uv      = clamp(warp_uv, vec2f(0.001), vec2f(0.999));
 
     // ---- Chromatic aberration -------------------------------------------
-    // R and B channels are offset radially from the screen centre;
-    // G uses the distorted UV directly.
+    // Radial direction is taken from the ORIGINAL in.uv (not the warped UV)
+    // so the fringe is always a small stable offset.  Both the warp and the
+    // CA offset are added before clamping so the clamp never amplifies the
+    // channel separation at screen edges.
     let ca_strength = clamp(cam_depth * 0.008, 0.001, 0.018);
-    let centre = vec2f(0.5);
-    let to_edge = safe_uv - centre;
-    let r_uv = clamp(centre + to_edge * (1.0 + ca_strength),       vec2f(0.001), vec2f(0.999));
-    let b_uv = clamp(centre + to_edge * (1.0 - ca_strength * 1.4), vec2f(0.001), vec2f(0.999));
+    let radial  = in.uv - 0.5;
+    let r_uv    = clamp(warp_uv + radial * ca_strength,        vec2f(0.001), vec2f(0.999));
+    let safe_uv = clamp(warp_uv,                               vec2f(0.001), vec2f(0.999));
+    let b_uv    = clamp(warp_uv - radial * ca_strength * 1.4,  vec2f(0.001), vec2f(0.999));
 
-    let r_col = textureSample(scene_tex, scene_samp, r_uv).r;
-    let g_col = textureSample(scene_tex, scene_samp, safe_uv).g;
-    let b_col = textureSample(scene_tex, scene_samp, b_uv).b;
+    // Use textureSampleLevel(lod=0) for all scene reads — the scene texture
+    // is always 1:1 with the screen so mip 0 is always correct.  Automatic
+    // mip selection via textureSample uses the UV *derivative across the 2×2
+    // fragment quad*; when adjacent pixels land on very different warped UVs
+    // (large warp gradient) the GPU picks a high mip and blurs/tears along
+    // the steep part of the noise field.  Forcing lod=0 prevents this.
+    let r_col = textureSampleLevel(scene_tex, scene_samp, r_uv,    0.).r;
+    let g_col = textureSampleLevel(scene_tex, scene_samp, safe_uv, 0.).g;
+    let b_col = textureSampleLevel(scene_tex, scene_samp, b_uv,    0.).b;
     let scene_color = vec3f(r_col, g_col, b_col);
 
     // ---- Colour tint matching the water volume ---------------------------

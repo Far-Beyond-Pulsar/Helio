@@ -62,7 +62,17 @@ struct DropUniform {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DeltaUniform {
     delta: [f32; 2],
-    _pad: [f32; 2],
+    /// Wave spring constant — how aggressively the surface snaps back.
+    /// Lower values (≈1.0) feel like fluid. Higher values (≈2.0) feel jelly-like.
+    spring: f32,
+    /// Per-step energy damping multiplier (0..1). Lower values dissipate waves faster.
+    damping: f32,
+    /// Wind direction in XZ plane (pre-normalised; zero vec = no wind).
+    wind_dir: [f32; 2],
+    /// Wind strength: scales the noise-driven velocity perturbation. 0 = calm.
+    wind_strength: f32,
+    /// Elapsed simulation time in seconds, used to scroll the wind-noise pattern.
+    time: f32,
 }
 
 #[repr(C)]
@@ -244,6 +254,22 @@ pub struct WaterSimPass {
     tint_scratch_view: wgpu::TextureView,
     underwater_tint_bgl: wgpu::BindGroupLayout,
     underwater_tint_pipeline: wgpu::RenderPipeline,
+
+    // ---- Simulation dynamics (configurable via set_sim_dynamics) ----
+    /// Wave spring constant: restoring force toward the mean height.
+    /// Lower values (~1.0) feel fluid; higher values (~2.0) feel jelly-like.
+    wave_spring: f32,
+    /// Per-step energy damping multiplier (0..1).
+    /// Closer to 1.0 = waves persist longer. Closer to 0.9 = waves die quickly.
+    wave_damping: f32,
+
+    // ---- Wind (configurable via set_wind) ----
+    /// Normalised XZ wind direction. [0,0] = no directional bias.
+    wind_direction: [f32; 2],
+    /// Wind strength. 0 = calm, ~1 = gentle ripples, ~5 = choppy.
+    wind_strength: f32,
+    /// Accumulated simulation time (seconds), incremented each frame for noise scrolling.
+    sim_time: f32,
 }
 
 // Shared vertex buffer layout: packed [f32; 3] positions, location 0
@@ -1102,7 +1128,48 @@ impl WaterSimPass {
             tint_scratch_view,
             underwater_tint_bgl,
             underwater_tint_pipeline,
+            // Default sim dynamics: fluid-feeling water (not jelly)
+            wave_spring: 1.2,
+            wave_damping: 0.985,
+            // Default: no wind
+            wind_direction: [0.0, 0.0],
+            wind_strength: 0.0,
+            sim_time: 0.0,
         }
+    }
+
+    /// Set the shallow-water simulation dynamics.
+    ///
+    /// Call this whenever the corresponding `WaterVolumeDescriptor` fields change.
+    ///
+    /// - `spring`: restoring-force multiplier toward the mean height.
+    ///   Range `[0.5, 2.0]`. Lower values (≈1.0) feel fluid; higher values (≈2.0)
+    ///   feel jelly-like. Default: `1.2`.
+    /// - `damping`: per-step energy-retention multiplier `(0.0, 1.0)`.
+    ///   Closer to `1.0` = waves persist longer. Closer to `0.9` = waves die quickly.
+    ///   Default: `0.985`.
+    pub fn set_sim_dynamics(&mut self, spring: f32, damping: f32) {
+        self.wave_spring = spring.clamp(0.1, 2.0);
+        self.wave_damping = damping.clamp(0.0, 1.0);
+    }
+
+    /// Set the wind that drives surface turbulence each simulation step.
+    ///
+    /// The wind scrolls a two-octave noise pattern across the heightfield to
+    /// inject randomish velocity impulses, producing the appearance of wind-driven
+    /// ripples on top of any manually-triggered drops or hitbox displacement.
+    ///
+    /// - `direction`: XZ wind vector (does not need to be normalised; zero = no wind).
+    /// - `strength`: impulse scale per step. `0.0` = calm. `1.0` = gentle ripples.
+    ///   `5.0` = choppy surface. Values above `10.0` will cause numerical blow-up.
+    pub fn set_wind(&mut self, direction: [f32; 2], strength: f32) {
+        let len = (direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
+        self.wind_direction = if len > 1e-6 {
+            [direction[0] / len, direction[1] / len]
+        } else {
+            [0.0, 0.0]
+        };
+        self.wind_strength = strength.max(0.0);
     }
 
     /// Queue a water-drop ripple to be applied next frame.
@@ -1137,9 +1204,15 @@ impl RenderPass for WaterSimPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Advance sim time (~60 fps fixed step; keeps noise scrolling frame-rate independent)
+        self.sim_time += 1.0 / 60.0;
         let delta = DeltaUniform {
             delta: [1.0 / SIM_SIZE as f32, 1.0 / SIM_SIZE as f32],
-            _pad: [0.0; 2],
+            spring: self.wave_spring,
+            damping: self.wave_damping,
+            wind_dir: self.wind_direction,
+            wind_strength: self.wind_strength,
+            time: self.sim_time,
         };
         ctx.write_buffer(&self.update_buf, 0, bytemuck::bytes_of(&delta));
         ctx.write_buffer(&self.normal_buf, 0, bytemuck::bytes_of(&delta));

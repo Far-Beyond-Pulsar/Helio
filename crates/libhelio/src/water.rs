@@ -72,8 +72,12 @@ pub struct GpuWaterVolume {
 
     /// SSR parameters: (enable 0/1, max_steps, step_size, thickness)
     pub ssr_params: [f32; 4],
-    pub _pad4: [f32; 4],
-    pub _pad5: [f32; 4],
+    /// Simulation physics: (wave_spring, wave_damping, _, _).
+    /// wave_spring: restoring-force multiplier. wave_damping: per-step energy retention.
+    pub sim_dynamics: [f32; 4],
+    /// Wind parameters: (dir_x, dir_z, strength, _). Stored for serialisation;
+    /// runtime use is via `WaterSimPass::set_wind()`.
+    pub wind_params: [f32; 4],
     pub _pad6: [f32; 4],
 }
 
@@ -98,8 +102,9 @@ impl GpuWaterVolume {
             sun_direction: [0.408_248_3, 0.816_496_6, 0.408_248_3, 0.0],
             // SSR: enabled, 32 steps, 0.05 world-space step size, 0.02 thickness
             ssr_params: [1.0, 32.0, 0.05, 0.02],
-            _pad4: [0.0; 4],
-            _pad5: [0.0; 4],
+            // wave_spring=1.2, wave_damping=0.985 — fluid, not jelly
+            sim_dynamics: [1.2, 0.985, 0.0, 0.0],
+            wind_params: [0.0; 4],
             _pad6: [0.0; 4],
         }
     }
@@ -121,8 +126,9 @@ impl GpuWaterVolume {
             sun_direction: [0.408_248_3, 0.816_496_6, 0.408_248_3, 0.0],
             // SSR: enabled, 32 steps, 0.05 world-space step size, 0.02 thickness
             ssr_params: [1.0, 32.0, 0.05, 0.02],
-            _pad4: [0.0; 4],
-            _pad5: [0.0; 4],
+            // wave_spring=1.0, wave_damping=0.980 — still water settles fast
+            sim_dynamics: [1.0, 0.980, 0.0, 0.0],
+            wind_params: [0.0; 4],
             _pad6: [0.0; 4],
         }
     }
