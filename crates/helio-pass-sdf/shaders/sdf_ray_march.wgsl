@@ -24,43 +24,54 @@ struct CameraUniform {
     prev_view_proj: mat4x4<f32>,
 };
 
-// ── Clip map params ─────────────────────────────────────────────────────────
+// ── Clip config (static, matches sdf_scroll.wgsl ClipConfig exactly) ───────
 
-struct ClipLevel {
-    volume_min: vec3<f32>,
-    _pad0: f32,
-    volume_max: vec3<f32>,
-    _pad1: f32,
-    grid_origin: vec3<f32>,
-    _pad2: f32,
-    voxel_size: f32,
-    brick_size: u32,
-    brick_grid_dim: u32,
+struct ClipConfig {
+    level_count:           u32,
+    grid_dim:              u32,
+    brick_size:            u32,
+    brick_grid_dim:        u32,
+    bricks_per_level:      u32,
     atlas_bricks_per_axis: u32,
+    base_voxel_size:       f32,
+    edit_count:            u32,
+    bvh_node_count:        u32,
+    terrain_enabled:       u32,
+    terrain_y_min:         f32,
+    terrain_y_max:         f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
+    voxel_sizes_lo: vec4<f32>,   // levels 0–3
+    voxel_sizes_hi: vec4<f32>,   // levels 4–7
 };
 
-struct SdfClipMapParams {
-    level_count: u32,
-    grid_dim: u32,
-    max_march_dist: f32,
-    debug_flags: u32,
-    levels: array<ClipLevel, 8>,
+// ── Scroll state (GPU-written each frame by sdf_scroll pass) ────────────────
+
+struct ScrollState {
+    snap_origins:  array<vec4<i32>, 8>,  // brick-coord snap per level
+    edit_gen:      u32,
+    prev_edit_gen: u32,
+    _pad0:         u32,
+    _pad1:         u32,
 };
 
 // ── Bindings ────────────────────────────────────────────────────────────────
 
-@group(0) @binding(0) var<uniform> camera: CameraUniform;
-@group(0) @binding(1) var<uniform> clip_params: SdfClipMapParams;
+@group(0) @binding(0)  var<uniform>         camera:           CameraUniform;
+@group(0) @binding(1)  var<uniform>         clip_config:      ClipConfig;
+@group(0) @binding(2)  var<storage, read>   scroll_state:     ScrollState;
 
-@group(0) @binding(2)  var<storage, read> atlas_0: array<u32>;
-@group(0) @binding(3)  var<storage, read> atlas_1: array<u32>;
-@group(0) @binding(4)  var<storage, read> atlas_2: array<u32>;
-@group(0) @binding(5)  var<storage, read> atlas_3: array<u32>;
-@group(0) @binding(6)  var<storage, read> atlas_4: array<u32>;
-@group(0) @binding(7)  var<storage, read> atlas_5: array<u32>;
-@group(0) @binding(8)  var<storage, read> atlas_6: array<u32>;
-@group(0) @binding(9)  var<storage, read> atlas_7: array<u32>;
-@group(0) @binding(10) var<storage, read> all_brick_indices: array<u32>;
+@group(0) @binding(3)  var<storage, read> atlas_0: array<u32>;
+@group(0) @binding(4)  var<storage, read> atlas_1: array<u32>;
+@group(0) @binding(5)  var<storage, read> atlas_2: array<u32>;
+@group(0) @binding(6)  var<storage, read> atlas_3: array<u32>;
+@group(0) @binding(7)  var<storage, read> atlas_4: array<u32>;
+@group(0) @binding(8)  var<storage, read> atlas_5: array<u32>;
+@group(0) @binding(9)  var<storage, read> atlas_6: array<u32>;
+@group(0) @binding(10) var<storage, read> atlas_7: array<u32>;
+@group(0) @binding(11) var<storage, read> all_brick_indices: array<u32>;
 
 // ── Vertex shader (fullscreen triangle) ─────────────────────────────────────
 
@@ -107,9 +118,39 @@ fn dequantize(t: f32, vs: f32) -> f32 {
     return t * 2.0 * range - range;
 }
 
-fn atlas_byte_index(atlas_id: u32, local: vec3<u32>, level: ClipLevel) -> u32 {
-    let aba = level.atlas_bricks_per_axis;
-    let ps = level.brick_size + 1u;
+// ── Per-level helpers ───────────────────────────────────────────────────────
+
+// Returns the voxel size at the given clip level (powers of two from base).
+fn level_voxel_size(level_idx: u32) -> f32 {
+    let lo = clip_config.voxel_sizes_lo;
+    let hi = clip_config.voxel_sizes_hi;
+    if level_idx == 0u { return lo.x; }
+    if level_idx == 1u { return lo.y; }
+    if level_idx == 2u { return lo.z; }
+    if level_idx == 3u { return lo.w; }
+    if level_idx == 4u { return hi.x; }
+    if level_idx == 5u { return hi.y; }
+    if level_idx == 6u { return hi.z; }
+    return hi.w;
+}
+
+// Returns the world-space volume_min for the given level,
+// derived from the GPU scroll_state without any CPU involvement.
+fn level_world_min(level_idx: u32) -> vec3<f32> {
+    let vs        = level_voxel_size(level_idx);
+    let brick_step = vs * f32(clip_config.brick_size);
+    let half_bgd  = i32(clip_config.brick_grid_dim) / 2;
+    let snap      = scroll_state.snap_origins[level_idx].xyz;
+    return vec3<f32>(
+        f32(snap.x - half_bgd) * brick_step,
+        f32(snap.y - half_bgd) * brick_step,
+        f32(snap.z - half_bgd) * brick_step,
+    );
+}
+
+fn atlas_byte_index(atlas_id: u32, local: vec3<u32>, level_idx: u32) -> u32 {
+    let aba = clip_config.atlas_bricks_per_axis;
+    let ps = clip_config.brick_size + 1u;
     let bx = atlas_id % aba;
     let by = (atlas_id / aba) % aba;
     let bz = atlas_id / (aba * aba);
@@ -121,16 +162,14 @@ fn atlas_byte_index(atlas_id: u32, local: vec3<u32>, level: ClipLevel) -> u32 {
 }
 
 fn brick_index_offset(level_idx: u32) -> u32 {
-    // Each level has brick_grid_dim^3 entries
-    let bgd = clip_params.levels[0].brick_grid_dim;
+    let bgd = clip_config.brick_grid_dim;
     return level_idx * bgd * bgd * bgd;
 }
 
 fn sample_level_trilinear(level_idx: u32, world_pos: vec3<f32>) -> f32 {
-    let level = clip_params.levels[level_idx];
-    let vs = level.voxel_size;
-    let bs = level.brick_size;
-    let bgd = level.brick_grid_dim;
+    let vs  = level_voxel_size(level_idx);
+    let bs  = clip_config.brick_size;
+    let bgd = clip_config.brick_grid_dim;
     let ibs = i32(bs);
     let ibgd = i32(bgd);
 
@@ -186,7 +225,7 @@ fn sample_level_trilinear(level_idx: u32, world_pos: vec3<f32>) -> f32 {
                 let ly = u32(sy - by * ibs);
                 let lz = u32(sz - bz * ibs);
 
-                let bi = atlas_byte_index(atlas_id, vec3<u32>(lx, ly, lz), level);
+                let bi = atlas_byte_index(atlas_id, vec3<u32>(lx, ly, lz), level_idx);
                 let t = read_atlas_byte(level_idx, bi);
                 result += w * dequantize(t, vs);
             }
@@ -197,16 +236,21 @@ fn sample_level_trilinear(level_idx: u32, world_pos: vec3<f32>) -> f32 {
 }
 
 fn point_in_level(level_idx: u32, pos: vec3<f32>) -> bool {
-    let level = clip_params.levels[level_idx];
-    return all(pos >= level.volume_min) && all(pos <= level.volume_max);
+    let vs       = level_voxel_size(level_idx);
+    let vol_min  = level_world_min(level_idx);
+    let grid_sz  = f32(clip_config.grid_dim) * vs;
+    let vol_max  = vol_min + vec3<f32>(grid_sz);
+    return all(pos >= vol_min) && all(pos <= vol_max);
 }
 
 // Compute blend factor between clipmap levels for smooth LOD transitions.
 // Returns alpha in [0, 1] where 0 = full fine level, 1 = full coarse level.
 fn clipmap_blend_alpha(level_idx: u32, pos: vec3<f32>) -> f32 {
-    let level = clip_params.levels[level_idx];
-    let center = (level.volume_min + level.volume_max) * 0.5;
-    let extent = level.volume_max - level.volume_min;
+    let vs      = level_voxel_size(level_idx);
+    let vol_min = level_world_min(level_idx);
+    let vol_max = vol_min + vec3<f32>(f32(clip_config.grid_dim) * vs);
+    let center  = (vol_min + vol_max) * 0.5;
+    let extent  = vol_max - vol_min;
 
     // Distance from center in each axis, normalized to [0, 1] at the boundary
     let dist = abs(pos - center) / (extent * 0.5);
@@ -225,8 +269,8 @@ fn clipmap_blend_alpha(level_idx: u32, pos: vec3<f32>) -> f32 {
 // When near the edge of a level, smoothly blends to the next coarser level.
 fn sdf_query(world_pos: vec3<f32>) -> f32 {
     // Find the finest level that contains the point
-    var fine_level = clip_params.level_count;
-    for (var i = 0u; i < clip_params.level_count; i++) {
+    var fine_level = clip_config.level_count;
+    for (var i = 0u; i < clip_config.level_count; i++) {
         if point_in_level(i, world_pos) {
             fine_level = i;
             break;
@@ -234,7 +278,7 @@ fn sdf_query(world_pos: vec3<f32>) -> f32 {
     }
 
     // If point is outside all levels, return large distance
-    if fine_level >= clip_params.level_count {
+    if fine_level >= clip_config.level_count {
         return 1e10;
     }
 
@@ -243,7 +287,7 @@ fn sdf_query(world_pos: vec3<f32>) -> f32 {
 
     // Check if we should blend to coarser level
     let alpha = clipmap_blend_alpha(fine_level, world_pos);
-    if alpha > 0.001 && fine_level < clip_params.level_count - 1u {
+    if alpha > 0.001 && fine_level < clip_config.level_count - 1u {
         // Sample from next coarser level and blend
         let coarse_dist = sample_level_trilinear(fine_level + 1u, world_pos);
         return mix(fine_dist, coarse_dist, alpha);
@@ -254,12 +298,12 @@ fn sdf_query(world_pos: vec3<f32>) -> f32 {
 
 // Query which clip level a point falls in (for consistent normal estimation)
 fn sdf_query_level(world_pos: vec3<f32>) -> u32 {
-    for (var i = 0u; i < clip_params.level_count; i++) {
+    for (var i = 0u; i < clip_config.level_count; i++) {
         if point_in_level(i, world_pos) {
             return i;
         }
     }
-    return clip_params.level_count;
+    return clip_config.level_count;
 }
 
 // Normal estimation using the blended SDF field for smooth LOD transitions.
@@ -358,14 +402,16 @@ fn fs_main(in: VsOutput) -> FsOutput {
     let ray_dir = normalize(far_w - near_w);
     let ray_origin = camera.position_near.xyz;
 
-    let max_dist = clip_params.max_march_dist;
+    // max_march_dist derived from coarsest level (fully GPU — no CPU upload)
+    let coarsest_vs  = level_voxel_size(clip_config.level_count - 1u);
+    let max_dist     = f32(clip_config.grid_dim) * coarsest_vs * 2.0;
 
     // ── Step budget ───────────────────────────────────────────────────────
     // 256 steps for better quality - prevents banding and missed surfaces
     let max_steps = 256u;
 
     // Finest-level voxel size — drives the adaptive threshold and min step floor
-    let vs0 = clip_params.levels[0].voxel_size;
+    let vs0 = level_voxel_size(0u);
 
     // Add ray dither offset to break up banding patterns (IQ technique)
     // Uses fragment position (pixel coordinate) for stable inter-pixel variation
@@ -430,7 +476,7 @@ fn fs_main(in: VsOutput) -> FsOutput {
     // samples span at least one voxel at the appropriate LOD, avoiding
     // quantisation artifacts without over-smoothing fine detail.
     let hit_level = sdf_query_level(hit_pos);
-    let eps_vs = select(vs0, clip_params.levels[hit_level].voxel_size, hit_level < clip_params.level_count);
+    let eps_vs = select(vs0, level_voxel_size(hit_level), hit_level < clip_config.level_count);
     let eps = eps_vs * 0.5;
     let normal = estimate_normal(hit_pos, eps);
 
@@ -453,22 +499,21 @@ fn fs_main(in: VsOutput) -> FsOutput {
     let final_color = mix(color, SKY_COLOR, fog);
 
     // ── Debug mode ───────────────────────────────────────────────────────
-    if clip_params.debug_flags != 0u {
+    if clip_config.bvh_node_count == 0xFFFFFFFFu { // debug mode sentinel (unused in normal operation)
         // Find which clip level the hit is in
         var hit_level = 0u;
-        for (var i = 0u; i < clip_params.level_count; i++) {
+        for (var i = 0u; i < clip_config.level_count; i++) {
             if point_in_level(i, hit_pos) {
                 hit_level = i;
                 break;
             }
         }
-        let level = clip_params.levels[hit_level];
-        let bvs = level.voxel_size;
-        let bbs = f32(level.brick_size);
+        let bvs = level_voxel_size(hit_level);
+        let bbs = f32(clip_config.brick_size);
         let brick_world = bvs * bbs;
 
         // Clip level color: green (fine) → red (coarse)
-        let t_col = f32(hit_level) / max(f32(clip_params.level_count - 1u), 1.0);
+        let t_col = f32(hit_level) / max(f32(clip_config.level_count - 1u), 1.0);
         let level_color = mix(vec3<f32>(0.1, 0.8, 0.2), vec3<f32>(0.9, 0.15, 0.1), t_col);
 
         // Brick grid outline (thin lines at brick boundaries)
