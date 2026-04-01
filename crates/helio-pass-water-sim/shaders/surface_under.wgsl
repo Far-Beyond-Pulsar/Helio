@@ -111,19 +111,16 @@ fn trace_ssr(
         // Sample scene depth at ray position
         let scene_depth = textureSampleLevel(depth_texture, depth_sampler, sample_uv, 0);
 
-        // Compare depths in NDC space (more accurate than world-space distance)
+        // Compare depths in NDC space
         let ray_depth = sample_ndc.z;
+        let depth_diff = abs(ray_depth - scene_depth);
 
-        // Ray has intersected geometry if it's gone past the surface
-        // (ray_depth > scene_depth means ray is behind geometry)
-        if ray_depth >= scene_depth {
-            // Check if we're within thickness tolerance
-            let depth_diff = ray_depth - scene_depth;
-            if depth_diff < thickness * 10.0 {  // Scale thickness for NDC space
-                // Hit! Sample scene color at this position
-                hit_color = textureSampleLevel(scene_color, shared_samp, sample_uv, 0.0).rgb;
-                hit = true;
-            }
+        // Hit if ray is close to scene surface (works for both normal and reversed-Z)
+        // Very loose tolerance to catch all potential hits
+        if depth_diff < 0.5 {  // Extremely loose tolerance in NDC space [0,1]
+            // Hit! Sample scene color at this position
+            hit_color = textureSampleLevel(scene_color, shared_samp, sample_uv, 0.0).rgb;
+            hit = true;
         }
     }
 
@@ -209,17 +206,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         let surface_h = vol.bounds_max.w;
         let world_pos = simToWorld(in.simPos, vol.bounds_min.xyz, vol.bounds_max.xyz, surface_h);
 
-        // Extract SSR parameters from volume
+        // Extract SSR parameters from volume (increase step_size dramatically for testing)
         let max_steps = u32(vol.ssr_params.y);
-        let step_size = vol.ssr_params.z;
+        let step_size = vol.ssr_params.z * 50.0;  // DEBUG: 50x larger steps
         let thickness = vol.ssr_params.w;
 
         // Trace SSR - returns (0,0,0) if no hit
         below_color = trace_ssr(world_pos, reflected_ray, screen_uv, max_steps, step_size, thickness);
+
+        // DEBUG: Show cyan if SSR enabled but no hit
+        if dot(below_color, below_color) < 0.001 {
+            below_color = vec3f(0.0, 1.0, 1.0);  // Bright cyan = SSR active underwater, no hits
+        }
     }
 
-    // Fallback to screen-space distortion if SSR disabled or missed
-    if dot(below_color, below_color) < 0.001 {
+    // Fallback to screen-space distortion if SSR disabled
+    if !ssr_enabled && dot(below_color, below_color) < 0.001 {
         let distort_str = vol.reflection_refraction.y;
         let reflect_uv  = clamp(screen_uv + normal.xz * distort_str,
                                 vec2f(0.001), vec2f(0.999));
