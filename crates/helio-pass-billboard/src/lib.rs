@@ -501,7 +501,7 @@ impl RenderPass for BillboardPass {
             // Read-only depth: test against opaque scene but do not write.
             depth_ops: Some(wgpu::Operations {
                 load: depth_load_op,
-                store: wgpu::StoreOp::Discard,
+                store: wgpu::StoreOp::Store,
             }),
             stencil_ops: None,
         };

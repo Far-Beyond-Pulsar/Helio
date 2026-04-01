@@ -1,5 +1,5 @@
 [package]
-name = "helio-pass-water-caustics"
+name = "helio-pass-water-sim"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,3 +7,4 @@ edition = "2021"
 helio-v3 = { path = "../helio-v3" }
 libhelio = { path = "../libhelio" }
 wgpu = { workspace = true }
+bytemuck = { version = "1.14", features = ["derive"] }

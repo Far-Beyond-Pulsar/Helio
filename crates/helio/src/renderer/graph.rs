@@ -15,9 +15,7 @@ use helio_pass_sky::SkyPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_hlfs::HlfsPass;
-use helio_pass_water_caustics::WaterCausticsPass;
-use helio_pass_water_surface::WaterSurfacePass;
-use helio_pass_underwater::UnderwaterPass;
+use helio_pass_water_sim::WaterSimPass;
 use helio_v3::RenderGraph;
 
 use crate::scene::Scene;
@@ -119,24 +117,6 @@ pub fn build_default_graph(
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
 
-    // Water rendering passes (caustics → surface → underwater)
-    // Add passes unconditionally so water appears when water volumes are inserted at runtime.
-    graph.add_pass(Box::new(WaterCausticsPass::new(device)));
-    graph.add_pass(Box::new(WaterSurfacePass::new(
-        device,
-        camera_buf,
-        config.internal_width(),
-        config.internal_height(),
-        config.surface_format,
-    )));
-    graph.add_pass(Box::new(UnderwaterPass::new(
-        device,
-        camera_buf,
-        config.internal_width(),
-        config.internal_height(),
-        config.surface_format,
-    )));
-
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
         .into_rgba8();
@@ -152,6 +132,14 @@ pub fn build_default_graph(
     );
     billboard_pass.set_occluded_by_geometry(true);
     graph.add_pass(Box::new(billboard_pass));
+
+    graph.add_pass(Box::new(WaterSimPass::new(
+        device,
+        camera_buf,
+        config.internal_width(),
+        config.internal_height(),
+        config.surface_format,
+    )));
 
     graph.add_pass(Box::new(TaaPass::new(
         device,
@@ -264,23 +252,6 @@ pub fn build_hlfs_graph(
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
-    // Always include water passes in HLFS pipeline, enabling runtime insertion of water volumes.
-    graph.add_pass(Box::new(WaterCausticsPass::new(device)));
-    graph.add_pass(Box::new(WaterSurfacePass::new(
-        device,
-        camera_buf,
-        config.internal_width(),
-        config.internal_height(),
-        config.surface_format,
-    )));
-    graph.add_pass(Box::new(UnderwaterPass::new(
-        device,
-        camera_buf,
-        config.internal_width(),
-        config.internal_height(),
-        config.surface_format,
-    )));
-
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
         .into_rgba8();
@@ -296,6 +267,14 @@ pub fn build_hlfs_graph(
     );
     billboard_pass.set_occluded_by_geometry(true);
     graph.add_pass(Box::new(billboard_pass));
+
+    graph.add_pass(Box::new(WaterSimPass::new(
+        device,
+        camera_buf,
+        config.internal_width(),
+        config.internal_height(),
+        config.surface_format,
+    )));
 
     graph.add_pass(Box::new(TaaPass::new(
         device,

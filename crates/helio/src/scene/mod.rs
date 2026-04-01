@@ -75,13 +75,17 @@ mod core;
 mod errors;
 mod groups;
 mod helpers;
+mod hitbox;
 mod objects;
 mod resources;
 mod types;
 mod virtual_geometry;
 mod water;
 
-pub use actor::{SceneActor, SceneActorId, SceneActorTrait, WaterVolumeDescriptor};
+pub use actor::{
+    SceneActor, SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
+    WaterVolumeDescriptor, WaterVolumeActor,
+};
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;

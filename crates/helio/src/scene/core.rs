@@ -14,7 +14,7 @@ use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
-use crate::handles::{LightId, MaterialId, ObjectId, TextureId, VirtualObjectId, WaterVolumeId};
+use crate::handles::{LightId, MaterialId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 use crate::mesh::MeshPool;
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
@@ -22,7 +22,7 @@ use crate::vg::VirtualMeshId;
 use super::camera::Camera;
 use super::types::{
     LightRecord, MaterialRecord, ObjectRecord, TextureRecord, VirtualMeshRecord,
-    VirtualObjectRecord, WaterVolumeRecord,
+    VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
 };
 use libhelio::sky::SkyContext;
 
@@ -111,6 +111,13 @@ pub struct Scene {
 
     /// Set when water volumes are added/removed/updated
     pub(in crate::scene) water_volumes_dirty: bool,
+
+    // ── Water hitboxes ────────────────────────────────────────────────────────
+    /// AABB hitboxes that displace the water heightfield simulation
+    pub(in crate::scene) water_hitboxes: DenseArena<WaterHitboxRecord, WaterHitboxId>,
+
+    /// Set when hitboxes are added/removed/updated
+    pub(in crate::scene) water_hitboxes_dirty: bool,
 }
 
 impl Scene {
@@ -209,6 +216,8 @@ impl Scene {
             vg_cpu_instances: Vec::new(),
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
+            water_hitboxes: DenseArena::new(),
+            water_hitboxes_dirty: false,
         }
     }
 

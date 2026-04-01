@@ -7,4 +7,3 @@ edition = "2021"
 helio-v3 = { path = "../helio-v3" }
 libhelio = { path = "../libhelio" }
 wgpu = { workspace = true }
-bytemuck = { version = "1.14", features = ["derive"] }

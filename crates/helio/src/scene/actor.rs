@@ -252,18 +252,19 @@ impl SceneActorTrait for ObjectActor {
 
 /// Water volume configuration descriptor.
 ///
-/// Defines all parameters for realistic water rendering including waves,
-/// visual properties, reflections, caustics, and underwater effects.
+/// Defines all parameters for heightfield-simulation water rendering including
+/// waves, visual properties, reflections, caustics, and underwater effects.
+/// This maps directly onto the new webgpu-water-style sim + render pipeline.
 #[derive(Debug, Clone, Copy)]
 pub struct WaterVolumeDescriptor {
     /// AABB minimum corner in world space
     pub bounds_min: [f32; 3],
     /// AABB maximum corner in world space
     pub bounds_max: [f32; 3],
-    /// Water surface height (Y coordinate)
+    /// Water surface height (Y coordinate, local to bounds)
     pub surface_height: f32,
 
-    // Wave parameters (Gerstner waves)
+    // Wave parameters (legacy Gerstner — kept for compatibility; heightfield uses sim)
     /// Wave amplitude (height in meters)
     pub wave_amplitude: f32,
     /// Wave frequency (spacing between waves)
@@ -296,7 +297,7 @@ pub struct WaterVolumeDescriptor {
     // Caustics
     /// Enable caustics rendering
     pub caustics_enabled: bool,
-    /// Caustics brightness multiplier
+    /// Caustics brightness multiplier (caustics_intensity fed to sim_params)
     pub caustics_intensity: f32,
     /// Caustics pattern scale
     pub caustics_scale: f32,
@@ -308,11 +309,36 @@ pub struct WaterVolumeDescriptor {
     pub fog_density: f32,
     /// God rays (volumetric light shafts) intensity
     pub god_rays_intensity: f32,
+
+    // Heightfield simulation surface parameters
+    /// Index of refraction (default 1.333 for water)
+    pub ior: f32,
+    /// Fresnel minimum reflectance at normal incidence (default 0.1)
+    pub fresnel_min: f32,
+    /// Effective water density for fog (default 0.03)
+    pub density: f32,
+
+    // Shadow / lighting parameters
+    /// Rim light intensity for pool walls (default 1.0)
+    pub shadow_rim: f32,
+    /// Hitbox shadow (0.0 = no hitbox shadow, 1.0 = full shadow under hitbox)
+    pub shadow_hitbox: f32,
+    /// Ambient occlusion strength (default 1.0)
+    pub shadow_ao: f32,
+
+    /// Sun / dominant directional light direction (world space, need not be normalized —
+    /// will be normalised in `to_gpu()`). Default: [0.5, 1.0, 0.5] (upper-right).
+    pub sun_direction: [f32; 3],
 }
 
 impl WaterVolumeDescriptor {
     /// Converts descriptor to GPU-side representation.
     pub fn to_gpu(&self) -> GpuWaterVolume {
+        let sun = {
+            let [x, y, z] = self.sun_direction;
+            let len = (x * x + y * y + z * z).sqrt().max(1e-6);
+            [x / len, y / len, z / len, 0.0]
+        };
         GpuWaterVolume {
             bounds_min: [self.bounds_min[0], self.bounds_min[1], self.bounds_min[2], 0.0],
             bounds_max: [self.bounds_max[0], self.bounds_max[1], self.bounds_max[2], self.surface_height],
@@ -323,10 +349,10 @@ impl WaterVolumeDescriptor {
             reflection_refraction: [self.reflection_strength, self.refraction_strength, self.fresnel_power, 0.0],
             caustics_params: [if self.caustics_enabled { 1.0 } else { 0.0 }, self.caustics_intensity, self.caustics_scale, self.caustics_speed],
             fog_params: [self.fog_density, self.god_rays_intensity, 0.0, 0.0],
-            _pad0: [0.0; 4],
-            _pad1: [0.0; 4],
-            _pad2: [0.0; 4],
-            _pad3: [0.0; 4],
+            sim_params: [self.ior, self.caustics_intensity, self.fresnel_min, self.density],
+            shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
+            sun_direction: sun,
+            ssr_params: [1.0, 32.0, 0.05, 0.02],  // Default SSR: enabled, 32 steps
             _pad4: [0.0; 4],
             _pad5: [0.0; 4],
             _pad6: [0.0; 4],
@@ -357,10 +383,17 @@ impl WaterVolumeDescriptor {
             caustics_speed: 0.5,
             fog_density: 0.03,
             god_rays_intensity: 1.0,
+            ior: 1.333,
+            fresnel_min: 0.1,
+            density: 0.03,
+            shadow_rim: 1.0,
+            shadow_hitbox: 0.0,
+            shadow_ao: 1.0,
+            sun_direction: [0.5, 1.0, 0.5],
         }
     }
 
-    /// Creates a default lake water volume.
+    /// Creates a default lake / pool water volume.
     pub fn lake() -> Self {
         Self {
             bounds_min: [-50.0, -5.0, -50.0],
@@ -378,13 +411,26 @@ impl WaterVolumeDescriptor {
             reflection_strength: 0.6,
             refraction_strength: 0.3,
             fresnel_power: 4.0,
-            caustics_enabled: false,
-            caustics_intensity: 0.0,
-            caustics_scale: 0.0,
-            caustics_speed: 0.0,
+            caustics_enabled: true,
+            caustics_intensity: 1.2,
+            caustics_scale: 4.0,
+            caustics_speed: 0.4,
             fog_density: 0.05,
             god_rays_intensity: 0.5,
+            ior: 1.333,
+            fresnel_min: 0.1,
+            density: 0.05,
+            shadow_rim: 1.0,
+            shadow_hitbox: 0.0,
+            shadow_ao: 1.0,
+            sun_direction: [0.5, 1.0, 0.5],
         }
+    }
+}
+
+impl Default for WaterVolumeDescriptor {
+    fn default() -> Self {
+        Self::ocean()
     }
 }
 
@@ -424,6 +470,86 @@ impl SceneActorTrait for WaterVolumeActor {
     }
 }
 
+// ── Water Hitbox ─────────────────────────────────────────────────────────────
+
+/// Descriptor for a water hitbox — an AABB that displaces the heightfield simulation.
+///
+/// A hitbox records where an object *was* (old bounds) and where it *is* (new bounds).
+/// The simulation computes the volume that was vacated minus the new volume to produce
+/// a realistic rise-and-fall displacement pattern on the water surface.
+///
+/// # Usage
+/// ```ignore
+/// let hitbox_id = scene.insert_water_hitbox(WaterHitboxDescriptor {
+///     old_min: [-0.5, 0.0, -0.5],
+///     old_max: [0.5, 1.0, 0.5],
+///     new_min: [-0.5, -0.3, -0.5],  // moved downward into the water
+///     new_max: [0.5, 0.7, 0.5],
+///     edge_softness: 0.5,
+///     strength: 1.0,
+/// })?;
+/// ```
+#[derive(Debug, Clone, Copy)]
+pub struct WaterHitboxDescriptor {
+    /// Previous frame AABB minimum (world space XYZ)
+    pub old_min: [f32; 3],
+    /// Previous frame AABB maximum (world space XYZ)
+    pub old_max: [f32; 3],
+    /// Current frame AABB minimum (world space XYZ)
+    pub new_min: [f32; 3],
+    /// Current frame AABB maximum (world space XYZ)
+    pub new_max: [f32; 3],
+    /// Gaussian falloff width at the AABB edges (lower = sharper, typical range 0.3–2.0)
+    pub edge_softness: f32,
+    /// Displacement strength multiplier (default 1.0)
+    pub strength: f32,
+}
+
+impl WaterHitboxDescriptor {
+    /// Converts to GPU representation.
+    pub fn to_gpu(&self) -> libhelio::GpuWaterHitbox {
+        libhelio::GpuWaterHitbox {
+            old_min: [self.old_min[0], self.old_min[1], self.old_min[2], 0.0],
+            old_max: [self.old_max[0], self.old_max[1], self.old_max[2], 0.0],
+            new_min: [self.new_min[0], self.new_min[1], self.new_min[2], 0.0],
+            new_max: [self.new_max[0], self.new_max[1], self.new_max[2], 0.0],
+            params: [self.edge_softness, self.strength, 0.0, 0.0],
+        }
+    }
+}
+
+/// Water hitbox actor — wraps a [`WaterHitboxDescriptor`] for the scene actor system.
+#[derive(Debug, Clone, Copy)]
+pub struct WaterHitboxActor {
+    pub descriptor: WaterHitboxDescriptor,
+    pub hitbox_id: Option<crate::handles::WaterHitboxId>,
+}
+
+impl WaterHitboxActor {
+    pub fn new(descriptor: WaterHitboxDescriptor) -> Self {
+        Self { descriptor, hitbox_id: None }
+    }
+
+    pub fn id(&self) -> Option<crate::handles::WaterHitboxId> {
+        self.hitbox_id
+    }
+}
+
+impl SceneActorTrait for WaterHitboxActor {
+    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
+        if self.hitbox_id.is_none() {
+            if let Ok(id) = scene.insert_water_hitbox(self.descriptor) {
+                self.hitbox_id = Some(id);
+            }
+        }
+    }
+
+    fn inserted_id(&self) -> SceneActorId {
+        // Hitboxes don't map to a top-level SceneActorId variant; return None
+        SceneActorId::None
+    }
+}
+
 /// Unified scene actor type. Includes shading, geometry, and user custom logic.
 #[derive(Debug, Clone)]
 pub enum SceneActor {
@@ -434,6 +560,7 @@ pub enum SceneActor {
     VirtualObject(VirtualObjectActor),
     Object(ObjectActor),
     WaterVolume(WaterVolumeActor),
+    WaterHitbox(WaterHitboxActor),
 }
 
 impl SceneActor {
@@ -480,6 +607,7 @@ impl SceneActorTrait for SceneActor {
             SceneActor::VirtualObject(actor) => actor.inserted_id(),
             SceneActor::Object(actor) => actor.inserted_id(),
             SceneActor::WaterVolume(actor) => actor.inserted_id(),
+            SceneActor::WaterHitbox(actor) => actor.inserted_id(),
         }
     }
 
@@ -494,6 +622,7 @@ impl SceneActorTrait for SceneActor {
             SceneActor::VirtualObject(actor) => actor.on_attach(scene),
             SceneActor::Object(actor) => actor.on_attach(scene),
             SceneActor::WaterVolume(actor) => actor.on_attach(scene),
+            SceneActor::WaterHitbox(actor) => actor.on_attach(scene),
         }
     }
 
@@ -505,6 +634,7 @@ impl SceneActorTrait for SceneActor {
             SceneActor::VirtualObject(actor) => actor.on_tick(scene),
             SceneActor::Object(actor) => actor.on_tick(scene),
             SceneActor::WaterVolume(actor) => actor.on_tick(scene),
+            SceneActor::WaterHitbox(_) => {}
             SceneActor::Sky(_) => {}
         }
     }
