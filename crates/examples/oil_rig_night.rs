@@ -166,6 +166,8 @@ impl ApplicationHandler for App {
             caustics_speed: 1.8,
             fog_density: 0.035,
             god_rays_intensity: 0.4,
+            wind_direction: [0.8, 0.3],
+            wind_strength: 2.5,
             // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)
             ..Default::default()
         };
