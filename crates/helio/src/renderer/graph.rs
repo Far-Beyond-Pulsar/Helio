@@ -133,6 +133,14 @@ pub fn build_default_graph(
     billboard_pass.set_occluded_by_geometry(true);
     graph.add_pass(Box::new(billboard_pass));
 
+    graph.add_pass(Box::new(WaterSimPass::new(
+        device,
+        camera_buf,
+        config.internal_width(),
+        config.internal_height(),
+        config.surface_format,
+    )));
+
     graph.add_pass(Box::new(TaaPass::new(
         device,
         config.internal_width(),
@@ -141,11 +149,6 @@ pub fn build_default_graph(
         config.height,
         config.surface_format,
     )));
-
-    // Water renders post-TAA: composited on top of the upscaled scene.
-    // This avoids TAA overwriting the water surface, and is standard AAA practice
-    // for transparent/animated water effects.
-    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
 
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
@@ -265,6 +268,14 @@ pub fn build_hlfs_graph(
     billboard_pass.set_occluded_by_geometry(true);
     graph.add_pass(Box::new(billboard_pass));
 
+    graph.add_pass(Box::new(WaterSimPass::new(
+        device,
+        camera_buf,
+        config.internal_width(),
+        config.internal_height(),
+        config.surface_format,
+    )));
+
     graph.add_pass(Box::new(TaaPass::new(
         device,
         config.internal_width(),
@@ -273,9 +284,6 @@ pub fn build_hlfs_graph(
         config.height,
         config.surface_format,
     )));
-
-    // Water renders post-TAA: composited on top of the upscaled scene.
-    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
 
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
