@@ -1,28 +1,33 @@
-//! SDF Clipmap Demo — helio v3
+//! SDF Demo — sparse signed distance field terrain with editable shapes.
 //!
-//! Fullscreen volumetric ray march through a sparse SDF brick atlas.
-//! No triangle meshes are rendered — the entire scene is SDF geometry:
-//!   - Procedural rolling terrain via FBM noise (CPU + GPU match)
-//!   - A few sphere/capsule edits to show boolean operations
-//!
-//! The clipmap has 8 nested LOD levels (level 0 = finest at 0.5 wu/voxel).
-//! Only the newly-visible toroidal shell is reclassified each frame -> O(1) CPU.
+//! Uses `helio-pass-sdf` as a custom render pass on top of the Helio renderer.
+//! A procedural terrain is generated via noise, and the user can place shapes
+//! into the scene to demonstrate union/subtraction/intersection operations.
 //!
 //! Controls:
-//!   WASD / Space / Shift  -- free-fly (auto-orbit disabled on first input)
-//!   Mouse drag            -- look (click window to grab cursor)
-//!   Escape                -- release cursor / exit
+//!   Mouse + Left click  – look around
+//!   W/A/S/D             – fly
+//!   Space/Shift         – up / down
+//!   1                   – place sphere (union)
+//!   2                   – subtract sphere (subtraction)
+//!   3                   – place cube (union)
+//!   4                   – place smooth-blended sphere
+//!   5                   – toggle debug clip-level visualisation
+//!   R                   – clear all edits
+//!   Escape              – release / quit
 
-use glam::{Mat4, Vec3};
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
-use helio_pass_sdf::{
-    edit_list::{BooleanOp, SdfEdit},
-    primitives::{SdfShapeParams, SdfShapeType},
-    terrain::TerrainConfig,
-    SdfClipmapPass,
-};
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Instant;
+
+use glam::{EulerRot, Mat4, Quat, Vec3};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
+use helio::{
+    RenderGraph,
+};
+use helio_pass_sdf::{
+    BooleanOp, SdfEdit, SdfPass, SdfShapeParams, SdfShapeType, TerrainConfig,
+};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -31,17 +36,13 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// APP BOILERPLATE
-// ─────────────────────────────────────────────────────────────────────────────
+// ── constants ─────────────────────────────────────────────────────────────────
 
-fn main() {
-    env_logger::init();
-    EventLoop::new()
-        .expect("event loop")
-        .run_app(&mut App { state: None })
-        .expect("run");
-}
+const LOOK_SENS: f32 = 0.002;
+const FLY_SPEED: f32 = 8.0;
+const DRAG: f32 = 6.0;
+
+// ── app ───────────────────────────────────────────────────────────────────────
 
 struct App {
     state: Option<AppState>,
@@ -51,328 +52,335 @@ struct AppState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
-    last_frame: std::time::Instant,
-    // Camera
+    sdf_pass: *mut SdfPass,
+    last_frame: Instant,
     cam_pos: Vec3,
-    cam_yaw: f32,
-    cam_pitch: f32,
-    orbit_mode: bool,
-    elapsed: f32,
-    // Input
+    yaw: f32,
+    pitch: f32,
+    velocity: Vec3,
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 }
 
+// SAFETY: SdfPass is only accessed from the main thread (winit event loop).
+unsafe impl Send for AppState {}
+unsafe impl Sync for AppState {}
+
+impl AppState {
+    fn update(&mut self, dt: f32) {
+        let (dx, dy) = self.mouse_delta;
+        self.mouse_delta = (0.0, 0.0);
+        self.yaw -= dx * LOOK_SENS;
+        self.pitch = (self.pitch - dy * LOOK_SENS).clamp(-1.5, 1.5);
+
+        let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+        let forward = orientation * -Vec3::Z;
+        let right = orientation * Vec3::X;
+
+        let mut accel = Vec3::ZERO;
+        if self.keys.contains(&KeyCode::KeyW) { accel += forward; }
+        if self.keys.contains(&KeyCode::KeyS) { accel -= forward; }
+        if self.keys.contains(&KeyCode::KeyA) { accel -= right; }
+        if self.keys.contains(&KeyCode::KeyD) { accel += right; }
+        if self.keys.contains(&KeyCode::Space) { accel += Vec3::Y; }
+        if self.keys.contains(&KeyCode::ShiftLeft) { accel -= Vec3::Y; }
+
+        self.velocity += accel * FLY_SPEED * dt;
+        self.velocity /= 1.0 + DRAG * dt;
+        self.cam_pos += self.velocity * dt;
+    }
+
+    fn camera(&self, width: u32, height: u32) -> Camera {
+        let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+        let target = self.cam_pos + orientation * -Vec3::Z;
+        let up = orientation * Vec3::Y;
+        Camera::perspective_look_at(
+            self.cam_pos,
+            target,
+            up,
+            std::f32::consts::FRAC_PI_4,
+            width as f32 / height.max(1) as f32,
+            0.01,
+            2000.0,
+        )
+    }
+
+    fn sdf(&mut self) -> &mut SdfPass {
+        unsafe { &mut *self.sdf_pass }
+    }
+
+    fn place_edit(&mut self, shape: SdfShapeType, op: BooleanOp, params: SdfShapeParams, blend: f32) {
+        let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
+        let forward = orientation * -Vec3::Z;
+        let pos = self.cam_pos + forward * 5.0;
+        let transform = Mat4::from_translation(pos);
+
+        self.sdf().add_edit(SdfEdit {
+            shape,
+            op,
+            transform,
+            params,
+            blend_radius: blend,
+        });
+        log::info!("Placed {:?} {:?} at {:?} (blend={})", shape, op, pos, blend);
+    }
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
+        if self.state.is_some() { return; }
 
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("Helio SDF Clipmap Demo (v3)")
-                        .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
-                )
-                .expect("window"),
-        );
+        let attrs = Window::default_attributes()
+            .with_title("Helio SDF Demo")
+            .with_inner_size(winit::dpi::PhysicalSize::new(1280, 720));
+        let window = Arc::new(event_loop.create_window(attrs).unwrap());
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            ..Default::default()
-        });
-        let surface = instance.create_surface(window.clone()).expect("surface");
+        let instance = wgpu::Instance::default();
+        let surface = instance.create_surface(window.clone()).unwrap();
+
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
+            power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
         }))
-        .expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            ..Default::default()
-        }))
-        .expect("device");
-        device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
-            panic!("[GPU] {:?}", e)
-        }));
+        .expect("No suitable GPU adapter");
+
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            },
+        ))
+        .expect("Device request failed");
+
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+
+        // Capture GPU validation errors so we can debug pipeline issues
+        device.on_uncaptured_error(Arc::new(|error| {
+            log::error!("wgpu uncaptured error: {}", error);
+        }));
+
         let size = window.inner_size();
+        let caps = surface.get_capabilities(&adapter);
+        let surface_format = caps.formats.iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(caps.formats[0]);
+
         surface.configure(
             &device,
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
+                format: surface_format,
                 width: size.width,
                 height: size.height,
-                present_mode: wgpu::PresentMode::AutoVsync,
+                present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             },
         );
 
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            RendererConfig::new(size.width, size.height, format),
-        );
+        // ── Renderer + custom graph with SDF pass ─────────────────────────────
+        let config = RendererConfig::new(size.width, size.height, surface_format);
+        let mut renderer = Renderer::new(device.clone(), queue.clone(), config);
 
-        // Build the SDF clipmap pass using the renderer's camera buffer.
-        let mut sdf = {
-            let camera_buf = renderer.camera_buffer();
-            SdfClipmapPass::new(&device, camera_buf, format)
-        };
-
-        // Rolling terrain base
-        sdf.set_terrain(TerrainConfig::rolling());
-
-        // Sphere on a hill
-        sdf.add_edit(SdfEdit {
-            shape: SdfShapeType::Sphere,
-            op: BooleanOp::Union,
-            transform: Mat4::from_translation(Vec3::new(0.0, 12.0, 0.0)),
-            params: SdfShapeParams::sphere(6.0),
-            blend_radius: 2.0,
-        });
-
-        // Tall capsule pillar
-        sdf.add_edit(SdfEdit {
-            shape: SdfShapeType::Capsule,
-            op: BooleanOp::Union,
-            transform: Mat4::from_translation(Vec3::new(20.0, 8.0, 5.0)),
-            params: SdfShapeParams::capsule(2.0, 8.0),
-            blend_radius: 1.0,
-        });
-
-        // Subtracted hollow in the terrain
-        sdf.add_edit(SdfEdit {
-            shape: SdfShapeType::Sphere,
-            op: BooleanOp::Subtraction,
-            transform: Mat4::from_translation(Vec3::new(0.0, 2.0, 0.0)),
-            params: SdfShapeParams::sphere(5.0),
-            blend_radius: 1.5,
-        });
-
-        renderer.add_pass(Box::new(sdf));
-
-        eprintln!("[SDF] Clipmap ready. Auto-orbiting -- press WASD to fly freely.");
+        // Build a minimal graph: SDF pass only
+        let mut graph = RenderGraph::new(&device, &queue);
+        let sdf_pass = SdfPass::new(&device, surface_format, Some(TerrainConfig::rolling()));
+        let sdf_box = Box::new(sdf_pass);
+        let sdf_ptr = &*sdf_box as *const SdfPass as *mut SdfPass;
+        graph.add_pass(sdf_box);
+        renderer.set_graph(graph);
 
         self.state = Some(AppState {
             window,
             surface,
             device,
-            surface_format: format,
+            queue,
+            surface_format,
             renderer,
-            last_frame: std::time::Instant::now(),
-            cam_pos: Vec3::new(0.0, 30.0, 80.0),
-            cam_yaw: std::f32::consts::PI,
-            cam_pitch: -0.18,
-            orbit_mode: true,
-            elapsed: 0.0,
+            sdf_pass: sdf_ptr,
+            last_frame: Instant::now(),
+            cam_pos: Vec3::new(0.0, 4.0, 15.0),
+            yaw: 0.0,
+            pitch: -0.2,
+            velocity: Vec3::ZERO,
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
         });
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Escape),
-                        ..
-                    },
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                    ..
+                },
                 ..
             } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
-                    let _ = state.window.set_cursor_grab(CursorGrabMode::None);
                     state.window.set_cursor_visible(true);
+                    let _ = state.window.set_cursor_grab(CursorGrabMode::None);
                 } else {
                     event_loop.exit();
                 }
             }
+
+            // ── SDF edit keys ─────────────────────────────────────────────────
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ks,
-                        physical_key: PhysicalKey::Code(key),
-                        ..
-                    },
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(code),
+                    repeat: false,
+                    ..
+                },
                 ..
-            } => match ks {
-                ElementState::Pressed => {
-                    state.keys.insert(key);
+            } => {
+                match code {
+                    KeyCode::Digit1 => {
+                        state.place_edit(
+                            SdfShapeType::Sphere, BooleanOp::Union,
+                            SdfShapeParams::sphere(2.0), 0.0,
+                        );
+                    }
+                    KeyCode::Digit2 => {
+                        state.place_edit(
+                            SdfShapeType::Sphere, BooleanOp::Subtraction,
+                            SdfShapeParams::sphere(3.0), 0.5,
+                        );
+                    }
+                    KeyCode::Digit3 => {
+                        state.place_edit(
+                            SdfShapeType::Cube, BooleanOp::Union,
+                            SdfShapeParams::cube(1.5, 1.5, 1.5), 0.0,
+                        );
+                    }
+                    KeyCode::Digit4 => {
+                        state.place_edit(
+                            SdfShapeType::Sphere, BooleanOp::Union,
+                            SdfShapeParams::sphere(2.5), 1.5,
+                        );
+                    }
+                    KeyCode::Digit5 => {
+                        state.sdf().toggle_debug();
+                        log::info!("Debug clip-level vis toggled");
+                    }
+                    KeyCode::KeyR => {
+                        state.sdf().clear_edits();
+                        log::info!("All SDF edits cleared");
+                    }
+                    _ => { state.keys.insert(code); }
                 }
-                ElementState::Released => {
-                    state.keys.remove(&key);
-                }
-            },
+            }
+
+            WindowEvent::KeyboardInput {
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(code),
+                    state: ElementState::Released,
+                    ..
+                },
+                ..
+            } => {
+                state.keys.remove(&code);
+            }
+
+            WindowEvent::Resized(size) => {
+                state.surface.configure(
+                    &state.device,
+                    &wgpu::SurfaceConfiguration {
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format: state.surface_format,
+                        width: size.width,
+                        height: size.height,
+                        present_mode: wgpu::PresentMode::Fifo,
+                        alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+                        view_formats: vec![],
+                        desired_maximum_frame_latency: 2,
+                    },
+                );
+                state.renderer.set_render_size(size.width, size.height);
+            }
+
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let ok = state
-                        .window
+                    let ok = state.window
                         .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
                     if ok {
-                        state.window.set_cursor_visible(false);
                         state.cursor_grabbed = true;
+                        state.window.set_cursor_visible(false);
                     }
                 }
             }
-            WindowEvent::Resized(sz) if sz.width > 0 && sz.height > 0 => {
-                state.surface.configure(
-                    &state.device,
-                    &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: state.surface_format,
-                        width: sz.width,
-                        height: sz.height,
-                        present_mode: wgpu::PresentMode::AutoVsync,
-                        alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                        view_formats: vec![],
-                        desired_maximum_frame_latency: 2,
-                    },
-                );
-                state.renderer.set_render_size(sz.width, sz.height);
-            }
+
             WindowEvent::RedrawRequested => {
-                let now = std::time::Instant::now();
-                let dt = (now - state.last_frame).as_secs_f32();
+                let now = Instant::now();
+                let dt = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
                 state.last_frame = now;
-                state.render(dt);
+                state.update(dt);
+
+                let size = state.window.inner_size();
+                let camera = state.camera(size.width, size.height);
+
+                let output = match state.surface.get_current_texture() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::warn!("surface error: {:?}", e);
+                        return;
+                    }
+                };
+                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+                if let Err(e) = state.renderer.render(&camera, &view) {
+                    log::error!("render error: {:?}", e);
+                }
+                output.present();
                 state.window.request_redraw();
             }
+
             _ => {}
         }
     }
 
-    fn device_event(&mut self, _: &ActiveEventLoop, _: winit::event::DeviceId, event: DeviceEvent) {
-        let Some(s) = &mut self.state else { return };
+    fn device_event(&mut self, _: &ActiveEventLoop, _: DeviceId, event: DeviceEvent) {
+        let Some(state) = &mut self.state else { return };
         if let DeviceEvent::MouseMotion { delta: (dx, dy) } = event {
-            if s.cursor_grabbed {
-                s.mouse_delta.0 += dx as f32;
-                s.mouse_delta.1 += dy as f32;
+            if state.cursor_grabbed {
+                state.mouse_delta.0 += dx as f32;
+                state.mouse_delta.1 += dy as f32;
             }
         }
     }
 
     fn about_to_wait(&mut self, _: &ActiveEventLoop) {
-        if let Some(s) = &self.state {
-            s.window.request_redraw();
+        if let Some(state) = &self.state {
+            state.window.request_redraw();
         }
     }
 }
 
-impl AppState {
-    fn render(&mut self, dt: f32) {
-        const SPEED: f32 = 25.0;
-        const SENS: f32 = 0.0020;
-
-        self.elapsed += dt;
-
-        // Exit orbit mode on first movement input
-        if self.keys.contains(&KeyCode::KeyW)
-            || self.keys.contains(&KeyCode::KeyS)
-            || self.keys.contains(&KeyCode::KeyA)
-            || self.keys.contains(&KeyCode::KeyD)
-            || self.keys.contains(&KeyCode::Space)
-        {
-            self.orbit_mode = false;
-        }
-
-        // Apply mouse look
-        self.cam_yaw += self.mouse_delta.0 * SENS;
-        self.cam_pitch = (self.cam_pitch - self.mouse_delta.1 * SENS).clamp(-1.55, 1.55);
-        self.mouse_delta = (0.0, 0.0);
-
-        if self.orbit_mode {
-            let angle = self.elapsed * 0.07;
-            let radius = 100.0_f32;
-            let height = 30.0 + 15.0 * (self.elapsed * 0.022).sin();
-            self.cam_pos = Vec3::new(radius * angle.cos(), height, radius * angle.sin());
-            let dir = (-self.cam_pos).normalize();
-            self.cam_yaw = dir.z.atan2(dir.x);
-            self.cam_pitch = dir.y.asin();
-        } else {
-            let (sy, cy) = self.cam_yaw.sin_cos();
-            let (sp, cp) = self.cam_pitch.sin_cos();
-            let fwd = Vec3::new(sy * cp, sp, -cy * cp);
-            let right = Vec3::new(cy, 0.0, sy);
-            if self.keys.contains(&KeyCode::KeyW) {
-                self.cam_pos += fwd * SPEED * dt;
-            }
-            if self.keys.contains(&KeyCode::KeyS) {
-                self.cam_pos -= fwd * SPEED * dt;
-            }
-            if self.keys.contains(&KeyCode::KeyA) {
-                self.cam_pos -= right * SPEED * dt;
-            }
-            if self.keys.contains(&KeyCode::KeyD) {
-                self.cam_pos += right * SPEED * dt;
-            }
-            if self.keys.contains(&KeyCode::Space) {
-                self.cam_pos.y += SPEED * dt;
-            }
-            if self.keys.contains(&KeyCode::ShiftLeft) {
-                self.cam_pos.y -= SPEED * dt;
-            }
-        }
-
-        let (sy, cy) = self.cam_yaw.sin_cos();
-        let (sp, cp) = self.cam_pitch.sin_cos();
-        let fwd = Vec3::new(sy * cp, sp, -cy * cp);
-        let sz = self.window.inner_size();
-        let asp = sz.width as f32 / sz.height.max(1) as f32;
-        let camera = Camera::perspective_look_at(
-            self.cam_pos,
-            self.cam_pos + fwd,
-            Vec3::Y,
-            std::f32::consts::FRAC_PI_4,
-            asp,
-            0.5,
-            2000.0,
-        );
-
-        let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("surface: {:?}", e);
-                return;
-            }
-        };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        if let Err(e) = self.renderer.render(&camera, &view) {
-            log::error!("render: {:?}", e);
-        }
-        output.present();
-    }
+fn main() {
+    env_logger::init();
+    let event_loop = EventLoop::new().unwrap();
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let mut app = App { state: None };
+    event_loop.run_app(&mut app).unwrap();
 }
-

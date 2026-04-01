@@ -1,251 +1,366 @@
-//! Multi-resolution SDF clip-map: 8 nested levels with toroidal scrolling.
+//! Geometry Clip Maps — multi-resolution SDF with camera-centered LOD.
 //!
-//! Level 0 is the finest (smallest voxel_size), level 7 is the coarsest.
-//! When the camera moves, only the newly-visible shell of each level is
-//! reclassified — O(1) CPU work per frame.
+//! Nests multiple `BrickMap` levels centered on the camera, each with
+//! progressively coarser voxel sizes.
 
-use crate::brick::BrickMap;
-use crate::edit_bvh::{Aabb, EditBvh};
-use crate::edit_list::GpuSdfEdit;
+use crate::brick::{BrickMap, DEFAULT_BRICK_SIZE, EMPTY_BRICK};
+use crate::edit_bvh::EditBvh;
+use crate::edit_list::SdfEdit;
 use crate::terrain::TerrainConfig;
-use crate::uniforms::{GpuClipLevel, SdfClipMapParams};
-use bytemuck;
-use glam::Vec3;
+use crate::uniforms::SdfGridParams;
 
-/// Number of clip-map levels.
-pub const LEVEL_COUNT: usize = 8;
-/// Grid dimension in bricks per axis per level.
-pub const GRID_DIM: u32 = 16;
-/// Brick size in voxels.
-pub const BRICK_SIZE: u32 = 8;
-/// Atlas dimension in bricks per axis.
-pub const ATLAS_DIM: u32 = 8; // 8^3 = 512 bricks per level
+/// Default number of clip levels.
+pub const DEFAULT_CLIP_LEVELS: u32 = 8;
 
+/// Each level multiplies the voxel size by this factor.
+pub const CLIP_VOXEL_SCALE: f32 = 2.0;
+
+/// Default atlas bricks per axis per level.
+const DEFAULT_ATLAS_BRICKS_PER_AXIS: u32 = 16;
+
+/// GPU-side per-level clip data (64 bytes, 16-byte aligned).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuClipLevel {
+    pub volume_min: [f32; 3],
+    pub _pad0: f32,
+    pub volume_max: [f32; 3],
+    pub _pad1: f32,
+    pub grid_origin: [f32; 3],
+    pub _pad2: f32,
+    pub voxel_size: f32,
+    pub brick_size: u32,
+    pub brick_grid_dim: u32,
+    pub atlas_bricks_per_axis: u32,
+}
+
+/// GPU-side clip map parameters (528 bytes, 16-byte aligned).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SdfClipMapParams {
+    pub level_count: u32,
+    pub grid_dim: u32,
+    pub max_march_dist: f32,
+    pub debug_flags: u32,
+    pub levels: [GpuClipLevel; 8],
+}
+
+/// A single clip level with its own BrickMap.
 pub struct ClipLevel {
+    pub level_index: u32,
+    pub voxel_size: f32,
+    pub volume_min: [f32; 3],
+    pub volume_max: [f32; 3],
+    pub prev_volume_min: [f32; 3],
+    pub prev_volume_max: [f32; 3],
     pub brick_map: BrickMap,
-    /// Camera-aligned world-space center for this level (snapped to brick grid).
-    pub center: Vec3,
-    /// Level index (0 = finest).
-    pub level_idx: usize,
+    /// Integer brick coordinate of last snapped center (avoids float comparison)
+    pub last_snapped_brick: [i32; 3],
+    pub params_buffer: Option<wgpu::Buffer>,
 }
 
-impl ClipLevel {
-    pub fn new(level_idx: usize, base_voxel_size: f32, center: Vec3) -> Self {
-        let voxel_size = base_voxel_size * (1 << level_idx) as f32;
-        let (world_min, toroidal_origin) = Self::compute_origin(center, voxel_size);
-        let mut bm = BrickMap::new(world_min, voxel_size, GRID_DIM, BRICK_SIZE, ATLAS_DIM);
-        bm.toroidal_origin = toroidal_origin;
-        ClipLevel {
-            brick_map: bm,
-            center,
-            level_idx,
-        }
-    }
-
-    fn compute_origin(center: Vec3, voxel_size: f32) -> (Vec3, [i32; 3]) {
-        let bs = (BRICK_SIZE as f32) * voxel_size;
-        let half = (GRID_DIM as f32) * bs * 0.5;
-        // Snap center to brick grid.
-        let snapped = Vec3::new(
-            (center.x / bs).floor() * bs,
-            (center.y / bs).floor() * bs,
-            (center.z / bs).floor() * bs,
-        );
-        let world_min = snapped - Vec3::splat(half);
-        let origin = [
-            (world_min.x / bs) as i32,
-            (world_min.y / bs) as i32,
-            (world_min.z / bs) as i32,
-        ];
-        (world_min, origin)
-    }
-
-    /// Move the level center to `new_center`. Returns the previous toroidal origin.
-    pub fn update_center(&mut self, new_center: Vec3) -> [i32; 3] {
-        let voxel_size = self.brick_map.voxel_size;
-        let (world_min, new_origin) = Self::compute_origin(new_center, voxel_size);
-        let prev_origin = self.brick_map.toroidal_origin;
-        self.center = new_center;
-        self.brick_map.world_min = world_min;
-        self.brick_map.toroidal_origin = new_origin;
-        prev_origin
-    }
-}
-
-/// Full multi-resolution SDF clip-map.
+/// Multi-level clip map managing several `BrickMap`s centered on the camera.
 pub struct SdfClipMap {
-    pub levels: Vec<ClipLevel>,
-    pub base_voxel_size: f32,
-
-    /// GPU buffer for SdfClipMapParams (uploaded each frame if dirty).
-    pub clip_params_buf: Option<wgpu::Buffer>,
-    /// CPU-side concatenated active brick indices across all levels.
-    pub cached_all_indices: Vec<u32>,
-    /// GPU buffer for the concatenated all-brick-indices.
-    pub all_brick_indices_buf: Option<wgpu::Buffer>,
+    levels: Vec<ClipLevel>,
+    grid_dim: u32,
+    level_count: u32,
+    pub clip_params_buffer: Option<wgpu::Buffer>,
+    cached_all_indices: Vec<u32>,
 }
 
 impl SdfClipMap {
-    pub fn new(base_voxel_size: f32, center: Vec3) -> Self {
-        let levels = (0..LEVEL_COUNT)
-            .map(|i| ClipLevel::new(i, base_voxel_size, center))
-            .collect();
+    pub fn new(grid_dim: u32, base_voxel_size: f32, level_count: u32) -> Self {
+        let mut levels = Vec::with_capacity(level_count as usize);
+
+        for i in 0..level_count {
+            let scale = CLIP_VOXEL_SCALE.powi(i as i32);
+            let voxel_size = base_voxel_size * scale;
+            let half_extent = voxel_size * grid_dim as f32 * 0.5;
+
+            levels.push(ClipLevel {
+                level_index: i,
+                voxel_size,
+                volume_min: [-half_extent, -half_extent, -half_extent],
+                volume_max: [half_extent, half_extent, half_extent],
+                prev_volume_min: [-half_extent, -half_extent, -half_extent],
+                prev_volume_max: [half_extent, half_extent, half_extent],
+                brick_map: BrickMap::new(
+                    grid_dim,
+                    DEFAULT_BRICK_SIZE,
+                    DEFAULT_ATLAS_BRICKS_PER_AXIS,
+                ),
+                last_snapped_brick: [i32::MAX, i32::MAX, i32::MAX],
+                params_buffer: None,
+            });
+        }
+
+        let bgd = grid_dim / DEFAULT_BRICK_SIZE;
+        let entries_per_level = (bgd * bgd * bgd) as usize;
+        let cached_all_indices = vec![EMPTY_BRICK; level_count as usize * entries_per_level];
+
         Self {
             levels,
-            base_voxel_size,
-            clip_params_buf: None,
-            cached_all_indices: Vec::new(),
-            all_brick_indices_buf: None,
+            grid_dim,
+            level_count,
+            clip_params_buffer: None,
+            cached_all_indices,
         }
     }
 
-    /// Create GPU buffers for the clip-map level data and all-brick-indices.
     pub fn create_gpu_resources(&mut self, device: &wgpu::Device) {
-        for level in &mut self.levels {
-            level.brick_map.create_gpu_resources(device);
-        }
-        self.clip_params_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("SdfClipMapParams"),
+        self.clip_params_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("SDF Clip Map Params"),
             size: std::mem::size_of::<SdfClipMapParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
-        // Max size: LEVEL_COUNT * GRID_DIM^3 * 4 bytes.
-        let max_indices = LEVEL_COUNT * (GRID_DIM as usize).pow(3);
-        self.all_brick_indices_buf = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("SDF All Brick Indices"),
-            size: (max_indices * 4).max(4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-    }
 
-    /// Full classify: reclassify all bricks in all levels against the BVH.
-    pub fn classify_all(
-        &mut self,
-        bvh: &EditBvh,
-        edits: &[GpuSdfEdit],
-        terrain: Option<&TerrainConfig>,
-    ) {
-        for level in &mut self.levels {
-            level.brick_map.classify_bvh(bvh, edits, terrain);
+        for (i, level) in self.levels.iter_mut().enumerate() {
+            level.brick_map.create_gpu_resources(device);
+            level.params_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(&format!("SDF Clip Level {} Params", i)),
+                size: std::mem::size_of::<SdfGridParams>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
         }
     }
 
-    /// Update camera center and return a bitmask of which levels scrolled.
-    pub fn update_center(&mut self, new_center: Vec3) -> u8 {
-        let mut dirty_mask = 0u8;
-        for (i, level) in self.levels.iter_mut().enumerate() {
-            let voxel_size = level.brick_map.voxel_size;
-            let bs = (BRICK_SIZE as f32) * voxel_size;
-            let old_snap = Vec3::new(
-                (level.center.x / bs).floor() * bs,
-                (level.center.y / bs).floor() * bs,
-                (level.center.z / bs).floor() * bs,
-            );
-            let new_snap = Vec3::new(
-                (new_center.x / bs).floor() * bs,
-                (new_center.y / bs).floor() * bs,
-                (new_center.z / bs).floor() * bs,
-            );
-            if old_snap.distance_squared(new_snap) > 0.0 {
-                dirty_mask |= 1 << i;
-                level.update_center(new_center);
+    /// Update volume centers based on a focal point (camera).
+    /// Returns a bitmask of which levels have dirty bricks.
+    /// Uses integer brick coordinates for snapping to avoid float comparison jitter.
+    pub fn update_center(&mut self, center: glam::Vec3) -> u32 {
+        let mut dirty_mask = 0u32;
+
+        for level in self.levels.iter_mut() {
+            let vs = level.voxel_size;
+            let half_extent = vs * self.grid_dim as f32 * 0.5;
+            let brick_step = vs * DEFAULT_BRICK_SIZE as f32;
+
+            // Snap to integer brick coordinates (deterministic, no float comparison)
+            let snap_brick = [
+                (center.x / brick_step).floor() as i32,
+                (center.y / brick_step).floor() as i32,
+                (center.z / brick_step).floor() as i32,
+            ];
+
+            if snap_brick != level.last_snapped_brick {
+                level.prev_volume_min = level.volume_min;
+                level.prev_volume_max = level.volume_max;
+
+                let snapped_x = snap_brick[0] as f32 * brick_step;
+                let snapped_y = snap_brick[1] as f32 * brick_step;
+                let snapped_z = snap_brick[2] as f32 * brick_step;
+
+                level.volume_min = [
+                    snapped_x - half_extent,
+                    snapped_y - half_extent,
+                    snapped_z - half_extent,
+                ];
+                level.volume_max = [
+                    snapped_x + half_extent,
+                    snapped_y + half_extent,
+                    snapped_z + half_extent,
+                ];
+                level.last_snapped_brick = snap_brick;
+                dirty_mask |= 1 << level.level_index;
             }
         }
         dirty_mask
     }
 
-    /// Toroidal reclassify for dirty levels.
+    /// Toroidal full classify for all dirty levels.
     pub fn classify_toroidal_levels(
         &mut self,
-        dirty_mask: u8,
-        prev_origins: &[[i32; 3]; LEVEL_COUNT],
-        bvh: &EditBvh,
-        edits: &[GpuSdfEdit],
+        dirty_mask: u32,
+        edits: &[SdfEdit],
         terrain: Option<&TerrainConfig>,
+        bvh: Option<&EditBvh>,
     ) {
-        for (i, level) in self.levels.iter_mut().enumerate() {
-            if dirty_mask & (1 << i) != 0 {
-                let prev = prev_origins[i];
-                let curr = level.brick_map.toroidal_origin;
-                level
-                    .brick_map
-                    .classify_toroidal(prev, curr, bvh, edits, terrain);
+        let bounds: Vec<(glam::Vec3, f32)> = edits
+            .iter()
+            .map(|edit| BrickMap::edit_bounding_sphere(edit))
+            .collect();
+
+        for level in self.levels.iter_mut() {
+            if dirty_mask & (1 << level.level_index) != 0 {
+                level.brick_map.classify_toroidal(
+                    edits,
+                    level.volume_min,
+                    level.volume_max,
+                    terrain,
+                    bvh,
+                    &bounds,
+                );
+            } else {
+                level.brick_map.clear_dirty();
             }
         }
     }
 
-    /// Upload dirty GPU buffers for all levels.
-    pub fn upload_dirty(&mut self, dirty_mask: u8, queue: &wgpu::Queue) {
-        for (i, level) in self.levels.iter_mut().enumerate() {
-            if dirty_mask & (1 << i) != 0 || level.brick_map.dirty.iter().any(|d| *d) {
-                level.brick_map.upload_dirty(queue);
+    /// Toroidal scroll for camera movement.
+    pub fn scroll_toroidal_levels(
+        &mut self,
+        dirty_mask: u32,
+        edits: &[SdfEdit],
+        terrain: Option<&TerrainConfig>,
+        bvh: Option<&EditBvh>,
+    ) {
+        let bounds: Vec<(glam::Vec3, f32)> = edits
+            .iter()
+            .map(|edit| BrickMap::edit_bounding_sphere(edit))
+            .collect();
+
+        for level in self.levels.iter_mut() {
+            if dirty_mask & (1 << level.level_index) != 0 {
+                level.brick_map.scroll_toroidal(
+                    level.prev_volume_min,
+                    level.volume_min,
+                    level.volume_max,
+                    edits,
+                    terrain,
+                    bvh,
+                    &bounds,
+                );
+            } else {
+                level.brick_map.clear_dirty();
             }
         }
     }
 
-    /// Rebuild the cached concatenated all-brick-indices and upload it.
-    pub fn update_cached_indices(&mut self, queue: &wgpu::Queue) {
-        self.cached_all_indices.clear();
+    /// Mark bricks overlapping an edit as dirty across all levels.
+    pub fn mark_edit_dirty_levels(
+        &mut self,
+        edit: &SdfEdit,
+        all_edits: &[SdfEdit],
+        terrain: Option<&TerrainConfig>,
+        bvh: Option<&EditBvh>,
+    ) {
+        let bounds: Vec<(glam::Vec3, f32)> = all_edits
+            .iter()
+            .map(|edit| BrickMap::edit_bounding_sphere(edit))
+            .collect();
+
+        for level in self.levels.iter_mut() {
+            level.brick_map.mark_edit_dirty(
+                edit,
+                all_edits,
+                level.volume_min,
+                level.volume_max,
+                terrain,
+                bvh,
+                &bounds,
+            );
+        }
+    }
+
+    /// Upload dirty-only bricks for all levels. Returns per-level dirty brick counts.
+    pub fn upload_dirty_toroidal(&self, queue: &wgpu::Queue, edit_count: u32) -> Vec<u32> {
+        let mut counts = Vec::with_capacity(self.levels.len());
         for level in &self.levels {
-            let active: Vec<u32> = level
-                .brick_map
-                .states
-                .iter()
-                .enumerate()
-                .filter_map(|(i, s)| {
-                    if matches!(s, crate::brick::BrickState::Active(_)) {
-                        Some(i as u32)
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            self.cached_all_indices.extend_from_slice(&active);
+            level.brick_map.upload_dirty(queue);
+
+            if let Some(buf) = &level.params_buffer {
+                let vs = level.voxel_size;
+                let mut params = SdfGridParams::new_sparse(
+                    level.volume_min,
+                    level.volume_max,
+                    self.grid_dim,
+                    edit_count,
+                    level.brick_map.brick_size(),
+                    level.brick_map.dirty_count(),
+                    level.brick_map.atlas_bricks_per_axis(),
+                );
+                params.grid_origin = [
+                    (level.volume_min[0] / vs).floor(),
+                    (level.volume_min[1] / vs).floor(),
+                    (level.volume_min[2] / vs).floor(),
+                ];
+                queue.write_buffer(buf, 0, bytemuck::bytes_of(&params));
+            }
+            counts.push(level.brick_map.dirty_count());
         }
-        if let Some(buf) = &self.all_brick_indices_buf {
-            if !self.cached_all_indices.is_empty() {
-                queue.write_buffer(buf, 0, bytemuck::cast_slice(&self.cached_all_indices));
+        counts
+    }
+
+    /// Build the GPU clip map params uniform.
+    pub fn build_clip_params(&self) -> SdfClipMapParams {
+        let mut gpu_levels = [GpuClipLevel {
+            volume_min: [0.0; 3],
+            _pad0: 0.0,
+            volume_max: [0.0; 3],
+            _pad1: 0.0,
+            grid_origin: [0.0; 3],
+            _pad2: 0.0,
+            voxel_size: 0.0,
+            brick_size: 0,
+            brick_grid_dim: 0,
+            atlas_bricks_per_axis: 0,
+        }; 8];
+
+        for (i, level) in self.levels.iter().enumerate() {
+            if i >= 8 {
+                break;
+            }
+            gpu_levels[i] = GpuClipLevel {
+                volume_min: level.volume_min,
+                _pad0: 0.0,
+                volume_max: level.volume_max,
+                _pad1: 0.0,
+                grid_origin: [
+                    (level.volume_min[0] / level.voxel_size).floor(),
+                    (level.volume_min[1] / level.voxel_size).floor(),
+                    (level.volume_min[2] / level.voxel_size).floor(),
+                ],
+                _pad2: 0.0,
+                voxel_size: level.voxel_size,
+                brick_size: level.brick_map.brick_size(),
+                brick_grid_dim: level.brick_map.brick_grid_dim(),
+                atlas_bricks_per_axis: level.brick_map.atlas_bricks_per_axis(),
+            };
+        }
+
+        let coarsest = &self.levels[self.levels.len() - 1];
+        let range_x = coarsest.volume_max[0] - coarsest.volume_min[0];
+        let range_y = coarsest.volume_max[1] - coarsest.volume_min[1];
+        let range_z = coarsest.volume_max[2] - coarsest.volume_min[2];
+        let max_range = range_x.max(range_y).max(range_z);
+
+        SdfClipMapParams {
+            level_count: self.level_count,
+            grid_dim: self.grid_dim,
+            max_march_dist: max_range * 2.0,
+            debug_flags: 0,
+            levels: gpu_levels,
+        }
+    }
+
+    pub fn levels(&self) -> &[ClipLevel] {
+        &self.levels
+    }
+    pub fn levels_mut(&mut self) -> &mut [ClipLevel] {
+        &mut self.levels
+    }
+    pub fn level_count(&self) -> u32 {
+        self.level_count
+    }
+    pub fn grid_dim(&self) -> u32 {
+        self.grid_dim
+    }
+
+    pub fn update_cached_indices(&mut self, dirty_mask: u32) {
+        let bgd = self.grid_dim / DEFAULT_BRICK_SIZE;
+        let entries_per_level = (bgd * bgd * bgd) as usize;
+        for (i, level) in self.levels.iter().enumerate() {
+            if dirty_mask & (1 << i) != 0 {
+                let offset = i * entries_per_level;
+                self.cached_all_indices[offset..offset + entries_per_level]
+                    .copy_from_slice(level.brick_map.brick_index_slice());
             }
         }
     }
 
-    /// Upload SdfClipMapParams to GPU buffer.
-    pub fn upload_clip_params(&self, queue: &wgpu::Queue) {
-        let params = self.build_clip_params();
-        if let Some(buf) = &self.clip_params_buf {
-            queue.write_buffer(buf, 0, bytemuck::bytes_of(&params));
-        }
-    }
-
-    /// Build the SdfClipMapParams struct.
-    pub fn build_clip_params(&self) -> SdfClipMapParams {
-        let mut levels = [GpuClipLevel::zeroed(); LEVEL_COUNT];
-        let mut brick_index_offset = 0u32;
-        for (i, level) in self.levels.iter().enumerate() {
-            let bm = &level.brick_map;
-            levels[i] = GpuClipLevel {
-                world_min: bm.world_min.to_array(),
-                voxel_size: bm.voxel_size,
-                grid_dim: bm.grid_dim,
-                brick_dim: bm.brick_size,
-                brick_index_offset,
-                active_brick_count: bm.active_count(),
-                toroidal_origin: bm.toroidal_origin,
-                _pad0: 0,
-                atlas_dim: [bm.atlas_dim; 3],
-                _pad1: 0,
-            };
-            brick_index_offset += bm.active_count();
-        }
-        SdfClipMapParams {
-            level_count: LEVEL_COUNT as u32,
-            _pad: [0; 3],
-            levels,
-        }
+    pub fn cached_all_indices(&self) -> &[u32] {
+        &self.cached_all_indices
     }
 }
-
-use bytemuck::Zeroable;
-

@@ -1,98 +1,59 @@
-//! GPU-mapped uniform structs for the SDF clipmap system.
-//!
-//! All structs are `bytemuck::Pod` + `Zeroable` and match their WGSL counterparts.
+//! GPU uniform structs for the SDF system.
 
-use bytemuck::{Pod, Zeroable};
-
-/// Parameters for a single sparse SDF grid level (matches WGSL `GridParams`).
-/// Size: 80 bytes.
+/// Parameters for the SDF evaluation grid (80 bytes, 16-byte aligned).
+///
+/// Layout must match the WGSL `SdfGridParams` struct.
 #[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct SdfGridParams {
-    /// World-space origin of the grid.
-    pub world_min: [f32; 3],
-    /// Voxel size (world units per voxel).
-    pub voxel_size: f32,
-    /// Grid dimensions in bricks (x, y, z).
-    pub grid_dim: [u32; 3],
-    /// Brick size in voxels (e.g., 8).
-    pub brick_size: u32,
-    /// Total number of active bricks (set by CPU before dispatch).
-    pub active_brick_count: u32,
-    /// Atlas capacity in bricks.
-    pub atlas_capacity: u32,
-    /// Total number of SDF edits.
+    pub volume_min: [f32; 3],
+    pub _pad0: f32,
+    pub volume_max: [f32; 3],
+    pub _pad1: f32,
+    pub grid_dim: u32,
     pub edit_count: u32,
-    /// Whether terrain is enabled (0 or 1).
-    pub terrain_enabled: u32,
-    /// Atlas dimensions (bricks per axis).
-    pub atlas_dim: [u32; 3],
-    /// Padding.
-    pub _pad: u32,
+    pub voxel_size: f32,
+    pub max_march_dist: f32,
+    pub brick_size: u32,
+    pub brick_grid_dim: u32,
+    pub active_brick_count: u32,
+    pub atlas_bricks_per_axis: u32,
+    pub grid_origin: [f32; 3],
+    pub debug_flags: u32,
 }
 
 impl SdfGridParams {
-    /// Construct params for a sparse grid at `world_min`/`world_max`.
     pub fn new_sparse(
-        world_min: [f32; 3],
-        voxel_size: f32,
+        volume_min: [f32; 3],
+        volume_max: [f32; 3],
         grid_dim: u32,
-        brick_size: u32,
-        atlas_dim: u32,
-        active_brick_count: u32,
         edit_count: u32,
-        terrain_enabled: bool,
+        brick_size: u32,
+        active_brick_count: u32,
+        atlas_bricks_per_axis: u32,
     ) -> Self {
+        let range_x = volume_max[0] - volume_min[0];
+        let range_y = volume_max[1] - volume_min[1];
+        let range_z = volume_max[2] - volume_min[2];
+        let max_range = range_x.max(range_y).max(range_z);
+        let voxel_size = max_range / grid_dim as f32;
+        let max_march_dist = max_range * 2.0;
+
         Self {
-            world_min,
-            voxel_size,
-            grid_dim: [grid_dim; 3],
-            brick_size,
-            active_brick_count,
-            atlas_capacity: atlas_dim * atlas_dim * atlas_dim,
+            volume_min,
+            _pad0: 0.0,
+            volume_max,
+            _pad1: 0.0,
+            grid_dim,
             edit_count,
-            terrain_enabled: terrain_enabled as u32,
-            atlas_dim: [atlas_dim; 3],
-            _pad: 0,
+            voxel_size,
+            max_march_dist,
+            brick_size,
+            brick_grid_dim: grid_dim / brick_size,
+            active_brick_count,
+            atlas_bricks_per_axis,
+            grid_origin: [0.0; 3],
+            debug_flags: 0,
         }
     }
 }
-
-/// Per-level clip-map state uploaded to GPU (matches WGSL `ClipLevel`).
-/// Size: 64 bytes.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct GpuClipLevel {
-    /// World-space origin of this level's grid.
-    pub world_min: [f32; 3],
-    /// Voxel size for this level.
-    pub voxel_size: f32,
-    /// Grid dimensions in voxels per side.
-    pub grid_dim: u32,
-    /// Brick dimensions per side.
-    pub brick_dim: u32,
-    /// Offset into the global brick-indices array (packed bricks for this level).
-    pub brick_index_offset: u32,
-    /// Number of active bricks for this level.
-    pub active_brick_count: u32,
-    /// Toroidal origin (in brick coords) for this level.
-    pub toroidal_origin: [i32; 3],
-    /// Padding.
-    pub _pad0: u32,
-    /// Atlas grid dimensions for this level.
-    pub atlas_dim: [u32; 3],
-    /// Padding.
-    pub _pad1: u32,
-}
-
-/// Full clip-map parameters uploaded to GPU (matches WGSL `ClipMapParams`).
-/// Size: 16 + 8 * 64 = 528 bytes.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Pod, Zeroable)]
-pub struct SdfClipMapParams {
-    /// Number of active clip levels.
-    pub level_count: u32,
-    pub _pad: [u32; 3],
-    pub levels: [GpuClipLevel; 8],
-}
-

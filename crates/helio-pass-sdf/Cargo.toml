@@ -2,7 +2,7 @@
 name = "helio-pass-sdf"
 version = "0.1.0"
 edition = "2021"
-description = "Helio render pass: screen-space SDF via GPU Jump Flooding Algorithm (O(1) CPU)"
+description = "Helio render pass: sparse SDF terrain with clip-map LOD, brick atlas, and fullscreen ray march"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
@@ -10,5 +10,5 @@ helio-v3  = { path = "../helio-v3" }
 libhelio  = { path = "../libhelio" }
 wgpu      = { workspace = true }
 bytemuck  = { version = "1.14", features = ["derive"] }
-glam      = "0.29"
+glam      = { version = "0.29", features = ["bytemuck"] }
 log       = "0.4"

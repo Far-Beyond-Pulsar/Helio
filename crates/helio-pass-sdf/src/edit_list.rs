@@ -1,7 +1,6 @@
 //! SDF edit list — ordered list of shape + transform + boolean operation.
 
-use super::primitives::{SdfShapeParams, SdfShapeType};
-use bytemuck::{Pod, Zeroable};
+use crate::primitives::{SdfShapeParams, SdfShapeType};
 use glam::Mat4;
 
 /// Boolean operation applied between an edit and the accumulated SDF.
@@ -18,16 +17,16 @@ pub enum BooleanOp {
 pub struct SdfEdit {
     pub shape: SdfShapeType,
     pub op: BooleanOp,
-    /// World-to-local transform (set to Mat4::IDENTITY for world-space edits).
     pub transform: Mat4,
     pub params: SdfShapeParams,
     pub blend_radius: f32,
 }
 
 /// GPU-side SDF edit (96 bytes, 16-byte aligned).
+///
 /// Layout must match the WGSL `SdfEdit` struct exactly.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GpuSdfEdit {
     /// World-to-local transform (inverse of the object transform).
     pub transform: [f32; 16],
@@ -68,13 +67,10 @@ impl SdfEditList {
         }
     }
 
-    /// Appends `edit` and returns its stable index.
-    pub fn add(&mut self, edit: SdfEdit) -> usize {
-        let idx = self.edits.len();
+    pub fn add(&mut self, edit: SdfEdit) {
         self.edits.push(edit);
         self.dirty = true;
         self.generation += 1;
-        idx
     }
 
     pub fn remove(&mut self, index: usize) {
@@ -98,20 +94,24 @@ impl SdfEditList {
     pub fn len(&self) -> usize {
         self.edits.len()
     }
+
     pub fn is_empty(&self) -> bool {
         self.edits.is_empty()
     }
+
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
+
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
     pub fn edits(&self) -> &[SdfEdit] {
         &self.edits
     }
 
-    /// Build the GPU buffer contents and clear the dirty flag.
+    /// Produce the GPU buffer contents and clear the dirty flag.
     pub fn flush_gpu_data(&mut self) -> Vec<GpuSdfEdit> {
         self.dirty = false;
         self.edits.iter().map(|e| e.to_gpu()).collect()
@@ -123,4 +123,3 @@ impl Default for SdfEditList {
         Self::new()
     }
 }
-
