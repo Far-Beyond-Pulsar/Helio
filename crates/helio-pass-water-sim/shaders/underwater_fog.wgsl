@@ -131,8 +131,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let cam_depth = surface_h - cam_pos.y;
 
     // ---- Animated lens distortion ----------------------------------------
-    // Time comes from the frame counter stored in jitter_frame.w.
-    let t            = camera.jitter_frame.w * 0.016;
+    // jitter_frame: xy = TAA jitter, z = frame counter, w = 0 (unused).
+    // Convert frame index to seconds at ~60 fps.
+    let t            = camera.jitter_frame.z * 0.016;
     // Two octaves for richer shape distortion — fast small ripples over
     // slower large swells, both scrolling at different angles.
     let dist0        = water_distortion(in.uv, t);
