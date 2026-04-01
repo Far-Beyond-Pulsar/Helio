@@ -98,18 +98,15 @@ fn vs_main(@location(0) position: vec3f) -> VertexOutput {
     var u: f32;
     var v: f32;
     
-    if abs_pos.x > abs_pos.y && abs_pos.x > abs_pos.z {
-        // X-aligned wall - use Z for horizontal, Y for vertical
+    // Check which axis is dominant to determine face orientation
+    if abs_pos.x >= abs_pos.z {
+        // X-aligned wall (East or West face) - use Z for horizontal, Y for vertical
         u = worldPos.z / tile_size;
         v = worldPos.y / tile_size;
-    } else if abs_pos.z > abs_pos.y {
-        // Z-aligned wall - use X for horizontal, Y for vertical
+    } else {
+        // Z-aligned wall (North or South face) - use X for horizontal, Y for vertical
         u = worldPos.x / tile_size;
         v = worldPos.y / tile_size;
-    } else {
-        // Y-aligned (floor/ceiling) - use X and Z
-        u = worldPos.x / tile_size;
-        v = worldPos.z / tile_size;
     }
     
     let wallUV = vec2f(u, v);
@@ -178,15 +175,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // Apply water color like surface shader does (Beer-Lambert absorption)
     var refracted = scene_sample * vol.water_color.rgb;
     
-    // Walls simulate looking through thickness of water - apply extra absorption
+    // Walls simulate looking through thickness of water - apply stronger absorption than surface
     let water_extent_x = bmax.x - bmin.x;
     let water_extent_z = bmax.z - bmin.z;
     let avg_extent = (water_extent_x + water_extent_z) * 0.25;
-    let water_thickness = avg_extent * 1.0;
+    let water_thickness = avg_extent * 2.5;  // Increased thickness
     
-    // Additional depth-based absorption for thickness
+    // Additional depth-based absorption for thickness - stronger than before
     let extinction = vol.extinction.rgb;
-    let absorption = exp(-extinction * water_thickness);
+    let absorption = exp(-extinction * water_thickness * 1.5);  // Increased multiplier
     refracted *= absorption;
     
     // No caustics on walls - they cause white squares
