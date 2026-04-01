@@ -186,6 +186,11 @@ fn sample_level_trilinear(level_idx: u32, world_pos: vec3<f32>) -> f32 {
     let fy = fract(grid_pos.y);
     let fz = fract(grid_pos.z);
 
+    // Hoist loop-invariant values: replaces 8× float division + 8× function call.
+    let inv_bs   = 1.0 / f32(ibs);
+    let base_off = brick_index_offset(level_idx);
+    let dq_range = 4.0 * vs;  // dequantize range = 2*range in [-range, +range]
+
     var result = 0.0;
 
     // 8-point trilinear interpolation
@@ -200,23 +205,21 @@ fn sample_level_trilinear(level_idx: u32, world_pos: vec3<f32>) -> f32 {
                       * select(1.0 - fy, fy, dy == 1)
                       * select(1.0 - fz, fz, dz == 1);
 
-                // World brick coordinate via floor-division
-                // (WGSL i32 division truncates; floor(float) rounds towards -inf)
-                let bx = i32(floor(f32(sx) / f32(ibs)));
-                let by = i32(floor(f32(sy) / f32(ibs)));
-                let bz = i32(floor(f32(sz) / f32(ibs)));
+                // World brick coordinate — multiply by inv_bs beats 3 float divides
+                let bx = i32(floor(f32(sx) * inv_bs));
+                let by = i32(floor(f32(sy) * inv_bs));
+                let bz = i32(floor(f32(sz) * inv_bs));
 
-                // Toroidal grid coordinate — same modular wrap as CPU world_to_grid
+                // Toroidal grid coordinate — same modular wrap as scroll shader
                 let gx = ((bx % ibgd) + ibgd) % ibgd;
                 let gy = ((by % ibgd) + ibgd) % ibgd;
                 let gz = ((bz % ibgd) + ibgd) % ibgd;
                 let brick_flat = u32(gz * ibgd * ibgd + gy * ibgd + gx);
 
-                let offset = brick_index_offset(level_idx);
-                let atlas_id = all_brick_indices[offset + brick_flat];
+                let atlas_id = all_brick_indices[base_off + brick_flat];
 
                 if atlas_id == EMPTY_BRICK {
-                    result += w * (4.0 * vs);
+                    result += w * dq_range;
                     continue;
                 }
 
@@ -225,9 +228,9 @@ fn sample_level_trilinear(level_idx: u32, world_pos: vec3<f32>) -> f32 {
                 let ly = u32(sy - by * ibs);
                 let lz = u32(sz - bz * ibs);
 
-                let bi = atlas_byte_index(atlas_id, vec3<u32>(lx, ly, lz), level_idx);
-                let t = read_atlas_byte(level_idx, bi);
-                result += w * dequantize(t, vs);
+                let bi  = atlas_byte_index(atlas_id, vec3<u32>(lx, ly, lz), level_idx);
+                let qd  = read_atlas_byte(level_idx, bi);
+                result += w * (qd * 2.0 * dq_range - dq_range);
             }
         }
     }
@@ -265,90 +268,34 @@ fn clipmap_blend_alpha(level_idx: u32, pos: vec3<f32>) -> f32 {
     return smoothstep(start_blend, end_blend, d_max);
 }
 
-// ── Fast march step: O(1) common-case, no inter-level blending ──────────────
+// ── Blended SDF query — shading/normals only, never called from the march loop ─
 //
-// Used exclusively inside the ray march loop where blending is unnecessary
-// (it's a shading quality feature, not a correctness requirement for stepping).
-//
-// Key optimisation: callers pass `hint` = the level the previous step used.
-// Since consecutive march positions rarely cross level boundaries (~90%+ of
-// steps), the hot path is a single point_in_level + trilinear lookup instead
-// of the full O(level_count) search.
-
-struct SdfResult {
-    dist:  f32,
-    level: u32,
-};
-
-fn sdf_march_step(world_pos: vec3<f32>, hint: u32) -> SdfResult {
-    // Fast path: same level as the previous step.
-    if hint < clip_config.level_count && point_in_level(hint, world_pos) {
-        return SdfResult(sample_level_trilinear(hint, world_pos), hint);
-    }
-    // Slow path: find the finest enclosing level.
-    for (var i = 0u; i < clip_config.level_count; i++) {
-        if point_in_level(i, world_pos) {
-            return SdfResult(sample_level_trilinear(i, world_pos), i);
-        }
-    }
-    // Outside all levels — huge distance so the marcher takes one giant step.
-    return SdfResult(1e10, clip_config.level_count);
-}
-
-// ── Full blended SDF query (used only at the hit point for shading) ──────────
-//
-// Called from estimate_normal after a confirmed hit.  The blending cost is
-// acceptable because it only fires once per pixel, not once per step.
-
-fn sdf_query(world_pos: vec3<f32>) -> f32 {
-    // Find the finest level that contains the point
-    var fine_level = clip_config.level_count;
-    for (var i = 0u; i < clip_config.level_count; i++) {
-        if point_in_level(i, world_pos) {
-            fine_level = i;
-            break;
-        }
-    }
-
-    // If point is outside all levels, return large distance
-    if fine_level >= clip_config.level_count {
-        return 1e10;
-    }
-
-    // Sample from the finest containing level
-    let fine_dist = sample_level_trilinear(fine_level, world_pos);
-
-    // Check if we should blend to coarser level
-    let alpha = clipmap_blend_alpha(fine_level, world_pos);
-    if alpha > 0.001 && fine_level < clip_config.level_count - 1u {
-        // Sample from next coarser level and blend
-        let coarse_dist = sample_level_trilinear(fine_level + 1u, world_pos);
+// Level search is skipped because the caller already knows which level the
+// hit point is in (the march loop tracks it in `cur_level`).  The inter-level
+// blend is kept so normals are smooth across clip-map boundaries.
+fn sdf_query_hinted(world_pos: vec3<f32>, level: u32) -> f32 {
+    if level >= clip_config.level_count { return 1e10; }
+    let fine_dist = sample_level_trilinear(level, world_pos);
+    let alpha     = clipmap_blend_alpha(level, world_pos);
+    if alpha > 0.001 && level < clip_config.level_count - 1u {
+        let coarse_dist = sample_level_trilinear(level + 1u, world_pos);
         return mix(fine_dist, coarse_dist, alpha);
     }
-
     return fine_dist;
-}
-
-// Query which clip level a point falls in (for consistent normal estimation)
-fn sdf_query_level(world_pos: vec3<f32>) -> u32 {
-    for (var i = 0u; i < clip_config.level_count; i++) {
-        if point_in_level(i, world_pos) {
-            return i;
-        }
-    }
-    return clip_config.level_count;
 }
 
 // Normal estimation using the blended SDF field for smooth LOD transitions.
 // This ensures normals match the geometry that was actually hit by the ray marcher.
-fn estimate_normal(p: vec3<f32>, eps: f32) -> vec3<f32> {
-    // Use tetrahedron technique (4 samples instead of 6) for smoother normals
-    // All samples use sdf_query which blends between clipmap levels smoothly
+fn estimate_normal(p: vec3<f32>, eps: f32, level: u32) -> vec3<f32> {
+    // Tetrahedron technique — 4 blended samples for smooth normals.
+    // sdf_query_hinted skips the O(level_count) level search since the march
+    // loop already identified which level contains the hit point, saving
+    // 4 × O(level_count) = ~32 containment checks per pixel on the shade path.
     let k = vec2<f32>(1.0, -1.0);
-    let n = k.xyy * sdf_query(p + k.xyy * eps) +
-    k.yyx * sdf_query(p + k.yyx * eps) +
-    k.yxy * sdf_query(p + k.yxy * eps) +
-    k.xxx * sdf_query(p + k.xxx * eps);
+    let n = k.xyy * sdf_query_hinted(p + k.xyy * eps, level) +
+            k.yyx * sdf_query_hinted(p + k.yyx * eps, level) +
+            k.yxy * sdf_query_hinted(p + k.yxy * eps, level) +
+            k.xxx * sdf_query_hinted(p + k.xxx * eps, level);
     return normalize(n);
 }
 
@@ -485,44 +432,77 @@ fn fs_main(in: VsOutput) -> FsOutput {
     // Start at the volume entry face (clamp to 0 if camera is already inside),
     // backed off by one fine voxel to avoid missing the entry surface, then
     // dithered by a sub-voxel amount to reduce banding.
+    // ── Level-bound cache ─────────────────────────────────────────────────
+    // Hot path: 6 float comparisons (already-cached vol_min/max).
+    // Cold path: only on level transitions — O(level_count) point_in_level.
+    // Degenerate initial box forces a cache fill on the very first step.
+    var cur_level   = clip_config.level_count; // sentinel = "invalid"
+    var cur_vs      = vs0;
+    var cur_vol_min = vec3<f32>( 1e10);
+    var cur_vol_max = vec3<f32>(-1e10);
+
     var t         = max(t_enter - vs0, 0.0) + vs0 * 0.5 * dither;
     var hit       = false;
     var hit_pos   = vec3<f32>(0.0);
     var fog_accum = 0.0;
-    // Level hint: avoids re-searching all levels every step.
-    var cur_level = clip_config.level_count; // invalid sentinel — forces full search on first step
 
     for (var step = 0u; step < max_steps; step++) {
-        // Break as soon as the ray exits the coarsest level's back face.
         if t >= t_vol_exit { break; }
 
-        let p  = ray_origin + ray_dir * t;
-        let sr = sdf_march_step(p, cur_level);  // O(1) hot path via level hint
-        cur_level = sr.level;
-        let d = sr.dist;
+        let p = ray_origin + ray_dir * t;
+
+        // ── Level cache check ─────────────────────────────────────────────
+        // Hot path (same level as previous step): just 6 float compares.
+        // Cold path (level transition, ~1% of steps): O(level_count) search
+        // + one scroll_state buffer read + cache fill.
+        if !(all(p >= cur_vol_min) && all(p <= cur_vol_max)) {
+            cur_level = clip_config.level_count;
+            for (var i = 0u; i < clip_config.level_count; i++) {
+                if point_in_level(i, p) { cur_level = i; break; }
+            }
+            if cur_level < clip_config.level_count {
+                cur_vs         = level_voxel_size(cur_level);
+                let brick_step = cur_vs * f32(clip_config.brick_size);
+                let half_bgd   = i32(clip_config.brick_grid_dim) / 2;
+                let snap       = scroll_state.snap_origins[cur_level].xyz;
+                cur_vol_min    = vec3<f32>(f32(snap.x - half_bgd),
+                                          f32(snap.y - half_bgd),
+                                          f32(snap.z - half_bgd)) * brick_step;
+                cur_vol_max    = cur_vol_min + vec3<f32>(f32(clip_config.grid_dim) * cur_vs);
+            } else {
+                // Outside all levels — degenerate cache, take a huge step.
+                cur_vs      = vs0;
+                cur_vol_min = vec3<f32>( 1e10);
+                cur_vol_max = vec3<f32>(-1e10);
+            }
+        }
+
+        // ── SDF sample ───────────────────────────────────────────────────
+        var d = 1e10;
+        if cur_level < clip_config.level_count {
+            d = sample_level_trilinear(cur_level, p);
+        }
 
         // ── Adaptive hit threshold ────────────────────────────────────────
-        // vs0 * 0.05 base prevents tunneling through thin terrain features;
-        // t * 0.0005 widens the epsilon for accumulated floating-point error
-        // on long rays.
-        let threshold = max(vs0 * 0.05, t * 0.0005);
+        // cur_vs * 0.05: scaled to the current LOD so coarse levels don't
+        // false-hit sub-voxel noise; t * 0.0005: accounts for fp error on long rays.
+        let threshold = max(cur_vs * 0.05, t * 0.0005);
         if d < threshold {
             hit     = true;
             hit_pos = p;
             break;
         }
 
-        // ── Step size ─────────────────────────────────────────────────────
-        // 0.8 multiplier is safe for u8-quantised cached SDF without being
-        // overly conservative.  vs0 * 0.2 floor prevents stalling in perfectly
-        // flat empty regions.
-        let step_size = max(d * 0.8, vs0 * 0.2);
+        // ── Step size — multiplier AND floor scale with cur_vs ────────────
+        // The SDF range at each level is 4 * cur_vs.  Using vs0 as the floor
+        // caused grazing rays in coarse levels to stall with tiny steps
+        // (vs0 vs cur_vs can differ by 128×).  Now both scale with the level.
+        // Multiplier ramps from 0.85 (finest, most conservative) to 0.92
+        // (coarsest, smoother / less-quantised SDF).
+        let step_mult = 0.85 + f32(cur_level) * 0.01; // 0.85 @ L0 → 0.92 @ L7
+        let step_size = max(d * step_mult, cur_vs * 0.2);
         t += step_size;
 
-        // ── Fog-based early exit ──────────────────────────────────────────
-        // Terminates rays that fly over terrain without hitting, so they don't
-        // exhaust the full step budget.  FOG_DENSITY is tuned relative to scene
-        // scale; FOG_EXIT_THRESHOLD ~ 1000 world units for the default scene.
         fog_accum += step_size * FOG_DENSITY;
         if fog_accum > FOG_EXIT_THRESHOLD { break; }
     }
@@ -533,13 +513,12 @@ fn fs_main(in: VsOutput) -> FsOutput {
 
     // ── Normal estimation ────────────────────────────────────────────────
     let cam_dist = length(hit_pos - ray_origin);
-    // Use hit-point's clip level voxel size for epsilon — ensures normal
-    // samples span at least one voxel at the appropriate LOD, avoiding
-    // quantisation artifacts without over-smoothing fine detail.
-    let hit_level = sdf_query_level(hit_pos);
-    let eps_vs = select(vs0, level_voxel_size(hit_level), hit_level < clip_config.level_count);
-    let eps = eps_vs * 0.5;
-    let normal = estimate_normal(hit_pos, eps);
+    // cur_level/cur_vs are valid at hit: the loop only reaches `hit = true`
+    // via the cache-filled path, so cur_level is the finest level at hit_pos.
+    // This eliminates sdf_query_level (O(level_count) search) and the 4×
+    // redundant level searches that estimate_normal previously triggered.
+    let eps    = cur_vs * 0.5;
+    let normal = estimate_normal(hit_pos, eps, cur_level);
 
     // ── Terrain shading ──────────────────────────────────────────────────
     let light_dir = normalize(vec3<f32>(0.4, 0.8, 0.3));
