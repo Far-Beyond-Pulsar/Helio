@@ -108,6 +108,49 @@ fn make_surface_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32)
     (vbuf, ibuf, indices.len() as u32)
 }
 
+// Create a box mesh for rendering water volume walls (4 sides + bottom)
+fn make_volume_box_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
+    // Unit box from -1 to +1 in all axes
+    // We'll render bottom and 4 sides (top is the displaced surface mesh)
+    let verts: Vec<[f32; 3]> = vec![
+        // Bottom face (Y = -1)
+        [-1.0, -1.0, -1.0], [ 1.0, -1.0, -1.0], [ 1.0, -1.0,  1.0], [-1.0, -1.0,  1.0],
+        // Front face (Z = -1)
+        [-1.0, -1.0, -1.0], [-1.0,  1.0, -1.0], [ 1.0,  1.0, -1.0], [ 1.0, -1.0, -1.0],
+        // Back face (Z = 1)
+        [-1.0, -1.0,  1.0], [ 1.0, -1.0,  1.0], [ 1.0,  1.0,  1.0], [-1.0,  1.0,  1.0],
+        // Left face (X = -1)
+        [-1.0, -1.0, -1.0], [-1.0, -1.0,  1.0], [-1.0,  1.0,  1.0], [-1.0,  1.0, -1.0],
+        // Right face (X = 1)
+        [ 1.0, -1.0, -1.0], [ 1.0,  1.0, -1.0], [ 1.0,  1.0,  1.0], [ 1.0, -1.0,  1.0],
+    ];
+
+    let indices: Vec<u32> = vec![
+        // Bottom
+        0, 1, 2,  0, 2, 3,
+        // Front
+        4, 5, 6,  4, 6, 7,
+        // Back
+        8, 9, 10,  8, 10, 11,
+        // Left
+        12, 13, 14,  12, 14, 15,
+        // Right
+        16, 17, 18,  16, 18, 19,
+    ];
+
+    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Water Volume Box VB"),
+        contents: bytemuck::cast_slice(&verts),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("Water Volume Box IB"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    (vbuf, ibuf, indices.len() as u32)
+}
+
 // ---- Pass struct ----------------------------------------------------------------
 
 pub struct WaterSimPass {
@@ -146,6 +189,11 @@ pub struct WaterSimPass {
     surface_ibuf: wgpu::Buffer,
     surface_index_count: u32,
 
+    // Volume box mesh (sides + bottom of water volume)
+    volume_vbuf: wgpu::Buffer,
+    volume_ibuf: wgpu::Buffer,
+    volume_index_count: u32,
+
     _caustics_tex: wgpu::Texture,
     caustics_view: wgpu::TextureView,
     caustics_sampler: wgpu::Sampler,
@@ -158,6 +206,7 @@ pub struct WaterSimPass {
     caustics_pipeline: wgpu::RenderPipeline,
     surface_above_pipeline: wgpu::RenderPipeline,
     surface_under_pipeline: wgpu::RenderPipeline,
+    volume_walls_pipeline: wgpu::RenderPipeline,
 
     // Fallback 1×1 black texture used when pre_aa is not yet available
     _pre_aa_fallback_tex: wgpu::Texture,
@@ -726,6 +775,10 @@ impl WaterSimPass {
             label: Some("Water Surface Under Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/surface_under.wgsl").into()),
         });
+        let volume_walls_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Water Volume Walls Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/volume_walls.wgsl").into()),
+        });
 
         let vbl = vec3_vbl();
 
@@ -838,8 +891,52 @@ impl WaterSimPass {
             cache: None,
         });
 
+        let volume_walls_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Water Volume Walls Pipeline"),
+            layout: Some(&render_pl_layout),
+            vertex: wgpu::VertexState {
+                module: &volume_walls_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vbl.clone()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &volume_walls_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::OVER,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),  // Cull back faces
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),  // Don't write depth (semi-transparent)
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // --------------------------------------------------------- meshes
         let (surface_vbuf, surface_ibuf, surface_index_count) = make_surface_mesh(device);
+        let (volume_vbuf, volume_ibuf, volume_index_count) = make_volume_box_mesh(device);
 
         Self {
             sim_bgl,
@@ -865,6 +962,9 @@ impl WaterSimPass {
             surface_vbuf,
             surface_ibuf,
             surface_index_count,
+            volume_vbuf,
+            volume_ibuf,
+            volume_index_count,
             _caustics_tex: caustics_tex,
             caustics_view,
             caustics_sampler,
@@ -873,6 +973,7 @@ impl WaterSimPass {
             caustics_pipeline,
             surface_above_pipeline,
             surface_under_pipeline,
+            volume_walls_pipeline,
             _pre_aa_fallback_tex: pre_aa_fallback_tex,
             pre_aa_fallback_view,
             _gbuffer_fallback_tex: gbuffer_fallback_tex,
@@ -1266,28 +1367,54 @@ impl RenderPass for WaterSimPass {
                     ],
                 });
 
-                // -- Water surface (above-water front faces) --
-                // Use original depth for depth testing (not the copy used for SSR)
+                // -- VOLUMETRIC WATER RENDERING ORDER --
+                // Render in correct order: walls first (depth write), then surface (refraction/reflection)
+                
                 let depth_view = ctx.depth;
-                let surf_color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                let color_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: &self.water_output_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })];
-                let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                };
+
+                // 1. Water volume walls (sides + bottom) - Render FIRST to establish volume depth
+                {
+                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Water Volume Walls"),
+                        color_attachments: &color_attachments,
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,  // Write depth so surface renders on top
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(&self.volume_walls_pipeline);
+                    pass.set_bind_group(0, &render_bg, &[]);
+                    pass.set_vertex_buffer(0, self.volume_vbuf.slice(..));
+                    pass.set_index_buffer(self.volume_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..self.volume_index_count, 0, 0..1);
+                }
+
+                // 2. Water surface (top) - above-water view with refraction
                 {
                     let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Surface Above"),
-                        color_attachments: &surf_color_attachments,
-                        depth_stencil_attachment: Some(depth_attachment),
+                        color_attachments: &color_attachments,
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,
@@ -1299,26 +1426,19 @@ impl RenderPass for WaterSimPass {
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
                 }
 
-                // -- Water surface (underwater back faces) --
-                let surf_under_color_attachments = [Some(wgpu::RenderPassColorAttachment {
-                    view: &self.water_output_view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                })];
-                let depth_attachment_under = wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Discard,
-                    }),
-                    stencil_ops: None,
-                };
+                // 3. Water surface (bottom) - underwater view (looking up through water)
                 {
                     let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("Water Surface Under"),
-                        color_attachments: &surf_under_color_attachments,
-                        depth_stencil_attachment: Some(depth_attachment_under),
+                        color_attachments: &color_attachments,
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
                         timestamp_writes: None,
                         occlusion_query_set: None,
                         multiview_mask: None,
