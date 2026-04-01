@@ -1150,14 +1150,16 @@ impl WaterSimPass {
 
     /// Set the shallow-water simulation dynamics.
     ///
-    /// - `spring`: base wave-propagation spring constant.
-    ///   Physical wave speed = `sqrt(spring) * 112.5 m/s` (at wave_speed=1.0 on a 240m volume).
-    ///   Range `[0.001, 2.0]`. Ocean swell: ~0.04. Pool chop: ~0.3. Jelly: ~1.5.
+    /// Call this whenever the corresponding `WaterVolumeDescriptor` fields change.
+    ///
+    /// - `spring`: restoring-force multiplier toward the mean height.
+    ///   Range `[0.5, 2.0]`. Lower values (≈1.0) feel fluid; higher values (≈2.0)
+    ///   feel jelly-like. Default: `1.2`.
     /// - `damping`: per-step energy-retention multiplier `(0.0, 1.0)`.
     ///   Closer to `1.0` = waves persist longer. Closer to `0.9` = waves die quickly.
     ///   Default: `0.985`.
     pub fn set_sim_dynamics(&mut self, spring: f32, damping: f32) {
-        self.wave_spring = spring.clamp(0.001, 2.0);
+        self.wave_spring = spring.clamp(0.1, 2.0);
         self.wave_damping = damping.clamp(0.0, 1.0);
     }
 
@@ -1244,12 +1246,9 @@ impl RenderPass for WaterSimPass {
         // differential (w_old - w_new).  It must NOT scale with wave_speed, otherwise
         // slower speeds produce near-zero deltas and therefore near-zero wave amplitude.
         let step_dt = 1.0 / 120.0;
-        // Scale spring by wave_speed² so wave_speed intuitively controls propagation
-        // velocity (c ∝ sqrt(spring), so doubling wave_speed quadruples spring → doubles c).
-        let effective_spring = self.wave_spring * self.wave_speed * self.wave_speed;
         let delta = DeltaUniform {
             delta: [1.0 / SIM_SIZE as f32, 1.0 / SIM_SIZE as f32],
-            spring: effective_spring,
+            spring: self.wave_spring,
             damping: self.wave_damping,
             wind_dir: self.wind_direction,
             wind_strength: self.wind_strength,
