@@ -89,25 +89,30 @@ fn vs_main(@location(0) position: vec3f) -> VertexOutput {
     
     let worldPos = boxToWorld(position, bmin, bmax, surface_h);
     
-    // Calculate wall UV that varies both horizontally and vertically
-    let y_normalized = (worldPos.y - bmin.y) / (surface_h - bmin.y);
+    // Calculate wall UV that tiles uniformly both horizontally and vertically
+    // Use world position divided by a tile size for both U and V
+    let tile_size = 2.0;  // Size of tiles in world units
     
     // Use the unit cube position to figure out orientation
     let abs_pos = abs(position);
     var u: f32;
+    var v: f32;
     
     if abs_pos.x > abs_pos.y && abs_pos.x > abs_pos.z {
-        // X-aligned wall - use Z for horizontal
-        u = (worldPos.z - bmin.z) / (bmax.z - bmin.z);
+        // X-aligned wall - use Z for horizontal, Y for vertical
+        u = worldPos.z / tile_size;
+        v = worldPos.y / tile_size;
     } else if abs_pos.z > abs_pos.y {
-        // Z-aligned wall - use X for horizontal
-        u = (worldPos.x - bmin.x) / (bmax.x - bmin.x);
+        // Z-aligned wall - use X for horizontal, Y for vertical
+        u = worldPos.x / tile_size;
+        v = worldPos.y / tile_size;
     } else {
-        // Y-aligned (floor/ceiling) - use X for horizontal
-        u = (worldPos.x - bmin.x) / (bmax.x - bmin.x);
+        // Y-aligned (floor/ceiling) - use X and Z
+        u = worldPos.x / tile_size;
+        v = worldPos.z / tile_size;
     }
     
-    let wallUV = vec2f(u, y_normalized);
+    let wallUV = vec2f(u, v);
     
     // Sample heightfield to check if above water surface  
     let simUV = worldToSimUV(worldPos.xz, bmin, bmax);
@@ -196,7 +201,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     
     var alpha = 0.95;  // Nearly opaque
     alpha = mix(alpha, 1.0, fresnel_factor * 0.3);
-    alpha *= in.fadeAlpha;
+    // Don't multiply by fadeAlpha - that creates vertical gradient
     
     let view_dist = length(in.worldPos - camera_pos);
     alpha *= smoothstep(50.0, 5.0, view_dist);
