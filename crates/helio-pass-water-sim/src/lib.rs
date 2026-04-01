@@ -236,6 +236,14 @@ pub struct WaterSimPass {
     // Cached bind groups (invalidated when key pointer changes)
     caustics_bg_key: Option<(usize, usize)>,
     caustics_bg: Option<wgpu::BindGroup>,
+
+    // Underwater fullscreen effect — reads water_output, writes to scratch,
+    // then blits scratch back to water_output.  This allows the shader to
+    // distort the image (you can't read and write the same texture).
+    _tint_scratch_tex: wgpu::Texture,
+    tint_scratch_view: wgpu::TextureView,
+    underwater_tint_bgl: wgpu::BindGroupLayout,
+    underwater_tint_pipeline: wgpu::RenderPipeline,
 }
 
 // Shared vertex buffer layout: packed [f32; 3] positions, location 0
@@ -751,6 +759,106 @@ impl WaterSimPass {
             cache: None,
         });
 
+        // --------------------------------------------------------- underwater tint
+        // Scratch texture at internal resolution used by the underwater effect.
+        // The effect reads water_output (scene) and writes here, then we blit
+        // scratch → water_output so the result is visible downstream.
+        let tint_scratch_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Tint Scratch"),
+            size: wgpu::Extent3d {
+                width: internal_width.max(1),
+                height: internal_height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let tint_scratch_view = tint_scratch_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let underwater_tint_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Water Underwater Tint BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // scene texture — water_output at this point contains the full scene
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let underwater_tint_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Water Underwater Tint Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/underwater_fog.wgsl").into()),
+        });
+        let underwater_tint_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Water Underwater Tint PL"),
+            bind_group_layouts: &[Some(&underwater_tint_bgl)],
+            immediate_size: 0,
+        });
+        let underwater_tint_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Water Underwater Tint Pipeline"),
+            layout: Some(&underwater_tint_pl),
+            vertex: wgpu::VertexState {
+                module: &underwater_tint_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &underwater_tint_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None, // full replace — writes complete processed color
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
         // --------------------------------------------------------- rendering pipelines
         let caustics_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Caustics PL"),
@@ -990,6 +1098,10 @@ impl WaterSimPass {
             blit_bg_key: None,
             caustics_bg_key: None,
             caustics_bg: None,
+            _tint_scratch_tex: tint_scratch_tex,
+            tint_scratch_view,
+            underwater_tint_bgl,
+            underwater_tint_pipeline,
         }
     }
 
@@ -1448,6 +1560,74 @@ impl RenderPass for WaterSimPass {
                     pass.set_vertex_buffer(0, self.surface_vbuf.slice(..));
                     pass.set_index_buffer(self.surface_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
+                }
+
+                // 4. Underwater effect — reads water_output (scene), writes to scratch.
+                // The shader does distortion + chromatic aberration + color tint.
+                // When the camera is above water the shader passes through unchanged.
+                {
+                    let tint_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Water Underwater Tint BG"),
+                        layout: &self.underwater_tint_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 1, resource: vols_buf.as_entire_binding() },
+                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.water_output_view) },
+                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.depth_sampler) },
+                        ],
+                    });
+                    // Draw to scratch (can't read and write water_output simultaneously)
+                    let tint_attachments = [Some(wgpu::RenderPassColorAttachment {
+                        view: &self.tint_scratch_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })];
+                    let mut tint_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Water Underwater Tint"),
+                        color_attachments: &tint_attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    tint_pass.set_pipeline(&self.underwater_tint_pipeline);
+                    tint_pass.set_bind_group(0, &tint_bg, &[]);
+                    tint_pass.draw(0..3, 0..1);
+                    drop(tint_pass);
+
+                    // Blit scratch → water_output to make the result visible
+                    let scratch_blit_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Water Tint Blit BG"),
+                        layout: &self.blit_bgl,
+                        entries: &[
+                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.tint_scratch_view) },
+                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
+                        ],
+                    });
+                    let blit_attachments = [Some(wgpu::RenderPassColorAttachment {
+                        view: &self.water_output_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })];
+                    let mut blit_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Water Tint Blit Back"),
+                        color_attachments: &blit_attachments,
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    blit_pass.set_pipeline(&self.blit_pipeline);
+                    blit_pass.set_bind_group(0, &scratch_blit_bg, &[]);
+                    blit_pass.draw(0..3, 0..1);
                 }
             }
         }
