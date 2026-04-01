@@ -25,7 +25,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
 
     // Distance from drop centre in UV space (centre converted from [-1,1] to [0,1])
     let drop = max(0.0, 1.0 - length(u.center * 0.5 + 0.5 - uv) / u.radius);
-    let drop_val = 0.5 - cos(drop * 3.141_592_653) * 0.5;
+    let drop_val = 0.5 - cos(drop * 3.14159265) * 0.5;
 
     info.r += drop_val * u.strength;
     return info;

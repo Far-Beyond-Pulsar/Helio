@@ -250,21 +250,6 @@ pub fn build_hlfs_graph(
 
     // Always include water passes in HLFS pipeline, enabling runtime insertion of water volumes.
     graph.add_pass(Box::new(WaterSimPass::new(device)));
-    graph.add_pass(Box::new(WaterCausticsPass::new(device)));
-    graph.add_pass(Box::new(WaterSurfacePass::new(
-        device,
-        camera_buf,
-        config.internal_width(),
-        config.internal_height(),
-        config.surface_format,
-    )));
-    graph.add_pass(Box::new(UnderwaterPass::new(
-        device,
-        camera_buf,
-        config.internal_width(),
-        config.internal_height(),
-        config.surface_format,
-    )));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
