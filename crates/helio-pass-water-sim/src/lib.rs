@@ -572,14 +572,6 @@ impl WaterSimPass {
             cache: None,
         });
 
-        let depth_stencil_state = wgpu::DepthStencilState {
-            format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: Some(true),
-            depth_compare: Some(wgpu::CompareFunction::LessEqual),
-            stencil: wgpu::StencilState::default(),
-            bias: wgpu::DepthBiasState::default(),
-        };
-
         let pool_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Water Pool Pipeline"),
             layout: Some(&render_pl_layout),
@@ -604,7 +596,7 @@ impl WaterSimPass {
                 cull_mode: Some(wgpu::Face::Front), // render inside of pool
                 ..Default::default()
             },
-            depth_stencil: Some(depth_stencil_state.clone()),
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -634,7 +626,7 @@ impl WaterSimPass {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: Some(depth_stencil_state.clone()),
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -664,7 +656,7 @@ impl WaterSimPass {
                 cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
-            depth_stencil: Some(depth_stencil_state),
+            depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -989,10 +981,11 @@ impl RenderPass for WaterSimPass {
         }
 
         // ---- 6 & 7. Pool + surface rendering --------------------------------
+        // NOTE: use self.caustics_view directly — it was filled in stage 5 this
+        // same frame. ctx.frame.water_caustics is None during execute() because
+        // publish() hasn't run yet, so we must NOT guard on it here.
         if ctx.frame.water_volume_count > 0 {
-            if let (Some(vols_buf), Some(caustics_view)) =
-                (ctx.frame.water_volumes, ctx.frame.water_caustics)
-            {
+            if let Some(vols_buf) = ctx.frame.water_volumes {
                 let sim_view = if self.front { &self.view_a } else { &self.view_b };
 
                 let cam_key = ctx.scene.camera as *const wgpu::Buffer as usize;
@@ -1009,7 +1002,7 @@ impl RenderPass for WaterSimPass {
                             wgpu::BindGroupEntry { binding: 1, resource: vols_buf.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(sim_view) },
                             wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
-                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(caustics_view) },
+                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.caustics_view) },
                             wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.caustics_sampler) },
                         ],
                     }));
@@ -1025,15 +1018,10 @@ impl RenderPass for WaterSimPass {
                     depth_slice: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })];
-                let pool_depth = wgpu::RenderPassDepthStencilAttachment {
-                    view: ctx.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                };
                 let desc = wgpu::RenderPassDescriptor {
                     label: Some("Water Pool"),
                     color_attachments: &pool_attachments,
-                    depth_stencil_attachment: Some(pool_depth),
+                    depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
@@ -1054,15 +1042,10 @@ impl RenderPass for WaterSimPass {
                     depth_slice: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })];
-                let surf_depth = wgpu::RenderPassDepthStencilAttachment {
-                    view: ctx.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                };
                 let desc = wgpu::RenderPassDescriptor {
                     label: Some("Water Surface Above"),
                     color_attachments: &surf_attachments,
-                    depth_stencil_attachment: Some(surf_depth),
+                    depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
@@ -1083,15 +1066,10 @@ impl RenderPass for WaterSimPass {
                     depth_slice: None,
                     ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
                 })];
-                let surf_under_depth = wgpu::RenderPassDepthStencilAttachment {
-                    view: ctx.depth,
-                    depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }),
-                    stencil_ops: None,
-                };
                 let desc = wgpu::RenderPassDescriptor {
                     label: Some("Water Surface Under"),
                     color_attachments: &surf_under_attachments,
-                    depth_stencil_attachment: Some(surf_under_depth),
+                    depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
