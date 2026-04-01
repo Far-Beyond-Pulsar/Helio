@@ -304,6 +304,16 @@ impl RenderGraph {
         self.passes.push(pass);
     }
 
+    /// Returns a mutable reference to the first pass of type `T`, if present.
+    ///
+    /// Uses `RenderPass::as_any_mut()` for downcasting. Only passes that return
+    /// `Some` from `as_any_mut()` can be found; others are skipped safely.
+    pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
+        self.passes.iter_mut().find_map(|p| {
+            p.as_any_mut()?.downcast_mut::<T>()
+        })
+    }
+
     /// Executes the render graph with automatic profiling.
     ///
     /// This is the main entry point for rendering. It:

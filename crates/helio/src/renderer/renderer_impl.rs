@@ -2,7 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use arrayvec::ArrayVec;
 use helio_pass_debug::{DebugVertex};
-use helio_v3::{RenderGraph, Result as HelioResult};
+use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 use helio_pass_debug::DebugCameraUniform;
 const MAX_TEXTURES: usize = crate::material::MAX_TEXTURES;
 
@@ -642,6 +642,14 @@ impl Renderer {
         let water_volume_count = self.scene.water_volumes_count();
         if water_volume_count > 0 {
             let water_volumes = self.scene.get_water_volumes_gpu();
+            // Bridge descriptor sim/wind params into WaterSimPass so the update
+            // shader sees them. The descriptor is the source of truth — the pass's
+            // own fields are updated from the first volume each frame.
+            if let Some(pass) = self.graph.find_pass_mut::<helio_pass_water_sim::WaterSimPass>() {
+                let vol = &water_volumes[0];
+                pass.set_sim_dynamics(vol.sim_dynamics[0], vol.sim_dynamics[1]);
+                pass.set_wind([vol.wind_params[0], vol.wind_params[1]], vol.wind_params[2]);
+            }
             self.queue.write_buffer(
                 &self.water_volumes_buffer,
                 0,

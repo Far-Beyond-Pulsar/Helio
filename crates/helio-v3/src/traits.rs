@@ -349,6 +349,24 @@ pub trait RenderPass: MaybeSend + MaybeSync {
     fn prepare(&mut self, _ctx: &PrepareContext) -> Result<()> {
         Ok(())
     }
+
+    /// Returns a shared reference to `self` as `dyn Any` for downcasting.
+    ///
+    /// Implement this to allow the render graph to retrieve a typed reference
+    /// to a specific pass via `RenderGraph::find_pass_mut`. The default returns
+    /// `None`; return `Some(self)` in concrete implementations.
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        None
+    }
+
+    /// Returns a mutable reference to `self` as `dyn Any` for downcasting.
+    ///
+    /// Implement this to allow the render graph to retrieve a typed mutable
+    /// reference to a specific pass via `RenderGraph::find_pass_mut`. The
+    /// default returns `None`; return `Some(self)` in concrete implementations.
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        None
+    }
 }
 
 /// Trait for GPU scene managers (lights, meshes, materials).

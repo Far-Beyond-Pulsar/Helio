@@ -1193,6 +1193,14 @@ impl RenderPass for WaterSimPass {
         "WaterSim"
     }
 
+    fn as_any(&self) -> Option<&dyn std::any::Any> {
+        Some(self)
+    }
+
+    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
+        Some(self)
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         let view = if self.front { &self.view_a } else { &self.view_b };
         frame.water_sim_texture = Some(view);
