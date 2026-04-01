@@ -51,6 +51,9 @@ struct WaterVolume {
 @group(0) @binding(5) var shared_samp:   sampler;
 @group(0) @binding(6) var scene_color:   texture_2d<f32>;
 @group(0) @binding(7) var<uniform>       viewport:    vec4f;
+@group(0) @binding(8) var depth_texture:   texture_2d<f32>;
+@group(0) @binding(9) var depth_sampler:   sampler;
+@group(0) @binding(10) var gbuffer_normal: texture_2d<f32>;
 
 struct VertexOutput {
     @builtin(position) position: vec4f,
@@ -75,6 +78,64 @@ fn worldToSim(world: vec3f, bmin: vec3f, bmax: vec3f, surface_h: f32) -> vec3f {
         (world.y - surface_h) / d,
         (world.z - bmin.z) / (bmax.z - bmin.z) * 2.0 - 1.0,
     );
+}
+
+// ── SSR Helper Functions ──────────────────────────────────────────────────────
+
+// Reconstruct world position from screen UV + depth
+fn reconstruct_world_pos(uv: vec2f, depth: f32) -> vec3f {
+    let ndc_xy = vec2f(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0);
+    let world_h = camera.inv_view_proj * vec4f(ndc_xy, depth, 1.0);
+    return world_h.xyz / world_h.w;
+}
+
+// Screen-space ray march along reflected direction
+fn trace_ssr(
+    ray_origin: vec3f,      // World space
+    ray_dir: vec3f,         // World space, normalized
+    screen_uv: vec2f,       // Starting UV [0,1]
+    max_steps: u32,         // Quality control (16-64)
+    step_size: f32,         // World-space step size
+    thickness: f32,         // Depth comparison threshold
+) -> vec3f {
+    var hit_color = vec3f(0.0);
+    var hit = false;
+
+    // March in world space
+    for (var i = 0u; i < max_steps && !hit; i++) {
+        let t = f32(i) * step_size;
+        let sample_world = ray_origin + ray_dir * t;
+
+        // Project to screen space
+        let sample_clip = camera.view_proj * vec4f(sample_world, 1.0);
+        let sample_ndc = sample_clip.xyz / sample_clip.w;
+        let sample_uv = vec2f(
+            sample_ndc.x * 0.5 + 0.5,
+            1.0 - (sample_ndc.y * 0.5 + 0.5)
+        );
+
+        // Out of screen bounds - miss
+        if any(sample_uv < vec2f(0.0)) || any(sample_uv > vec2f(1.0)) {
+            break;
+        }
+
+        // Sample scene depth at ray position
+        let scene_depth = textureSampleLevel(depth_texture, depth_sampler, sample_uv, 0.0).r;
+
+        // Reconstruct world position of scene geometry at this UV
+        let scene_world = reconstruct_world_pos(sample_uv, scene_depth);
+        let scene_dist = length(scene_world - ray_origin);
+        let ray_dist = t;
+
+        // Check if ray intersects geometry (within thickness tolerance)
+        if abs(scene_dist - ray_dist) < thickness {
+            // Hit! Sample scene color at this position
+            hit_color = textureSampleLevel(scene_color, shared_samp, sample_uv, 0.0).rgb;
+            hit = true;
+        }
+    }
+
+    return hit_color;
 }
 
 // ── Vertex shader (identical to reference surface.vert) ───────────────────────
@@ -154,9 +215,30 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // Beer–Lambert water colour absorption
     refracted *= vol.water_color.rgb;
 
-    // ── Reflection: real sky + sun specular ───────────────────────────────────
+    // ── Reflection: Screen-Space Reflections (SSR) + sky fallback ─────────────
     let reflected_ray = reflect(incoming, normal);
-    let reflected     = sky_color(reflected_ray, light_dir);
+    var reflected = vec3f(0.0);
+
+    // Check if SSR is enabled for this water volume
+    let ssr_enabled = vol.ssr_params.x > 0.5;
+
+    if ssr_enabled {
+        // Convert sim-space to world-space for SSR
+        let world_pos = simToWorld(in.simPos, vol.bounds_min.xyz, vol.bounds_max.xyz, surface_h);
+
+        // Extract SSR parameters from volume
+        let max_steps = u32(vol.ssr_params.y);
+        let step_size = vol.ssr_params.z;
+        let thickness = vol.ssr_params.w;
+
+        // Trace SSR - returns (0,0,0) if no hit
+        reflected = trace_ssr(world_pos, reflected_ray, screen_uv, max_steps, step_size, thickness);
+    }
+
+    // Fallback to procedural sky if SSR disabled or missed
+    if dot(reflected, reflected) < 0.001 {
+        reflected = sky_color(reflected_ray, light_dir);
+    }
 
     // ── Fresnel blend ─────────────────────────────────────────────────────────
     return vec4f(mix(refracted, reflected, fresnel), 1.0);
