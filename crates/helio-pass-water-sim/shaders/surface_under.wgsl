@@ -42,7 +42,7 @@ struct WaterVolume {
 @group(0) @binding(5) var shared_samp:   sampler;
 @group(0) @binding(6) var scene_color:   texture_2d<f32>;
 @group(0) @binding(7) var<uniform>       viewport:    vec4f;
-@group(0) @binding(8) var depth_texture:   texture_2d<f32>;
+@group(0) @binding(8) var depth_texture:   texture_depth_2d;
 @group(0) @binding(9) var depth_sampler:   sampler;
 @group(0) @binding(10) var gbuffer_normal: texture_2d<f32>;
 
@@ -109,7 +109,7 @@ fn trace_ssr(
         }
 
         // Sample scene depth at ray position
-        let scene_depth = textureSampleLevel(depth_texture, depth_sampler, sample_uv, 0.0).r;
+        let scene_depth = textureSampleLevel(depth_texture, depth_sampler, sample_uv, 0);
 
         // Reconstruct world position of scene geometry at this UV
         let scene_world = reconstruct_world_pos(sample_uv, scene_depth);

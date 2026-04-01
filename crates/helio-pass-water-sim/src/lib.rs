@@ -167,6 +167,10 @@ pub struct WaterSimPass {
     _gbuffer_fallback_tex: wgpu::Texture,
     gbuffer_fallback_view: wgpu::TextureView,
 
+    // Depth copy for SSR (allows reading depth while using original as attachment)
+    _depth_copy_tex: wgpu::Texture,
+    depth_copy_view: wgpu::TextureView,
+
     // Pre-TAA water composite intermediary (internal resolution, surface_format)
     _water_output_tex: wgpu::Texture,
     water_output_view: wgpu::TextureView,
@@ -524,7 +528,7 @@ impl WaterSimPass {
                     binding: 8,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        sample_type: wgpu::TextureSampleType::Depth,
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
@@ -599,6 +603,25 @@ impl WaterSimPass {
             view_formats: &[],
         });
         let gbuffer_fallback_view = gbuffer_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // --------------------------------------------------------- depth copy for SSR
+        // Copy of depth texture so we can sample from it while rendering with depth testing.
+        // Same size as internal resolution to match the render target.
+        let depth_copy_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Water Depth Copy"),
+            size: wgpu::Extent3d {
+                width: internal_width.max(1),
+                height: internal_height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let depth_copy_view = depth_copy_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // --------------------------------------------------------- water output intermediary
         // Owned render target at internal resolution. Water composites onto a copy
@@ -854,6 +877,8 @@ impl WaterSimPass {
             pre_aa_fallback_view,
             _gbuffer_fallback_tex: gbuffer_fallback_tex,
             gbuffer_fallback_view,
+            _depth_copy_tex: depth_copy_tex,
+            depth_copy_view,
             _water_output_tex: water_output_tex,
             water_output_view,
             internal_width,
@@ -1205,8 +1230,18 @@ impl RenderPass for WaterSimPass {
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
 
-                // Get depth texture (use ctx.depth, fallback to 1×1 black if not available)
-                let depth_view = ctx.depth;
+                // Copy depth texture for SSR sampling
+                // This allows us to sample from the copy while using the original as a depth attachment
+                let src_depth_tex = ctx.frame.depth_texture.expect("Depth texture required for water SSR");
+                ctx.encoder.copy_texture_to_texture(
+                    src_depth_tex.as_image_copy(),
+                    self._depth_copy_tex.as_image_copy(),
+                    wgpu::Extent3d {
+                        width: self.internal_width,
+                        height: self.internal_height,
+                        depth_or_array_layers: 1,
+                    },
+                );
 
                 // Get GBuffer normal texture (fallback to 1×1 black if not available)
                 let gbuffer_normal_view = ctx.frame.gbuffer
@@ -1225,14 +1260,14 @@ impl RenderPass for WaterSimPass {
                         wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.caustics_sampler) },
                         wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(scene_view) },
                         wgpu::BindGroupEntry { binding: 7, resource: viewport_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(depth_view) },
+                        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.depth_copy_view) },
                         wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.depth_sampler) },
                         wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(gbuffer_normal_view) },
                     ],
                 });
 
                 // -- Water surface (above-water front faces) --
-                // Depth exactly as billboard: occluded_by_geometry=true path uses ctx.depth.
+                // Use original depth for depth testing (not the copy used for SSR)
                 let depth_view = ctx.depth;
                 let surf_color_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: &self.water_output_view,
