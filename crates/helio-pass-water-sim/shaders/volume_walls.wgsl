@@ -167,34 +167,31 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let refract_uv = clamp(screen_uv + water_normal.xz * refract_str,
                           vec2f(0.001), vec2f(0.999));
     
-    // Sample background and blend with water color
+    // Sample background and blend with water color - very dark for walls
     let scene_sample = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
-    let solid_water_color = vol.water_color.rgb * 0.8;
-    var refracted = mix(scene_sample, solid_water_color, 0.9);
+    let solid_water_color = vol.water_color.rgb * 0.15;  // Very dark base color
+    var refracted = mix(scene_sample, solid_water_color, 0.98);  // 98% water color
     
     // Water thickness for absorption
     let water_extent_x = bmax.x - bmin.x;
     let water_extent_z = bmax.z - bmin.z;
     let avg_extent = (water_extent_x + water_extent_z) * 0.25;
-    let water_thickness = avg_extent * 1.5;
+    let water_thickness = avg_extent * 4.0;  // Much thicker for very dark look
     
-    // Apply water color tint and absorption
-    refracted *= pow(vol.water_color.rgb, vec3f(0.5));
+    // Apply water color tint and absorption - much darker
+    refracted *= pow(vol.water_color.rgb, vec3f(3.0));  // Cube for very dark tint
     let extinction = vol.extinction.rgb;
-    let absorption = exp(-extinction * water_thickness * 1.2);
+    let absorption = exp(-extinction * water_thickness * 4.0);  // Very strong absorption
     refracted *= absorption;
     
-    // Apply caustics
-    let caustics_sample = textureSampleLevel(caustics_tex, shared_samp, sample_uv, 0.0);
-    let caustics_intensity = caustics_sample.r * vol.sim_params.y;
-    refracted += vec3f(caustics_intensity) * 0.25;
+    // No caustics on walls - they cause white squares
     
     // Calculate alpha with Fresnel
     let view_dir = normalize(in.worldPos - camera_pos);
     let view_angle = abs(dot(-view_dir, geom_normal));
     let fresnel_factor = pow(1.0 - view_angle, 2.0);
     
-    var alpha = 0.7;
+    var alpha = 0.85;  // More opaque
     alpha = mix(alpha, 1.0, fresnel_factor * 0.3);
     alpha *= in.fadeAlpha;
     
