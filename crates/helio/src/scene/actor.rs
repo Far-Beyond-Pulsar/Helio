@@ -352,7 +352,7 @@ impl WaterVolumeDescriptor {
             sim_params: [self.ior, self.caustics_intensity, self.fresnel_min, self.density],
             shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
             sun_direction: sun,
-            _pad3: [0.0; 4],
+            ssr_params: [1.0, 32.0, 0.05, 0.02],  // Default SSR: enabled, 32 steps
             _pad4: [0.0; 4],
             _pad5: [0.0; 4],
             _pad6: [0.0; 4],
