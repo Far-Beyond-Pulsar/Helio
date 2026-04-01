@@ -12,7 +12,7 @@
 struct UpdateUniforms {
     /// Texel size: (1 / texture_width, 1 / texture_height)
     delta: vec2<f32>,
-    /// Wave spring constant — restoring force toward the mean height.
+    /// Wave spring constant -- restoring force toward the mean height.
     /// Lower (~1.0) feels like fluid; higher (~2.0) feels jelly-like.
     spring: f32,
     /// Per-step energy damping multiplier (0..1).
@@ -22,30 +22,29 @@ struct UpdateUniforms {
     wind_dir: vec2<f32>,
     /// Wind strength multiplier. 0 = calm; ~1 = gentle ripples; ~5 = choppy.
     wind_strength: f32,
-    /// Elapsed simulation time (seconds) — scrolls the wind-noise pattern.
+    /// Elapsed simulation time (seconds) -- drives gust-centre trajectories.
     time: f32,
 }
 @group(0) @binding(2) var<uniform> u: UpdateUniforms;
 
 // ---------------------------------------------------------------------------
-// Value noise helpers for wind-driven turbulence
+// Wind: Lissajous gust-centre trajectory (stays smoothly in UV [0, 1]^2)
 // ---------------------------------------------------------------------------
-
-fn hash2(p: vec2<f32>) -> f32 {
-    var q = fract(p * vec2<f32>(127.1, 311.7));
-    q += dot(q, q + vec2<f32>(19.19, 74.39));
-    return fract(q.x * q.y) * 2.0 - 1.0;  // [-1, 1]
-}
-
-fn value_noise(p: vec2<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);  // smoothstep
-    return mix(
-        mix(hash2(i),                    hash2(i + vec2<f32>(1.0, 0.0)), u.x),
-        mix(hash2(i + vec2<f32>(0.0, 1.0)), hash2(i + vec2<f32>(1.0, 1.0)), u.x),
-        u.y,
+fn gust_pos(t: f32, idx: i32, wind_dir: vec2<f32>) -> vec2<f32> {
+    let fi = f32(idx);
+    // Each source has a unique natural frequency and starting phase so they
+    // spread across the surface and never synchronise.
+    let fx = 0.17 + fi * 0.083;
+    let fy = 0.21 + fi * 0.067;
+    let px = fi * 1.2345;
+    let py = fi * 2.3456 + 1.5708;
+    let base = vec2<f32>(
+        sin(t * fx + px) * 0.38 + 0.5,
+        sin(t * fy + py) * 0.38 + 0.5,
     );
+    // Slight persistent drift in wind direction so gusts feel directional
+    // without dominating the Lissajous variation.
+    return clamp(base + wind_dir * 0.05, vec2<f32>(0.05), vec2<f32>(0.95));
 }
 
 @fragment
@@ -66,19 +65,39 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // Velocity = displacement toward mean (spring) + energy damping
     info.g += (avg - info.r) * u.spring;
     info.g *= u.damping;
-
-    // Wind: scroll a two-octave noise pattern in the wind direction and use it
-    // to inject turbulent velocity impulses each sim step.
-    if u.wind_strength > 0.001 {
-        let scroll = u.wind_dir * u.time * 0.04;
-        let p0 = uv * 6.0 + scroll;
-        let p1 = uv * 12.7 + scroll * 1.3 + vec2<f32>(5.31, 1.73);
-        let turbulence = value_noise(p0) * 0.65 + value_noise(p1) * 0.35;
-        info.g += turbulence * u.wind_strength * 0.003;
-    }
-
     // Euler-integrate height
     info.r += info.g;
+
+    // Wind: N traveling gust centres, hitbox-style conservative delta encoding.
+    //
+    // Each gust centre follows a Lissajous trajectory across the surface.
+    // Writing the height delta (old_weight - new_weight) rather than a raw
+    // impulse is conservative: the net displacement integrated over the whole
+    // surface is zero every step, so the global mean height never drifts.
+    // This mirrors exactly how hitbox.frag.wgsl creates waves.
+    if u.wind_strength > 0.001 {
+        // One sim step back in time (2 steps/frame * 60 fps = ~120 steps/s).
+        let prev_t = u.time - 0.00833;
+        let gust_radius = 0.10;
+        let scale = u.wind_strength * 0.10;
+
+        for (var i: i32 = 0; i < 6; i++) {
+            let p_new = gust_pos(u.time, i, u.wind_dir);
+            let p_old = gust_pos(prev_t, i, u.wind_dir);
+
+            // Cosine-bell weight: 0 outside radius, 1 at centre -- same profile
+            // as drop.frag.wgsl so the excited waves look identical.
+            let d_new = max(0.0, 1.0 - length(p_new - uv) / gust_radius);
+            let d_old = max(0.0, 1.0 - length(p_old - uv) / gust_radius);
+            let w_new = 0.5 - cos(d_new * 3.14159265) * 0.5;
+            let w_old = 0.5 - cos(d_old * 3.14159265) * 0.5;
+
+            // Same sign convention as hitbox.frag.wgsl:
+            //   where gust was  -> height rises  (surface springs back up)
+            //   where gust is   -> height falls   (gust drags surface down)
+            info.r += (w_old - w_new) * scale;
+        }
+    }
 
     return info;
 }
