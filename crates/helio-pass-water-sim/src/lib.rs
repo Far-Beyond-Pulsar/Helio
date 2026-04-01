@@ -73,6 +73,10 @@ struct DeltaUniform {
     wind_strength: f32,
     /// Elapsed simulation time in seconds, used to scroll the wind-noise pattern.
     time: f32,
+    /// Wave spatial scale factor. 1.0 = default; 0.25 = fine ripples; 2.0 = huge swells.
+    wave_scale: f32,
+    /// Time elapsed in one sim step (seconds). Drives gust-centre velocity.
+    time_step: f32,
 }
 
 #[repr(C)]
@@ -268,6 +272,10 @@ pub struct WaterSimPass {
     wind_direction: [f32; 2],
     /// Wind strength. 0 = calm, ~1 = gentle ripples, ~5 = choppy.
     wind_strength: f32,
+    /// Wave spatial scale. 1.0 = default size; smaller = finer ripples.
+    wave_scale: f32,
+    /// Wave animation speed multiplier. 1.0 = default; 0.1 = very slow; 3.0 = fast.
+    wave_speed: f32,
     /// Accumulated simulation time (seconds), incremented each frame for noise scrolling.
     sim_time: f32,
 }
@@ -1134,6 +1142,8 @@ impl WaterSimPass {
             // Default: no wind
             wind_direction: [0.0, 0.0],
             wind_strength: 0.0,
+            wave_scale: 1.0,
+            wave_speed: 1.0,
             sim_time: 0.0,
         }
     }
@@ -1170,6 +1180,24 @@ impl WaterSimPass {
             [0.0, 0.0]
         };
         self.wind_strength = strength.max(0.0);
+    }
+
+    /// Set the wave spatial scale factor.
+    ///
+    /// Scales the footprint of each gust impulse on the heightfield.
+    /// `1.0` = default wave size. `0.25` = fine quarter-sized ripples.
+    /// `2.0` = large swells. Clamped to `[0.05, 4.0]` in the shader.
+    pub fn set_wave_scale(&mut self, scale: f32) {
+        self.wave_scale = scale.max(0.01);
+    }
+
+    /// Set the wave animation speed multiplier.
+    ///
+    /// Scales how fast gust centres travel across the surface, directly controlling
+    /// the apparent speed of wind-driven waves. `1.0` = default. `0.1` = very slow
+    /// lazy swells. `3.0` = fast choppy seas.
+    pub fn set_wave_speed(&mut self, speed: f32) {
+        self.wave_speed = speed.max(0.0);
     }
 
     /// Queue a water-drop ripple to be applied next frame.
@@ -1212,8 +1240,12 @@ impl RenderPass for WaterSimPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Advance sim time (~60 fps fixed step; keeps noise scrolling frame-rate independent)
-        self.sim_time += 1.0 / 60.0;
+        // Advance sim time scaled by wave_speed (keeps gust trajectories frame-rate independent)
+        self.sim_time += self.wave_speed / 60.0;
+        // time_step is fixed — it sets how far back we look to compute the gust-centre
+        // differential (w_old - w_new).  It must NOT scale with wave_speed, otherwise
+        // slower speeds produce near-zero deltas and therefore near-zero wave amplitude.
+        let step_dt = 1.0 / 120.0;
         let delta = DeltaUniform {
             delta: [1.0 / SIM_SIZE as f32, 1.0 / SIM_SIZE as f32],
             spring: self.wave_spring,
@@ -1221,6 +1253,8 @@ impl RenderPass for WaterSimPass {
             wind_dir: self.wind_direction,
             wind_strength: self.wind_strength,
             time: self.sim_time,
+            wave_scale: self.wave_scale,
+            time_step: step_dt,
         };
         ctx.write_buffer(&self.update_buf, 0, bytemuck::bytes_of(&delta));
         ctx.write_buffer(&self.normal_buf, 0, bytemuck::bytes_of(&delta));

@@ -648,6 +648,8 @@ impl Renderer {
             if let Some(pass) = self.graph.find_pass_mut::<helio_pass_water_sim::WaterSimPass>() {
                 let vol = &water_volumes[0];
                 pass.set_sim_dynamics(vol.sim_dynamics[0], vol.sim_dynamics[1]);
+                pass.set_wave_scale(vol.sim_dynamics[2]);
+                pass.set_wave_speed(vol.wave_params[2]);
                 pass.set_wind([vol.wind_params[0], vol.wind_params[1]], vol.wind_params[2]);
             }
             self.queue.write_buffer(

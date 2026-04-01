@@ -143,32 +143,52 @@ impl ApplicationHandler for App {
         let sky = helio::SkyActor::new().with_sky_color([0.02, 0.03, 0.08]);
         renderer.scene_mut().insert_actor(helio::SceneActor::Sky(sky));
 
-        // Ocean water volume
+        // Ocean water volume — mid-ocean night, sea state 4 (moderate breeze, ~1.5m swells)
         let ocean = helio::WaterVolumeDescriptor {
             bounds_min: [-120.0, -20.0, -120.0],
             bounds_max: [120.0, 40.0, 120.0],
             surface_height: 0.0,
-            wave_amplitude: 0.7,
-            wave_frequency: 0.45,
-            wave_speed: 1.35,
-            wave_direction: [0.9, 0.2],
-            wave_steepness: 0.55,
-            water_color: [0.02, 0.08, 0.16],
-            extinction: [0.08, 0.04, 0.02],
-            foam_threshold: 0.78,
-            foam_amount: 0.68,
-            reflection_strength: 0.95,
-            refraction_strength: 0.55,
-            fresnel_power: 6.0,
+
+            // Legacy Gerstner (for compat — heightfield sim drives actual surface)
+            wave_amplitude: 1.1,
+            wave_frequency: 0.22,      // long deep-ocean wavelengths
+            wave_speed: 0.75,          // swells travel at ~moderate pace
+            wave_direction: [0.97, 0.14],
+            wave_steepness: 0.42,
+
+            // Deep pelagic water: absorbs red rapidly, blue penetrates deepest
+            water_color: [0.005, 0.025, 0.09],
+            extinction: [0.38, 0.13, 0.03],
+
+            // Whitecaps begin at moderate steepness; consistent mid-ocean spray
+            foam_threshold: 0.60,
+            foam_amount: 0.80,
+
+            // Night ocean is near-mirror at glancing angles (no skylight to wash it out)
+            reflection_strength: 0.92,
+            refraction_strength: 0.38,
+            fresnel_power: 5.5,        // seawater Fresnel exponent
+
+            // Caustics from rig lights, not sunlight — softer and slower
             caustics_enabled: true,
-            caustics_intensity: 2.2,
-            caustics_scale: 7.0,
-            caustics_speed: 1.8,
-            fog_density: 0.035,
-            god_rays_intensity: 0.4,
-            wind_direction: [0.8, 0.3],
-            wind_strength: 2.5,
-            // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)
+            caustics_intensity: 1.2,
+            caustics_scale: 4.5,
+            caustics_speed: 0.6,
+
+            // Clear deep-ocean water: visibility ~20-30m
+            fog_density: 0.016,
+            god_rays_intensity: 0.18,
+
+            // Heightfield sim physics: deep ocean — waves propagate well, dissipate slowly
+            wave_spring: 1.3,
+            wave_damping: 0.993,
+
+            // Beaufort 4 steady wind (~28 km/h) from NNE
+            wind_direction: [0.97, 0.14],
+            wind_strength: 3.2,
+            // Mid-sized swell footprint for open-ocean swells
+            wave_scale: 0.55,
+
             ..Default::default()
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(ocean));

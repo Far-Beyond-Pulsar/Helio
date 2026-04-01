@@ -347,6 +347,9 @@ pub struct WaterVolumeDescriptor {
     /// Wind strength. 0 = calm, ~1 = gentle ripples, ~5 = choppy.
     /// Pass to `WaterSimPass::set_wind()` after updating the volume.
     pub wind_strength: f32,
+    /// Wave spatial scale factor. 1.0 = default size; 0.25 = fine ripples; 2.0 = large swells.
+    /// Controls the footprint of gust impulses on the heightfield surface.
+    pub wave_scale: f32,
 }
 
 impl WaterVolumeDescriptor {
@@ -371,7 +374,7 @@ impl WaterVolumeDescriptor {
             shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
             sun_direction: sun,
             ssr_params: [1.0, 32.0, 0.05, 0.02],  // Default SSR: enabled, 32 steps
-            sim_dynamics: [self.wave_spring, self.wave_damping, 0.0, 0.0],
+            sim_dynamics: [self.wave_spring, self.wave_damping, self.wave_scale, 0.0],
             wind_params: [self.wind_direction[0], self.wind_direction[1], self.wind_strength, 0.0],
             _pad6: [0.0; 4],
         }
@@ -412,6 +415,7 @@ impl WaterVolumeDescriptor {
             wave_damping: 0.985,
             wind_direction: [0.0, 0.0],
             wind_strength: 0.0,
+            wave_scale: 1.0,
         }
     }
 
@@ -450,6 +454,7 @@ impl WaterVolumeDescriptor {
             wave_damping: 0.980,
             wind_direction: [0.0, 0.0],
             wind_strength: 0.0,
+            wave_scale: 1.0,
         }
     }
 }

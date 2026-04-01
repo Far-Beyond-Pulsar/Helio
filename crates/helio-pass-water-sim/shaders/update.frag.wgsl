@@ -13,10 +13,8 @@ struct UpdateUniforms {
     /// Texel size: (1 / texture_width, 1 / texture_height)
     delta: vec2<f32>,
     /// Wave spring constant -- restoring force toward the mean height.
-    /// Lower (~1.0) feels like fluid; higher (~2.0) feels jelly-like.
     spring: f32,
     /// Per-step energy damping multiplier (0..1).
-    /// Closer to 1.0 = waves persist longer. Closer to 0.9 = waves die quickly.
     damping: f32,
     /// Wind direction in XZ sim-texture space (pre-normalised; zero = no wind).
     wind_dir: vec2<f32>,
@@ -24,6 +22,10 @@ struct UpdateUniforms {
     wind_strength: f32,
     /// Elapsed simulation time (seconds) -- drives gust-centre trajectories.
     time: f32,
+    /// Wave spatial scale. 1.0 = default size; 0.25 = quarter-size (fine ripples).
+    wave_scale: f32,
+    /// Elapsed time for one sim step (seconds). Controls gust-centre velocity and wave speed.
+    time_step: f32,
 }
 @group(0) @binding(2) var<uniform> u: UpdateUniforms;
 
@@ -32,8 +34,6 @@ struct UpdateUniforms {
 // ---------------------------------------------------------------------------
 fn gust_pos(t: f32, idx: i32, wind_dir: vec2<f32>) -> vec2<f32> {
     let fi = f32(idx);
-    // Each source has a unique natural frequency and starting phase so they
-    // spread across the surface and never synchronise.
     let fx = 0.17 + fi * 0.083;
     let fy = 0.21 + fi * 0.067;
     let px = fi * 1.2345;
@@ -42,8 +42,6 @@ fn gust_pos(t: f32, idx: i32, wind_dir: vec2<f32>) -> vec2<f32> {
         sin(t * fx + px) * 0.38 + 0.5,
         sin(t * fy + py) * 0.38 + 0.5,
     );
-    // Slight persistent drift in wind direction so gusts feel directional
-    // without dominating the Lissajous variation.
     return clamp(base + wind_dir * 0.05, vec2<f32>(0.05), vec2<f32>(0.95));
 }
 
@@ -69,32 +67,21 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     info.r += info.g;
 
     // Wind: N traveling gust centres, hitbox-style conservative delta encoding.
-    //
-    // Each gust centre follows a Lissajous trajectory across the surface.
-    // Writing the height delta (old_weight - new_weight) rather than a raw
-    // impulse is conservative: the net displacement integrated over the whole
-    // surface is zero every step, so the global mean height never drifts.
-    // This mirrors exactly how hitbox.frag.wgsl creates waves.
+    // wave_scale shrinks/enlarges the gust footprint: smaller = finer ripples.
     if u.wind_strength > 0.001 {
-        // One sim step back in time (2 steps/frame * 60 fps = ~120 steps/s).
-        let prev_t = u.time - 0.00833;
-        let gust_radius = 0.10;
+        let prev_t = u.time - u.time_step;
+        let gust_radius = 0.10 * clamp(u.wave_scale, 0.05, 4.0);
         let scale = u.wind_strength * 0.10;
 
         for (var i: i32 = 0; i < 6; i++) {
             let p_new = gust_pos(u.time, i, u.wind_dir);
             let p_old = gust_pos(prev_t, i, u.wind_dir);
 
-            // Cosine-bell weight: 0 outside radius, 1 at centre -- same profile
-            // as drop.frag.wgsl so the excited waves look identical.
             let d_new = max(0.0, 1.0 - length(p_new - uv) / gust_radius);
             let d_old = max(0.0, 1.0 - length(p_old - uv) / gust_radius);
             let w_new = 0.5 - cos(d_new * 3.14159265) * 0.5;
             let w_old = 0.5 - cos(d_old * 3.14159265) * 0.5;
 
-            // Same sign convention as hitbox.frag.wgsl:
-            //   where gust was  -> height rises  (surface springs back up)
-            //   where gust is   -> height falls   (gust drags surface down)
             info.r += (w_old - w_new) * scale;
         }
     }
