@@ -924,7 +924,7 @@ impl WaterSimPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),  // Don't write depth (semi-transparent)
+                depth_write_enabled: Some(true),  // Write depth
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),

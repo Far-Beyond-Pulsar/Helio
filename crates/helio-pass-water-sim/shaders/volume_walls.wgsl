@@ -143,11 +143,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     }
     
     // For floor, get detailed water normal from heightfield
-    // For walls, use geometric normal with subtle wave perturbation
+    // For walls, use geometric normal with wave perturbation from offset UV
     var water_normal: vec3f;
+    var sample_uv: vec2f;
+    
     if is_floor {
-        // Floor uses full water surface normal (5 iterations like surface shader)
-        var uv = in.simUV;
+        // Floor uses exact UV position
+        sample_uv = in.simUV;
+        // Full water surface normal (5 iterations like surface shader)
+        var uv = sample_uv;
         var info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
         for (var i = 0; i < 5; i++) {
             uv += info.ba * 0.005;
@@ -156,9 +160,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         let ba = vec2f(info.b, info.a);
         water_normal = vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
     } else {
-        // Walls use geometric normal with subtle wave influence
-        let info = textureSampleLevel(water_sim, water_samp, in.simUV, 0.0);
-        let wave_perturb = vec2f(info.b, info.a) * 0.2;  // Reduced influence
+        // Walls: offset UV based on Y position to create vertical variation
+        let y_norm = (in.worldPos.y - bmin.y) / (surface_h - bmin.y);
+        sample_uv = in.simUV + vec2f(0.0, y_norm * 0.3);  // Offset V by height
+        
+        let info = textureSampleLevel(water_sim, water_samp, sample_uv, 0.0);
+        let wave_perturb = vec2f(info.b, info.a) * 0.3;
         water_normal = normalize(geom_normal + vec3f(wave_perturb.x, 0.0, wave_perturb.y));
     }
     
@@ -183,7 +190,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     }
     
     // Calculate water thickness for absorption
-    let info = textureSampleLevel(water_sim, water_samp, in.simUV, 0.0);
+    let info = textureSampleLevel(water_sim, water_samp, sample_uv, 0.0);
     let water_surface_y = surface_h + info.r * (surface_h - bmin.y);
     
     // For walls, use uniform water thickness (horizontal extent of water volume)
@@ -213,7 +220,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     refracted *= absorption;
     
     // Sample and apply caustics
-    let caustics_sample = textureSampleLevel(caustics_tex, shared_samp, in.simUV, 0.0);
+    let caustics_sample = textureSampleLevel(caustics_tex, shared_samp, sample_uv, 0.0);
     let caustics_intensity = caustics_sample.r * vol.sim_params.y;
     let caustic_strength = select(0.5, 1.0, is_floor);
     refracted += vec3f(caustics_intensity) * caustic_strength * 0.5;
@@ -223,11 +230,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let view_angle = abs(dot(-view_dir, geom_normal));
     let fresnel_factor = pow(1.0 - view_angle, 2.0);
     
-    // Base alpha - walls are now fully opaque to show consistent color
-    var alpha = select(0.95, 0.95, is_floor);  // Both very opaque
+    // Base alpha - walls have moderate transparency, floor more opaque
+    var alpha = select(0.7, 0.85, is_floor);
     
     // Apply Fresnel - more opaque at grazing angles
-    alpha = mix(alpha, 1.0, fresnel_factor * 0.2);
+    alpha = mix(alpha, 1.0, fresnel_factor * 0.3);
     
     // Apply height-based fade from vertex shader
     alpha *= in.fadeAlpha;
