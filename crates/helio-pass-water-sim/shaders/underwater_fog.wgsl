@@ -64,30 +64,6 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Edge detection (Sobel on luminance)
-// ---------------------------------------------------------------------------
-
-fn luma(c: vec3f) -> f32 {
-    return dot(c, vec3f(0.2126, 0.7152, 0.0722));
-}
-
-// 3x3 Sobel gradient.  Uses textureSampleLevel(lod=0) so it is valid in
-// non-uniform control flow (after a dynamic branch).
-fn sobel_edge(uv: vec2f, px: vec2f) -> vec2f {
-    let tl = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f(-1., -1.), 0.).rgb);
-    let tc = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f( 0., -1.), 0.).rgb);
-    let tr = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f( 1., -1.), 0.).rgb);
-    let ml = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f(-1.,  0.), 0.).rgb);
-    let mr = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f( 1.,  0.), 0.).rgb);
-    let bl = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f(-1.,  1.), 0.).rgb);
-    let bc = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f( 0.,  1.), 0.).rgb);
-    let br = luma(textureSampleLevel(scene_tex, scene_samp, uv + px * vec2f( 1.,  1.), 0.).rgb);
-    let gx = -tl - 2.*ml - bl + tr + 2.*mr + br;
-    let gy = -tl - 2.*tc - tr + bl + 2.*bc + br;
-    return vec2f(gx, gy);
-}
-
-// ---------------------------------------------------------------------------
 // Noise helpers for lens distortion
 // ---------------------------------------------------------------------------
 
@@ -166,27 +142,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let dist0          = water_distortion(in.uv, t);
     let dist1          = water_distortion(in.uv * 2.1 + vec2f(0.37, 0.71), t * 0.6);
     let dist_raw       = dist0 * 0.7 + dist1 * 0.3;
-    // Scale with wave amplitude: amplitude 0.5 → ~18% distortion at surface,
-    // ~35% deep. Amplitude 0.1 → light wobble. Amplitude 1.0 → very heavy.
-    let dist_strength  = clamp(wave_amplitude * (0.25 + cam_depth * 0.10), 0.015, 0.45);
+    // Scale with wave amplitude. The smooth noise field is artifact-free at
+    // any magnitude — stretching is physically correct lens distortion.
+    // amplitude 0.5 surface → ~15%, deep → up to 80%. No upper clamp on
+    // depth term so very deep / high-amplitude water can go fully abstract.
+    let dist_strength  = clamp(wave_amplitude * (0.25 + cam_depth * 0.35), 0.015, 1.5);
 
-    // ---- Edge-tangent swimming warp -------------------------------------
-    // Detect screen-space object edges via Sobel luminance gradient, then
-    // displace pixels *along* the edge tangent with a sine wave that scrolls
-    // in the wave_direction at wave_speed.  This makes object silhouettes
-    // appear to swim and bend in the water current.
-    let px           = 1.0 / vec2f(textureDimensions(scene_tex));
-    let edge_grad    = sobel_edge(in.uv, px);
-    let edge_mag     = length(edge_grad);
-    // Tangent = gradient rotated 90° (runs along the edge instead of across)
-    let tangent      = vec2f(-edge_grad.y, edge_grad.x);
-    // Phase scrolls in wave_direction so edges swim with the current
-    let wdir         = normalize(vol.wave_direction.xy + vec2f(0.0001, 0.0));
-    let wave_phase   = dot(in.uv, wdir) * 14.0 - t * 3.5;
-    let edge_swing   = sin(wave_phase) * edge_mag;
-    let edge_warp    = tangent * edge_swing * clamp(wave_amplitude * 0.20, 0.0, 0.35);
-
-    let warp_uv      = in.uv + dist_raw * dist_strength + edge_warp;
+    let warp_uv      = in.uv + dist_raw * dist_strength;
     // Keep UVs on-screen so we never sample outside the texture.
     let safe_uv      = clamp(warp_uv, vec2f(0.001), vec2f(0.999));
 
