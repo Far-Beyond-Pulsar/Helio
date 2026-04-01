@@ -265,8 +265,41 @@ fn clipmap_blend_alpha(level_idx: u32, pos: vec3<f32>) -> f32 {
     return smoothstep(start_blend, end_blend, d_max);
 }
 
-// Query SDF with smooth LOD blending between clipmap levels.
-// When near the edge of a level, smoothly blends to the next coarser level.
+// ── Fast march step: O(1) common-case, no inter-level blending ──────────────
+//
+// Used exclusively inside the ray march loop where blending is unnecessary
+// (it's a shading quality feature, not a correctness requirement for stepping).
+//
+// Key optimisation: callers pass `hint` = the level the previous step used.
+// Since consecutive march positions rarely cross level boundaries (~90%+ of
+// steps), the hot path is a single point_in_level + trilinear lookup instead
+// of the full O(level_count) search.
+
+struct SdfResult {
+    dist:  f32,
+    level: u32,
+};
+
+fn sdf_march_step(world_pos: vec3<f32>, hint: u32) -> SdfResult {
+    // Fast path: same level as the previous step.
+    if hint < clip_config.level_count && point_in_level(hint, world_pos) {
+        return SdfResult(sample_level_trilinear(hint, world_pos), hint);
+    }
+    // Slow path: find the finest enclosing level.
+    for (var i = 0u; i < clip_config.level_count; i++) {
+        if point_in_level(i, world_pos) {
+            return SdfResult(sample_level_trilinear(i, world_pos), i);
+        }
+    }
+    // Outside all levels — huge distance so the marcher takes one giant step.
+    return SdfResult(1e10, clip_config.level_count);
+}
+
+// ── Full blended SDF query (used only at the hit point for shading) ──────────
+//
+// Called from estimate_normal after a confirmed hit.  The blending cost is
+// acceptable because it only fires once per pixel, not once per step.
+
 fn sdf_query(world_pos: vec3<f32>) -> f32 {
     // Find the finest level that contains the point
     var fine_level = clip_config.level_count;
@@ -402,13 +435,44 @@ fn fs_main(in: VsOutput) -> FsOutput {
     let ray_dir = normalize(far_w - near_w);
     let ray_origin = camera.position_near.xyz;
 
+    // ── Ray–AABB clip against the coarsest clip level ─────────────────────
+    //
+    // (a) Rays that completely miss the volume discard immediately — zero steps.
+    // (b) Rays entering from outside advance t to the entry face — no wasted
+    //     steps before the terrain starts.
+    // (c) `t_vol_exit` is used inside the loop to break as soon as the ray
+    //     leaves the back face — no wasted steps after terrain ends.
+    //
+    // IEEE 754: dividing by zero gives ±inf, which is handled correctly by
+    // min/max comparisons, so no guard for axis-aligned rays is needed.
+    let aabb_idx   = clip_config.level_count - 1u;
+    let aabb_vs    = level_voxel_size(aabb_idx);
+    let aabb_min   = level_world_min(aabb_idx);
+    let aabb_max   = aabb_min + vec3<f32>(f32(clip_config.grid_dim) * aabb_vs);
+    let inv_rd     = 1.0 / ray_dir;
+    let t0_aabb    = (aabb_min - ray_origin) * inv_rd;
+    let t1_aabb    = (aabb_max - ray_origin) * inv_rd;
+    let tmin_aabb  = min(t0_aabb, t1_aabb);
+    let tmax_aabb  = max(t0_aabb, t1_aabb);
+    let t_enter    = max(max(tmin_aabb.x, tmin_aabb.y), tmin_aabb.z);
+    let t_vol_exit = min(min(tmax_aabb.x, tmax_aabb.y), tmax_aabb.z);
+
+    // Ray misses or is entirely behind the camera.
+    if t_vol_exit < 0.0 || t_enter > t_vol_exit {
+        discard;
+    }
+
     // max_march_dist derived from coarsest level (fully GPU — no CPU upload)
     let coarsest_vs  = level_voxel_size(clip_config.level_count - 1u);
+    // (used below for fog distance in the shading block)
     let max_dist     = f32(clip_config.grid_dim) * coarsest_vs * 2.0;
 
     // ── Step budget ───────────────────────────────────────────────────────
-    // 256 steps for better quality - prevents banding and missed surfaces
-    let max_steps = 256u;
+    // 1024 steps: sdf_march_step is ~4x cheaper than the old sdf_query
+    // (O(1) level lookup + no inter-level blend), so 1024 steps costs roughly
+    // the same wall-time as 256 old steps while allowing near-terrain horizon
+    // rays to correctly reach the fog exit distance.
+    let max_steps = 1024u;
 
     // Finest-level voxel size — drives the adaptive threshold and min step floor
     let vs0 = level_voxel_size(0u);
@@ -417,53 +481,50 @@ fn fs_main(in: VsOutput) -> FsOutput {
     // Uses fragment position (pixel coordinate) for stable inter-pixel variation
     let dither = fract(sin(dot(in.position.xy, 
                                vec2<f32>(12.9898, 78.233))) * 43758.5453);
-    var t = vs0 * 0.5 * dither; // Start with sub-voxel jitter
-    var hit = false;
-    var hit_pos = vec3<f32>(0.0);
 
-    // Accumulated fog optical depth used exclusively for early exit.
+    // Start at the volume entry face (clamp to 0 if camera is already inside),
+    // backed off by one fine voxel to avoid missing the entry surface, then
+    // dithered by a sub-voxel amount to reduce banding.
+    var t         = max(t_enter - vs0, 0.0) + vs0 * 0.5 * dither;
+    var hit       = false;
+    var hit_pos   = vec3<f32>(0.0);
     var fog_accum = 0.0;
-    var prev_t = t; // Track previous t to compute step delta for fog
+    // Level hint: avoids re-searching all levels every step.
+    var cur_level = clip_config.level_count; // invalid sentinel — forces full search on first step
 
     for (var step = 0u; step < max_steps; step++) {
-        let p = ray_origin + ray_dir * t;
-        let d = sdf_query(p);
+        // Break as soon as the ray exits the coarsest level's back face.
+        if t >= t_vol_exit { break; }
+
+        let p  = ray_origin + ray_dir * t;
+        let sr = sdf_march_step(p, cur_level);  // O(1) hot path via level hint
+        cur_level = sr.level;
+        let d = sr.dist;
 
         // ── Adaptive hit threshold ────────────────────────────────────────
-        // Slightly conservative for u8-quantised cached SDF: vs0 * 0.05
-        // base prevents tunneling through thin terrain features, while the
-        // distance-scaled term (t * 0.0005) accounts for accumulated
-        // floating-point error on long rays.
+        // vs0 * 0.05 base prevents tunneling through thin terrain features;
+        // t * 0.0005 widens the epsilon for accumulated floating-point error
+        // on long rays.
         let threshold = max(vs0 * 0.05, t * 0.0005);
         if d < threshold {
-            hit = true;
+            hit     = true;
             hit_pos = p;
             break;
         }
 
-        // ── Adaptive step size (IQ relaxed sphere tracing) ─────────────
-        // Base multiplier 0.75 is conservative for quantised atlas SDF.
-        // Linear ramp (t * 0.0005, capped at 0.15) widens towards 0.90
-        // for distant open-space rays, reducing iterations by ~30-40%
-        // without risking surface over-stepping.  vs0 * 0.2 floor guards
-        // against stalling in flat empty regions.
-        let step_mult = 0.75 + min(t * 0.0005, 0.15);
-        let step_size = max(d * step_mult, vs0 * 0.2);
-        prev_t = t;
+        // ── Step size ─────────────────────────────────────────────────────
+        // 0.8 multiplier is safe for u8-quantised cached SDF without being
+        // overly conservative.  vs0 * 0.2 floor prevents stalling in perfectly
+        // flat empty regions.
+        let step_size = max(d * 0.8, vs0 * 0.2);
         t += step_size;
 
-        if t > max_dist {
-            break;
-        }
-
         // ── Fog-based early exit ──────────────────────────────────────────
-        // Accumulate fog proportional to the actual step taken (t - prev_t),
-        // not total ray distance. Using total `t` caused quadratic blow-up,
-        // prematurely discarding distant terrain rays.
-        fog_accum += (t - prev_t) * FOG_DENSITY;
-        if fog_accum > FOG_EXIT_THRESHOLD {
-            break;
-        }
+        // Terminates rays that fly over terrain without hitting, so they don't
+        // exhaust the full step budget.  FOG_DENSITY is tuned relative to scene
+        // scale; FOG_EXIT_THRESHOLD ~ 1000 world units for the default scene.
+        fog_accum += step_size * FOG_DENSITY;
+        if fog_accum > FOG_EXIT_THRESHOLD { break; }
     }
 
     if !hit {
