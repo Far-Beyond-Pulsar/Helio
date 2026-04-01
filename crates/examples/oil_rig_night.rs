@@ -143,51 +143,50 @@ impl ApplicationHandler for App {
         let sky = helio::SkyActor::new().with_sky_color([0.02, 0.03, 0.08]);
         renderer.scene_mut().insert_actor(helio::SceneActor::Sky(sky));
 
-        // Ocean water volume — mid-ocean night, sea state 4 (moderate breeze, ~1.5m swells)
+        // Ocean water volume — mid-ocean night, sea state 3 (~0.8m significant wave height)
         let ocean = helio::WaterVolumeDescriptor {
             bounds_min: [-120.0, -20.0, -120.0],
             bounds_max: [120.0, 40.0, 120.0],
             surface_height: 0.0,
 
-            // Legacy Gerstner (for compat — heightfield sim drives actual surface)
-            wave_amplitude: 1.1,
-            wave_frequency: 0.22,      // long deep-ocean wavelengths
-            wave_speed: 0.75,          // swells travel at ~moderate pace
+            // Legacy Gerstner (heightfield sim drives actual surface)
+            wave_amplitude: 0.6,
+            wave_frequency: 0.28,
+            wave_speed: 0.55,
             wave_direction: [0.97, 0.14],
-            wave_steepness: 0.42,
+            wave_steepness: 0.35,
 
-            // Deep pelagic water: absorbs red rapidly, blue penetrates deepest
+            // Deep pelagic water: red absorbed ~3m, green ~8m, blue ~30m
             water_color: [0.005, 0.025, 0.09],
             extinction: [0.38, 0.13, 0.03],
 
-            // Whitecaps begin at moderate steepness; consistent mid-ocean spray
-            foam_threshold: 0.60,
-            foam_amount: 0.80,
+            // Light spray only on steeper crests
+            foam_threshold: 0.72,
+            foam_amount: 0.55,
 
-            // Night ocean is near-mirror at glancing angles (no skylight to wash it out)
+            // Night mirror reflection, seawater Fresnel
             reflection_strength: 0.92,
-            refraction_strength: 0.38,
-            fresnel_power: 5.5,        // seawater Fresnel exponent
+            refraction_strength: 0.30,
+            fresnel_power: 5.5,
 
-            // Caustics from rig lights, not sunlight — softer and slower
+            // Caustics from rig lights — soft and slow
             caustics_enabled: true,
-            caustics_intensity: 1.2,
+            caustics_intensity: 1.1,
             caustics_scale: 4.5,
-            caustics_speed: 0.6,
+            caustics_speed: 0.5,
 
-            // Clear deep-ocean water: visibility ~20-30m
+            // Clear deep-ocean, ~25m visibility
             fog_density: 0.016,
-            god_rays_intensity: 0.18,
+            god_rays_intensity: 0.15,
 
-            // Heightfield sim physics: deep ocean — waves propagate well, dissipate slowly
-            wave_spring: 1.3,
-            wave_damping: 0.993,
+            // Sim physics: ocean spring gives c≈15 m/s at wave_speed=0.7
+            wave_spring: 0.04,
+            wave_damping: 0.986,
 
-            // Beaufort 4 steady wind (~28 km/h) from NNE
+            // Beaufort 3 wind (~18 km/h), small chop relative to the platform
             wind_direction: [0.97, 0.14],
-            wind_strength: 3.2,
-            // Mid-sized swell footprint for open-ocean swells
-            wave_scale: 0.55,
+            wind_strength: 0.9,
+            wave_scale: 0.18,
 
             ..Default::default()
         };

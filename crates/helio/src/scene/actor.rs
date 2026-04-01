@@ -411,8 +411,8 @@ impl WaterVolumeDescriptor {
             shadow_hitbox: 0.0,
             shadow_ao: 1.0,
             sun_direction: [0.5, 1.0, 0.5],
-            wave_spring: 1.2,
-            wave_damping: 0.985,
+            wave_spring: 0.04,   // c ≈ 22 m/s at wave_speed=1.0 — realistic ocean swell
+            wave_damping: 0.988,
             wind_direction: [0.0, 0.0],
             wind_strength: 0.0,
             wave_scale: 1.0,
@@ -450,8 +450,8 @@ impl WaterVolumeDescriptor {
             shadow_hitbox: 0.0,
             shadow_ao: 1.0,
             sun_direction: [0.5, 1.0, 0.5],
-            wave_spring: 1.0,
-            wave_damping: 0.980,
+            wave_spring: 0.06,   // c ≈ 27 m/s, slightly choppier than flat ocean
+            wave_damping: 0.984,
             wind_direction: [0.0, 0.0],
             wind_strength: 0.0,
             wave_scale: 1.0,
