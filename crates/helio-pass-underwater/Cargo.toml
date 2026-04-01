@@ -1,0 +1,9 @@
+[package]
+name = "helio-pass-underwater"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helio-v3 = { path = "../helio-v3" }
+libhelio = { path = "../libhelio" }
+wgpu = { workspace = true }

@@ -2914,6 +2914,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-underwater"
+version = "0.1.0"
+dependencies = [
+ "helio-v3",
+ "libhelio",
+ "wgpu 28.0.0",
+]
+
+[[package]]
 name = "helio-pass-virtual-geometry"
 version = "0.1.0"
 dependencies = [
@@ -2925,10 +2934,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-water-caustics"
+version = "0.1.0"
+dependencies = [
+ "helio-v3",
+ "libhelio",
+ "wgpu 28.0.0",
+]
+
+[[package]]
 name = "helio-pass-water-sim"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-pass-water-surface"
+version = "0.1.0"
+dependencies = [
  "helio-v3",
  "libhelio",
  "wgpu 28.0.0",

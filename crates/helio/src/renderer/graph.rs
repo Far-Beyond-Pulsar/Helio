@@ -119,7 +119,7 @@ pub fn build_default_graph(
 
     // Water rendering passes (sim → caustics → surface → underwater)
     // Add passes unconditionally so water appears when water volumes are inserted at runtime.
-    graph.add_pass(Box::new(WaterSimPass::new(device)));
+    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
@@ -249,7 +249,7 @@ pub fn build_hlfs_graph(
     graph.add_pass(Box::new(hlfs_pass));
 
     // Always include water passes in HLFS pipeline, enabling runtime insertion of water volumes.
-    graph.add_pass(Box::new(WaterSimPass::new(device)));
+    graph.add_pass(Box::new(WaterSimPass::new(device, camera_buf, config.surface_format)));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
