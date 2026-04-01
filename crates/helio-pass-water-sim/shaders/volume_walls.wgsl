@@ -168,20 +168,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let refract_uv = clamp(screen_uv + water_normal.xz * refract_str,
                           vec2f(0.001), vec2f(0.999));
     
-    // Sample background scene through water
-    var refracted = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
+    // Sample background scene
+    var scene_sample = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
     
-    // Calculate water depth for absorption
+    // For walls, blend heavily toward water color (they should look like thick water)
+    // For floor, use normal refraction
+    var refracted: vec3f;
+    if is_floor {
+        refracted = scene_sample;
+    } else {
+        // Walls: blend background with solid water color (90% water, 10% scene)
+        let solid_water_color = vol.water_color.rgb * 0.8;  // Slightly dimmed water color
+        refracted = mix(scene_sample, solid_water_color, 0.9);
+    }
+    
+    // Calculate water thickness for absorption
     let info = textureSampleLevel(water_sim, water_samp, in.simUV, 0.0);
     let water_surface_y = surface_h + info.r * (surface_h - bmin.y);
-    let depth_below_surface = max(0.0, water_surface_y - in.worldPos.y);
+    
+    // For walls, use uniform water thickness (horizontal extent of water volume)
+    // For floor, use vertical depth
+    var water_thickness: f32;
+    if is_floor {
+        // Floor: vertical depth below surface
+        water_thickness = max(0.0, water_surface_y - in.worldPos.y);
+    } else {
+        // Walls: use consistent thickness based on water volume size
+        // This gives uniform appearance across entire wall height
+        let water_extent_x = bmax.x - bmin.x;
+        let water_extent_z = bmax.z - bmin.z;
+        let avg_extent = (water_extent_x + water_extent_z) * 0.25;  // Average half-width
+        water_thickness = avg_extent * 1.5;  // Consistent thickness for walls
+    }
     
     // Beer-Lambert absorption - apply water color tint
-    refracted *= vol.water_color.rgb;
+    // For walls, apply stronger water color to ensure uniform appearance
+    let color_strength = select(2.0, 1.0, is_floor);  // Walls get stronger tint
+    refracted *= pow(vol.water_color.rgb, vec3f(1.0 / color_strength));
     
-    // Additional depth-based absorption
+    // Additional depth-based absorption (now uniform for walls)
     let extinction = vol.extinction.rgb;
-    let absorption = exp(-extinction * depth_below_surface * 0.5);
+    let absorption_strength = select(1.2, 0.8, is_floor);  // Walls get stronger absorption
+    let absorption = exp(-extinction * water_thickness * absorption_strength);
     refracted *= absorption;
     
     // Sample and apply caustics
@@ -195,11 +223,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let view_angle = abs(dot(-view_dir, geom_normal));
     let fresnel_factor = pow(1.0 - view_angle, 2.0);
     
-    // Base alpha - walls and floor both fairly opaque now
-    var alpha = select(0.85, 0.9, is_floor);
+    // Base alpha - walls are now fully opaque to show consistent color
+    var alpha = select(0.95, 0.95, is_floor);  // Both very opaque
     
     // Apply Fresnel - more opaque at grazing angles
-    alpha = mix(alpha, 1.0, fresnel_factor * 0.3);
+    alpha = mix(alpha, 1.0, fresnel_factor * 0.2);
     
     // Apply height-based fade from vertex shader
     alpha *= in.fadeAlpha;
