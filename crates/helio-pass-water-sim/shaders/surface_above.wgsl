@@ -101,8 +101,8 @@ fn trace_ssr(
     var hit_color = vec3f(0.0);
     var hit = false;
 
-    // March in world space
-    for (var i = 0u; i < max_steps && !hit; i++) {
+    // March in world space, starting slightly ahead to avoid self-intersection
+    for (var i = 1u; i < max_steps && !hit; i++) {
         let t = f32(i) * step_size;
         let sample_world = ray_origin + ray_dir * t;
 
@@ -122,16 +122,19 @@ fn trace_ssr(
         // Sample scene depth at ray position
         let scene_depth = textureSampleLevel(depth_texture, depth_sampler, sample_uv, 0);
 
-        // Reconstruct world position of scene geometry at this UV
-        let scene_world = reconstruct_world_pos(sample_uv, scene_depth);
-        let scene_dist = length(scene_world - ray_origin);
-        let ray_dist = t;
+        // Compare depths in NDC space (more accurate than world-space distance)
+        let ray_depth = sample_ndc.z;
 
-        // Check if ray intersects geometry (within thickness tolerance)
-        if abs(scene_dist - ray_dist) < thickness {
-            // Hit! Sample scene color at this position
-            hit_color = textureSampleLevel(scene_color, shared_samp, sample_uv, 0.0).rgb;
-            hit = true;
+        // Ray has intersected geometry if it's gone past the surface
+        // (ray_depth > scene_depth means ray is behind geometry)
+        if ray_depth >= scene_depth {
+            // Check if we're within thickness tolerance
+            let depth_diff = ray_depth - scene_depth;
+            if depth_diff < thickness * 10.0 {  // Scale thickness for NDC space
+                // Hit! Sample scene color at this position
+                hit_color = textureSampleLevel(scene_color, shared_samp, sample_uv, 0.0).rgb;
+                hit = true;
+            }
         }
     }
 
