@@ -594,7 +594,13 @@ impl WaterSimPass {
                 cull_mode: Some(wgpu::Face::Back),
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -624,7 +630,13 @@ impl WaterSimPass {
                 cull_mode: Some(wgpu::Face::Front),
                 ..Default::default()
             },
-            depth_stencil: None,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
             cache: None,
@@ -981,6 +993,10 @@ impl RenderPass for WaterSimPass {
                     ],
                 });
 
+                // Water runs post-TAA: ctx.target is native res, but ctx.depth is internal res
+                // when render_scale < 1.0. Use full_res_depth when available.
+                let depth_view = ctx.frame.full_res_depth.unwrap_or(ctx.depth);
+
                 // -- Water surface (above-water front faces) --
                 let surf_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: ctx.target,
@@ -991,7 +1007,14 @@ impl RenderPass for WaterSimPass {
                 let desc = wgpu::RenderPassDescriptor {
                     label: Some("Water Surface Above"),
                     color_attachments: &surf_attachments,
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,
@@ -1015,7 +1038,14 @@ impl RenderPass for WaterSimPass {
                 let desc = wgpu::RenderPassDescriptor {
                     label: Some("Water Surface Under"),
                     color_attachments: &surf_under_attachments,
-                    depth_stencil_attachment: None,
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
                     multiview_mask: None,

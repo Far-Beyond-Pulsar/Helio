@@ -323,13 +323,14 @@ impl ApplicationHandler for App {
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
 
         // === BOUNCING BALL ===
-        // A shiny sphere that bounces on the water surface, creating ripple waves.
+        // A shiny sphere that bounces perfectly on the water surface, creating ripple waves.
         const BALL_RADIUS: f32 = 0.5;
         const WATER_SURFACE: f32 = 1.8;
-        // Pool X/Z world half-extent for normalising to hitbox [-1,1] sim space
         const POOL_HALF_XZ: f32 = 6.0;
 
         let ball_start = glam::Vec3::new(0.0, WATER_SURFACE + 4.0, 0.0);
+        // Give it a diagonal horizontal kick so it travels across the pool
+        let ball_start_vel = glam::Vec3::new(1.8, 0.0, 1.2);
         let ball_mesh_id = renderer.scene_mut()
             .insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], BALL_RADIUS)))
             .as_mesh()
@@ -668,7 +669,7 @@ impl ApplicationHandler for App {
             ball_obj_id,
             ball_hitbox_id,
             ball_pos: ball_start,
-            ball_vel: glam::Vec3::ZERO,
+            ball_vel: ball_start_vel,
             ball_prev_pos: ball_start,
             // Start at entrance, looking toward the altar
             cam_pos: glam::Vec3::new(0.0, 2.0, 24.0),
@@ -893,30 +894,27 @@ impl AppState {
         const BALL_RADIUS: f32 = 0.5;
         const WATER_SURFACE: f32 = 1.8;
         const POOL_HALF_XZ: f32 = 6.0;
-        const RESTITUTION: f32 = 0.65;
 
         let prev_pos = self.ball_pos;
         self.ball_vel.y += GRAVITY * dt;
         self.ball_pos += self.ball_vel * dt;
 
+        // Perfect elastic bounce off water — restores full height every time
         let floor_y = WATER_SURFACE + BALL_RADIUS;
         if self.ball_pos.y < floor_y {
             self.ball_pos.y = floor_y;
-            self.ball_vel.y = self.ball_vel.y.abs() * RESTITUTION;
-            // Damp horizontal drift slightly on each bounce
-            self.ball_vel.x *= 0.92;
-            self.ball_vel.z *= 0.92;
+            self.ball_vel.y = self.ball_vel.y.abs(); // no energy loss on vertical
         }
 
-        // Keep ball inside the pool X/Z bounds
+        // Elastic bounce off pool walls (no energy loss)
         let limit = POOL_HALF_XZ - BALL_RADIUS;
         if self.ball_pos.x.abs() > limit {
             self.ball_pos.x = self.ball_pos.x.signum() * limit;
-            self.ball_vel.x = -self.ball_vel.x * RESTITUTION;
+            self.ball_vel.x = -self.ball_vel.x;
         }
         if self.ball_pos.z.abs() > limit {
             self.ball_pos.z = self.ball_pos.z.signum() * limit;
-            self.ball_vel.z = -self.ball_vel.z * RESTITUTION;
+            self.ball_vel.z = -self.ball_vel.z;
         }
 
         let _ = renderer.scene_mut().update_object_transform(
