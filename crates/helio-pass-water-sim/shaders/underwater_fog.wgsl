@@ -132,16 +132,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     // ---- Animated lens distortion ----------------------------------------
     // jitter_frame: xy = TAA jitter, z = frame counter, w = 0 (unused).
-    // Convert frame index to seconds at ~60 fps.
-    let t            = camera.jitter_frame.z * 0.016;
+    // wave_params: x = amplitude, y = frequency, z = speed, w = steepness.
+    let wave_amplitude = vol.wave_params.x;
+    let wave_speed     = vol.wave_params.z;
+    // Advance time at the same speed the waves move.
+    let t              = camera.jitter_frame.z * 0.016 * wave_speed;
     // Two octaves for richer shape distortion — fast small ripples over
     // slower large swells, both scrolling at different angles.
-    let dist0        = water_distortion(in.uv, t);
-    let dist1        = water_distortion(in.uv * 2.1 + vec2f(0.37, 0.71), t * 0.6);
-    let dist_raw     = dist0 * 0.7 + dist1 * 0.3;
-    // 1% base so distortion is visible at the surface; ramps up to 8% deep.
-    let dist_strength = clamp(cam_depth * 0.030, 0.010, 0.080);
-    let warp_uv      = in.uv + dist_raw * dist_strength;
+    let dist0          = water_distortion(in.uv, t);
+    let dist1          = water_distortion(in.uv * 2.1 + vec2f(0.37, 0.71), t * 0.6);
+    let dist_raw       = dist0 * 0.7 + dist1 * 0.3;
+    // Scale with wave amplitude: amplitude 0.5 → ~4% distortion at surface,
+    // ~10% deep. Amplitude 0.1 → barely perceptible. Amplitude 1.0 → heavy.
+    let dist_strength  = clamp(wave_amplitude * (0.06 + cam_depth * 0.025), 0.004, 0.12);
+    let warp_uv        = in.uv + dist_raw * dist_strength;
     // Keep UVs on-screen so we never sample outside the texture.
     let safe_uv      = clamp(warp_uv, vec2f(0.001), vec2f(0.999));
 
