@@ -164,13 +164,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let IOR_WATER = vol.sim_params.x;
     let light_dir = normalize(vol.sun_direction.xyz);
 
-    // ── Normal — 5-iteration refinement, then FLIP for underwater (reference) ─
-    var uv   = in.simPos.xz * 0.5 + 0.5;
-    var info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
-    for (var i = 0; i < 5; i++) {
-        uv  += info.ba * 0.005;
-        info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
-    }
+    // ── Normal — sample at grid UV, then FLIP for underwater view.
+    // No iterative UV walk: for a SWE heightfield the surface only displaces
+    // vertically, so no horizontal correction is needed.  The walk caused
+    // reflections/refractions to drift with traveling wave fronts.
+    let uv     = in.simPos.xz * 0.5 + 0.5;
+    let info   = textureSampleLevel(water_sim, water_samp, uv, 0.0);
     let ba     = vec2f(info.b, info.a);
     let normal = -vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
 

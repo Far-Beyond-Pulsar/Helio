@@ -183,13 +183,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let IOR_WATER = vol.sim_params.x;
     let light_dir = normalize(vol.sun_direction.xyz);
 
-    // ── Normal from sim — 5-iteration UV refinement (identical to reference) ──
-    var uv   = in.simPos.xz * 0.5 + 0.5;
-    var info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
-    for (var i = 0; i < 5; i++) {
-        uv  += info.ba * 0.005;
-        info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
-    }
+    // ── Normal from sim — sample at the grid UV (no iterative walk).
+    // The old loop shifted UV by info.ba each iteration, which caused the sample
+    // point to follow the wave-tilt direction.  For a SWE heightfield (vertical
+    // displacement only) no horizontal correction is needed, and the walk made
+    // reflections drift with traveling wave fronts.
+    let uv     = in.simPos.xz * 0.5 + 0.5;
+    let info   = textureSampleLevel(water_sim, water_samp, uv, 0.0);
     let ba     = vec2f(info.b, info.a);
     let normal = vec3f(info.b, sqrt(max(0.0, 1.0 - dot(ba, ba))), info.a);
 
