@@ -316,16 +316,16 @@ impl GpuScene {
     ///   scene.flush()                   // Uploads light buffer
     /// ```
     pub fn flush(&mut self) {
-        let queue = self.queue.clone();
-        self.camera.flush(&queue);
-        self.instances.flush(&queue);
-        self.aabbs.flush(&queue);
-        self.draw_calls.flush(&queue);
-        self.lights.flush(&queue);
-        self.materials.flush(&queue);
-        self.shadow_matrices.flush(&queue);
-        self.indirect.flush(&queue);
-        self.visibility.flush(&queue);
+        let queue: &wgpu::Queue = &self.queue;
+        self.camera.flush(queue);
+        self.instances.flush(queue);
+        self.aabbs.flush(queue);
+        self.draw_calls.flush(queue);
+        self.lights.flush(queue);
+        self.materials.flush(queue);
+        self.shadow_matrices.flush(queue);
+        self.indirect.flush(queue);
+        self.visibility.flush(queue);
     }
 }
 

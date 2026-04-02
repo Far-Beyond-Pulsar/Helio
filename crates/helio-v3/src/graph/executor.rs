@@ -493,6 +493,17 @@ impl RenderGraph {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Graph"),
             });
+
+        // Apply resource routes once (transient texture pointer → FrameResources field).
+        // Routes are stable across passes, so there is no reason to re-apply them inside
+        // the per-pass loop (previously O(passes × routes), now O(routes)).
+        let mut base_frame_resources = *frame_resources;
+        for (name, route) in &self.resource_routes {
+            if let Some(tex) = self.transient_textures.get(name) {
+                route(&tex.view, &mut base_frame_resources);
+            }
+        }
+
         for pass_index in 0..self.passes.len() {
             let (published_passes, pending_passes) = self.passes.split_at_mut(pass_index);
             let (pass, _) = pending_passes
@@ -501,16 +512,7 @@ impl RenderGraph {
             let _scope = self.profiler.scope(pass.name());
 
             // Populate frame resources with transient textures + pass-published resources
-            let mut visible_frame_resources = *frame_resources;
-
-            // Apply registered resource routes: populate FrameResources fields
-            // from graph-managed transient textures.  Routes are registered in
-            // RenderGraph::new() (built-ins) and via register_transient_route().
-            for (name, route) in &self.resource_routes {
-                if let Some(tex) = self.transient_textures.get(name) {
-                    route(&tex.view, &mut visible_frame_resources);
-                }
-            }
+            let mut visible_frame_resources = base_frame_resources;
 
             // Add pass-published resources (e.g., GBufferPass publishes gbuffer views)
             for published_pass in published_passes {

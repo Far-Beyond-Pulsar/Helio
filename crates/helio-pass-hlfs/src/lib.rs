@@ -61,6 +61,14 @@ pub struct HlfsPass {
     bind_group_compute_importance: Option<wgpu::BindGroup>,
     bind_group_compute_inject: Option<wgpu::BindGroup>,
     bind_group_compute_propagate: Option<wgpu::BindGroup>,
+    /// Cached shade bind group 0 (clip-stack, pre_aa, lights, shadow, camera).
+    bind_group_shade0: Option<wgpu::BindGroup>,
+    /// Raw-pointer key for lazy rebuild of shade BG0.
+    bind_group_shade0_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    /// Cached shade bind group 1 (GBuffer + depth).
+    bind_group_shade1: Option<wgpu::BindGroup>,
+    /// Raw-pointer key for lazy rebuild of shade BG1.
+    bind_group_shade1_key: Option<(usize, usize, usize, usize, usize)>,
 
     width: u32,
     height: u32,
@@ -470,6 +478,10 @@ impl HlfsPass {
             bind_group_compute_importance: None,
             bind_group_compute_inject: None,
             bind_group_compute_propagate: None,
+            bind_group_shade0: None,
+            bind_group_shade0_key: None,
+            bind_group_shade1: None,
+            bind_group_shade1_key: None,
             width,
             height,
             output_texture,
@@ -492,6 +504,13 @@ impl HlfsPass {
         let (texture, view) = create_output_texture(device, width, height, self.output_format);
         self.output_texture = texture;
         self.output_view = view;
+        // External views (depth, gbuffer) will be new objects after a resize — invalidate
+        // all cached bind groups that reference them so they are rebuilt on next execute().
+        self.bind_group_compute_importance = None;
+        self.bind_group_shade0 = None;
+        self.bind_group_shade0_key = None;
+        self.bind_group_shade1 = None;
+        self.bind_group_shade1_key = None;
     }
 }
 
@@ -534,7 +553,8 @@ impl RenderPass for HlfsPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
 
-        // Create shade bind group 0 (clip-stack + pre_aa) - must be recreated each frame for pre_aa
+        // Shade bind group 0 (clip-stack, pre_aa, lights, shadow, camera).
+        // Lazily rebuilt only when any referenced pointer changes (resize, scene realloc).
         let pre_aa = ctx.resources.pre_aa.ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "HLFS requires pre_aa (sky + debug layers)".to_string(),
@@ -548,59 +568,81 @@ impl RenderPass for HlfsPass {
             helio_v3::Error::InvalidPassConfig("HLFS requires shadow_sampler (shadow pass must run first)".to_string())
         })?;
 
-        let bind_group_shade_group0 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("HLFS Shade BG Group 0"),
-            layout: &self.bgl_shade_group0,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]) },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[1]) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[2]) },
-                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[3]) },
-                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler) },
-                wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(pre_aa) },
-                wgpu::BindGroupEntry { binding: 6, resource: self.globals_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: ctx.scene.camera.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: ctx.scene.lights.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 9, resource: self.shadow_config_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(shadow_view) },
-                wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(shadow_sampler) },
-                wgpu::BindGroupEntry { binding: 12, resource: ctx.scene.shadow_matrices.as_entire_binding() },
-            ],
-        });
+        let shade0_key = (
+            pre_aa         as *const _ as usize,
+            shadow_view    as *const _ as usize,
+            shadow_sampler as *const _ as usize,
+            ctx.scene.camera          as *const _ as usize,
+            ctx.scene.lights          as *const _ as usize,
+            ctx.scene.shadow_matrices as *const _ as usize,
+        );
+        if self.bind_group_shade0_key != Some(shade0_key) {
+            self.bind_group_shade0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HLFS Shade BG Group 0"),
+                layout: &self.bgl_shade_group0,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[1]) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[2]) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[3]) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.clip_stack_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(pre_aa) },
+                    wgpu::BindGroupEntry { binding: 6, resource: self.globals_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 7, resource: ctx.scene.camera.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 8, resource: ctx.scene.lights.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 9, resource: self.shadow_config_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(shadow_view) },
+                    wgpu::BindGroupEntry { binding: 11, resource: wgpu::BindingResource::Sampler(shadow_sampler) },
+                    wgpu::BindGroupEntry { binding: 12, resource: ctx.scene.shadow_matrices.as_entire_binding() },
+                ],
+            }));
+            self.bind_group_shade0_key = Some(shade0_key);
+        }
 
-        // Create shade bind group 1 (GBuffer) - must be recreated each frame
+        // Shade bind group 1 (GBuffer + depth).
+        // Lazily rebuilt only when gbuffer or depth pointers change (resize).
         let gbuffer = ctx.resources.gbuffer.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "HLFS requires published gbuffer resources".to_string(),
             )
         })?;
 
-        let bind_group_shade_group1 = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("HLFS Shade BG Group 1 (GBuffer)"),
-            layout: &self.bgl_shade_group1,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(gbuffer.albedo),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(gbuffer.normal),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(gbuffer.orm),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(gbuffer.emissive),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(ctx.depth),
-                },
-            ],
-        });
+        let shade1_key = (
+            gbuffer.albedo   as *const _ as usize,
+            gbuffer.normal   as *const _ as usize,
+            gbuffer.orm      as *const _ as usize,
+            gbuffer.emissive as *const _ as usize,
+            ctx.depth        as *const _ as usize,
+        );
+        if self.bind_group_shade1_key != Some(shade1_key) {
+            self.bind_group_shade1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("HLFS Shade BG Group 1 (GBuffer)"),
+                layout: &self.bgl_shade_group1,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(gbuffer.albedo),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(gbuffer.normal),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(gbuffer.orm),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(gbuffer.emissive),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                ],
+            }));
+            self.bind_group_shade1_key = Some(shade1_key);
+        }
 
         // Create compute bind groups (a few extra resources are reused in all stages)
         if self.bind_group_compute_importance.is_none() {
@@ -709,8 +751,8 @@ impl RenderPass for HlfsPass {
 
         let mut pass = ctx.begin_render_pass(&render_pass_desc);
         pass.set_pipeline(&self.final_shade_pipeline);
-        pass.set_bind_group(0, &bind_group_shade_group0, &[]);
-        pass.set_bind_group(1, &bind_group_shade_group1, &[]);
+        pass.set_bind_group(0, self.bind_group_shade0.as_ref().unwrap(), &[]);
+        pass.set_bind_group(1, self.bind_group_shade1.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
 
         Ok(())
