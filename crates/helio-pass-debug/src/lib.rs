@@ -245,7 +245,7 @@ impl DebugPass {
         }
 
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.frame.full_res_depth {
+            let depth_view = if let Some(frd) = ctx.resources.full_res_depth {
                 frd
             } else {
                 ctx.depth
@@ -306,5 +306,7 @@ impl RenderPass for DebugPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         self.execute_on_target(ctx, ctx.target)
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

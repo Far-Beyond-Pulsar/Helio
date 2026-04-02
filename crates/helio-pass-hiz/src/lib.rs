@@ -354,4 +354,6 @@ impl RenderPass for HiZBuildPass {
         frame.hiz = Some(&*self.hiz_view);
         frame.hiz_sampler = Some(&*self.hiz_sampler);
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

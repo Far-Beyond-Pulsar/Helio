@@ -305,7 +305,7 @@ impl RenderPass for ShadowPass {
             return Ok(());
         }
 
-        let main_scene = ctx.frame.main_scene.as_ref().ok_or_else(|| {
+        let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("ShadowPass requires main_scene".into())
         })?;
 
@@ -389,5 +389,7 @@ impl RenderPass for ShadowPass {
 
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

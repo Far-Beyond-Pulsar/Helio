@@ -897,13 +897,9 @@ impl RenderPass for SdfPass {
         "SDF"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
+    fn as_any(&self) -> &dyn std::any::Any { self }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         if !self.enabled {
@@ -1133,7 +1129,7 @@ impl RenderPass for SdfPass {
 
         // ── Pass 4: Fullscreen ray march ───────────────────────────────────
         {
-            let depth_view = ctx.frame.full_res_depth.unwrap_or(ctx.depth);
+            let depth_view = ctx.resources.full_res_depth.unwrap_or(ctx.depth);
             let color_load_op = if self.preserve_framebuffer {
                 wgpu::LoadOp::Load
             } else {

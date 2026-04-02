@@ -82,6 +82,9 @@ pub struct SkyPass {
     width: u32,
     height: u32,
     target_format: wgpu::TextureFormat,
+    /// Owned pre-AA render target — written by sky, published for downstream passes.
+    pre_aa_tex: wgpu::Texture,
+    pre_aa_view: wgpu::TextureView,
 }
 
 impl SkyPass {
@@ -237,6 +240,8 @@ impl SkyPass {
             cache: None,
         });
 
+        let (pre_aa_tex, pre_aa_view) = Self::create_pre_aa(device, width, height, target_format);
+
         Self {
             pipeline,
             bgl_0,
@@ -247,37 +252,36 @@ impl SkyPass {
             width,
             height,
             target_format,
+            pre_aa_tex,
+            pre_aa_view,
         }
     }
 
-    fn format_to_resource(format: wgpu::TextureFormat) -> helio_v3::graph::ResourceFormat {
-        match format {
-            wgpu::TextureFormat::Rgba16Float => helio_v3::graph::ResourceFormat::Rgba16Float,
-            wgpu::TextureFormat::Bgra8UnormSrgb => helio_v3::graph::ResourceFormat::Bgra8UnormSrgb,
-            wgpu::TextureFormat::Rgba8UnormSrgb => helio_v3::graph::ResourceFormat::Rgba8UnormSrgb,
-            wgpu::TextureFormat::R16Float => helio_v3::graph::ResourceFormat::R16Float,
-            wgpu::TextureFormat::R8Unorm => helio_v3::graph::ResourceFormat::R8Unorm,
-            wgpu::TextureFormat::Depth32Float => helio_v3::graph::ResourceFormat::Depth32Float,
-            _ => panic!("Unsupported SkyPass target format: {:?}", format),
-        }
+    fn create_pre_aa(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Sky pre_aa"),
+            size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        (tex, view)
     }
+
 }
 
 impl RenderPass for SkyPass {
     fn name(&self) -> &'static str {
         "Sky"
-    }
-
-    fn declare_resources(&self, builder: &mut helio_v3::graph::ResourceBuilder) {
-        builder.read("sky_lut");
-        builder.write_color(
-            "pre_aa",
-            Self::format_to_resource(self.target_format),
-            helio_v3::graph::ResourceSize::Absolute {
-                width: self.width,
-                height: self.height,
-            },
-        );
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -300,21 +304,17 @@ impl RenderPass for SkyPass {
             uniforms.skylight_intensity = clouds.skylight_intensity;
         }
 
-        uniforms.time_sky = (ctx.frame as f32) * 0.03;
+        uniforms.time_sky = (ctx.frame_num as f32) * 0.03;
         ctx.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): single fullscreen draw — GPU samples LUT and composites sky.
-        let target_view = if let Some(pre_aa) = ctx.frame.pre_aa {
-            pre_aa
-        } else {
-            ctx.target
-        };
-
+        // Always render to the owned pre_aa texture so downstream passes see
+        // the sky background via FrameResources::pre_aa (published below).
         let color_attachment = wgpu::RenderPassColorAttachment {
-            view: target_view,
+            view: &self.pre_aa_view,
             resolve_target: None,
             depth_slice: None,
             ops: wgpu::Operations {
@@ -333,7 +333,7 @@ impl RenderPass for SkyPass {
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);
-        if ctx.frame.sky.has_sky {
+        if ctx.resources.sky.has_sky {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group_0, &[]);
             pass.set_bind_group(1, &self.bind_group_1, &[]);
@@ -341,5 +341,14 @@ impl RenderPass for SkyPass {
         }
         Ok(())
     }
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        // Make the sky background available to all passes that run after this one.
+        if frame.pre_aa.is_none() {
+            frame.pre_aa = Some(&self.pre_aa_view);
+        }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

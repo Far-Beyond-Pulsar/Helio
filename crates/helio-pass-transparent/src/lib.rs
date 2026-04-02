@@ -225,7 +225,7 @@ impl RenderPass for TransparentPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let globals = GBufferGlobals {
-            frame: ctx.frame as u32,
+            frame: ctx.frame_num as u32,
             delta_time: 0.0,
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity: 0.1,
@@ -244,7 +244,7 @@ impl RenderPass for TransparentPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = ctx.frame.main_scene.as_ref().ok_or_else(|| {
+        let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "TransparentPass requires main_scene mesh buffers".to_string(),
             )
@@ -296,5 +296,7 @@ impl RenderPass for TransparentPass {
 
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

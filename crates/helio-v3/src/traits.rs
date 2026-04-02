@@ -97,7 +97,6 @@ pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
 impl<T> MaybeSync for T {}
 
-use crate::graph::ResourceBuilder;
 use crate::{PassContext, PrepareContext, Result};
 
 /// Core trait for all rendering passes.
@@ -279,33 +278,6 @@ pub trait RenderPass: MaybeSend + MaybeSync {
     /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
-    /// Optionally declares resource dependencies (future feature).
-    ///
-    /// Used for automatic resource lifetime management and pass reordering.
-    /// Currently a stub for future graph optimization.
-    ///
-    /// # Parameters
-    ///
-    /// - `builder`: Resource dependency builder
-    ///
-    /// # Example (Future API)
-    ///
-    /// ```rust,no_run
-    /// # use helio_v3::{RenderPass, PassContext, Result};
-    /// # use helio_v3::graph::ResourceBuilder;
-    /// # struct MyPass;
-    /// # impl RenderPass for MyPass {
-    /// #     fn name(&self) -> &'static str { "MyPass" }
-    /// #     fn execute(&mut self, _: &mut PassContext) -> Result<()> { Ok(()) }
-    /// fn declare_resources(&self, builder: &mut ResourceBuilder) {
-    ///     builder.read("gbuffer_albedo");
-    ///     builder.read("gbuffer_normal");
-    ///     builder.write("final_color");
-    /// }
-    /// # }
-    /// ```
-    fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
-
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms
@@ -350,255 +322,20 @@ pub trait RenderPass: MaybeSend + MaybeSync {
         Ok(())
     }
 
+    /// Called when the render target is resized.
+    ///
+    /// Override to recreate size-dependent resources (pipelines, textures, bind groups).
+    /// The default is a no-op, so passes that don't need resize handling can ignore it.
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+
     /// Returns a shared reference to `self` as `dyn Any` for downcasting.
     ///
-    /// Implement this to allow the render graph to retrieve a typed reference
-    /// to a specific pass via `RenderGraph::find_pass_mut`. The default returns
-    /// `None`; return `Some(self)` in concrete implementations.
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        None
-    }
+    /// Required by every concrete pass so `RenderGraph::find_pass` can downcast.
+    fn as_any(&self) -> &dyn std::any::Any;
 
     /// Returns a mutable reference to `self` as `dyn Any` for downcasting.
     ///
-    /// Implement this to allow the render graph to retrieve a typed mutable
-    /// reference to a specific pass via `RenderGraph::find_pass_mut`. The
-    /// default returns `None`; return `Some(self)` in concrete implementations.
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        None
-    }
-}
-
-/// Trait for GPU scene managers (lights, meshes, materials).
-///
-/// `GpuSceneManager` provides a unified interface for managing GPU buffers with **dirty tracking**.
-/// Each manager (e.g., `LightBuffer`, `MeshBuffer`) maintains a CPU mirror of GPU data and uploads
-/// only changed data to the GPU via `flush()`.
-///
-/// # Contract
-///
-/// Implementations must:
-/// - Track **dirty state** internally (e.g., `dirty: bool` flag)
-/// - Skip GPU upload in `flush()` if `dirty == false` (zero cost at steady state)
-/// - Provide **zero-copy access** to GPU buffers via `buffer()`
-///
-/// # Performance
-///
-/// - **O(changed)**: `flush()` uploads only changed data, not entire buffer
-/// - **Zero cost at steady state**: If no changes, `flush()` is a no-op
-/// - **No clones**: `buffer()` returns `&wgpu::Buffer` (borrowed reference)
-///
-/// # Example Implementation
-///
-/// ```rust,no_run
-/// use helio_v3::GpuSceneManager;
-///
-/// pub struct LightBuffer {
-///     buffer: wgpu::Buffer,
-///     lights: Vec<GpuLight>,
-///     dirty: bool,
-/// }
-///
-/// impl GpuSceneManager for LightBuffer {
-///     fn flush(&mut self, queue: &wgpu::Queue) {
-///         if !self.dirty {
-///             return; // Zero cost at steady state
-///         }
-///         queue.write_buffer(&self.buffer, 0, bytemuck::cast_slice(&self.lights));
-///         self.dirty = false;
-///     }
-///
-///     fn buffer(&self) -> &wgpu::Buffer {
-///         &self.buffer
-///     }
-///
-///     fn count(&self) -> u32 {
-///         self.lights.len() as u32
-///     }
-/// }
-/// # #[repr(C)]
-/// # #[derive(Copy, Clone)]
-/// # struct GpuLight { position: [f32; 3], _pad: f32 }
-/// # unsafe impl bytemuck::Pod for GpuLight {}
-/// # unsafe impl bytemuck::Zeroable for GpuLight {}
-/// ```
-pub trait GpuSceneManager: MaybeSend + MaybeSync {
-    /// Flushes dirty data to the GPU.
-    ///
-    /// Uploads changed data from the CPU mirror to the GPU buffer. Should be a **no-op**
-    /// if nothing changed (dirty tracking).
-    ///
-    /// # Performance
-    ///
-    /// - **O(changed)**: Upload only changed data, not entire buffer
-    /// - **O(1) at steady state**: If `dirty == false`, this is a no-op
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use helio_v3::GpuSceneManager;
-    /// # struct LightBuffer { buffer: wgpu::Buffer, lights: Vec<u8>, dirty: bool }
-    /// # impl GpuSceneManager for LightBuffer {
-    /// #     fn buffer(&self) -> &wgpu::Buffer { &self.buffer }
-    /// #     fn count(&self) -> u32 { 0 }
-    /// fn flush(&mut self, queue: &wgpu::Queue) {
-    ///     if !self.dirty {
-    ///         return; // Zero cost at steady state
-    ///     }
-    ///     queue.write_buffer(&self.buffer, 0, &self.lights);
-    ///     self.dirty = false;
-    /// }
-    /// # }
-    /// ```
-    fn flush(&mut self, queue: &wgpu::Queue);
-
-    /// Returns a reference to the GPU buffer.
-    ///
-    /// Provides zero-copy access to the underlying `wgpu::Buffer`. Used by passes
-    /// to create bind groups or access buffer metadata.
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Returns a borrowed reference (no clones)
-    fn buffer(&self) -> &wgpu::Buffer;
-
-    /// Optionally returns the bind group for this resource.
-    ///
-    /// If the manager maintains a persistent bind group, return it here.
-    /// Otherwise, passes can create bind groups on-the-fly using `buffer()`.
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Returns a borrowed reference (no clones)
-    fn bind_group(&self) -> Option<&wgpu::BindGroup> {
-        None
-    }
-
-    /// Returns the current number of items in the buffer.
-    ///
-    /// Used by passes to set dynamic offsets or dispatch counts.
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Returns cached count
-    fn count(&self) -> u32;
-}
-
-/// Trait for GPU resources with automatic capacity management.
-///
-/// `GpuResource` extends `GpuSceneManager` with automatic buffer growth. When item count
-/// exceeds capacity, the buffer is reallocated with increased capacity (e.g., 2x growth).
-///
-/// # Contract
-///
-/// Implementations must:
-/// - Provide **capacity tracking** (current buffer size)
-/// - Implement **buffer growth** logic (allocate new buffer, copy old data)
-///
-/// # Performance
-///
-/// - **Amortized O(1)**: Rare reallocations amortize to constant time
-/// - **No shrinking**: Buffers never shrink (reduces reallocations)
-///
-/// # Example Implementation
-///
-/// ```rust,no_run
-/// use helio_v3::GpuResource;
-///
-/// pub struct GrowableBuffer {
-///     buffer: wgpu::Buffer,
-///     count: u32,
-///     capacity: u32,
-/// }
-///
-/// impl GpuResource for GrowableBuffer {
-///     fn buffer(&self) -> &wgpu::Buffer {
-///         &self.buffer
-///     }
-///
-///     fn count(&self) -> u32 {
-///         self.count
-///     }
-///
-///     fn capacity(&self) -> u32 {
-///         self.capacity
-///     }
-///
-///     fn grow(&mut self, device: &wgpu::Device, new_capacity: u32) {
-///         let new_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-///             label: Some("Growable Buffer"),
-///             size: (new_capacity * std::mem::size_of::<u32>() as u32) as u64,
-///             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-///             mapped_at_creation: false,
-///         });
-///         self.buffer = new_buffer;
-///         self.capacity = new_capacity;
-///     }
-/// }
-/// ```
-pub trait GpuResource {
-    /// Returns a reference to the GPU buffer.
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Returns a borrowed reference (no clones)
-    fn buffer(&self) -> &wgpu::Buffer;
-
-    /// Returns the current number of items in the buffer.
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Returns cached count
-    fn count(&self) -> u32;
-
-    /// Returns the current buffer capacity (maximum items before reallocation).
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Returns cached capacity
-    fn capacity(&self) -> u32;
-
-    /// Checks if the buffer needs to grow to accommodate `new_count` items.
-    ///
-    /// Default implementation: `new_count > self.capacity()`
-    ///
-    /// # Performance
-    ///
-    /// - **O(1)**: Simple comparison
-    fn needs_grow(&self, new_count: u32) -> bool {
-        new_count > self.capacity()
-    }
-
-    /// Grows the buffer to `new_capacity`.
-    ///
-    /// Allocates a new GPU buffer with increased capacity. The old buffer is dropped
-    /// automatically. Implementations should copy old data to the new buffer if needed.
-    ///
-    /// # Performance
-    ///
-    /// - **Rare operation**: Only happens when capacity is exceeded
-    /// - **Amortized O(1)**: Exponential growth (e.g., 2x) ensures rare reallocations
-    ///
-    /// # Example
-    ///
-    /// ```rust,no_run
-    /// # use helio_v3::GpuResource;
-    /// # struct MyBuffer { buffer: wgpu::Buffer, capacity: u32 }
-    /// # impl GpuResource for MyBuffer {
-    /// #     fn buffer(&self) -> &wgpu::Buffer { &self.buffer }
-    /// #     fn count(&self) -> u32 { 0 }
-    /// #     fn capacity(&self) -> u32 { self.capacity }
-    /// fn grow(&mut self, device: &wgpu::Device, new_capacity: u32) {
-    ///     self.buffer = device.create_buffer(&wgpu::BufferDescriptor {
-    ///         label: Some("Growable Buffer"),
-    ///         size: (new_capacity * 16) as u64, // 16 bytes per item
-    ///         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-    ///         mapped_at_creation: false,
-    ///     });
-    ///     self.capacity = new_capacity;
-    /// }
-    /// # }
-    /// ```
-    fn grow(&mut self, device: &wgpu::Device, new_capacity: u32);
+    /// Required by every concrete pass so `RenderGraph::find_pass_mut` can downcast.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 

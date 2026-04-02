@@ -24,6 +24,7 @@ pub struct GrowableBuffer<T: bytemuck::Pod> {
     usage: wgpu::BufferUsages,
     label: &'static str,
     device: Arc<wgpu::Device>,
+    buffer_version: u64,
 }
 
 impl<T: bytemuck::Pod> GrowableBuffer<T> {
@@ -48,12 +49,20 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
             usage,
             label,
             device,
+            buffer_version: 0,
         }
     }
 
     /// Returns a reference to the underlying GPU buffer.
     pub fn buffer(&self) -> &wgpu::Buffer {
         &self.buf
+    }
+
+    /// Returns the buffer version, incremented each time the buffer is reallocated.
+    ///
+    /// Passes can use this to detect when bind groups need to be recreated.
+    pub fn buffer_version(&self) -> u64 {
+        self.buffer_version
     }
 
     /// Returns the number of elements currently stored.
@@ -151,6 +160,7 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
         if self.data.len() > self.capacity {
             self.capacity = self.data.len() * 2;
             let new_size = (self.capacity * std::mem::size_of::<T>()).max(64) as u64;
+            self.buffer_version += 1;
             self.buf = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(self.label),
                 size: new_size,
@@ -261,6 +271,9 @@ impl GpuInstanceBuffer {
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
     }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
+    }
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -292,6 +305,9 @@ impl GpuAabbBuffer {
     }
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
+    }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
     }
     pub fn len(&self) -> usize {
         self.0.len()
@@ -325,6 +341,9 @@ impl GpuDrawCallBuffer {
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
     }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
+    }
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -356,6 +375,9 @@ impl GpuLightBuffer {
     }
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
+    }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
     }
     pub fn len(&self) -> usize {
         self.0.len()
@@ -392,6 +414,9 @@ impl GpuMaterialBuffer {
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
     }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
+    }
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -423,6 +448,9 @@ impl GpuShadowMatrixBuffer {
     }
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
+    }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
     }
     pub fn len(&self) -> usize {
         self.0.len()
@@ -456,6 +484,9 @@ impl GpuIndirectBuffer {
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
     }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
+    }
     pub fn len(&self) -> usize {
         self.0.len()
     }
@@ -487,6 +518,9 @@ impl GpuVisibilityBuffer {
     }
     pub fn buffer(&self) -> &wgpu::Buffer {
         self.0.buffer()
+    }
+    pub fn buffer_version(&self) -> u64 {
+        self.0.buffer_version()
     }
     pub fn len(&self) -> usize {
         self.0.len()

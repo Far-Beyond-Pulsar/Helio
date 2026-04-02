@@ -121,7 +121,7 @@ impl RenderPass for DebugDrawPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let target_view = if self.editor_mode {
-            ctx.frame.pre_aa.unwrap_or(ctx.target)
+            ctx.resources.pre_aa.unwrap_or(ctx.target)
         } else {
             ctx.target
         };
@@ -135,4 +135,7 @@ impl RenderPass for DebugDrawPass {
 
         res
     }
+
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }

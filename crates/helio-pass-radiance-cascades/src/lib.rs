@@ -202,7 +202,7 @@ impl RenderPass for RadianceCascadesPass {
         let dyn_data = RCDynamic {
             world_min: [-10.0, -1.0, -10.0, 0.0],
             world_max: [10.0, 10.0, 10.0, 0.0],
-            frame: ctx.frame as u32,
+            frame: ctx.frame_num as u32,
             light_count,
             _pad0: 0,
             _pad1: 0,
@@ -227,5 +227,7 @@ impl RenderPass for RadianceCascadesPass {
         pass.dispatch_workgroups(wg_x, wg_y, 1);
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

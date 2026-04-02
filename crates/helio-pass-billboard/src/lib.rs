@@ -454,7 +454,7 @@ impl RenderPass for BillboardPass {
             self.instance_count = 0;
         }
         let globals = BillboardGlobals {
-            frame: ctx.frame as u32,
+            frame: ctx.frame_num as u32,
             delta_time: 0.0,
             ambient_intensity: 1.0,
             _pad: 0.0,
@@ -470,7 +470,7 @@ impl RenderPass for BillboardPass {
         }
 
         let target_view = if self.occluded_by_geometry {
-            ctx.frame.pre_aa.unwrap_or(ctx.target)
+            ctx.resources.pre_aa.unwrap_or(ctx.target)
         } else {
             ctx.target
         };
@@ -491,7 +491,7 @@ impl RenderPass for BillboardPass {
 
         let (depth_view, depth_load_op) = if self.occluded_by_geometry {
             (ctx.depth, wgpu::LoadOp::Load)
-        } else if let Some(frd) = ctx.frame.full_res_depth {
+        } else if let Some(frd) = ctx.resources.full_res_depth {
             (frd, wgpu::LoadOp::Load)
         } else {
             (ctx.depth, wgpu::LoadOp::Load)
@@ -524,5 +524,7 @@ impl RenderPass for BillboardPass {
         pass.draw(0..6, 0..self.instance_count); // O(1) — single GPU draw call
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

@@ -500,34 +500,6 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
 
-    fn declare_resources(&self, builder: &mut helio_v3::graph::ResourceBuilder) {
-        // Read from gbuffer
-        builder.read("gbuffer_albedo");
-        builder.read("gbuffer_normal");
-        builder.read("gbuffer_orm");
-        builder.read("gbuffer_depth");
-
-        // Read and write pre_aa (to preserve sky and debug layers)
-        builder.read("pre_aa");
-
-        // Write final output
-        let format = match self.output_format {
-            wgpu::TextureFormat::Rgba16Float => helio_v3::graph::ResourceFormat::Rgba16Float,
-            wgpu::TextureFormat::Bgra8UnormSrgb => helio_v3::graph::ResourceFormat::Bgra8UnormSrgb,
-            wgpu::TextureFormat::Rgba8UnormSrgb => helio_v3::graph::ResourceFormat::Rgba8UnormSrgb,
-            _ => panic!("Unsupported HLFS output format"),
-        };
-
-        builder.write_color(
-            "hlfs_output",
-            format,
-            helio_v3::graph::ResourceSize::Absolute {
-                width: self.width,
-                height: self.height,
-            },
-        );
-    }
-
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // Publish output as pre_aa for downstream passes (always overwrite)
         frame.pre_aa = Some(&self.output_view);
@@ -538,7 +510,7 @@ impl RenderPass for HlfsPass {
         let cam_forward = [0.0_f32, 0.0_f32, -1.0_f32];
 
         let globals = HlfsGlobals {
-            frame: ctx.frame as u32,
+            frame: ctx.frame_num as u32,
             sample_count: SAMPLES_PER_PIXEL,
             light_count: ctx.scene.lights.len() as u32,
             screen_width: self.width,
@@ -563,16 +535,16 @@ impl RenderPass for HlfsPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
 
         // Create shade bind group 0 (clip-stack + pre_aa) - must be recreated each frame for pre_aa
-        let pre_aa = ctx.frame.pre_aa.ok_or_else(|| {
+        let pre_aa = ctx.resources.pre_aa.ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "HLFS requires pre_aa (sky + debug layers)".to_string(),
             )
         })?;
 
-        let shadow_view = ctx.frame.shadow_atlas.ok_or_else(|| {
+        let shadow_view = ctx.resources.shadow_atlas.ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("HLFS requires shadow_atlas (shadow pass must run first)".to_string())
         })?;
-        let shadow_sampler = ctx.frame.shadow_sampler.ok_or_else(|| {
+        let shadow_sampler = ctx.resources.shadow_sampler.ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("HLFS requires shadow_sampler (shadow pass must run first)".to_string())
         })?;
 
@@ -597,7 +569,7 @@ impl RenderPass for HlfsPass {
         });
 
         // Create shade bind group 1 (GBuffer) - must be recreated each frame
-        let gbuffer = ctx.frame.gbuffer.as_ref().ok_or_else(|| {
+        let gbuffer = ctx.resources.gbuffer.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "HLFS requires published gbuffer resources".to_string(),
             )
@@ -743,6 +715,8 @@ impl RenderPass for HlfsPass {
 
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 fn create_output_texture(

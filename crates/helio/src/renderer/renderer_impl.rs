@@ -2,6 +2,7 @@ use std::sync::{Arc, Mutex};
 
 use arrayvec::ArrayVec;
 use helio_pass_debug::{DebugVertex};
+use helio_pass_deferred_light::DeferredLightPass;
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 use helio_pass_debug::DebugCameraUniform;
 const MAX_TEXTURES: usize = crate::material::MAX_TEXTURES;
@@ -165,48 +166,18 @@ impl Renderer {
     pub fn set_shadow_quality(&mut self, quality: libhelio::ShadowQuality) {
         self.shadow_quality = quality;
         if matches!(self.graph_kind, GraphKind::Default) {
-            let config = RendererConfig {
-                width: self.output_width,
-                height: self.output_height,
-                surface_format: self.surface_format,
-                gi_config: self.gi_config,
-                shadow_quality: self.shadow_quality,
-                debug_mode: self.debug_mode,
-                render_scale: self.render_scale,
-            };
-            self.graph = build_default_graph(
-                &self.device,
-                &self.queue,
-                &self.scene,
-                config,
-                self.debug_state.clone(),
-                &self.debug_camera_buffer,
-                self.debug_depth_test,
-            );
+            if let Some(pass) = self.graph.find_pass_mut::<DeferredLightPass>() {
+                pass.set_shadow_quality(quality, &self.queue);
+            }
         }
     }
 
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
         if matches!(self.graph_kind, GraphKind::Default) {
-            let config = RendererConfig {
-                width: self.output_width,
-                height: self.output_height,
-                surface_format: self.surface_format,
-                gi_config: self.gi_config,
-                shadow_quality: self.shadow_quality,
-                debug_mode: self.debug_mode,
-                render_scale: self.render_scale,
-            };
-            self.graph = build_default_graph(
-                &self.device,
-                &self.queue,
-                &self.scene,
-                config,
-                self.debug_state.clone(),
-                &self.debug_camera_buffer,
-                self.debug_depth_test,
-            );
+            if let Some(pass) = self.graph.find_pass_mut::<DeferredLightPass>() {
+                pass.set_debug_mode(mode);
+            }
         }
     }
 

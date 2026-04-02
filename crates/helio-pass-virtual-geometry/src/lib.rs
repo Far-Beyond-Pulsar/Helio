@@ -753,7 +753,7 @@ impl RenderPass for VirtualGeometryPass {
 
         // ── Upload globals ────────────────────────────────────────────────────
         let globals = VgGlobals {
-            frame: ctx.frame as u32,
+            frame: ctx.frame_num as u32,
             delta_time: 0.016,
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity: main_scene.ambient_intensity,
@@ -787,7 +787,7 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if self.last_meshlet_count == 0 || ctx.frame.vg.is_none() {
+        if self.last_meshlet_count == 0 || ctx.resources.vg.is_none() {
             return Ok(());
         }
 
@@ -800,10 +800,10 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else {
             return Ok(());
         };
-        let Some(main_scene) = ctx.frame.main_scene else {
+        let Some(main_scene) = ctx.resources.main_scene else {
             return Ok(());
         };
-        let Some(gbuffer) = ctx.frame.gbuffer else {
+        let Some(gbuffer) = ctx.resources.gbuffer else {
             return Ok(());
         };
 
@@ -924,6 +924,8 @@ impl RenderPass for VirtualGeometryPass {
 
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

@@ -113,7 +113,7 @@ impl RenderPass for FxaaPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let input_view = ctx.frame.pre_aa.ok_or_else(|| {
+        let input_view = ctx.resources.pre_aa.ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("FXAA requires published pre_aa input".to_string())
         })?;
         let input_key = input_view as *const _ as usize;
@@ -160,5 +160,7 @@ impl RenderPass for FxaaPass {
         pass.draw(0..3, 0..1);
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

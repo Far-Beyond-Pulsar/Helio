@@ -242,7 +242,7 @@ impl RenderPass for SkyLutPass {
             uniforms.skylight_intensity = clouds.skylight_intensity;
         }
 
-        uniforms.time_sky = (ctx.frame as f32) * 0.03;
+        uniforms.time_sky = (ctx.frame_num as f32) * 0.03;
         ctx.write_buffer(&self.sky_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
@@ -269,7 +269,7 @@ impl RenderPass for SkyLutPass {
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);
-        if ctx.frame.sky.has_sky {
+        if ctx.resources.sky.has_sky {
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind_group_0, &[]);
             pass.set_bind_group(1, &self.bind_group_1, &[]);
@@ -277,5 +277,7 @@ impl RenderPass for SkyLutPass {
         }
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

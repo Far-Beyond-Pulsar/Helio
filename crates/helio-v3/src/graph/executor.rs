@@ -60,8 +60,8 @@
 //! // }
 //! ```
 
-use super::resource::{ResourceAccess, ResourceBuilder};
 use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
+use std::any::TypeId;
 use std::collections::HashMap;
 
 /// Type-erased routing function: wires a graph-managed transient texture view
@@ -175,6 +175,9 @@ pub struct RenderGraph {
     /// Passes are stored as trait objects (`Box<dyn RenderPass>`) for polymorphism.
     passes: Vec<Box<dyn RenderPass>>,
 
+    /// Parallel TypeId vector for O(1) `find_pass` / `find_pass_mut` lookups.
+    pass_type_ids: Vec<TypeId>,
+
     /// Profiler for automatic CPU/GPU profiling.
     ///
     /// Injected into `PassContext` to provide automatic profiling for passes.
@@ -245,6 +248,7 @@ impl RenderGraph {
 
         Self {
             passes: Vec::new(),
+            pass_type_ids: Vec::new(),
             profiler: Profiler::new(device, queue),
             transient_textures: HashMap::new(),
             device: device.clone(),
@@ -329,6 +333,9 @@ impl RenderGraph {
         }
         self.width = width;
         self.height = height;
+        for pass in &mut self.passes {
+            pass.on_resize(&self.device, width, height);
+        }
         self.recreate_transient_textures();
     }
 
@@ -375,26 +382,27 @@ impl RenderGraph {
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
         // Note: We just push the pass for now. Declarations are collected
         // and textures created in set_render_size() by iterating all passes.
+        let type_id = pass.as_any().type_id();
+        self.pass_type_ids.push(type_id);
         self.passes.push(pass);
     }
 
     /// Returns a mutable reference to the first pass of type `T`, if present.
     ///
-    /// Uses `RenderPass::as_any_mut()` for downcasting. Only passes that return
-    /// `Some` from `as_any_mut()` can be found; others are skipped safely.
+    /// Uses the parallel `pass_type_ids` vector for O(1) lookup by `TypeId`.
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
-        self.passes.iter_mut().find_map(|p| {
-            p.as_any_mut()?.downcast_mut::<T>()
-        })
+        let wanted = TypeId::of::<T>();
+        let idx = self.pass_type_ids.iter().position(|&id| id == wanted)?;
+        self.passes[idx].as_any_mut().downcast_mut::<T>()
     }
 
     /// Returns an immutable reference to the first pass of type `T`, if present.
     ///
-    /// Requires the pass to implement `RenderPass::as_any()`.
+    /// Uses the parallel `pass_type_ids` vector for O(1) lookup by `TypeId`.
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
-        self.passes.iter().find_map(|p| {
-            p.as_any()?.downcast_ref::<T>()
-        })
+        let wanted = TypeId::of::<T>();
+        let idx = self.pass_type_ids.iter().position(|&id| id == wanted)?;
+        self.passes[idx].as_any().downcast_ref::<T>()
     }
 
     /// Executes the render graph with automatic profiling.
@@ -512,7 +520,7 @@ impl RenderGraph {
             let prepare_ctx = PrepareContext {
                 device: &scene.device,
                 queue: &scene.queue,
-                frame: scene.frame_count,
+                frame_num: scene.frame_count,
                 scene,
                 frame_resources: &visible_frame_resources,
                 resize: false,
@@ -532,7 +540,7 @@ impl RenderGraph {
                 width: scene.width,
                 height: scene.height,
                 device: &scene.device,
-                frame: &visible_frame_resources,
+                resources: &visible_frame_resources,
             };
 
             pass.execute(&mut ctx)?;
@@ -556,63 +564,6 @@ impl RenderGraph {
     fn recreate_transient_textures(&mut self) {
         // Clear existing textures
         self.transient_textures.clear();
-
-        // Collect all write declarations from all passes
-        for pass in &self.passes {
-            let mut builder = ResourceBuilder::new();
-            pass.declare_resources(&mut builder);
-
-            for decl in builder.declarations() {
-                if decl.access == ResourceAccess::Write {
-                    // Only create textures for writes (reads are inputs from other passes)
-                    if self.transient_textures.contains_key(decl.name) {
-                        // Texture already created by an earlier pass
-                        continue;
-                    }
-
-                    let format = decl.format.expect("Write declaration must specify format");
-                    let size = decl.size.expect("Write declaration must specify size");
-
-                    let (width, height) = match size {
-                        super::resource::ResourceSize::MatchSurface => (self.width, self.height),
-                        super::resource::ResourceSize::Absolute { width, height } => {
-                            (width, height)
-                        }
-                        super::resource::ResourceSize::Scaled { divisor } => {
-                            (self.width / divisor, self.height / divisor)
-                        }
-                    };
-
-                    // Create the transient texture
-                    let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some(decl.name),
-                        size: wgpu::Extent3d {
-                            width: width.max(1),
-                            height: height.max(1),
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: format.to_wgpu(),
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                            | wgpu::TextureUsages::TEXTURE_BINDING,
-                        view_formats: &[],
-                    });
-
-                    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-                    self.transient_textures.insert(
-                        decl.name,
-                        TransientTexture {
-                            texture,
-                            view,
-                            name: decl.name,
-                        },
-                    );
-                }
-            }
-        }
     }
 }
 

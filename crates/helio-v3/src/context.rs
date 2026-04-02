@@ -208,7 +208,7 @@ pub struct PassContext<'a> {
     pub device: &'a wgpu::Device,
 
     /// Per-frame transient resource views (GBuffer, HiZ, shadow atlas, sky LUT, etc.)
-    pub frame: &'a libhelio::FrameResources<'a>,
+    pub resources: &'a libhelio::FrameResources<'a>,
 }
 
 impl<'a> PassContext<'a> {
@@ -404,7 +404,7 @@ pub struct PrepareContext<'a> {
     /// Current frame number (starts at 0).
     ///
     /// Useful for time-based effects (e.g., animations, TAA jitter).
-    pub frame: u64,
+    pub frame_num: u64,
 
     /// Zero-copy scene resource references for prepare().
     pub scene: &'a GpuScene,

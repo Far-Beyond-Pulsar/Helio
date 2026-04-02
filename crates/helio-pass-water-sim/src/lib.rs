@@ -1221,13 +1221,9 @@ impl RenderPass for WaterSimPass {
         "WaterSim"
     }
 
-    fn as_any(&self) -> Option<&dyn std::any::Any> {
-        Some(self)
-    }
+    fn as_any(&self) -> &dyn std::any::Any { self }
 
-    fn as_any_mut(&mut self) -> Option<&mut dyn std::any::Any> {
-        Some(self)
-    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         let view = if self.front { &self.view_a } else { &self.view_b };
@@ -1277,8 +1273,8 @@ impl RenderPass for WaterSimPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ---- 1. Hitbox displacement ------------------------------------------
-        if ctx.frame.water_hitbox_count > 0 {
-            if let Some(hitboxes_buf) = ctx.frame.water_hitboxes {
+        if ctx.resources.water_hitbox_count > 0 {
+            if let Some(hitboxes_buf) = ctx.resources.water_hitboxes {
                 // SAFETY: view_a and view_b are separate, non-overlapping wgpu
                 // TextureView allocations. We render FROM src INTO dst — never
                 // the same texture for both roles simultaneously.
@@ -1447,8 +1443,8 @@ impl RenderPass for WaterSimPass {
         }
 
         // ---- 5. Caustics projection ------------------------------------------
-        if ctx.frame.water_volume_count > 0 {
-            if let Some(vols_buf) = ctx.frame.water_volumes {
+        if ctx.resources.water_volume_count > 0 {
+            if let Some(vols_buf) = ctx.resources.water_volumes {
                 let sim_view = if self.front { &self.view_a } else { &self.view_b };
 
                 let vols_key = vols_buf as *const wgpu::Buffer as usize;
@@ -1499,9 +1495,9 @@ impl RenderPass for WaterSimPass {
         // Always runs so TAA always receives a valid intermediary as its pre_aa
         // input, even when there are no water volumes this frame.
         // NOTE: use self.caustics_view directly — it was filled in stage 5 this
-        // same frame. ctx.frame.water_caustics is None during execute() because
+        // same frame. ctx.resources.water_caustics is None during execute() because
         // publish() hasn't run yet, so we must NOT guard on it here.
-        let scene_view: &wgpu::TextureView = ctx.frame.pre_aa
+        let scene_view: &wgpu::TextureView = ctx.resources.pre_aa
             .unwrap_or(&self.pre_aa_fallback_view);
         let blit_key = scene_view as *const _ as usize;
         if self.blit_bg_key != Some(blit_key) {
@@ -1540,8 +1536,8 @@ impl RenderPass for WaterSimPass {
         }
 
         // ---- 7. Water surface render → water_output --------------------------
-        if ctx.frame.water_volume_count > 0 {
-            if let Some(vols_buf) = ctx.frame.water_volumes {
+        if ctx.resources.water_volume_count > 0 {
+            if let Some(vols_buf) = ctx.resources.water_volumes {
                 let sim_view = if self.front { &self.view_a } else { &self.view_b };
 
                 // Per-frame viewport uniform: (w, h, 1/w, 1/h)
@@ -1560,7 +1556,7 @@ impl RenderPass for WaterSimPass {
 
                 // Copy depth texture for SSR sampling
                 // This allows us to sample from the copy while using the original as a depth attachment
-                let src_depth_tex = ctx.frame.depth_texture.expect("Depth texture required for water SSR");
+                let src_depth_tex = ctx.resources.depth_texture.expect("Depth texture required for water SSR");
                 ctx.encoder.copy_texture_to_texture(
                     src_depth_tex.as_image_copy(),
                     self._depth_copy_tex.as_image_copy(),
@@ -1572,7 +1568,7 @@ impl RenderPass for WaterSimPass {
                 );
 
                 // Get GBuffer normal texture (fallback to 1×1 black if not available)
-                let gbuffer_normal_view = ctx.frame.gbuffer
+                let gbuffer_normal_view = ctx.resources.gbuffer
                     .map(|gb| gb.normal)
                     .unwrap_or(&self.gbuffer_fallback_view);
 

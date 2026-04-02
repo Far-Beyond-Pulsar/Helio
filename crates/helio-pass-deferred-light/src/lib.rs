@@ -405,33 +405,6 @@ impl RenderPass for DeferredLightPass {
         "DeferredLight"
     }
 
-    fn declare_resources(&self, builder: &mut helio_v3::graph::ResourceBuilder) {
-        builder.read("gbuffer_albedo");
-        builder.read("gbuffer_normal");
-        builder.read("gbuffer_orm");
-        builder.read("gbuffer_emissive");
-        builder.read("gbuffer_depth");
-
-        let pre_aa_format = match self.pre_aa_format {
-            wgpu::TextureFormat::Rgba16Float => helio_v3::graph::ResourceFormat::Rgba16Float,
-            wgpu::TextureFormat::Bgra8UnormSrgb => helio_v3::graph::ResourceFormat::Bgra8UnormSrgb,
-            wgpu::TextureFormat::Rgba8UnormSrgb => helio_v3::graph::ResourceFormat::Rgba8UnormSrgb,
-            wgpu::TextureFormat::R16Float => helio_v3::graph::ResourceFormat::R16Float,
-            wgpu::TextureFormat::R8Unorm => helio_v3::graph::ResourceFormat::R8Unorm,
-            wgpu::TextureFormat::Depth32Float => helio_v3::graph::ResourceFormat::Depth32Float,
-            other => panic!("Unsupported pre_aa format for render graph: {:?}", other),
-        };
-
-        builder.write_color(
-            "pre_aa",
-            pre_aa_format,
-            helio_v3::graph::ResourceSize::Absolute {
-                width: self.width,
-                height: self.height,
-            },
-        );
-    }
-
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         if frame.pre_aa.is_none() {
             frame.pre_aa = Some(&self.pre_aa_view);
@@ -453,7 +426,7 @@ impl RenderPass for DeferredLightPass {
         };
 
         let globals = DeferredGlobals {
-            frame: ctx.frame as u32,
+            frame: ctx.frame_num as u32,
             delta_time: 0.0,
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity,
@@ -474,7 +447,7 @@ impl RenderPass for DeferredLightPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = ctx.frame.gbuffer.as_ref().ok_or_else(|| {
+        let gbuffer = ctx.resources.gbuffer.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "DeferredLight requires published gbuffer resources".to_string(),
             )
@@ -505,9 +478,9 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
-        let shadow_view = ctx.frame.shadow_atlas.unwrap_or(&self.fallback_shadow_view);
+        let shadow_view = ctx.resources.shadow_atlas.unwrap_or(&self.fallback_shadow_view);
         let shadow_sampler = ctx
-            .frame
+            .resources
             .shadow_sampler
             .unwrap_or(&self.fallback_shadow_sampler);
         let rc_view = &self.fallback_rc_view;
@@ -552,7 +525,7 @@ impl RenderPass for DeferredLightPass {
                         resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
                     },
                     // Water caustics texture (binding 8)
-                    texture_view_entry(8, ctx.frame.water_caustics.unwrap_or(&self.fallback_caustics_view)),
+                    texture_view_entry(8, ctx.resources.water_caustics.unwrap_or(&self.fallback_caustics_view)),
                     // Caustics sampler (binding 9)
                     wgpu::BindGroupEntry {
                         binding: 9,
@@ -561,7 +534,7 @@ impl RenderPass for DeferredLightPass {
                     // Water volumes buffer (binding 10)
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: ctx.frame.water_volumes.unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
+                        resource: ctx.resources.water_volumes.unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
                     },
                 ],
             }));
@@ -569,8 +542,8 @@ impl RenderPass for DeferredLightPass {
         }
 
         // ── Bind group 3: tile light culling results ──────────────────────────
-        let tile_lists   = ctx.frame.tile_light_lists.unwrap_or(&self.fallback_tile_lists);
-        let tile_counts  = ctx.frame.tile_light_counts.unwrap_or(&self.fallback_tile_counts);
+        let tile_lists   = ctx.resources.tile_light_lists.unwrap_or(&self.fallback_tile_lists);
+        let tile_counts  = ctx.resources.tile_light_counts.unwrap_or(&self.fallback_tile_counts);
         let tile_key = (tile_lists as *const _ as usize, tile_counts as *const _ as usize);
         if self.bind_group_3_key != Some(tile_key) {
             self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -584,13 +557,13 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_3_key = Some(tile_key);
         }
 
-        let load_op = if ctx.frame.sky_lut.is_some() {
+        let load_op = if ctx.resources.sky_lut.is_some() {
             wgpu::LoadOp::Load
         } else {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         };
 
-        let pre_aa_view = ctx.frame.pre_aa.unwrap_or(&self.pre_aa_view);
+        let pre_aa_view = ctx.resources.pre_aa.unwrap_or(&self.pre_aa_view);
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: pre_aa_view,
             resolve_target: None,
@@ -617,6 +590,8 @@ impl RenderPass for DeferredLightPass {
         pass.draw(0..3, 0..1);
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {

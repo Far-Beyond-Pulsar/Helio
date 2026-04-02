@@ -447,6 +447,8 @@ impl RenderPass for SsaoPass {
         pass.draw(0..3, 0..1);
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 impl SsaoPass {

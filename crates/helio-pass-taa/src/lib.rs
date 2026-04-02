@@ -380,7 +380,7 @@ impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let jitter_idx = (ctx.frame % 16) as usize;
+        let jitter_idx = (ctx.frame_num % 16) as usize;
         let raw = HALTON_JITTER[jitter_idx];
         // Consume the first_frame flag so RESET runs on exactly one frame.
         let reset = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
@@ -397,7 +397,7 @@ impl RenderPass for TaaPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ────────────────────────────────────────────────
-        let pre_aa_view = ctx.frame.pre_aa.ok_or_else(|| {
+        let pre_aa_view = ctx.resources.pre_aa.ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )
@@ -471,4 +471,6 @@ impl RenderPass for TaaPass {
 
         Ok(())
     }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
