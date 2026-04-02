@@ -153,6 +153,8 @@ pub struct SdfPass {
     dirty_bricks_buffer:          wgpu::Buffer,
     /// Indirect dispatch counter + args — `level_count * 3` u32s (96 bytes for 8 levels).
     eval_indirect_buffer:         wgpu::Buffer,
+    /// Pre-initialised copy source for eval_indirect reset — [0,1,1]×level_count, never mutated.
+    eval_indirect_template_buffer: wgpu::Buffer,
 
     // ── Per-level GPU buffers ──────────────────────────────────────────────
     /// Packed u8 SDF atlas per level (stored as u32 words).
@@ -338,14 +340,29 @@ impl SdfPass {
         // ── Eval indirect ─────────────────────────────────────────────────
         // Layout: [x_dirty_count, y=1, z=1] × level_count.
         // `x` is written by classify via atomicAdd and used as the indirect dispatch x.
+        // The template buffer holds [0,1,1]×level_count and never changes; each frame
+        // execute() copies it to eval_indirect_buffer via GPU DMA — zero CPU work.
+        let indirect_byte_size = (level_count * 3 * 4) as u64;
         let eval_indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SDF Eval Indirect"),
-            size: (level_count * 3 * 4) as u64,
+            size: indirect_byte_size,
             usage: wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        let eval_indirect_template_buffer = {
+            let buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("SDF Eval Indirect Template"),
+                size: indirect_byte_size,
+                usage: wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: true,
+            });
+            let template_data: Vec<u32> = (0..level_count).flat_map(|_| [0u32, 1, 1]).collect();
+            buf.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&template_data));
+            buf.unmap();
+            buf
+        };
 
         // ── Compute pipelines ─────────────────────────────────────────────
         let scroll_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -489,6 +506,7 @@ impl SdfPass {
             all_brick_indices_buffer,
             dirty_bricks_buffer,
             eval_indirect_buffer,
+            eval_indirect_template_buffer,
             atlas_buffers,
             level_params_buffers,
             scroll_bg: None,
@@ -884,20 +902,6 @@ impl RenderPass for SdfPass {
             return Ok(());
         }
 
-        // ── O(1): reset eval_indirect to [0, 1, 1] × level_count ─────────
-        // The classify shader uses element x as an atomic counter while elements
-        // y and z stay 1 (wgpu indirect dispatch requires workgroup counts ≥ 1).
-        {
-            let template: Vec<u32> = (0..self.level_count)
-                .flat_map(|_| [0u32, 1, 1])
-                .collect();
-            ctx.queue.write_buffer(
-                &self.eval_indirect_buffer,
-                0,
-                bytemuck::cast_slice(&template),
-            );
-        }
-
         let gen = self.edit_list.generation();
         let needs_upload = gen != self.last_gen;
 
@@ -1061,7 +1065,16 @@ impl RenderPass for SdfPass {
             self.march_bg_camera_key = camera_ptr;
         }
 
-        // ── GPU reset (O(1) CPU, GPU-side memset) ──────────────────────────
+        // ── GPU reset (zero CPU work — pure encoder commands) ─────────────
+        // Restore indirect dispatch args to [0,1,1]×level_count via GPU DMA.
+        // classify will atomically increment element x (dirty count); y,z stay 1.
+        ctx.encoder.copy_buffer_to_buffer(
+            &self.eval_indirect_template_buffer,
+            0,
+            &self.eval_indirect_buffer,
+            0,
+            self.level_count as u64 * 3 * 4,
+        );
         ctx.encoder.clear_buffer(&self.dirty_flags_buffer, 0, None);
         ctx.encoder.clear_buffer(&self.dirty_bricks_buffer, 0, None);
 
