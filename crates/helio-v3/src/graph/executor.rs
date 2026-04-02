@@ -405,6 +405,17 @@ impl RenderGraph {
         self.passes[idx].as_any().downcast_ref::<T>()
     }
 
+    /// Returns mutable references to **all** passes of type `T`.
+    ///
+    /// Unlike `find_pass_mut`, which returns only the first match, this iterates
+    /// the full pass list. Use when multiple instances of the same pass type exist
+    /// in the graph (e.g., two `DebugDrawPass` nodes).
+    pub fn iter_passes_mut<T: RenderPass + 'static>(&mut self) -> impl Iterator<Item = &mut T> {
+        self.passes
+            .iter_mut()
+            .filter_map(|p| p.as_any_mut().downcast_mut::<T>())
+    }
+
     /// Executes the render graph with automatic profiling.
     ///
     /// This is the main entry point for rendering. It:

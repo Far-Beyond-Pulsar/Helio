@@ -215,6 +215,12 @@ impl DebugPass {
     pub fn clear(&mut self) {
         self.vertex_count = 0;
     }
+
+    /// Toggle depth-test at runtime — no pipeline rebuild required, both
+    /// pipelines are compiled at construction.
+    pub fn set_depth_test(&mut self, enabled: bool) {
+        self.depth_test_enabled = enabled;
+    }
 }
 
 impl DebugPass {

@@ -12,7 +12,7 @@ use crate::mesh::MeshBuffers;
 use crate::scene::{Camera, Scene};
 
 use super::config::{GiConfig, RendererConfig};
-use super::debug::{DebugDrawState};
+use super::debug::{DebugDrawPass, DebugDrawState};
 use super::graph::{build_default_graph, build_simple_graph, create_depth_resources};
 
 type CustomGraphBuilder = Arc<dyn Fn(&Arc<wgpu::Device>, &Arc<wgpu::Queue>, &Scene, RendererConfig, Arc<Mutex<DebugDrawState>>, &wgpu::Buffer, bool) -> RenderGraph + Send + Sync>;
@@ -183,25 +183,10 @@ impl Renderer {
 
     pub fn set_debug_depth_test(&mut self, enabled: bool) {
         self.debug_depth_test = enabled;
-        if matches!(self.graph_kind, GraphKind::Default) {
-            let config = RendererConfig {
-                width: self.output_width,
-                height: self.output_height,
-                surface_format: self.surface_format,
-                gi_config: self.gi_config,
-                shadow_quality: self.shadow_quality,
-                debug_mode: self.debug_mode,
-                render_scale: self.render_scale,
-            };
-            self.graph = build_default_graph(
-                &self.device,
-                &self.queue,
-                &self.scene,
-                config,
-                self.debug_state.clone(),
-                &self.debug_camera_buffer,
-                self.debug_depth_test,
-            );
+        // Both pipelines are pre-compiled inside DebugPass; toggling the flag is O(1)
+        // and requires no pipeline or graph rebuild.
+        for pass in self.graph.iter_passes_mut::<DebugDrawPass>() {
+            pass.set_depth_test(enabled);
         }
     }
 
@@ -743,6 +728,8 @@ impl Renderer {
             &frame_resources,
         )?;
 
+        // Explicit drops needed: both ArrayVecs borrow from `self.scene` and must
+        // be released before `advance_frame()` takes `&mut self.scene`.
         drop(texture_views);
         drop(samplers);
         self.scene.advance_frame();

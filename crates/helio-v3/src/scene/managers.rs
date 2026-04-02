@@ -268,30 +268,14 @@ impl GpuInstanceBuffer {
             "Instance Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn push(&mut self, item: GpuInstanceData) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<GpuInstanceData>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: GpuInstanceData) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuInstanceData> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuInstanceBuffer {
+    type Target = GrowableBuffer<GpuInstanceData>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuInstanceBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 impl GpuAabbBuffer {
@@ -303,30 +287,14 @@ impl GpuAabbBuffer {
             "AABB Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn push(&mut self, item: GpuInstanceAabb) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<GpuInstanceAabb>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: GpuInstanceAabb) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuInstanceAabb> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuAabbBuffer {
+    type Target = GrowableBuffer<GpuInstanceAabb>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuAabbBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 impl GpuDrawCallBuffer {
@@ -338,30 +306,14 @@ impl GpuDrawCallBuffer {
             "DrawCall Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn push(&mut self, item: GpuDrawCall) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<GpuDrawCall>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: GpuDrawCall) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuDrawCall> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuDrawCallBuffer {
+    type Target = GrowableBuffer<GpuDrawCall>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuDrawCallBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 impl GpuLightBuffer {
@@ -373,33 +325,14 @@ impl GpuLightBuffer {
             "Light Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn as_slice(&self) -> &[GpuLight] {
-        self.0.as_slice()
-    }
-    pub fn push(&mut self, item: GpuLight) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<GpuLight>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: GpuLight) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuLight> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuLightBuffer {
+    type Target = GrowableBuffer<GpuLight>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuLightBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 impl GpuMaterialBuffer {
@@ -411,30 +344,14 @@ impl GpuMaterialBuffer {
             "Material Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn push(&mut self, item: GpuMaterial) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<GpuMaterial>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: GpuMaterial) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuMaterial> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuMaterialBuffer {
+    type Target = GrowableBuffer<GpuMaterial>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuMaterialBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 impl GpuShadowMatrixBuffer {
@@ -446,30 +363,14 @@ impl GpuShadowMatrixBuffer {
             "Shadow Matrix Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn push(&mut self, item: GpuShadowMatrix) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<GpuShadowMatrix>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: GpuShadowMatrix) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<GpuShadowMatrix> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuShadowMatrixBuffer {
+    type Target = GrowableBuffer<GpuShadowMatrix>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuShadowMatrixBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 impl GpuIndirectBuffer {
@@ -481,30 +382,14 @@ impl GpuIndirectBuffer {
             "Indirect Draw Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn push(&mut self, item: DrawIndexedIndirectArgs) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<DrawIndexedIndirectArgs>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: DrawIndexedIndirectArgs) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<DrawIndexedIndirectArgs> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuIndirectBuffer {
+    type Target = GrowableBuffer<DrawIndexedIndirectArgs>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuIndirectBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 impl GpuVisibilityBuffer {
@@ -516,29 +401,13 @@ impl GpuVisibilityBuffer {
             "Visibility Buffer",
         ))
     }
-    pub fn buffer(&self) -> &wgpu::Buffer {
-        self.0.buffer()
-    }
-    pub fn buffer_version(&self) -> u64 {
-        self.0.buffer_version()
-    }
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-    pub fn push(&mut self, item: u32) -> usize {
-        self.0.push(item)
-    }
-    pub fn set_data(&mut self, data: Vec<u32>) {
-        self.0.set_data(data);
-    }
-    pub fn update(&mut self, index: usize, item: u32) -> bool {
-        self.0.update(index, item)
-    }
-    pub fn swap_remove(&mut self, index: usize) -> Option<u32> {
-        self.0.swap_remove(index)
-    }
-    pub fn flush(&mut self, queue: &wgpu::Queue) {
-        self.0.flush(queue);
-    }
+}
+
+impl std::ops::Deref for GpuVisibilityBuffer {
+    type Target = GrowableBuffer<u32>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+impl std::ops::DerefMut for GpuVisibilityBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 

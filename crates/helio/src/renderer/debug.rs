@@ -41,6 +41,12 @@ impl DebugDrawPass {
         }
     }
 
+    /// Toggle depth-test at runtime. Propagates to the inner `DebugPass`
+    /// without any pipeline rebuild (both pipelines are pre-compiled).
+    pub fn set_depth_test(&mut self, enabled: bool) {
+        self.pass.set_depth_test(enabled);
+    }
+
     fn build_frame_vertices(&self) -> Vec<DebugVertex> {
         let state = self.state.lock().unwrap();
 
