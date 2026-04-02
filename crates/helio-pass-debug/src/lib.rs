@@ -306,7 +306,5 @@ impl RenderPass for DebugPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         self.execute_on_target(ctx, ctx.target)
     }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

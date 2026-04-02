@@ -99,6 +99,29 @@ impl<T> MaybeSync for T {}
 
 use crate::{PassContext, PrepareContext, Result};
 
+/// Supertrait that provides safe `Any`-based downcasting for render passes.
+///
+/// Blanket-implemented for every `T: 'static`, so no concrete pass needs to
+/// write `fn as_any` / `fn as_any_mut` — the compiler generates the correct
+/// body automatically and it can never be written incorrectly.
+///
+/// `RenderGraph::find_pass` / `find_pass_mut` use this to downcast a
+/// `Box<dyn RenderPass>` back to a concrete pass type in O(1).
+pub trait AsAny: std::any::Any {
+    /// Returns `self` as a `&dyn Any` so `downcast_ref` can be called.
+    fn as_any(&self) -> &dyn std::any::Any;
+    /// Returns `self` as a `&mut dyn Any` so `downcast_mut` can be called.
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+/// Blanket implementation — every concrete type gets this for free.
+impl<T: std::any::Any> AsAny for T {
+    #[inline]
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    #[inline]
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+}
+
 /// Core trait for all rendering passes.
 ///
 /// `RenderPass` is the fundamental building block of helio-v3. Each pass is a self-contained
@@ -234,7 +257,7 @@ use crate::{PassContext, PrepareContext, Result};
 /// - **Error Handling**: Return `Result<()>` for GPU errors (e.g., shader compilation)
 /// - **Profiling**: Use `ctx.begin_render_pass()` instead of `ctx.encoder.begin_render_pass()`
 ///   to get automatic GPU timestamp injection
-pub trait RenderPass: MaybeSend + MaybeSync {
+pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Returns a unique name for this pass.
     ///
     /// Used for profiling labels and debugging. Should be a human-readable identifier
@@ -328,14 +351,5 @@ pub trait RenderPass: MaybeSend + MaybeSync {
     /// The default is a no-op, so passes that don't need resize handling can ignore it.
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
-    /// Returns a shared reference to `self` as `dyn Any` for downcasting.
-    ///
-    /// Required by every concrete pass so `RenderGraph::find_pass` can downcast.
-    fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Returns a mutable reference to `self` as `dyn Any` for downcasting.
-    ///
-    /// Required by every concrete pass so `RenderGraph::find_pass_mut` can downcast.
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
 }
 

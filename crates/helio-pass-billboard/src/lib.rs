@@ -524,7 +524,5 @@ impl RenderPass for BillboardPass {
         pass.draw(0..6, 0..self.instance_count); // O(1) — single GPU draw call
         Ok(())
     }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 

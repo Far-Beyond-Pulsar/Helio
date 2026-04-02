@@ -199,8 +199,6 @@ impl RenderPass for IndirectDispatchPass {
         pass.dispatch_workgroups(workgroups, 1, 1);
         Ok(())
     }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 /// Extract 6 frustum planes from a view-projection matrix (Gribb/Hartmann method).

@@ -245,8 +245,6 @@ impl RenderPass for OcclusionCullPass {
         pass.dispatch_workgroups(wg, 1, 1);
         Ok(())
     }
-    fn as_any(&self) -> &dyn std::any::Any { self }
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 fn mip_levels(w: u32, h: u32) -> u32 {

@@ -393,5 +393,5 @@ pub use error::{Error, Result};
 pub use graph::RenderGraph;
 pub use profiling::Profiler;
 pub use scene::{GpuScene, SceneResources};
-pub use traits::{MaybeSend, MaybeSync, RenderPass};
+pub use traits::{AsAny, MaybeSend, MaybeSync, RenderPass};
 
