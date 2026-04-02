@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use helio_pass_debug::{DebugPass, DebugVertex, DebugCameraUniform};
+use helio_pass_debug::{DebugPass, DebugVertex};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 pub struct DebugDrawState {
