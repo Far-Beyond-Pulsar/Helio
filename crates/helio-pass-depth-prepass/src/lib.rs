@@ -61,12 +61,13 @@ impl DepthPrepassPass {
             immediate_size: 0,
         });
 
-        // Vertex layout matches the shared mesh vertex buffer (stride = 32 bytes).
+        // Vertex layout matches the shared mesh vertex buffer (stride = 40 bytes).
         //   offset  0 — position       (Float32x3, location 0)
         //   offset 12 — bitangent_sign (Float32,   location 1) — skipped here
-        //   offset 16 — tex_coords     (Float32x2, location 2)
-        //   offset 24 — normal         (Uint32,    location 3) — skipped here
-        //   offset 28 — tangent        (Uint32,    location 4) — skipped here
+        //   offset 16 — tex_coords0   (Float32x2, location 2)
+        //   offset 24 — tex_coords1   (Float32x2) — skipped here
+        //   offset 32 — normal        (Uint32,    location 3) — skipped here
+        //   offset 36 — tangent       (Uint32,    location 4) — skipped here
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("DepthPrepass Pipeline"),
             layout: Some(&pipeline_layout),

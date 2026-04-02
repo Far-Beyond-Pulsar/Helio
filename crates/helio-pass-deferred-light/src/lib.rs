@@ -427,7 +427,7 @@ impl RenderPass for DeferredLightPass {
 
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
-            delta_time: 0.0,
+            delta_time: ctx.delta_time,
             light_count: ctx.scene.lights.len() as u32,
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],

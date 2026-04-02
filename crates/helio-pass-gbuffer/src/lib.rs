@@ -60,9 +60,7 @@ pub struct GBufferGlobals {
 
 pub struct GBufferPass {
     pipeline: wgpu::RenderPipeline,
-    #[allow(dead_code)]
     bind_group_layout_0: wgpu::BindGroupLayout,
-    #[allow(dead_code)]
     bind_group_layout_1: wgpu::BindGroupLayout,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
@@ -72,6 +70,12 @@ pub struct GBufferPass {
     bind_group_1_version: Option<u64>,
     /// Per-frame globals uploaded in `prepare()`.
     globals_buf: wgpu::Buffer,
+    /// CSM cascade split distances. Must match the values used in shadow_matrices.wgsl
+    /// so that cascade selection in any shader that reads `globals.csm_splits` is
+    /// consistent with the shadow maps that were actually generated.
+    pub csm_splits: [f32; 4],
+    /// Debug visualisation mode forwarded to the GBuffer shader (0 = off).
+    pub debug_mode: u32,
     // ── GBuffer textures (owned; exposed for downstream passes) ───────────────
     pub albedo_tex: wgpu::Texture,
     pub albedo_view: wgpu::TextureView,
@@ -189,7 +193,7 @@ impl GBufferPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                // Full vertex layout (stride = 32 bytes, matching shared mesh buffer).
+                // Full vertex layout (stride = 40 bytes, matching shared mesh buffer).
                 //   offset  0 — position       Float32x3  location 0
                 //   offset 12 — bitangent_sign Float32    location 1
                 //   offset 16 — tex_coords0   Float32x2  location 2
@@ -262,8 +266,12 @@ impl GBufferPass {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual), // allows minor FP precision differences vs prepass
+                // Depth prepass already wrote the closest depth with `Less`.
+                // Use `Equal` so only fragments at that exact depth are shaded,
+                // giving the GPU a hard guarantee for early-Z culling.
+                // `depth_write_enabled: false` avoids redundant bandwidth.
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Equal),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -311,6 +319,9 @@ impl GBufferPass {
             bind_group_1: None,
             bind_group_1_version: None,
             globals_buf,
+            // Default CSM splits must agree with shadow_matrices.wgsl (CSM_SPLITS constant).
+            csm_splits: [16.0, 80.0, 300.0, 1400.0],
+            debug_mode: 0,
             albedo_tex,
             albedo_view,
             normal_tex,
@@ -338,17 +349,32 @@ impl RenderPass for GBufferPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Read per-scene values from frame_resources so the GBuffer globals match
+        // what the renderer configured (ambient light, GI bounds, etc.).
+        let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
+            if let Some(ref ms) = ctx.frame_resources.main_scene {
+                (
+                    [ms.ambient_color[0], ms.ambient_color[1], ms.ambient_color[2], 1.0],
+                    ms.ambient_intensity,
+                    [ms.rc_world_min[0], ms.rc_world_min[1], ms.rc_world_min[2], 0.0],
+                    [ms.rc_world_max[0], ms.rc_world_max[1], ms.rc_world_max[2], 0.0],
+                )
+            } else {
+                // Fallback for headless / test usage without a full renderer.
+                ([0.1, 0.1, 0.15, 1.0], 0.1, [-100.0_f32; 4], [100.0_f32; 4])
+            };
+
         // Upload per-frame globals (O(1) — fixed-size struct).
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
-            delta_time: 0.016, // TODO: expose delta_time in PrepareContext
+            delta_time: ctx.delta_time,
             light_count: ctx.scene.lights.len() as u32,
-            ambient_intensity: 0.1,
-            ambient_color: [0.1, 0.1, 0.15, 1.0],
-            rc_world_min: [-100.0, -100.0, -100.0, 0.0],
-            rc_world_max: [100.0, 100.0, 100.0, 0.0],
-            csm_splits: [5.0, 20.0, 60.0, 200.0],
-            debug_mode: 0,
+            ambient_intensity,
+            ambient_color,
+            rc_world_min,
+            rc_world_max,
+            csm_splits: self.csm_splits,
+            debug_mode: self.debug_mode,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
