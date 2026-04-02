@@ -241,6 +241,9 @@ pub struct WaterSimPass {
     // ctx.width/height = full output res (scene.width), NOT internal res.
     internal_width: u32,
     internal_height: u32,
+    // Persistent viewport uniform buffer: vec4f(w, h, 1/w, 1/h).
+    // Built once at construction; the water pass is recreated on resize anyway.
+    viewport_buf: wgpu::Buffer,
     // Blit pipeline: copies pre_aa -> water_output as the scene baseline
     blit_bgl: wgpu::BindGroupLayout,
     blit_pipeline: wgpu::RenderPipeline,
@@ -1126,6 +1129,16 @@ impl WaterSimPass {
             water_output_view,
             internal_width,
             internal_height,
+            viewport_buf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("Water Viewport"),
+                contents: bytemuck::cast_slice(&[
+                    internal_width  as f32,
+                    internal_height as f32,
+                    1.0 / internal_width  as f32,
+                    1.0 / internal_height as f32,
+                ]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            }),
             blit_bgl,
             blit_pipeline,
             blit_bg: None,
@@ -1542,19 +1555,17 @@ impl RenderPass for WaterSimPass {
                 // IMPORTANT: water now renders at INTERNAL resolution (pre-TAA).
                 // ctx.width/height = full output res (scene.width/height), which is WRONG here.
                 // Use self.internal_width/height so depth_coord and screen_uv are correct.
-                let vp = [
-                    self.internal_width  as f32, self.internal_height as f32,
-                    1.0 / self.internal_width  as f32, 1.0 / self.internal_height as f32,
-                ];
-                let viewport_buf = ctx.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("Water Viewport"),
-                    contents: bytemuck::cast_slice(&vp),
-                    usage: wgpu::BufferUsages::UNIFORM,
-                });
+                //
+                // `viewport_buf` is a persistent uniform buffer initialised at construction;
+                // the pass is recreated on resize so it always contains valid data.
 
                 // Copy depth texture for SSR sampling
                 // This allows us to sample from the copy while using the original as a depth attachment
-                let src_depth_tex = ctx.resources.depth_texture.expect("Depth texture required for water SSR");
+                let src_depth_tex = ctx.resources.depth_texture.ok_or_else(|| {
+                    helio_v3::Error::InvalidPassConfig(
+                        "Water SSR requires depth_texture in FrameResources".to_string(),
+                    )
+                })?;
                 ctx.encoder.copy_texture_to_texture(
                     src_depth_tex.as_image_copy(),
                     self._depth_copy_tex.as_image_copy(),
@@ -1581,7 +1592,7 @@ impl RenderPass for WaterSimPass {
                         wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.caustics_view) },
                         wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.caustics_sampler) },
                         wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(scene_view) },
-                        wgpu::BindGroupEntry { binding: 7, resource: viewport_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.viewport_buf.as_entire_binding() },
                         wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.depth_copy_view) },
                         wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.depth_sampler) },
                         wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(gbuffer_normal_view) },
