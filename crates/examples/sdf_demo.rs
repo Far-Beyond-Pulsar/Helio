@@ -55,7 +55,6 @@ struct AppState {
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
-    sdf_pass: *mut SdfPass,
     last_frame: Instant,
     cam_pos: Vec3,
     yaw: f32,
@@ -65,10 +64,6 @@ struct AppState {
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
 }
-
-// SAFETY: SdfPass is only accessed from the main thread (winit event loop).
-unsafe impl Send for AppState {}
-unsafe impl Sync for AppState {}
 
 impl AppState {
     fn update(&mut self, dt: f32) {
@@ -110,7 +105,9 @@ impl AppState {
     }
 
     fn sdf(&mut self) -> &mut SdfPass {
-        unsafe { &mut *self.sdf_pass }
+        self.renderer
+            .find_pass_mut::<SdfPass>()
+            .expect("SdfPass not found in render graph")
     }
 
     fn place_edit(&mut self, shape: SdfShapeType, op: BooleanOp, params: SdfShapeParams, blend: f32) {
@@ -193,10 +190,7 @@ impl ApplicationHandler for App {
 
         // Build a minimal graph: SDF pass only
         let mut graph = RenderGraph::new(&device, &queue);
-        let sdf_pass = SdfPass::new(&device, surface_format, Some(TerrainConfig::rolling()));
-        let sdf_box = Box::new(sdf_pass);
-        let sdf_ptr = &*sdf_box as *const SdfPass as *mut SdfPass;
-        graph.add_pass(sdf_box);
+        graph.add_pass(Box::new(SdfPass::new(&device, surface_format, Some(TerrainConfig::rolling()))));
         renderer.set_graph(graph);
 
         self.state = Some(AppState {
@@ -206,7 +200,6 @@ impl ApplicationHandler for App {
             queue,
             surface_format,
             renderer,
-            sdf_pass: sdf_ptr,
             last_frame: Instant::now(),
             cam_pos: Vec3::new(0.0, 4.0, 15.0),
             yaw: 0.0,

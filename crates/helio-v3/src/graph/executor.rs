@@ -64,6 +64,17 @@ use super::resource::{ResourceAccess, ResourceBuilder};
 use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
 use std::collections::HashMap;
 
+/// Type-erased routing function: wires a graph-managed transient texture view
+/// into the appropriate field of `FrameResources` each frame.
+///
+/// Registered via `RenderGraph::register_transient_route`.
+type TransientRoute = Box<
+    dyn for<'frame> Fn(
+        &'frame wgpu::TextureView,
+        &mut libhelio::FrameResources<'frame>,
+    ) + Send + Sync,
+>;
+
 /// Transient texture managed by the render graph.
 ///
 /// Created based on pass resource declarations, owned by the graph,
@@ -188,6 +199,18 @@ pub struct RenderGraph {
 
     /// Surface height (for ResourceSize::MatchSurface)
     height: u32,
+
+    /// Elapsed frame time in seconds, set by `set_delta_time()` before `execute()`.
+    ///
+    /// Forwarded into `PrepareContext::delta_time` so passes can implement
+    /// frame-rate-independent updates without querying a global clock.
+    delta_time: f32,
+
+    /// Registered name → FrameResources routing functions for transient textures.
+    ///
+    /// The three legacy names ("pre_aa", "sky_lut", "ssao") are pre-registered in
+    /// `new()`.  Custom passes add their own routes via `register_transient_route()`.
+    resource_routes: Vec<(&'static str, TransientRoute)>,
 }
 
 impl RenderGraph {
@@ -213,6 +236,13 @@ impl RenderGraph {
     /// let graph = RenderGraph::new(&Arc::new(device), &queue);
     /// ```
     pub fn new(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
+        // Pre-register the three built-in transient routes so existing graphs
+        // that rely on these names continue to work without any changes.
+        let mut resource_routes: Vec<(&'static str, TransientRoute)> = Vec::new();
+        resource_routes.push(("pre_aa",  Box::new(|view, fr| fr.pre_aa  = Some(view))));
+        resource_routes.push(("sky_lut", Box::new(|view, fr| fr.sky_lut = Some(view))));
+        resource_routes.push(("ssao",    Box::new(|view, fr| fr.ssao    = Some(view))));
+
         Self {
             passes: Vec::new(),
             profiler: Profiler::new(device, queue),
@@ -220,7 +250,51 @@ impl RenderGraph {
             device: device.clone(),
             width: 0,  // Set via set_render_size() before first execute()
             height: 0, // Set via set_render_size() before first execute()
+            delta_time: 0.0,
+            resource_routes,
         }
+    }
+
+    /// Sets the elapsed frame time (seconds) forwarded to `PrepareContext::delta_time`.
+    ///
+    /// Call once per frame, **before** `execute()`.  The high-level `Renderer` does
+    /// this automatically.  Direct `RenderGraph` users should call this themselves:
+    ///
+    /// ```rust,ignore
+    /// let dt = last_frame.elapsed().as_secs_f32().min(0.1);
+    /// last_frame = Instant::now();
+    /// graph.set_delta_time(dt);
+    /// graph.execute(&scene, &target, &depth)?;
+    /// ```
+    pub fn set_delta_time(&mut self, dt: f32) {
+        self.delta_time = dt;
+    }
+
+    /// Registers a routing function that populates a `FrameResources` field from
+    /// a graph-managed transient texture each frame.
+    ///
+    /// Call this in your graph builder after adding a pass that declares a
+    /// transient texture write.  Without a route, the texture is created and
+    /// resized correctly but never wired into `ctx.frame` for downstream passes.
+    ///
+    /// The three built-in names (`"pre_aa"`, `"sky_lut"`, `"ssao"`) are already
+    /// registered in `RenderGraph::new()` for backward compatibility.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// graph.register_transient_route("ssr_result", |view, fr| {
+    ///     fr.ssr_result = Some(view);
+    /// });
+    /// ```
+    pub fn register_transient_route<F>(&mut self, name: &'static str, route: F)
+    where
+        F: for<'frame> Fn(
+                &'frame wgpu::TextureView,
+                &mut libhelio::FrameResources<'frame>,
+            ) + Send + Sync + 'static,
+    {
+        self.resource_routes.push((name, Box::new(route)));
     }
 
     /// Sets the render target size and recreates transient textures.
@@ -311,6 +385,15 @@ impl RenderGraph {
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
         self.passes.iter_mut().find_map(|p| {
             p.as_any_mut()?.downcast_mut::<T>()
+        })
+    }
+
+    /// Returns an immutable reference to the first pass of type `T`, if present.
+    ///
+    /// Requires the pass to implement `RenderPass::as_any()`.
+    pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
+        self.passes.iter().find_map(|p| {
+            p.as_any()?.downcast_ref::<T>()
         })
     }
 
@@ -412,15 +495,13 @@ impl RenderGraph {
             // Populate frame resources with transient textures + pass-published resources
             let mut visible_frame_resources = *frame_resources;
 
-            // Map well-known transient resource names to FrameResources fields
-            if let Some(tex) = self.transient_textures.get("pre_aa") {
-                visible_frame_resources.pre_aa = Some(&tex.view);
-            }
-            if let Some(tex) = self.transient_textures.get("sky_lut") {
-                visible_frame_resources.sky_lut = Some(&tex.view);
-            }
-            if let Some(tex) = self.transient_textures.get("ssao") {
-                visible_frame_resources.ssao = Some(&tex.view);
+            // Apply registered resource routes: populate FrameResources fields
+            // from graph-managed transient textures.  Routes are registered in
+            // RenderGraph::new() (built-ins) and via register_transient_route().
+            for (name, route) in &self.resource_routes {
+                if let Some(tex) = self.transient_textures.get(name) {
+                    route(&tex.view, &mut visible_frame_resources);
+                }
             }
 
             // Add pass-published resources (e.g., GBufferPass publishes gbuffer views)
@@ -437,6 +518,7 @@ impl RenderGraph {
                 resize: false,
                 width: scene.width,
                 height: scene.height,
+                delta_time: self.delta_time,
             };
             pass.prepare(&prepare_ctx)?;
 

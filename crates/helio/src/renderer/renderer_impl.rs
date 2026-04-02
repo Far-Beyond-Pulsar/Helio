@@ -65,6 +65,8 @@ pub struct Renderer {
     billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
     water_volumes_buffer: wgpu::Buffer,
     water_hitboxes_buffer: wgpu::Buffer,
+    /// Instant of the previous `render()` call, used to compute real `delta_time`.
+    last_render_time: std::time::Instant,
 }
 
 enum GraphKind {
@@ -148,6 +150,7 @@ impl Renderer {
             billboard_scratch: Vec::new(),
             water_volumes_buffer,
             water_hitboxes_buffer,
+            last_render_time: std::time::Instant::now(),
         }
     }
 
@@ -430,6 +433,26 @@ impl Renderer {
         self.graph.add_pass(pass);
     }
 
+    /// Returns a typed mutable reference to the first pass of type `T` in the graph.
+    ///
+    /// Requires the pass to implement `RenderPass::as_any_mut()` (returning `Some(self)`).
+    /// Use this to configure a custom pass after it has been added to the graph without
+    /// holding a raw pointer:
+    ///
+    /// ```rust,ignore
+    /// renderer.find_pass_mut::<SdfPass>()?.add_edit(edit);
+    /// ```
+    pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
+        self.graph.find_pass_mut::<T>()
+    }
+
+    /// Returns a typed immutable reference to the first pass of type `T` in the graph.
+    ///
+    /// Requires the pass to implement `RenderPass::as_any()` (returning `Some(self)`).
+    pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
+        self.graph.find_pass::<T>()
+    }
+
     pub fn set_render_size(&mut self, width: u32, height: u32) {
         self.output_width = width;
         self.output_height = height;
@@ -576,6 +599,13 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
+        // Compute real frame delta, capped at 100 ms to avoid spiral-of-death on
+        // slow frames (e.g. first frame, window unfocus/refocus, GPU stalls).
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
+        self.last_render_time = now;
+        self.graph.set_delta_time(dt);
+
         let frame_idx = self.scene.gpu_scene().frame_count;
         let raw = HALTON_JITTER[(frame_idx % 16) as usize];
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);

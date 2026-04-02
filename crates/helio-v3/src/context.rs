@@ -420,6 +420,19 @@ pub struct PrepareContext<'a> {
 
     /// Render target height.
     pub height: u32,
+
+    /// Elapsed time since the previous frame, in seconds.
+    ///
+    /// Set by `RenderGraph::set_delta_time()` before each `execute()` call.
+    /// The high-level `Renderer` updates this automatically.  Direct
+    /// `RenderGraph` users should call `graph.set_delta_time(dt)` at the top
+    /// of their render loop.
+    ///
+    /// Passes that need frame-rate-independent motion (water simulation,
+    /// particle systems, material time-animations) should read this rather
+    /// than hard-coding `0.016`.  Returns `0.0` if the host has not yet
+    /// called `set_delta_time()`.
+    pub delta_time: f32,
 }
 
 impl<'a> PrepareContext<'a> {
