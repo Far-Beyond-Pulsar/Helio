@@ -15,7 +15,7 @@ use super::config::{GiConfig, RendererConfig};
 use super::debug::{DebugDrawPass, DebugDrawState};
 use super::graph::{build_default_graph, build_simple_graph, create_depth_resources};
 
-type CustomGraphBuilder = Arc<dyn Fn(&Arc<wgpu::Device>, &Arc<wgpu::Queue>, &Scene, RendererConfig, Arc<Mutex<DebugDrawState>>, &wgpu::Buffer, bool) -> RenderGraph + Send + Sync>;
+type CustomGraphBuilder = Arc<dyn Fn(&Arc<wgpu::Device>, &Arc<wgpu::Queue>, &Scene, RendererConfig, Arc<Mutex<DebugDrawState>>, &wgpu::Buffer) -> RenderGraph + Send + Sync>;
 
 const HALTON_JITTER: [[f32; 2]; 16] = [
     [0.5,     0.333333],
@@ -90,7 +90,7 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer, true);
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer);
 
         let (depth_texture, depth_view) = create_depth_resources(
             &device,
@@ -447,7 +447,6 @@ impl Renderer {
                     config,
                     self.debug_state.clone(),
                     &self.debug_camera_buffer,
-                    self.debug_depth_test,
                 );
             }
             GraphKind::Simple => {
@@ -468,7 +467,6 @@ impl Renderer {
                             new_cfg,
                             self.debug_state.clone(),
                             &self.debug_camera_buffer,
-                            self.debug_depth_test,
                         );
                         self.custom_graph_config = Some(new_cfg);
                     } else {
@@ -540,7 +538,6 @@ impl Renderer {
             config,
             self.debug_state.clone(),
             &self.debug_camera_buffer,
-            self.debug_depth_test,
         );
         self.graph_kind = GraphKind::Default;
     }

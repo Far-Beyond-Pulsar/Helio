@@ -319,8 +319,8 @@ impl GBufferPass {
             bind_group_1: None,
             bind_group_1_version: None,
             globals_buf,
-            // Default CSM splits must agree with shadow_matrices.wgsl (CSM_SPLITS constant).
-            csm_splits: [16.0, 80.0, 300.0, 1400.0],
+            // Default CSM splits — single source of truth is libhelio::CSM_SPLITS.
+            csm_splits: libhelio::CSM_SPLITS,
             debug_mode: 0,
             albedo_tex,
             albedo_view,

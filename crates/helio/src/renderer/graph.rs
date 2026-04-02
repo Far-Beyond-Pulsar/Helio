@@ -32,7 +32,6 @@ pub fn build_default_graph(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<crate::renderer::debug::DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
-    debug_depth_test: bool,
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);
@@ -171,7 +170,6 @@ pub fn build_hlfs_graph(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<crate::renderer::debug::DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
-    _debug_depth_test: bool,
 ) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
     let mut graph = RenderGraph::new(device, queue);

@@ -436,7 +436,7 @@ impl RenderPass for DeferredLightPass {
             // Must match CSM_SPLITS constant in shadow_matrices.wgsl ([16,80,300,1400]).
             // The shadow matrices are computed for these distances, so cascade selection
             // must use the same values or shadow maps will be sampled outside their valid range.
-            csm_splits: [16.0, 80.0, 300.0, 1400.0],
+            csm_splits: libhelio::CSM_SPLITS,
             debug_mode: self.debug_mode,
             _pad0: 0,
             num_tiles_x: self.width.div_ceil(16),

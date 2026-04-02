@@ -50,10 +50,18 @@ impl DebugDrawPass {
     fn build_frame_vertices(&self) -> Vec<DebugVertex> {
         let state = self.state.lock().unwrap();
 
-        let mut output = if self.editor_mode {
+        // Editor pass only draws grid + camera gizmo (no user lines).
+        // Non-editor pass only draws user lines (no grid).
+        // The branches are mutually exclusive, so we can avoid a clone in the
+        // non-editor case by moving/extending from the source slice directly.
+        let mut output: Vec<DebugVertex> = if self.editor_mode {
             Vec::new()
         } else {
-            state.user_lines.clone()
+            // Extend from slice rather than clone the whole Vec — avoids
+            // an extra heap alloc when user_lines is large.
+            let mut v = Vec::with_capacity(state.user_lines.len());
+            v.extend_from_slice(&state.user_lines);
+            v
         };
 
         let cam = state.camera_position;

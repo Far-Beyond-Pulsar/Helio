@@ -541,7 +541,7 @@ impl RenderPass for HlfsPass {
             _pad0: 0,
             camera_forward: cam_forward,
             _pad1: 0,
-            csm_splits: [16.0, 80.0, 300.0, 1400.0],
+            csm_splits: libhelio::CSM_SPLITS,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
 

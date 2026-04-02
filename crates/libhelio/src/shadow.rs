@@ -5,6 +5,13 @@
 
 use bytemuck::{Pod, Zeroable};
 
+/// Cascade far-plane distances (metres) shared by all passes that read or
+/// write CSM data (GBuffer, DeferredLight, HLFS).
+///
+/// **Must stay in sync** with the WGSL constant `CSM_SPLITS` in
+/// `helio-pass-shadow-matrix/shaders/shadow_matrices.wgsl`.
+pub const CSM_SPLITS: [f32; 4] = [16.0, 80.0, 300.0, 1400.0];
+
 /// Shadow quality presets for runtime configuration.
 ///
 /// Sample counts are halved vs a non-TAA renderer because the Vogel disk is
