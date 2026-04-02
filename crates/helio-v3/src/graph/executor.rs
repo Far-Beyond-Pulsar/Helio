@@ -175,8 +175,9 @@ pub struct RenderGraph {
     /// Passes are stored as trait objects (`Box<dyn RenderPass>`) for polymorphism.
     passes: Vec<Box<dyn RenderPass>>,
 
-    /// Parallel TypeId vector for O(1) `find_pass` / `find_pass_mut` lookups.
-    pass_type_ids: Vec<TypeId>,
+    /// TypeId → pass index map for true O(1) `find_pass` / `find_pass_mut` lookups.
+    /// Only the first pass of each type is stored; duplicates are harmlessly ignored.
+    pass_index_map: HashMap<TypeId, usize>,
 
     /// Profiler for automatic CPU/GPU profiling.
     ///
@@ -248,7 +249,7 @@ impl RenderGraph {
 
         Self {
             passes: Vec::new(),
-            pass_type_ids: Vec::new(),
+            pass_index_map: HashMap::new(),
             profiler: Profiler::new(device, queue),
             transient_textures: HashMap::new(),
             device: device.clone(),
@@ -383,25 +384,24 @@ impl RenderGraph {
         // Note: We just push the pass for now. Declarations are collected
         // and textures created in set_render_size() by iterating all passes.
         let type_id = pass.as_any().type_id();
-        self.pass_type_ids.push(type_id);
+        // Only store the first occurrence so find_pass() returns the first matching pass.
+        self.pass_index_map.entry(type_id).or_insert(self.passes.len());
         self.passes.push(pass);
     }
 
     /// Returns a mutable reference to the first pass of type `T`, if present.
     ///
-    /// Uses the parallel `pass_type_ids` vector for O(1) lookup by `TypeId`.
+    /// Uses `pass_index_map` for true O(1) lookup by `TypeId`.
     pub fn find_pass_mut<T: RenderPass + 'static>(&mut self) -> Option<&mut T> {
-        let wanted = TypeId::of::<T>();
-        let idx = self.pass_type_ids.iter().position(|&id| id == wanted)?;
+        let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
         self.passes[idx].as_any_mut().downcast_mut::<T>()
     }
 
     /// Returns an immutable reference to the first pass of type `T`, if present.
     ///
-    /// Uses the parallel `pass_type_ids` vector for O(1) lookup by `TypeId`.
+    /// Uses `pass_index_map` for true O(1) lookup by `TypeId`.
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
-        let wanted = TypeId::of::<T>();
-        let idx = self.pass_type_ids.iter().position(|&id| id == wanted)?;
+        let idx = *self.pass_index_map.get(&TypeId::of::<T>())?;
         self.passes[idx].as_any().downcast_ref::<T>()
     }
 

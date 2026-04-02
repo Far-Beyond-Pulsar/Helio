@@ -624,6 +624,45 @@ impl Renderer {
             }
         }
 
+        // Upload water volumes to GPU only when the descriptor has changed.
+        // get_water_volumes_gpu() allocates a Vec; skipping it at steady state
+        // eliminates the per-frame heap allocation and GPU write.
+        // NOTE: must happen before the `texture_views` ArrayVec is built, since
+        // clear_water_volumes_dirty() requires `&mut self.scene` and cannot
+        // coexist with the immutable borrows held by that ArrayVec.
+        let water_volume_count = self.scene.water_volumes_count();
+        if water_volume_count > 0 && self.scene.water_volumes_dirty() {
+            let water_volumes = self.scene.get_water_volumes_gpu();
+            // Bridge descriptor sim/wind params into WaterSimPass so the update
+            // shader sees them. The descriptor is the source of truth — the pass's
+            // own fields are updated when the volume descriptor changes.
+            if let Some(pass) = self.graph.find_pass_mut::<helio_pass_water_sim::WaterSimPass>() {
+                let vol = &water_volumes[0];
+                pass.set_sim_dynamics(vol.sim_dynamics[0], vol.sim_dynamics[1]);
+                pass.set_wave_scale(vol.sim_dynamics[2]);
+                pass.set_wave_speed(vol.wave_params[2]);
+                pass.set_wind([vol.wind_params[0], vol.wind_params[1]], vol.wind_params[2]);
+            }
+            self.queue.write_buffer(
+                &self.water_volumes_buffer,
+                0,
+                bytemuck::cast_slice(&water_volumes),
+            );
+            self.scene.clear_water_volumes_dirty();
+        }
+
+        // Upload water hitboxes to GPU only when they have changed.
+        let water_hitbox_count = self.scene.water_hitboxes_count();
+        if water_hitbox_count > 0 && self.scene.water_hitboxes_dirty() {
+            let water_hitboxes = self.scene.get_water_hitboxes_gpu();
+            self.queue.write_buffer(
+                &self.water_hitboxes_buffer,
+                0,
+                bytemuck::cast_slice(&water_hitboxes),
+            );
+            self.scene.clear_water_hitboxes_dirty();
+        }
+
         let mut texture_views = ArrayVec::<&wgpu::TextureView, MAX_TEXTURES>::new();
         let mut samplers = ArrayVec::<&wgpu::Sampler, MAX_TEXTURES>::new();
         for slot in 0..crate::material::MAX_TEXTURES {
@@ -638,38 +677,6 @@ impl Renderer {
         let rc_radius = self.gi_config.rc_radius;
         let rc_min = [camera.position.x - rc_radius, camera.position.y - rc_radius, camera.position.z - rc_radius];
         let rc_max = [camera.position.x + rc_radius, camera.position.y + rc_radius, camera.position.z + rc_radius];
-
-        // Upload water volumes to GPU if any exist
-        let water_volume_count = self.scene.water_volumes_count();
-        if water_volume_count > 0 {
-            let water_volumes = self.scene.get_water_volumes_gpu();
-            // Bridge descriptor sim/wind params into WaterSimPass so the update
-            // shader sees them. The descriptor is the source of truth — the pass's
-            // own fields are updated from the first volume each frame.
-            if let Some(pass) = self.graph.find_pass_mut::<helio_pass_water_sim::WaterSimPass>() {
-                let vol = &water_volumes[0];
-                pass.set_sim_dynamics(vol.sim_dynamics[0], vol.sim_dynamics[1]);
-                pass.set_wave_scale(vol.sim_dynamics[2]);
-                pass.set_wave_speed(vol.wave_params[2]);
-                pass.set_wind([vol.wind_params[0], vol.wind_params[1]], vol.wind_params[2]);
-            }
-            self.queue.write_buffer(
-                &self.water_volumes_buffer,
-                0,
-                bytemuck::cast_slice(&water_volumes),
-            );
-        }
-
-        // Upload water hitboxes to GPU if any exist
-        let water_hitbox_count = self.scene.water_hitboxes_count();
-        if water_hitbox_count > 0 {
-            let water_hitboxes = self.scene.get_water_hitboxes_gpu();
-            self.queue.write_buffer(
-                &self.water_hitboxes_buffer,
-                0,
-                bytemuck::cast_slice(&water_hitboxes),
-            );
-        }
 
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
