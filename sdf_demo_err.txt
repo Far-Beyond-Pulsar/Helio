@@ -1,0 +1,6 @@
+[2026-04-01T22:53:50Z WARN  wgpu_hal::vulkan::instance] GENERAL [Loader Message (0x0)]
+    	windows_read_data_files_in_registry: Registry lookup failed to get layer manifest files.
+[2026-04-01T22:53:50Z WARN  wgpu_hal::vulkan::instance] 	objects: (type: INSTANCE, hndl: 0x26e54164160, name: ?)
+[helio][debug] GPU uploads last 100 frames: 1.04 MiB total (10.6 KiB/frame avg)
+[helio][debug] GPU uploads last 100 frames: 0.04 MiB total (0.4 KiB/frame avg)
+[helio][debug] GPU uploads last 100 frames: 0.04 MiB total (0.4 KiB/frame avg)
