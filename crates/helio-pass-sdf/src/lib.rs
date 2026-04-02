@@ -897,10 +897,6 @@ impl RenderPass for SdfPass {
         "SDF"
     }
 
-    fn as_any(&self) -> &dyn std::any::Any { self }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
-
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         if !self.enabled {
             return Ok(());
