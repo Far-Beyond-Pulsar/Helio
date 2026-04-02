@@ -1,6 +1,6 @@
 [package]
 name = "helio"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 authors = ["Helio Contributors"]
 description = "High-level facade over helio-v3 for stable scene handles and O(1)-style CPU updates"
