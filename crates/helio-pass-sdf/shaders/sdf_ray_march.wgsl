@@ -284,18 +284,26 @@ fn sdf_query_hinted(world_pos: vec3<f32>, level: u32) -> f32 {
     return fine_dist;
 }
 
-// Normal estimation using the blended SDF field for smooth LOD transitions.
-// This ensures normals match the geometry that was actually hit by the ray marcher.
+// Normal estimation using the SDF field at a consistently-chosen clip level.
+//
+// The previous implementation (sdf_query_hinted) blended fine and coarse levels
+// using a per-sample blend alpha: each tetrahedron point is at a slightly
+// different position, so each picked a different blend weight.  That cross-level
+// inconsistency produced noisy, flicker-prone normals near clip-map boundaries.
+//
+// Fix: evaluate the blend alpha ONCE at the hit point (p), pick either the fine
+// or coarse level uniformly for all 4 samples, and sample directly without any
+// further blending.  This makes the gradient consistent and eliminates the noise.
 fn estimate_normal(p: vec3<f32>, eps: f32, level: u32) -> vec3<f32> {
-    // Tetrahedron technique — 4 blended samples for smooth normals.
-    // sdf_query_hinted skips the O(level_count) level search since the march
-    // loop already identified which level contains the hit point, saving
-    // 4 × O(level_count) = ~32 containment checks per pixel on the shade path.
+    let alpha       = clipmap_blend_alpha(level, p);
+    let query_level = select(level,
+                             level + 1u,
+                             alpha > 0.5 && level + 1u < clip_config.level_count);
     let k = vec2<f32>(1.0, -1.0);
-    let n = k.xyy * sdf_query_hinted(p + k.xyy * eps, level) +
-            k.yyx * sdf_query_hinted(p + k.yyx * eps, level) +
-            k.yxy * sdf_query_hinted(p + k.yxy * eps, level) +
-            k.xxx * sdf_query_hinted(p + k.xxx * eps, level);
+    let n = k.xyy * sample_level_trilinear(query_level, p + k.xyy * eps) +
+            k.yyx * sample_level_trilinear(query_level, p + k.yyx * eps) +
+            k.yxy * sample_level_trilinear(query_level, p + k.yxy * eps) +
+            k.xxx * sample_level_trilinear(query_level, p + k.xxx * eps);
     return normalize(n);
 }
 
@@ -424,10 +432,13 @@ fn fs_main(in: VsOutput) -> FsOutput {
     // Finest-level voxel size — drives the adaptive threshold and min step floor
     let vs0 = level_voxel_size(0u);
 
-    // Add ray dither offset to break up banding patterns (IQ technique)
-    // Uses fragment position (pixel coordinate) for stable inter-pixel variation
-    let dither = fract(sin(dot(in.position.xy, 
-                               vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    // Interleaved gradient noise (Jimenez, SIGGRAPH 2014) — better spatial
+    // uniformity than the sin hash and no GPU sin-precision issues (which can
+    // produce visible banding on some AMD hardware).  The golden-ratio increment
+    // on the frame counter (jitter_frame.z) gives near-optimal temporal
+    // convergence when TAA is active.
+    let dither = fract(52.9829189 * fract(dot(in.position.xy, vec2<f32>(0.06711056, 0.00583715))
+                       + camera.jitter_frame.z * 0.61803398875));
 
     // Start at the volume entry face (clamp to 0 if camera is already inside),
     // backed off by one fine voxel to avoid missing the entry surface, then

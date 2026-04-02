@@ -197,6 +197,14 @@ pub struct SdfPass {
     volume_max:        [f32; 3],
     #[allow(dead_code)]
     surface_format:    wgpu::TextureFormat,
+
+    // ── Static-scene early-out ─────────────────────────────────────────────
+    /// CPU mirror of the per-level brick-snapped origins (mirrors sdf_scroll.wgsl).
+    /// Initialised to i32::MIN as a sentinel that forces the first frame dirty.
+    cached_snap_origins: [[i32; 3]; 8],
+    /// Set by `prepare()`, read by `execute()`.  When true the scroll, classify,
+    /// and evaluate compute passes are all skipped; only the ray-march runs.
+    gpu_passes_clean:    bool,
 }
 
 impl SdfPass {
@@ -533,6 +541,8 @@ impl SdfPass {
             volume_min,
             volume_max,
             surface_format,
+            cached_snap_origins: [[i32::MIN; 3]; 8], // sentinel → first frame always dirty
+            gpu_passes_clean: false,
         }
     }
 
@@ -1030,6 +1040,28 @@ impl RenderPass for SdfPass {
             self.bindings_dirty = false;
         }
 
+        // ── Static-scene detection ────────────────────────────────────────
+        // Mirror the snap-origin computation from sdf_scroll.wgsl so execute()
+        // can skip scroll / classify / evaluate when nothing has changed.
+        // This eliminates ~512 compute WGs (classify early-returns) every frame
+        // on static scenes. The ray-march pass still runs unconditionally.
+        let cam_pos = ctx.scene.camera.position();
+        let mut any_level_dirty = false;
+        for level in 0..self.level_count as usize {
+            let vs         = self.voxel_size_for_level(level as u32);
+            let brick_step = vs * self.brick_size as f32;
+            let new_snap = [
+                (cam_pos[0] / brick_step).floor() as i32,
+                (cam_pos[1] / brick_step).floor() as i32,
+                (cam_pos[2] / brick_step).floor() as i32,
+            ];
+            if new_snap != self.cached_snap_origins[level] {
+                any_level_dirty = true;
+                self.cached_snap_origins[level] = new_snap;
+            }
+        }
+        self.gpu_passes_clean = !needs_upload && !any_level_dirty;
+
         Ok(())
     }
 
@@ -1065,61 +1097,68 @@ impl RenderPass for SdfPass {
             self.march_bg_camera_key = camera_ptr;
         }
 
-        // ── GPU reset (zero CPU work — pure encoder commands) ─────────────
-        // Restore indirect dispatch args to [0,1,1]×level_count via GPU DMA.
-        // classify will atomically increment element x (dirty count); y,z stay 1.
-        ctx.encoder.copy_buffer_to_buffer(
-            &self.eval_indirect_template_buffer,
-            0,
-            &self.eval_indirect_buffer,
-            0,
-            self.level_count as u64 * 3 * 4,
-        );
-        ctx.encoder.clear_buffer(&self.dirty_flags_buffer, 0, None);
-        ctx.encoder.clear_buffer(&self.dirty_bricks_buffer, 0, None);
+        // ── GPU reset + compute passes (skipped on static frames) ────────
+        // When neither the camera nor any edit has changed since the last frame,
+        // scroll_state and the atlas are already up-to-date: skip all three
+        // compute passes.  The ray-march pass still runs (it reads the atlas
+        // without modifying it).
+        if !self.gpu_passes_clean {
+            // ── GPU reset (zero CPU work — pure encoder commands) ─────────────
+            // Restore indirect dispatch args to [0,1,1]×level_count via GPU DMA.
+            // classify will atomically increment element x (dirty count); y,z stay 1.
+            ctx.encoder.copy_buffer_to_buffer(
+                &self.eval_indirect_template_buffer,
+                0,
+                &self.eval_indirect_buffer,
+                0,
+                self.level_count as u64 * 3 * 4,
+            );
+            ctx.encoder.clear_buffer(&self.dirty_flags_buffer, 0, None);
+            ctx.encoder.clear_buffer(&self.dirty_bricks_buffer, 0, None);
 
-        // ── Pass 1: Scroll detection ───────────────────────────────────────
-        // One workgroup of 8 threads checks each level's snap origin.
-        {
-            let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("SDF Scroll"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.scroll_pipeline);
-            cpass.set_bind_group(0, self.scroll_bg.as_ref().unwrap(), &[]);
-            cpass.dispatch_workgroups(1, 1, 1);
-        }
+            // ── Pass 1: Scroll detection ───────────────────────────────────────
+            // One workgroup of 8 threads checks each level's snap origin.
+            {
+                let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SDF Scroll"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.scroll_pipeline);
+                cpass.set_bind_group(0, self.scroll_bg.as_ref().unwrap(), &[]);
+                cpass.dispatch_workgroups(1, 1, 1);
+            }
 
-        // ── Pass 2: Classify (GPU BVH traversal per brick × level) ────────
-        // Fixed dispatch: 64 WGs × level_count = 512 WGs for default config.
-        // Each WG handles 64 bricks (grid_dim/brick_size = 16; 4096/64 = 64 WGs).
-        {
-            let wgs_x = self.bricks_per_level / 64; // 4096 / 64 = 64
-            let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("SDF Classify"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.classify_pipeline);
-            cpass.set_bind_group(0, &self.classify_bg, &[]);
-            cpass.dispatch_workgroups(wgs_x, self.level_count, 1);
-        }
+            // ── Pass 2: Classify (GPU BVH traversal per brick × level) ────────
+            // Fixed dispatch: 64 WGs × level_count = 512 WGs for default config.
+            // Each WG handles 64 bricks (grid_dim/brick_size = 16; 4096/64 = 64 WGs).
+            {
+                let wgs_x = self.bricks_per_level / 64; // 4096 / 64 = 64
+                let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SDF Classify"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.classify_pipeline);
+                cpass.set_bind_group(0, &self.classify_bg, &[]);
+                cpass.dispatch_workgroups(wgs_x, self.level_count, 1);
+            }
 
-        // ── Pass 3: Evaluate (indirect per level) ─────────────────────────
-        // Each level dispatches x WGs where x = number of dirty bricks for that level.
-        // x was written atomically by the classify pass.
-        {
-            let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("SDF Evaluate"),
-                timestamp_writes: None,
-            });
-            cpass.set_pipeline(&self.eval_pipeline);
-            for (level, eval_bg) in self.eval_bgs.iter().enumerate() {
-                cpass.set_bind_group(0, eval_bg, &[]);
-                // Each level's indirect args are at byte offset `level * 3 * 4`.
-                cpass.dispatch_workgroups_indirect(
-                    &self.eval_indirect_buffer,
-                    (level * 3 * 4) as u64,
-                );
+            // ── Pass 3: Evaluate (indirect per level) ─────────────────────────
+            // Each level dispatches x WGs where x = number of dirty bricks for that level.
+            // x was written atomically by the classify pass.
+            {
+                let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SDF Evaluate"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.eval_pipeline);
+                for (level, eval_bg) in self.eval_bgs.iter().enumerate() {
+                    cpass.set_bind_group(0, eval_bg, &[]);
+                    // Each level's indirect args are at byte offset `level * 3 * 4`.
+                    cpass.dispatch_workgroups_indirect(
+                        &self.eval_indirect_buffer,
+                        (level * 3 * 4) as u64,
+                    );
+                }
             }
         }
 
