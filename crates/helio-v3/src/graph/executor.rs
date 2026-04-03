@@ -416,6 +416,29 @@ impl RenderGraph {
             .filter_map(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Returns a reference to the profiler for reading timing data.
+    ///
+    /// Use this to access CPU and GPU profiling results after calling `execute()`.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use helio_v3::RenderGraph;
+    /// # let mut graph = RenderGraph::new(&device, &queue);
+    /// graph.execute(&scene, &target, &depth).unwrap();
+    ///
+    /// // Print timing results
+    /// graph.profiler().print_frame_timings();
+    ///
+    /// // Or access raw data
+    /// for (name, duration) in graph.profiler().get_cpu_timings() {
+    ///     println!("{}: {:?}", name, duration);
+    /// }
+    /// ```
+    pub fn profiler(&self) -> &Profiler {
+        &self.profiler
+    }
+
     /// Executes the render graph with automatic profiling.
     ///
     /// This is the main entry point for rendering. It:
@@ -499,6 +522,9 @@ impl RenderGraph {
         depth: &wgpu::TextureView,
         frame_resources: &libhelio::FrameResources<'_>,
     ) -> Result<()> {
+        // Clear CPU timings from previous frame
+        self.profiler.clear_cpu_timings();
+
         let mut encoder = scene
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -520,7 +546,6 @@ impl RenderGraph {
             let (pass, _) = pending_passes
                 .split_first_mut()
                 .expect("pass_index within bounds");
-            let _scope = self.profiler.scope(pass.name());
 
             // Populate frame resources with transient textures + pass-published resources
             let mut visible_frame_resources = base_frame_resources;
@@ -530,37 +555,58 @@ impl RenderGraph {
                 published_pass.publish(&mut visible_frame_resources);
             }
 
-            let prepare_ctx = PrepareContext {
-                device: &scene.device,
-                queue: &scene.queue,
-                frame_num: scene.frame_count,
-                scene,
-                frame_resources: &visible_frame_resources,
-                resize: false,
-                width: scene.width,
-                height: scene.height,
-                delta_time: self.delta_time,
-            };
-            pass.prepare(&prepare_ctx)?;
+            // CPU profiling scope for prepare()
+            {
+                let _scope = self.profiler.scope(pass.name());
+                let prepare_ctx = PrepareContext {
+                    device: &scene.device,
+                    queue: &scene.queue,
+                    frame_num: scene.frame_count,
+                    scene,
+                    frame_resources: &visible_frame_resources,
+                    resize: false,
+                    width: scene.width,
+                    height: scene.height,
+                    delta_time: self.delta_time,
+                };
+                pass.prepare(&prepare_ctx)?;
+            } // Scope ends here, profiler is released
 
-            let mut ctx = PassContext {
-                encoder: &mut encoder,
-                target,
-                depth,
-                scene: scene.resources(),
-                profiler: &mut self.profiler,
-                frame_num: scene.frame_count,
-                width: scene.width,
-                height: scene.height,
-                device: &scene.device,
-                resources: &visible_frame_resources,
-            };
+            // GPU profiling: write start timestamp
+            let pass_name = pass.name();
+            self.profiler.begin_gpu_pass(&mut encoder, pass_name);
 
-            pass.execute(&mut ctx)?;
+            // execute() with GPU profiling (handled via PassContext)
+            {
+                let mut ctx = PassContext {
+                    encoder: &mut encoder,
+                    target,
+                    depth,
+                    scene: scene.resources(),
+                    profiler: &mut self.profiler,
+                    frame_num: scene.frame_count,
+                    width: scene.width,
+                    height: scene.height,
+                    device: &scene.device,
+                    resources: &visible_frame_resources,
+                };
+
+                pass.execute(&mut ctx)?;
+            }
+
+            // GPU profiling: write end timestamp
+            self.profiler.end_gpu_pass(&mut encoder, pass_name);
         }
+
+        // Resolve GPU timestamp queries
+        self.profiler.resolve_gpu_queries(&mut encoder);
 
         scene.queue.submit([encoder.finish()]);
         crate::upload::finish_frame();
+
+        // Read back GPU timestamps (blocks until GPU completes)
+        self.profiler.read_gpu_timestamps_blocking(&scene.device);
+
         Ok(())
     }
 

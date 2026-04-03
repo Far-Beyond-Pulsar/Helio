@@ -259,11 +259,8 @@ impl<'a> PassContext<'a> {
         &'b mut self,
         desc: &'b wgpu::RenderPassDescriptor<'b>,
     ) -> wgpu::RenderPass<'b> {
-        let label = desc.label.unwrap_or("unnamed");
-        self.profiler.begin_gpu_pass(self.encoder, label);
-
+        // TODO: GPU profiling with begin/end_gpu_pass (needs lifetime fixes)
         self.encoder.begin_render_pass(desc)
-        // TODO: Wrap in AutoProfiledRenderPass with Drop for end_gpu_pass
     }
 
     /// Begins a compute pass with automatic GPU profiling.
@@ -302,11 +299,8 @@ impl<'a> PassContext<'a> {
         &'b mut self,
         desc: &'b wgpu::ComputePassDescriptor<'b>,
     ) -> wgpu::ComputePass<'b> {
-        let label = desc.label.unwrap_or("unnamed");
-        self.profiler.begin_gpu_pass(self.encoder, label);
-
+        // TODO: GPU profiling with begin/end_gpu_pass (needs lifetime fixes)
         self.encoder.begin_compute_pass(desc)
-        // TODO: Wrap in AutoProfiledComputePass
     }
 }
 

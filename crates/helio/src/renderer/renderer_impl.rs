@@ -68,6 +68,15 @@ pub struct Renderer {
     water_hitboxes_buffer: wgpu::Buffer,
     /// Instant of the previous `render()` call, used to compute real `delta_time`.
     last_render_time: std::time::Instant,
+    /// Precomputed TAA jitter translation matrices (16-sample Halton sequence).
+    /// Cached per resolution to avoid per-frame matrix construction overhead.
+    jitter_matrices: [glam::Mat4; 16],
+    /// Cached resolution for jitter matrix precomputation.
+    jitter_cache_width: u32,
+    jitter_cache_height: u32,
+    /// Optional live portal handle for non-blocking profiling telemetry
+    #[cfg(feature = "live-portal")]
+    portal_handle: Option<helio_live_portal::LivePortalHandle>,
 }
 
 enum GraphKind {
@@ -77,6 +86,18 @@ enum GraphKind {
 }
 
 impl Renderer {
+    /// Precompute all 16 TAA jitter translation matrices for the given resolution.
+    /// This avoids per-frame matrix construction overhead in render().
+    fn compute_jitter_matrices(width: u32, height: u32) -> [glam::Mat4; 16] {
+        let mut matrices = [glam::Mat4::IDENTITY; 16];
+        for (i, raw) in HALTON_JITTER.iter().enumerate() {
+            let jx = ((raw[0] - 0.5) * 2.0) / (width as f32);
+            let jy = ((raw[1] - 0.5) * 2.0) / (height as f32);
+            matrices[i] = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
+        }
+        matrices
+    }
+
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, config: RendererConfig) -> Self {
         let mut scene = Scene::new(device.clone(), queue.clone());
         scene.set_render_size(config.width, config.height);
@@ -121,7 +142,12 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        Self {
+        // Precompute jitter matrices for TAA
+        let internal_w = config.internal_width();
+        let internal_h = config.internal_height();
+        let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
+
+        let mut renderer = Self {
             device,
             queue,
             graph,
@@ -152,7 +178,28 @@ impl Renderer {
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: std::time::Instant::now(),
+            jitter_matrices,
+            jitter_cache_width: internal_w,
+            jitter_cache_height: internal_h,
+            #[cfg(feature = "live-portal")]
+            portal_handle: None,
+        };
+
+        // Automatically start live performance dashboard if feature is enabled
+        #[cfg(feature = "live-portal")]
+        {
+            match helio_live_portal::start_live_portal("127.0.0.1:3030") {
+                Ok(handle) => {
+                    log::info!("🌐 Live performance dashboard: {}", handle.url);
+                    renderer.portal_handle = Some(handle);
+                }
+                Err(e) => {
+                    log::warn!("Failed to start live performance dashboard: {}", e);
+                }
+            }
         }
+
+        renderer
     }
 
     pub fn set_gi_config(&mut self, gi_config: GiConfig) {
@@ -565,13 +612,21 @@ impl Renderer {
         self.last_render_time = now;
         self.graph.set_delta_time(dt);
 
-        let frame_idx = self.scene.gpu_scene().frame_count;
-        let raw = HALTON_JITTER[(frame_idx % 16) as usize];
+        // OPTIMIZATION: Use precomputed jitter matrices (avoid per-frame Mat4 construction).
+        // Recompute cache only if internal resolution changes (rare).
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
+        if internal_w != self.jitter_cache_width || internal_h != self.jitter_cache_height {
+            self.jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
+            self.jitter_cache_width = internal_w;
+            self.jitter_cache_height = internal_h;
+        }
+
+        let frame_idx = self.scene.gpu_scene().frame_count;
+        let jitter_mat = self.jitter_matrices[(frame_idx % 16) as usize];
+        let raw = HALTON_JITTER[(frame_idx % 16) as usize]; // Still needed for jx/jy below
         let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
         let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
-        let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
         let jittered_m = jitter_mat * camera.proj * camera.view;
         let col = jittered_m.to_cols_array();
         let debug_camera_uniform = DebugCameraUniform {
@@ -731,6 +786,60 @@ impl Renderer {
             &frame_resources,
         )?;
 
+        // Send profiling data to live portal (non-blocking)
+        #[cfg(feature = "live-portal")]
+        if let Some(ref portal) = self.portal_handle {
+            let (pass_timings, total_cpu_ms, total_gpu_ms) = self.graph.profiler().export_timings();
+
+            // Convert helio_v3::PassTiming to helio_live_portal::PortalPassTiming
+            let portal_timings: Vec<_> = pass_timings.iter().map(|pt| {
+                helio_live_portal::PortalPassTiming {
+                    name: pt.name.clone(),
+                    gpu_ms: pt.gpu_ms,
+                    cpu_ms: pt.cpu_ms,
+                }
+            }).collect();
+
+            // Create stage timing hierarchy for node graph visualization
+            // Top-level stage represents the entire GPU render pipeline
+            let render_stage_id = "gpu_render";
+            let stage_timings = vec![
+                helio_live_portal::PortalStageTiming {
+                    id: render_stage_id.to_string(),
+                    name: "GPU Render".to_string(),
+                    ms: total_gpu_ms,
+                    children: Vec::new(),
+                }
+            ];
+
+            let snapshot = helio_live_portal::PortalFrameSnapshot {
+                frame: self.scene.gpu_scene().frame_count,
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+                frame_time_ms: dt * 1000.0,
+                frame_to_frame_ms: dt * 1000.0,
+                total_gpu_ms,
+                total_cpu_ms,
+                pass_timings: portal_timings,
+                pipeline_order: pass_timings.iter().map(|pt| pt.name.clone()).collect(),
+                pipeline_stage_id: Some(render_stage_id.to_string()),
+                scene_delta: None,
+                object_count: self.scene.gpu_scene().instances.len(),
+                light_count: self.scene.gpu_scene().lights.len(),
+                billboard_count: self.billboard_instances.len(),
+                draw_calls: helio_live_portal::DrawCallMetrics {
+                    total: self.scene.gpu_scene().resources().draw_count as usize,
+                    opaque: self.scene.gpu_scene().resources().draw_count as usize,
+                    transparent: 0,
+                },
+                stage_timings,
+            };
+
+            portal.publish(snapshot);
+        }
+
         // Explicit drops needed: both ArrayVecs borrow from `self.scene` and must
         // be released before `advance_frame()` takes `&mut self.scene`.
         drop(texture_views);
@@ -740,12 +849,20 @@ impl Renderer {
     }
 
     /// Start the live performance portal web dashboard on http://127.0.0.1:3030
+    ///
+    /// **Note**: When the `live-portal` feature is enabled (default), the dashboard
+    /// starts automatically during `Renderer::new()`. You only need to call this manually
+    /// if you want to restart the server or handle startup errors differently.
+    ///
+    /// Once started, profiling data will automatically be sent to the web UI
+    /// on every frame without blocking the render thread.
+    ///
     /// Returns the URL on success.
     #[cfg(feature = "live-portal")]
     pub fn start_live_portal_default(&mut self) -> std::io::Result<String> {
         let handle = helio_live_portal::start_live_portal("127.0.0.1:3030")?;
         let url = handle.url.clone();
-        // TODO: Store handle and integrate frame snapshots
+        self.portal_handle = Some(handle);
         Ok(url)
     }
 }

@@ -267,11 +267,12 @@ impl GBufferPass {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 // Depth prepass already wrote the closest depth with `Less`.
-                // Use `Equal` so only fragments at that exact depth are shaded,
-                // giving the GPU a hard guarantee for early-Z culling.
+                // Use `LessEqual` for early-Z culling while being robust to precision issues.
+                // This maintains early-Z benefits (GPU can discard fragments before shading)
+                // while avoiding re-shading due to minor floating-point differences.
                 // `depth_write_enabled: false` avoids redundant bandwidth.
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::Equal),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

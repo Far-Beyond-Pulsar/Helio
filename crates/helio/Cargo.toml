@@ -11,7 +11,7 @@ arrayvec = "0.7"
 bytemuck = { version = "1.14", features = ["derive"] }
 glam = { version = "0.29", features = ["bytemuck"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
-helio-v3 = { path = "../helio-v3" }
+helio-v3 = { path = "../helio-v3", default-features = false }
 helio-pass-billboard = { path = "../helio-pass-billboard" }
 helio-pass-light-cull = { path = "../helio-pass-light-cull" }
 helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
@@ -42,5 +42,6 @@ quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" 
 helio-live-portal = { path = "../helio-live-portal", optional = true }
 
 [features]
-default = []
+default = ["profiling", "live-portal"]
+profiling = ["helio-v3/profiling"]
 live-portal = ["helio-live-portal"]

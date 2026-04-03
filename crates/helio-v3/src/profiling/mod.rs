@@ -215,7 +215,7 @@ impl Profiler {
     ///
     /// - `encoder`: Command encoder to write timestamp into
     /// - `name`: Pass name for debugging
-    pub fn begin_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &str) {
+    pub fn begin_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
             self.gpu.begin_pass(encoder, name);
         }
@@ -235,10 +235,143 @@ impl Profiler {
     ///
     /// - `encoder`: Command encoder to write timestamp into
     /// - `name`: Pass name for debugging
-    pub fn end_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &str) {
+    pub fn end_gpu_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if self.enabled {
             self.gpu.end_pass(encoder, name);
         }
     }
+
+    /// Resolve GPU timestamp queries to buffer (call after submitting command buffer)
+    pub fn resolve_gpu_queries(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if self.enabled {
+            self.gpu.resolve_queries(encoder);
+            self.gpu.copy_to_resolve_buffer(encoder);
+        }
+    }
+
+    /// Read back GPU timestamps (blocking, call after frame completion)
+    pub fn read_gpu_timestamps_blocking(&mut self, device: &wgpu::Device) -> &[GpuTimestamp] {
+        if self.enabled {
+            self.gpu.read_timestamps_blocking(device)
+        } else {
+            &[]
+        }
+    }
+
+    /// Get CPU timings
+    pub fn get_cpu_timings(&self) -> &std::collections::HashMap<&'static str, std::time::Duration> {
+        self.cpu.get_timings()
+    }
+
+    /// Get last GPU timings (non-blocking)
+    pub fn get_gpu_timings(&self) -> &[GpuTimestamp] {
+        self.gpu.get_last_timings()
+    }
+
+    /// Clear CPU timings for new frame
+    pub fn clear_cpu_timings(&mut self) {
+        self.cpu.clear();
+    }
+
+    /// Print profiling results to console (blocking - use for debugging only!)
+    ///
+    /// **Warning**: This blocks the render thread and causes frame hitches.
+    /// For production use, export to helio-live-portal instead via `export_pass_timings()`.
+    pub fn print_frame_timings(&self) {
+        if !self.enabled {
+            return;
+        }
+
+        println!("\n=== Frame Timings ===");
+
+        // CPU timings
+        let mut cpu_timings: Vec<_> = self.cpu.get_timings().iter().collect();
+        cpu_timings.sort_by_key(|(name, _)| *name);
+
+        println!("CPU:");
+        let mut total_cpu = std::time::Duration::ZERO;
+        for (name, duration) in cpu_timings {
+            println!("  {:<30} {:>8.2}ms", name, duration.as_secs_f64() * 1000.0);
+            total_cpu += *duration;
+        }
+        println!("  {:<30} {:>8.2}ms", "TOTAL CPU", total_cpu.as_secs_f64() * 1000.0);
+
+        // GPU timings
+        if !self.gpu.get_last_timings().is_empty() {
+            println!("\nGPU:");
+            let mut total_gpu = 0u64;
+            for ts in self.gpu.get_last_timings() {
+                println!("  {:<30} {:>8.2}ms", ts.name, ts.duration_ns as f64 / 1_000_000.0);
+                total_gpu += ts.duration_ns;
+            }
+            println!("  {:<30} {:>8.2}ms", "TOTAL GPU", total_gpu as f64 / 1_000_000.0);
+        }
+
+        println!("====================\n");
+    }
+
+    /// Export profiling data in a format suitable for helio-live-portal.
+    ///
+    /// Returns (pass_timings, total_cpu_ms, total_gpu_ms) for non-blocking transmission
+    /// to the web UI. This is the recommended way to access profiling data.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use helio_v3::RenderGraph;
+    /// # let graph = RenderGraph::new(&device, &queue);
+    /// let (pass_timings, total_cpu_ms, total_gpu_ms) = graph.profiler().export_timings();
+    ///
+    /// // Send to helio-live-portal without blocking
+    /// // portal_handle.publish(PortalFrameSnapshot { pass_timings, ... });
+    /// ```
+    pub fn export_timings(&self) -> (Vec<PassTiming>, f32, f32) {
+        if !self.enabled {
+            return (Vec::new(), 0.0, 0.0);
+        }
+
+        let mut pass_timings = Vec::new();
+        let mut total_cpu_ms = 0.0;
+        let mut total_gpu_ms = 0.0;
+
+        // Merge CPU and GPU timings by pass name
+        let mut pass_map = std::collections::HashMap::new();
+
+        // Add CPU timings
+        for (name, duration) in self.cpu.get_timings() {
+            let ms = duration.as_secs_f64() * 1000.0;
+            pass_map.insert(*name, (ms as f32, 0.0f32));
+            total_cpu_ms += ms as f32;
+        }
+
+        // Add GPU timings
+        for ts in self.gpu.get_last_timings() {
+            let ms = ts.duration_ns as f64 / 1_000_000.0;
+            pass_map.entry(ts.name.as_str()).or_insert((0.0, 0.0)).1 = ms as f32;
+            total_gpu_ms += ms as f32;
+        }
+
+        // Convert to Vec
+        for (name, (cpu_ms, gpu_ms)) in pass_map {
+            pass_timings.push(PassTiming {
+                name: name.to_string(),
+                cpu_ms,
+                gpu_ms,
+            });
+        }
+
+        // Sort by name for consistent ordering
+        pass_timings.sort_by(|a, b| a.name.cmp(&b.name));
+
+        (pass_timings, total_cpu_ms, total_gpu_ms)
+    }
+}
+
+/// Pass timing data for export to helio-live-portal or other telemetry systems.
+#[derive(Clone, Debug)]
+pub struct PassTiming {
+    pub name: String,
+    pub cpu_ms: f32,
+    pub gpu_ms: f32,
 }
 

@@ -71,12 +71,15 @@
 /// // GPU commands...
 /// profiler.end_pass(&mut encoder, "ShadowPass");
 /// ```
+use std::collections::VecDeque;
+
 pub struct GpuProfiler {
     query_set: Option<wgpu::QuerySet>,
-    // Future: Add query allocation and readback
-    // query_buffer: wgpu::Buffer,
-    // pending_queries: VecDeque<(String, u32, u32)>, // (name, start_index, end_index)
-    // next_index: u32,
+    query_buffer: Option<wgpu::Buffer>,
+    resolve_buffer: Option<wgpu::Buffer>,
+    pending_queries: VecDeque<(&'static str, u32, u32)>, // (name, start_index, end_index)
+    next_index: u32,
+    last_timings: Vec<GpuTimestamp>,
 }
 
 impl GpuProfiler {
@@ -100,9 +103,11 @@ impl GpuProfiler {
     /// let profiler = GpuProfiler::new(&device, &queue);
     /// ```
     pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue) -> Self {
-        let query_set = if device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+        let has_timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+
+        let query_set = if has_timestamps {
             Some(device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("GPU Profiler"),
+                label: Some("GPU Profiler QuerySet"),
                 ty: wgpu::QueryType::Timestamp,
                 count: 256, // 128 passes * 2 timestamps per pass
             }))
@@ -110,12 +115,35 @@ impl GpuProfiler {
             None
         };
 
+        let query_buffer = if has_timestamps {
+            Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("GPU Profiler Query Buffer"),
+                size: 256 * 8, // 256 timestamps * 8 bytes each
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }))
+        } else {
+            None
+        };
+
+        let resolve_buffer = if has_timestamps {
+            Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("GPU Profiler Resolve Buffer"),
+                size: 256 * 8,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }))
+        } else {
+            None
+        };
+
         Self {
             query_set,
-            // Future: Initialize query buffer and allocation
-            // query_buffer: device.create_buffer(...),
-            // pending_queries: VecDeque::new(),
-            // next_index: 0,
+            query_buffer,
+            resolve_buffer,
+            pending_queries: VecDeque::new(),
+            next_index: 0,
+            last_timings: Vec::new(),
         }
     }
 
@@ -141,14 +169,13 @@ impl GpuProfiler {
     /// # let mut encoder = device.create_command_encoder(&Default::default());
     /// profiler.begin_pass(&mut encoder, "ShadowPass");
     /// ```
-    pub fn begin_pass(&mut self, encoder: &mut wgpu::CommandEncoder, _name: &str) {
+    pub fn begin_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if let Some(ref query_set) = self.query_set {
-            // Future: Allocate next query index
-            // let start_index = self.next_index;
-            // self.next_index += 1;
-
-            // Write start timestamp
-            encoder.write_timestamp(query_set, 0); // Stub: use start_index
+            let start_index = self.next_index;
+            self.next_index += 1;
+            encoder.write_timestamp(query_set, start_index);
+            // Push incomplete entry (will be completed by end_pass)
+            self.pending_queries.push_back((name, start_index, 0));
         }
     }
 
@@ -174,22 +201,89 @@ impl GpuProfiler {
     /// # let mut encoder = device.create_command_encoder(&Default::default());
     /// profiler.end_pass(&mut encoder, "ShadowPass");
     /// ```
-    pub fn end_pass(&mut self, encoder: &mut wgpu::CommandEncoder, _name: &str) {
+    pub fn end_pass(&mut self, encoder: &mut wgpu::CommandEncoder, _name: &'static str) {
         if let Some(ref query_set) = self.query_set {
-            // Future: Allocate next query index
-            // let end_index = self.next_index;
-            // self.next_index += 1;
+            let end_index = self.next_index;
+            self.next_index += 1;
+            encoder.write_timestamp(query_set, end_index);
 
-            // Write end timestamp
-            encoder.write_timestamp(query_set, 1); // Stub: use end_index
-
-            // Future: Record query for readback
-            // self.pending_queries.push_back((name.to_string(), start_index, end_index));
+            // Update the last pending query with end index
+            if let Some(last) = self.pending_queries.back_mut() {
+                last.2 = end_index;
+            }
         }
     }
 
-    // Future: Add readback method
-    // pub fn read_timestamps(&mut self, queue: &wgpu::Queue) -> Vec<GpuTimestamp> { ... }
+    /// Resolve query set to buffer (call after frame submit)
+    pub fn resolve_queries(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if let (Some(ref query_set), Some(ref query_buffer)) = (&self.query_set, &self.query_buffer) {
+            if self.next_index > 0 {
+                encoder.resolve_query_set(query_set, 0..self.next_index, query_buffer, 0);
+            }
+        }
+    }
+
+    /// Copy resolved queries to CPU-readable buffer
+    pub fn copy_to_resolve_buffer(&mut self, encoder: &mut wgpu::CommandEncoder) {
+        if let (Some(ref query_buffer), Some(ref resolve_buffer)) = (&self.query_buffer, &self.resolve_buffer) {
+            if self.next_index > 0 {
+                encoder.copy_buffer_to_buffer(query_buffer, 0, resolve_buffer, 0, (self.next_index as u64) * 8);
+            }
+        }
+    }
+
+    /// Read back GPU timestamps (blocking, call after frame completion)
+    pub fn read_timestamps_blocking(&mut self, device: &wgpu::Device) -> &[GpuTimestamp] {
+        self.last_timings.clear();
+
+        if let Some(ref resolve_buffer) = self.resolve_buffer {
+            if self.pending_queries.is_empty() {
+                return &self.last_timings;
+            }
+
+            let buffer_slice = resolve_buffer.slice(..);
+            let (tx, rx) = std::sync::mpsc::channel();
+
+            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                tx.send(result).ok();
+            });
+
+            // Wait for buffer mapping to complete (rx.recv() will block)
+            if rx.recv().ok().is_some() {
+                let data = buffer_slice.get_mapped_range();
+                let timestamps: &[u64] = bytemuck::cast_slice(&data);
+
+                // Process all pending queries
+                for &(name, start_idx, end_idx) in &self.pending_queries {
+                    if (end_idx as usize) < timestamps.len() {
+                        let start_ns = timestamps[start_idx as usize];
+                        let end_ns = timestamps[end_idx as usize];
+
+                        if end_ns > start_ns {
+                            self.last_timings.push(GpuTimestamp {
+                                name: name.to_string(),
+                                duration_ns: end_ns - start_ns,
+                            });
+                        }
+                    }
+                }
+
+                drop(data);
+                resolve_buffer.unmap();
+            }
+        }
+
+        // Reset for next frame
+        self.pending_queries.clear();
+        self.next_index = 0;
+
+        &self.last_timings
+    }
+
+    /// Get last recorded timings (non-blocking)
+    pub fn get_last_timings(&self) -> &[GpuTimestamp] {
+        &self.last_timings
+    }
 }
 
 /// GPU timestamp result.

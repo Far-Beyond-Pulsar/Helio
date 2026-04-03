@@ -143,7 +143,7 @@ fn pcss_penumbra_size(receiver_depth: f32, avg_blocker_depth: f32, light_size: f
     return (receiver_depth - avg_blocker_depth) / max(avg_blocker_depth, 0.001) * light_size;
 }
 
-fn sample_cascade_shadow(layer: u32, cascade_scale: f32, world_pos: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
+fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world_pos: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
     let light_clip = shadow_matrices[layer].mat * vec4<f32>(world_pos, 1.0);
     if light_clip.w <= 0.0 { return 1.0; }
 
@@ -156,14 +156,24 @@ fn sample_cascade_shadow(layer: u32, cascade_scale: f32, world_pos: vec3<f32>, f
 
     let receiver_depth = ndc.z;
     let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
-    var lit_sum = 0.0;
 
-    for (var i = 0u; i < shadow_config.pcf_sample_count; i++) {
-        let offset = vogel_disk_sample(i, shadow_config.pcf_sample_count, theta) * (cascade_scale / ATLAS_SIZE);
+    // OPTIMIZATION: Adaptive PCF sample count based on cascade distance
+    let base_count = shadow_config.pcf_sample_count;
+    var pcf_count: u32;
+    switch cascade_idx {
+        case 0u: { pcf_count = base_count; }
+        case 1u: { pcf_count = max(base_count * 3u / 4u, 4u); }
+        case 2u: { pcf_count = max(base_count / 2u, 4u); }
+        default: { pcf_count = max(base_count / 4u, 4u); }
+    }
+
+    var lit_sum = 0.0;
+    for (var i = 0u; i < pcf_count; i++) {
+        let offset = vogel_disk_sample(i, pcf_count, theta) * (cascade_scale / ATLAS_SIZE);
         lit_sum += textureSampleCompareLevel(shadow_atlas, shadow_sampler, shadow_uv + offset, i32(layer), receiver_depth);
     }
 
-    return lit_sum / f32(shadow_config.pcf_sample_count);
+    return lit_sum / f32(pcf_count);
 }
 
 fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>, frag_coord: vec2<f32>, frame: u32) -> f32 {
@@ -221,7 +231,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
     if light.light_type > 0u && light.light_type < 2u {
         let to_frag = biased_pos - light.position_range.xyz;
         layer = light.shadow_index + point_light_face(to_frag);
-        return sample_cascade_shadow(layer, 1.0, biased_pos, frag_coord, frame);
+        return sample_cascade_shadow(layer, 0u, 1.0, biased_pos, frag_coord, frame);
     } else if light.light_type == 0u {
         let dist = length(world_pos - camera.position_near.xyz);
         let splits = globals.csm_splits;
@@ -261,7 +271,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
             shadow_a = sample_cascade_shadow_pcss(layer_a, cascade_a, biased_pos, frag_coord, frame);
         } else {
             let cascade_scale_a = 1.0 + f32(cascade_a) * 1.5;
-            shadow_a = sample_cascade_shadow(layer_a, cascade_scale_a, biased_pos, frag_coord, frame);
+            shadow_a = sample_cascade_shadow(layer_a, cascade_a, cascade_scale_a, biased_pos, frag_coord, frame);
         }
 
         if blend <= 0.001 { return shadow_a; }
@@ -274,7 +284,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
                 shadow_b = sample_cascade_shadow_pcss(layer_b, cascade_b, biased_pos, frag_coord, frame);
             } else {
                 let cascade_scale_b = 1.0 + f32(cascade_b) * 1.5;
-                shadow_b = sample_cascade_shadow(layer_b, cascade_scale_b, biased_pos, frag_coord, frame);
+                shadow_b = sample_cascade_shadow(layer_b, cascade_b, cascade_scale_b, biased_pos, frag_coord, frame);
             }
             return mix(shadow_a, shadow_b, blend);
         }
@@ -282,7 +292,7 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
         return shadow_a;
     } else {
         layer = light.shadow_index;
-        return sample_cascade_shadow(layer, 1.0, biased_pos, frag_coord, frame);
+        return sample_cascade_shadow(layer, 0u, 1.0, biased_pos, frag_coord, frame);
     }
 }
 

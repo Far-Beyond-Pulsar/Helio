@@ -64,9 +64,13 @@ use std::time::Instant;
 ///     // ... CPU work ...
 /// } // Timing recorded automatically
 /// ```
+use std::collections::HashMap;
+#[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+use std::time::Duration;
+
 pub struct CpuProfiler {
-    // Future: Timing tree for hierarchical profiling
-    // scopes: Vec<(String, Duration)>,
+    /// Timing records per pass name
+    timings: HashMap<&'static str, Duration>,
 }
 
 impl CpuProfiler {
@@ -77,8 +81,18 @@ impl CpuProfiler {
     /// - **O(1)**: Initializes empty profiler
     pub fn new() -> Self {
         Self {
-            // Future: Initialize timing tree
+            timings: HashMap::new(),
         }
+    }
+
+    /// Get recorded CPU timings for all passes
+    pub fn get_timings(&self) -> &HashMap<&'static str, Duration> {
+        &self.timings
+    }
+
+    /// Clear recorded timings (call at frame start)
+    pub fn clear(&mut self) {
+        self.timings.clear();
     }
 
     /// Creates a CPU profiling scope (RAII guard).
@@ -105,13 +119,14 @@ impl CpuProfiler {
     ///     // ... CPU work ...
     /// } // Timing recorded when guard drops
     /// ```
-    pub fn scope(&mut self, _name: &'static str) -> ScopeGuard {
+    pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
         ScopeGuard {
             #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
             start: Instant::now(),
-            // Future: Pass profiler reference for recording
-            // profiler: self,
-            // name,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+            profiler: self,
+            #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+            name,
         }
     }
 }
@@ -149,15 +164,16 @@ impl Default for CpuProfiler {
 ///     // ... CPU work ...
 /// } // <-- Timing recorded here (automatic via Drop)
 /// ```
-pub struct ScopeGuard {
+pub struct ScopeGuard<'a> {
     #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
     start: Instant,
-    // Future: Reference to profiler for recording
-    // profiler: &'a mut CpuProfiler,
-    // name: &'static str,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+    profiler: &'a mut CpuProfiler,
+    #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+    name: &'static str,
 }
 
-impl Drop for ScopeGuard {
+impl Drop for ScopeGuard<'_> {
     /// Records elapsed time when the guard is dropped.
     ///
     /// # Performance
@@ -165,9 +181,10 @@ impl Drop for ScopeGuard {
     /// - **O(1)**: Calculates elapsed time and records to profiler
     fn drop(&mut self) {
         #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
-        let _elapsed = self.start.elapsed();
-        // Future: Record to profiler
-        // self.profiler.record(self.name, elapsed);
+        {
+            let elapsed = self.start.elapsed();
+            self.profiler.timings.insert(self.name, elapsed);
+        }
     }
 }
 

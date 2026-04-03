@@ -17,5 +17,5 @@ libhelio = { path = "../libhelio" }
 pollster = "0.4"
 
 [features]
-default = []
+default = ["profiling"]
 profiling = []
