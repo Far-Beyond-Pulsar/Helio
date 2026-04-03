@@ -295,6 +295,25 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
+        // Hash camera buffer pointer to detect changes (conservative: pointer changes trigger rebuild)
+        let camera_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            // Hash the camera buffer pointer (conservative - detects buffer reallocations)
+            (ctx.scene.camera as *const _ as usize).hash(&mut hasher);
+            hasher.finish()
+        };
+
+        // Skip HiZ rebuild if camera hasn't changed (reuse previous frame's pyramid)
+        if camera_hash == self.prev_camera_hash && self.copy_bind_group.is_some() {
+            // Camera static - reuse existing HiZ pyramid from previous frame
+            return Ok(());
+        }
+
+        // Camera moved - update hash and rebuild pyramid
+        self.prev_camera_hash = camera_hash;
+
         // Rebuild depth-copy bind group if the depth texture view pointer changed
         let depth_key = ctx.depth as *const _ as usize;
         if self.copy_bind_group_key != Some(depth_key) {

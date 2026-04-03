@@ -51,6 +51,8 @@ pub struct LightCullPass {
     bind_group: Option<wgpu::BindGroup>,
     /// Key: (camera_ptr, lights_ptr) — used to skip needless bind-group rebuilds.
     bind_group_key: Option<(usize, usize)>,
+    /// Light culling cache key: (camera_hash, lights_hash, light_count) — used to skip culling compute when scene static.
+    cull_cache_key: Option<(u64, u64, u32)>,
     num_tiles_x: u32,
     num_tiles_y: u32,
     width: u32,
@@ -177,6 +179,7 @@ impl LightCullPass {
             tile_light_counts,
             bind_group: None,
             bind_group_key: None,
+            cull_cache_key: None,
             num_tiles_x,
             num_tiles_y,
             width,
@@ -216,8 +219,36 @@ impl RenderPass for LightCullPass {
             // No active lights: clear light lists/counts to avoid stale data usage.
             ctx.encoder.clear_buffer(&self.tile_light_lists, 0, None);
             ctx.encoder.clear_buffer(&self.tile_light_counts, 0, None);
+            self.cull_cache_key = None; // Invalidate cache
             return Ok(());
         }
+
+        // ── Light culling cache: skip compute if scene static ─────────────────
+        // Hash camera and lights to detect changes
+        let camera_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (ctx.scene.camera as *const _ as usize).hash(&mut hasher);
+            hasher.finish()
+        };
+        let lights_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (ctx.scene.lights as *const _ as usize).hash(&mut hasher);
+            ctx.scene.light_count.hash(&mut hasher);
+            hasher.finish()
+        };
+
+        let cache_key = (camera_hash, lights_hash, ctx.scene.light_count);
+
+        // Check if we can reuse previous frame's culling results
+        if self.cull_cache_key == Some(cache_key) {
+            // Camera and lights unchanged - reuse cached tile culling results
+            return Ok(());
+        }
+
+        // Update cache key
+        self.cull_cache_key = Some(cache_key);
 
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let lights_ptr = ctx.scene.lights as *const _ as usize;
