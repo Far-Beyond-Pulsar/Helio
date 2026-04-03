@@ -345,9 +345,9 @@ impl RenderPass for ShadowPass {
         }
 
         // ── Shadow caching: read dirty flags from previous frame ──────────────
-        // Check if we have mapped data from the previous frame's dirty flags
-        if self.mapping_ready.load(std::sync::atomic::Ordering::Acquire) {
-            // Mapping is complete - read the dirty flags
+        // First, ensure staging buffer is unmapped before any copy operations
+        if self.mapping_pending && self.mapping_ready.load(std::sync::atomic::Ordering::Acquire) {
+            // Mapping complete - read the dirty flags before unmapping
             {
                 let slice = self.shadow_dirty_staging.slice(..).get_mapped_range();
                 let flags_u32: &[u32] = bytemuck::cast_slice(&slice[..64]);
@@ -361,21 +361,20 @@ impl RenderPass for ShadowPass {
             self.shadow_dirty_staging.unmap();
             self.mapping_ready.store(false, std::sync::atomic::Ordering::Release);
             self.mapping_pending = false;
-        } else if self.mapping_pending {
-            // Mapping not ready yet, but we need to unmap to allow copy operations
-            // Conservative: assume all lights dirty if we can't read the staging buffer
-            self.shadow_dirty_staging.unmap();
-            self.mapping_pending = false;
-            self.light_dirty_flags.fill(true);
         }
 
         // Shadow caching optimization: check if any lights are dirty
         // (Uses dirty flags from previous frame due to 1-frame async latency)
-        let any_dirty = self.light_dirty_flags.iter().any(|&d| d);
+        // Conservative: if mapping still pending, assume all dirty
+        let any_dirty = if self.mapping_pending {
+            true // Can't read flags yet, be conservative
+        } else {
+            self.light_dirty_flags.iter().any(|&d| d)
+        };
 
         if !any_dirty {
             // No lights moved - reuse previous frame's shadow atlas entirely
-            // Still copy dirty flags for next frame, then return early
+            // Copy dirty flags to staging for next frame (buffer is guaranteed unmapped)
             ctx.encoder.copy_buffer_to_buffer(
                 &self.shadow_dirty_buf,
                 0,
@@ -386,16 +385,14 @@ impl RenderPass for ShadowPass {
             ctx.encoder.clear_buffer(&self.shadow_dirty_buf, 0, None);
 
             // Initiate async mapping for next frame
-            if !self.mapping_pending {
-                let staging = self.shadow_dirty_staging.slice(..);
-                let ready_flag = Arc::clone(&self.mapping_ready);
-                staging.map_async(wgpu::MapMode::Read, move |result| {
-                    if result.is_ok() {
-                        ready_flag.store(true, std::sync::atomic::Ordering::Release);
-                    }
-                });
-                self.mapping_pending = true;
-            }
+            let staging = self.shadow_dirty_staging.slice(..);
+            let ready_flag = Arc::clone(&self.mapping_ready);
+            staging.map_async(wgpu::MapMode::Read, move |result| {
+                if result.is_ok() {
+                    ready_flag.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
+            self.mapping_pending = true;
 
             return Ok(());
         }
@@ -483,20 +480,21 @@ impl RenderPass for ShadowPass {
         }
 
         // ── Shadow caching: copy dirty flags for next frame ───────────────────
-        // Copy current dirty flags to staging buffer (will be read next frame)
-        ctx.encoder.copy_buffer_to_buffer(
-            &self.shadow_dirty_buf,
-            0,
-            &self.shadow_dirty_staging,
-            0,
-            64,
-        );
-
-        // Clear dirty flags on GPU (ShadowMatrixPass will set them again if lights move)
-        ctx.encoder.clear_buffer(&self.shadow_dirty_buf, 0, None);
-
-        // Initiate async mapping for next frame (non-blocking)
+        // Only copy and map if buffer is not currently mapped (mapping_pending = false)
         if !self.mapping_pending {
+            // Copy current dirty flags to staging buffer (will be read next frame)
+            ctx.encoder.copy_buffer_to_buffer(
+                &self.shadow_dirty_buf,
+                0,
+                &self.shadow_dirty_staging,
+                0,
+                64,
+            );
+
+            // Clear dirty flags on GPU (ShadowMatrixPass will set them again if lights move)
+            ctx.encoder.clear_buffer(&self.shadow_dirty_buf, 0, None);
+
+            // Initiate async mapping for next frame (non-blocking)
             let staging = self.shadow_dirty_staging.slice(..);
             let ready_flag = Arc::clone(&self.mapping_ready);
             staging.map_async(wgpu::MapMode::Read, move |result| {
