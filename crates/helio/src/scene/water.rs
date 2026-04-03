@@ -157,4 +157,12 @@ impl Scene {
     pub(crate) fn clear_water_volumes_dirty(&mut self) {
         self.water_volumes_dirty = false;
     }
+
+    /// Force-mark water volumes as dirty so their parameters are re-applied to
+    /// the render pass on the next frame. Call this after the render graph is
+    /// rebuilt (e.g. on resize) to ensure the new `WaterSimPass` receives the
+    /// current wind/sim settings from the volume descriptor.
+    pub(crate) fn mark_water_volumes_dirty(&mut self) {
+        self.water_volumes_dirty = true;
+    }
 }

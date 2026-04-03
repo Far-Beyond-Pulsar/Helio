@@ -448,6 +448,10 @@ impl Renderer {
                     self.debug_state.clone(),
                     &self.debug_camera_buffer,
                 );
+                // The new graph contains a fresh WaterSimPass with default (no-wind)
+                // settings. Re-dirty the water volumes so the next frame re-applies
+                // the descriptor's wind/sim params to the new pass.
+                self.scene.mark_water_volumes_dirty();
             }
             GraphKind::Simple => {
                 self.graph = build_simple_graph(&self.device, &self.queue, self.surface_format);
@@ -469,6 +473,8 @@ impl Renderer {
                             &self.debug_camera_buffer,
                         );
                         self.custom_graph_config = Some(new_cfg);
+                        // Same as Default: re-dirty so the new pass gets wind params.
+                        self.scene.mark_water_volumes_dirty();
                     } else {
                         self.graph.set_render_size(width, height);
                     }
