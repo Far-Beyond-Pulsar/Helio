@@ -361,6 +361,12 @@ impl RenderPass for ShadowPass {
             self.shadow_dirty_staging.unmap();
             self.mapping_ready.store(false, std::sync::atomic::Ordering::Release);
             self.mapping_pending = false;
+        } else if self.mapping_pending {
+            // Mapping not ready yet, but we need to unmap to allow copy operations
+            // Conservative: assume all lights dirty if we can't read the staging buffer
+            self.shadow_dirty_staging.unmap();
+            self.mapping_pending = false;
+            self.light_dirty_flags.fill(true);
         }
 
         // Shadow caching optimization: check if any lights are dirty
