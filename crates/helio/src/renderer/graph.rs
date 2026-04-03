@@ -42,12 +42,12 @@ pub fn build_default_graph(
     let hiz_view = Arc::clone(&hiz_pass.hiz_view);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
 
-    let shadow_dirty_buf = device.create_buffer(&wgpu::BufferDescriptor {
+    let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
         size: 64,
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
-    });
+    }));
     let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Hashes"),
         size: 64,
@@ -63,7 +63,7 @@ pub fn build_default_graph(
         &shadow_hashes_buf,
     )));
 
-    graph.add_pass(Box::new(ShadowPass::new(device)));
+    graph.add_pass(Box::new(ShadowPass::new(device, Arc::clone(&shadow_dirty_buf))));
 
     let has_sky = scene.sky_context().has_sky;
     if has_sky {
@@ -180,12 +180,12 @@ pub fn build_hlfs_graph(
     let hiz_view = Arc::clone(&hiz_pass.hiz_view);
     let hiz_sampler = Arc::clone(&hiz_pass.hiz_sampler);
 
-    let shadow_dirty_buf = device.create_buffer(&wgpu::BufferDescriptor {
+    let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
         size: 64,
-        usage: wgpu::BufferUsages::STORAGE,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
-    });
+    }));
     let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Hashes"),
         size: 64,
@@ -201,7 +201,7 @@ pub fn build_hlfs_graph(
         &shadow_hashes_buf,
     )));
 
-    graph.add_pass(Box::new(ShadowPass::new(device)));
+    graph.add_pass(Box::new(ShadowPass::new(device, Arc::clone(&shadow_dirty_buf))));
 
     let has_sky = scene.sky_context().has_sky;
     if has_sky {

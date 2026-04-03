@@ -40,6 +40,7 @@
 //! no per-frame CPU write to this buffer.
 
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -84,11 +85,27 @@ pub struct ShadowPass {
 
     /// PCF comparison sampler (`LessEqual`) — consumed by the deferred lighting pass.
     pub compare_sampler: wgpu::Sampler,
+
+    /// Dirty flag buffer reference (per-light dirty flags from shadow matrix compute)
+    shadow_dirty_buf: Arc<wgpu::Buffer>,
+
+    /// Staging buffer for reading back dirty flags to CPU
+    shadow_dirty_staging: wgpu::Buffer,
+
+    /// Cached per-light dirty flags (conservative: all true initially)
+    /// Maps light index -> dirty flag
+    light_dirty_flags: Vec<bool>,
+
+    /// Whether we have a pending buffer map operation
+    mapping_pending: bool,
+
+    /// Whether the current mapping is complete and ready to read
+    mapping_ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ShadowPass {
     /// Allocate all GPU resources.  Called once; zero allocations after this.
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, shadow_dirty_buf: Arc<wgpu::Buffer>) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow"),
@@ -266,6 +283,17 @@ impl ShadowPass {
             ..Default::default()
         });
 
+        // Staging buffer for reading back dirty flags (MAP_READ)
+        let shadow_dirty_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow/DirtyStaging"),
+            size: 256, // 64 lights max (same size as shadow_dirty_buf in graph.rs)
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Initialize all lights as dirty (conservative - render everything on first frame)
+        let light_dirty_flags = vec![true; 64];
+
         Self {
             pipeline,
             bgl_0,
@@ -276,6 +304,11 @@ impl ShadowPass {
             atlas_tex,
             atlas_view,
             compare_sampler,
+            shadow_dirty_buf,
+            shadow_dirty_staging,
+            light_dirty_flags,
+            mapping_pending: false,
+            mapping_ready: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 }
@@ -293,7 +326,13 @@ impl RenderPass for ShadowPass {
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
-        // Zero per-frame CPU work: nothing to upload.
+        // TODO: Async dirty flag readback
+        // For full shadow caching optimization, we would:
+        // 1. Trigger async read of shadow_dirty_staging from previous frame
+        // 2. Update self.light_dirty_flags when mapping completes
+        // 3. Copy current dirty flags to staging for next frame
+        //
+        // Skipped for now due to buffer mapping complexity (see earlier GPU timestamp issues)
         Ok(())
     }
 
@@ -302,6 +341,56 @@ impl RenderPass for ShadowPass {
         let face_count = (ctx.scene.shadow_count as usize).min(MAX_SHADOW_FACES);
 
         if draw_count == 0 || face_count == 0 {
+            return Ok(());
+        }
+
+        // ── Shadow caching: read dirty flags from previous frame ──────────────
+        // Check if we have mapped data from the previous frame's dirty flags
+        if self.mapping_ready.load(std::sync::atomic::Ordering::Acquire) {
+            // Mapping is complete - read the dirty flags
+            {
+                let slice = self.shadow_dirty_staging.slice(..).get_mapped_range();
+                let flags_u32: &[u32] = bytemuck::cast_slice(&slice[..64]);
+
+                // Update our cached dirty flags
+                for (i, &flag) in flags_u32.iter().enumerate().take(self.light_dirty_flags.len()) {
+                    self.light_dirty_flags[i] = flag != 0;
+                }
+            } // Drop the slice
+
+            self.shadow_dirty_staging.unmap();
+            self.mapping_ready.store(false, std::sync::atomic::Ordering::Release);
+            self.mapping_pending = false;
+        }
+
+        // Shadow caching optimization: check if any lights are dirty
+        // (Uses dirty flags from previous frame due to 1-frame async latency)
+        let any_dirty = self.light_dirty_flags.iter().any(|&d| d);
+
+        if !any_dirty {
+            // No lights moved - reuse previous frame's shadow atlas entirely
+            // Still copy dirty flags for next frame, then return early
+            ctx.encoder.copy_buffer_to_buffer(
+                &self.shadow_dirty_buf,
+                0,
+                &self.shadow_dirty_staging,
+                0,
+                64,
+            );
+            ctx.encoder.clear_buffer(&self.shadow_dirty_buf, 0, None);
+
+            // Initiate async mapping for next frame
+            if !self.mapping_pending {
+                let staging = self.shadow_dirty_staging.slice(..);
+                let ready_flag = Arc::clone(&self.mapping_ready);
+                staging.map_async(wgpu::MapMode::Read, move |result| {
+                    if result.is_ok() {
+                        ready_flag.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                });
+                self.mapping_pending = true;
+            }
+
             return Ok(());
         }
 
@@ -385,6 +474,31 @@ impl RenderPass for ShadowPass {
             for i in 0..draw_count {
                 pass.draw_indexed_indirect(indirect, i as u64 * 20);
             }
+        }
+
+        // ── Shadow caching: copy dirty flags for next frame ───────────────────
+        // Copy current dirty flags to staging buffer (will be read next frame)
+        ctx.encoder.copy_buffer_to_buffer(
+            &self.shadow_dirty_buf,
+            0,
+            &self.shadow_dirty_staging,
+            0,
+            64,
+        );
+
+        // Clear dirty flags on GPU (ShadowMatrixPass will set them again if lights move)
+        ctx.encoder.clear_buffer(&self.shadow_dirty_buf, 0, None);
+
+        // Initiate async mapping for next frame (non-blocking)
+        if !self.mapping_pending {
+            let staging = self.shadow_dirty_staging.slice(..);
+            let ready_flag = Arc::clone(&self.mapping_ready);
+            staging.map_async(wgpu::MapMode::Read, move |result| {
+                if result.is_ok() {
+                    ready_flag.store(true, std::sync::atomic::Ordering::Release);
+                }
+            });
+            self.mapping_pending = true;
         }
 
         Ok(())

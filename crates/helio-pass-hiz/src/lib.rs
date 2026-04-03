@@ -52,6 +52,9 @@ pub struct HiZBuildPass {
     mip_views: Vec<wgpu::TextureView>,
     width: u32,
     height: u32,
+
+    // Camera tracking for HiZ reuse optimization (skip rebuild if camera static)
+    prev_camera_hash: u64,
 }
 
 impl HiZBuildPass {
@@ -255,6 +258,7 @@ impl HiZBuildPass {
             mip_views,
             width,
             height,
+            prev_camera_hash: 0, // Force rebuild on first frame
         }
     }
 }
