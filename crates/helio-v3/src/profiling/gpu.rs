@@ -80,6 +80,7 @@ pub struct GpuProfiler {
     pending_queries: VecDeque<(&'static str, u32, u32)>, // (name, start_index, end_index)
     next_index: u32,
     last_timings: Vec<GpuTimestamp>,
+    timestamp_period: f32, // Nanoseconds per timestamp tick
 }
 
 impl GpuProfiler {
@@ -102,7 +103,7 @@ impl GpuProfiler {
     /// # use helio_v3::profiling::GpuProfiler;
     /// let profiler = GpuProfiler::new(&device, &queue);
     /// ```
-    pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         let has_timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
 
         let query_set = if has_timestamps {
@@ -137,6 +138,9 @@ impl GpuProfiler {
             None
         };
 
+        // Get timestamp period for converting ticks to nanoseconds
+        let timestamp_period = queue.get_timestamp_period();
+
         Self {
             query_set,
             query_buffer,
@@ -144,6 +148,7 @@ impl GpuProfiler {
             pending_queries: VecDeque::new(),
             next_index: 0,
             last_timings: Vec::new(),
+            timestamp_period,
         }
     }
 
@@ -256,13 +261,17 @@ impl GpuProfiler {
                 // Process all pending queries
                 for &(name, start_idx, end_idx) in &self.pending_queries {
                     if (end_idx as usize) < timestamps.len() {
-                        let start_ns = timestamps[start_idx as usize];
-                        let end_ns = timestamps[end_idx as usize];
+                        let start_ticks = timestamps[start_idx as usize];
+                        let end_ticks = timestamps[end_idx as usize];
 
-                        if end_ns > start_ns {
+                        if end_ticks > start_ticks {
+                            // Convert ticks to nanoseconds using timestamp period
+                            let duration_ticks = end_ticks - start_ticks;
+                            let duration_ns = (duration_ticks as f32 * self.timestamp_period) as u64;
+
                             self.last_timings.push(GpuTimestamp {
                                 name: name.to_string(),
-                                duration_ns: end_ns - start_ns,
+                                duration_ns,
                             });
                         }
                     }
