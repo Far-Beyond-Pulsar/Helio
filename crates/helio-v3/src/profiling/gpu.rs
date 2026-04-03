@@ -104,7 +104,7 @@ impl GpuProfiler {
     /// let profiler = GpuProfiler::new(&device, &queue);
     /// ```
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let has_timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+        let has_timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
 
         let query_set = if has_timestamps {
             Some(device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -238,49 +238,11 @@ impl GpuProfiler {
     }
 
     /// Read back GPU timestamps (blocking, call after frame completion)
-    pub fn read_timestamps_blocking(&mut self, device: &wgpu::Device) -> &[GpuTimestamp] {
+    pub fn read_timestamps_blocking(&mut self, _device: &wgpu::Device) -> &[GpuTimestamp] {
         self.last_timings.clear();
 
-        if let Some(ref resolve_buffer) = self.resolve_buffer {
-            if self.pending_queries.is_empty() {
-                return &self.last_timings;
-            }
-
-            let buffer_slice = resolve_buffer.slice(..);
-            let (tx, rx) = std::sync::mpsc::channel();
-
-            buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                tx.send(result).ok();
-            });
-
-            // Wait for buffer mapping to complete (rx.recv() will block)
-            if rx.recv().ok().is_some() {
-                let data = buffer_slice.get_mapped_range();
-                let timestamps: &[u64] = bytemuck::cast_slice(&data);
-
-                // Process all pending queries
-                for &(name, start_idx, end_idx) in &self.pending_queries {
-                    if (end_idx as usize) < timestamps.len() {
-                        let start_ticks = timestamps[start_idx as usize];
-                        let end_ticks = timestamps[end_idx as usize];
-
-                        if end_ticks > start_ticks {
-                            // Convert ticks to nanoseconds using timestamp period
-                            let duration_ticks = end_ticks - start_ticks;
-                            let duration_ns = (duration_ticks as f32 * self.timestamp_period) as u64;
-
-                            self.last_timings.push(GpuTimestamp {
-                                name: name.to_string(),
-                                duration_ns,
-                            });
-                        }
-                    }
-                }
-
-                drop(data);
-                resolve_buffer.unmap();
-            }
-        }
+        // TODO: GPU timestamp readback disabled - buffer mapping API needs investigation
+        // For now, only CPU profiling is available
 
         // Reset for next frame
         self.pending_queries.clear();
