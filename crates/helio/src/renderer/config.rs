@@ -9,7 +9,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     let required = wgpu::Features::empty();
     let optional =
         wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
-        wgpu::Features::SHADER_PRIMITIVE_INDEX; // @builtin(primitive_index) in fs
+        wgpu::Features::SHADER_PRIMITIVE_INDEX | // @builtin(primitive_index) in fs
+        wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS; // GPU profiling timestamps via encoder
     required | (adapter_features & optional)
 }
 
