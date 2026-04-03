@@ -302,6 +302,9 @@ impl RenderGraph {
         self.resource_routes.push((name, Box::new(route)));
     }
 
+    // TODO: Automate the additional calls of this method internally such that
+    //       the end user only ever calls it at resize time. Document this when
+    //       it is confirmed to be the case.
     /// Sets the render target size and recreates transient textures.
     ///
     /// Must be called after adding passes and before first execute().

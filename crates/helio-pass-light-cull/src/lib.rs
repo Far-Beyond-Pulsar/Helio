@@ -241,9 +241,12 @@ impl RenderPass for LightCullPass {
 
         let cache_key = (camera_hash, lights_hash, ctx.scene.light_count);
 
+        // Check if resolution changed (window resize invalidates tile grid)
+        let resolution_changed = ctx.width != self.width || ctx.height != self.height;
+
         // Check if we can reuse previous frame's culling results
-        if self.cull_cache_key == Some(cache_key) {
-            // Camera and lights unchanged - reuse cached tile culling results
+        if self.cull_cache_key == Some(cache_key) && !resolution_changed {
+            // Camera, lights, and resolution unchanged - reuse cached tile culling results
             return Ok(());
         }
 

@@ -305,13 +305,16 @@ impl RenderPass for HiZBuildPass {
             hasher.finish()
         };
 
-        // Skip HiZ rebuild if camera hasn't changed (reuse previous frame's pyramid)
-        if camera_hash == self.prev_camera_hash && self.copy_bind_group.is_some() {
-            // Camera static - reuse existing HiZ pyramid from previous frame
+        // Check if resolution changed (window resize invalidates HiZ pyramid)
+        let resolution_changed = ctx.width != self.width || ctx.height != self.height;
+
+        // Skip HiZ rebuild if camera hasn't changed and resolution is the same
+        if camera_hash == self.prev_camera_hash && self.copy_bind_group.is_some() && !resolution_changed {
+            // Camera static and resolution unchanged - reuse existing HiZ pyramid from previous frame
             return Ok(());
         }
 
-        // Camera moved - update hash and rebuild pyramid
+        // Camera moved or resolution changed - update hash and rebuild pyramid
         self.prev_camera_hash = camera_hash;
 
         // Rebuild depth-copy bind group if the depth texture view pointer changed

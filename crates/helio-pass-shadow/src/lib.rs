@@ -323,19 +323,20 @@ impl RenderPass for ShadowPass {
         }
 
         // ── Shadow caching: skip rendering if scene static ────────────────────
-        // Hash camera to detect changes (conservative - buffer pointer changes trigger rebuild)
-        let camera_hash = {
+        // Hash lights to detect changes (conservative - buffer pointer changes trigger rebuild)
+        let lights_hash = {
             use std::hash::{Hash, Hasher};
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (ctx.scene.camera as *const _ as usize).hash(&mut hasher);
+            (ctx.scene.lights as *const _ as usize).hash(&mut hasher);
+            ctx.scene.light_count.hash(&mut hasher);
             hasher.finish()
         };
 
-        let cache_key = (camera_hash, ctx.scene.shadow_count);
+        let cache_key = (lights_hash, ctx.scene.shadow_count);
 
         // Check if we can reuse previous frame's shadow atlas
         if self.shadow_cache_key == Some(cache_key) {
-            // Camera and shadow count unchanged - reuse cached shadow atlas
+            // Lights and shadow count unchanged - reuse cached shadow atlas
             return Ok(());
         }
 
