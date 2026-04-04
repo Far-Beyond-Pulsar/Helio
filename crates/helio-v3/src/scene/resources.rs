@@ -131,5 +131,18 @@ pub struct SceneResources<'a> {
     pub movable_objects_generation: u64,
     /// Generation counter for movable lights (increments when any Movable light moves)
     pub movable_lights_generation: u64,
+
+    // ── Shadow partition buffers (Unreal-style static/dynamic split) ──────────
+    // Both passes use `instances` (main buffer) — only the indirect call lists differ.
+    /// Indirect draw commands for Static/Stationary objects (first_instance into main `instances`).
+    pub shadow_static_indirect: &'a wgpu::Buffer,
+    /// Indirect draw commands for Movable objects (first_instance into main `instances`).
+    pub shadow_movable_indirect: &'a wgpu::Buffer,
+    /// Number of draw calls in shadow_static_indirect.
+    pub shadow_static_draw_count: u32,
+    /// Number of draw calls in shadow_movable_indirect.
+    pub shadow_movable_draw_count: u32,
+    /// Increments when static object topology changes; triggers static atlas re-render.
+    pub static_objects_generation: u64,
 }
 

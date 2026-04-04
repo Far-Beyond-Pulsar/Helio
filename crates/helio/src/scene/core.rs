@@ -72,6 +72,10 @@ pub struct Scene {
     /// When true, objects are sorted for cache coherency (instanced batching).
     pub(in crate::scene) objects_layout_optimized: bool,
 
+    /// True when a Static or Stationary object has been added or removed since the last
+    /// shadow atlas render. Triggers a re-render of the static shadow atlas.
+    pub(in crate::scene) static_objects_dirty: bool,
+
     /// Previous frame's view-projection matrix (for temporal effects)
     pub(in crate::scene) prev_view_proj: Mat4,
 
@@ -212,6 +216,7 @@ impl Scene {
             objects: DenseArena::new(),
             objects_dirty: true,             // rebuild on first flush
             objects_layout_optimized: false, // start in persistent mode
+            static_objects_dirty: true,      // rebuild static shadow atlas on first flush
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
             movable_objects_generation: 0,

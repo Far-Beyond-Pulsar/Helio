@@ -64,35 +64,41 @@ pub struct ShadowPass {
     #[allow(dead_code)]
     bgl_0: wgpu::BindGroupLayout,
 
-    /// Single bind group for the whole pass.  Rebuilt when buffer pointers change.
-    bg_0: Option<wgpu::BindGroup>,
-    /// (shadow_matrices ptr, instances ptr) — detects GrowableBuffer reallocations.
-    bg_0_key: Option<(usize, usize)>,
-
     /// Per-face face-index values, written once at construction and never touched again.
     /// Layout: `face_idx_buf[face * FACE_BUF_STRIDE]` = `u32(face)` followed by 252 zero bytes.
     face_idx_buf: wgpu::Buffer,
 
-    /// Per-face depth-only render-target views into the atlas array.
-    /// `Box<[_]>` instead of `Vec` — capacity is fixed at MAX_SHADOW_FACES forever.
+    // ── Dynamic shadow atlas (Movable objects only) ───────────────────────────
+    /// Per-face render-target views into the dynamic atlas (movable objects).
     face_views: Box<[wgpu::TextureView]>,
-
-    /// The underlying atlas texture (owned).
+    /// The dynamic atlas texture (owned).
     pub atlas_tex: wgpu::Texture,
-
-    /// `D2Array` view over the full atlas — consumed by the deferred lighting pass.
+    /// `D2Array` view — consumed by the deferred lighting pass.
     pub atlas_view: wgpu::TextureView,
+    /// Bind group 0 (shared by both static and dynamic passes — both use `instances`).
+    bg_0: Option<wgpu::BindGroup>,
+    /// Detects GrowableBuffer reallocations; rebuilt on pointer change only.
+    bg_0_key: Option<(usize, usize)>,
+
+    // ── Static shadow atlas (Static/Stationary objects only) ─────────────────
+    /// Per-face render-target views into the static atlas.
+    static_face_views: Box<[wgpu::TextureView]>,
+    /// The static atlas texture (owned, cached indefinitely until static topology changes).
+    pub static_atlas_tex: wgpu::Texture,
+    /// `D2Array` view of the static atlas — consumed by deferred lighting.
+    pub static_atlas_view: wgpu::TextureView,
+    /// Last `static_objects_generation` we rendered the static atlas for.
+    /// `None` = never rendered yet → must render on first frame.
+    static_atlas_cache_gen: Option<u64>,
 
     /// PCF comparison sampler (`LessEqual`) — consumed by the deferred lighting pass.
     pub compare_sampler: wgpu::Sampler,
 
     /// Dirty flag buffer reference (per-light dirty flags from shadow matrix compute)
-    /// This optimization tracks which shadow-casting lights have moved to skip unchanged shadow map renders
     _shadow_dirty_buf: Arc<wgpu::Buffer>,
 
-    /// Intelligent shadow cache state based on movability tracking
-    /// Tracks: (movable_objects_gen, movable_lights_gen, shadow_count)
-    /// Only invalidates when Movable entities actually move, allowing Static scenes to cache indefinitely
+    /// Cache state for the dynamic atlas: (movable_objects_gen, movable_lights_gen, shadow_count).
+    /// Skips re-render when nothing Movable has changed.
     shadow_cache_state: Option<(u64, u64, u32)>,
 }
 
@@ -226,8 +232,9 @@ impl ShadowPass {
         face_idx_buf.unmap();
 
         // ── Atlas texture ──────────────────────────────────────────────────────
+        // Dynamic (Movable objects) atlas — re-rendered when Movable entities move.
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Shadow/Atlas"),
+            label: Some("Shadow/DynamicAtlas"),
             size: wgpu::Extent3d {
                 width: SHADOW_RES,
                 height: SHADOW_RES,
@@ -240,12 +247,10 @@ impl ShadowPass {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-
-        // Per-face 2D render-target views — fixed capacity Box, never grows.
         let face_views: Box<[wgpu::TextureView]> = (0..MAX_SHADOW_FACES as u32)
             .map(|i| {
                 atlas_tex.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("Shadow/Face"),
+                    label: Some("Shadow/DynamicFace"),
                     format: Some(wgpu::TextureFormat::Depth32Float),
                     dimension: Some(wgpu::TextureViewDimension::D2),
                     base_array_layer: i,
@@ -254,10 +259,42 @@ impl ShadowPass {
                 })
             })
             .collect();
-
-        // Full D2Array view for downstream sampling.
         let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("Shadow/AtlasArray"),
+            label: Some("Shadow/DynamicAtlasArray"),
+            format: Some(wgpu::TextureFormat::Depth32Float),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        // Static (Static/Stationary objects) atlas — re-rendered only when static topology changes.
+        let static_atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow/StaticAtlas"),
+            size: wgpu::Extent3d {
+                width: SHADOW_RES,
+                height: SHADOW_RES,
+                depth_or_array_layers: MAX_SHADOW_FACES as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let static_face_views: Box<[wgpu::TextureView]> = (0..MAX_SHADOW_FACES as u32)
+            .map(|i| {
+                static_atlas_tex.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("Shadow/StaticFace"),
+                    format: Some(wgpu::TextureFormat::Depth32Float),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: i,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+        let static_atlas_view = static_atlas_tex.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("Shadow/StaticAtlasArray"),
             format: Some(wgpu::TextureFormat::Depth32Float),
             dimension: Some(wgpu::TextureViewDimension::D2Array),
             ..Default::default()
@@ -281,10 +318,14 @@ impl ShadowPass {
             bgl_0,
             bg_0: None,
             bg_0_key: None,
+            static_atlas_cache_gen: None,
             face_idx_buf,
             face_views,
             atlas_tex,
             atlas_view,
+            static_face_views,
+            static_atlas_tex,
+            static_atlas_view,
             compare_sampler,
             _shadow_dirty_buf: shadow_dirty_buf,
             shadow_cache_state: None,
@@ -300,8 +341,11 @@ impl RenderPass for ShadowPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        // The dynamic atlas contains movable-object shadows.
         frame.shadow_atlas = Some(&self.atlas_view);
         frame.shadow_sampler = Some(&self.compare_sampler);
+        // The static atlas contains static-object shadows (cached between frames).
+        frame.static_shadow_atlas = Some(&self.static_atlas_view);
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
@@ -316,71 +360,66 @@ impl RenderPass for ShadowPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let draw_count = ctx.scene.draw_count;
         let face_count = (ctx.scene.shadow_count as usize).min(MAX_SHADOW_FACES);
+        let static_draw_count = ctx.scene.shadow_static_draw_count;
+        let movable_draw_count = ctx.scene.shadow_movable_draw_count;
 
-        if draw_count == 0 || face_count == 0 {
+        if face_count == 0 {
             self.shadow_cache_state = None;
+            self.static_atlas_cache_gen = None;
             return Ok(());
         }
 
-        // ── Movability-aware intelligent shadow caching ───────────────────────
-        // Uses generation counters that ONLY increment when Movable entities move.
-        // This enables perfect caching for Static scenes:
+        // ── Decide which atlas(es) need re-rendering ──────────────────────────
         //
-        // - Static lights + Static objects = Shadow atlas cached indefinitely ✨
-        // - Static lights + Movable objects = Invalidate when objects move
-        // - Movable lights + Static objects = Invalidate when lights move
-        // - Movable lights + Movable objects = Invalidate when either moves
+        // Unreal-style static/dynamic shadow split:
         //
-        // The generation counters are incremented in Scene's transform update functions
-        // only for entities with Movability::Movable, providing precise invalidation.
+        //   Static atlas  — rendered ONCE when Static/Stationary objects change.
+        //                   Cached indefinitely while static topology is stable.
+        //
+        //   Dynamic atlas — rendered only when Movable objects move or lights move.
+        //                   For a scene where only the ball moves, 90%+ of shadow
+        //                   render cost is eliminated by not re-rendering the
+        //                   cathedral walls, floors, columns, etc.
 
+        let static_gen = ctx.scene.static_objects_generation;
         let movable_objects_gen = ctx.scene.movable_objects_generation;
         let movable_lights_gen = ctx.scene.movable_lights_generation;
         let shadow_count = ctx.scene.shadow_count;
 
-        let current_state = (movable_objects_gen, movable_lights_gen, shadow_count);
+        let need_static = self.static_atlas_cache_gen != Some(static_gen)
+            || self.shadow_cache_state.map_or(true, |(_, _, c)| c != shadow_count);
 
-        // Check if we can reuse the previous frame's shadow atlas
-        if let Some(prev_state) = self.shadow_cache_state {
-            let (prev_objects_gen, prev_lights_gen, prev_shadow_count) = prev_state;
+        let need_dynamic = {
+            let current_state = (movable_objects_gen, movable_lights_gen, shadow_count);
+            let changed = self.shadow_cache_state != Some(current_state);
+            // Also re-render dynamic if static was just rebuilt (light count may differ)
+            changed || need_static
+        };
 
-            // Determine what changed
-            let movable_objects_moved = movable_objects_gen != prev_objects_gen;
-            let movable_lights_moved = movable_lights_gen != prev_lights_gen;
-            let shadow_count_changed = shadow_count != prev_shadow_count;
-
-            // If nothing movable has changed, we can skip rendering entirely!
-            // This is the key optimization - Static scenes never re-render shadows.
-            if !movable_objects_moved && !movable_lights_moved && !shadow_count_changed {
-                return Ok(());
-            }
-
-            // Future: With per-light spatial tracking, we could:
-            // - If only lights moved: invalidate only shadows for those specific lights
-            // - If only objects moved: invalidate only shadows affected by those objects (spatial query)
-            // - If both moved: smart combined invalidation
-            //
-            // For now, we re-render all shadows if anything Movable changed,
-            // but Static content is perfectly cached.
+        if !need_static && !need_dynamic {
+            return Ok(());
         }
-
-        // Update cache state
-        self.shadow_cache_state = Some(current_state);
 
         let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("ShadowPass requires main_scene".into())
         })?;
 
-        // ── Bind group — rebuilt only on GrowableBuffer reallocation ──────────
-        // In steady state (no scene growth) this branch is never taken.
-        // O(1) amortised: pointer changes happen at most O(log N) total across the
-        // entire lifetime of the scene.
+        let vertices = main_scene.mesh_buffers.vertices;
+        let indices = main_scene.mesh_buffers.indices;
+
+        // ── Bind group helpers ─────────────────────────────────────────────────
+        // Each bind group uses: [shadow_matrices, <partition instances>, face_idx_buf].
+        // Rebuilt only on GrowableBuffer pointer change (O(1) amortised).
+        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+
+        // ── Single shared bind group ───────────────────────────────────────────
+        // Both static and dynamic passes use the main `instances` buffer at binding 1.
+        // Transforms are always up-to-date here because update_object_transform writes
+        // directly into this buffer. Rebuilt only on GrowableBuffer reallocation.
         let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
         let inst_ptr = ctx.scene.instances as *const _ as usize;
         let key = (sm_ptr, inst_ptr);
-
         if self.bg_0_key != Some(key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Shadow BG 0"),
@@ -396,8 +435,6 @@ impl RenderPass for ShadowPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        // Bind the first 16 bytes of the face-index buffer.
-                        // The actual face is selected via the dynamic offset below.
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &self.face_idx_buf,
                             offset: 0,
@@ -408,47 +445,126 @@ impl RenderPass for ShadowPass {
             }));
             self.bg_0_key = Some(key);
         }
-
-        // ── Per-face render loop ───────────────────────────────────────────────
-        // face_count ≤ MAX_SHADOW_FACES (compile-time constant = 256).
-        // Each iteration: O(1) — only constant-size wgpu calls, no allocations.
         let bg = self.bg_0.as_ref().unwrap();
+
         let pipeline = &self.pipeline;
-        let vertices = main_scene.mesh_buffers.vertices;
-        let indices = main_scene.mesh_buffers.indices;
-        let indirect = ctx.scene.indirect;
 
-        for face in 0..face_count {
-            let face_view = &self.face_views[face];
-            // Byte offset into face_idx_buf that holds the u32 for this face.
-            let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-
-            let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Shadow"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: face_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            pass.set_pipeline(pipeline);
-            pass.set_bind_group(0, bg, &[dyn_offset]);
-            pass.set_vertex_buffer(0, vertices.slice(..));
-            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-            #[cfg(not(target_arch = "wasm32"))]
-            pass.multi_draw_indexed_indirect(indirect, 0, draw_count);
-            #[cfg(target_arch = "wasm32")]
-            for i in 0..draw_count {
-                pass.draw_indexed_indirect(indirect, i as u64 * 20);
+        // ── Static atlas render ────────────────────────────────────────────────
+        // Only re-rendered when Static/Stationary topology changes.
+        // For a typical scene this renders ONCE at load time, never again.
+        if need_static {
+            let static_indirect = ctx.scene.shadow_static_indirect;
+            if static_draw_count > 0 {
+                for face in 0..face_count {
+                    let face_view = &self.static_face_views[face];
+                    let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
+                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow/Static"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: face_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, bg, &[dyn_offset]);
+                    pass.set_vertex_buffer(0, vertices.slice(..));
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    pass.multi_draw_indexed_indirect(static_indirect, 0, static_draw_count);
+                    #[cfg(target_arch = "wasm32")]
+                    for i in 0..static_draw_count {
+                        pass.draw_indexed_indirect(static_indirect, i as u64 * 20);
+                    }
+                }
+            } else {
+                // No static shadow casters — clear the atlas to 1.0 (fully lit / no shadow)
+                for face in 0..face_count {
+                    let face_view = &self.static_face_views[face];
+                    let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow/StaticClear"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: face_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                }
             }
+            self.static_atlas_cache_gen = Some(static_gen);
+            log::debug!("Shadow: re-rendered static atlas ({} draws, {} faces)", static_draw_count, face_count);
+        }
+
+        // ── Dynamic atlas render ───────────────────────────────────────────────
+        // Re-rendered only when Movable objects or lights move.
+        if need_dynamic {
+            let movable_indirect = ctx.scene.shadow_movable_indirect;
+            if movable_draw_count > 0 {
+                for face in 0..face_count {
+                    let face_view = &self.face_views[face];
+                    let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
+                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow/Dynamic"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: face_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, bg, &[dyn_offset]);
+                    pass.set_vertex_buffer(0, vertices.slice(..));
+                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    pass.multi_draw_indexed_indirect(movable_indirect, 0, movable_draw_count);
+                    #[cfg(target_arch = "wasm32")]
+                    for i in 0..movable_draw_count {
+                        pass.draw_indexed_indirect(movable_indirect, i as u64 * 20);
+                    }
+                }
+            } else {
+                // No movable shadow casters — clear to 1.0 (fully lit)
+                for face in 0..face_count {
+                    let face_view = &self.face_views[face];
+                    let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow/DynamicClear"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: face_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                }
+            }
+            self.shadow_cache_state = Some((movable_objects_gen, movable_lights_gen, shadow_count));
         }
 
         Ok(())

@@ -70,8 +70,11 @@ pub struct MainSceneResources<'a> {
 pub struct FrameResources<'a> {
     /// GBuffer textures (populated after GBufferPass)
     pub gbuffer: Option<GBufferViews<'a>>,
-    /// Shadow atlas (2D array texture view) — populated after ShadowPass
+    /// Shadow atlas (2D array texture view) — populated after ShadowPass (dynamic/Movable objects)
     pub shadow_atlas: Option<&'a wgpu::TextureView>,
+    /// Static shadow atlas (2D array texture view) — cached until Static/Stationary topology changes.
+    /// Combined with `shadow_atlas` in the lighting shader: a pixel is shadowed if either atlas occludes it.
+    pub static_shadow_atlas: Option<&'a wgpu::TextureView>,
     /// Shadow atlas sampler (comparison sampler)
     pub shadow_sampler: Option<&'a wgpu::Sampler>,
     /// Hi-Z pyramid (mip chain of depth, for occlusion culling)
@@ -138,6 +141,7 @@ impl<'a> FrameResources<'a> {
         Self {
             gbuffer: None,
             shadow_atlas: None,
+            static_shadow_atlas: None,
             shadow_sampler: None,
             hiz: None,
             hiz_sampler: None,

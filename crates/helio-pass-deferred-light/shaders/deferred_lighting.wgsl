@@ -112,7 +112,8 @@ struct ShadowConfig {
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
-@group(2) @binding(1) var shadow_atlas:   texture_depth_2d_array;
+@group(2) @binding(1)  var shadow_atlas:         texture_depth_2d_array;  // Dynamic (Movable objects)
+@group(2) @binding(11) var static_shadow_atlas:  texture_depth_2d_array;  // Static (cached forever)
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
 @group(2) @binding(3) var env_cube:       texture_cube<f32>;
 @group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
@@ -231,12 +232,21 @@ fn sample_cascade_shadow(
     var lit_sum = 0.0;
     for (var i = 0u; i < pcf_count; i++) {
         let offset = vogel_disk_sample(i, pcf_count, theta) * filter_radius;
-        lit_sum += textureSampleCompareLevel(
+        // Sample both atlases and take the minimum — pixel is lit only if neither occludes it.
+        // This is the Unreal-style static/dynamic shadow combine for mixed mobility scenes.
+        let dyn_lit = textureSampleCompareLevel(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
             biased_depth,
         );
+        let sta_lit = textureSampleCompareLevel(
+            static_shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            biased_depth,
+        );
+        lit_sum += min(dyn_lit, sta_lit);
     }
     return lit_sum / f32(pcf_count);
 }
@@ -267,8 +277,11 @@ fn pcss_blocker_search(
             continue;
         }
 
-        // Sample actual depth value (not comparison) for blocker detection
-        let occluder_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
+        // Sample actual depth value (not comparison) for blocker detection.
+        // Use min of dynamic and static atlases — the closer occluder is the true blocker.
+        let dyn_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
+        let sta_depth = textureLoad(static_shadow_atlas, pixel_coord, i32(layer), 0);
+        let occluder_depth = min(dyn_depth, sta_depth);
 
         if occluder_depth < receiver_depth - 0.0001 {  // Is blocker
             blocker_sum += occluder_depth;
@@ -338,12 +351,20 @@ fn sample_cascade_shadow_pcss(
     var lit_sum = 0.0;
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
-        lit_sum += textureSampleCompareLevel(
+        // Combine dynamic and static atlases: shadowed by either
+        let dyn_lit = textureSampleCompareLevel(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
             receiver_depth
         );
+        let sta_lit = textureSampleCompareLevel(
+            static_shadow_atlas, shadow_sampler,
+            shadow_uv + offset,
+            i32(layer),
+            receiver_depth
+        );
+        lit_sum += min(dyn_lit, sta_lit);
     }
 
     return lit_sum / f32(shadow_config.pcss_filter_samples);

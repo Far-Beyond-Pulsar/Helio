@@ -724,6 +724,7 @@ impl Renderer {
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
             shadow_atlas: None,
+            static_shadow_atlas: None,
             shadow_sampler: None,
             hiz: None,
             hiz_sampler: None,

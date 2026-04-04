@@ -32,7 +32,7 @@ pub struct DeferredLightPass {
     bind_group_2: Option<wgpu::BindGroup>,
     bind_group_3: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize, usize, usize)>,
-    bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
     width: u32,
     height: u32,
@@ -42,6 +42,7 @@ pub struct DeferredLightPass {
     pre_aa_view: wgpu::TextureView,
     pre_aa_format: wgpu::TextureFormat,
     fallback_shadow_view: wgpu::TextureView,
+    fallback_static_shadow_view: wgpu::TextureView,
     fallback_shadow_sampler: wgpu::Sampler,
     shadow_depth_sampler: wgpu::Sampler,
     fallback_env_view: wgpu::TextureView,
@@ -214,6 +215,17 @@ impl DeferredLightPass {
                 },
                 // Water volumes buffer
                 storage_entry(10),
+                // Static shadow atlas (cached, rendered only when Static/Stationary topology changes)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -282,7 +294,8 @@ impl DeferredLightPass {
 
         let (pre_aa_texture, pre_aa_view) =
             color_texture(device, width, height, pre_aa_format, "Deferred PreAA");
-        let (fallback_shadow_texture, fallback_shadow_view) = fallback_shadow_texture(device);
+        let (_fallback_shadow_tex, fallback_shadow_view) = fallback_shadow_texture(device);
+        let (_fallback_static_shadow_tex, fallback_static_shadow_view) = fallback_shadow_texture(device);
         let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Deferred Fallback Shadow Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -364,6 +377,7 @@ impl DeferredLightPass {
             pre_aa_view,
             pre_aa_format,
             fallback_shadow_view,
+            fallback_static_shadow_view,
             fallback_shadow_sampler,
             shadow_depth_sampler,
             fallback_env_view,
@@ -479,6 +493,7 @@ impl RenderPass for DeferredLightPass {
         }
 
         let shadow_view = ctx.resources.shadow_atlas.unwrap_or(&self.fallback_shadow_view);
+        let static_shadow_view = ctx.resources.static_shadow_atlas.unwrap_or(&self.fallback_static_shadow_view);
         let shadow_sampler = ctx
             .resources
             .shadow_sampler
@@ -488,6 +503,7 @@ impl RenderPass for DeferredLightPass {
         let scene_key = (
             ctx.scene.lights as *const _ as usize,
             shadow_view as *const _ as usize,
+            static_shadow_view as *const _ as usize,
             shadow_sampler as *const _ as usize,
             env_view as *const _ as usize,
             ctx.scene.shadow_matrices as *const _ as usize,
@@ -536,6 +552,8 @@ impl RenderPass for DeferredLightPass {
                         binding: 10,
                         resource: ctx.resources.water_volumes.unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
                     },
+                    // Static shadow atlas (binding 11) — cached, only changes with Static topology
+                    texture_view_entry(11, static_shadow_view),
                 ],
             }));
             self.bind_group_2_key = Some(scene_key);

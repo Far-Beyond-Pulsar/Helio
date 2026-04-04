@@ -160,6 +160,7 @@ impl super::super::Scene {
             n,
             n
         );
+        self.rebuild_shadow_partition_buffers();
     }
 
     /// Optimized path: sorts objects by (mesh_id, material_id) for cache coherency.
@@ -302,6 +303,67 @@ impl super::super::Scene {
         self.gpu_scene.draw_calls.set_data(draw_calls);
         self.gpu_scene.indirect.set_data(indirect);
         self.gpu_scene.visibility.set_data(visibility);
+        self.rebuild_shadow_partition_buffers();
+    }
+
+    /// Builds the shadow-specific partitioned instance + indirect buffers.
+    ///
+    /// Separates objects by movability into two groups:
+    /// - Static/Stationary → `shadow_static_instances` + `shadow_static_indirect`  
+    /// - Movable           → `shadow_movable_instances` + `shadow_movable_indirect`
+    ///
+    /// Each group has its own 0-based instance indices so the shadow passes can
+    /// render them independently with separate atlases (Unreal-style static+dynamic split).
+    ///
+    /// When `static_objects_dirty` is `true`, `static_objects_generation` is incremented
+    /// to signal the ShadowPass to re-render the static shadow atlas.
+    pub(in crate::scene) fn rebuild_shadow_partition_buffers(&mut self) {
+        let n = self.objects.dense_len();
+
+        // Build two INDIRECT call lists — one per mobility class.
+        // first_instance in each entry is the object's dense_index into the main
+        // `instances` buffer, so transforms stay in sync with update_object_transform.
+        // DO NOT copy instance data into separate buffers — that causes stale shadows.
+        let mut static_indirect: Vec<DrawIndexedIndirectArgs> = Vec::new();
+        let mut movable_indirect: Vec<DrawIndexedIndirectArgs> = Vec::new();
+
+        for i in 0..n {
+            let r = self.objects.get_dense(i).unwrap();
+            // Use the object's actual first_instance (its slot in the main instances buffer).
+            let entry = DrawIndexedIndirectArgs {
+                index_count: r.draw.index_count,
+                instance_count: 1,
+                first_index: r.draw.first_index,
+                base_vertex: r.draw.vertex_offset,
+                first_instance: r.draw.first_instance,
+            };
+            if r.movability.can_move() {
+                movable_indirect.push(entry);
+            } else {
+                static_indirect.push(entry);
+            }
+        }
+
+        let static_draw_count = static_indirect.len() as u32;
+        let movable_draw_count = movable_indirect.len() as u32;
+
+        // Bump static generation if the static set was modified
+        if self.static_objects_dirty {
+            self.gpu_scene.static_objects_generation += 1;
+            self.static_objects_dirty = false;
+        }
+
+        self.gpu_scene.shadow_static_draw_count = static_draw_count;
+        self.gpu_scene.shadow_movable_draw_count = movable_draw_count;
+
+        self.gpu_scene.shadow_static_indirect.set_data(static_indirect);
+        self.gpu_scene.shadow_movable_indirect.set_data(movable_indirect);
+
+        log::debug!(
+            "rebuild_shadow_partition_buffers: {} static + {} movable shadow draws",
+            static_draw_count,
+            movable_draw_count,
+        );
     }
 }
 
