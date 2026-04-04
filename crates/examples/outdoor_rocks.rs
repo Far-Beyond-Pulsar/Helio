@@ -370,6 +370,7 @@ impl ApplicationHandler for App {
                                 bounds: [center.x, center.y, center.z, bounds_radius],
                                 flags: 0,
                                 groups: helio::GroupMask::NONE,
+                                movability: None, // Static rocks
                             }));
                         }
                     }

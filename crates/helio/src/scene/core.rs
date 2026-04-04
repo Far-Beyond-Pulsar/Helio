@@ -79,6 +79,14 @@ pub struct Scene {
     /// An object is invisible if any of its groups intersects this mask.
     pub(in crate::scene) group_hidden: GroupMask,
 
+    /// Generation counter for movable objects - increments when any Movable object's transform changes.
+    /// Used by shadow caching to detect when Movable objects move.
+    pub(in crate::scene) movable_objects_generation: u64,
+
+    /// Generation counter for movable lights - increments when any Movable light's position/direction changes.
+    /// Used by shadow caching to detect when Movable lights move.
+    pub(in crate::scene) movable_lights_generation: u64,
+
     /// Per-frame custom trait-based scene actors.
     pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
 
@@ -206,6 +214,8 @@ impl Scene {
             objects_layout_optimized: false, // start in persistent mode
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
+            movable_objects_generation: 0,
+            movable_lights_generation: 0,
             custom_actors: Vec::new(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,

@@ -25,7 +25,7 @@ use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge,
     LightId, MeshId, ObjectId, Renderer, RendererConfig, WaterHitboxDescriptor, WaterHitboxId,
 };
-use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light, sphere_mesh};
+use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
 
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
@@ -342,12 +342,13 @@ impl ApplicationHandler for App {
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let ball_obj_id = insert_object(
+        let ball_obj_id = insert_object_with_movability(
             &mut renderer,
             ball_mesh_id,
             ball_mat,
             glam::Mat4::from_translation(ball_start),
             BALL_RADIUS,
+            Some(helio::Movability::Movable),
         )
         .expect("ball object");
 

@@ -8,7 +8,7 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light};
+use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -231,7 +231,7 @@ impl AppState {
                     let pos = glam::Vec3::new((x as f32 - 1.0) * 1.1, (z as f32 + 0.5) * 1.05, (y as f32 - 1.0) * 1.1);
                     let transform = glam::Mat4::from_translation(pos) * glam::Mat4::from_scale(glam::Vec3::splat(1.0));
                     let box_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.5,0.5,0.5]))).as_mesh().unwrap();
-                    let obj = insert_object(&mut self.renderer, box_mesh_id, box_mat, transform, 1.0).expect("insert box");
+                    let obj = insert_object_with_movability(&mut self.renderer, box_mesh_id, box_mat, transform, 1.0, Some(helio::Movability::Movable)).expect("insert box");
 
                     let body = RigidBodyBuilder::dynamic().translation([pos.x, pos.y, pos.z].into()).build();
                     let body_handle = self.physics_bodies.insert(body);

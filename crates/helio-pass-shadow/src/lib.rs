@@ -90,8 +90,10 @@ pub struct ShadowPass {
     /// This optimization tracks which shadow-casting lights have moved to skip unchanged shadow map renders
     _shadow_dirty_buf: Arc<wgpu::Buffer>,
 
-    /// Previous frame cache key (camera hash, light count) for detecting static scenes
-    shadow_cache_key: Option<(u64, u32)>,
+    /// Intelligent shadow cache state based on movability tracking
+    /// Tracks: (movable_objects_gen, movable_lights_gen, shadow_count)
+    /// Only invalidates when Movable entities actually move, allowing Static scenes to cache indefinitely
+    shadow_cache_state: Option<(u64, u64, u32)>,
 }
 
 impl ShadowPass {
@@ -285,7 +287,7 @@ impl ShadowPass {
             atlas_view,
             compare_sampler,
             _shadow_dirty_buf: shadow_dirty_buf,
-            shadow_cache_key: None,
+            shadow_cache_state: None,
         }
     }
 }
@@ -318,30 +320,54 @@ impl RenderPass for ShadowPass {
         let face_count = (ctx.scene.shadow_count as usize).min(MAX_SHADOW_FACES);
 
         if draw_count == 0 || face_count == 0 {
-            self.shadow_cache_key = None;
+            self.shadow_cache_state = None;
             return Ok(());
         }
 
-        // ── Shadow caching: skip rendering if scene static ────────────────────
-        // Hash lights to detect changes (conservative - buffer pointer changes trigger rebuild)
-        let lights_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (ctx.scene.lights as *const _ as usize).hash(&mut hasher);
-            ctx.scene.light_count.hash(&mut hasher);
-            hasher.finish()
-        };
+        // ── Movability-aware intelligent shadow caching ───────────────────────
+        // Uses generation counters that ONLY increment when Movable entities move.
+        // This enables perfect caching for Static scenes:
+        //
+        // - Static lights + Static objects = Shadow atlas cached indefinitely ✨
+        // - Static lights + Movable objects = Invalidate when objects move
+        // - Movable lights + Static objects = Invalidate when lights move
+        // - Movable lights + Movable objects = Invalidate when either moves
+        //
+        // The generation counters are incremented in Scene's transform update functions
+        // only for entities with Movability::Movable, providing precise invalidation.
 
-        let cache_key = (lights_hash, ctx.scene.shadow_count);
+        let movable_objects_gen = ctx.scene.movable_objects_generation;
+        let movable_lights_gen = ctx.scene.movable_lights_generation;
+        let shadow_count = ctx.scene.shadow_count;
 
-        // Check if we can reuse previous frame's shadow atlas
-        if self.shadow_cache_key == Some(cache_key) {
-            // Lights and shadow count unchanged - reuse cached shadow atlas
-            return Ok(());
+        let current_state = (movable_objects_gen, movable_lights_gen, shadow_count);
+
+        // Check if we can reuse the previous frame's shadow atlas
+        if let Some(prev_state) = self.shadow_cache_state {
+            let (prev_objects_gen, prev_lights_gen, prev_shadow_count) = prev_state;
+
+            // Determine what changed
+            let movable_objects_moved = movable_objects_gen != prev_objects_gen;
+            let movable_lights_moved = movable_lights_gen != prev_lights_gen;
+            let shadow_count_changed = shadow_count != prev_shadow_count;
+
+            // If nothing movable has changed, we can skip rendering entirely!
+            // This is the key optimization - Static scenes never re-render shadows.
+            if !movable_objects_moved && !movable_lights_moved && !shadow_count_changed {
+                return Ok(());
+            }
+
+            // Future: With per-light spatial tracking, we could:
+            // - If only lights moved: invalidate only shadows for those specific lights
+            // - If only objects moved: invalidate only shadows affected by those objects (spatial query)
+            // - If both moved: smart combined invalidation
+            //
+            // For now, we re-render all shadows if anything Movable changed,
+            // but Static content is perfectly cached.
         }
 
-        // Update cache key
-        self.shadow_cache_key = Some(cache_key);
+        // Update cache state
+        self.shadow_cache_state = Some(current_state);
 
         let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("ShadowPass requires main_scene".into())

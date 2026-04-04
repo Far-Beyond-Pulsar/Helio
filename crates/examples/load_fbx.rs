@@ -222,12 +222,15 @@ impl ApplicationHandler for App {
         }
 
         let point_light_pos = Vec3::new(0.0, 3.0, 0.0);
-        let point_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-            point_light_pos.to_array(),
-            [1.0, 0.95, 0.8],
-            12.0,
-            18.0,
-        ))).as_light().unwrap();
+        let point_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
+            point_light(
+                point_light_pos.to_array(),
+                [1.0, 0.95, 0.8],
+                12.0,
+                18.0,
+            ),
+            Some(helio::Movability::Movable),
+        )).as_light().unwrap();
 
         self.state = Some(AppState {
             window,

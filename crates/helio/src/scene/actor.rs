@@ -121,6 +121,7 @@ impl SceneActorTrait for MeshActor {
 pub struct LightActor {
     pub light: GpuLight,
     pub light_id: Option<LightId>,
+    pub movability: Option<libhelio::Movability>,
 }
 
 impl LightActor {
@@ -128,6 +129,15 @@ impl LightActor {
         Self {
             light,
             light_id: None,
+            movability: None,
+        }
+    }
+
+    pub fn new_with_movability(light: GpuLight, movability: Option<libhelio::Movability>) -> Self {
+        Self {
+            light,
+            light_id: None,
+            movability,
         }
     }
 
@@ -139,7 +149,7 @@ impl LightActor {
 impl SceneActorTrait for LightActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.light_id.is_none() {
-            self.light_id = Some(scene.insert_light(self.light));
+            self.light_id = Some(scene.insert_light_with_movability(self.light, self.movability));
         }
     }
 
@@ -605,6 +615,10 @@ impl SceneActor {
 
     pub fn light(light: GpuLight) -> Self {
         SceneActor::Light(LightActor::new(light))
+    }
+
+    pub fn light_with_movability(light: GpuLight, movability: Option<libhelio::Movability>) -> Self {
+        SceneActor::Light(LightActor::new_with_movability(light, movability))
     }
 
     pub fn virtual_mesh(upload: VirtualMeshUpload) -> Self {

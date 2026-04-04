@@ -9,7 +9,7 @@
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, point_light, plane_mesh};
+use v3_demo_common::{box_mesh, cube_mesh, insert_object, insert_object_with_movability, make_material, point_light, plane_mesh};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, MeshId, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -303,7 +303,7 @@ impl AppState {
                 .build();
             let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
 
-            if let Ok(obj_id) = insert_object(&mut self.renderer, mesh, material, transform, (scale * 1.3).max(0.15)) {
+            if let Ok(obj_id) = insert_object_with_movability(&mut self.renderer, mesh, material, transform, (scale * 1.3).max(0.15), Some(helio::Movability::Movable)) {
                 self.dynamic_objects.push(SpawnedObject { id: obj_id, seed: self.rng.next_f32(0.0, std::f32::consts::TAU), speed: self.rng.next_f32(0.4, 1.6), scale, mesh, material, body_handle, collider_handle });
             } else {
                 self.physics_colliders.remove(collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);

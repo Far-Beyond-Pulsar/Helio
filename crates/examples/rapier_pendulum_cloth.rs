@@ -8,7 +8,7 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, point_light, plane_mesh};
+use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, point_light, plane_mesh};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -248,7 +248,7 @@ impl AppState {
                 let z = z_offset;
 
                 let sphere_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.4, 0.4, 0.4]))).as_mesh().unwrap();
-                let obj = insert_object(&mut self.renderer, sphere_mesh_id, sphere_mat, glam::Mat4::from_translation(glam::Vec3::new(x, y, z)) * glam::Mat4::from_scale(glam::Vec3::splat(0.8)), 0.9).expect("insert sphere");
+                let obj = insert_object_with_movability(&mut self.renderer, sphere_mesh_id, sphere_mat, glam::Mat4::from_translation(glam::Vec3::new(x, y, z)) * glam::Mat4::from_scale(glam::Vec3::splat(0.8)), 0.9, Some(helio::Movability::Movable)).expect("insert sphere");
 
                 let body = RigidBodyBuilder::dynamic().translation([x, y, z].into()).build();
                 let body_handle = self.physics_bodies.insert(body);

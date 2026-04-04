@@ -40,7 +40,13 @@
       "WebFetch(domain:lettier.github.io)",
       "WebFetch(domain:zznewclear13.github.io)",
       "Bash(git show:*)",
-      "Bash(ls:*)"
+      "Bash(ls:*)",
+      "Bash(for:*)",
+      "Bash(do if ! grep -q \"bind_group_key\" \"$f\")",
+      "Bash(then echo \"$f\")",
+      "Bash(fi)",
+      "Bash(do if grep -q \"update_light\" \"$f\")",
+      "Bash(do sed -i 's/libhelio::Movability/helio::Movability/g' \"$f\")"
     ]
   }
 }

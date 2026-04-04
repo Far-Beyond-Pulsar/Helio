@@ -127,5 +127,9 @@ pub struct SceneResources<'a> {
     pub draw_count: u32,
     pub light_count: u32,
     pub shadow_count: u32,
+    /// Generation counter for movable objects (increments when any Movable object moves)
+    pub movable_objects_generation: u64,
+    /// Generation counter for movable lights (increments when any Movable light moves)
+    pub movable_lights_generation: u64,
 }
 

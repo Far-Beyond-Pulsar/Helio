@@ -159,6 +159,14 @@ pub struct GpuScene {
     /// Render target height in pixels.
     pub height: u32,
 
+    /// Generation counter for movable objects - increments when any Movable object moves.
+    /// Used by shadow caching to detect movement.
+    pub movable_objects_generation: u64,
+
+    /// Generation counter for movable lights - increments when any Movable light moves.
+    /// Used by shadow caching to detect movement.
+    pub movable_lights_generation: u64,
+
     pub camera: GpuCameraBuffer,
     pub instances: GpuInstanceBuffer,
     pub aabbs: GpuAabbBuffer,
@@ -213,6 +221,8 @@ impl GpuScene {
             frame_count: 0,
             width: 0,
             height: 0,
+            movable_objects_generation: 0,
+            movable_lights_generation: 0,
             camera,
             instances,
             aabbs,
@@ -265,6 +275,8 @@ impl GpuScene {
             draw_count: self.draw_calls.len() as u32,
             light_count: self.lights.len() as u32,
             shadow_count: self.shadow_matrices.len() as u32,
+            movable_objects_generation: self.movable_objects_generation,
+            movable_lights_generation: self.movable_lights_generation,
         }
     }
 

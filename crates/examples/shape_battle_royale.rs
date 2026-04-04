@@ -10,7 +10,7 @@
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, plane_mesh, point_light};
+use v3_demo_common::{box_mesh, cube_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, ObjectId, Renderer, RendererConfig};
 use rapier3d::prelude::*;
@@ -361,7 +361,7 @@ impl AppState {
 
             let mat_id = self.mats[i % self.mats.len()];
             let transform = glam::Mat4::from_translation(floor) * glam::Mat4::from_scale(scale * size);
-            let obj = insert_object(&mut self.renderer, mesh_id, mat_id, transform, size * 1.2).expect("insert object");
+            let obj = insert_object_with_movability(&mut self.renderer, mesh_id, mat_id, transform, size * 1.2, Some(helio::Movability::Movable)).expect("insert object");
 
             self.battle_shapes.push(BattleShape { body_handle, collider_handle, object_id: obj, eliminated: false });
         }
@@ -377,7 +377,7 @@ impl AppState {
             let pos = position + offset;
             let mesh = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0,0.0,0.0],0.12))).as_mesh().unwrap();
             let mat = self.mats[(i % self.mats.len())];
-            let obj = insert_object(&mut self.renderer, mesh, mat, glam::Mat4::from_translation(pos), 0.2).expect("insert explosion");
+            let obj = insert_object_with_movability(&mut self.renderer, mesh, mat, glam::Mat4::from_translation(pos), 0.2, Some(helio::Movability::Movable)).expect("insert explosion");
             self.explosion_particles.push(BlastParticle {
                 object_id: obj,
                 birth: Instant::now(),
