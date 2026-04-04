@@ -51,7 +51,7 @@ pub struct LightCullPass {
     bind_group: Option<wgpu::BindGroup>,
     /// Key: (camera_ptr, lights_ptr) — used to skip needless bind-group rebuilds.
     bind_group_key: Option<(usize, usize)>,
-    /// Light culling cache key: (camera_hash, lights_hash, light_count) — used to skip culling compute when scene static.
+    /// Light culling cache key: (camera_generation, lights_generation, light_count) — used to skip culling compute when scene static.
     cull_cache_key: Option<(u64, u64, u32)>,
     num_tiles_x: u32,
     num_tiles_y: u32,
@@ -63,7 +63,9 @@ impl LightCullPass {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let num_tiles_x = width.div_ceil(TILE_SIZE);
         let num_tiles_y = height.div_ceil(TILE_SIZE);
-        let num_tiles = num_tiles_x * num_tiles_y;
+        let num_tiles = num_tiles_x
+            .checked_mul(num_tiles_y)
+            .expect("tile grid overflow: viewport dimensions too large");
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("LightCull Shader"),
@@ -224,22 +226,11 @@ impl RenderPass for LightCullPass {
         }
 
         // ── Light culling cache: skip compute if scene static ─────────────────
-        // Hash camera and lights to detect changes
-        let camera_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (ctx.scene.camera as *const _ as usize).hash(&mut hasher);
-            hasher.finish()
-        };
-        let lights_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (ctx.scene.lights as *const _ as usize).hash(&mut hasher);
-            ctx.scene.light_count.hash(&mut hasher);
-            hasher.finish()
-        };
+        // Use generation counters to detect actual data changes (not pointer addresses).
+        let camera_gen = ctx.scene.camera_generation;
+        let lights_gen = ctx.scene.movable_lights_generation;
 
-        let cache_key = (camera_hash, lights_hash, ctx.scene.light_count);
+        let cache_key = (camera_gen, lights_gen, ctx.scene.light_count);
 
         // Check if resolution changed (window resize invalidates tile grid)
         let resolution_changed = ctx.width != self.width || ctx.height != self.height;

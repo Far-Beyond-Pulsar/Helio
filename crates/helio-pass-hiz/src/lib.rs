@@ -54,7 +54,7 @@ pub struct HiZBuildPass {
     height: u32,
 
     // Camera tracking for HiZ reuse optimization (skip rebuild if camera static)
-    prev_camera_hash: u64,
+    prev_camera_generation: u64,
 }
 
 impl HiZBuildPass {
@@ -258,7 +258,7 @@ impl HiZBuildPass {
             mip_views,
             width,
             height,
-            prev_camera_hash: 0, // Force rebuild on first frame
+            prev_camera_generation: u64::MAX, // Force rebuild on first frame
         }
     }
 }
@@ -296,26 +296,20 @@ impl RenderPass for HiZBuildPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
-        // Hash camera buffer pointer to detect changes (conservative: pointer changes trigger rebuild)
-        let camera_hash = {
-            use std::hash::{Hash, Hasher};
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            // Hash the camera buffer pointer (conservative - detects buffer reallocations)
-            (ctx.scene.camera as *const _ as usize).hash(&mut hasher);
-            hasher.finish()
-        };
+        // Use camera_generation counter to detect actual camera data changes.
+        let camera_gen = ctx.scene.camera_generation;
 
         // Check if resolution changed (window resize invalidates HiZ pyramid)
         let resolution_changed = ctx.width != self.width || ctx.height != self.height;
 
         // Skip HiZ rebuild if camera hasn't changed and resolution is the same
-        if camera_hash == self.prev_camera_hash && self.copy_bind_group.is_some() && !resolution_changed {
+        if camera_gen == self.prev_camera_generation && self.copy_bind_group.is_some() && !resolution_changed {
             // Camera static and resolution unchanged - reuse existing HiZ pyramid from previous frame
             return Ok(());
         }
 
-        // Camera moved or resolution changed - update hash and rebuild pyramid
-        self.prev_camera_hash = camera_hash;
+        // Camera moved or resolution changed - update generation and rebuild pyramid
+        self.prev_camera_generation = camera_gen;
 
         // Rebuild depth-copy bind group if the depth texture view pointer changed
         let depth_key = ctx.depth as *const _ as usize;

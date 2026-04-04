@@ -347,6 +347,7 @@ impl Scene {
         let unjittered_proj = inv_jitter * camera.proj;
         self.prev_view_proj = unjittered_proj * camera.view;
         self.gpu_scene.camera.update(uniforms);
+        self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
     }
 
     /// Flush pending changes to GPU buffers.

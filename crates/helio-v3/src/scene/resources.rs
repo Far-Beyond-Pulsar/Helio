@@ -131,6 +131,8 @@ pub struct SceneResources<'a> {
     pub movable_objects_generation: u64,
     /// Generation counter for movable lights (increments when any Movable light moves)
     pub movable_lights_generation: u64,
+    /// Generation counter for camera (increments when camera view/projection changes)
+    pub camera_generation: u64,
 
     // ── Shadow partition buffers (Unreal-style static/dynamic split) ──────────
     // Both passes use `instances` (main buffer) — only the indirect call lists differ.

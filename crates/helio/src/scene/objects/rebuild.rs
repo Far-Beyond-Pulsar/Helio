@@ -103,6 +103,9 @@ impl super::super::Scene {
         let mut aabbs = Vec::with_capacity(n);
         let mut draw_calls = Vec::with_capacity(n);
         let mut indirect = Vec::with_capacity(n);
+        let mut visibility = Vec::with_capacity(n);
+
+        let group_hidden = self.group_hidden;
 
         // Linear iteration: each object gets slot = dense_index
         for i in 0..n {
@@ -126,20 +129,13 @@ impl super::super::Scene {
                 base_vertex: r.draw.vertex_offset,
                 first_instance: i as u32,
             });
-        }
 
-        // Build visibility
-        let group_hidden = self.group_hidden;
-        let visibility: Vec<u32> = (0..n)
-            .map(|i| {
-                let r = self.objects.get_dense(i).unwrap();
-                if object_is_visible(r.groups, group_hidden) {
-                    1u32
-                } else {
-                    0u32
-                }
-            })
-            .collect();
+            visibility.push(if object_is_visible(r.groups, group_hidden) {
+                1u32
+            } else {
+                0u32
+            });
+        }
 
         // Update ObjectRecords with GPU slots
         for i in 0..n {
@@ -226,8 +222,11 @@ impl super::super::Scene {
         let mut aabbs: Vec<GpuInstanceAabb> = Vec::with_capacity(n);
         let mut draw_calls: Vec<GpuDrawCall> = Vec::new();
         let mut indirect: Vec<DrawIndexedIndirectArgs> = Vec::new();
+        let mut visibility: Vec<u32> = Vec::with_capacity(n);
         // Track the new GPU slot assigned to each dense-array entry.
         let mut gpu_slots: Vec<u32> = vec![0u32; n];
+
+        let group_hidden = self.group_hidden;
 
         let mut i = 0;
         while i < order.len() {
@@ -249,6 +248,11 @@ impl super::super::Scene {
                 gpu_slots[order[i]] = instances.len() as u32;
                 instances.push(r.instance);
                 aabbs.push(r.aabb);
+                visibility.push(if object_is_visible(r.groups, group_hidden) {
+                    1u32
+                } else {
+                    0u32
+                });
                 i += 1;
             }
 
@@ -283,20 +287,6 @@ impl super::super::Scene {
             n,
             draw_calls.len()
         );
-
-        // Build visibility buffer: 0 = hidden (any group is hidden), 1 = visible.
-        let group_hidden = self.group_hidden;
-        let visibility: Vec<u32> = order
-            .iter()
-            .map(|&di| {
-                let r = self.objects.get_dense(di).unwrap();
-                if object_is_visible(r.groups, group_hidden) {
-                    1u32
-                } else {
-                    0u32
-                }
-            })
-            .collect();
 
         self.gpu_scene.instances.set_data(instances);
         self.gpu_scene.aabbs.set_data(aabbs);

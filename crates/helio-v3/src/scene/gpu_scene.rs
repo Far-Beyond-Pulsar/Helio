@@ -167,6 +167,10 @@ pub struct GpuScene {
     /// Used by shadow caching to detect movement.
     pub movable_lights_generation: u64,
 
+    /// Generation counter for camera - increments every time the camera is updated.
+    /// Used by HiZ and light-cull passes to detect camera movement.
+    pub camera_generation: u64,
+
     pub camera: GpuCameraBuffer,
     pub instances: GpuInstanceBuffer,
     pub aabbs: GpuAabbBuffer,
@@ -249,6 +253,7 @@ impl GpuScene {
             height: 0,
             movable_objects_generation: 0,
             movable_lights_generation: 0,
+            camera_generation: 0,
             static_objects_generation: 0,
             camera,
             instances,
@@ -308,6 +313,7 @@ impl GpuScene {
             shadow_count: self.shadow_matrices.len() as u32,
             movable_objects_generation: self.movable_objects_generation,
             movable_lights_generation: self.movable_lights_generation,
+            camera_generation: self.camera_generation,
             shadow_static_indirect: self.shadow_static_indirect.buffer(),
             shadow_movable_indirect: self.shadow_movable_indirect.buffer(),
             shadow_static_draw_count: self.shadow_static_draw_count,
