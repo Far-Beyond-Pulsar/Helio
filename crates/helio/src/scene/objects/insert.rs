@@ -145,6 +145,15 @@ impl super::super::Scene {
                 0u32
             };
             self.gpu_scene.visibility.push(vis);
+
+            // Shadow partition indirect buffers are not updated by delta inserts;
+            // mark them for rebuild on the next flush().
+            self.shadow_partition_dirty = true;
+            if inserted_movability.can_move() {
+                // Signal the shadow pass to re-render the dynamic atlas.
+                self.movable_objects_generation += 1;
+                self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
+            }
         }
 
         Ok(id)

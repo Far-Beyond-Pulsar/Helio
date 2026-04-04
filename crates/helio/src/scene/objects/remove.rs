@@ -153,6 +153,15 @@ impl super::super::Scene {
             if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
                 mesh.ref_count = mesh.ref_count.saturating_sub(1);
             }
+
+            // Shadow partition indirect buffers are not updated by delta removes;
+            // mark them for rebuild on the next flush().
+            self.shadow_partition_dirty = true;
+            if !is_static {
+                // Signal the shadow pass to re-render the dynamic atlas.
+                self.movable_objects_generation += 1;
+                self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
+            }
         }
 
         // After removal: mark static atlas dirty if a static object was removed

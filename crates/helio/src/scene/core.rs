@@ -76,6 +76,11 @@ pub struct Scene {
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
     pub(in crate::scene) static_objects_dirty: bool,
 
+    /// True when objects have been added or removed via persistent-mode delta operations.
+    /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
+    /// indirect buffers must be explicitly rebuilt on the next flush.
+    pub(in crate::scene) shadow_partition_dirty: bool,
+
     /// Previous frame's view-projection matrix (for temporal effects)
     pub(in crate::scene) prev_view_proj: Mat4,
 
@@ -217,6 +222,7 @@ impl Scene {
             objects_dirty: true,             // rebuild on first flush
             objects_layout_optimized: false, // start in persistent mode
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
+            shadow_partition_dirty: false,   // full rebuild on first flush handles this
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
             movable_objects_generation: 0,
@@ -436,6 +442,14 @@ impl Scene {
                 self.rebuild_instance_buffers_persistent();
             }
             self.objects_dirty = false;
+            // Full rebuild already called rebuild_shadow_partition_buffers().
+            self.shadow_partition_dirty = false;
+        }
+        // Persistent-mode delta inserts/removes bypass the full rebuild, so shadow
+        // partition indirect buffers need an explicit rebuild here.
+        if self.shadow_partition_dirty {
+            self.rebuild_shadow_partition_buffers();
+            self.shadow_partition_dirty = false;
         }
         // Rebuild virtual geometry CPU buffers when VG topology or transforms changed.
         if self.vg_objects_dirty {
