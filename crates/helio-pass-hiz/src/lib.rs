@@ -55,6 +55,8 @@ pub struct HiZBuildPass {
 
     // Camera tracking for HiZ reuse optimization (skip rebuild if camera static)
     prev_camera_generation: u64,
+    /// Whether this is the first frame (forces a full rebuild regardless of generation).
+    first_frame: bool,
 }
 
 impl HiZBuildPass {
@@ -258,7 +260,8 @@ impl HiZBuildPass {
             mip_views,
             width,
             height,
-            prev_camera_generation: u64::MAX, // Force rebuild on first frame
+            prev_camera_generation: 0,
+            first_frame: true,
         }
     }
 }
@@ -303,12 +306,13 @@ impl RenderPass for HiZBuildPass {
         let resolution_changed = ctx.width != self.width || ctx.height != self.height;
 
         // Skip HiZ rebuild if camera hasn't changed and resolution is the same
-        if camera_gen == self.prev_camera_generation && self.copy_bind_group.is_some() && !resolution_changed {
+        if !self.first_frame && camera_gen == self.prev_camera_generation && self.copy_bind_group.is_some() && !resolution_changed {
             // Camera static and resolution unchanged - reuse existing HiZ pyramid from previous frame
             return Ok(());
         }
 
         // Camera moved or resolution changed - update generation and rebuild pyramid
+        self.first_frame = false;
         self.prev_camera_generation = camera_gen;
 
         // Rebuild depth-copy bind group if the depth texture view pointer changed
