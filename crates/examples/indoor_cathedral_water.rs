@@ -81,6 +81,18 @@ const PEW_Z_START: f32 = -20.0;
 const PEW_Z_STEP: f32 = 3.2;
 const PEW_COUNT: usize = 6;
 
+const BALL_RADIUS: f32 = 0.5;
+const WATER_SURFACE: f32 = 1.8;
+const POOL_HALF_XZ: f32 = 6.0;
+
+fn initial_ball_position() -> glam::Vec3 {
+    glam::Vec3::new(0.0, WATER_SURFACE + 4.0, 0.0)
+}
+
+fn initial_ball_velocity() -> glam::Vec3 {
+    glam::Vec3::new(1.8, 0.0, 1.2)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Build a WaterHitboxDescriptor for a sphere at `new_pos` (previously at `old_pos`).
@@ -289,20 +301,20 @@ impl ApplicationHandler for App {
             bounds_max: [6.0, 2.5, 6.0],    // 2.2m deep pool
             surface_height: 1.8,  // Water surface at 1.8m above floor
 
-            // GERSTNER WAVE PARAMETERS (realistic ocean physics)
-            wave_amplitude: 0.12,      // Realistic wave height (12cm primary waves)
-            wave_frequency: 1.2,       // Higher frequency for detailed ripples
-            wave_speed: 1.5,           // Natural wave propagation speed
-            wave_direction: [0.7, 0.4], // Diagonal wave direction for natural look
-            wave_steepness: 0.65,      // Sharp, realistic wave peaks (0.6-0.7 is physically accurate)
+            // GERSTNER WAVE PARAMETERS (natural pool surface)
+            wave_amplitude: 0.06,      // Moderate wave height for smooth water
+            wave_frequency: 0.9,       // Lower frequency for broader, more natural ripples
+            wave_speed: 2.2,           // Slower propagation for calmer surface motion
+            wave_direction: [0.6, 0.3], // Subtle diagonal wave direction
+            wave_steepness: 0.35,      // Softer wave peaks to avoid jello-like bumps
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
             water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
             extinction: [0.08, 0.04, 0.02],   // Very low absorption for crystal clear water (reduced by ~55%)
 
             // FOAM PARAMETERS (white caps on wave crests)
-            foam_threshold: 0.68,      // Foam appears on steeper waves
-            foam_amount: 0.75,         // Generous foam coverage for realism
+            foam_threshold: 0.76,      // Foam appears on steeper wave crests
+            foam_amount: 0.45,         // Moderate foam coverage for realism
 
             // REFLECTION & REFRACTION (physically accurate)
             reflection_strength: 1.0,  // Full reflectivity (water is ~100% reflective at grazing angles)
@@ -311,9 +323,9 @@ impl ApplicationHandler for App {
 
             // CAUSTICS (underwater light patterns - VISIBLE)
             caustics_enabled: true,
-            caustics_intensity: 4.0,   // Strong visible caustics
-            caustics_scale: 8.0,       // Larger, more visible patterns
-            caustics_speed: 1.5,       // Faster animation for visibility
+            caustics_intensity: 2.5,   // Visible but less overpowering caustics
+            caustics_scale: 9.0,       // Natural caustic pattern scale
+            caustics_speed: 1.25,      // Smooth animation for caustics
 
             // VOLUMETRIC EFFECTS (subtle for clear visibility)
             fog_density: 0.015,        // Very subtle underwater fog (reduced from 0.06)
@@ -836,6 +848,18 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::KeyR),
+                        ..
+                    },
+                ..
+            } => {
+                state.reset_simulation();
+                println!("[input] simulation reset");
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
                         state: ks,
                         physical_key: PhysicalKey::Code(key),
                         ..
@@ -913,6 +937,27 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
+    fn reset_simulation(&mut self) {
+        let start_pos = initial_ball_position();
+        let start_vel = initial_ball_velocity();
+
+        self.ball_pos = start_pos;
+        self.ball_prev_pos = start_pos;
+        self.ball_vel = start_vel;
+        self.start_time = std::time::Instant::now();
+
+        if let Ok(mut renderer) = self.renderer.lock() {
+            let _ = renderer.scene_mut().update_object_transform(
+                self.ball_obj_id,
+                glam::Mat4::from_translation(self.ball_pos),
+            );
+            let _ = renderer.scene_mut().update_water_hitbox(
+                self.ball_hitbox_id,
+                ball_aabb(self.ball_prev_pos, self.ball_pos, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ),
+            );
+        }
+    }
+
     fn render(&mut self, dt: f32) {
         const SPEED: f32 = 5.0;
         const SENS: f32 = 0.002;
@@ -999,16 +1044,23 @@ impl AppState {
         const BALL_RADIUS: f32 = 0.5;
         const WATER_SURFACE: f32 = 1.8;
         const POOL_HALF_XZ: f32 = 6.0;
+        const WATER_STIFFNESS: f32 = 45.0;
+        const WATER_DAMPING: f32 = 4.0;
+        const WATER_DRAG: f32 = 1.1;
 
         let prev_pos = self.ball_pos;
         self.ball_vel.y += GRAVITY * dt;
         self.ball_pos += self.ball_vel * dt;
 
-        // Perfect elastic bounce off water — restores full height every time
-        let floor_y = WATER_SURFACE + BALL_RADIUS;
-        if self.ball_pos.y < floor_y {
-            self.ball_pos.y = floor_y;
-            self.ball_vel.y = self.ball_vel.y.abs(); // no energy loss on vertical
+        // Water contact: allow the ball to penetrate and come back up naturally,
+        // so it can fully submerge before each bounce.
+        let depth = WATER_SURFACE - self.ball_pos.y;
+        if depth > 0.0 {
+            self.ball_vel.y += WATER_STIFFNESS * depth * dt;
+            self.ball_vel.y *= (1.0 - WATER_DAMPING * dt).clamp(0.0, 1.0);
+            let drag = (1.0 - WATER_DRAG * dt).clamp(0.0, 1.0);
+            self.ball_vel.x *= drag;
+            self.ball_vel.z *= drag;
         }
 
         // Elastic bounce off pool walls (no energy loss)

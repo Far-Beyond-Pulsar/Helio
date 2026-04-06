@@ -109,6 +109,10 @@ struct ShadowConfig {
 @group(1) @binding(2) var gbuf_orm:      texture_2d<f32>;       // Rgba8Unorm   AO, roughness, metallic
 @group(1) @binding(3) var gbuf_emissive: texture_2d<f32>;       // Rgba16Float  pre-multiplied emissive
 @group(1) @binding(4) var gbuf_depth:    texture_depth_2d;      // Depth32Float
+// R8Unorm screen-space AO (SSAO or pre-baked equivalent). 1.0 = fully lit, 0.0 = fully occluded.
+// Bound to a 1×1 white fallback texture when neither SSAO nor baked AO is available.
+@group(1) @binding(5) var screen_ao:     texture_2d<f32>;
+@group(1) @binding(6) var screen_ao_samp: sampler;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -699,6 +703,13 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let roughness = orm_r.g;
     let metallic  = orm_r.b;
 
+    // Screen-space AO (SSAO or pre-baked AO).  Sampled by normalised screen UV
+    // so it works regardless of whether the AO texture is at a different resolution.
+    let screen_uv    = in.clip_pos.xy / vec2<f32>(textureDimensions(gbuf_albedo));
+    let ssao_factor  = textureSample(screen_ao, screen_ao_samp, screen_uv).r;
+    // Combined AO: material AO from G-buffer × screen-space AO.
+    let ao_combined  = ao * ssao_factor;
+
     // ── Debug mode: bypass lighting ───────────────────────────────────────────
     // Mode 1 (UV Grid) and Mode 2 (Texture Direct) show raw colors without lighting
     // Mode 3 (Lit without normal mapping) goes through normal lighting
@@ -813,7 +824,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let ambient_fallback = mix(hemi, diff_ind, rc_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
-    let indirect  = (ambient_fallback + spec_ind) * ao;
+    let indirect  = (ambient_fallback + spec_ind) * ao_combined;
     var color     = Lo + indirect;
     color        += emissive;               // emissive from G-buffer
 

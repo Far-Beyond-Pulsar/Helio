@@ -31,7 +31,7 @@ pub struct DeferredLightPass {
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_2: Option<wgpu::BindGroup>,
     bind_group_3: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
     bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
     width: u32,
@@ -51,6 +51,9 @@ pub struct DeferredLightPass {
     fallback_caustics_view: wgpu::TextureView,
     caustics_sampler: wgpu::Sampler,
     fallback_water_volumes: wgpu::Buffer,
+    /// 1×1 white R8Unorm fallback used when neither SSAO nor baked AO is available.
+    fallback_ao_view: wgpu::TextureView,
+    fallback_ao_sampler: wgpu::Sampler,
     pub debug_mode: u32,
 }
 
@@ -156,6 +159,15 @@ impl DeferredLightPass {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         multisampled: false,
                     },
+                    count: None,
+                },
+                // Screen-space AO (SSAO result or pre-baked AO). Filterable so the
+                // bilinear sampler can soften the AO at the edges of the screen.
+                texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -354,6 +366,40 @@ impl DeferredLightPass {
             mapped_at_creation: false,
         });
 
+        // Fallback 1×1 white R8Unorm AO texture.
+        // Used when neither SSAO nor pre-baked AO is available so the shader sees
+        // AO = 1.0 (fully unoccluded) rather than undefined data.
+        let fallback_ao_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Deferred Fallback AO"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_ao_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255u8], // white = AO 1.0
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_ao_view = fallback_ao_tex.create_view(&Default::default());
+        let fallback_ao_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Deferred Fallback AO Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         Self {
             pipeline,
             globals_buf,
@@ -386,6 +432,8 @@ impl DeferredLightPass {
             fallback_caustics_view,
             caustics_sampler,
             fallback_water_volumes,
+            fallback_ao_view,
+            fallback_ao_sampler,
             debug_mode: 0,
         }
     }
@@ -467,12 +515,17 @@ impl RenderPass for DeferredLightPass {
             )
         })?;
 
+        // Screen-space AO: use baked AO (via frame.ssao, which SsaoPass publishes as override
+        // when a baked AO texture is present) or fall back to the 1×1 white texture.
+        let ao_view = ctx.resources.ssao.unwrap_or(&self.fallback_ao_view);
+
         let gbuffer_key = (
             gbuffer.albedo as *const _ as usize,
             gbuffer.normal as *const _ as usize,
             gbuffer.orm as *const _ as usize,
             gbuffer.emissive as *const _ as usize,
             ctx.depth as *const _ as usize,
+            ao_view as *const _ as usize,
         );
         if self.bind_group_1_key != Some(gbuffer_key) {
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -486,6 +539,12 @@ impl RenderPass for DeferredLightPass {
                     wgpu::BindGroupEntry {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                    // Screen-space AO (binding 5): SSAO or pre-baked AO from SsaoPass.publish()
+                    texture_view_entry(5, ao_view),
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::Sampler(&self.fallback_ao_sampler),
                     },
                 ],
             }));
