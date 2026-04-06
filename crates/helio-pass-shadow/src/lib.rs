@@ -351,7 +351,7 @@ impl RenderPass for ShadowPass {
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         // Per-light dirty-flag readback (async GPU→CPU) would allow skipping individual
         // shadow faces for lights whose frustum or scene contribution hasn't changed.
-        // That optimisation is tracked for future work; the generation-counter cache in
+        // That optimization is tracked for future work; the generation-counter cache in
         // `execute()` already avoids full re-renders when nothing Movable has changed.
         Ok(())
     }
