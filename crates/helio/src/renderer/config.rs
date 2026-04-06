@@ -23,12 +23,12 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     }
 }
 
-/// Global Illumination configuration (AAA dual-tier: RC near, ambient far).
+/// Global Illumination configuration (dual-tier: RC near, ambient far).
 #[derive(Debug, Clone, Copy)]
 pub struct GiConfig {
     /// Radiance Cascades volume radius around camera (world units).
     /// GI within this radius uses RC, outside uses cheap ambient fallback.
-    /// Default: 80.0 (AAA near-field quality like Unreal Lumen).
+    /// Default: 80.0 (near-field quality like Unreal Lumen).
     pub rc_radius: f32,
     /// Fade margin for smooth RC→ambient transition (world units).
     /// Default: 20.0 (soft blend zone).

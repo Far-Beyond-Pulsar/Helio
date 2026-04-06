@@ -5,7 +5,7 @@
 //!
 //! # Design Pattern: GPU-Native Scene
 //!
-//! Helio v3 follows the **AAA GPU-driven pattern**:
+//! Helio v3 follows the **GPU-driven pattern**:
 //!
 //! 1. **All data on GPU**: Lights, meshes, materials stored in GPU buffers
 //! 2. **Dirty tracking**: CPU mirrors track changes, upload only deltas

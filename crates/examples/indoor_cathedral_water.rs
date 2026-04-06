@@ -282,7 +282,7 @@ impl ApplicationHandler for App {
             }),
         ));
 
-        // === AAA QUALITY WATER POOL ===
+        // === QUALITY WATER POOL ===
         // Realistic oceanographic parameters for stunning photorealistic water
         let pool = helio::WaterVolumeDescriptor {
             bounds_min: [-6.0, 0.3, -6.0],  // 12x12 meter pool, slightly raised
@@ -618,7 +618,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
-        // ── Configure AAA baking ──────────────────────────────────────────────
+        // ── Configure baking ──────────────────────────────────────────────
         // Build a SceneGeometry that mirrors the major structural surfaces so
         // Nebula can bake AO on first launch.  Results are cached to disk;
         // subsequent launches skip all GPU work and load from cache.

@@ -2,7 +2,7 @@
 name = "helio-bake"
 version = "0.1.0"
 edition = "2021"
-description = "Offline AAA baking for Helio via Nebula (AO, lightmaps, reflection probes, PVS) with on-disk caching"
+description = "Offline baking for Helio via Nebula (AO, lightmaps, reflection probes, PVS) with on-disk caching"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

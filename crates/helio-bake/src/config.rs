@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-/// Configuration for offline AAA baking.
+/// Configuration for offline baking.
 ///
 /// Controls which passes run, their quality settings, and the cache directory.
 /// Use [`BakeConfig::fast`] or [`BakeConfig::ultra`] for common presets,

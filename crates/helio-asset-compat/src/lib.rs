@@ -2,7 +2,7 @@
 //!
 //! This crate provides a bridge between SolidRS (comprehensive 3D model loader)
 //! and Helio's GPU-driven rendering pipeline. It handles conversion of CPU-side
-//! scene data to GPU buffers while maintaining AAA performance standards.
+//! scene data to GPU buffers while maintaining performance standards.
 
 mod animation_system;
 mod camera_converter;

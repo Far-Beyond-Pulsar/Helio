@@ -40,7 +40,7 @@ members = [
     "crates/helio-wasm",
     "crates/helio-web-demos",
 
-    # AAA baking (offline AO, lightmaps, reflection probes, PVS via Nebula)
+    # Baking (offline AO, lightmaps, reflection probes, PVS via Nebula)
     "crates/helio-bake",
 ]
 resolver = "2"

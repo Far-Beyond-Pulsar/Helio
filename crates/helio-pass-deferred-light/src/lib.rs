@@ -432,7 +432,7 @@ impl RenderPass for DeferredLightPass {
         } else {
             ([0.5, 0.5, 0.6], 1.0) // Brighter fallback ambient: sky-blue tint
         };
-        // Get RC bounds from frame resources (AAA dual-tier GI: RC near, ambient far)
+        // Get RC bounds from frame resources (dual-tier GI: RC near, ambient far)
         let (rc_min, rc_max) = if let Some(main) = main_scene {
             (main.rc_world_min, main.rc_world_max)
         } else {

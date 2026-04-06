@@ -56,7 +56,7 @@ pub struct MainSceneResources<'a> {
     pub clear_color: [f32; 4],
     pub ambient_color: [f32; 3],
     pub ambient_intensity: f32,
-    /// Radiance Cascades volume bounds (AAA dual-tier GI: RC near, ambient far).
+    /// Radiance Cascades volume bounds (dual-tier GI: RC near, ambient far).
     /// RC active within these bounds, simpler ambient fallback outside.
     pub rc_world_min: [f32; 3],
     pub rc_world_max: [f32; 3],
@@ -138,7 +138,7 @@ pub struct FrameResources<'a> {
     /// Main depth texture (for passes that need to copy/sample it)
     pub depth_texture: Option<&'a wgpu::Texture>,
 
-    // ── Pre-baked AAA data (populated by BakeInjectPass when baking is enabled) ──
+    // ── Pre-baked data (populated by BakeInjectPass when baking is enabled) ──
 
     /// Pre-baked ambient occlusion texture (R8Unorm, same format as SSAO output).
     ///

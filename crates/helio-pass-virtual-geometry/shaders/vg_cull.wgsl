@@ -8,7 +8,7 @@
 //
 // The GPU-written draw_count is passed to multi_draw_indexed_indirect_count so
 // the hardware only reads the N_visible compact commands — never stale zero-
-// instance_count entries (Nanite / DOTS style AAA compaction).
+// instance_count entries (Nanite / DOTS style compaction).
 
 struct Camera {
     view:           mat4x4<f32>,

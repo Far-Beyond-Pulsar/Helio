@@ -78,7 +78,7 @@ pub struct Renderer {
     #[cfg(feature = "live-portal")]
     portal_handle: Option<helio_live_portal::LivePortalHandle>,
 
-    // ── AAA Baking ────────────────────────────────────────────────────────────
+    // ── Baking ────────────────────────────────────────────────────────────
     /// Pending bake configuration.  Consumed in the first call to `render()`,
     /// blocking until all passes complete before the first draw.
     bake_pending: Option<helio_bake::BakeRequest>,
@@ -630,7 +630,7 @@ impl Renderer {
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
-        // ── AAA Baking: run once, blocking, before the first drawn frame ──────
+        // ── Baking: run once, blocking, before the first drawn frame ──────
         if let Some(request) = self.bake_pending.take() {
             log::info!(
                 "[helio-bake] Starting pre-frame-1 bake for scene '{}' (cache: {})…",
@@ -829,7 +829,7 @@ impl Renderer {
             },
             water_hitbox_count,
             depth_texture: Some(&self.depth_texture),
-            // Baked AAA data — populated after configure_bake() completes.
+            // Baked data — populated after configure_bake() completes.
             baked_ao: self.baked_data.as_deref().and_then(|d| d.ao_view_ref()),
             baked_ao_sampler: self.baked_data.as_deref().and_then(|d| d.ao_sampler_ref()),
             baked_lightmap: self.baked_data.as_deref().and_then(|d| d.lightmap_view_ref()),

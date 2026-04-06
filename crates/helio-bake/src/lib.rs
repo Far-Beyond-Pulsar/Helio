@@ -1,6 +1,6 @@
 //! # helio-bake
 //!
-//! Offline AAA baking integration for Helio, powered by Nebula.
+//! Offline baking integration for Helio, powered by Nebula.
 //!
 //! ## What is baked
 //!
