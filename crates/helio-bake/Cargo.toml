@@ -1,0 +1,30 @@
+[package]
+name = "helio-bake"
+version = "0.1.0"
+edition = "2021"
+description = "Offline AAA baking for Helio via Nebula (AO, lightmaps, reflection probes, PVS) with on-disk caching"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# Nebula baker — all heavyweight GPU bake passes live here
+nebula = { path = "../../../Nebula/crates/nebula", default-features = false, features = ["ao", "light", "probe", "visibility"] }
+
+# Helio internal crates
+libhelio = { path = "../libhelio" }
+helio-v3 = { path = "../helio-v3", default-features = false }
+
+# GPU
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
+bytemuck = { version = "1", features = ["derive"] }
+glam = { version = "0.29" }
+
+# Async runtime (blocking wrapper around Nebula's async bake API)
+pollster = "0.3"
+
+# Serialization for on-disk cache
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+
+# Utilities
+log = "0.4"
+thiserror = "2.0"

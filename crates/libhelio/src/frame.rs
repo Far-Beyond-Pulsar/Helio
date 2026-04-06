@@ -81,6 +81,10 @@ pub struct FrameResources<'a> {
     pub hiz: Option<&'a wgpu::TextureView>,
     /// Hi-Z sampler (min reduction sampler)
     pub hiz_sampler: Option<&'a wgpu::Sampler>,
+    /// Static HiZ: Pre-baked 3D voxel occlusion grid for static geometry (camera-independent)
+    pub static_hiz: Option<&'a wgpu::TextureView>,
+    /// Static HiZ sampler (linear, clamp)
+    pub static_hiz_sampler: Option<&'a wgpu::Sampler>,
     /// Atmospheric sky LUT (transmittance + aerial perspective)
     pub sky_lut: Option<&'a wgpu::TextureView>,
     /// Sky LUT sampler (linear, clamp)
@@ -133,6 +137,104 @@ pub struct FrameResources<'a> {
 
     /// Main depth texture (for passes that need to copy/sample it)
     pub depth_texture: Option<&'a wgpu::Texture>,
+
+    // ── Pre-baked AAA data (populated by BakeInjectPass when baking is enabled) ──
+
+    /// Pre-baked ambient occlusion texture (R8Unorm, same format as SSAO output).
+    ///
+    /// When present, `SsaoPass` skips runtime computation and publishes this texture
+    /// instead of its own SSAO result.
+    pub baked_ao: Option<&'a wgpu::TextureView>,
+
+    /// Sampler for [`baked_ao`](Self::baked_ao).
+    pub baked_ao_sampler: Option<&'a wgpu::Sampler>,
+
+    /// Pre-baked lightmap atlas (RGBA32F or RGBA16F).
+    ///
+    /// Contains direct + multi-bounce indirect illumination for static geometry.
+    /// Indexed by per-mesh UV atlas regions stored in the baked data.
+    pub baked_lightmap: Option<&'a wgpu::TextureView>,
+
+    /// Sampler for [`baked_lightmap`](Self::baked_lightmap).
+    pub baked_lightmap_sampler: Option<&'a wgpu::Sampler>,
+
+    /// Pre-baked reflection cubemap (Rgba32Float or Rgba8Unorm RGBE, 6 faces + mip chain).
+    ///
+    /// First probe only; closest-probe blending is future work.
+    pub baked_reflection: Option<&'a wgpu::TextureView>,
+
+    /// Sampler for [`baked_reflection`](Self::baked_reflection) (trilinear).
+    pub baked_reflection_sampler: Option<&'a wgpu::Sampler>,
+
+    /// Pre-baked irradiance spherical harmonics (L2, 9 RGB coefficients = 27 × f32).
+    ///
+    /// Stored as a uniform buffer (`wgpu::BufferUsages::UNIFORM`).
+    pub baked_irradiance_sh: Option<&'a wgpu::Buffer>,
+
+    /// Pre-baked potentially-visible set for CPU-side visibility culling.
+    ///
+    /// Use [`BakedPvsRef::is_visible`] to test cell-to-cell visibility before
+    /// submitting draw calls. Returns `None` when PVS baking was not configured.
+    pub baked_pvs: Option<BakedPvsRef<'a>>,
+}
+
+// ── PVS CPU reference ──────────────────────────────────────────────────────────
+
+/// Borrowed reference into the pre-baked PVS bitfield grid.
+///
+/// Zero-copy view — `bits` borrows directly from the `BakedData` owned by
+/// `BakeInjectPass`. Valid for the duration of the frame.
+#[derive(Clone, Copy)]
+pub struct BakedPvsRef<'a> {
+    pub world_min: [f32; 3],
+    pub world_max: [f32; 3],
+    pub grid_dims: [u32; 3],
+    pub cell_size: f32,
+    pub cell_count: u32,
+    pub words_per_cell: u32,
+    /// Packed bitfield: `bits[from * words_per_cell + to/64] >> (to%64) & 1 == 1` means
+    /// cell `to` is potentially visible from cell `from`.
+    pub bits: &'a [u64],
+}
+
+impl<'a> BakedPvsRef<'a> {
+    /// Returns `true` if cell `to_cell` is potentially visible from cell `from_cell`.
+    #[inline]
+    pub fn is_visible(&self, from_cell: usize, to_cell: usize) -> bool {
+        let idx = from_cell * self.words_per_cell as usize + to_cell / 64;
+        if idx >= self.bits.len() { return true; } // conservative default
+        (self.bits[idx] >> (to_cell % 64)) & 1 == 1
+    }
+
+    /// Returns the grid-cell index at world position `p`, or `None` if out of bounds.
+    #[inline]
+    pub fn cell_at(&self, p: [f32; 3]) -> Option<usize> {
+        let [gx, gy, gz] = self.grid_dims;
+        let dx = ((p[0] - self.world_min[0]) / self.cell_size) as i32;
+        let dy = ((p[1] - self.world_min[1]) / self.cell_size) as i32;
+        let dz = ((p[2] - self.world_min[2]) / self.cell_size) as i32;
+        if dx < 0 || dy < 0 || dz < 0
+            || dx >= gx as i32 || dy >= gy as i32 || dz >= gz as i32
+        {
+            return None;
+        }
+        Some(dx as usize + dy as usize * gx as usize + dz as usize * gx as usize * gy as usize)
+    }
+}
+
+// ── Owned PVS data (lives in BakedData, referenced by BakedPvsRef) ────────────
+
+/// Owned CPU-side PVS data stored in [`BakedData`].
+///
+/// Published as a zero-copy [`BakedPvsRef`] into `FrameResources` each frame.
+pub struct BakedPvsData {
+    pub world_min: [f32; 3],
+    pub world_max: [f32; 3],
+    pub grid_dims: [u32; 3],
+    pub cell_size: f32,
+    pub cell_count: u32,
+    pub words_per_cell: u32,
+    pub bits: Vec<u64>,
 }
 
 impl<'a> FrameResources<'a> {
@@ -145,6 +247,8 @@ impl<'a> FrameResources<'a> {
             shadow_sampler: None,
             hiz: None,
             hiz_sampler: None,
+            static_hiz: None,
+            static_hiz_sampler: None,
             sky_lut: None,
             sky_lut_sampler: None,
             ssao: None,
@@ -164,6 +268,14 @@ impl<'a> FrameResources<'a> {
             water_hitboxes: None,
             water_hitbox_count: 0,
             depth_texture: None,
+            baked_ao: None,
+            baked_ao_sampler: None,
+            baked_lightmap: None,
+            baked_lightmap_sampler: None,
+            baked_reflection: None,
+            baked_reflection_sampler: None,
+            baked_irradiance_sh: None,
+            baked_pvs: None,
         }
     }
 }

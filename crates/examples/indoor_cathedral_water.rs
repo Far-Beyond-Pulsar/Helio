@@ -24,6 +24,7 @@ mod demo_portal;
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge,
     LightId, MeshId, ObjectId, Renderer, RendererConfig, WaterHitboxDescriptor, WaterHitboxId,
+    BakeConfig, BakeRequest, SceneGeometry, LightSource, LightSourceKind, mesh_upload_to_bake,
 };
 use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
 
@@ -616,6 +617,60 @@ impl ApplicationHandler for App {
         }
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
+
+        // ── Configure AAA baking ──────────────────────────────────────────────
+        // Build a SceneGeometry that mirrors the major structural surfaces so
+        // Nebula can bake AO on first launch.  Results are cached to disk;
+        // subsequent launches skip all GPU work and load from cache.
+        {
+            let t = |dx: f32, dy: f32, dz: f32| {
+                glam::Mat4::from_translation(glam::Vec3::new(dx, dy, dz))
+            };
+            let mut bake_scene = SceneGeometry::new();
+
+            // Structural surfaces
+            bake_scene.add_mesh(mesh_upload_to_bake(&plane_mesh([0.0, 0.0, 0.0], 32.0), glam::Mat4::IDENTITY));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [6.0,0.18,28.0]),  t(0.0,21.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [2.5,0.15,28.0]),  t(-8.5,11.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [2.5,0.15,28.0]),  t(8.5,11.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.25,7.0,28.0]),  t(-11.0,7.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.25,7.0,28.0]),  t(11.0,7.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,28.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,-28.0)));
+
+            // Columns
+            for &z in COLUMN_Z {
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(-5.5,10.0,z)));
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(5.5,10.0,z)));
+            }
+
+            // Chandelier lights (warm white)
+            for &z in CHANDELIER_Z {
+                bake_scene.add_light(LightSource {
+                    kind: LightSourceKind::Point { position: [0.0, 15.0, z], range: 22.0 },
+                    color: [1.0, 0.92, 0.78],
+                    intensity: 8.0,
+                    bake_enabled: true,
+                    casts_shadows: true,
+                });
+            }
+
+            // Stained glass accent lights
+            for &(x, y, z, r, g, b) in GLASS_LIGHTS {
+                bake_scene.add_light(LightSource {
+                    kind: LightSourceKind::Point { position: [x, y, z], range: 8.0 },
+                    color: [r, g, b],
+                    intensity: 1.8,
+                    bake_enabled: true,
+                    casts_shadows: false,
+                });
+            }
+
+            renderer.configure_bake(BakeRequest {
+                scene: bake_scene,
+                config: BakeConfig::fast("indoor_cathedral_water"),
+            });
+        }
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
