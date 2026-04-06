@@ -367,7 +367,8 @@ impl ApplicationHandler for App {
 
         let ball_hitbox_id = renderer
             .scene_mut()
-            .insert_water_hitbox(ball_aabb(ball_start, ball_start, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ))
+            .insert_actor(helio::SceneActor::water_hitbox(ball_aabb(ball_start, ball_start, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ)))
+            .as_water_hitbox()
             .expect("ball hitbox");
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m

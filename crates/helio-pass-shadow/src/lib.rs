@@ -349,13 +349,10 @@ impl RenderPass for ShadowPass {
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
-        // TODO: Async dirty flag readback
-        // For full shadow caching optimization, we would:
-        // 1. Trigger async read of shadow_dirty_staging from previous frame
-        // 2. Update self.light_dirty_flags when mapping completes
-        // 3. Copy current dirty flags to staging for next frame
-        //
-        // Skipped for now due to buffer mapping complexity (see earlier GPU timestamp issues)
+        // Per-light dirty-flag readback (async GPU→CPU) would allow skipping individual
+        // shadow faces for lights whose frustum or scene contribution hasn't changed.
+        // That optimisation is tracked for future work; the generation-counter cache in
+        // `execute()` already avoids full re-renders when nothing Movable has changed.
         Ok(())
     }
 

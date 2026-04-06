@@ -1,4 +1,4 @@
-use crate::handles::{LightId, MeshId, ObjectId, VirtualObjectId, WaterVolumeId};
+use crate::handles::{LightId, MeshId, ObjectId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
@@ -12,8 +12,10 @@ pub enum SceneActorId {
     Mesh(MeshId),
     Light(LightId),
     VirtualMesh(VirtualMeshId),
+    VirtualObject(VirtualObjectId),
     Object(ObjectId),
     WaterVolume(WaterVolumeId),
+    WaterHitbox(WaterHitboxId),
 }
 
 impl SceneActorId {
@@ -41,6 +43,14 @@ impl SceneActorId {
         }
     }
 
+    pub fn as_virtual_object(self) -> Option<VirtualObjectId> {
+        if let SceneActorId::VirtualObject(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
     pub fn as_object(self) -> Option<ObjectId> {
         if let SceneActorId::Object(id) = self {
             Some(id)
@@ -51,6 +61,14 @@ impl SceneActorId {
 
     pub fn as_water_volume(self) -> Option<WaterVolumeId> {
         if let SceneActorId::WaterVolume(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_water_hitbox(self) -> Option<WaterHitboxId> {
+        if let SceneActorId::WaterHitbox(id) = self {
             Some(id)
         } else {
             None
@@ -221,6 +239,12 @@ impl SceneActorTrait for VirtualObjectActor {
                 self.object_id = Some(id);
             }
         }
+    }
+
+    fn inserted_id(&self) -> SceneActorId {
+        self.object_id
+            .map(SceneActorId::VirtualObject)
+            .unwrap_or(SceneActorId::None)
     }
 }
 
@@ -586,8 +610,9 @@ impl SceneActorTrait for WaterHitboxActor {
     }
 
     fn inserted_id(&self) -> SceneActorId {
-        // Hitboxes don't map to a top-level SceneActorId variant; return None
-        SceneActorId::None
+        self.hitbox_id
+            .map(SceneActorId::WaterHitbox)
+            .unwrap_or(SceneActorId::None)
     }
 }
 
@@ -635,6 +660,10 @@ impl SceneActor {
 
     pub fn water_volume(descriptor: WaterVolumeDescriptor) -> Self {
         SceneActor::WaterVolume(WaterVolumeActor::new(descriptor))
+    }
+
+    pub fn water_hitbox(descriptor: WaterHitboxDescriptor) -> Self {
+        SceneActor::WaterHitbox(WaterHitboxActor::new(descriptor))
     }
 }
 
