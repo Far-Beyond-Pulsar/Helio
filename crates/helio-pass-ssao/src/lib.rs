@@ -65,6 +65,9 @@ pub struct SsaoPass {
     noise_sampler: wgpu::Sampler,
     pub ssao_texture: wgpu::Texture,
     pub ssao_view: wgpu::TextureView,
+    /// When set, replaces the runtime SSAO computation with a pre-baked AO texture.
+    /// The pass skips GPU execution and publishes this view into `frame.ssao` instead.
+    baked_ao_override: Option<std::sync::Arc<wgpu::TextureView>>,
 }
 
 impl SsaoPass {
@@ -384,6 +387,7 @@ impl SsaoPass {
             noise_sampler,
             ssao_texture,
             ssao_view,
+            baked_ao_override: None,
         }
     }
 }
@@ -394,7 +398,12 @@ impl RenderPass for SsaoPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame.ssao = Some(&self.ssao_view);
+        // Use baked AO if available — avoids runtime screen-space computation entirely.
+        if let Some(ref baked) = self.baked_ao_override {
+            frame.ssao = Some(baked.as_ref());
+        } else {
+            frame.ssao = Some(&self.ssao_view);
+        }
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -419,6 +428,11 @@ impl RenderPass for SsaoPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // Skip computation if a pre-baked AO texture is in use.
+        if self.baked_ao_override.is_some() {
+            return Ok(());
+        }
+
         // O(1): single fullscreen draw — GPU samples GBuffer and accumulates AO.
         let color_attachment = wgpu::RenderPassColorAttachment {
             view: &self.ssao_view,
@@ -455,6 +469,15 @@ impl SsaoPass {
         let (tex, view) = make_ssao_texture(device, width, height);
         self.ssao_texture = tex;
         self.ssao_view = view;
+    }
+
+    /// Replace runtime SSAO with a pre-baked AO texture.
+    ///
+    /// After this call, the pass does no GPU work and publishes `view` as
+    /// `frame.ssao` instead of the screen-space computed result.
+    /// Pass `None` to restore normal SSAO computation.
+    pub fn set_baked_ao(&mut self, view: Option<std::sync::Arc<wgpu::TextureView>>) {
+        self.baked_ao_override = view;
     }
 }
 

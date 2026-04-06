@@ -48,6 +48,8 @@ pub struct VirtualObjectDescriptor {
     pub flags: u32,
     /// Group membership bitmask.  Use `GroupMask::NONE` for ungrouped objects.
     pub groups: crate::groups::GroupMask,
+    /// Movability mode. Defaults to Static when None.
+    pub movability: Option<libhelio::Movability>,
 }
 
 // ─── Private helpers ────────────────────────────────────────────────────────

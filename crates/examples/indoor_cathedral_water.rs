@@ -24,8 +24,9 @@ mod demo_portal;
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge,
     LightId, MeshId, ObjectId, Renderer, RendererConfig, WaterHitboxDescriptor, WaterHitboxId,
+    BakeConfig, BakeRequest, SceneGeometry, LightSource, LightSourceKind, mesh_upload_to_bake,
 };
-use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light, sphere_mesh};
+use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
 
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
@@ -79,6 +80,18 @@ const CANDLES: &[(f32, f32, f32)] = &[
 const PEW_Z_START: f32 = -20.0;
 const PEW_Z_STEP: f32 = 3.2;
 const PEW_COUNT: usize = 6;
+
+const BALL_RADIUS: f32 = 0.5;
+const WATER_SURFACE: f32 = 1.8;
+const POOL_HALF_XZ: f32 = 6.0;
+
+fn initial_ball_position() -> glam::Vec3 {
+    glam::Vec3::new(0.0, WATER_SURFACE + 4.0, 0.0)
+}
+
+fn initial_ball_velocity() -> glam::Vec3 {
+    glam::Vec3::new(1.8, 0.0, 1.2)
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -281,27 +294,27 @@ impl ApplicationHandler for App {
             }),
         ));
 
-        // === AAA QUALITY WATER POOL ===
+        // === QUALITY WATER POOL ===
         // Realistic oceanographic parameters for stunning photorealistic water
         let pool = helio::WaterVolumeDescriptor {
             bounds_min: [-6.0, 0.3, -6.0],  // 12x12 meter pool, slightly raised
             bounds_max: [6.0, 2.5, 6.0],    // 2.2m deep pool
             surface_height: 1.8,  // Water surface at 1.8m above floor
 
-            // GERSTNER WAVE PARAMETERS (realistic ocean physics)
-            wave_amplitude: 0.12,      // Realistic wave height (12cm primary waves)
-            wave_frequency: 1.2,       // Higher frequency for detailed ripples
-            wave_speed: 1.5,           // Natural wave propagation speed
-            wave_direction: [0.7, 0.4], // Diagonal wave direction for natural look
-            wave_steepness: 0.65,      // Sharp, realistic wave peaks (0.6-0.7 is physically accurate)
+            // GERSTNER WAVE PARAMETERS (natural pool surface)
+            wave_amplitude: 0.035,     // Smaller ripples for a thinner, calmer surface
+            wave_frequency: 0.75,      // Broader, slower waves with less lumpiness
+            wave_speed: 3.2,           // Faster propagation to avoid sluggish, viscous motion
+            wave_direction: [0.6, 0.3], // Subtle diagonal wave direction
+            wave_steepness: 0.22,      // Much softer peaks for a thinner-looking pool
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
             water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
             extinction: [0.08, 0.04, 0.02],   // Very low absorption for crystal clear water (reduced by ~55%)
 
             // FOAM PARAMETERS (white caps on wave crests)
-            foam_threshold: 0.68,      // Foam appears on steeper waves
-            foam_amount: 0.75,         // Generous foam coverage for realism
+            foam_threshold: 0.76,      // Foam appears on steeper wave crests
+            foam_amount: 0.45,         // Moderate foam coverage for realism
 
             // REFLECTION & REFRACTION (physically accurate)
             reflection_strength: 1.0,  // Full reflectivity (water is ~100% reflective at grazing angles)
@@ -310,9 +323,9 @@ impl ApplicationHandler for App {
 
             // CAUSTICS (underwater light patterns - VISIBLE)
             caustics_enabled: true,
-            caustics_intensity: 4.0,   // Strong visible caustics
-            caustics_scale: 8.0,       // Larger, more visible patterns
-            caustics_speed: 1.5,       // Faster animation for visibility
+            caustics_intensity: 2.5,   // Visible but less overpowering caustics
+            caustics_scale: 9.0,       // Natural caustic pattern scale
+            caustics_speed: 1.25,      // Smooth animation for caustics
 
             // VOLUMETRIC EFFECTS (subtle for clear visibility)
             fog_density: 0.015,        // Very subtle underwater fog (reduced from 0.06)
@@ -342,18 +355,20 @@ impl ApplicationHandler for App {
             [0.0, 0.0, 0.0],
             0.0,
         ));
-        let ball_obj_id = insert_object(
+        let ball_obj_id = insert_object_with_movability(
             &mut renderer,
             ball_mesh_id,
             ball_mat,
             glam::Mat4::from_translation(ball_start),
             BALL_RADIUS,
+            Some(helio::Movability::Movable),
         )
         .expect("ball object");
 
         let ball_hitbox_id = renderer
             .scene_mut()
-            .insert_water_hitbox(ball_aabb(ball_start, ball_start, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ))
+            .insert_actor(helio::SceneActor::water_hitbox(ball_aabb(ball_start, ball_start, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ)))
+            .as_water_hitbox()
             .expect("ball hitbox");
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
@@ -616,6 +631,109 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
+        // ── Configure baking ──────────────────────────────────────────────
+        // Build a SceneGeometry that mirrors every static surface so Nebula
+        // can bake AO + lightmap on first launch.  Results are cached to
+        // disk; subsequent launches skip all GPU work and load from cache.
+        {
+            let t = |dx: f32, dy: f32, dz: f32| {
+                glam::Mat4::from_translation(glam::Vec3::new(dx, dy, dz))
+            };
+            let mut bake_scene = SceneGeometry::new();
+
+            // ── Shell geometry ────────────────────────────────────────────
+            bake_scene.add_mesh(mesh_upload_to_bake(&plane_mesh([0.0, 0.0, 0.0], 32.0), glam::Mat4::IDENTITY));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [6.0,0.18,28.0]),  t(0.0,21.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [2.5,0.15,28.0]),  t(-8.5,11.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [2.5,0.15,28.0]),  t(8.5,11.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.25,7.0,28.0]),  t(-11.0,7.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.25,7.0,28.0]),  t(11.0,7.0,0.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,28.0)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,-28.0)));
+
+            // ── Colonnade inner walls ─────────────────────────────────────
+            {
+                let col_z_all: Vec<f32> = {
+                    let mut v = vec![-28.0_f32];
+                    v.extend_from_slice(COLUMN_Z);
+                    v.push(28.0);
+                    v
+                };
+                for w in col_z_all.windows(2) {
+                    let mid_z   = (w[0] + w[1]) * 0.5;
+                    let half_len = ((w[1] - w[0]) * 0.5 - 0.9_f32).max(0.1);
+                    let seg = box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len]);
+                    bake_scene.add_mesh(mesh_upload_to_bake(&seg, t(-5.5, 5.5, mid_z)));
+                    bake_scene.add_mesh(mesh_upload_to_bake(&seg, t( 5.5, 5.5, mid_z)));
+                }
+            }
+
+            // ── Columns ───────────────────────────────────────────────────
+            for &z in COLUMN_Z {
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(-5.5,10.0,z)));
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(5.5,10.0,z)));
+            }
+
+            // ── Altar ─────────────────────────────────────────────────────
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [5.5, 0.20, 3.0]),  t(0.0, 0.2, -24.5)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [3.0, 0.45, 1.5]),  t(0.0, 0.65, -25.5)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.18, 2.2, 0.18]), t(0.0, 3.2, -25.8)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [1.0, 0.18, 0.18]), t(0.0, 4.5, -25.8)));
+
+            // ── Pews ──────────────────────────────────────────────────────
+            for i in 0..PEW_COUNT {
+                let pz = PEW_Z_START + i as f32 * PEW_Z_STEP;
+                let pew = box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]);
+                bake_scene.add_mesh(mesh_upload_to_bake(&pew, t(-3.2, 0.45, pz)));
+                bake_scene.add_mesh(mesh_upload_to_bake(&pew, t( 3.2, 0.45, pz)));
+            }
+
+            // ── Chandelier hardware ───────────────────────────────────────
+            for &z in CHANDELIER_Z {
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.06, 2.0, 0.06]), t(0.0, 17.5, z)));
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [1.2, 0.12, 1.2]),  t(0.0, 15.2, z)));
+            }
+
+            // ── Lights ───────────────────────────────────────────────────
+            // Chandelier (warm white, shadow-casting)
+            for &z in CHANDELIER_Z {
+                bake_scene.add_light(LightSource {
+                    kind: LightSourceKind::Point { position: [0.0, 15.0, z], range: 22.0 },
+                    color: [1.0, 0.92, 0.78],
+                    intensity: 8.0,
+                    bake_enabled: true,
+                    casts_shadows: true,
+                });
+            }
+
+            // Stained-glass accent lights (coloured fill, no hard shadows)
+            for &(x, y, z, r, g, b) in GLASS_LIGHTS {
+                bake_scene.add_light(LightSource {
+                    kind: LightSourceKind::Point { position: [x, y, z], range: 8.0 },
+                    color: [r, g, b],
+                    intensity: 1.8,
+                    bake_enabled: true,
+                    casts_shadows: false,
+                });
+            }
+
+            // Altar candles (warm orange, soft shadow)
+            for &(x, y, z) in CANDLES {
+                bake_scene.add_light(LightSource {
+                    kind: LightSourceKind::Point { position: [x, y, z], range: 4.0 },
+                    color: [1.0, 0.6, 0.15],
+                    intensity: 1.2,
+                    bake_enabled: true,
+                    casts_shadows: false,
+                });
+            }
+
+            renderer.configure_bake(BakeRequest {
+                scene: bake_scene,
+                config: BakeConfig::fast("indoor_cathedral_water"),
+            });
+        }
+
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
         let command_bridge = Arc::new(bridge);
@@ -731,6 +849,18 @@ impl ApplicationHandler for App {
             WindowEvent::KeyboardInput {
                 event:
                     KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::KeyR),
+                        ..
+                    },
+                ..
+            } => {
+                state.reset_simulation();
+                println!("[input] simulation reset");
+            }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
                         state: ks,
                         physical_key: PhysicalKey::Code(key),
                         ..
@@ -808,6 +938,27 @@ impl ApplicationHandler for App {
 }
 
 impl AppState {
+    fn reset_simulation(&mut self) {
+        let start_pos = initial_ball_position();
+        let start_vel = initial_ball_velocity();
+
+        self.ball_pos = start_pos;
+        self.ball_prev_pos = start_pos;
+        self.ball_vel = start_vel;
+        self.start_time = std::time::Instant::now();
+
+        if let Ok(mut renderer) = self.renderer.lock() {
+            let _ = renderer.scene_mut().update_object_transform(
+                self.ball_obj_id,
+                glam::Mat4::from_translation(self.ball_pos),
+            );
+            let _ = renderer.scene_mut().update_water_hitbox(
+                self.ball_hitbox_id,
+                ball_aabb(self.ball_prev_pos, self.ball_pos, BALL_RADIUS, WATER_SURFACE, POOL_HALF_XZ),
+            );
+        }
+    }
+
     fn render(&mut self, dt: f32) {
         const SPEED: f32 = 5.0;
         const SENS: f32 = 0.002;
@@ -894,16 +1045,23 @@ impl AppState {
         const BALL_RADIUS: f32 = 0.5;
         const WATER_SURFACE: f32 = 1.8;
         const POOL_HALF_XZ: f32 = 6.0;
+        const WATER_STIFFNESS: f32 = 26.0;
+        const WATER_DAMPING: f32 = 1.2;
+        const WATER_DRAG: f32 = 0.35;
 
         let prev_pos = self.ball_pos;
         self.ball_vel.y += GRAVITY * dt;
         self.ball_pos += self.ball_vel * dt;
 
-        // Perfect elastic bounce off water — restores full height every time
-        let floor_y = WATER_SURFACE + BALL_RADIUS;
-        if self.ball_pos.y < floor_y {
-            self.ball_pos.y = floor_y;
-            self.ball_vel.y = self.ball_vel.y.abs(); // no energy loss on vertical
+        // Water contact: allow the ball to sink and rebound naturally,
+        // while avoiding a syrupy, over-damped response.
+        let depth = WATER_SURFACE - self.ball_pos.y;
+        if depth > 0.0 {
+            self.ball_vel.y += WATER_STIFFNESS * depth * dt;
+            self.ball_vel.y *= (1.0 - WATER_DAMPING * dt).clamp(0.0, 1.0);
+            let drag = (1.0 - WATER_DRAG * dt).clamp(0.0, 1.0);
+            self.ball_vel.x *= drag;
+            self.ball_vel.z *= drag;
         }
 
         // Elastic bounce off pool walls (no energy loss)

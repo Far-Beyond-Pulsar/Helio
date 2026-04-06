@@ -77,6 +77,14 @@ pub struct Renderer {
     /// Optional live portal handle for non-blocking profiling telemetry
     #[cfg(feature = "live-portal")]
     portal_handle: Option<helio_live_portal::LivePortalHandle>,
+
+    // ── Baking ────────────────────────────────────────────────────────────
+    /// Pending bake configuration.  Consumed in the first call to `render()`,
+    /// blocking until all passes complete before the first draw.
+    bake_pending: Option<helio_bake::BakeRequest>,
+    /// GPU-resident baked data (AO, lightmaps, probes, PVS).
+    /// Populated once, published into `FrameResources` every subsequent frame.
+    baked_data: Option<std::sync::Arc<helio_bake::BakedData>>,
 }
 
 enum GraphKind {
@@ -183,6 +191,9 @@ impl Renderer {
             jitter_cache_height: internal_h,
             #[cfg(feature = "live-portal")]
             portal_handle: None,
+
+            bake_pending: None,
+            baked_data: None,
         };
 
         // Automatically start live performance dashboard if feature is enabled
@@ -599,12 +610,50 @@ impl Renderer {
         self.scene.optimize_scene_layout();
     }
 
+    /// Queue a bake to run **once**, blocking before the first rendered frame.
+    ///
+    /// Helio will call [`helio_bake::run_bake_blocking`] at the top of the next
+    /// `render()` invocation, writing cache files to `request.config.cache_dir`
+    /// (skipping any pass whose cache file already exists).  After the bake,
+    /// baked AO is injected directly into `SsaoPass` so that pass skips its
+    /// per-frame screen-space computation, and all baked resources are available
+    /// via `FrameResources` fields for use by downstream passes.
+    ///
+    /// Calling this a second time replaces any previous pending request.
+    pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
+        self.bake_pending = Some(request);
+    }
+
     pub fn set_billboard_instances(&mut self, instances: &[helio_pass_billboard::BillboardInstance]) {
         self.billboard_instances.clear();
         self.billboard_instances.extend_from_slice(instances);
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
+        // ── Baking: run once, blocking, before the first drawn frame ──────
+        if let Some(request) = self.bake_pending.take() {
+            log::info!(
+                "[helio-bake] Starting pre-frame-1 bake for scene '{}' (cache: {})…",
+                request.config.scene_name,
+                request.config.cache_dir.display(),
+            );
+            let baked = helio_bake::run_bake_blocking(
+                &self.device,
+                &self.queue,
+                &request.scene,
+                &request.config,
+            )
+            .map_err(|e| helio_v3::Error::InvalidPassConfig(e.to_string()))?;
+            let baked = std::sync::Arc::new(baked);
+            // Bypass per-frame SSAO — SsaoPass holds an Arc to the baked AO view
+            // and skips GPU execution while that override is set.
+            if let Some(pass) = self.graph.find_pass_mut::<helio_pass_ssao::SsaoPass>() {
+                pass.set_baked_ao(baked.ao_view());
+            }
+            log::info!("[helio-bake] Bake complete — all resources uploaded to GPU.");
+            self.baked_data = Some(baked);
+        }
+
         // Compute real frame delta, capped at 100 ms to avoid spiral-of-death on
         // slow frames (e.g. first frame, window unfocus/refocus, GPU stalls).
         let now = std::time::Instant::now();
@@ -724,9 +773,12 @@ impl Renderer {
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
             shadow_atlas: None,
+            static_shadow_atlas: None,
             shadow_sampler: None,
             hiz: None,
             hiz_sampler: None,
+            static_hiz: None,
+            static_hiz_sampler: None,
             sky_lut: None,
             sky_lut_sampler: None,
             ssao: None,
@@ -777,6 +829,15 @@ impl Renderer {
             },
             water_hitbox_count,
             depth_texture: Some(&self.depth_texture),
+            // Baked data — populated after configure_bake() completes.
+            baked_ao: self.baked_data.as_deref().and_then(|d| d.ao_view_ref()),
+            baked_ao_sampler: self.baked_data.as_deref().and_then(|d| d.ao_sampler_ref()),
+            baked_lightmap: self.baked_data.as_deref().and_then(|d| d.lightmap_view_ref()),
+            baked_lightmap_sampler: self.baked_data.as_deref().and_then(|d| d.lightmap_sampler_ref()),
+            baked_reflection: self.baked_data.as_deref().and_then(|d| d.reflection_view_ref()),
+            baked_reflection_sampler: self.baked_data.as_deref().and_then(|d| d.reflection_sampler_ref()),
+            baked_irradiance_sh: self.baked_data.as_deref().and_then(|d| d.irradiance_sh_buf_ref()),
+            baked_pvs: self.baked_data.as_deref().and_then(|d| d.pvs_ref()),
         };
 
         self.graph.execute_with_frame_resources(

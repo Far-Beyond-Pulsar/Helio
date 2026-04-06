@@ -64,7 +64,7 @@ struct ShadowMatrixParams {
 @group(0) @binding(1) var<storage, read_write> shadow_mats:    array<GpuShadowMatrix>;
 @group(0) @binding(2) var<uniform>             camera:         CameraUniforms;
 @group(0) @binding(3) var<uniform>             params:         ShadowMatrixParams;
-@group(0) @binding(4) var<storage, read>       shadow_dirty:   array<u32>;  // Bitset: dirty flags per light
+@group(0) @binding(4) var<storage, read_write> shadow_dirty:   array<atomic<u32>>;  // Atomic dirty flags per light
 @group(0) @binding(5) var<storage, read_write> shadow_hashes:  array<u32>;  // FNV hashes to detect changes
 
 // ── Matrix math helpers ───────────────────────────────────────────────────────
@@ -288,13 +288,28 @@ fn compute_shadow_matrices(@builtin(global_invocation_id) gid: vec3u) {
 
     let light = lights[light_idx];
 
-    // Compute matrices based on light type (every frame; dirty tracking removed
-    // because shadow_dirty is never written and would skip all non-directional lights)
+    // Skip shadow computation if light doesn't cast shadows
+    if light.shadow_index == 0xFFFFFFFFu { return; }
+
+    // Compute matrices based on light type
     if light.light_type == LIGHT_TYPE_POINT {
         compute_point_light_matrices(light_idx, light.position_range.xyz, light.position_range.w);
     } else if light.light_type == LIGHT_TYPE_DIRECTIONAL {
         compute_directional_cascades(light_idx, light.direction_outer.xyz);
     } else if light.light_type == LIGHT_TYPE_SPOT {
         compute_spot_matrix(light_idx, light.position_range.xyz, light.direction_outer.xyz, light.position_range.w, light.direction_outer.w);
+    }
+
+    // Hash the computed matrices to detect changes
+    // This enables shadow atlas caching for static geometry
+    let base_idx = light.shadow_index;
+    let new_hash = fnv_hash_mats_6(base_idx);
+    let old_hash = shadow_hashes[light_idx];
+
+    // Update hash and mark dirty if changed
+    if new_hash != old_hash {
+        shadow_hashes[light_idx] = new_hash;
+        // Atomically set dirty flag for this light
+        atomicStore(&shadow_dirty[light_idx], 1u);
     }
 }

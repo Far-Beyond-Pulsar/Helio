@@ -20,7 +20,7 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, point_light, sphere_mesh};
+use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, point_light, sphere_mesh};
 
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, MeshId, ObjectId, Renderer, RendererConfig};
 use salva3d::{
@@ -628,7 +628,7 @@ impl AppState {
         let initial_visual_count = self.fluid_particles.len();
         while self.fluid_particles.len() < physics_particle_count {
             let transform = glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
-            let obj = insert_object(&mut self.renderer, self.sphere_mesh, self.water_material, transform, self.particle_radius)
+            let obj = insert_object_with_movability(&mut self.renderer, self.sphere_mesh, self.water_material, transform, self.particle_radius, Some(helio::Movability::Movable))
                 .expect("insert particle");
             self.fluid_particles.push(FluidParticle { id: obj });
 

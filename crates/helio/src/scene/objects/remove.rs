@@ -78,6 +78,12 @@ impl super::super::Scene {
     /// }
     /// ```
     pub fn remove_object(&mut self, id: ObjectId) -> Result<()> {
+        // Check movability before removal for static atlas tracking
+        let is_static = self.objects
+            .get_with_index(id)
+            .map(|(_, r)| !r.movability.can_move())
+            .unwrap_or(false);
+
         if self.objects_layout_optimized {
             // Optimization active - invalidate and mark for rebuild
             self.objects_layout_optimized = false;
@@ -147,6 +153,20 @@ impl super::super::Scene {
             if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
                 mesh.ref_count = mesh.ref_count.saturating_sub(1);
             }
+
+            // Shadow partition indirect buffers are not updated by delta removes;
+            // mark them for rebuild on the next flush().
+            self.shadow_partition_dirty = true;
+            if !is_static {
+                // Signal the shadow pass to re-render the dynamic atlas.
+                self.movable_objects_generation += 1;
+                self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
+            }
+        }
+
+        // After removal: mark static atlas dirty if a static object was removed
+        if is_static {
+            self.static_objects_dirty = true;
         }
 
         Ok(())

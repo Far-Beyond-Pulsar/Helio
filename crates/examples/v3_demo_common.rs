@@ -77,6 +77,17 @@ pub fn insert_object(
     transform: Mat4,
     radius: f32,
 ) -> helio::SceneResult<helio::ObjectId> {
+    insert_object_with_movability(renderer, mesh, material, transform, radius, None)
+}
+
+pub fn insert_object_with_movability(
+    renderer: &mut Renderer,
+    mesh: MeshId,
+    material: MaterialId,
+    transform: Mat4,
+    radius: f32,
+    movability: Option<helio::Movability>,
+) -> helio::SceneResult<helio::ObjectId> {
     let object_actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::object(ObjectDescriptor {
         mesh,
         material,
@@ -89,6 +100,7 @@ pub fn insert_object(
         ],
         flags: 0,
         groups: helio::GroupMask::NONE,
+        movability,
     }));
 
     object_actor_id

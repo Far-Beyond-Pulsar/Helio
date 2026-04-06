@@ -65,6 +65,10 @@ pub struct ObjectDescriptor {
     /// An object is hidden if **any** of its groups are currently hidden.
     /// Use [`GroupMask::NONE`] for objects that are always visible.
     pub groups: GroupMask,
+
+    /// Movability mode. Defaults to Static when None.
+    /// Set to Some(Movability::Movable) for objects that will update their transforms at runtime.
+    pub movability: Option<libhelio::Movability>,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -93,6 +97,8 @@ pub(crate) struct MaterialRecord {
 pub(crate) struct LightRecord {
     /// GPU-side light parameters (position, color, intensity, type, etc.).
     pub gpu: GpuLight,
+    /// Mobility mode (Static, Stationary, Movable).
+    pub movability: libhelio::Movability,
 }
 
 /// Internal record for a scene object.
@@ -109,6 +115,9 @@ pub(crate) struct ObjectRecord {
 
     /// Group membership bitmask.
     pub groups: GroupMask,
+
+    /// Movability mode (Static, Stationary, Movable).
+    pub movability: libhelio::Movability,
 
     /// GPU instance data (model matrix, normal matrix, bounds, mesh/material indices).
     pub instance: GpuInstanceData,
@@ -171,6 +180,9 @@ pub(crate) struct VirtualObjectRecord {
 
     /// Group membership bitmask.
     pub groups: GroupMask,
+
+    /// Movability mode (Static, Stationary, Movable).
+    pub movability: libhelio::Movability,
 
     /// GPU instance data (model matrix, normal matrix, bounds).
     pub instance: GpuInstanceData,
