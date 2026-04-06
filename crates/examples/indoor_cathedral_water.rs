@@ -302,11 +302,11 @@ impl ApplicationHandler for App {
             surface_height: 1.8,  // Water surface at 1.8m above floor
 
             // GERSTNER WAVE PARAMETERS (natural pool surface)
-            wave_amplitude: 0.075,     // Slightly larger ripples for livelier surface motion
-            wave_frequency: 0.95,      // Broader ripples with more movement
-            wave_speed: 2.8,           // Faster propagation for less sluggish water
+            wave_amplitude: 0.035,     // Smaller ripples for a thinner, calmer surface
+            wave_frequency: 0.75,      // Broader, slower waves with less lumpiness
+            wave_speed: 3.2,           // Faster propagation to avoid sluggish, viscous motion
             wave_direction: [0.6, 0.3], // Subtle diagonal wave direction
-            wave_steepness: 0.42,      // Slightly sharper peaks without becoming jello-like
+            wave_steepness: 0.22,      // Much softer peaks for a thinner-looking pool
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
             water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
