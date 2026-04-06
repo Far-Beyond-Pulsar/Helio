@@ -3845,6 +3845,7 @@ dependencies = [
 [[package]]
 name = "nebula"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "nebula-ao",
  "nebula-core",
@@ -3858,6 +3859,7 @@ dependencies = [
 [[package]]
 name = "nebula-ao"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -3875,6 +3877,7 @@ dependencies = [
 [[package]]
 name = "nebula-core"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "async-trait",
  "bitflags 2.11.0",
@@ -3891,6 +3894,7 @@ dependencies = [
 [[package]]
 name = "nebula-gpu"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "bytemuck",
  "glam 0.29.3",
@@ -3903,6 +3907,7 @@ dependencies = [
 [[package]]
 name = "nebula-light"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "async-trait",
  "bytemuck",
@@ -3922,6 +3927,7 @@ dependencies = [
 [[package]]
 name = "nebula-probe"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",
@@ -3940,6 +3946,7 @@ dependencies = [
 [[package]]
 name = "nebula-serialize"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "bincode 2.0.1",
  "log",
@@ -3953,6 +3960,7 @@ dependencies = [
 [[package]]
 name = "nebula-visibility"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Nebula?rev=7b427afc5cbb678aed24d4d16df580ac63d5bfb5#7b427afc5cbb678aed24d4d16df580ac63d5bfb5"
 dependencies = [
  "async-trait",
  "bincode 2.0.1",

@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Nebula baker — all heavyweight GPU bake passes live here
-nebula = { git = "https://github.com/Far-Beyond-Pulsar/Nebula", rev = "", default-features = false, features = ["ao", "light", "probe", "visibility"] }
+nebula = { git = "https://github.com/Far-Beyond-Pulsar/Nebula", rev = "7b427afc5cbb678aed24d4d16df580ac63d5bfb5", default-features = false, features = ["ao", "light", "probe", "visibility"] }
 
 # Helio internal crates
 libhelio = { path = "../libhelio" }
