@@ -619,16 +619,16 @@ impl ApplicationHandler for App {
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         // ── Configure baking ──────────────────────────────────────────────
-        // Build a SceneGeometry that mirrors the major structural surfaces so
-        // Nebula can bake AO on first launch.  Results are cached to disk;
-        // subsequent launches skip all GPU work and load from cache.
+        // Build a SceneGeometry that mirrors every static surface so Nebula
+        // can bake AO + lightmap on first launch.  Results are cached to
+        // disk; subsequent launches skip all GPU work and load from cache.
         {
             let t = |dx: f32, dy: f32, dz: f32| {
                 glam::Mat4::from_translation(glam::Vec3::new(dx, dy, dz))
             };
             let mut bake_scene = SceneGeometry::new();
 
-            // Structural surfaces
+            // ── Shell geometry ────────────────────────────────────────────
             bake_scene.add_mesh(mesh_upload_to_bake(&plane_mesh([0.0, 0.0, 0.0], 32.0), glam::Mat4::IDENTITY));
             bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [6.0,0.18,28.0]),  t(0.0,21.0,0.0)));
             bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [2.5,0.15,28.0]),  t(-8.5,11.0,0.0)));
@@ -638,13 +638,51 @@ impl ApplicationHandler for App {
             bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,28.0)));
             bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,-28.0)));
 
-            // Columns
+            // ── Colonnade inner walls ─────────────────────────────────────
+            {
+                let col_z_all: Vec<f32> = {
+                    let mut v = vec![-28.0_f32];
+                    v.extend_from_slice(COLUMN_Z);
+                    v.push(28.0);
+                    v
+                };
+                for w in col_z_all.windows(2) {
+                    let mid_z   = (w[0] + w[1]) * 0.5;
+                    let half_len = ((w[1] - w[0]) * 0.5 - 0.9_f32).max(0.1);
+                    let seg = box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len]);
+                    bake_scene.add_mesh(mesh_upload_to_bake(&seg, t(-5.5, 5.5, mid_z)));
+                    bake_scene.add_mesh(mesh_upload_to_bake(&seg, t( 5.5, 5.5, mid_z)));
+                }
+            }
+
+            // ── Columns ───────────────────────────────────────────────────
             for &z in COLUMN_Z {
                 bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(-5.5,10.0,z)));
                 bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(5.5,10.0,z)));
             }
 
-            // Chandelier lights (warm white)
+            // ── Altar ─────────────────────────────────────────────────────
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [5.5, 0.20, 3.0]),  t(0.0, 0.2, -24.5)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [3.0, 0.45, 1.5]),  t(0.0, 0.65, -25.5)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.18, 2.2, 0.18]), t(0.0, 3.2, -25.8)));
+            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [1.0, 0.18, 0.18]), t(0.0, 4.5, -25.8)));
+
+            // ── Pews ──────────────────────────────────────────────────────
+            for i in 0..PEW_COUNT {
+                let pz = PEW_Z_START + i as f32 * PEW_Z_STEP;
+                let pew = box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]);
+                bake_scene.add_mesh(mesh_upload_to_bake(&pew, t(-3.2, 0.45, pz)));
+                bake_scene.add_mesh(mesh_upload_to_bake(&pew, t( 3.2, 0.45, pz)));
+            }
+
+            // ── Chandelier hardware ───────────────────────────────────────
+            for &z in CHANDELIER_Z {
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.06, 2.0, 0.06]), t(0.0, 17.5, z)));
+                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [1.2, 0.12, 1.2]),  t(0.0, 15.2, z)));
+            }
+
+            // ── Lights ───────────────────────────────────────────────────
+            // Chandelier (warm white, shadow-casting)
             for &z in CHANDELIER_Z {
                 bake_scene.add_light(LightSource {
                     kind: LightSourceKind::Point { position: [0.0, 15.0, z], range: 22.0 },
@@ -655,12 +693,23 @@ impl ApplicationHandler for App {
                 });
             }
 
-            // Stained glass accent lights
+            // Stained-glass accent lights (coloured fill, no hard shadows)
             for &(x, y, z, r, g, b) in GLASS_LIGHTS {
                 bake_scene.add_light(LightSource {
                     kind: LightSourceKind::Point { position: [x, y, z], range: 8.0 },
                     color: [r, g, b],
                     intensity: 1.8,
+                    bake_enabled: true,
+                    casts_shadows: false,
+                });
+            }
+
+            // Altar candles (warm orange, soft shadow)
+            for &(x, y, z) in CANDLES {
+                bake_scene.add_light(LightSource {
+                    kind: LightSourceKind::Point { position: [x, y, z], range: 4.0 },
+                    color: [1.0, 0.6, 0.15],
+                    intensity: 1.2,
                     bake_enabled: true,
                     casts_shadows: false,
                 });

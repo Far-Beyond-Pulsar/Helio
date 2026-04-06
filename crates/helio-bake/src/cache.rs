@@ -112,7 +112,7 @@ impl BakeCache {
         file.write_all(CACHE_MAGIC).map_err(BakeError::Io)?;
         file.write_all(&CACHE_VERSION.to_le_bytes()).map_err(BakeError::Io)?;
         file.write_all(&payload).map_err(BakeError::Io)?;
-        log::debug!("Wrote bake cache: {}", path.display());
+        log::info!("[helio-bake] Wrote cache: {}", path.display());
         Ok(())
     }
 
@@ -150,7 +150,7 @@ impl BakeCache {
             log::warn!("Bake cache {} failed to deserialize: {}. Will re-bake.", path.display(), e);
             BakeError::Deserialize(e)
         })?;
-        log::debug!("Loaded bake cache: {}", path.display());
+        log::info!("[helio-bake] Loaded from cache: {}", path.display());
         Ok(Some(value))
     }
 

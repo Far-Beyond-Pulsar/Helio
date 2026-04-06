@@ -22,3 +22,4 @@ target/
 /.vscode/fastsearch
 /3d
 hlfs.md
+/bake_cache

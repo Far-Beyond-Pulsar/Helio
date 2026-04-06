@@ -61,3 +61,6 @@ solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070
 solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
 solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
 solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
+
+[patch."https://github.com/Far-Beyond-Pulsar/Nebula"]
+nebula = { path = "../Nebula/crates/nebula" }

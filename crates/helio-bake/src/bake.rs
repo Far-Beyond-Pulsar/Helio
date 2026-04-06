@@ -57,6 +57,12 @@ pub fn run_bake_blocking(
     let need_pvs = config.pvs.is_some() && cache.load_pvs()?.is_none();
 
     // ── GPU baking (all cache misses in one Nebula context) ────────────────────
+    if !need_ao && !need_lm && !need_probes && !need_pvs {
+        log::info!(
+            "[helio-bake] '{}' — all passes loaded from disk cache, no GPU bake needed.",
+            config.scene_name
+        );
+    }
     if need_ao || need_lm || need_probes || need_pvs {
         log::info!(
             "[helio-bake] Starting GPU bake for '{}' (ao={}, lightmap={}, probes={}, pvs={})",
