@@ -302,11 +302,11 @@ impl ApplicationHandler for App {
             surface_height: 1.8,  // Water surface at 1.8m above floor
 
             // GERSTNER WAVE PARAMETERS (natural pool surface)
-            wave_amplitude: 0.06,      // Moderate wave height for smooth water
-            wave_frequency: 0.9,       // Lower frequency for broader, more natural ripples
-            wave_speed: 2.2,           // Slower propagation for calmer surface motion
+            wave_amplitude: 0.075,     // Slightly larger ripples for livelier surface motion
+            wave_frequency: 0.95,      // Broader ripples with more movement
+            wave_speed: 2.8,           // Faster propagation for less sluggish water
             wave_direction: [0.6, 0.3], // Subtle diagonal wave direction
-            wave_steepness: 0.35,      // Softer wave peaks to avoid jello-like bumps
+            wave_steepness: 0.42,      // Slightly sharper peaks without becoming jello-like
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
             water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
@@ -1044,16 +1044,16 @@ impl AppState {
         const BALL_RADIUS: f32 = 0.5;
         const WATER_SURFACE: f32 = 1.8;
         const POOL_HALF_XZ: f32 = 6.0;
-        const WATER_STIFFNESS: f32 = 45.0;
-        const WATER_DAMPING: f32 = 4.0;
-        const WATER_DRAG: f32 = 1.1;
+        const WATER_STIFFNESS: f32 = 26.0;
+        const WATER_DAMPING: f32 = 1.2;
+        const WATER_DRAG: f32 = 0.35;
 
         let prev_pos = self.ball_pos;
         self.ball_vel.y += GRAVITY * dt;
         self.ball_pos += self.ball_vel * dt;
 
-        // Water contact: allow the ball to penetrate and come back up naturally,
-        // so it can fully submerge before each bounce.
+        // Water contact: allow the ball to sink and rebound naturally,
+        // while avoiding a syrupy, over-damped response.
         let depth = WATER_SURFACE - self.ball_pos.y;
         if depth > 0.0 {
             self.ball_vel.y += WATER_STIFFNESS * depth * dt;
