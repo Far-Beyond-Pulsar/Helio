@@ -42,7 +42,7 @@ pub enum PerfOverlayMode {
 /// Depth comparison compute shader parameters.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct DepthCompareParams {
+struct ColorCompareParams {
     screen_width: u32,
     screen_height: u32,
     _pad0: u32,
@@ -80,8 +80,10 @@ struct VisualizeParams {
     mode: u32,              // PerfOverlayMode as u32
     num_tiles_x: u32,
     num_tiles_y: u32,
-    screen_width: u32,
-    screen_height: u32,
+    internal_width: u32,    // Buffer dimensions (internal resolution)
+    internal_height: u32,
+    display_width: u32,     // Target dimensions (display resolution)
+    display_height: u32,
     opacity: f32,           // Blend factor (0.0 = invisible, 1.0 = full overlay)
     heatmap_scale: f32,     // Max value for normalization
     _pad0: u32,
@@ -94,18 +96,25 @@ struct PerfOverlayRuntime {
 }
 
 pub struct PerfOverlayShared {
-    width: u32,
-    height: u32,
+    // Internal (render) resolution - buffers are sized to this
+    internal_width: u32,
+    internal_height: u32,
+    // Display (output) resolution - rendering target size
+    display_width: u32,
+    display_height: u32,
     num_tiles_x: u32,
     num_tiles_y: u32,
 
-    depth_snapshot_prev: wgpu::Texture,
-    depth_snapshot_prev_view: wgpu::TextureView,
+    color_snapshot_prev: wgpu::Texture,
+    color_snapshot_prev_view: wgpu::TextureView,
     pass_overdraw_buf: wgpu::Buffer,
 
-    depth_compare_pipeline: wgpu::ComputePipeline,
-    depth_compare_bgl: wgpu::BindGroupLayout,
-    depth_compare_params_buf: wgpu::Buffer,
+    color_compare_pipeline: wgpu::ComputePipeline,
+    color_compare_bgl: wgpu::BindGroupLayout,
+    color_compare_params_buf: wgpu::Buffer,
+
+    blit_pipeline: wgpu::ComputePipeline,
+    blit_bgl: wgpu::BindGroupLayout,
 
     mode: Mutex<PerfOverlayMode>,
     opacity: Mutex<f32>,
@@ -141,8 +150,8 @@ impl PerfOverlayShared {
         let num_tiles_x = width.div_ceil(TILE_SIZE);
         let num_tiles_y = height.div_ceil(TILE_SIZE);
 
-        let depth_snapshot_prev = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("PerfOverlay Depth Snapshot"),
+        let color_snapshot_prev = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PerfOverlay Color Snapshot"),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -151,13 +160,13 @@ impl PerfOverlayShared {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
+                | wgpu::TextureUsages::STORAGE_BINDING,
             view_formats: &[],
         });
-        let depth_snapshot_prev_view =
-            depth_snapshot_prev.create_view(&wgpu::TextureViewDescriptor::default());
+        let color_snapshot_prev_view =
+            color_snapshot_prev.create_view(&wgpu::TextureViewDescriptor::default());
 
         let pixel_count = (width as u64) * (height as u64);
         let pass_overdraw_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -167,16 +176,16 @@ impl PerfOverlayShared {
             mapped_at_creation: false,
         });
 
-        let depth_compare_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PerfOverlay Depth Compare Shader"),
+        let color_compare_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("PerfOverlay Color Compare Shader"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/analyze_pass_overdraw.wgsl").into(),
+                include_str!("../shaders/analyze_color_overdraw.wgsl").into(),
             ),
         });
 
-        let depth_compare_bgl =
+        let color_compare_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("PerfOverlay Depth Compare BGL"),
+                label: Some("PerfOverlay Color Compare BGL"),
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
@@ -192,7 +201,7 @@ impl PerfOverlayShared {
                         binding: 1,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
@@ -202,7 +211,7 @@ impl PerfOverlayShared {
                         binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
                         ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
                             view_dimension: wgpu::TextureViewDimension::D2,
                             multisampled: false,
                         },
@@ -221,41 +230,94 @@ impl PerfOverlayShared {
                 ],
             });
 
-        let depth_compare_pipeline_layout =
+        let color_compare_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("PerfOverlay Depth Compare PL"),
-                bind_group_layouts: &[Some(&depth_compare_bgl)],
+                label: Some("PerfOverlay Color Compare PL"),
+                bind_group_layouts: &[Some(&color_compare_bgl)],
                 immediate_size: 0,
             });
 
-        let depth_compare_pipeline =
+        let color_compare_pipeline =
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("PerfOverlay Depth Compare Pipeline"),
-                layout: Some(&depth_compare_pipeline_layout),
-                module: &depth_compare_shader,
-                entry_point: Some("analyze_pass_overdraw"),
+                label: Some("PerfOverlay Color Compare Pipeline"),
+                layout: Some(&color_compare_pipeline_layout),
+                module: &color_compare_shader,
+                entry_point: Some("analyze_color_overdraw"),
                 compilation_options: Default::default(),
                 cache: None,
             });
 
-        let depth_compare_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PerfOverlay Depth Compare Params"),
-            size: std::mem::size_of::<DepthCompareParams>() as u64,
+        let color_compare_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PerfOverlay Color Compare Params"),
+            size: std::mem::size_of::<ColorCompareParams>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
+        // Blit shader for copying color textures
+        let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("PerfOverlay Blit Shader"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/blit_color.wgsl").into(),
+            ),
+        });
+
+        let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("PerfOverlay Blit BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let blit_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("PerfOverlay Blit PL"),
+            bind_group_layouts: &[Some(&blit_bgl)],
+            immediate_size: 0,
+        });
+
+        let blit_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("PerfOverlay Blit Pipeline"),
+            layout: Some(&blit_pipeline_layout),
+            module: &blit_shader,
+            entry_point: Some("blit_color"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         Arc::new(Mutex::new(Self {
-            width,
-            height,
+            internal_width: width,
+            internal_height: height,
+            display_width: width, // Initially same as internal
+            display_height: height,
             num_tiles_x,
             num_tiles_y,
-            depth_snapshot_prev,
-            depth_snapshot_prev_view,
+            color_snapshot_prev,
+            color_snapshot_prev_view,
             pass_overdraw_buf,
-            depth_compare_pipeline,
-            depth_compare_bgl,
-            depth_compare_params_buf,
+            color_compare_pipeline,
+            color_compare_bgl,
+            color_compare_params_buf,
+            blit_pipeline,
+            blit_bgl,
             mode: Mutex::new(PerfOverlayMode::Disabled),
             opacity: Mutex::new(0.6),
             runtime: Mutex::new(PerfOverlayRuntime {
@@ -265,44 +327,17 @@ impl PerfOverlayShared {
         }))
     }
 
-    pub fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if width == self.width && height == self.height {
+    pub fn on_resize(&mut self, _device: &wgpu::Device, width: u32, height: u32) {
+        // Update display resolution (rendering target size)
+        // Buffers remain at internal resolution to match pre_aa buffer
+        if width == self.display_width && height == self.display_height {
             return;
         }
 
-        self.width = width;
-        self.height = height;
-        self.num_tiles_x = width.div_ceil(TILE_SIZE);
-        self.num_tiles_y = height.div_ceil(TILE_SIZE);
-
-        self.depth_snapshot_prev = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("PerfOverlay Depth Snapshot"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.depth_snapshot_prev_view =
-            self.depth_snapshot_prev.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let pixel_count = (width as u64) * (height as u64);
-        self.pass_overdraw_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PerfOverlay Pass Overdraw Counters"),
-            size: pixel_count * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut runtime = self.runtime.lock().unwrap();
-        runtime.snapshot_valid = false;
+        self.display_width = width;
+        self.display_height = height;
+        // Note: internal buffers are NOT resized here - they stay at internal resolution
+        // to match the pre_aa color buffer they're tracking
     }
 
     pub fn get_mode(&self) -> PerfOverlayMode {
@@ -569,8 +604,8 @@ impl RenderPass for PerfOverlayPass {
             num_tiles_x: shared.num_tiles_x,
             num_tiles_y: shared.num_tiles_y,
             num_tiles: shared.num_tiles_x * shared.num_tiles_y,
-            screen_width: shared.width,
-            screen_height: shared.height,
+            screen_width: shared.internal_width,
+            screen_height: shared.internal_height,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -585,8 +620,10 @@ impl RenderPass for PerfOverlayPass {
             mode: shared.mode.lock().unwrap().clone() as u32,
             num_tiles_x: shared.num_tiles_x,
             num_tiles_y: shared.num_tiles_y,
-            screen_width: shared.width,
-            screen_height: shared.height,
+            internal_width: shared.internal_width,
+            internal_height: shared.internal_height,
+            display_width: shared.display_width,
+            display_height: shared.display_height,
             opacity: *shared.opacity.lock().unwrap(),
             heatmap_scale: 5.0,
             _pad0: 0,
@@ -742,21 +779,21 @@ impl RenderPass for PerfOverlayPass {
 
 impl RenderPass for PerfOverlayAnalyzerPass {
     fn name(&self) -> &'static str {
-        "PerfOverlay Depth Analyzer"
+        "PerfOverlay Color Analyzer"
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let shared = self.shared.lock().unwrap();
-        let depth_compare_params = DepthCompareParams {
-            screen_width: shared.width,
-            screen_height: shared.height,
+        let color_compare_params = ColorCompareParams {
+            screen_width: shared.internal_width,
+            screen_height: shared.internal_height,
             _pad0: 0,
             _pad1: 0,
         };
         ctx.write_buffer(
-            &shared.depth_compare_params_buf,
+            &shared.color_compare_params_buf,
             0,
-            bytemuck::bytes_of(&depth_compare_params),
+            bytemuck::bytes_of(&color_compare_params),
         );
         Ok(())
     }
@@ -767,15 +804,13 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             return Ok(());
         }
 
-        let depth_texture = if let Some(full_res) = ctx.resources.full_res_depth_texture {
-            full_res
-        } else if let Some(depth_texture) = ctx.resources.depth_texture {
-            depth_texture
+        // Get the color render target (pre-AA buffer)
+        let color_texture = if let Some(pre_aa) = ctx.resources.pre_aa {
+            pre_aa
         } else {
-            return Ok(());
+            // If no pre_aa, use the main target (though this is less ideal)
+            ctx.target
         };
-
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
             ctx.encoder.clear_buffer(&shared.pass_overdraw_buf, 0, None);
@@ -786,21 +821,21 @@ impl RenderPass for PerfOverlayAnalyzerPass {
 
         let mut runtime = shared.runtime.lock().unwrap();
         if runtime.snapshot_valid {
-            let depth_compare_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("PerfOverlay Depth Compare BG"),
-                layout: &shared.depth_compare_bgl,
+            let color_compare_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("PerfOverlay Color Compare BG"),
+                layout: &shared.color_compare_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: shared.depth_compare_params_buf.as_entire_binding(),
+                        resource: shared.color_compare_params_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&shared.depth_snapshot_prev_view),
+                        resource: wgpu::BindingResource::TextureView(&shared.color_snapshot_prev_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                        resource: wgpu::BindingResource::TextureView(color_texture),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -810,27 +845,44 @@ impl RenderPass for PerfOverlayAnalyzerPass {
             });
 
             let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("PerfOverlay Depth Compare"),
+                label: Some("PerfOverlay Color Compare"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&shared.depth_compare_pipeline);
-            pass.set_bind_group(0, &depth_compare_bg, &[]);
-            let dispatch_x = shared.width.div_ceil(16);
-            let dispatch_y = shared.height.div_ceil(16);
+            pass.set_pipeline(&shared.color_compare_pipeline);
+            pass.set_bind_group(0, &color_compare_bg, &[]);
+            let dispatch_x = shared.internal_width.div_ceil(16);
+            let dispatch_y = shared.internal_height.div_ceil(16);
             pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
         } else {
             runtime.snapshot_valid = true;
         }
+        drop(runtime);
 
-        ctx.encoder.copy_texture_to_texture(
-            depth_texture.as_image_copy(),
-            shared.depth_snapshot_prev.as_image_copy(),
-            wgpu::Extent3d {
-                width: shared.width,
-                height: shared.height,
-                depth_or_array_layers: 1,
-            },
-        );
+        // Copy current color to snapshot for next pass comparison using blit shader
+        let blit_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("PerfOverlay Blit BG"),
+            layout: &shared.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(color_texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&shared.color_snapshot_prev_view),
+                },
+            ],
+        });
+
+        let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("PerfOverlay Blit Color"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&shared.blit_pipeline);
+        pass.set_bind_group(0, &blit_bg, &[]);
+        let dispatch_x = shared.internal_width.div_ceil(16);
+        let dispatch_y = shared.internal_height.div_ceil(16);
+        pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
 
         Ok(())
     }

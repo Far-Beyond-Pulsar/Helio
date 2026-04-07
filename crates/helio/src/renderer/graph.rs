@@ -95,7 +95,7 @@ pub fn build_default_graph(
 
     graph.add_pass(Box::new(DepthPrepassPass::new(device, wgpu::TextureFormat::Depth32Float)));
 
-    let perf_overlay_shared = PerfOverlayShared::new(device, config.width, config.height);
+    let perf_overlay_shared = PerfOverlayShared::new(device, config.internal_width(), config.internal_height());
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     graph.add_pass(Box::new(hiz_pass));
@@ -249,7 +249,7 @@ pub fn build_hlfs_graph(
 
     graph.add_pass(Box::new(DepthPrepassPass::new(device, wgpu::TextureFormat::Depth32Float)));
 
-    let perf_overlay_shared = PerfOverlayShared::new(device, config.width, config.height);
+    let perf_overlay_shared = PerfOverlayShared::new(device, config.internal_width(), config.internal_height());
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     graph.add_pass(Box::new(hiz_pass));

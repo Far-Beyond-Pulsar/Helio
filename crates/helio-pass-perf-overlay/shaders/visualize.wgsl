@@ -6,8 +6,10 @@ struct VisualizeParams {
     mode: u32,              // PerfOverlayMode as u32
     num_tiles_x: u32,
     num_tiles_y: u32,
-    screen_width: u32,
-    screen_height: u32,
+    internal_width: u32,    // Buffer dimensions (internal resolution)
+    internal_height: u32,
+    display_width: u32,     // Target dimensions (display resolution)
+    display_height: u32,
     opacity: f32,           // Blend factor (0.0-1.0)
     heatmap_scale: f32,     // Max value for normalization
     _pad0: u32,
@@ -79,10 +81,46 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Sample scene color
     let scene = textureSample(scene_color, scene_sampler, in.uv).rgb;
 
-    // Get tile index from UV
-    let pixel_x = u32(clamp(in.uv.x * f32(params.screen_width), 0.0, f32(params.screen_width - 1u)));
-    let pixel_y = u32(clamp(in.uv.y * f32(params.screen_height), 0.0, f32(params.screen_height - 1u)));
-    let pixel_idx = pixel_y * params.screen_width + pixel_x;
+    // Map display UV to internal buffer coordinates
+    // Display is at full resolution (e.g., 1920×1080)
+    // Internal buffers are at render resolution (e.g., 1440×810)
+    let display_x = u32(clamp(in.uv.x * f32(params.display_width), 0.0, f32(params.display_width - 1u)));
+    let display_y = u32(clamp(in.uv.y * f32(params.display_height), 0.0, f32(params.display_height - 1u)));
+    
+    let internal_x = u32(clamp(in.uv.x * f32(params.internal_width), 0.0, f32(params.internal_width - 1u)));
+    let internal_y = u32(clamp(in.uv.y * f32(params.internal_height), 0.0, f32(params.internal_height - 1u)));
+    let pixel_idx = internal_y * params.internal_width + internal_x;
+
+    // Scale bar at bottom (40 pixels high) - use display resolution for UI
+    let scale_bar_height = 40.0;
+    let scale_bar_start_y = f32(params.display_height) - scale_bar_height;
+    
+    if f32(display_y) >= scale_bar_start_y {
+        // Render gradient scale bar
+        let bar_progress = in.uv.x; // 0.0 to 1.0 left to right
+        let gradient_color = heatmap_color(bar_progress);
+        
+        // Add tick marks every 20% and black border
+        let local_y = f32(display_y) - scale_bar_start_y;
+        let is_top_border = local_y < 2.0;
+        let is_bottom_border = local_y >= scale_bar_height - 2.0;
+        
+        // Tick marks at 0%, 25%, 50%, 75%, 100%
+        let tick_width = 2.0 / f32(params.display_width);
+        let is_tick = (abs(bar_progress - 0.0) < tick_width) ||
+                      (abs(bar_progress - 0.25) < tick_width) ||
+                      (abs(bar_progress - 0.5) < tick_width) ||
+                      (abs(bar_progress - 0.75) < tick_width) ||
+                      (abs(bar_progress - 1.0) < tick_width);
+        
+        let is_tick_mark = is_tick && (local_y < 12.0 || local_y >= scale_bar_height - 12.0);
+        
+        if is_top_border || is_bottom_border || is_tick_mark {
+            return vec4<f32>(0.0, 0.0, 0.0, 1.0); // Black borders/ticks
+        }
+        
+        return vec4<f32>(gradient_color, 1.0);
+    }
 
     var overlay_color = vec3<f32>(0.0);
 
