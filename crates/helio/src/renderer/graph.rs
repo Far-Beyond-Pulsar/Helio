@@ -15,7 +15,7 @@ use helio_pass_sky::SkyPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_hlfs::HlfsPass;
-use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayPass, PerfOverlayShared};
+use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared};
 use helio_pass_water_sim::WaterSimPass;
 use helio_v3::RenderGraph;
 
@@ -120,6 +120,7 @@ pub fn build_default_graph(
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
+    graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)

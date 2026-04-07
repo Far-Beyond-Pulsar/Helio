@@ -1,6 +1,6 @@
 //! Fullscreen quad visualization shader.
 //!
-//! Renders heatmap overlay blended with scene color based on selected performance metric.
+//! Renders raw heatmap data for performance metrics.
 
 struct VisualizeParams {
     mode: u32,              // PerfOverlayMode as u32
@@ -10,10 +10,10 @@ struct VisualizeParams {
     internal_height: u32,
     display_width: u32,     // Target dimensions (display resolution)
     display_height: u32,
-    opacity: f32,           // Blend factor (0.0-1.0)
     heatmap_scale: f32,     // Max value for normalization
     _pad0: u32,
     _pad1: u32,
+    _pad2: u32,
 }
 
 struct TileMetrics {
@@ -26,8 +26,8 @@ struct TileMetrics {
 @group(0) @binding(0) var<uniform> params: VisualizeParams;
 @group(0) @binding(1) var<storage, read> pass_overdraw: array<u32>;
 @group(0) @binding(2) var<storage, read> tile_metrics: array<TileMetrics>;
-@group(0) @binding(3) var scene_color: texture_2d<f32>;
-@group(0) @binding(4) var scene_sampler: sampler;
+@group(0) @binding(3) var gbuffer_orm: texture_2d<f32>;
+@group(0) @binding(4) var<storage, read> shader_cost: array<atomic<u32>>;
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
@@ -70,16 +70,13 @@ fn heatmap_color(value: f32) -> vec3<f32> {
     }
 }
 
-/// Fragment shader: heatmap overlay blended with scene.
+/// Fragment shader: raw heatmap data visualization.
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // Early discard when disabled
     if params.mode == 0u {
         discard;
     }
-
-    // Sample scene color
-    let scene = textureSample(scene_color, scene_sampler, in.uv).rgb;
 
     // Map display UV to internal buffer coordinates
     // Display is at full resolution (e.g., 1920×1080)
@@ -132,22 +129,27 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
         return vec4<f32>(overlay_color, 1.0);
     }
 
-    let tile_x = u32(in.uv.x * f32(params.num_tiles_x));
-    let tile_y = u32(in.uv.y * f32(params.num_tiles_y));
+    // Calculate exact tile coordinates from internal resolution pixel coordinates
+    // This ensures pixel-perfect mapping instead of approximation from UV
+    let tile_x = internal_x / 16u;  // TILE_SIZE = 16
+    let tile_y = internal_y / 16u;
     let tile_idx = tile_y * params.num_tiles_x + tile_x;
     let metrics = tile_metrics[tile_idx];
 
     if params.mode == 2u {
-        // Shader complexity (0-200 scale)
-        let normalized = f32(metrics.complexity_avg) / 200.0;
+        // Shader complexity: estimated per-pixel rendering cost
+        let cost = atomicLoad(&shader_cost[pixel_idx]);
+        // Normalize cost (typical range: 0-500, adjust based on profiling)
+        let normalized = min(f32(cost) / 500.0, 1.0);
         overlay_color = heatmap_color(normalized);
+        return vec4<f32>(overlay_color, 1.0);
     } else if params.mode == 3u {
         // Tile light count (0-64 scale)
         let normalized = f32(metrics.light_count) / 64.0;
         overlay_color = heatmap_color(normalized);
+        return vec4<f32>(overlay_color, 1.0);
     }
 
-    // Blend overlay with scene for non-overdraw modes
-    let blended = mix(scene, overlay_color, params.opacity);
-    return vec4<f32>(blended, 1.0);
+    // Fallback: black
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
 }
