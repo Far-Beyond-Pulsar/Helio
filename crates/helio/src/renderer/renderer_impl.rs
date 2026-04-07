@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use arrayvec::ArrayVec;
 use helio_pass_debug::{DebugVertex};
 use helio_pass_deferred_light::DeferredLightPass;
+use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 use helio_pass_debug::DebugCameraUniform;
 const MAX_TEXTURES: usize = crate::material::MAX_TEXTURES;
@@ -57,6 +58,7 @@ pub struct Renderer {
     gi_config: GiConfig,
     shadow_quality: libhelio::ShadowQuality,
     debug_mode: u32,
+    perf_overlay_mode: PerfOverlayMode,
     debug_depth_test: bool,
     editor_mode: bool,
     custom_graph_builder: Option<CustomGraphBuilder>,
@@ -175,11 +177,12 @@ impl Renderer {
             clear_color: [0.02, 0.02, 0.03, 1.0],
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
-            debug_mode: 0,
+            debug_mode: config.debug_mode,
             debug_depth_test: true,
             editor_mode: false,
             custom_graph_builder: None,
             custom_graph_config: None,
+            perf_overlay_mode: config.perf_overlay_mode,
             debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
@@ -235,6 +238,15 @@ impl Renderer {
         if matches!(self.graph_kind, GraphKind::Default) {
             if let Some(pass) = self.graph.find_pass_mut::<DeferredLightPass>() {
                 pass.set_debug_mode(mode);
+            }
+        }
+    }
+
+    pub fn set_perf_overlay_mode(&mut self, mode: PerfOverlayMode) {
+        self.perf_overlay_mode = mode;
+        if matches!(self.graph_kind, GraphKind::Default) {
+            if let Some(pass) = self.graph.find_pass_mut::<PerfOverlayPass>() {
+                pass.set_mode(mode);
             }
         }
     }
@@ -479,6 +491,7 @@ impl Renderer {
             shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
+            perf_overlay_mode: self.perf_overlay_mode,
         };
         let (depth_texture, depth_view) = create_depth_resources(
             &self.device,
@@ -594,6 +607,7 @@ impl Renderer {
             shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
+            perf_overlay_mode: self.perf_overlay_mode,
         };
         self.graph = build_default_graph(
             &self.device,
@@ -805,6 +819,7 @@ impl Renderer {
             tile_light_lists: None,
             tile_light_counts: None,
             full_res_depth: self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView),
+            full_res_depth_texture: self.full_res_depth_texture.as_ref().map(|t| t as &wgpu::Texture),
             sky: self.scene.sky_context(),
             billboards: if self.billboard_scratch.is_empty() {
                 None

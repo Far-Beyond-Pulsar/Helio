@@ -1,4 +1,5 @@
 use crate::material::MAX_TEXTURES;
+use helio_pass_perf_overlay::PerfOverlayMode;
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     #[cfg(not(target_arch = "wasm32"))]
@@ -69,6 +70,7 @@ pub struct RendererConfig {
     pub shadow_quality: libhelio::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
+    pub perf_overlay_mode: PerfOverlayMode,
 }
 
 impl RendererConfig {
@@ -81,6 +83,7 @@ impl RendererConfig {
             shadow_quality: libhelio::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
+            perf_overlay_mode: PerfOverlayMode::Disabled,
         }
     }
 
@@ -96,6 +99,11 @@ impl RendererConfig {
 
     pub fn with_render_scale(mut self, scale: f32) -> Self {
         self.render_scale = scale.clamp(0.25, 1.0);
+        self
+    }
+
+    pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
+        self.perf_overlay_mode = mode;
         self
     }
 

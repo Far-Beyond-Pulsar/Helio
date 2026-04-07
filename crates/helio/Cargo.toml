@@ -33,6 +33,7 @@ helio-pass-taa = { path = "../helio-pass-taa" }
 helio-pass-transparent = { path = "../helio-pass-transparent" }
 helio-pass-debug = { path = "../helio-pass-debug" }
 helio-pass-water-sim = { path = "../helio-pass-water-sim" }
+helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 libhelio = { path = "../libhelio" }
 log = "0.4"
 thiserror = "2.0"

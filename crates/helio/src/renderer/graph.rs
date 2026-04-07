@@ -15,6 +15,7 @@ use helio_pass_sky::SkyPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_hlfs::HlfsPass;
+use helio_pass_perf_overlay::PerfOverlayPass;
 use helio_pass_water_sim::WaterSimPass;
 use helio_v3::RenderGraph;
 
@@ -149,6 +150,15 @@ pub fn build_default_graph(
         config.surface_format,
     )));
 
+    let mut perf_overlay_pass = PerfOverlayPass::new(
+        device,
+        config.width,
+        config.height,
+        config.surface_format,
+    );
+    perf_overlay_pass.set_mode(config.perf_overlay_mode);
+    graph.add_pass(Box::new(perf_overlay_pass));
+
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,
         debug_camera_buf,
@@ -282,6 +292,15 @@ pub fn build_hlfs_graph(
         config.height,
         config.surface_format,
     )));
+
+    let mut perf_overlay_pass = PerfOverlayPass::new(
+        device,
+        config.width,
+        config.height,
+        config.surface_format,
+    );
+    perf_overlay_pass.set_mode(config.perf_overlay_mode);
+    graph.add_pass(Box::new(perf_overlay_pass));
 
     graph.add_pass(Box::new(DebugDrawPass::new(
         device,

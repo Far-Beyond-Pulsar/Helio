@@ -103,6 +103,9 @@ pub struct FrameResources<'a> {
     /// `ctx.target` must use this instead of `ctx.depth` (which is at internal res)
     /// to avoid a render-pass attachment size mismatch.
     pub full_res_depth: Option<&'a wgpu::TextureView>,
+
+    /// Full-resolution depth texture object for compute passes that need raw texture access.
+    pub full_res_depth_texture: Option<&'a wgpu::Texture>,
     /// High-level Helio scene resources used by wrapper-owned passes.
     pub main_scene: Option<MainSceneResources<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
@@ -256,6 +259,7 @@ impl<'a> FrameResources<'a> {
             tile_light_lists: None,
             tile_light_counts: None,
             full_res_depth: None,
+            full_res_depth_texture: None,
             main_scene: None,
             sky: crate::sky::SkyContext::default(),
             billboards: None,

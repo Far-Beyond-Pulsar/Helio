@@ -15,6 +15,7 @@
 //! Controls:
 //!   WASD        — move forward/left/back/right
 //!   Space/Shift — move up/down
+//!   F2          — toggle performance overlay modes
 //!   Mouse drag  — look around (click to grab cursor)
 //!   Escape      — release cursor / exit
 
@@ -23,8 +24,9 @@ mod demo_portal;
 
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge,
-    LightId, MeshId, ObjectId, Renderer, RendererConfig, WaterHitboxDescriptor, WaterHitboxId,
-    BakeConfig, BakeRequest, SceneGeometry, LightSource, LightSourceKind, mesh_upload_to_bake,
+    LightId, MeshId, ObjectId, PerfOverlayMode, Renderer, RendererConfig, WaterHitboxDescriptor,
+    WaterHitboxId, BakeConfig, BakeRequest, SceneGeometry, LightSource, LightSourceKind,
+    mesh_upload_to_bake,
 };
 use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
 
@@ -186,6 +188,7 @@ struct AppState {
 
     // Debug
     debug_mode: u32,
+    perf_overlay_mode: PerfOverlayMode,
 
     // Scene state
     chandelier_light_ids: Vec<LightId>,
@@ -801,6 +804,7 @@ impl ApplicationHandler for App {
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
             debug_mode: 0,
+            perf_overlay_mode: PerfOverlayMode::Disabled,
             chandelier_light_ids,
             candle_light_ids,
             start_time: std::time::Instant::now(),
@@ -848,6 +852,28 @@ impl ApplicationHandler for App {
                     renderer.set_debug_mode(state.debug_mode);
                 }
                 println!("[debug] shadow debug mode = {}", state.debug_mode);
+            }
+
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::F2),
+                        ..
+                    },
+                ..
+            } => {
+                state.perf_overlay_mode = match state.perf_overlay_mode {
+                    PerfOverlayMode::Disabled => PerfOverlayMode::PassOverdraw,
+                    PerfOverlayMode::PassOverdraw => PerfOverlayMode::ShaderComplexity,
+                    PerfOverlayMode::ShaderComplexity => PerfOverlayMode::TileLightCount,
+                    PerfOverlayMode::TileLightCount => PerfOverlayMode::PassOutput,
+                    PerfOverlayMode::PassOutput => PerfOverlayMode::Disabled,
+                };
+                if let Ok(mut renderer) = state.renderer.lock() {
+                    renderer.set_perf_overlay_mode(state.perf_overlay_mode);
+                }
+                println!("[debug] perf overlay mode = {:?}", state.perf_overlay_mode);
             }
 
             WindowEvent::KeyboardInput {

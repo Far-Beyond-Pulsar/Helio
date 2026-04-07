@@ -2501,6 +2501,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "glow"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5e5ea60d70410161c8bf5da3fdfeaa1c72ed2c15f8bbb9d19fe3a4fad085f08"
+dependencies = [
+ "js-sys",
+ "slotmap",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "glutin_wgl_sys"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2672,6 +2684,7 @@ dependencies = [
  "helio-pass-hlfs",
  "helio-pass-light-cull",
  "helio-pass-occlusion-cull",
+ "helio-pass-perf-overlay",
  "helio-pass-shadow",
  "helio-pass-shadow-matrix",
  "helio-pass-simple-cube",
@@ -2848,6 +2861,16 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "helio-v3",
+ "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-pass-perf-overlay"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
  "wgpu 28.0.0",
 ]
 
@@ -6483,6 +6506,7 @@ dependencies = [
  "js-sys",
  "log",
  "naga 28.0.0",
+ "parking_lot",
  "portable-atomic",
  "profiling",
  "raw-window-handle",
@@ -6546,6 +6570,7 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.18",
  "wgpu-core-deps-apple",
+ "wgpu-core-deps-emscripten",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal 28.0.0",
  "wgpu-types 28.0.0",
@@ -6553,6 +6578,14 @@ dependencies = [
 
 [[package]]
 name = "wgpu-core-deps-apple"
+version = "28.0.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?rev=fce5b80e8017304449124b12637ec324417e40c8#fce5b80e8017304449124b12637ec324417e40c8"
+dependencies = [
+ "wgpu-hal 28.0.0",
+]
+
+[[package]]
+name = "wgpu-core-deps-emscripten"
 version = "28.0.0"
 source = "git+https://github.com/Far-Beyond-Pulsar/wgpu?rev=fce5b80e8017304449124b12637ec324417e40c8#fce5b80e8017304449124b12637ec324417e40c8"
 dependencies = [
@@ -6582,7 +6615,7 @@ dependencies = [
  "bytemuck",
  "cfg_aliases 0.1.1",
  "core-graphics-types",
- "glow",
+ "glow 0.14.2",
  "glutin_wgl_sys",
  "gpu-alloc",
  "gpu-allocator 0.27.0",
@@ -6626,13 +6659,18 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "cfg_aliases 0.2.1",
+ "glow 0.16.0",
+ "glutin_wgl_sys",
  "gpu-allocator 0.28.0",
  "gpu-descriptor",
  "hashbrown 0.16.1",
+ "js-sys",
+ "khronos-egl",
  "libc",
  "libloading",
  "log",
  "naga 28.0.0",
+ "ndk-sys 0.6.0+11769913",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
@@ -6650,6 +6688,9 @@ dependencies = [
  "renderdoc-sys",
  "smallvec",
  "thiserror 2.0.18",
+ "wasm-bindgen",
+ "wayland-sys",
+ "web-sys",
  "wgpu-types 28.0.0",
  "windows 0.62.2",
  "windows-core 0.62.2",

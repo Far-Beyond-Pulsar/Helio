@@ -1,0 +1,10 @@
+[package]
+name = "helio-pass-perf-overlay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8" }
+bytemuck = { version = "1.14", features = ["derive"] }
+helio-v3 = { path = "../helio-v3" }
+libhelio = { path = "../libhelio" }

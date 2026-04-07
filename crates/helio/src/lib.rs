@@ -22,6 +22,7 @@ mod vg;
 pub use groups::{GroupId, GroupMask};
 pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 pub use helio_pass_billboard::BillboardInstance;
+pub use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
     TextureUpload, MAX_TEXTURES,
