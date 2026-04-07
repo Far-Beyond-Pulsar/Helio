@@ -8,6 +8,7 @@
 //!
 //! Zero cost when disabled. Works universally with all passes without shader modifications.
 
+use std::sync::{Arc, Mutex};
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
@@ -79,77 +80,67 @@ struct VisualizeParams {
     mode: u32,              // PerfOverlayMode as u32
     num_tiles_x: u32,
     num_tiles_y: u32,
+    screen_width: u32,
+    screen_height: u32,
     opacity: f32,           // Blend factor (0.0 = invisible, 1.0 = full overlay)
     heatmap_scale: f32,     // Max value for normalization
     _pad0: u32,
     _pad1: u32,
-    _pad2: u32,
+}
+
+struct PerfOverlayRuntime {
+    frame_num: u64,
+    snapshot_valid: bool,
+}
+
+pub struct PerfOverlayShared {
+    width: u32,
+    height: u32,
+    num_tiles_x: u32,
+    num_tiles_y: u32,
+
+    depth_snapshot_prev: wgpu::Texture,
+    depth_snapshot_prev_view: wgpu::TextureView,
+    pass_overdraw_buf: wgpu::Buffer,
+
+    depth_compare_pipeline: wgpu::ComputePipeline,
+    depth_compare_bgl: wgpu::BindGroupLayout,
+    depth_compare_params_buf: wgpu::Buffer,
+
+    mode: Mutex<PerfOverlayMode>,
+    opacity: Mutex<f32>,
+    runtime: Mutex<PerfOverlayRuntime>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Pass struct
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Performance overlay pass.
-///
-/// Tracks pass-to-pass overdraw by comparing depth snapshots and visualizes
-/// performance metrics as GPU-rendered heatmaps. Zero cost when disabled.
 pub struct PerfOverlayPass {
-    // ── Depth snapshot tracking ──────────────────────────────────────────────
-    /// Previous frame's depth snapshot for comparison.
-    depth_snapshot_prev: wgpu::Texture,
-    depth_snapshot_prev_view: wgpu::TextureView,
-    /// Per-pixel pass overdraw counter (u32 per pixel).
-    pass_overdraw_buf: wgpu::Buffer,
-
-    // ── Depth comparison compute ─────────────────────────────────────────────
-    depth_compare_pipeline: wgpu::ComputePipeline,
-    depth_compare_bgl: wgpu::BindGroupLayout,
-    depth_compare_params_buf: wgpu::Buffer,
-    depth_compare_bind_group: Option<wgpu::BindGroup>,
-
-    // ── Tile aggregation (compute) ───────────────────────────────────────────
+    shared: Arc<Mutex<PerfOverlayShared>>,
     aggregate_pipeline: wgpu::ComputePipeline,
     aggregate_bgl: wgpu::BindGroupLayout,
     aggregate_params_buf: wgpu::Buffer,
     aggregate_bind_group: Option<wgpu::BindGroup>,
-    /// Tile metrics buffer (TileMetrics per 16×16 tile).
     tile_metrics_buf: wgpu::Buffer,
-
-    // ── Visualization (fullscreen quad) ──────────────────────────────────────
     visualize_pipeline: wgpu::RenderPipeline,
     visualize_bgl: wgpu::BindGroupLayout,
     visualize_params_buf: wgpu::Buffer,
     visualize_bind_group: Option<wgpu::BindGroup>,
-
-    // ── Cached state ─────────────────────────────────────────────────────────
-    bind_group_key: Option<(usize, usize, usize)>, // (gbuffer_orm_ptr, tile_light_counts_ptr, pre_aa_ptr)
-    num_tiles_x: u32,
-    num_tiles_y: u32,
-    width: u32,
-    height: u32,
-    first_frame: bool, // Skip comparison on first frame
-
-    // ── Runtime control ──────────────────────────────────────────────────────
-    mode: PerfOverlayMode,
-    opacity: f32,
+    bind_group_key: Option<(usize, usize, usize)>,
 }
 
-impl PerfOverlayPass {
-    /// Creates a new performance overlay pass.
-    pub fn new(
-        device: &wgpu::Device,
-        width: u32,
-        height: u32,
-        target_format: wgpu::TextureFormat,
-    ) -> Self {
+/// Analyzer pass that runs after render passes and compares the current depth
+/// buffer against the previous snapshot to count pass overwrites.
+pub struct PerfOverlayAnalyzerPass {
+    shared: Arc<Mutex<PerfOverlayShared>>,
+}
+
+impl PerfOverlayShared {
+    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Arc<Mutex<Self>> {
         let num_tiles_x = width.div_ceil(TILE_SIZE);
         let num_tiles_y = height.div_ceil(TILE_SIZE);
-        let num_tiles = num_tiles_x
-            .checked_mul(num_tiles_y)
-            .expect("tile grid overflow: viewport dimensions too large");
 
-        // ── Depth snapshot texture ───────────────────────────────────────────
         let depth_snapshot_prev = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PerfOverlay Depth Snapshot"),
             size: wgpu::Extent3d {
@@ -165,20 +156,17 @@ impl PerfOverlayPass {
                 | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-
         let depth_snapshot_prev_view =
             depth_snapshot_prev.create_view(&wgpu::TextureViewDescriptor::default());
 
-        // ── Pass overdraw counter buffer ─────────────────────────────────────
         let pixel_count = (width as u64) * (height as u64);
         let pass_overdraw_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Pass Overdraw Counters"),
-            size: pixel_count * 4, // u32 per pixel
+            size: pixel_count * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        // ── Depth comparison compute pipeline ────────────────────────────────
         let depth_compare_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PerfOverlay Depth Compare Shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -190,7 +178,6 @@ impl PerfOverlayPass {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("PerfOverlay Depth Compare BGL"),
                 entries: &[
-                    // 0: params (uniform)
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -201,7 +188,6 @@ impl PerfOverlayPass {
                         },
                         count: None,
                     },
-                    // 1: depth_prev (texture_depth_2d)
                     wgpu::BindGroupLayoutEntry {
                         binding: 1,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -212,7 +198,6 @@ impl PerfOverlayPass {
                         },
                         count: None,
                     },
-                    // 2: depth_current (texture_depth_2d)
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -223,7 +208,6 @@ impl PerfOverlayPass {
                         },
                         count: None,
                     },
-                    // 3: pass_overdraw (storage, read_write)
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
                         visibility: wgpu::ShaderStages::COMPUTE,
@@ -261,7 +245,96 @@ impl PerfOverlayPass {
             mapped_at_creation: false,
         });
 
-        // ── Tile aggregation compute pipeline ────────────────────────────────
+        Arc::new(Mutex::new(Self {
+            width,
+            height,
+            num_tiles_x,
+            num_tiles_y,
+            depth_snapshot_prev,
+            depth_snapshot_prev_view,
+            pass_overdraw_buf,
+            depth_compare_pipeline,
+            depth_compare_bgl,
+            depth_compare_params_buf,
+            mode: Mutex::new(PerfOverlayMode::Disabled),
+            opacity: Mutex::new(0.6),
+            runtime: Mutex::new(PerfOverlayRuntime {
+                frame_num: 0,
+                snapshot_valid: false,
+            }),
+        }))
+    }
+
+    pub fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        if width == self.width && height == self.height {
+            return;
+        }
+
+        self.width = width;
+        self.height = height;
+        self.num_tiles_x = width.div_ceil(TILE_SIZE);
+        self.num_tiles_y = height.div_ceil(TILE_SIZE);
+
+        self.depth_snapshot_prev = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PerfOverlay Depth Snapshot"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.depth_snapshot_prev_view =
+            self.depth_snapshot_prev.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let pixel_count = (width as u64) * (height as u64);
+        self.pass_overdraw_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("PerfOverlay Pass Overdraw Counters"),
+            size: pixel_count * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut runtime = self.runtime.lock().unwrap();
+        runtime.snapshot_valid = false;
+    }
+
+    pub fn get_mode(&self) -> PerfOverlayMode {
+        *self.mode.lock().unwrap()
+    }
+
+    pub fn set_mode(&self, mode: PerfOverlayMode) {
+        *self.mode.lock().unwrap() = mode;
+    }
+
+    pub fn get_opacity(&self) -> f32 {
+        *self.opacity.lock().unwrap()
+    }
+
+    pub fn set_opacity(&self, opacity: f32) {
+        *self.opacity.lock().unwrap() = opacity.clamp(0.0, 1.0);
+    }
+}
+
+impl PerfOverlayPass {
+    pub fn new(
+        device: &wgpu::Device,
+        shared: Arc<Mutex<PerfOverlayShared>>,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        let shared_guard = shared.lock().unwrap();
+        let num_tiles = shared_guard
+            .num_tiles_x
+            .checked_mul(shared_guard.num_tiles_y)
+            .expect("tile grid overflow: viewport dimensions too large");
+        drop(shared_guard);
+
         let aggregate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PerfOverlay Aggregate Shader"),
             source: wgpu::ShaderSource::Wgsl(
@@ -272,7 +345,6 @@ impl PerfOverlayPass {
         let aggregate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Aggregate BGL"),
             entries: &[
-                // 0: params (uniform)
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -283,7 +355,6 @@ impl PerfOverlayPass {
                     },
                     count: None,
                 },
-                // 1: pass_overdraw_counters (storage, read)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -294,7 +365,6 @@ impl PerfOverlayPass {
                     },
                     count: None,
                 },
-                // 2: gbuffer_orm (texture_2d<f32>)
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -305,7 +375,6 @@ impl PerfOverlayPass {
                     },
                     count: None,
                 },
-                // 3: tile_light_counts (storage, read)
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -316,7 +385,6 @@ impl PerfOverlayPass {
                     },
                     count: None,
                 },
-                // 4: tile_metrics (storage, read_write)
                 wgpu::BindGroupLayoutEntry {
                     binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -360,7 +428,6 @@ impl PerfOverlayPass {
             mapped_at_creation: false,
         });
 
-        // ── Visualization fullscreen quad pipeline ───────────────────────────
         let visualize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PerfOverlay Visualize Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/visualize.wgsl").into()),
@@ -369,7 +436,6 @@ impl PerfOverlayPass {
         let visualize_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("PerfOverlay Visualize BGL"),
             entries: &[
-                // 0: params (uniform)
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -380,7 +446,6 @@ impl PerfOverlayPass {
                     },
                     count: None,
                 },
-                // 1: tile_metrics (storage, read)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -391,9 +456,18 @@ impl PerfOverlayPass {
                     },
                     count: None,
                 },
-                // 2: scene_color (texture_2d<f32>)
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
@@ -402,9 +476,8 @@ impl PerfOverlayPass {
                     },
                     count: None,
                 },
-                // 3: scene_sampler
                 wgpu::BindGroupLayoutEntry {
-                    binding: 3,
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -456,13 +529,7 @@ impl PerfOverlayPass {
         });
 
         Self {
-            depth_snapshot_prev,
-            depth_snapshot_prev_view,
-            pass_overdraw_buf,
-            depth_compare_pipeline,
-            depth_compare_bgl,
-            depth_compare_params_buf,
-            depth_compare_bind_group: None,
+            shared,
             aggregate_pipeline,
             aggregate_bgl,
             aggregate_params_buf,
@@ -473,24 +540,21 @@ impl PerfOverlayPass {
             visualize_params_buf,
             visualize_bind_group: None,
             bind_group_key: None,
-            num_tiles_x,
-            num_tiles_y,
-            width,
-            height,
-            first_frame: true,
-            mode: PerfOverlayMode::Disabled,
-            opacity: 0.6,
         }
     }
 
-    /// Sets the visualization mode.
     pub fn set_mode(&mut self, mode: PerfOverlayMode) {
-        self.mode = mode;
+        self.shared.lock().unwrap().set_mode(mode);
     }
 
-    /// Sets the overlay opacity (0.0 = invisible, 1.0 = full overlay).
     pub fn set_opacity(&mut self, opacity: f32) {
-        self.opacity = opacity.clamp(0.0, 1.0);
+        self.shared.lock().unwrap().set_opacity(opacity);
+    }
+}
+
+impl PerfOverlayAnalyzerPass {
+    pub fn new(shared: Arc<Mutex<PerfOverlayShared>>) -> Self {
+        Self { shared }
     }
 }
 
@@ -500,26 +564,13 @@ impl RenderPass for PerfOverlayPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // Upload depth compare params
-        let depth_compare_params = DepthCompareParams {
-            screen_width: self.width,
-            screen_height: self.height,
-            _pad0: 0,
-            _pad1: 0,
-        };
-        ctx.write_buffer(
-            &self.depth_compare_params_buf,
-            0,
-            bytemuck::bytes_of(&depth_compare_params),
-        );
-
-        // Upload aggregate params
+        let shared = self.shared.lock().unwrap();
         let aggregate_params = AggregateParams {
-            num_tiles_x: self.num_tiles_x,
-            num_tiles_y: self.num_tiles_y,
-            num_tiles: self.num_tiles_x * self.num_tiles_y,
-            screen_width: self.width,
-            screen_height: self.height,
+            num_tiles_x: shared.num_tiles_x,
+            num_tiles_y: shared.num_tiles_y,
+            num_tiles: shared.num_tiles_x * shared.num_tiles_y,
+            screen_width: shared.width,
+            screen_height: shared.height,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -530,16 +581,16 @@ impl RenderPass for PerfOverlayPass {
             bytemuck::bytes_of(&aggregate_params),
         );
 
-        // Upload visualize params
         let visualize_params = VisualizeParams {
-            mode: self.mode as u32,
-            num_tiles_x: self.num_tiles_x,
-            num_tiles_y: self.num_tiles_y,
-            opacity: self.opacity,
-            heatmap_scale: 5.0, // Max expected pass overlaps
+            mode: shared.mode.lock().unwrap().clone() as u32,
+            num_tiles_x: shared.num_tiles_x,
+            num_tiles_y: shared.num_tiles_y,
+            screen_width: shared.width,
+            screen_height: shared.height,
+            opacity: *shared.opacity.lock().unwrap(),
+            heatmap_scale: 5.0,
             _pad0: 0,
             _pad1: 0,
-            _pad2: 0,
         };
         ctx.write_buffer(
             &self.visualize_params_buf,
@@ -551,65 +602,11 @@ impl RenderPass for PerfOverlayPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // Zero-cost early exit when disabled
-        if self.mode == PerfOverlayMode::Disabled {
+        let shared = self.shared.lock().unwrap();
+        if *shared.mode.lock().unwrap() == PerfOverlayMode::Disabled {
             return Ok(());
         }
 
-        // Get required resources
-        let depth_texture = if let Some(full_res) = ctx.resources.full_res_depth_texture {
-            full_res
-        } else if let Some(depth_texture) = ctx.resources.depth_texture {
-            depth_texture
-        } else {
-            return Ok(()); // No depth buffer available
-        };
-
-        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
-
-        // ── Step 1: Clear overdraw counters ─────────────────────────────────────
-        ctx.encoder.clear_buffer(&self.pass_overdraw_buf, 0, None);
-
-        // ── Step 2: Depth comparison (skip on first frame) ──────────────────────
-        if !self.first_frame {
-            // Create bind group for depth comparison
-            let depth_compare_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("PerfOverlay Depth Compare BG"),
-                layout: &self.depth_compare_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.depth_compare_params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(&self.depth_snapshot_prev_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.pass_overdraw_buf.as_entire_binding(),
-                    },
-                ],
-            });
-
-            let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("PerfOverlay Depth Compare"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.depth_compare_pipeline);
-            pass.set_bind_group(0, &depth_compare_bg, &[]);
-
-            let dispatch_x = self.width.div_ceil(16);
-            let dispatch_y = self.height.div_ceil(16);
-            pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
-        }
-
-        // ── Step 3: Aggregate tiles ──────────────────────────────────────────────
-        // Create/update bind group if resources changed
         if let (Some(gbuffer), Some(tile_light_counts)) = (ctx.resources.gbuffer, ctx.resources.tile_light_counts) {
             let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
@@ -626,7 +623,7 @@ impl RenderPass for PerfOverlayPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: self.pass_overdraw_buf.as_entire_binding(),
+                            resource: shared.pass_overdraw_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -651,18 +648,15 @@ impl RenderPass for PerfOverlayPass {
             });
             pass.set_pipeline(&self.aggregate_pipeline);
             pass.set_bind_group(0, self.aggregate_bind_group.as_ref().unwrap(), &[]);
-
-            let num_tiles = self.num_tiles_x * self.num_tiles_y;
+            let num_tiles = shared.num_tiles_x * shared.num_tiles_y;
             pass.dispatch_workgroups(num_tiles.div_ceil(256), 1, 1);
         }
 
-        // ── Step 4: Visualize heatmap ─────────────────────────────────────────────
         if let Some(pre_aa) = ctx.resources.pre_aa {
             let pre_aa_ptr = pre_aa as *const _ as usize;
             let key = (0, 0, pre_aa_ptr);
 
             if self.bind_group_key != Some(key) || self.visualize_bind_group.is_none() {
-                // Create a simple linear sampler for scene texture
                 let scene_sampler = ctx.device.create_sampler(&wgpu::SamplerDescriptor {
                     label: Some("PerfOverlay Scene Sampler"),
                     address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -683,14 +677,18 @@ impl RenderPass for PerfOverlayPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: self.tile_metrics_buf.as_entire_binding(),
+                            resource: shared.pass_overdraw_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::TextureView(pre_aa),
+                            resource: self.tile_metrics_buf.as_entire_binding(),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
+                            resource: wgpu::BindingResource::TextureView(pre_aa),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
                             resource: wgpu::BindingResource::Sampler(&scene_sampler),
                         },
                     ],
@@ -716,68 +714,19 @@ impl RenderPass for PerfOverlayPass {
             };
 
             let mut pass = ctx.begin_render_pass(&render_pass_desc);
-
             pass.set_pipeline(&self.visualize_pipeline);
             pass.set_bind_group(0, self.visualize_bind_group.as_ref().unwrap(), &[]);
-            pass.draw(0..3, 0..1); // Fullscreen triangle
+            pass.draw(0..3, 0..1);
         }
 
-        // ── Step 5: Copy current depth snapshot for next frame ────────────────
-        ctx.encoder.copy_texture_to_texture(
-            depth_texture.as_image_copy(),
-            self.depth_snapshot_prev.as_image_copy(),
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-
-        self.first_frame = false;
         Ok(())
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        if width == self.width && height == self.height {
-            return;
-        }
+        let mut shared = self.shared.lock().unwrap();
+        shared.on_resize(device, width, height);
 
-        self.width = width;
-        self.height = height;
-        self.num_tiles_x = width.div_ceil(TILE_SIZE);
-        self.num_tiles_y = height.div_ceil(TILE_SIZE);
-
-        // Recreate depth snapshot texture
-        self.depth_snapshot_prev = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("PerfOverlay Depth Snapshot"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.depth_snapshot_prev_view =
-            self.depth_snapshot_prev
-                .create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Recreate pass overdraw buffer
-        let pixel_count = (width as u64) * (height as u64);
-        self.pass_overdraw_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PerfOverlay Pass Overdraw Counters"),
-            size: pixel_count * 4,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Recreate tile metrics buffer
-        let num_tiles = self.num_tiles_x * self.num_tiles_y;
+        let num_tiles = shared.num_tiles_x * shared.num_tiles_y;
         self.tile_metrics_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Tile Metrics"),
             size: (num_tiles as u64 * std::mem::size_of::<TileMetrics>() as u64).max(4),
@@ -785,11 +734,108 @@ impl RenderPass for PerfOverlayPass {
             mapped_at_creation: false,
         });
 
-        // Invalidate bind groups
-        self.depth_compare_bind_group = None;
         self.aggregate_bind_group = None;
         self.visualize_bind_group = None;
         self.bind_group_key = None;
-        self.first_frame = true;
+    }
+}
+
+impl RenderPass for PerfOverlayAnalyzerPass {
+    fn name(&self) -> &'static str {
+        "PerfOverlay Depth Analyzer"
+    }
+
+    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        let shared = self.shared.lock().unwrap();
+        let depth_compare_params = DepthCompareParams {
+            screen_width: shared.width,
+            screen_height: shared.height,
+            _pad0: 0,
+            _pad1: 0,
+        };
+        ctx.write_buffer(
+            &shared.depth_compare_params_buf,
+            0,
+            bytemuck::bytes_of(&depth_compare_params),
+        );
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        let shared = self.shared.lock().unwrap();
+        if *shared.mode.lock().unwrap() != PerfOverlayMode::PassOverdraw {
+            return Ok(());
+        }
+
+        let depth_texture = if let Some(full_res) = ctx.resources.full_res_depth_texture {
+            full_res
+        } else if let Some(depth_texture) = ctx.resources.depth_texture {
+            depth_texture
+        } else {
+            return Ok(());
+        };
+
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        if shared.runtime.lock().unwrap().frame_num != ctx.frame_num {
+            ctx.encoder.clear_buffer(&shared.pass_overdraw_buf, 0, None);
+            let mut runtime = shared.runtime.lock().unwrap();
+            runtime.frame_num = ctx.frame_num;
+            runtime.snapshot_valid = false;
+        }
+
+        let mut runtime = shared.runtime.lock().unwrap();
+        if runtime.snapshot_valid {
+            let depth_compare_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("PerfOverlay Depth Compare BG"),
+                layout: &shared.depth_compare_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: shared.depth_compare_params_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&shared.depth_snapshot_prev_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: shared.pass_overdraw_buf.as_entire_binding(),
+                    },
+                ],
+            });
+
+            let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("PerfOverlay Depth Compare"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&shared.depth_compare_pipeline);
+            pass.set_bind_group(0, &depth_compare_bg, &[]);
+            let dispatch_x = shared.width.div_ceil(16);
+            let dispatch_y = shared.height.div_ceil(16);
+            pass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+        } else {
+            runtime.snapshot_valid = true;
+        }
+
+        ctx.encoder.copy_texture_to_texture(
+            depth_texture.as_image_copy(),
+            shared.depth_snapshot_prev.as_image_copy(),
+            wgpu::Extent3d {
+                width: shared.width,
+                height: shared.height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        Ok(())
+    }
+
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        self.shared.lock().unwrap().on_resize(device, width, height);
     }
 }

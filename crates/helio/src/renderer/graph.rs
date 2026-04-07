@@ -15,7 +15,7 @@ use helio_pass_sky::SkyPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_hlfs::HlfsPass;
-use helio_pass_perf_overlay::PerfOverlayPass;
+use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayPass, PerfOverlayShared};
 use helio_pass_water_sim::WaterSimPass;
 use helio_v3::RenderGraph;
 
@@ -95,6 +95,9 @@ pub fn build_default_graph(
 
     graph.add_pass(Box::new(DepthPrepassPass::new(device, wgpu::TextureFormat::Depth32Float)));
 
+    let perf_overlay_shared = PerfOverlayShared::new(device, config.width, config.height);
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
+
     graph.add_pass(Box::new(hiz_pass));
 
     graph.add_pass(Box::new(LightCullPass::new(device, config.internal_width(), config.internal_height())));
@@ -104,6 +107,7 @@ pub fn build_default_graph(
     let mut vg_pass = VirtualGeometryPass::new(device, camera_buf);
     vg_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(vg_pass));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     let mut deferred_light_pass = DeferredLightPass::new(
         device,
@@ -116,6 +120,7 @@ pub fn build_default_graph(
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
         .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
@@ -132,6 +137,7 @@ pub fn build_default_graph(
     );
     billboard_pass.set_occluded_by_geometry(true);
     graph.add_pass(Box::new(billboard_pass));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     graph.add_pass(Box::new(WaterSimPass::new(
         device,
@@ -140,6 +146,7 @@ pub fn build_default_graph(
         config.internal_height(),
         config.surface_format,
     )));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     graph.add_pass(Box::new(TaaPass::new(
         device,
@@ -149,11 +156,11 @@ pub fn build_default_graph(
         config.height,
         config.surface_format,
     )));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     let mut perf_overlay_pass = PerfOverlayPass::new(
         device,
-        config.width,
-        config.height,
+        Arc::clone(&perf_overlay_shared),
         config.surface_format,
     );
     perf_overlay_pass.set_mode(config.perf_overlay_mode);
@@ -242,6 +249,9 @@ pub fn build_hlfs_graph(
 
     graph.add_pass(Box::new(DepthPrepassPass::new(device, wgpu::TextureFormat::Depth32Float)));
 
+    let perf_overlay_shared = PerfOverlayShared::new(device, config.width, config.height);
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
+
     graph.add_pass(Box::new(hiz_pass));
 
     graph.add_pass(Box::new(GBufferPass::new(device, config.internal_width(), config.internal_height())));
@@ -275,6 +285,7 @@ pub fn build_hlfs_graph(
     );
     billboard_pass.set_occluded_by_geometry(true);
     graph.add_pass(Box::new(billboard_pass));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     graph.add_pass(Box::new(WaterSimPass::new(
         device,
@@ -283,6 +294,7 @@ pub fn build_hlfs_graph(
         config.internal_height(),
         config.surface_format,
     )));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
 
     graph.add_pass(Box::new(TaaPass::new(
         device,
@@ -295,8 +307,7 @@ pub fn build_hlfs_graph(
 
     let mut perf_overlay_pass = PerfOverlayPass::new(
         device,
-        config.width,
-        config.height,
+        Arc::clone(&perf_overlay_shared),
         config.surface_format,
     );
     perf_overlay_pass.set_mode(config.perf_overlay_mode);
