@@ -38,11 +38,11 @@ pub struct DenseRemove<T, H> {
 /// slot table that maps stable handles to the current dense index.
 /// Removals are implemented with swap-remove to maintain O(1) behavior.
 pub struct DenseArena<T, H> {
-    slots: Vec<DenseSlotMeta>,
-    dense: Vec<T>,
-    dense_to_slot: Vec<u32>,
-    free_list: Vec<u32>,
-    marker: PhantomData<H>,
+    pub slots: Vec<DenseSlotMeta>,
+    pub dense: Vec<T>,
+    pub dense_to_slot: Vec<u32>,
+    pub free_list: Vec<u32>,
+    pub marker: PhantomData<H>,
 }
 
 impl<T, H: Handle> DenseArena<T, H> {

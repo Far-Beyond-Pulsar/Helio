@@ -717,17 +717,14 @@ impl Renderer {
         }
 
         // Upload water volumes to GPU only when the descriptor has changed.
-        // get_water_volumes_gpu() allocates a Vec; skipping it at steady state
-        // eliminates the per-frame heap allocation and GPU write.
+        // get_water_volumes_gpu_slice() avoids heap allocations at steady state.
         // NOTE: must happen before the `texture_views` ArrayVec is built, since
         // clear_water_volumes_dirty() requires `&mut self.scene` and cannot
         // coexist with the immutable borrows held by that ArrayVec.
         let water_volume_count = self.scene.water_volumes_count();
         if water_volume_count > 0 && self.scene.water_volumes_dirty() {
-            let water_volumes = self.scene.get_water_volumes_gpu();
-            // Bridge descriptor sim/wind params into WaterSimPass so the update
-            // shader sees them. The descriptor is the source of truth — the pass's
-            // own fields are updated when the volume descriptor changes.
+            let water_volumes = self.scene.get_water_volumes_gpu_slice();
+            let water_volume_dirty_range = self.scene.water_volumes_dirty_range();
             if let Some(pass) = self.graph.find_pass_mut::<helio_pass_water_sim::WaterSimPass>() {
                 let vol = &water_volumes[0];
                 pass.set_sim_dynamics(vol.sim_dynamics[0], vol.sim_dynamics[1]);
@@ -735,23 +732,28 @@ impl Renderer {
                 pass.set_wave_speed(vol.wave_params[2]);
                 pass.set_wind([vol.wind_params[0], vol.wind_params[1]], vol.wind_params[2]);
             }
-            self.queue.write_buffer(
-                &self.water_volumes_buffer,
-                0,
-                bytemuck::cast_slice(&water_volumes),
-            );
+            if let Some((start, end)) = water_volume_dirty_range {
+                self.queue.write_buffer(
+                    &self.water_volumes_buffer,
+                    (start * std::mem::size_of::<libhelio::GpuWaterVolume>()) as u64,
+                    bytemuck::cast_slice(&water_volumes[start..end]),
+                );
+            }
             self.scene.clear_water_volumes_dirty();
         }
 
         // Upload water hitboxes to GPU only when they have changed.
         let water_hitbox_count = self.scene.water_hitboxes_count();
         if water_hitbox_count > 0 && self.scene.water_hitboxes_dirty() {
-            let water_hitboxes = self.scene.get_water_hitboxes_gpu();
-            self.queue.write_buffer(
-                &self.water_hitboxes_buffer,
-                0,
-                bytemuck::cast_slice(&water_hitboxes),
-            );
+            let water_hitboxes = self.scene.get_water_hitboxes_gpu_slice();
+            let water_hitbox_dirty_range = self.scene.water_hitboxes_dirty_range();
+            if let Some((start, end)) = water_hitbox_dirty_range {
+                self.queue.write_buffer(
+                    &self.water_hitboxes_buffer,
+                    (start * std::mem::size_of::<libhelio::GpuWaterHitbox>()) as u64,
+                    bytemuck::cast_slice(&water_hitboxes[start..end]),
+                );
+            }
             self.scene.clear_water_hitboxes_dirty();
         }
 

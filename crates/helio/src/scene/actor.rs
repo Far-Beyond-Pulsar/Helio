@@ -344,6 +344,16 @@ pub struct WaterVolumeDescriptor {
     /// God rays (volumetric light shafts) intensity
     pub god_rays_intensity: f32,
 
+    // SSR / reflection quality
+    /// Enable screen-space reflection/refraction for water surfaces
+    pub ssr_enabled: bool,
+    /// Maximum SSR ray march steps
+    pub ssr_steps: u32,
+    /// SSR ray march step size in world units
+    pub ssr_step_size: f32,
+    /// SSR thickness comparison tolerance
+    pub ssr_thickness: f32,
+
     // Heightfield simulation surface parameters
     /// Index of refraction (default 1.333 for water)
     pub ior: f32,
@@ -407,7 +417,7 @@ impl WaterVolumeDescriptor {
             sim_params: [self.ior, self.caustics_intensity, self.fresnel_min, self.density],
             shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
             sun_direction: sun,
-            ssr_params: [1.0, 32.0, 0.05, 0.02],  // Default SSR: enabled, 32 steps
+            ssr_params: [if self.ssr_enabled { 1.0 } else { 0.0 }, self.ssr_steps as f32, self.ssr_step_size, self.ssr_thickness],
             sim_dynamics: [self.wave_spring, self.wave_damping, self.wave_scale, 0.0],
             wind_params: [self.wind_direction[0], self.wind_direction[1], self.wind_strength, 0.0],
             _pad6: [0.0; 4],
@@ -438,6 +448,10 @@ impl WaterVolumeDescriptor {
             caustics_speed: 0.5,
             fog_density: 0.03,
             god_rays_intensity: 1.0,
+            ssr_enabled: true,
+            ssr_steps: 32,
+            ssr_step_size: 0.05,
+            ssr_thickness: 0.02,
             ior: 1.333,
             fresnel_min: 0.1,
             density: 0.03,
@@ -477,6 +491,10 @@ impl WaterVolumeDescriptor {
             caustics_speed: 0.4,
             fog_density: 0.05,
             god_rays_intensity: 0.5,
+            ssr_enabled: true,
+            ssr_steps: 32,
+            ssr_step_size: 0.05,
+            ssr_thickness: 0.02,
             ior: 1.333,
             fresnel_min: 0.1,
             density: 0.05,

@@ -129,12 +129,18 @@ pub struct Scene {
     /// Set when water volumes are added/removed/updated
     pub(in crate::scene) water_volumes_dirty: bool,
 
+    /// Dirty range of water volumes that need GPU upload.
+    pub(in crate::scene) water_volumes_dirty_range: Option<(usize, usize)>,
+
     // ── Water hitboxes ────────────────────────────────────────────────────────
     /// AABB hitboxes that displace the water heightfield simulation
     pub(in crate::scene) water_hitboxes: DenseArena<WaterHitboxRecord, WaterHitboxId>,
 
     /// Set when hitboxes are added/removed/updated
     pub(in crate::scene) water_hitboxes_dirty: bool,
+
+    /// Dirty range of water hitboxes that need GPU upload.
+    pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
 }
 
 impl Scene {
@@ -237,8 +243,10 @@ impl Scene {
             vg_cpu_instances: Vec::new(),
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
+            water_volumes_dirty_range: None,
             water_hitboxes: DenseArena::new(),
             water_hitboxes_dirty: false,
+            water_hitboxes_dirty_range: None,
         }
     }
 

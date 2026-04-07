@@ -317,19 +317,23 @@ impl ApplicationHandler for App {
             foam_amount: 0.45,         // Moderate foam coverage for realism
 
             // REFLECTION & REFRACTION (physically accurate)
-            reflection_strength: 1.0,  // Full reflectivity (water is ~100% reflective at grazing angles)
-            refraction_strength: 1.0,  // Full refraction strength for chromatic aberration
-            fresnel_power: 5.0,        // Physically-based fresnel (water IOR ~1.333)
+            reflection_strength: 0.65,  // Lowered reflectivity for a cleaner pool look
+            refraction_strength: 0.0,   // Disable heavy chromatic refraction
+            fresnel_power: 5.0,         // Physically-based fresnel (water IOR ~1.333)
 
-            // CAUSTICS (underwater light patterns - VISIBLE)
-            caustics_enabled: true,
-            caustics_intensity: 2.5,   // Visible but less overpowering caustics
-            caustics_scale: 9.0,       // Natural caustic pattern scale
-            caustics_speed: 1.25,      // Smooth animation for caustics
+            // CAUSTICS (disabled for lower shader cost)
+            caustics_enabled: false,
+            caustics_intensity: 0.0,
+            caustics_scale: 8.0,
+            caustics_speed: 0.0,
 
-            // VOLUMETRIC EFFECTS (subtle for clear visibility)
-            fog_density: 0.015,        // Very subtle underwater fog (reduced from 0.06)
-            god_rays_intensity: 0.2,   // Subtle god rays through water (reduced from 2.0)
+            // VOLUMETRIC EFFECTS
+            fog_density: 0.0,
+            god_rays_intensity: 0.0,
+            ssr_enabled: false,
+            ssr_steps: 8,
+            ssr_step_size: 0.05,
+            ssr_thickness: 0.02,
             // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)
             ..Default::default()
         };
