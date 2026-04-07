@@ -37,8 +37,11 @@ const HALTON_JITTER: [[f32; 2]; 16] = [
 
 #[test]
 fn taa_uniform_size_is_16() {
-    assert_eq!(mem::size_of::<TaaUniform>(), 16,
-        "feedback_min(4) + feedback_max(4) + jitter[2](8) = 16");
+    assert_eq!(
+        mem::size_of::<TaaUniform>(),
+        16,
+        "feedback_min(4) + feedback_max(4) + jitter[2](8) = 16"
+    );
 }
 
 #[test]
@@ -62,19 +65,31 @@ fn taa_uniform_size_divisible_by_16() {
 
 #[test]
 fn feedback_min_less_than_feedback_max() {
-    let u = TaaUniform { feedback_min: 0.88, feedback_max: 0.97, jitter: [0.0; 2] };
+    let u = TaaUniform {
+        feedback_min: 0.88,
+        feedback_max: 0.97,
+        jitter: [0.0; 2],
+    };
     assert!(u.feedback_min < u.feedback_max);
 }
 
 #[test]
 fn feedback_min_in_0_1() {
-    let u = TaaUniform { feedback_min: 0.88, feedback_max: 0.97, jitter: [0.0; 2] };
+    let u = TaaUniform {
+        feedback_min: 0.88,
+        feedback_max: 0.97,
+        jitter: [0.0; 2],
+    };
     assert!(u.feedback_min >= 0.0 && u.feedback_min <= 1.0);
 }
 
 #[test]
 fn feedback_max_in_0_1() {
-    let u = TaaUniform { feedback_min: 0.88, feedback_max: 0.97, jitter: [0.0; 2] };
+    let u = TaaUniform {
+        feedback_min: 0.88,
+        feedback_max: 0.97,
+        jitter: [0.0; 2],
+    };
     assert!(u.feedback_max >= 0.0 && u.feedback_max <= 1.0);
 }
 
@@ -113,22 +128,29 @@ fn halton_has_16_entries() {
 #[test]
 fn halton_all_x_values_in_open_0_1() {
     for (i, entry) in HALTON_JITTER.iter().enumerate() {
-        assert!(entry[0] > 0.0f32 && entry[0] < 1.0f32,
-            "entry[{i}].x = {} not in (0,1)", entry[0]);
+        assert!(
+            entry[0] > 0.0f32 && entry[0] < 1.0f32,
+            "entry[{i}].x = {} not in (0,1)",
+            entry[0]
+        );
     }
 }
 
 #[test]
 fn halton_all_y_values_in_open_0_1() {
     for (i, entry) in HALTON_JITTER.iter().enumerate() {
-        assert!(entry[1] > 0.0f32 && entry[1] < 1.0f32,
-            "entry[{i}].y = {} not in (0,1)", entry[1]);
+        assert!(
+            entry[1] > 0.0f32 && entry[1] < 1.0f32,
+            "entry[{i}].y = {} not in (0,1)",
+            entry[1]
+        );
     }
 }
 
 #[test]
 fn halton_no_x_duplicates() {
-    let xs: Vec<u32> = HALTON_JITTER.iter()
+    let xs: Vec<u32> = HALTON_JITTER
+        .iter()
         .map(|e| (e[0] * 1_000_000.0) as u32)
         .collect();
     let set: std::collections::HashSet<_> = xs.iter().cloned().collect();
@@ -137,7 +159,8 @@ fn halton_no_x_duplicates() {
 
 #[test]
 fn halton_no_y_duplicates() {
-    let ys: Vec<u32> = HALTON_JITTER.iter()
+    let ys: Vec<u32> = HALTON_JITTER
+        .iter()
         .map(|e| (e[1] * 1_000_000.0) as u32)
         .collect();
     let set: std::collections::HashSet<_> = ys.iter().cloned().collect();

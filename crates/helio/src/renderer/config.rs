@@ -1,15 +1,12 @@
 use crate::material::MAX_TEXTURES;
-use helio_pass_perf_overlay::PerfOverlayMode;
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     #[cfg(not(target_arch = "wasm32"))]
-    let required =
-        wgpu::Features::TEXTURE_BINDING_ARRAY |
-        wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::empty();
-    let optional =
-        wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
+    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::SHADER_PRIMITIVE_INDEX | // @builtin(primitive_index) in fs
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS; // GPU profiling timestamps via encoder
@@ -24,12 +21,12 @@ pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     }
 }
 
-/// Global Illumination configuration (dual-tier: RC near, ambient far).
+/// Global Illumination configuration (AAA dual-tier: RC near, ambient far).
 #[derive(Debug, Clone, Copy)]
 pub struct GiConfig {
     /// Radiance Cascades volume radius around camera (world units).
     /// GI within this radius uses RC, outside uses cheap ambient fallback.
-    /// Default: 80.0 (near-field quality like Unreal Lumen).
+    /// Default: 80.0 (AAA near-field quality like Unreal Lumen).
     pub rc_radius: f32,
     /// Fade margin for smooth RC→ambient transition (world units).
     /// Default: 20.0 (soft blend zone).
@@ -70,7 +67,6 @@ pub struct RendererConfig {
     pub shadow_quality: libhelio::ShadowQuality,
     pub debug_mode: u32,
     pub render_scale: f32,
-    pub perf_overlay_mode: PerfOverlayMode,
 }
 
 impl RendererConfig {
@@ -83,7 +79,6 @@ impl RendererConfig {
             shadow_quality: libhelio::ShadowQuality::Medium,
             debug_mode: 0,
             render_scale: 0.75,
-            perf_overlay_mode: PerfOverlayMode::Disabled,
         }
     }
 
@@ -99,11 +94,6 @@ impl RendererConfig {
 
     pub fn with_render_scale(mut self, scale: f32) -> Self {
         self.render_scale = scale.clamp(0.25, 1.0);
-        self
-    }
-
-    pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
-        self.perf_overlay_mode = mode;
         self
     }
 

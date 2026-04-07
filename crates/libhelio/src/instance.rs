@@ -65,4 +65,3 @@ pub struct GpuInstanceAabb {
     pub max: [f32; 3],
     pub _pad1: f32,
 }
-

@@ -226,6 +226,17 @@ impl GpuCameraBuffer {
         [p[0], p[1], p[2]]
     }
 
+    /// Returns the camera forward direction as `[x, y, z]`.
+    pub fn forward(&self) -> [f32; 3] {
+        let f = self.data.forward_far;
+        [f[0], f[1], f[2]]
+    }
+
+    /// Returns a reference to the raw GPU camera uniform data.
+    pub fn data(&self) -> &GpuCameraUniforms {
+        &self.data
+    }
+
     pub fn update(&mut self, camera: GpuCameraUniforms) {
         self.data = camera;
         self.dirty = true;
@@ -272,10 +283,14 @@ impl GpuInstanceBuffer {
 
 impl std::ops::Deref for GpuInstanceBuffer {
     type Target = GrowableBuffer<GpuInstanceData>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuInstanceBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl GpuAabbBuffer {
@@ -291,10 +306,14 @@ impl GpuAabbBuffer {
 
 impl std::ops::Deref for GpuAabbBuffer {
     type Target = GrowableBuffer<GpuInstanceAabb>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuAabbBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl GpuDrawCallBuffer {
@@ -310,10 +329,14 @@ impl GpuDrawCallBuffer {
 
 impl std::ops::Deref for GpuDrawCallBuffer {
     type Target = GrowableBuffer<GpuDrawCall>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuDrawCallBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl GpuLightBuffer {
@@ -329,10 +352,14 @@ impl GpuLightBuffer {
 
 impl std::ops::Deref for GpuLightBuffer {
     type Target = GrowableBuffer<GpuLight>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuLightBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl GpuMaterialBuffer {
@@ -348,10 +375,14 @@ impl GpuMaterialBuffer {
 
 impl std::ops::Deref for GpuMaterialBuffer {
     type Target = GrowableBuffer<GpuMaterial>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuMaterialBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl GpuShadowMatrixBuffer {
@@ -367,10 +398,14 @@ impl GpuShadowMatrixBuffer {
 
 impl std::ops::Deref for GpuShadowMatrixBuffer {
     type Target = GrowableBuffer<GpuShadowMatrix>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuShadowMatrixBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl GpuIndirectBuffer {
@@ -386,10 +421,14 @@ impl GpuIndirectBuffer {
 
 impl std::ops::Deref for GpuIndirectBuffer {
     type Target = GrowableBuffer<DrawIndexedIndirectArgs>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuIndirectBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 impl GpuVisibilityBuffer {
@@ -405,9 +444,12 @@ impl GpuVisibilityBuffer {
 
 impl std::ops::Deref for GpuVisibilityBuffer {
     type Target = GrowableBuffer<u32>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for GpuVisibilityBuffer {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
-

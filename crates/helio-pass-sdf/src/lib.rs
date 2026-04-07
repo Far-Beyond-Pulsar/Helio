@@ -64,26 +64,26 @@ const EDIT_LIST_STRIDE: u32 = 65;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuClipConfig {
-    level_count:           u32,
-    grid_dim:              u32,
-    brick_size:            u32,
-    brick_grid_dim:        u32,      //  = grid_dim / brick_size
-    bricks_per_level:      u32,      //  = brick_grid_dim^3
-    atlas_bricks_per_axis: u32,      //  = brick_grid_dim  (direct mapping)
-    base_voxel_size:       f32,
-    edit_count:            u32,
-    bvh_node_count:        u32,
-    terrain_enabled:       u32,
-    terrain_y_min:         f32,
-    terrain_y_max:         f32,
-    _pad0:                 u32,
-    _pad1:                 u32,
-    _pad2:                 u32,
-    _pad3:                 u32,
+    level_count: u32,
+    grid_dim: u32,
+    brick_size: u32,
+    brick_grid_dim: u32,        //  = grid_dim / brick_size
+    bricks_per_level: u32,      //  = brick_grid_dim^3
+    atlas_bricks_per_axis: u32, //  = brick_grid_dim  (direct mapping)
+    base_voxel_size: f32,
+    edit_count: u32,
+    bvh_node_count: u32,
+    terrain_enabled: u32,
+    terrain_y_min: f32,
+    terrain_y_max: f32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+    _pad3: u32,
     /// Voxel sizes for levels 0-3.
-    voxel_sizes_lo:        [f32; 4],
+    voxel_sizes_lo: [f32; 4],
     /// Voxel sizes for levels 4-7.
-    voxel_sizes_hi:        [f32; 4],
+    voxel_sizes_hi: [f32; 4],
 }
 
 const _: () = assert!(
@@ -97,13 +97,13 @@ const _: () = assert!(
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct GpuScrollState {
     /// Snapped brick-coord origins per level (xyz + w=0 padding).
-    snap_origins:  [[i32; 4]; 8],    //  128 bytes
+    snap_origins: [[i32; 4]; 8], //  128 bytes
     /// Monotonically-increasing edit generation written by the CPU.
-    edit_gen:      u32,
+    edit_gen: u32,
     /// Last edit generation seen by the GPU (GPU writes this).
     prev_edit_gen: u32,
-    _pad0:         u32,
-    _pad1:         u32,
+    _pad0: u32,
+    _pad1: u32,
 }
 
 const _: () = assert!(
@@ -124,79 +124,79 @@ pub struct PickResult {
 /// Fully GPU-native SDF render pass.
 pub struct SdfPass {
     // ── Pipelines ──────────────────────────────────────────────────────────
-    scroll_pipeline:  wgpu::ComputePipeline,
+    scroll_pipeline: wgpu::ComputePipeline,
     classify_pipeline: wgpu::ComputePipeline,
-    eval_pipeline:    wgpu::ComputePipeline,
-    march_pipeline:   wgpu::RenderPipeline,
-    march_bgl:        wgpu::BindGroupLayout,
+    eval_pipeline: wgpu::ComputePipeline,
+    march_pipeline: wgpu::RenderPipeline,
+    march_bgl: wgpu::BindGroupLayout,
 
     // ── Global GPU buffers ─────────────────────────────────────────────────
     /// Packed GpuSdfEdit array — grows when edit count exceeds capacity.
-    edit_buffer:                  wgpu::Buffer,
+    edit_buffer: wgpu::Buffer,
     /// GpuTerrainParams uniform (64 bytes).
-    terrain_params_buffer:        wgpu::Buffer,
+    terrain_params_buffer: wgpu::Buffer,
     /// Flat GPU BVH nodes — grows when needed.
-    bvh_nodes_buffer:             wgpu::Buffer,
+    bvh_nodes_buffer: wgpu::Buffer,
     /// GpuScrollState (144 bytes, GPU rw).
-    scroll_state_buffer:          wgpu::Buffer,
+    scroll_state_buffer: wgpu::Buffer,
     /// Per-level dirty flags written by scroll, read by classify (32 bytes).
-    dirty_flags_buffer:           wgpu::Buffer,
+    dirty_flags_buffer: wgpu::Buffer,
     /// GpuClipConfig uniform (96 bytes).
-    clip_config_buffer:           wgpu::Buffer,
+    clip_config_buffer: wgpu::Buffer,
     /// Per-brick FNV-1a hash for change detection — `level_count * bricks_per_level` u32s.
-    per_brick_hashes_buffer:      wgpu::Buffer,
+    per_brick_hashes_buffer: wgpu::Buffer,
     /// Per-brick edit lists written by classify — `level_count * bricks_per_level * EDIT_LIST_STRIDE` u32s.
-    per_brick_edit_lists_buffer:  wgpu::Buffer,
+    per_brick_edit_lists_buffer: wgpu::Buffer,
     /// Atlas slot index per (level, brick) — `level_count * bricks_per_level` u32s.
-    all_brick_indices_buffer:     wgpu::Buffer,
+    all_brick_indices_buffer: wgpu::Buffer,
     /// GPU-built dirty brick list — `level_count * MAX_BRICKS_PER_LEVEL` u32s.
-    dirty_bricks_buffer:          wgpu::Buffer,
+    dirty_bricks_buffer: wgpu::Buffer,
     /// Indirect dispatch counter + args — `level_count * 3` u32s (96 bytes for 8 levels).
-    eval_indirect_buffer:         wgpu::Buffer,
+    eval_indirect_buffer: wgpu::Buffer,
     /// Pre-initialised copy source for eval_indirect reset — [0,1,1]×level_count, never mutated.
     eval_indirect_template_buffer: wgpu::Buffer,
 
     // ── Per-level GPU buffers ──────────────────────────────────────────────
     /// Packed u8 SDF atlas per level (stored as u32 words).
-    atlas_buffers:                Vec<wgpu::Buffer>,
+    atlas_buffers: Vec<wgpu::Buffer>,
     /// SdfGridParams uniform per level (96 bytes each).
-    level_params_buffers:         Vec<wgpu::Buffer>,
+    level_params_buffers: Vec<wgpu::Buffer>,
 
     // ── Bind groups ────────────────────────────────────────────────────────
-    scroll_bg:           Option<wgpu::BindGroup>,
+    scroll_bg: Option<wgpu::BindGroup>,
     scroll_bg_camera_key: usize,
-    classify_bg:         wgpu::BindGroup,
-    eval_bgs:            Vec<wgpu::BindGroup>,
-    march_bg:            Option<wgpu::BindGroup>,
+    classify_bg: wgpu::BindGroup,
+    eval_bgs: Vec<wgpu::BindGroup>,
+    march_bg: Option<wgpu::BindGroup>,
     march_bg_camera_key: usize,
 
     // ── Minimal CPU state ──────────────────────────────────────────────────
-    edit_list:        SdfEditList,
-    terrain_config:   Option<TerrainConfig>,
-    last_gen:         u64,
+    edit_list: SdfEditList,
+    terrain_config: Option<TerrainConfig>,
+    last_gen: u64,
     /// Written to `scroll_state.edit_gen` whenever the edit list changes.
-    edit_generation:  u32,
+    edit_generation: u32,
     /// Set when edit_buffer or bvh_nodes_buffer is reallocated.
-    bindings_dirty:   bool,
-    debug_mode:       bool,
-    enabled:          bool,
+    bindings_dirty: bool,
+    debug_mode: bool,
+    enabled: bool,
     /// If true, loads existing color/depth (deferred pipeline integration).
     preserve_framebuffer: bool,
 
     // ── Static geometry constants ──────────────────────────────────────────
-    level_count:       u32,
-    bricks_per_level:  u32,
-    brick_grid_dim:    u32,
-    brick_size:        u32,
-    grid_dim:          u32,
-    base_voxel_size:   f32,
+    level_count: u32,
+    bricks_per_level: u32,
+    brick_grid_dim: u32,
+    brick_size: u32,
+    grid_dim: u32,
+    base_voxel_size: f32,
     /// Atlas bytes per brick = `(brick_size+1)^3`.
     #[allow(dead_code)]
     padded_brick_voxels: u32,
-    volume_min:        [f32; 3],
-    volume_max:        [f32; 3],
+    volume_min: [f32; 3],
+    volume_max: [f32; 3],
     #[allow(dead_code)]
-    surface_format:    wgpu::TextureFormat,
+    surface_format: wgpu::TextureFormat,
 
     // ── Static-scene early-out ─────────────────────────────────────────────
     /// CPU mirror of the per-level brick-snapped origins (mirrors sdf_scroll.wgsl).
@@ -204,7 +204,7 @@ pub struct SdfPass {
     cached_snap_origins: [[i32; 3]; 8],
     /// Set by `prepare()`, read by `execute()`.  When true the scroll, classify,
     /// and evaluate compute passes are all skipped; only the ray-march runs.
-    gpu_passes_clean:    bool,
+    gpu_passes_clean: bool,
 }
 
 impl SdfPass {
@@ -216,7 +216,14 @@ impl SdfPass {
         surface_format: wgpu::TextureFormat,
         terrain: Option<TerrainConfig>,
     ) -> Self {
-        Self::with_grid(device, surface_format, DEFAULT_GRID_DIM, [-50.0; 3], [50.0; 3], terrain)
+        Self::with_grid(
+            device,
+            surface_format,
+            DEFAULT_GRID_DIM,
+            [-50.0; 3],
+            [50.0; 3],
+            terrain,
+        )
     }
 
     /// Creates the pass with an explicit world volume and grid resolution.
@@ -228,8 +235,8 @@ impl SdfPass {
         volume_max: [f32; 3],
         terrain: Option<TerrainConfig>,
     ) -> Self {
-        let level_count   = DEFAULT_CLIP_LEVELS;
-        let brick_size    = DEFAULT_BRICK_SIZE;
+        let level_count = DEFAULT_CLIP_LEVELS;
+        let brick_size = DEFAULT_BRICK_SIZE;
         let brick_grid_dim = grid_dim / brick_size;
         let bricks_per_level = brick_grid_dim * brick_grid_dim * brick_grid_dim;
 
@@ -284,7 +291,8 @@ impl SdfPass {
         // ── BVH nodes buffer ──────────────────────────────────────────────
         let bvh_nodes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("SDF BVH Nodes"),
-            size: (INITIAL_BVH_CAPACITY * std::mem::size_of::<gpu_bvh::GpuBvhNode>()).max(64) as u64,
+            size: (INITIAL_BVH_CAPACITY * std::mem::size_of::<gpu_bvh::GpuBvhNode>()).max(64)
+                as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -367,7 +375,9 @@ impl SdfPass {
                 mapped_at_creation: true,
             });
             let template_data: Vec<u32> = (0..level_count).flat_map(|_| [0u32, 1, 1]).collect();
-            buf.slice(..).get_mapped_range_mut().copy_from_slice(bytemuck::cast_slice(&template_data));
+            buf.slice(..)
+                .get_mapped_range_mut()
+                .copy_from_slice(bytemuck::cast_slice(&template_data));
             buf.unmap();
             buf
         };
@@ -375,9 +385,7 @@ impl SdfPass {
         // ── Compute pipelines ─────────────────────────────────────────────
         let scroll_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Scroll"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/sdf_scroll.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_scroll.wgsl").into()),
         });
         let scroll_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SDF Scroll Pipeline"),
@@ -390,9 +398,7 @@ impl SdfPass {
 
         let classify_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Classify"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/sdf_classify.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_classify.wgsl").into()),
         });
         let classify_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SDF Classify Pipeline"),
@@ -405,9 +411,7 @@ impl SdfPass {
 
         let eval_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Evaluate"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/sdf_evaluate.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_evaluate.wgsl").into()),
         });
         let eval_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SDF Evaluate Pipeline"),
@@ -450,9 +454,7 @@ impl SdfPass {
         // ── Render pipeline (ray march) ───────────────────────────────────
         let march_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("SDF Ray March"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/sdf_ray_march.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/sdf_ray_march.wgsl").into()),
         });
 
         let march_bgl = Self::build_march_bgl(device, level_count as usize);
@@ -613,8 +615,7 @@ impl SdfPass {
     ) -> Option<PickResult> {
         let edits = self.edit_list.edits();
         let terrain = self.terrain_config.as_ref();
-        let inv_transforms: Vec<glam::Mat4> =
-            edits.iter().map(|e| e.transform.inverse()).collect();
+        let inv_transforms: Vec<glam::Mat4> = edits.iter().map(|e| e.transform.inverse()).collect();
 
         let mut t = 0.0f32;
         for _ in 0..256 {
@@ -622,10 +623,16 @@ impl SdfPass {
             let d = cpu_evaluate_sdf(p, edits, &inv_transforms, terrain);
             if d.abs() < 0.02 {
                 let n = cpu_estimate_normal(p, edits, &inv_transforms, terrain);
-                return Some(PickResult { position: p, normal: n, distance: t });
+                return Some(PickResult {
+                    position: p,
+                    normal: n,
+                    distance: t,
+                });
             }
             t += d.max(0.01);
-            if t > max_dist { break; }
+            if t > max_dist {
+                break;
+            }
         }
         None
     }
@@ -636,12 +643,15 @@ impl SdfPass {
     fn sdf_edit_bounds(edit: &SdfEdit) -> (glam::Vec3, f32) {
         use SdfShapeType::*;
         let local_radius = match edit.shape {
-            Sphere   => edit.params.param0,
-            Cube     => glam::Vec3::new(edit.params.param0, edit.params.param1, edit.params.param2).length(),
-            Capsule  => edit.params.param0 + edit.params.param1,
-            Torus    => edit.params.param0 + edit.params.param1,
+            Sphere => edit.params.param0,
+            Cube => {
+                glam::Vec3::new(edit.params.param0, edit.params.param1, edit.params.param2).length()
+            }
+            Capsule => edit.params.param0 + edit.params.param1,
+            Torus => edit.params.param0 + edit.params.param1,
             Cylinder => (edit.params.param0 * edit.params.param0
-                         + edit.params.param1 * edit.params.param1).sqrt(),
+                + edit.params.param1 * edit.params.param1)
+                .sqrt(),
         };
         // World-space center via forward transform of origin.
         let center = edit.transform.transform_point3(glam::Vec3::ZERO);
@@ -673,7 +683,11 @@ impl SdfPass {
         }
 
         let (terrain_enabled, terrain_y_min, terrain_y_max) = match terrain {
-            Some(cfg) => (1u32, cfg.height - cfg.amplitude * 3.0, cfg.height + cfg.amplitude * 2.0),
+            Some(cfg) => (
+                1u32,
+                cfg.height - cfg.amplitude * 3.0,
+                cfg.height + cfg.amplitude * 2.0,
+            ),
             None => (0u32, -1e10, 1e10),
         };
 
@@ -690,7 +704,10 @@ impl SdfPass {
             terrain_enabled,
             terrain_y_min,
             terrain_y_max,
-            _pad0: 0, _pad1: 0, _pad2: 0, _pad3: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            _pad3: 0,
             voxel_sizes_lo,
             voxel_sizes_hi,
         }
@@ -701,22 +718,24 @@ impl SdfPass {
         let vs = self.voxel_size_for_level(level);
         let max_march_dist = self.grid_dim as f32 * vs * 2.0;
         SdfGridParams {
-            volume_min:            self.volume_min,
-            _pad0:                 0.0,
-            volume_max:            self.volume_max,
-            _pad1:                 0.0,
-            grid_dim:              self.grid_dim,
+            volume_min: self.volume_min,
+            _pad0: 0.0,
+            volume_max: self.volume_max,
+            _pad1: 0.0,
+            grid_dim: self.grid_dim,
             edit_count,
-            voxel_size:            vs,
+            voxel_size: vs,
             max_march_dist,
-            brick_size:            self.brick_size,
-            brick_grid_dim:        self.brick_grid_dim,
-            level_idx:             level,
+            brick_size: self.brick_size,
+            brick_grid_dim: self.brick_grid_dim,
+            level_idx: level,
             atlas_bricks_per_axis: self.brick_grid_dim,
-            grid_origin:           [0.0; 3],
-            debug_flags:           if self.debug_mode { 1 } else { 0 },
-            bricks_per_level:      self.bricks_per_level,
-            _pad2: 0, _pad3: 0, _pad4: 0,
+            grid_origin: [0.0; 3],
+            debug_flags: if self.debug_mode { 1 } else { 0 },
+            bricks_per_level: self.bricks_per_level,
+            _pad2: 0,
+            _pad3: 0,
+            _pad4: 0,
         }
     }
 
@@ -734,10 +753,22 @@ impl SdfPass {
             label: Some("SDF Scroll BG"),
             layout: scroll_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: clip_config_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: scroll_state_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: dirty_flags_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: camera_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: clip_config_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: scroll_state_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: dirty_flags_buf.as_entire_binding(),
+                },
             ],
         })
     }
@@ -746,29 +777,56 @@ impl SdfPass {
     fn build_classify_bg_impl(
         device: &wgpu::Device,
         bgl: &wgpu::BindGroupLayout,
-        clip_config_buf:            &wgpu::Buffer,
-        scroll_state_buf:           &wgpu::Buffer,
-        dirty_flags_buf:            &wgpu::Buffer,
-        bvh_nodes_buf:              &wgpu::Buffer,
-        per_brick_hashes_buf:       &wgpu::Buffer,
-        per_brick_edit_lists_buf:   &wgpu::Buffer,
-        all_brick_indices_buf:      &wgpu::Buffer,
-        dirty_bricks_buf:           &wgpu::Buffer,
-        eval_indirect_buf:          &wgpu::Buffer,
+        clip_config_buf: &wgpu::Buffer,
+        scroll_state_buf: &wgpu::Buffer,
+        dirty_flags_buf: &wgpu::Buffer,
+        bvh_nodes_buf: &wgpu::Buffer,
+        per_brick_hashes_buf: &wgpu::Buffer,
+        per_brick_edit_lists_buf: &wgpu::Buffer,
+        all_brick_indices_buf: &wgpu::Buffer,
+        dirty_bricks_buf: &wgpu::Buffer,
+        eval_indirect_buf: &wgpu::Buffer,
     ) -> wgpu::BindGroup {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("SDF Classify BG"),
             layout: bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: clip_config_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: scroll_state_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: dirty_flags_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: bvh_nodes_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: per_brick_hashes_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: per_brick_edit_lists_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 6, resource: all_brick_indices_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 7, resource: dirty_bricks_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 8, resource: eval_indirect_buf.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: clip_config_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: scroll_state_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: dirty_flags_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: bvh_nodes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: per_brick_hashes_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: per_brick_edit_lists_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: all_brick_indices_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: dirty_bricks_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: eval_indirect_buf.as_entire_binding(),
+                },
             ],
         })
     }
@@ -777,24 +835,45 @@ impl SdfPass {
         device: &wgpu::Device,
         bgl: &wgpu::BindGroupLayout,
         level_params_bufs: &[wgpu::Buffer],
-        edit_buf:           &wgpu::Buffer,
-        atlas_bufs:         &[wgpu::Buffer],
-        dirty_bricks_buf:   &wgpu::Buffer,
+        edit_buf: &wgpu::Buffer,
+        atlas_bufs: &[wgpu::Buffer],
+        dirty_bricks_buf: &wgpu::Buffer,
         per_brick_edit_lists_buf: &wgpu::Buffer,
         terrain_params_buf: &wgpu::Buffer,
     ) -> Vec<wgpu::BindGroup> {
-        level_params_bufs.iter().enumerate().zip(atlas_bufs.iter())
+        level_params_bufs
+            .iter()
+            .enumerate()
+            .zip(atlas_bufs.iter())
             .map(|((i, params_buf), atlas_buf)| {
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some(&format!("SDF Eval BG L{i}")),
                     layout: bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: params_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 1, resource: edit_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 2, resource: atlas_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: dirty_bricks_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 4, resource: per_brick_edit_lists_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 5, resource: terrain_params_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: params_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: edit_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: atlas_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: dirty_bricks_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: per_brick_edit_lists_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: terrain_params_buf.as_entire_binding(),
+                        },
                     ],
                 })
             })
@@ -878,9 +957,18 @@ impl SdfPass {
     ) -> wgpu::BindGroup {
         let level_count = atlas_bufs.len();
         let mut entries = vec![
-            wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: clip_config_buf.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: scroll_state_buf.as_entire_binding() },
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: clip_config_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: scroll_state_buf.as_entire_binding(),
+            },
         ];
         for (i, atlas) in atlas_bufs.iter().enumerate() {
             entries.push(wgpu::BindGroupEntry {
@@ -935,16 +1023,17 @@ impl RenderPass for SdfPass {
                 self.bindings_dirty = true;
             }
             if !gpu_edits.is_empty() {
-                ctx.queue.write_buffer(
-                    &self.edit_buffer,
-                    0,
-                    bytemuck::cast_slice(&gpu_edits),
-                );
+                ctx.queue
+                    .write_buffer(&self.edit_buffer, 0, bytemuck::cast_slice(&gpu_edits));
             }
 
             // Build + upload flat GPU BVH (O(n_edits), not O(n_bricks)).
-            let bounds: Vec<(glam::Vec3, f32)> =
-                self.edit_list.edits().iter().map(Self::sdf_edit_bounds).collect();
+            let bounds: Vec<(glam::Vec3, f32)> = self
+                .edit_list
+                .edits()
+                .iter()
+                .map(Self::sdf_edit_bounds)
+                .collect();
             let bvh = build_flat_bvh(&bounds);
             let bvh_node_count = bvh.len() as u32;
 
@@ -963,7 +1052,9 @@ impl RenderPass for SdfPass {
             ctx.queue.write_buffer(&self.bvh_nodes_buffer, 0, bvh_bytes);
 
             // Upload terrain params.
-            let terrain_gpu = self.terrain_config.as_ref()
+            let terrain_gpu = self
+                .terrain_config
+                .as_ref()
                 .map(|c| c.build_gpu_params())
                 .unwrap_or_else(GpuTerrainParams::disabled);
             ctx.queue.write_buffer(
@@ -973,16 +1064,10 @@ impl RenderPass for SdfPass {
             );
 
             // Upload clip config with updated counts.
-            let clip_cfg = self.build_clip_config(
-                edit_count,
-                bvh_node_count,
-                self.terrain_config.as_ref(),
-            );
-            ctx.queue.write_buffer(
-                &self.clip_config_buffer,
-                0,
-                bytemuck::bytes_of(&clip_cfg),
-            );
+            let clip_cfg =
+                self.build_clip_config(edit_count, bvh_node_count, self.terrain_config.as_ref());
+            ctx.queue
+                .write_buffer(&self.clip_config_buffer, 0, bytemuck::bytes_of(&clip_cfg));
 
             // Upload per-level SdfGridParams with updated edit_count + debug_flags.
             for level in 0..self.level_count {
@@ -1048,7 +1133,7 @@ impl RenderPass for SdfPass {
         let cam_pos = ctx.scene.camera.position();
         let mut any_level_dirty = false;
         for level in 0..self.level_count as usize {
-            let vs         = self.voxel_size_for_level(level as u32);
+            let vs = self.voxel_size_for_level(level as u32);
             let brick_step = vs * self.brick_size as f32;
             let new_snap = [
                 (cam_pos[0] / brick_step).floor() as i32,
@@ -1168,7 +1253,12 @@ impl RenderPass for SdfPass {
             let color_load_op = if self.preserve_framebuffer {
                 wgpu::LoadOp::Load
             } else {
-                wgpu::LoadOp::Clear(wgpu::Color { r: 0.53, g: 0.72, b: 0.90, a: 1.0 })
+                wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.53,
+                    g: 0.72,
+                    b: 0.90,
+                    a: 1.0,
+                })
             };
             let depth_load_op = if self.preserve_framebuffer {
                 wgpu::LoadOp::Load
@@ -1182,7 +1272,10 @@ impl RenderPass for SdfPass {
                     view: ctx.target,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: color_load_op, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: color_load_op,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: depth_view,
@@ -1299,10 +1392,10 @@ fn cpu_estimate_normal(
     let dy = glam::Vec3::new(0.0, eps, 0.0);
     let dz = glam::Vec3::new(0.0, 0.0, eps);
     let nx = cpu_evaluate_sdf(p + dx, edits, inv_transforms, terrain)
-           - cpu_evaluate_sdf(p - dx, edits, inv_transforms, terrain);
+        - cpu_evaluate_sdf(p - dx, edits, inv_transforms, terrain);
     let ny = cpu_evaluate_sdf(p + dy, edits, inv_transforms, terrain)
-           - cpu_evaluate_sdf(p - dy, edits, inv_transforms, terrain);
+        - cpu_evaluate_sdf(p - dy, edits, inv_transforms, terrain);
     let nz = cpu_evaluate_sdf(p + dz, edits, inv_transforms, terrain)
-           - cpu_evaluate_sdf(p - dz, edits, inv_transforms, terrain);
+        - cpu_evaluate_sdf(p - dz, edits, inv_transforms, terrain);
     glam::Vec3::new(nx, ny, nz).normalize_or_zero()
 }

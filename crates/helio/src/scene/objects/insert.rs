@@ -99,14 +99,6 @@ impl super::super::Scene {
         let record = object_gpu_data(desc.mesh, material_slot, desc, mesh_slice);
         let (id, dense_index) = self.objects.insert(record);
 
-        // Track static topology changes for shadow atlas caching
-        let inserted_movability = self.objects.get_dense(dense_index)
-            .map(|r| r.movability)
-            .unwrap_or_default();
-        if !inserted_movability.can_move() {
-            self.static_objects_dirty = true;
-        }
-
         if self.objects_layout_optimized {
             // Optimization active - invalidate and mark for rebuild
             self.objects_layout_optimized = false;
@@ -145,18 +137,8 @@ impl super::super::Scene {
                 0u32
             };
             self.gpu_scene.visibility.push(vis);
-
-            // Shadow partition indirect buffers are not updated by delta inserts;
-            // mark them for rebuild on the next flush().
-            self.shadow_partition_dirty = true;
-            if inserted_movability.can_move() {
-                // Signal the shadow pass to re-render the dynamic atlas.
-                self.movable_objects_generation += 1;
-                self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
-            }
         }
 
         Ok(id)
     }
 }
-

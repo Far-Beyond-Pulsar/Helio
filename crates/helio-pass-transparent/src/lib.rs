@@ -297,4 +297,3 @@ impl RenderPass for TransparentPass {
         Ok(())
     }
 }
-

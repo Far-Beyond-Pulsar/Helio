@@ -20,21 +20,21 @@ const WORKGROUP_SIZE: u32 = 64;
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullParams {
-    screen_width:  u32,
+    screen_width: u32,
     screen_height: u32,
-    total_slots:   u32,
+    total_slots: u32,
     hiz_mip_count: u32,
 }
 
 pub struct OcclusionCullPass {
-    pipeline:        wgpu::ComputePipeline,
-    bgl:             wgpu::BindGroupLayout,
+    pipeline: wgpu::ComputePipeline,
+    bgl: wgpu::BindGroupLayout,
     cull_params_buf: wgpu::Buffer,
-    hiz_view:        Arc<wgpu::TextureView>,
-    hiz_sampler:     Arc<wgpu::Sampler>,
+    hiz_view: Arc<wgpu::TextureView>,
+    hiz_sampler: Arc<wgpu::Sampler>,
 
     /// Cached bind group, invalidated when buffer pointers change.
-    bind_group:     Option<wgpu::BindGroup>,
+    bind_group: Option<wgpu::BindGroup>,
     /// (camera_ptr, instances_ptr, indirect_ptr)
     bind_group_key: Option<(usize, usize, usize)>,
 }
@@ -52,81 +52,79 @@ impl OcclusionCullPass {
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("OcclusionCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/occlusion_cull.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/occlusion_cull.wgsl").into()),
         });
 
         let cull_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label:              Some("OcclusionCull CullParams"),
-            size:               std::mem::size_of::<CullParams>() as u64,
-            usage:              wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            label: Some("OcclusionCull CullParams"),
+            size: std::mem::size_of::<CullParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         // Bind group layout must match occlusion_cull.wgsl binding declarations.
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label:   Some("OcclusionCull BGL"),
+            label: Some("OcclusionCull BGL"),
             entries: &[
                 // 0: Camera uniform
                 wgpu::BindGroupLayoutEntry {
-                    binding:    0,
+                    binding: 0,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size:   None,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
                 // 1: CullParams uniform
                 wgpu::BindGroupLayoutEntry {
-                    binding:    1,
+                    binding: 1,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Uniform,
+                        ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size:   None,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
                 // 2: GpuInstanceData[] (read-only)
                 wgpu::BindGroupLayoutEntry {
-                    binding:    2,
+                    binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
-                        min_binding_size:   None,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
                 // 3: Hi-Z texture
                 wgpu::BindGroupLayoutEntry {
-                    binding:    3,
+                    binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Texture {
-                        sample_type:    wgpu::TextureSampleType::Float { filterable: false },
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
                         view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled:   false,
+                        multisampled: false,
                     },
                     count: None,
                 },
                 // 4: Hi-Z sampler (non-filtering, nearest)
                 wgpu::BindGroupLayoutEntry {
-                    binding:    4,
+                    binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 // 5: indirect draw buffer (read + write, u32 raw view)
                 wgpu::BindGroupLayoutEntry {
-                    binding:    5,
+                    binding: 5,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty:                 wgpu::BufferBindingType::Storage { read_only: false },
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
-                        min_binding_size:   None,
+                        min_binding_size: None,
                     },
                     count: None,
                 },
@@ -134,18 +132,18 @@ impl OcclusionCullPass {
         });
 
         let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label:              Some("OcclusionCull PL"),
+            label: Some("OcclusionCull PL"),
             bind_group_layouts: &[Some(&bgl)],
-            immediate_size:     0,
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label:               Some("OcclusionCull Pipeline"),
-            layout:              Some(&pl),
-            module:              &shader,
-            entry_point:         Some("main"),
+            label: Some("OcclusionCull Pipeline"),
+            layout: Some(&pl),
+            module: &shader,
+            entry_point: Some("main"),
             compilation_options: Default::default(),
-            cache:               None,
+            cache: None,
         });
 
         Self {
@@ -154,7 +152,7 @@ impl OcclusionCullPass {
             cull_params_buf,
             hiz_view,
             hiz_sampler,
-            bind_group:     None,
+            bind_group: None,
             bind_group_key: None,
         }
     }
@@ -167,9 +165,9 @@ impl RenderPass for OcclusionCullPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let p = CullParams {
-            screen_width:  ctx.width,
+            screen_width: ctx.width,
             screen_height: ctx.height,
-            total_slots:   ctx.scene.instances.len() as u32,
+            total_slots: ctx.scene.instances.len() as u32,
             hiz_mip_count: mip_levels(ctx.width, ctx.height),
         };
         ctx.write_buffer(&self.cull_params_buf, 0, bytemuck::bytes_of(&p));
@@ -197,37 +195,37 @@ impl RenderPass for OcclusionCullPass {
         // Lazy bind-group rebuild: rebuild whenever any buffer pointer changes
         // (e.g. scene grows and GrowableBuffer reallocates its wgpu::Buffer).
         let key = (
-            ctx.scene.camera   as *const _ as usize,
+            ctx.scene.camera as *const _ as usize,
             ctx.scene.instances as *const _ as usize,
-            ctx.scene.indirect  as *const _ as usize,
+            ctx.scene.indirect as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label:  Some("OcclusionCull BG"),
+                label: Some("OcclusionCull BG"),
                 layout: &self.bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
-                        binding:  0,
+                        binding: 0,
                         resource: ctx.scene.camera.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding:  1,
+                        binding: 1,
                         resource: self.cull_params_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding:  2,
+                        binding: 2,
                         resource: ctx.scene.instances.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding:  3,
+                        binding: 3,
                         resource: wgpu::BindingResource::TextureView(&self.hiz_view),
                     },
                     wgpu::BindGroupEntry {
-                        binding:  4,
+                        binding: 4,
                         resource: wgpu::BindingResource::Sampler(&self.hiz_sampler),
                     },
                     wgpu::BindGroupEntry {
-                        binding:  5,
+                        binding: 5,
                         resource: ctx.scene.indirect.as_entire_binding(),
                     },
                 ],
@@ -236,10 +234,12 @@ impl RenderPass for OcclusionCullPass {
         }
 
         let wg = count.div_ceil(WORKGROUP_SIZE);
-        let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label:            Some("OcclusionCull"),
-            timestamp_writes: None,
-        });
+        let mut pass = ctx
+            .encoder
+            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("OcclusionCull"),
+                timestamp_writes: None,
+            });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(wg, 1, 1);

@@ -324,4 +324,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

@@ -66,4 +66,3 @@ impl DrawIndexedIndirectArgs {
         }
     }
 }
-

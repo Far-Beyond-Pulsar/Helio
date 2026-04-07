@@ -18,7 +18,6 @@ pub mod instance;
 pub mod light;
 pub mod material;
 pub mod meshlet;
-pub mod movability;
 pub mod shadow;
 pub mod sky;
 pub mod water;
@@ -30,8 +29,6 @@ pub use instance::*;
 pub use light::*;
 pub use material::*;
 pub use meshlet::*;
-pub use movability::*;
 pub use shadow::*;
 pub use sky::{SkyActor, VolumetricClouds};
 pub use water::*;
-

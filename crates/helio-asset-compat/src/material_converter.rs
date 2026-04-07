@@ -193,4 +193,3 @@ where
         textures,
     })
 }
-

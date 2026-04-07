@@ -221,4 +221,3 @@ fn extract_frustum_planes(vp: [[f32; 4]; 4]) -> [[f32; 4]; 6] {
         sub(r3, r2), // far
     ]
 }
-

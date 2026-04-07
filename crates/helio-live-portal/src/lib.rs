@@ -382,4 +382,3 @@ async fn ws_client(mut socket: WebSocket, state: PortalState) {
 }
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
-

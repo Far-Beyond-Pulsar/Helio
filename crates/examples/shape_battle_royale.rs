@@ -10,14 +10,22 @@
 //!   Escape               — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, cube_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light};
+use v3_demo_common::{box_mesh, cube_mesh, insert_object, make_material, plane_mesh, point_light};
 
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, ObjectId, Renderer, RendererConfig};
+use helio::{
+    required_wgpu_features, required_wgpu_limits, Camera, ObjectId, Renderer, RendererConfig,
+};
 use rapier3d::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use winit::{application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::{CursorGrabMode, Window, WindowId}};
+use winit::{
+    application::ApplicationHandler,
+    event::*,
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{CursorGrabMode, Window, WindowId},
+};
 
 const ARENA_RADIUS: f32 = 17.5;
 const WALL_HEIGHT: f32 = 6.0;
@@ -88,50 +96,192 @@ struct AppState {
 fn main() {
     env_logger::init();
     log::info!("Starting Shape Battle Royale");
-    EventLoop::new().expect("event loop").run_app(&mut App { state: None }).expect("run");
+    EventLoop::new()
+        .expect("event loop")
+        .run_app(&mut App { state: None })
+        .expect("run");
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.state.is_some() {
+            return;
+        }
 
-        let window = Arc::new(event_loop.create_window(Window::default_attributes().with_title("Helio — Shape Battle Royale").with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32))).expect("window"));
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Helio — Shape Battle Royale")
+                        .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
+                )
+                .expect("window"),
+        );
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), flags: wgpu::InstanceFlags::empty(), ..Default::default() });
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::empty(),
+            ..Default::default()
+        });
         let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false })).expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: required_wgpu_features(adapter.features()), required_limits: required_wgpu_limits(adapter.limits()), ..Default::default() })).expect("device");
-        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| { panic!("[GPU] {:?}", e) }));
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))
+        .expect("adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }))
+        .expect("device");
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU] {:?}", e)));
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
         let caps = surface.get_capabilities(&adapter);
-        let fmt = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        let fmt = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(&device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt, width: size.width, height: size.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: caps.alpha_modes[0], view_formats: vec![], desired_maximum_frame_latency: 1 });
+        surface.configure(
+            &device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: fmt,
+                width: size.width,
+                height: size.height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 1,
+            },
+        );
 
-        let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(size.width, size.height, fmt));
+        let mut renderer = Renderer::new(
+            device.clone(),
+            queue.clone(),
+            RendererConfig::new(size.width, size.height, fmt),
+        );
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let flooring = renderer.scene_mut().insert_material(make_material([0.15, 0.15, 0.18, 1.0], 0.86, 0.05, [0.0, 0.0, 0.0], 0.0));
-        let red = renderer.scene_mut().insert_material(make_material([0.84, 0.14, 0.14, 1.0], 0.45, 0.0, [0.0,0.0,0.0], 0.0));
-        let green = renderer.scene_mut().insert_material(make_material([0.18, 0.85, 0.25, 1.0], 0.45, 0.0, [0.0,0.0,0.0], 0.0));
-        let blue = renderer.scene_mut().insert_material(make_material([0.2, 0.38, 0.90, 1.0], 0.45, 0.0, [0.0,0.0,0.0], 0.0));
-        let yellow = renderer.scene_mut().insert_material(make_material([0.95, 0.85, 0.17, 1.0], 0.45, 0.0, [0.0,0.0,0.0], 0.0));
+        let flooring = renderer.scene_mut().insert_material(make_material(
+            [0.15, 0.15, 0.18, 1.0],
+            0.86,
+            0.05,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let red = renderer.scene_mut().insert_material(make_material(
+            [0.84, 0.14, 0.14, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let green = renderer.scene_mut().insert_material(make_material(
+            [0.18, 0.85, 0.25, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let blue = renderer.scene_mut().insert_material(make_material(
+            [0.2, 0.38, 0.90, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let yellow = renderer.scene_mut().insert_material(make_material(
+            [0.95, 0.85, 0.17, 1.0],
+            0.45,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let floor_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0,0.0,0.0], ARENA_RADIUS))).as_mesh().unwrap();
-        let _ = insert_object(&mut renderer, floor_mesh, flooring, glam::Mat4::from_translation(glam::Vec3::new(0.0,0.0,0.0)), ARENA_RADIUS);
+        let floor_mesh = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh(
+                [0.0, 0.0, 0.0],
+                ARENA_RADIUS,
+            )))
+            .as_mesh()
+            .unwrap();
+        let _ = insert_object(
+            &mut renderer,
+            floor_mesh,
+            flooring,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.0, 0.0)),
+            ARENA_RADIUS,
+        );
 
         // add lights to avoid TileLightLists COPY_DST validation failure
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([ 7.0, 6.0,  6.0], [0.9, 0.8, 0.7], 10.0, 20.0))).as_light().unwrap();
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-7.0, 6.0, -6.0], [0.7, 0.9, 1.0], 10.0, 20.0))).as_light().unwrap();
+        let _ = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [7.0, 6.0, 6.0],
+                [0.9, 0.8, 0.7],
+                10.0,
+                20.0,
+            )))
+            .as_light()
+            .unwrap();
+        let _ = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [-7.0, 6.0, -6.0],
+                [0.7, 0.9, 1.0],
+                10.0,
+                20.0,
+            )))
+            .as_light()
+            .unwrap();
 
-        let sphere_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.4,0.4,0.4]))).as_mesh().unwrap();
-        let cuboid_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.35,0.55,0.25]))).as_mesh().unwrap();
-        let capsule_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.35,0.55,0.35]))).as_mesh().unwrap();
-        let cylinder_mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0], [0.3,0.6,0.3]))).as_mesh().unwrap();
+        let sphere_mesh_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.4, 0.4, 0.4],
+            )))
+            .as_mesh()
+            .unwrap();
+        let cuboid_mesh_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.35, 0.55, 0.25],
+            )))
+            .as_mesh()
+            .unwrap();
+        let capsule_mesh_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.35, 0.55, 0.35],
+            )))
+            .as_mesh()
+            .unwrap();
+        let cylinder_mesh_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.3, 0.6, 0.3],
+            )))
+            .as_mesh()
+            .unwrap();
 
-        let meshes = [sphere_mesh_id, cuboid_mesh_id, capsule_mesh_id, cylinder_mesh_id];
+        let meshes = [
+            sphere_mesh_id,
+            cuboid_mesh_id,
+            capsule_mesh_id,
+            cylinder_mesh_id,
+        ];
 
         let mut state = AppState {
             window,
@@ -179,7 +329,15 @@ impl ApplicationHandler for App {
 
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Escape), ..}, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
                     let _ = state.window.set_cursor_grab(CursorGrabMode::None);
@@ -188,29 +346,51 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(key), ..}, .. } => {
-                match key {
-                    KeyCode::Equal | KeyCode::NumpadAdd => {
-                        state.shape_count = (state.shape_count + 1).min(MAX_SHAPES);
-                        eprintln!("shape_count={}", state.shape_count);
-                        state.start_new_round();
-                    }
-                    KeyCode::Minus | KeyCode::NumpadSubtract => {
-                        state.shape_count = (state.shape_count.saturating_sub(1)).max(MIN_SHAPES);
-                        eprintln!("shape_count={}", state.shape_count);
-                        state.start_new_round();
-                    }
-                    _ => {
-                        state.keys.insert(key);
-                    }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
+                ..
+            } => match key {
+                KeyCode::Equal | KeyCode::NumpadAdd => {
+                    state.shape_count = (state.shape_count + 1).min(MAX_SHAPES);
+                    eprintln!("shape_count={}", state.shape_count);
+                    state.start_new_round();
                 }
-            }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Released, physical_key: PhysicalKey::Code(key), .. }, .. } => {
+                KeyCode::Minus | KeyCode::NumpadSubtract => {
+                    state.shape_count = (state.shape_count.saturating_sub(1)).max(MIN_SHAPES);
+                    eprintln!("shape_count={}", state.shape_count);
+                    state.start_new_round();
+                }
+                _ => {
+                    state.keys.insert(key);
+                }
+            },
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Released,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
+                ..
+            } => {
                 state.keys.remove(&key);
             }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if !state.cursor_grabbed {
-                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined).or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked)).is_ok();
+                    let ok = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
+                        .is_ok();
                     if ok {
                         state.window.set_cursor_visible(false);
                         state.cursor_grabbed = true;
@@ -218,18 +398,34 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
-                state.surface.configure(&state.device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: state.surface_format, width: s.width, height: s.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: wgpu::CompositeAlphaMode::Auto, view_formats: vec![], desired_maximum_frame_latency: 1, });
+                state.surface.configure(
+                    &state.device,
+                    &wgpu::SurfaceConfiguration {
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format: state.surface_format,
+                        width: s.width,
+                        height: s.height,
+                        present_mode: wgpu::PresentMode::Fifo,
+                        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                        view_formats: vec![],
+                        desired_maximum_frame_latency: 1,
+                    },
+                );
                 state.renderer.set_render_size(s.width, s.height);
             }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 if let Some(last) = state.time_render_end {
                     let full_cycle_ms = last.elapsed().as_secs_f32() * 1000.0;
-                    if state.frame_count % 60 == 0 { eprintln!("render_end -> next: {:.2}ms", full_cycle_ms); }
+                    if state.frame_count % 60 == 0 {
+                        eprintln!("render_end -> next: {:.2}ms", full_cycle_ms);
+                    }
                 }
                 if let Some(about) = state.time_about_to_wait_start {
                     let gap_ms = about.elapsed().as_secs_f32() * 1000.0;
-                    if gap_ms > 2.0 { eprintln!("about_to_wait -> redraw: {:.2}ms", gap_ms); }
+                    if gap_ms > 2.0 {
+                        eprintln!("about_to_wait -> redraw: {:.2}ms", gap_ms);
+                    }
                 }
                 state.time_redraw_requested = Some(now);
                 let dt = (now - state.last_frame).as_secs_f32();
@@ -255,7 +451,9 @@ impl ApplicationHandler for App {
             let now = Instant::now();
             if let Some(end) = s.time_render_end {
                 let gap_ms = end.elapsed().as_secs_f32() * 1000.0;
-                if gap_ms > 2.0 { eprintln!("render_end -> about_to_wait: {:.2}ms", gap_ms); }
+                if gap_ms > 2.0 {
+                    eprintln!("render_end -> about_to_wait: {:.2}ms", gap_ms);
+                }
             }
             s.time_about_to_wait_start = Some(now);
             s.window.request_redraw();
@@ -268,37 +466,86 @@ impl AppState {
         let wall_material = self.mats[0];
 
         // Wall mesh is reused for visual objects; physics walls are separate colliders.
-        let wall_mesh_x = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0],[WALL_THICKNESS / 2.0, WALL_HEIGHT / 2.0, ARENA_RADIUS]))).as_mesh().unwrap();
-        let wall_mesh_z = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0,0.0,0.0],[ARENA_RADIUS, WALL_HEIGHT / 2.0, WALL_THICKNESS / 2.0]))).as_mesh().unwrap();
+        let wall_mesh_x = self
+            .renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [WALL_THICKNESS / 2.0, WALL_HEIGHT / 2.0, ARENA_RADIUS],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_mesh_z = self
+            .renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [ARENA_RADIUS, WALL_HEIGHT / 2.0, WALL_THICKNESS / 2.0],
+            )))
+            .as_mesh()
+            .unwrap();
 
         let wall_poses = [
-            (0.0, WALL_HEIGHT/2.0, ARENA_RADIUS + WALL_THICKNESS/2.0, wall_mesh_z),
-            (0.0, WALL_HEIGHT/2.0, -ARENA_RADIUS - WALL_THICKNESS/2.0, wall_mesh_z),
-            (ARENA_RADIUS + WALL_THICKNESS/2.0, WALL_HEIGHT/2.0, 0.0, wall_mesh_x),
-            (-ARENA_RADIUS - WALL_THICKNESS/2.0, WALL_HEIGHT/2.0, 0.0, wall_mesh_x),
+            (
+                0.0,
+                WALL_HEIGHT / 2.0,
+                ARENA_RADIUS + WALL_THICKNESS / 2.0,
+                wall_mesh_z,
+            ),
+            (
+                0.0,
+                WALL_HEIGHT / 2.0,
+                -ARENA_RADIUS - WALL_THICKNESS / 2.0,
+                wall_mesh_z,
+            ),
+            (
+                ARENA_RADIUS + WALL_THICKNESS / 2.0,
+                WALL_HEIGHT / 2.0,
+                0.0,
+                wall_mesh_x,
+            ),
+            (
+                -ARENA_RADIUS - WALL_THICKNESS / 2.0,
+                WALL_HEIGHT / 2.0,
+                0.0,
+                wall_mesh_x,
+            ),
         ];
 
         for (x, y, z, mesh_id) in wall_poses.iter() {
             let transform = glam::Mat4::from_translation(glam::Vec3::new(*x, *y, *z));
-            let _ = insert_object(&mut self.renderer, *mesh_id, wall_material, transform, ARENA_RADIUS);
+            let _ = insert_object(
+                &mut self.renderer,
+                *mesh_id,
+                wall_material,
+                transform,
+                ARENA_RADIUS,
+            );
 
-            let wall_body = RigidBodyBuilder::fixed().translation([*x, *y, *z].into()).build();
+            let wall_body = RigidBodyBuilder::fixed()
+                .translation([*x, *y, *z].into())
+                .build();
             let body_handle = self.physics_bodies.insert(wall_body);
 
             let half_extents = if (*x).abs() > 0.0 {
                 // X wall: thickness in X, radius in Z
-                [WALL_THICKNESS/2.0, WALL_HEIGHT/2.0, ARENA_RADIUS]
+                [WALL_THICKNESS / 2.0, WALL_HEIGHT / 2.0, ARENA_RADIUS]
             } else {
                 // Z wall: radius in X, thickness in Z
-                [ARENA_RADIUS, WALL_HEIGHT/2.0, WALL_THICKNESS/2.0]
+                [ARENA_RADIUS, WALL_HEIGHT / 2.0, WALL_THICKNESS / 2.0]
             };
 
-            let wall_collider = ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
-                .friction(0.0)
-                .restitution(0.95)
-                .build();
+            let wall_collider =
+                ColliderBuilder::cuboid(half_extents[0], half_extents[1], half_extents[2])
+                    .friction(0.0)
+                    .restitution(0.95)
+                    .build();
 
-            self.physics_colliders.insert_with_parent(wall_collider, body_handle, &mut self.physics_bodies);
+            self.physics_colliders.insert_with_parent(
+                wall_collider,
+                body_handle,
+                &mut self.physics_bodies,
+            );
         }
     }
 
@@ -306,7 +553,12 @@ impl AppState {
         // clear old objects
         for shape in self.battle_shapes.drain(..) {
             let _ = self.renderer.scene_mut().remove_object(shape.object_id);
-            self.physics_colliders.remove(shape.collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);
+            self.physics_colliders.remove(
+                shape.collider_handle,
+                &mut self.physics_forces,
+                &mut self.physics_bodies,
+                false,
+            );
             self.physics_bodies.remove(
                 shape.body_handle,
                 &mut self.physics_forces,
@@ -357,13 +609,24 @@ impl AppState {
             let body_handle = self.physics_bodies.insert(body);
 
             let size = 1.0 + (i as f32 * 0.05);
-            let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
+            let collider_handle = self.physics_colliders.insert_with_parent(
+                collider,
+                body_handle,
+                &mut self.physics_bodies,
+            );
 
             let mat_id = self.mats[i % self.mats.len()];
-            let transform = glam::Mat4::from_translation(floor) * glam::Mat4::from_scale(scale * size);
-            let obj = insert_object_with_movability(&mut self.renderer, mesh_id, mat_id, transform, size * 1.2, Some(helio::Movability::Movable)).expect("insert object");
+            let transform =
+                glam::Mat4::from_translation(floor) * glam::Mat4::from_scale(scale * size);
+            let obj = insert_object(&mut self.renderer, mesh_id, mat_id, transform, size * 1.2)
+                .expect("insert object");
 
-            self.battle_shapes.push(BattleShape { body_handle, collider_handle, object_id: obj, eliminated: false });
+            self.battle_shapes.push(BattleShape {
+                body_handle,
+                collider_handle,
+                object_id: obj,
+                eliminated: false,
+            });
         }
     }
 
@@ -375,9 +638,21 @@ impl AppState {
             let velocity = dir * speed;
             let offset = dir * 0.2;
             let pos = position + offset;
-            let mesh = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0,0.0,0.0],0.12))).as_mesh().unwrap();
+            let mesh = self
+                .renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.12)))
+                .as_mesh()
+                .unwrap();
             let mat = self.mats[(i % self.mats.len())];
-            let obj = insert_object_with_movability(&mut self.renderer, mesh, mat, glam::Mat4::from_translation(pos), 0.2, Some(helio::Movability::Movable)).expect("insert explosion");
+            let obj = insert_object(
+                &mut self.renderer,
+                mesh,
+                mat,
+                glam::Mat4::from_translation(pos),
+                0.2,
+            )
+            .expect("insert explosion");
             self.explosion_particles.push(BlastParticle {
                 object_id: obj,
                 birth: Instant::now(),
@@ -423,7 +698,10 @@ impl AppState {
                 let m = body.position().to_homogeneous();
                 let mat: [f32; 16] = m.as_slice().try_into().unwrap();
                 let trans = glam::Mat4::from_cols_array(&mat);
-                let _ = self.renderer.scene_mut().update_object_transform(shape.object_id, trans);
+                let _ = self
+                    .renderer
+                    .scene_mut()
+                    .update_object_transform(shape.object_id, trans);
 
                 let pos = body.position().translation.vector;
                 let radial_dist = glam::Vec3::new(pos.x, 0.0, pos.z).length();
@@ -449,7 +727,12 @@ impl AppState {
         for (_i, explosion_pos, object_id, collider_handle, body_handle) in eliminated {
             self.create_explosion(explosion_pos);
             let _ = self.renderer.scene_mut().remove_object(object_id);
-            self.physics_colliders.remove(collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);
+            self.physics_colliders.remove(
+                collider_handle,
+                &mut self.physics_forces,
+                &mut self.physics_bodies,
+                false,
+            );
             self.physics_bodies.remove(
                 body_handle,
                 &mut self.physics_forces,
@@ -482,7 +765,10 @@ impl AppState {
                 p.velocity *= 0.94;
                 p.position += p.velocity * dt;
                 let new_transform = glam::Mat4::from_translation(p.position);
-                let _ = self.renderer.scene_mut().update_object_transform(p.object_id, new_transform);
+                let _ = self
+                    .renderer
+                    .scene_mut()
+                    .update_object_transform(p.object_id, new_transform);
             } else {
                 let _ = self.renderer.scene_mut().remove_object(p.object_id);
             }
@@ -510,27 +796,54 @@ impl AppState {
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let right = glam::Vec3::new(cy, 0.0, sy);
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space) { self.cam_pos.y += SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos.y -= SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos.y += SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos.y -= SPEED * dt;
+        }
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let camera = Camera::perspective_look_at(self.cam_pos, self.cam_pos + forward, glam::Vec3::Y, std::f32::consts::FRAC_PI_4, aspect, 0.1, 200.0);
+        let camera = Camera::perspective_look_at(
+            self.cam_pos,
+            self.cam_pos + forward,
+            glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            aspect,
+            0.1,
+            200.0,
+        );
 
         self.step_physics(dt);
         self.update_battle_state();
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => { log::warn!("Surface error: {:?}", e); return; }
+            Err(e) => {
+                log::warn!("Surface error: {:?}", e);
+                return;
+            }
         };
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        if let Err(e) = self.renderer.render(&camera, &view) { log::error!("Render error: {:?}", e); }
+        if let Err(e) = self.renderer.render(&camera, &view) {
+            log::error!("Render error: {:?}", e);
+        }
         output.present();
 
         self.time_render_end = Some(Instant::now());
@@ -538,7 +851,14 @@ impl AppState {
 
         if self.frame_count % 60 == 0 {
             let live = self.battle_shapes.iter().filter(|b| !b.eliminated).count();
-            eprintln!("Frame {}: live={} particles={} shapes={}, active={}", self.frame_count, live, self.explosion_particles.len(), self.shape_count, self.round_active);
+            eprintln!(
+                "Frame {}: live={} particles={} shapes={}, active={}",
+                self.frame_count,
+                live,
+                self.explosion_particles.len(),
+                self.shape_count,
+                self.round_active
+            );
         }
     }
 }

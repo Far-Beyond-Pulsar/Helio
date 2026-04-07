@@ -278,4 +278,3 @@ impl RenderPass for SkyLutPass {
         Ok(())
     }
 }
-

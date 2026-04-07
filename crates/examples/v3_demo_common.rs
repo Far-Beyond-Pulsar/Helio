@@ -77,31 +77,22 @@ pub fn insert_object(
     transform: Mat4,
     radius: f32,
 ) -> helio::SceneResult<helio::ObjectId> {
-    insert_object_with_movability(renderer, mesh, material, transform, radius, None)
-}
-
-pub fn insert_object_with_movability(
-    renderer: &mut Renderer,
-    mesh: MeshId,
-    material: MaterialId,
-    transform: Mat4,
-    radius: f32,
-    movability: Option<helio::Movability>,
-) -> helio::SceneResult<helio::ObjectId> {
-    let object_actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::object(ObjectDescriptor {
-        mesh,
-        material,
-        transform,
-        bounds: [
-            transform.w_axis.x,
-            transform.w_axis.y,
-            transform.w_axis.z,
-            radius,
-        ],
-        flags: 0,
-        groups: helio::GroupMask::NONE,
-        movability,
-    }));
+    let object_actor_id =
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::object(ObjectDescriptor {
+                mesh,
+                material,
+                transform,
+                bounds: [
+                    transform.w_axis.x,
+                    transform.w_axis.y,
+                    transform.w_axis.z,
+                    radius,
+                ],
+                flags: 0,
+                groups: helio::GroupMask::NONE,
+            }));
 
     object_actor_id
         .as_object()
@@ -205,7 +196,13 @@ pub fn sphere_mesh(center: [f32; 3], radius: f32) -> MeshUpload {
             let uv = [j as f32 / lon_steps as f32, i as f32 / lat_steps as f32];
             let tangent_vec = Vec3::new(-z, 0.0, x).normalize_or_zero();
             let tangent = tangent_vec.to_array();
-            vertices.push(PackedVertex::from_components(position.to_array(), normal, uv, tangent, 1.0));
+            vertices.push(PackedVertex::from_components(
+                position.to_array(),
+                normal,
+                uv,
+                tangent,
+                1.0,
+            ));
         }
     }
 
@@ -234,5 +231,3 @@ pub fn update_point_light(
         point_light(position.to_array(), color, intensity, range),
     );
 }
-
-

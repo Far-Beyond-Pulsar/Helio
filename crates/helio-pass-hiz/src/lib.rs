@@ -32,15 +32,6 @@ struct HiZUniforms {
     dst_size: [u32; 2],
 }
 
-/// Metadata for loaded static HiZ data.
-#[derive(Clone, Debug)]
-struct StaticHizMetadata {
-    grid_resolution: [u32; 3],
-    world_bounds_min: [f32; 3],
-    world_bounds_max: [f32; 3],
-    mip_count: u32,
-}
-
 pub struct HiZBuildPass {
     // Mip-chain downsampling pipeline
     mip_pipeline: wgpu::ComputePipeline,
@@ -61,19 +52,6 @@ pub struct HiZBuildPass {
     mip_views: Vec<wgpu::TextureView>,
     width: u32,
     height: u32,
-
-    // Camera tracking for HiZ reuse optimization (skip rebuild if camera static)
-    prev_camera_generation: u64,
-    /// Whether this is the first frame (forces a full rebuild regardless of generation).
-    first_frame: bool,
-
-    // Static HiZ: Pre-baked voxel-based occlusion for static geometry
-    /// Pre-baked 3D voxel occlusion grid (camera-independent).
-    /// Contains 6 layers (±X, ±Y, ±Z directions) with hierarchical mips.
-    pub static_hiz_texture: Option<Arc<wgpu::Texture>>,
-    pub static_hiz_view: Option<Arc<wgpu::TextureView>>,
-    pub static_hiz_sampler: Option<Arc<wgpu::Sampler>>,
-    static_hiz_metadata: Option<StaticHizMetadata>,
 }
 
 impl HiZBuildPass {
@@ -217,9 +195,7 @@ impl HiZBuildPass {
         // Phase 1: depth-copy pipeline
         let copy_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("HiZ Depth Copy Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/hiz_depth_copy.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/hiz_depth_copy.wgsl").into()),
         });
 
         let copy_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -277,130 +253,7 @@ impl HiZBuildPass {
             mip_views,
             width,
             height,
-            prev_camera_generation: 0,
-            first_frame: true,
-            static_hiz_texture: None,
-            static_hiz_view: None,
-            static_hiz_sampler: None,
-            static_hiz_metadata: None,
         }
-    }
-
-    /// Load pre-baked static HiZ data from Nebula baker.
-    ///
-    /// This creates a 3D texture containing omnidirectional voxel occlusion data
-    /// for static geometry. The texture has 6 layers (±X, ±Y, ±Z) with hierarchical
-    /// mips, allowing camera-independent occlusion queries at runtime.
-    ///
-    /// # Arguments
-    /// * `device` - GPU device for texture creation
-    /// * `queue` - Command queue for data upload
-    /// * `grid_resolution` - Voxel grid dimensions [width, height, depth]
-    /// * `world_bounds_min` - AABB min corner in world space
-    /// * `world_bounds_max` - AABB max corner in world space
-    /// * `mip_count` - Number of mip levels in the hierarchy
-    /// * `texels` - Raw R32F texel data (all mips, all layers)
-    pub fn load_static_hiz(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        grid_resolution: [u32; 3],
-        world_bounds_min: [f32; 3],
-        world_bounds_max: [f32; 3],
-        mip_count: u32,
-        texels: &[u8],
-    ) {
-        // Create 3D texture (6 layers packed into Z dimension)
-        let depth_with_layers = grid_resolution[2] * 6;
-
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Static HiZ Voxel Grid"),
-            size: wgpu::Extent3d {
-                width: grid_resolution[0],
-                height: grid_resolution[1],
-                depth_or_array_layers: depth_with_layers,
-            },
-            mip_level_count: mip_count,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D3,
-            format: wgpu::TextureFormat::R32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        // Upload texel data for each mip level
-        let mut offset = 0;
-        for mip in 0..mip_count {
-            let mip_w = (grid_resolution[0] >> mip).max(1);
-            let mip_h = (grid_resolution[1] >> mip).max(1);
-            let mip_d = (grid_resolution[2] >> mip).max(1);
-            let mip_depth_with_layers = mip_d * 6;
-
-            let bytes_per_texel = 4; // R32Float
-            let row_bytes = mip_w * bytes_per_texel;
-            let layer_bytes = row_bytes * mip_h;
-            let mip_bytes = (layer_bytes * mip_depth_with_layers) as usize;
-
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: mip,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &texels[offset..offset + mip_bytes],
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(row_bytes),
-                    rows_per_image: Some(mip_h),
-                },
-                wgpu::Extent3d {
-                    width: mip_w,
-                    height: mip_h,
-                    depth_or_array_layers: mip_depth_with_layers,
-                },
-            );
-
-            offset += mip_bytes;
-        }
-
-        let view = Arc::new(texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("Static HiZ View"),
-            format: Some(wgpu::TextureFormat::R32Float),
-            dimension: Some(wgpu::TextureViewDimension::D3),
-            ..Default::default()
-        }));
-
-        let sampler = Arc::new(device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Static HiZ Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        }));
-
-        self.static_hiz_texture = Some(Arc::new(texture));
-        self.static_hiz_view = Some(view);
-        self.static_hiz_sampler = Some(sampler);
-        self.static_hiz_metadata = Some(StaticHizMetadata {
-            grid_resolution,
-            world_bounds_min,
-            world_bounds_max,
-            mip_count,
-        });
-
-        log::info!(
-            "Loaded static HiZ: {}x{}x{} voxels, {} mips, bounds [{:?} to {:?}]",
-            grid_resolution[0],
-            grid_resolution[1],
-            grid_resolution[2],
-            mip_count,
-            world_bounds_min,
-            world_bounds_max
-        );
     }
 }
 
@@ -436,23 +289,6 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
-        // Use camera_generation counter to detect actual camera data changes.
-        let camera_gen = ctx.scene.camera_generation;
-
-        // Check if resolution changed (window resize invalidates HiZ pyramid)
-        let resolution_changed = ctx.width != self.width || ctx.height != self.height;
-
-        // Skip HiZ rebuild if camera hasn't changed and resolution is the same
-        if !self.first_frame && camera_gen == self.prev_camera_generation && self.copy_bind_group.is_some() && !resolution_changed {
-            // Camera static and resolution unchanged - reuse existing HiZ pyramid from previous frame
-            return Ok(());
-        }
-
-        // Camera moved or resolution changed - update generation and rebuild pyramid
-        self.first_frame = false;
-        self.prev_camera_generation = camera_gen;
-
         // Rebuild depth-copy bind group if the depth texture view pointer changed
         let depth_key = ctx.depth as *const _ as usize;
         if self.copy_bind_group_key != Some(depth_key) {
@@ -477,10 +313,12 @@ impl RenderPass for HiZBuildPass {
         // A separate compute pass provides an implicit GPU barrier so Phase 2
         // sees the freshly written mip-0 data.
         {
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("HiZ DepthCopy"),
-                timestamp_writes: None,
-            });
+            let mut pass = ctx
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("HiZ DepthCopy"),
+                    timestamp_writes: None,
+                });
             pass.set_pipeline(&self.copy_pipeline);
             pass.set_bind_group(0, self.copy_bind_group.as_ref().unwrap(), &[]);
             let wg_x = self.width.div_ceil(WORKGROUP_SIZE);
@@ -491,10 +329,12 @@ impl RenderPass for HiZBuildPass {
         // Phase 2: build the remaining mip levels via MAX-reduction
         // O(log resolution) dispatches, fixed at ~10 for <= 4K resolution.
         {
-            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("HiZ MipChain"),
-                timestamp_writes: None,
-            });
+            let mut pass = ctx
+                .encoder
+                .begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("HiZ MipChain"),
+                    timestamp_writes: None,
+                });
             pass.set_pipeline(&self.mip_pipeline);
             for (mip, bg) in self.mip_bind_groups.iter().enumerate() {
                 let mip = mip as u32;
@@ -515,13 +355,5 @@ impl RenderPass for HiZBuildPass {
         // previous frame's data (temporal), not this freshly built pyramid.
         frame.hiz = Some(&*self.hiz_view);
         frame.hiz_sampler = Some(&*self.hiz_sampler);
-
-        // Expose static HiZ if loaded
-        if let Some(ref view) = self.static_hiz_view {
-            frame.static_hiz = Some(&**view);
-        }
-        if let Some(ref sampler) = self.static_hiz_sampler {
-            frame.static_hiz_sampler = Some(&**sampler);
-        }
     }
 }

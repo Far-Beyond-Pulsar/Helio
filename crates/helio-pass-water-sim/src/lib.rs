@@ -25,9 +25,9 @@
 //!   6. Blit pre_aa -> water_output (scene baseline)
 //!   7. Water surface render (above + below faces) -> water_output
 
-use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use wgpu::util::DeviceExt;
 
 /// Simple fullscreen blit: copies a texture to the render target as-is.
 const BLIT_WGSL: &str = "
@@ -128,28 +128,39 @@ fn make_volume_box_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u
     // We'll render bottom and 4 sides (top is the displaced surface mesh)
     let verts: Vec<[f32; 3]> = vec![
         // Bottom face (Y = -1)
-        [-1.0, -1.0, -1.0], [ 1.0, -1.0, -1.0], [ 1.0, -1.0,  1.0], [-1.0, -1.0,  1.0],
+        [-1.0, -1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, -1.0, 1.0],
+        [-1.0, -1.0, 1.0],
         // Front face (Z = -1)
-        [-1.0, -1.0, -1.0], [-1.0,  1.0, -1.0], [ 1.0,  1.0, -1.0], [ 1.0, -1.0, -1.0],
+        [-1.0, -1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [1.0, 1.0, -1.0],
+        [1.0, -1.0, -1.0],
         // Back face (Z = 1)
-        [-1.0, -1.0,  1.0], [ 1.0, -1.0,  1.0], [ 1.0,  1.0,  1.0], [-1.0,  1.0,  1.0],
+        [-1.0, -1.0, 1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
         // Left face (X = -1)
-        [-1.0, -1.0, -1.0], [-1.0, -1.0,  1.0], [-1.0,  1.0,  1.0], [-1.0,  1.0, -1.0],
+        [-1.0, -1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+        [-1.0, 1.0, -1.0],
         // Right face (X = 1)
-        [ 1.0, -1.0, -1.0], [ 1.0,  1.0, -1.0], [ 1.0,  1.0,  1.0], [ 1.0, -1.0,  1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, 1.0, -1.0],
+        [1.0, 1.0, 1.0],
+        [1.0, -1.0, 1.0],
     ];
 
     let indices: Vec<u32> = vec![
         // Bottom
-        0, 1, 2,  0, 2, 3,
-        // Front
-        4, 5, 6,  4, 6, 7,
-        // Back
-        8, 9, 10,  8, 10, 11,
-        // Left
-        12, 13, 14,  12, 14, 15,
-        // Right
-        16, 17, 18,  16, 18, 19,
+        0, 1, 2, 0, 2, 3, // Front
+        4, 5, 6, 4, 6, 7, // Back
+        8, 9, 10, 8, 10, 11, // Left
+        12, 13, 14, 12, 14, 15, // Right
+        16, 17, 18, 16, 18, 19,
     ];
 
     let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -198,7 +209,6 @@ pub struct WaterSimPass {
     drop_staged: bool,
 
     // ---- Rendering resources ----
-
     surface_vbuf: wgpu::Buffer,
     surface_ibuf: wgpu::Buffer,
     surface_index_count: u32,
@@ -215,10 +225,6 @@ pub struct WaterSimPass {
     // BGLs for rendering passes
     caustics_render_bgl: wgpu::BindGroupLayout,
     render_bgl: wgpu::BindGroupLayout,
-    render_bg: Option<wgpu::BindGroup>,
-    render_bg_key: Option<(usize, usize, usize, usize)>,
-    normal_bg: Option<wgpu::BindGroup>,
-    normal_bg_key: Option<usize>,
 
     // Rendering pipelines
     caustics_pipeline: wgpu::RenderPipeline,
@@ -417,51 +423,57 @@ impl WaterSimPass {
             immediate_size: 0,
         });
 
-        let make_sim_pipeline = |label, layout: &wgpu::PipelineLayout, frag: &wgpu::ShaderModule| {
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module: &vert,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: frag,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+        let make_sim_pipeline =
+            |label, layout: &wgpu::PipelineLayout, frag: &wgpu::ShaderModule| {
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(layout),
+                    vertex: wgpu::VertexState {
+                        module: &vert,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: frag,
+                        entry_point: Some("fs_main"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState::default(),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
 
-        let drop_pipeline   = make_sim_pipeline("WaterSim Drop",   &sim_pl,    &drop_frag);
-        let update_pipeline = make_sim_pipeline("WaterSim Update", &sim_pl,    &update_frag);
-        let normal_pipeline = make_sim_pipeline("WaterSim Normal", &sim_pl,    &normal_frag);
+        let drop_pipeline = make_sim_pipeline("WaterSim Drop", &sim_pl, &drop_frag);
+        let update_pipeline = make_sim_pipeline("WaterSim Update", &sim_pl, &update_frag);
+        let normal_pipeline = make_sim_pipeline("WaterSim Normal", &sim_pl, &normal_frag);
         let hitbox_pipeline = make_sim_pipeline("WaterSim Hitbox", &hitbox_pl, &hitbox_frag);
 
         let make_sim_tex = |label| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
-                size: wgpu::Extent3d { width: SIM_SIZE, height: SIM_SIZE, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width: SIM_SIZE,
+                    height: SIM_SIZE,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             })
         };
@@ -505,43 +517,53 @@ impl WaterSimPass {
             })
         };
 
-        let drop_buf         = make_ubuf("WaterSim Drop Uniform",  std::mem::size_of::<DropUniform>());
-        let update_buf       = make_ubuf("WaterSim Update Uniform", std::mem::size_of::<DeltaUniform>());
-        let normal_buf       = make_ubuf("WaterSim Normal Uniform", std::mem::size_of::<DeltaUniform>());
-        let hitbox_count_buf = make_ubuf("WaterSim Hitbox Count",   std::mem::size_of::<HitboxCountUniform>());
+        let drop_buf = make_ubuf("WaterSim Drop Uniform", std::mem::size_of::<DropUniform>());
+        let update_buf = make_ubuf(
+            "WaterSim Update Uniform",
+            std::mem::size_of::<DeltaUniform>(),
+        );
+        let normal_buf = make_ubuf(
+            "WaterSim Normal Uniform",
+            std::mem::size_of::<DeltaUniform>(),
+        );
+        let hitbox_count_buf = make_ubuf(
+            "WaterSim Hitbox Count",
+            std::mem::size_of::<HitboxCountUniform>(),
+        );
 
         // ----------------------------------------------------------- caustics BGL
-        let caustics_render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("WaterCaustics Render BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let caustics_render_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("WaterCaustics Render BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
 
         // --------------------------------------------------------- render BGL (pool + surface)
         let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -656,7 +678,11 @@ impl WaterSimPass {
         // --------------------------------------------------------- caustics texture
         let caustics_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Water Caustics Tex"),
-            size: wgpu::Extent3d { width: CAUSTICS_SIZE, height: CAUSTICS_SIZE, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: CAUSTICS_SIZE,
+                height: CAUSTICS_SIZE,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -678,7 +704,11 @@ impl WaterSimPass {
         // Used when the opaque scene hasn't been rendered yet (e.g. water is the first pass).
         let pre_aa_fallback_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Water PreAA Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -686,13 +716,18 @@ impl WaterSimPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let pre_aa_fallback_view = pre_aa_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let pre_aa_fallback_view =
+            pre_aa_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // --------------------------------------------------------- gbuffer fallback (1×1 black)
         // Used when GBuffer is not available (e.g. water renders before GBuffer pass).
         let gbuffer_fallback_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Water GBuffer Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -700,7 +735,8 @@ impl WaterSimPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let gbuffer_fallback_view = gbuffer_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let gbuffer_fallback_view =
+            gbuffer_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // --------------------------------------------------------- depth copy for SSR
         // Copy of depth texture so we can sample from it while rendering with depth testing.
@@ -738,7 +774,8 @@ impl WaterSimPass {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let water_output_view = water_output_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let water_output_view =
+            water_output_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
         // --------------------------------------------------------- blit BGL + pipeline
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -818,50 +855,52 @@ impl WaterSimPass {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
-        let tint_scratch_view = tint_scratch_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let tint_scratch_view =
+            tint_scratch_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let underwater_tint_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Water Underwater Tint BGL"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+        let underwater_tint_bgl =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Water Underwater Tint BGL"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                // scene texture — water_output at this point contains the full scene
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
+                    // scene texture — water_output at this point contains the full scene
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
                     },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 3,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
         let underwater_tint_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Underwater Tint Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/underwater_fog.wgsl").into()),
@@ -871,34 +910,35 @@ impl WaterSimPass {
             bind_group_layouts: &[Some(&underwater_tint_bgl)],
             immediate_size: 0,
         });
-        let underwater_tint_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Water Underwater Tint Pipeline"),
-            layout: Some(&underwater_tint_pl),
-            vertex: wgpu::VertexState {
-                module: &underwater_tint_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &underwater_tint_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None, // full replace — writes complete processed color
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let underwater_tint_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Water Underwater Tint Pipeline"),
+                layout: Some(&underwater_tint_pl),
+                vertex: wgpu::VertexState {
+                    module: &underwater_tint_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &underwater_tint_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None, // full replace — writes complete processed color
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
         // --------------------------------------------------------- rendering pipelines
         let caustics_pl_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -968,120 +1008,123 @@ impl WaterSimPass {
             cache: None,
         });
 
-        let surface_above_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Water Surface Above Pipeline"),
-            layout: Some(&render_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &surface_above_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vbl.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &surface_above_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let surface_above_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Water Surface Above Pipeline"),
+                layout: Some(&render_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &surface_above_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vbl.clone()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &surface_above_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
-        let surface_under_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Water Surface Under Pipeline"),
-            layout: Some(&render_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &surface_under_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vbl.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &surface_under_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Front),
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let surface_under_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Water Surface Under Pipeline"),
+                layout: Some(&render_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &surface_under_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vbl.clone()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &surface_under_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(wgpu::Face::Front),
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
-        let volume_walls_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Water Volume Walls Pipeline"),
-            layout: Some(&render_pl_layout),
-            vertex: wgpu::VertexState {
-                module: &volume_walls_shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vbl.clone()],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &volume_walls_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: surface_format,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::OVER,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),  // Cull back faces
-                ..Default::default()
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: Some(true),  // Write depth
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let volume_walls_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Water Volume Walls Pipeline"),
+                layout: Some(&render_pl_layout),
+                vertex: wgpu::VertexState {
+                    module: &volume_walls_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vbl.clone()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &volume_walls_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::SrcAlpha,
+                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent::OVER,
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: Some(wgpu::Face::Back), // Cull back faces
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true), // Write depth
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
 
         // --------------------------------------------------------- meshes
         let (surface_vbuf, surface_ibuf, surface_index_count) = make_surface_mesh(device);
@@ -1136,9 +1179,9 @@ impl WaterSimPass {
             viewport_buf: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("Water Viewport"),
                 contents: bytemuck::cast_slice(&[
-                    internal_width  as f32,
+                    internal_width as f32,
                     internal_height as f32,
-                    1.0 / internal_width  as f32,
+                    1.0 / internal_width as f32,
                     1.0 / internal_height as f32,
                 ]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -1149,10 +1192,6 @@ impl WaterSimPass {
             blit_bg_key: None,
             caustics_bg_key: None,
             caustics_bg: None,
-            render_bg: None,
-            render_bg_key: None,
-            normal_bg: None,
-            normal_bg_key: None,
             _tint_scratch_tex: tint_scratch_tex,
             tint_scratch_view,
             underwater_tint_bgl,
@@ -1242,10 +1281,12 @@ impl RenderPass for WaterSimPass {
         "WaterSim"
     }
 
-
-
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        let view = if self.front { &self.view_a } else { &self.view_b };
+        let view = if self.front {
+            &self.view_a
+        } else {
+            &self.view_b
+        };
         frame.water_sim_texture = Some(view);
         frame.water_sim_sampler = Some(&self.output_sampler);
         frame.water_caustics = Some(&self.caustics_view);
@@ -1278,7 +1319,10 @@ impl RenderPass for WaterSimPass {
         ctx.write_buffer(
             &self.hitbox_count_buf,
             0,
-            bytemuck::bytes_of(&HitboxCountUniform { count, _pad: [0; 3] }),
+            bytemuck::bytes_of(&HitboxCountUniform {
+                count,
+                _pad: [0; 3],
+            }),
         );
 
         self.drop_staged = false;
@@ -1297,19 +1341,37 @@ impl RenderPass for WaterSimPass {
                 // SAFETY: view_a and view_b are separate, non-overlapping wgpu
                 // TextureView allocations. We render FROM src INTO dst — never
                 // the same texture for both roles simultaneously.
-                let src: &wgpu::TextureView =
-                    if self.front { &self.view_a } else { &self.view_b };
-                let dst_ptr: *const wgpu::TextureView =
-                    if self.front { &self.view_b } else { &self.view_a };
+                let src: &wgpu::TextureView = if self.front {
+                    &self.view_a
+                } else {
+                    &self.view_b
+                };
+                let dst_ptr: *const wgpu::TextureView = if self.front {
+                    &self.view_b
+                } else {
+                    &self.view_a
+                };
 
                 let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("WaterSim Hitbox BG"),
                     layout: &self.hitbox_bgl,
                     entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                        wgpu::BindGroupEntry { binding: 2, resource: self.hitbox_count_buf.as_entire_binding() },
-                        wgpu::BindGroupEntry { binding: 3, resource: hitboxes_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(src),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.hitbox_count_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: hitboxes_buf.as_entire_binding(),
+                        },
                     ],
                 });
 
@@ -1318,7 +1380,10 @@ impl RenderPass for WaterSimPass {
                     view: dst,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })];
                 let desc = wgpu::RenderPassDescriptor {
                     label: Some("WaterSim Hitbox"),
@@ -1340,18 +1405,33 @@ impl RenderPass for WaterSimPass {
         // ---- 2. Drop ripple --------------------------------------------------
         if self.drop_staged {
             // SAFETY: same as hitbox block above.
-            let src: &wgpu::TextureView =
-                if self.front { &self.view_a } else { &self.view_b };
-            let dst_ptr: *const wgpu::TextureView =
-                if self.front { &self.view_b } else { &self.view_a };
+            let src: &wgpu::TextureView = if self.front {
+                &self.view_a
+            } else {
+                &self.view_b
+            };
+            let dst_ptr: *const wgpu::TextureView = if self.front {
+                &self.view_b
+            } else {
+                &self.view_a
+            };
 
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("WaterSim Drop BG"),
                 layout: &self.sim_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 2, resource: self.drop_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.drop_buf.as_entire_binding(),
+                    },
                 ],
             });
 
@@ -1360,7 +1440,10 @@ impl RenderPass for WaterSimPass {
                 view: dst,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let desc = wgpu::RenderPassDescriptor {
                 label: Some("WaterSim Drop"),
@@ -1381,28 +1464,50 @@ impl RenderPass for WaterSimPass {
         // ---- 3. Wave propagation (2 steps per frame) ------------------------
         for i in 0..2u32 {
             // SAFETY: same as hitbox block above.
-            let src: &wgpu::TextureView =
-                if self.front { &self.view_a } else { &self.view_b };
-            let dst_ptr: *const wgpu::TextureView =
-                if self.front { &self.view_b } else { &self.view_a };
+            let src: &wgpu::TextureView = if self.front {
+                &self.view_a
+            } else {
+                &self.view_b
+            };
+            let dst_ptr: *const wgpu::TextureView = if self.front {
+                &self.view_b
+            } else {
+                &self.view_a
+            };
 
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("WaterSim Update BG"),
                 layout: &self.sim_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                    wgpu::BindGroupEntry { binding: 2, resource: self.update_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.update_buf.as_entire_binding(),
+                    },
                 ],
             });
 
             let dst = unsafe { &*dst_ptr };
-            let label = if i == 0 { "WaterSim Update 1" } else { "WaterSim Update 2" };
+            let label = if i == 0 {
+                "WaterSim Update 1"
+            } else {
+                "WaterSim Update 2"
+            };
             let color_attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: dst,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let desc = wgpu::RenderPassDescriptor {
                 label: Some(label),
@@ -1423,32 +1528,45 @@ impl RenderPass for WaterSimPass {
         // ---- 4. Normal recomputation ----------------------------------------
         {
             // SAFETY: same as hitbox block above.
-            let src: &wgpu::TextureView =
-                if self.front { &self.view_a } else { &self.view_b };
-            let dst_ptr: *const wgpu::TextureView =
-                if self.front { &self.view_b } else { &self.view_a };
+            let src: &wgpu::TextureView = if self.front {
+                &self.view_a
+            } else {
+                &self.view_b
+            };
+            let dst_ptr: *const wgpu::TextureView = if self.front {
+                &self.view_b
+            } else {
+                &self.view_a
+            };
 
-            let src_key = src as *const wgpu::TextureView as usize;
-            if self.normal_bg_key != Some(src_key) {
-                self.normal_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("WaterSim Normal BG"),
-                    layout: &self.sim_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(src) },
-                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
-                        wgpu::BindGroupEntry { binding: 2, resource: self.normal_buf.as_entire_binding() },
-                    ],
-                }));
-                self.normal_bg_key = Some(src_key);
-            }
-            let bg = self.normal_bg.as_ref().unwrap();
+            let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("WaterSim Normal BG"),
+                layout: &self.sim_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.normal_buf.as_entire_binding(),
+                    },
+                ],
+            });
 
             let dst = unsafe { &*dst_ptr };
             let color_attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: dst,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let desc = wgpu::RenderPassDescriptor {
                 label: Some("WaterSim Normal"),
@@ -1460,7 +1578,7 @@ impl RenderPass for WaterSimPass {
             };
             let mut pass = ctx.begin_render_pass(&desc);
             pass.set_pipeline(&self.normal_pipeline);
-            pass.set_bind_group(0, bg, &[]);
+            pass.set_bind_group(0, &bg, &[]);
             pass.draw(0..6, 0..1);
             drop(pass);
             self.front = !self.front;
@@ -1469,22 +1587,36 @@ impl RenderPass for WaterSimPass {
         // ---- 5. Caustics projection ------------------------------------------
         if ctx.resources.water_volume_count > 0 {
             if let Some(vols_buf) = ctx.resources.water_volumes {
-                let sim_view = if self.front { &self.view_a } else { &self.view_b };
+                let sim_view = if self.front {
+                    &self.view_a
+                } else {
+                    &self.view_b
+                };
 
                 let vols_key = vols_buf as *const wgpu::Buffer as usize;
                 let sim_key = sim_view as *const wgpu::TextureView as usize;
                 let new_key = (vols_key, sim_key);
 
                 if self.caustics_bg_key != Some(new_key) {
-                    self.caustics_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Water Caustics BG"),
-                        layout: &self.caustics_render_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: vols_buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(sim_view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
-                        ],
-                    }));
+                    self.caustics_bg =
+                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Water Caustics BG"),
+                            layout: &self.caustics_render_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: vols_buf.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::TextureView(sim_view),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 2,
+                                    resource: wgpu::BindingResource::Sampler(&self.output_sampler),
+                                },
+                            ],
+                        }));
                     self.caustics_bg_key = Some(new_key);
                 }
 
@@ -1521,16 +1653,22 @@ impl RenderPass for WaterSimPass {
         // NOTE: use self.caustics_view directly — it was filled in stage 5 this
         // same frame. ctx.resources.water_caustics is None during execute() because
         // publish() hasn't run yet, so we must NOT guard on it here.
-        let scene_view: &wgpu::TextureView = ctx.resources.pre_aa
-            .unwrap_or(&self.pre_aa_fallback_view);
+        let scene_view: &wgpu::TextureView =
+            ctx.resources.pre_aa.unwrap_or(&self.pre_aa_fallback_view);
         let blit_key = scene_view as *const _ as usize;
         if self.blit_bg_key != Some(blit_key) {
             self.blit_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Water Blit BG"),
                 layout: &self.blit_bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(scene_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(scene_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.output_sampler),
+                    },
                 ],
             }));
             self.blit_bg_key = Some(blit_key);
@@ -1562,7 +1700,11 @@ impl RenderPass for WaterSimPass {
         // ---- 7. Water surface render → water_output --------------------------
         if ctx.resources.water_volume_count > 0 {
             if let Some(vols_buf) = ctx.resources.water_volumes {
-                let sim_view = if self.front { &self.view_a } else { &self.view_b };
+                let sim_view = if self.front {
+                    &self.view_a
+                } else {
+                    &self.view_b
+                };
 
                 // Per-frame viewport uniform: (w, h, 1/w, 1/h)
                 // IMPORTANT: water now renders at INTERNAL resolution (pre-TAA).
@@ -1590,49 +1732,75 @@ impl RenderPass for WaterSimPass {
                 );
 
                 // Get GBuffer normal texture (fallback to 1×1 black if not available)
-                let gbuffer_normal_view = ctx.resources.gbuffer
+                let gbuffer_normal_view = ctx
+                    .resources
+                    .gbuffer
                     .map(|gb| gb.normal)
                     .unwrap_or(&self.gbuffer_fallback_view);
 
-                let scene_key = scene_view as *const wgpu::TextureView as usize;
-                let gbuffer_key = gbuffer_normal_view as *const wgpu::TextureView as usize;
-                let new_key = (
-                    vols_buf as *const wgpu::Buffer as usize,
-                    sim_view as *const wgpu::TextureView as usize,
-                    scene_key,
-                    gbuffer_key,
-                );
-                if self.render_bg_key != Some(new_key) {
-                    self.render_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Water Render BG"),
-                        layout: &self.render_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: vols_buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(sim_view) },
-                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
-                            wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&self.caustics_view) },
-                            wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.caustics_sampler) },
-                            wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(scene_view) },
-                            wgpu::BindGroupEntry { binding: 7, resource: self.viewport_buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&self.depth_copy_view) },
-                            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&self.depth_sampler) },
-                            wgpu::BindGroupEntry { binding: 10, resource: wgpu::BindingResource::TextureView(gbuffer_normal_view) },
-                        ],
-                    }));
-                    self.render_bg_key = Some(new_key);
-                }
-                let render_bg = self.render_bg.as_ref().unwrap();
+                let render_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Water Render BG"),
+                    layout: &self.render_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ctx.scene.camera.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: vols_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(sim_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Sampler(&self.output_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(&self.caustics_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::TextureView(scene_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: self.viewport_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 8,
+                            resource: wgpu::BindingResource::TextureView(&self.depth_copy_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(gbuffer_normal_view),
+                        },
+                    ],
+                });
 
                 // -- VOLUMETRIC WATER RENDERING ORDER --
                 // Render in correct order: walls first (depth write), then surface (refraction/reflection)
-                
+
                 let depth_view = ctx.depth;
                 let color_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: &self.water_output_view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
                 })];
 
                 // 1. Water volume walls (sides + bottom) - Render FIRST to establish volume depth
@@ -1644,7 +1812,7 @@ impl RenderPass for WaterSimPass {
                             view: depth_view,
                             depth_ops: Some(wgpu::Operations {
                                 load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,  // Write depth so surface renders on top
+                                store: wgpu::StoreOp::Store, // Write depth so surface renders on top
                             }),
                             stencil_ops: None,
                         }),
@@ -1653,7 +1821,7 @@ impl RenderPass for WaterSimPass {
                         multiview_mask: None,
                     });
                     pass.set_pipeline(&self.volume_walls_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
+                    pass.set_bind_group(0, &render_bg, &[]);
                     pass.set_vertex_buffer(0, self.volume_vbuf.slice(..));
                     pass.set_index_buffer(self.volume_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.volume_index_count, 0, 0..1);
@@ -1677,7 +1845,7 @@ impl RenderPass for WaterSimPass {
                         multiview_mask: None,
                     });
                     pass.set_pipeline(&self.surface_above_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
+                    pass.set_bind_group(0, &render_bg, &[]);
                     pass.set_vertex_buffer(0, self.surface_vbuf.slice(..));
                     pass.set_index_buffer(self.surface_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
@@ -1701,7 +1869,7 @@ impl RenderPass for WaterSimPass {
                         multiview_mask: None,
                     });
                     pass.set_pipeline(&self.surface_under_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
+                    pass.set_bind_group(0, &render_bg, &[]);
                     pass.set_vertex_buffer(0, self.surface_vbuf.slice(..));
                     pass.set_index_buffer(self.surface_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
@@ -1715,10 +1883,24 @@ impl RenderPass for WaterSimPass {
                         label: Some("Water Underwater Tint BG"),
                         layout: &self.underwater_tint_bgl,
                         entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: ctx.scene.camera.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 1, resource: vols_buf.as_entire_binding() },
-                            wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.water_output_view) },
-                            wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.depth_sampler) },
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: ctx.scene.camera.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: vols_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.water_output_view,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                            },
                         ],
                     });
                     // Draw to scratch (can't read and write water_output simultaneously)
@@ -1731,28 +1913,38 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut tint_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Water Underwater Tint"),
-                        color_attachments: &tint_attachments,
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                    let mut tint_pass =
+                        ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Water Underwater Tint"),
+                            color_attachments: &tint_attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
                     tint_pass.set_pipeline(&self.underwater_tint_pipeline);
                     tint_pass.set_bind_group(0, &tint_bg, &[]);
                     tint_pass.draw(0..3, 0..1);
                     drop(tint_pass);
 
                     // Blit scratch → water_output to make the result visible
-                    let scratch_blit_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("Water Tint Blit BG"),
-                        layout: &self.blit_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&self.tint_scratch_view) },
-                            wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.output_sampler) },
-                        ],
-                    });
+                    let scratch_blit_bg =
+                        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: Some("Water Tint Blit BG"),
+                            layout: &self.blit_bgl,
+                            entries: &[
+                                wgpu::BindGroupEntry {
+                                    binding: 0,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &self.tint_scratch_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 1,
+                                    resource: wgpu::BindingResource::Sampler(&self.output_sampler),
+                                },
+                            ],
+                        });
                     let blit_attachments = [Some(wgpu::RenderPassColorAttachment {
                         view: &self.water_output_view,
                         resolve_target: None,
@@ -1762,14 +1954,15 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut blit_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Water Tint Blit Back"),
-                        color_attachments: &blit_attachments,
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                    let mut blit_pass =
+                        ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Water Tint Blit Back"),
+                            color_attachments: &blit_attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
                     blit_pass.set_pipeline(&self.blit_pipeline);
                     blit_pass.set_bind_group(0, &scratch_blit_bg, &[]);
                     blit_pass.draw(0..3, 0..1);

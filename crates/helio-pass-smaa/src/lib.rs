@@ -339,4 +339,3 @@ impl RenderPass for SmaaPass {
         Ok(())
     }
 }
-

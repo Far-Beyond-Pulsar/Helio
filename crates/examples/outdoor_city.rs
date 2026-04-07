@@ -211,17 +211,22 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let _ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0))).as_mesh().unwrap();
+        let _ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 40.0)))
+            .as_mesh()
+            .unwrap();
         let _ =
-            v3_demo_common::insert_object(
-                &mut renderer,
-                _ground,
-                mat,
-                glam::Mat4::IDENTITY,
-                40.0,
-            );
+            v3_demo_common::insert_object(&mut renderer, _ground, mat, glam::Mat4::IDENTITY, 40.0);
 
-        let _road_center = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 0.01, 32.0]))).as_mesh().unwrap();
+        let _road_center = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [4.0, 0.01, 32.0],
+            )))
+            .as_mesh()
+            .unwrap();
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _road_center,
@@ -231,10 +236,38 @@ impl ApplicationHandler for App {
         );
 
         let _sidewalks: Vec<MeshId> = vec![
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.35, 0.04, 32.0]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.35, 0.04, 32.0]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [32.0, 0.04, 0.35]))).as_mesh().unwrap(),
-            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [32.0, 0.04, 0.35]))).as_mesh().unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [0.35, 0.04, 32.0],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [0.35, 0.04, 32.0],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [32.0, 0.04, 0.35],
+                )))
+                .as_mesh()
+                .unwrap(),
+            renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [0.0, 0.0, 0.0],
+                    [32.0, 0.04, 0.35],
+                )))
+                .as_mesh()
+                .unwrap(),
         ];
         for (&m, t) in _sidewalks.iter().zip(
             [
@@ -245,49 +278,98 @@ impl ApplicationHandler for App {
             ]
             .iter(),
         ) {
-            let _ =
-                v3_demo_common::insert_object(&mut renderer, m, mat, *t, 32.0);
+            let _ = v3_demo_common::insert_object(&mut renderer, m, mat, *t, 32.0);
         }
 
         let _buildings: Vec<MeshId> = BUILDINGS
             .iter()
-            .map(|&(_, _, hw, hd, hh)| renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hw, hh, hd]))).as_mesh().unwrap())
+            .map(|&(_, _, hw, hd, hh)| {
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [hw, hh, hd],
+                    )))
+                    .as_mesh()
+                    .unwrap()
+            })
             .collect();
         for (&m, &(cx, cz, _hw, _hd, hh)) in _buildings.iter().zip(BUILDINGS.iter()) {
-            let _ =
-                v3_demo_common::insert_object(&mut renderer, m, mat, glam::Mat4::from_translation(glam::Vec3::new(cx, hh, cz)), 15.0);
+            let _ = v3_demo_common::insert_object(
+                &mut renderer,
+                m,
+                mat,
+                glam::Mat4::from_translation(glam::Vec3::new(cx, hh, cz)),
+                15.0,
+            );
         }
 
         let _lamp_poles: Vec<MeshId> = LAMPS
             .iter()
-            .map(|&(_x, _z)| renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.08, 2.75, 0.08]))).as_mesh().unwrap())
+            .map(|&(_x, _z)| {
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.08, 2.75, 0.08],
+                    )))
+                    .as_mesh()
+                    .unwrap()
+            })
             .collect();
         for (&m, &(x, z)) in _lamp_poles.iter().zip(LAMPS.iter()) {
-            let _ = v3_demo_common::insert_object(&mut renderer, m, mat, glam::Mat4::from_translation(glam::Vec3::new(x, 2.75, z)), 3.0);
+            let _ = v3_demo_common::insert_object(
+                &mut renderer,
+                m,
+                mat,
+                glam::Mat4::from_translation(glam::Vec3::new(x, 2.75, z)),
+                3.0,
+            );
         }
 
-        let sun_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
-            [-0.35, -0.38, -0.45],
-            [1.0, 0.9, 0.7],
-            0.005,
-        ))).as_light().unwrap();
+        let sun_light_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(directional_light(
+                [-0.35, -0.38, -0.45],
+                [1.0, 0.9, 0.7],
+                0.005,
+            )))
+            .as_light()
+            .unwrap();
         let mut lamp_light_ids = Vec::new();
         for &(x, z) in LAMPS {
             let p = [x, 5.55, z];
-            lamp_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
-                p,
-                [0.0, -1.0, 0.0],
-                [1.0, 0.72, 0.30],
-                0.0,
-                14.0,
-                0.96,
-                1.22,
-            ))).as_light().unwrap());
+            lamp_light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(spot_light(
+                        p,
+                        [0.0, -1.0, 0.0],
+                        [1.0, 0.72, 0.30],
+                        0.0,
+                        14.0,
+                        0.96,
+                        1.22,
+                    )))
+                    .as_light()
+                    .unwrap(),
+            );
         }
         let mut neon_light_ids = Vec::new();
         for &(x, y, z, r, g, b) in NEONS {
             let p = [x, y, z];
-            neon_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p, [r, g, b], 3.0, 12.0))).as_light().unwrap());
+            neon_light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(point_light(
+                        p,
+                        [r, g, b],
+                        3.0,
+                        12.0,
+                    )))
+                    .as_light()
+                    .unwrap(),
+            );
         }
         renderer.set_ambient([0.5, 0.5, 0.55], 0.06);
         renderer.set_clear_color([0.55, 0.65, 0.9, 1.0]);
@@ -518,7 +600,10 @@ impl AppState {
         for (i, &id) in self.neon_light_ids.iter().enumerate() {
             let (x, y, z, r, g, b) = NEONS[i];
             let p = [x, y, z];
-            let _ = self.renderer.scene_mut().update_light(id, point_light(p, [r, g, b], 5.0 * neon_boost, 12.0));
+            let _ = self
+                .renderer
+                .scene_mut()
+                .update_light(id, point_light(p, [r, g, b], 5.0 * neon_boost, 12.0));
         }
 
         if let Err(e) = self.renderer.render(&camera, &view) {
@@ -527,6 +612,3 @@ impl AppState {
         output.present();
     }
 }
-
-
-

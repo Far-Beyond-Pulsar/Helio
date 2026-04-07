@@ -79,7 +79,6 @@ impl super::super::Scene {
         let (id, _) = self.vg_objects.insert(VirtualObjectRecord {
             virtual_mesh: desc.virtual_mesh,
             groups: desc.groups,
-            movability: desc.movability.unwrap_or_default(),
             instance,
         });
         self.vg_objects_dirty = true;
@@ -131,21 +130,8 @@ impl super::super::Scene {
         let Some((_, record)) = self.vg_objects.get_mut_with_index(id) else {
             return Err(invalid("virtual_object"));
         };
-        // Enforce movability: Static objects cannot have transforms updated
-        if !record.movability.can_move() {
-            log::warn!(
-                "Attempted to update transform on Static virtual object {:?}. Set movability to Movable to allow transform updates.",
-                id
-            );
-            return Ok(()); // No-op instead of error
-        }
         record.instance.model = transform.to_cols_array();
         record.instance.normal_mat = normal_matrix(transform);
-
-        // Increment generation counter for movable objects (for shadow cache invalidation)
-        self.movable_objects_generation += 1;
-        self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
-
         // Mark dirty so vg_frame_data() picks up the new transform.
         self.vg_objects_dirty = true;
         Ok(())
@@ -193,4 +179,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

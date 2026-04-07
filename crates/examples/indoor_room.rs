@@ -144,15 +144,72 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 4.0))).as_mesh().unwrap();
-        let ceiling = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 3.0, 0.0], 4.0))).as_mesh().unwrap();
-        let wall_n = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]))).as_mesh().unwrap();
-        let wall_s = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [4.0, 1.5, 0.05]))).as_mesh().unwrap();
-        let wall_e = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]))).as_mesh().unwrap();
-        let wall_w = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.05, 1.5, 4.0]))).as_mesh().unwrap();
-        let table = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.8, 0.4, 0.5]))).as_mesh().unwrap();
-        let bookcase = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.3, 1.0, 1.2]))).as_mesh().unwrap();
-        let sofa = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.35, 0.5]))).as_mesh().unwrap();
+        let floor = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 4.0)))
+            .as_mesh()
+            .unwrap();
+        let ceiling = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 3.0, 0.0], 4.0)))
+            .as_mesh()
+            .unwrap();
+        let wall_n = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [4.0, 1.5, 0.05],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_s = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [4.0, 1.5, 0.05],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_e = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.05, 1.5, 4.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let wall_w = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.05, 1.5, 4.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let table = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.8, 0.4, 0.5],
+            )))
+            .as_mesh()
+            .unwrap();
+        let bookcase = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.3, 1.0, 1.2],
+            )))
+            .as_mesh()
+            .unwrap();
+        let sofa = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [1.2, 0.35, 0.5],
+            )))
+            .as_mesh()
+            .unwrap();
 
         let _ = v3_demo_common::insert_object(&mut renderer, floor, mat, glam::Mat4::IDENTITY, 4.0);
         let _ =
@@ -208,10 +265,32 @@ impl ApplicationHandler for App {
         );
 
         let overhead_pos = [0.0f32, 2.85, 0.0];
-        let overhead_light_id =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(overhead_pos, [1.0, 0.85, 0.6], 4.0, 7.0))).as_light().unwrap();
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-2.5, 0.9, -2.5], [1.0, 0.55, 0.2], 2.5, 5.0)));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([2.5, 0.9, 2.5], [1.0, 0.75, 0.35], 2.0, 4.5)));
+        let overhead_light_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                overhead_pos,
+                [1.0, 0.85, 0.6],
+                4.0,
+                7.0,
+            )))
+            .as_light()
+            .unwrap();
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [-2.5, 0.9, -2.5],
+                [1.0, 0.55, 0.2],
+                2.5,
+                5.0,
+            )));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [2.5, 0.9, 2.5],
+                [1.0, 0.75, 0.35],
+                2.0,
+                4.5,
+            )));
         renderer.set_ambient([1.0, 0.95, 0.85], 0.05);
         renderer.set_clear_color([0.02, 0.02, 0.06, 1.0]);
 
@@ -400,6 +479,3 @@ impl AppState {
         output.present();
     }
 }
-
-
-

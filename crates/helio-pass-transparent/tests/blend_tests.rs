@@ -70,7 +70,10 @@ fn blend_src_alpha_and_premultiplied_equivalent() {
     let standard = blend_src_alpha(rgb, a, dst);
     let premul = blend_premultiplied([rgb[0] * a, rgb[1] * a, rgb[2] * a], a, dst);
     for (i, (&s, &p)) in standard.iter().zip(premul.iter()).enumerate() {
-        assert!((s - p).abs() < 1e-5f32, "channel {i}: standard={s} premul={p}");
+        assert!(
+            (s - p).abs() < 1e-5f32,
+            "channel {i}: standard={s} premul={p}"
+        );
     }
 }
 

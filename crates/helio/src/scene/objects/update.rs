@@ -73,21 +73,8 @@ impl super::super::Scene {
         let Some((_, record)) = self.objects.get_mut_with_index(id) else {
             return Err(invalid("object"));
         };
-        // Enforce movability: Static objects cannot have transforms updated
-        if !record.movability.can_move() {
-            log::warn!(
-                "Attempted to update transform on Static object {:?}. Set movability to Movable to allow transform updates.",
-                id
-            );
-            return Ok(()); // No-op instead of error
-        }
         record.instance.model = transform.to_cols_array();
         record.instance.normal_mat = normal_matrix(transform);
-
-        // Increment generation counter for movable objects (for shadow cache invalidation)
-        self.movable_objects_generation += 1;
-        self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
-
         // If the GPU layout is stable (no pending rebuild), update the slot in-place.
         // If a rebuild is pending the new data will be included in it automatically.
         if !self.objects_dirty {
@@ -233,4 +220,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

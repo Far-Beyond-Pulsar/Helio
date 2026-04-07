@@ -193,4 +193,3 @@ impl std::ops::Not for GroupMask {
         GroupMask(!self.0)
     }
 }
-

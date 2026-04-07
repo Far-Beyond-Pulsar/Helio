@@ -206,4 +206,3 @@ fn bytes_of_debug_vertex_is_32_bytes() {
     let v: DebugVertex = Zeroable::zeroed();
     assert_eq!(bytes_of(&v).len(), 32);
 }
-

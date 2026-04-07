@@ -177,4 +177,3 @@ fn frustum_plane_array_total_bytes() {
     let planes: [[f32; 4]; 6] = [[0.0; 4]; 6];
     assert_eq!(std::mem::size_of_val(&planes), 96);
 }
-

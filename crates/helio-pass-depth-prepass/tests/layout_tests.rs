@@ -156,4 +156,3 @@ fn draw_indirect_first_index_field_offset_is_8() {
     const FIRST_INDEX_OFFSET: usize = 2 * size_of::<u32>();
     assert_eq!(FIRST_INDEX_OFFSET, 8);
 }
-

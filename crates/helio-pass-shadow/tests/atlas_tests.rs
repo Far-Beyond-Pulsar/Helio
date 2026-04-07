@@ -30,7 +30,7 @@ fn resolution_2048_per_face_bytes() {
 fn atlas_512_total_bytes() {
     let total = 512u64 * 512 * 4 * MAX_SHADOW_FACES as u64;
     assert_eq!(total, 268_435_456); // 256 MiB
-    // NOTE: The source doc comment "~256 MB at 1024 px" appears to apply 512-px math.
+                                    // NOTE: The source doc comment "~256 MB at 1024 px" appears to apply 512-px math.
 }
 
 #[test]

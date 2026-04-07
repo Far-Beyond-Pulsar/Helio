@@ -67,7 +67,10 @@ impl super::super::Scene {
     ///     })?;
     /// }
     /// ```
-    pub(in crate::scene) fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
+    pub(in crate::scene) fn insert_virtual_mesh(
+        &mut self,
+        upload: VirtualMeshUpload,
+    ) -> VirtualMeshId {
         // Generate three LOD levels (full, medium, coarse) via vertex clustering.
         let lod_meshes = generate_lod_meshes(&upload.vertices, &upload.indices);
 
@@ -164,4 +167,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

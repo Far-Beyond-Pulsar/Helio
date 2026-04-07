@@ -525,4 +525,3 @@ impl RenderPass for BillboardPass {
         Ok(())
     }
 }
-

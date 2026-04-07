@@ -1,4 +1,4 @@
-use crate::handles::{LightId, MeshId, ObjectId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
+use crate::handles::{LightId, MeshId, ObjectId, VirtualObjectId, WaterVolumeId};
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
@@ -12,10 +12,8 @@ pub enum SceneActorId {
     Mesh(MeshId),
     Light(LightId),
     VirtualMesh(VirtualMeshId),
-    VirtualObject(VirtualObjectId),
     Object(ObjectId),
     WaterVolume(WaterVolumeId),
-    WaterHitbox(WaterHitboxId),
 }
 
 impl SceneActorId {
@@ -43,14 +41,6 @@ impl SceneActorId {
         }
     }
 
-    pub fn as_virtual_object(self) -> Option<VirtualObjectId> {
-        if let SceneActorId::VirtualObject(id) = self {
-            Some(id)
-        } else {
-            None
-        }
-    }
-
     pub fn as_object(self) -> Option<ObjectId> {
         if let SceneActorId::Object(id) = self {
             Some(id)
@@ -61,14 +51,6 @@ impl SceneActorId {
 
     pub fn as_water_volume(self) -> Option<WaterVolumeId> {
         if let SceneActorId::WaterVolume(id) = self {
-            Some(id)
-        } else {
-            None
-        }
-    }
-
-    pub fn as_water_hitbox(self) -> Option<WaterHitboxId> {
-        if let SceneActorId::WaterHitbox(id) = self {
             Some(id)
         } else {
             None
@@ -139,7 +121,6 @@ impl SceneActorTrait for MeshActor {
 pub struct LightActor {
     pub light: GpuLight,
     pub light_id: Option<LightId>,
-    pub movability: Option<libhelio::Movability>,
 }
 
 impl LightActor {
@@ -147,15 +128,6 @@ impl LightActor {
         Self {
             light,
             light_id: None,
-            movability: None,
-        }
-    }
-
-    pub fn new_with_movability(light: GpuLight, movability: Option<libhelio::Movability>) -> Self {
-        Self {
-            light,
-            light_id: None,
-            movability,
         }
     }
 
@@ -167,7 +139,7 @@ impl LightActor {
 impl SceneActorTrait for LightActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.light_id.is_none() {
-            self.light_id = Some(scene.insert_light_with_movability(self.light, self.movability));
+            self.light_id = Some(scene.insert_light(self.light));
         }
     }
 
@@ -239,12 +211,6 @@ impl SceneActorTrait for VirtualObjectActor {
                 self.object_id = Some(id);
             }
         }
-    }
-
-    fn inserted_id(&self) -> SceneActorId {
-        self.object_id
-            .map(SceneActorId::VirtualObject)
-            .unwrap_or(SceneActorId::None)
     }
 }
 
@@ -344,16 +310,6 @@ pub struct WaterVolumeDescriptor {
     /// God rays (volumetric light shafts) intensity
     pub god_rays_intensity: f32,
 
-    // SSR / reflection quality
-    /// Enable screen-space reflection/refraction for water surfaces
-    pub ssr_enabled: bool,
-    /// Maximum SSR ray march steps
-    pub ssr_steps: u32,
-    /// SSR ray march step size in world units
-    pub ssr_step_size: f32,
-    /// SSR thickness comparison tolerance
-    pub ssr_thickness: f32,
-
     // Heightfield simulation surface parameters
     /// Index of refraction (default 1.333 for water)
     pub ior: f32,
@@ -405,21 +361,66 @@ impl WaterVolumeDescriptor {
             [x / len, y / len, z / len, 0.0]
         };
         GpuWaterVolume {
-            bounds_min: [self.bounds_min[0], self.bounds_min[1], self.bounds_min[2], 0.0],
-            bounds_max: [self.bounds_max[0], self.bounds_max[1], self.bounds_max[2], self.surface_height],
-            wave_params: [self.wave_amplitude, self.wave_frequency, self.wave_speed, self.wave_steepness],
+            bounds_min: [
+                self.bounds_min[0],
+                self.bounds_min[1],
+                self.bounds_min[2],
+                0.0,
+            ],
+            bounds_max: [
+                self.bounds_max[0],
+                self.bounds_max[1],
+                self.bounds_max[2],
+                self.surface_height,
+            ],
+            wave_params: [
+                self.wave_amplitude,
+                self.wave_frequency,
+                self.wave_speed,
+                self.wave_steepness,
+            ],
             wave_direction: [self.wave_direction[0], self.wave_direction[1], 0.0, 0.0],
-            water_color: [self.water_color[0], self.water_color[1], self.water_color[2], self.foam_threshold],
-            extinction: [self.extinction[0], self.extinction[1], self.extinction[2], self.foam_amount],
-            reflection_refraction: [self.reflection_strength, self.refraction_strength, self.fresnel_power, 0.0],
-            caustics_params: [if self.caustics_enabled { 1.0 } else { 0.0 }, self.caustics_intensity, self.caustics_scale, self.caustics_speed],
+            water_color: [
+                self.water_color[0],
+                self.water_color[1],
+                self.water_color[2],
+                self.foam_threshold,
+            ],
+            extinction: [
+                self.extinction[0],
+                self.extinction[1],
+                self.extinction[2],
+                self.foam_amount,
+            ],
+            reflection_refraction: [
+                self.reflection_strength,
+                self.refraction_strength,
+                self.fresnel_power,
+                0.0,
+            ],
+            caustics_params: [
+                if self.caustics_enabled { 1.0 } else { 0.0 },
+                self.caustics_intensity,
+                self.caustics_scale,
+                self.caustics_speed,
+            ],
             fog_params: [self.fog_density, self.god_rays_intensity, 0.0, 0.0],
-            sim_params: [self.ior, self.caustics_intensity, self.fresnel_min, self.density],
+            sim_params: [
+                self.ior,
+                self.caustics_intensity,
+                self.fresnel_min,
+                self.density,
+            ],
             shadow_params: [self.shadow_rim, self.shadow_hitbox, self.shadow_ao, 0.0],
             sun_direction: sun,
-            ssr_params: [if self.ssr_enabled { 1.0 } else { 0.0 }, self.ssr_steps as f32, self.ssr_step_size, self.ssr_thickness],
+            ssr_params: [1.0, 32.0, 0.05, 0.02], // Default SSR: enabled, 32 steps
             sim_dynamics: [self.wave_spring, self.wave_damping, self.wave_scale, 0.0],
-            wind_params: [self.wind_direction[0], self.wind_direction[1], self.wind_strength, 0.0],
+            wind_params: [
+                self.wind_direction[0],
+                self.wind_direction[1],
+                self.wind_strength,
+                0.0,
+            ],
             _pad6: [0.0; 4],
         }
     }
@@ -448,10 +449,6 @@ impl WaterVolumeDescriptor {
             caustics_speed: 0.5,
             fog_density: 0.03,
             god_rays_intensity: 1.0,
-            ssr_enabled: true,
-            ssr_steps: 32,
-            ssr_step_size: 0.05,
-            ssr_thickness: 0.02,
             ior: 1.333,
             fresnel_min: 0.1,
             density: 0.03,
@@ -491,10 +488,6 @@ impl WaterVolumeDescriptor {
             caustics_speed: 0.4,
             fog_density: 0.05,
             god_rays_intensity: 0.5,
-            ssr_enabled: true,
-            ssr_steps: 32,
-            ssr_step_size: 0.05,
-            ssr_thickness: 0.02,
             ior: 1.333,
             fresnel_min: 0.1,
             density: 0.05,
@@ -610,7 +603,10 @@ pub struct WaterHitboxActor {
 
 impl WaterHitboxActor {
     pub fn new(descriptor: WaterHitboxDescriptor) -> Self {
-        Self { descriptor, hitbox_id: None }
+        Self {
+            descriptor,
+            hitbox_id: None,
+        }
     }
 
     pub fn id(&self) -> Option<crate::handles::WaterHitboxId> {
@@ -628,9 +624,8 @@ impl SceneActorTrait for WaterHitboxActor {
     }
 
     fn inserted_id(&self) -> SceneActorId {
-        self.hitbox_id
-            .map(SceneActorId::WaterHitbox)
-            .unwrap_or(SceneActorId::None)
+        // Hitboxes don't map to a top-level SceneActorId variant; return None
+        SceneActorId::None
     }
 }
 
@@ -660,10 +655,6 @@ impl SceneActor {
         SceneActor::Light(LightActor::new(light))
     }
 
-    pub fn light_with_movability(light: GpuLight, movability: Option<libhelio::Movability>) -> Self {
-        SceneActor::Light(LightActor::new_with_movability(light, movability))
-    }
-
     pub fn virtual_mesh(upload: VirtualMeshUpload) -> Self {
         SceneActor::VirtualMesh(VirtualMeshActor::new(upload))
     }
@@ -678,10 +669,6 @@ impl SceneActor {
 
     pub fn water_volume(descriptor: WaterVolumeDescriptor) -> Self {
         SceneActor::WaterVolume(WaterVolumeActor::new(descriptor))
-    }
-
-    pub fn water_hitbox(descriptor: WaterHitboxDescriptor) -> Self {
-        SceneActor::WaterHitbox(WaterHitboxActor::new(descriptor))
     }
 }
 

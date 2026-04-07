@@ -161,4 +161,3 @@ impl RenderPass for FxaaPass {
         Ok(())
     }
 }
-

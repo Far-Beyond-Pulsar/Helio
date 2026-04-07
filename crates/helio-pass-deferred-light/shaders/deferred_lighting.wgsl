@@ -109,15 +109,10 @@ struct ShadowConfig {
 @group(1) @binding(2) var gbuf_orm:      texture_2d<f32>;       // Rgba8Unorm   AO, roughness, metallic
 @group(1) @binding(3) var gbuf_emissive: texture_2d<f32>;       // Rgba16Float  pre-multiplied emissive
 @group(1) @binding(4) var gbuf_depth:    texture_depth_2d;      // Depth32Float
-// R8Unorm screen-space AO (SSAO or pre-baked equivalent). 1.0 = fully lit, 0.0 = fully occluded.
-// Bound to a 1×1 white fallback texture when neither SSAO nor baked AO is available.
-@group(1) @binding(5) var screen_ao:     texture_2d<f32>;
-@group(1) @binding(6) var screen_ao_samp: sampler;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
-@group(2) @binding(1)  var shadow_atlas:         texture_depth_2d_array;  // Dynamic (Movable objects)
-@group(2) @binding(11) var static_shadow_atlas:  texture_depth_2d_array;  // Static (cached forever)
+@group(2) @binding(1) var shadow_atlas:   texture_depth_2d_array;
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
 @group(2) @binding(3) var env_cube:       texture_cube<f32>;
 @group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
@@ -236,21 +231,12 @@ fn sample_cascade_shadow(
     var lit_sum = 0.0;
     for (var i = 0u; i < pcf_count; i++) {
         let offset = vogel_disk_sample(i, pcf_count, theta) * filter_radius;
-        // Sample both atlases and take the minimum — pixel is lit only if neither occludes it.
-        // This is the Unreal-style static/dynamic shadow combine for mixed mobility scenes.
-        let dyn_lit = textureSampleCompareLevel(
+        lit_sum += textureSampleCompareLevel(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
             biased_depth,
         );
-        let sta_lit = textureSampleCompareLevel(
-            static_shadow_atlas, shadow_sampler,
-            shadow_uv + offset,
-            i32(layer),
-            biased_depth,
-        );
-        lit_sum += min(dyn_lit, sta_lit);
     }
     return lit_sum / f32(pcf_count);
 }
@@ -281,11 +267,8 @@ fn pcss_blocker_search(
             continue;
         }
 
-        // Sample actual depth value (not comparison) for blocker detection.
-        // Use min of dynamic and static atlases — the closer occluder is the true blocker.
-        let dyn_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
-        let sta_depth = textureLoad(static_shadow_atlas, pixel_coord, i32(layer), 0);
-        let occluder_depth = min(dyn_depth, sta_depth);
+        // Sample actual depth value (not comparison) for blocker detection
+        let occluder_depth = textureLoad(shadow_atlas, pixel_coord, i32(layer), 0);
 
         if occluder_depth < receiver_depth - 0.0001 {  // Is blocker
             blocker_sum += occluder_depth;
@@ -355,20 +338,12 @@ fn sample_cascade_shadow_pcss(
     var lit_sum = 0.0;
     for (var i = 0u; i < shadow_config.pcss_filter_samples; i++) {
         let offset = vogel_disk_sample(i, shadow_config.pcss_filter_samples, theta) * filter_radius;
-        // Combine dynamic and static atlases: shadowed by either
-        let dyn_lit = textureSampleCompareLevel(
+        lit_sum += textureSampleCompareLevel(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
             receiver_depth
         );
-        let sta_lit = textureSampleCompareLevel(
-            static_shadow_atlas, shadow_sampler,
-            shadow_uv + offset,
-            i32(layer),
-            receiver_depth
-        );
-        lit_sum += min(dyn_lit, sta_lit);
     }
 
     return lit_sum / f32(shadow_config.pcss_filter_samples);
@@ -703,13 +678,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let roughness = orm_r.g;
     let metallic  = orm_r.b;
 
-    // Screen-space AO (SSAO or pre-baked AO).  Sampled by normalised screen UV
-    // so it works regardless of whether the AO texture is at a different resolution.
-    let screen_uv    = in.clip_pos.xy / vec2<f32>(textureDimensions(gbuf_albedo));
-    let ssao_factor  = textureSample(screen_ao, screen_ao_samp, screen_uv).r;
-    // Combined AO: material AO from G-buffer × screen-space AO.
-    let ao_combined  = ao * ssao_factor;
-
     // ── Debug mode: bypass lighting ───────────────────────────────────────────
     // Mode 1 (UV Grid) and Mode 2 (Texture Direct) show raw colors without lighting
     // Mode 3 (Lit without normal mapping) goes through normal lighting
@@ -824,7 +792,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let ambient_fallback = mix(hemi, diff_ind, rc_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
-    let indirect  = (ambient_fallback + spec_ind) * ao_combined;
+    let indirect  = (ambient_fallback + spec_ind) * ao;
     var color     = Lo + indirect;
     color        += emissive;               // emissive from G-buffer
 

@@ -1,5 +1,5 @@
 //! Rapier Stack Demo — helio v3
-//! 
+//!
 //! Stack a tower of boxes onto a floor and let Rapier collapse it.
 //! Controls:
 //!   R — restart stack
@@ -8,13 +8,22 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light};
+use v3_demo_common::{box_mesh, insert_object, make_material, plane_mesh, point_light};
 
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, ObjectId, Renderer, RendererConfig};
+use helio::{
+    required_wgpu_features, required_wgpu_limits, Camera, MaterialId, ObjectId, Renderer,
+    RendererConfig,
+};
 use rapier3d::prelude::*;
 use std::collections::HashSet;
 use std::sync::Arc;
-use winit::{application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::{CursorGrabMode, Window, WindowId}};
+use winit::{
+    application::ApplicationHandler,
+    event::*,
+    event_loop::{ActiveEventLoop, EventLoop},
+    keyboard::{KeyCode, PhysicalKey},
+    window::{CursorGrabMode, Window, WindowId},
+};
 
 struct BoxItem {
     id: ObjectId,
@@ -57,43 +66,133 @@ struct AppState {
     time_redraw_requested: Option<std::time::Instant>,
 }
 
-struct App { state: Option<AppState> }
+struct App {
+    state: Option<AppState>,
+}
 
 fn main() {
     env_logger::init();
     log::info!("Starting Rapier Stack Demo");
-    EventLoop::new().expect("event loop").run_app(&mut App { state: None }).expect("run");
+    EventLoop::new()
+        .expect("event loop")
+        .run_app(&mut App { state: None })
+        .expect("run");
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() { return; }
+        if self.state.is_some() {
+            return;
+        }
 
-        let window = Arc::new(event_loop.create_window(Window::default_attributes().with_title("Helio — Rapier Stack Demo").with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32))).expect("window"));
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), flags: wgpu::InstanceFlags::empty(), ..Default::default() });
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Helio — Rapier Stack Demo")
+                        .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
+                )
+                .expect("window"),
+        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            flags: wgpu::InstanceFlags::empty(),
+            ..Default::default()
+        });
         let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false })).expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: required_wgpu_features(adapter.features()), required_limits: required_wgpu_limits(adapter.limits()), ..Default::default() })).expect("device");
-        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| { panic!("[GPU] {:?}", e) }));
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: Some(&surface),
+            force_fallback_adapter: false,
+        }))
+        .expect("adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }))
+        .expect("device");
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU] {:?}", e)));
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
         let caps = surface.get_capabilities(&adapter);
-        let fmt = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
+        let fmt = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(&device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt, width: size.width, height: size.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: caps.alpha_modes[0], view_formats: vec![], desired_maximum_frame_latency: 1 });
+        surface.configure(
+            &device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: fmt,
+                width: size.width,
+                height: size.height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: caps.alpha_modes[0],
+                view_formats: vec![],
+                desired_maximum_frame_latency: 1,
+            },
+        );
 
-        let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(size.width, size.height, fmt));
+        let mut renderer = Renderer::new(
+            device.clone(),
+            queue.clone(),
+            RendererConfig::new(size.width, size.height, fmt),
+        );
         renderer.set_ambient([0.05, 0.05, 0.07], 1.0);
 
-        let floor_mat = renderer.scene_mut().insert_material(make_material([0.25, 0.25, 0.3, 1.0], 0.85, 0.03, [0.0, 0.0, 0.0], 0.0));
-        let block_mat = renderer.scene_mut().insert_material(make_material([0.78, 0.72, 0.19, 1.0], 0.46, 0.0, [0.0, 0.0, 0.0], 0.0));
+        let floor_mat = renderer.scene_mut().insert_material(make_material(
+            [0.25, 0.25, 0.3, 1.0],
+            0.85,
+            0.03,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
+        let block_mat = renderer.scene_mut().insert_material(make_material(
+            [0.78, 0.72, 0.19, 1.0],
+            0.46,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
+        ));
 
-        let floor_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 50.0))).as_mesh().unwrap();
-        let _ = insert_object(&mut renderer, floor_mesh, floor_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.01, 0.0)), 50.0);
+        let floor_mesh = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 50.0)))
+            .as_mesh()
+            .unwrap();
+        let _ = insert_object(
+            &mut renderer,
+            floor_mesh,
+            floor_mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.01, 0.0)),
+            50.0,
+        );
 
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([20.0, 24.0, 20.0], [0.9, 0.85, 0.8], 14.0, 60.0))).as_light().unwrap();
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-20.0, 20.0, -20.0], [0.6, 0.7, 1.0], 12.0, 60.0))).as_light().unwrap();
+        let _ = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [20.0, 24.0, 20.0],
+                [0.9, 0.85, 0.8],
+                14.0,
+                60.0,
+            )))
+            .as_light()
+            .unwrap();
+        let _ = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [-20.0, 20.0, -20.0],
+                [0.6, 0.7, 1.0],
+                12.0,
+                60.0,
+            )))
+            .as_light()
+            .unwrap();
 
         let mut state = AppState {
             window,
@@ -134,7 +233,15 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Escape), ..}, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::Escape),
+                        ..
+                    },
+                ..
+            } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
                     let _ = state.window.set_cursor_grab(CursorGrabMode::None);
@@ -143,23 +250,57 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::KeyC), ..}, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::KeyC),
+                        ..
+                    },
+                ..
+            } => {
                 state.physics_enabled = !state.physics_enabled;
                 eprintln!("rapier physics={}", state.physics_enabled);
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::KeyR), ..}, .. } => {
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::KeyR),
+                        ..
+                    },
+                ..
+            } => {
                 state.clear_stack();
                 state.reset_stack(state.stack_mat);
             }
-            WindowEvent::KeyboardInput { event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), ..}, .. } => {
-                match ks {
-                    ElementState::Pressed => { state.keys.insert(key); }
-                    ElementState::Released => { state.keys.remove(&key); }
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ks,
+                        physical_key: PhysicalKey::Code(key),
+                        ..
+                    },
+                ..
+            } => match ks {
+                ElementState::Pressed => {
+                    state.keys.insert(key);
                 }
-            }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                ElementState::Released => {
+                    state.keys.remove(&key);
+                }
+            },
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
                 if !state.cursor_grabbed {
-                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined).or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked)).is_ok();
+                    let ok = state
+                        .window
+                        .set_cursor_grab(CursorGrabMode::Confined)
+                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
+                        .is_ok();
                     if ok {
                         state.window.set_cursor_visible(false);
                         state.cursor_grabbed = true;
@@ -167,18 +308,34 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
-                state.surface.configure(&state.device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: state.surface_format, width: s.width, height: s.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: wgpu::CompositeAlphaMode::Auto, view_formats: vec![], desired_maximum_frame_latency: 1 });
+                state.surface.configure(
+                    &state.device,
+                    &wgpu::SurfaceConfiguration {
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format: state.surface_format,
+                        width: s.width,
+                        height: s.height,
+                        present_mode: wgpu::PresentMode::Fifo,
+                        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+                        view_formats: vec![],
+                        desired_maximum_frame_latency: 1,
+                    },
+                );
                 state.renderer.set_render_size(s.width, s.height);
             }
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
                 if let Some(last) = state.time_render_end {
                     let full_cycle_ms = last.elapsed().as_secs_f32() * 1000.0;
-                    if state.frame_count % 60 == 0 { eprintln!("render_end -> next: {:.2}ms", full_cycle_ms); }
+                    if state.frame_count % 60 == 0 {
+                        eprintln!("render_end -> next: {:.2}ms", full_cycle_ms);
+                    }
                 }
                 if let Some(about) = state.time_about_to_wait_start {
                     let gap_ms = about.elapsed().as_secs_f32() * 1000.0;
-                    if gap_ms > 2.0 { eprintln!("about_to_wait -> redraw: {:.2}ms", gap_ms); }
+                    if gap_ms > 2.0 {
+                        eprintln!("about_to_wait -> redraw: {:.2}ms", gap_ms);
+                    }
                 }
                 state.time_redraw_requested = Some(now);
                 let dt = (now - state.last_frame).as_secs_f32();
@@ -204,7 +361,9 @@ impl ApplicationHandler for App {
             let now = std::time::Instant::now();
             if let Some(end) = s.time_render_end {
                 let gap_ms = end.elapsed().as_secs_f32() * 1000.0;
-                if gap_ms > 2.0 { eprintln!("render_end -> about_to_wait: {:.2}ms", gap_ms); }
+                if gap_ms > 2.0 {
+                    eprintln!("render_end -> about_to_wait: {:.2}ms", gap_ms);
+                }
             }
             s.time_about_to_wait_start = Some(now);
             s.window.request_redraw();
@@ -216,8 +375,20 @@ impl AppState {
     fn clear_stack(&mut self) {
         for item in self.boxes.drain(..) {
             let _ = self.renderer.scene_mut().remove_object(item.id);
-            self.physics_colliders.remove(item.collider_handle, &mut self.physics_forces, &mut self.physics_bodies, false);
-            self.physics_bodies.remove(item.body_handle, &mut self.physics_forces, &mut self.physics_colliders, &mut self.physics_impulse_joints, &mut self.physics_multibody_joint_set, true);
+            self.physics_colliders.remove(
+                item.collider_handle,
+                &mut self.physics_forces,
+                &mut self.physics_bodies,
+                false,
+            );
+            self.physics_bodies.remove(
+                item.body_handle,
+                &mut self.physics_forces,
+                &mut self.physics_colliders,
+                &mut self.physics_impulse_joints,
+                &mut self.physics_multibody_joint_set,
+                true,
+            );
         }
     }
 
@@ -228,25 +399,62 @@ impl AppState {
         for z in 0..stack_height {
             for x in 0..3 {
                 for y in 0..3 {
-                    let pos = glam::Vec3::new((x as f32 - 1.0) * 1.1, (z as f32 + 0.5) * 1.05, (y as f32 - 1.0) * 1.1);
-                    let transform = glam::Mat4::from_translation(pos) * glam::Mat4::from_scale(glam::Vec3::splat(1.0));
-                    let box_mesh_id = self.renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.5,0.5,0.5]))).as_mesh().unwrap();
-                    let obj = insert_object_with_movability(&mut self.renderer, box_mesh_id, box_mat, transform, 1.0, Some(helio::Movability::Movable)).expect("insert box");
+                    let pos = glam::Vec3::new(
+                        (x as f32 - 1.0) * 1.1,
+                        (z as f32 + 0.5) * 1.05,
+                        (y as f32 - 1.0) * 1.1,
+                    );
+                    let transform = glam::Mat4::from_translation(pos)
+                        * glam::Mat4::from_scale(glam::Vec3::splat(1.0));
+                    let box_mesh_id = self
+                        .renderer
+                        .scene_mut()
+                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                            [0.0, 0.0, 0.0],
+                            [0.5, 0.5, 0.5],
+                        )))
+                        .as_mesh()
+                        .unwrap();
+                    let obj =
+                        insert_object(&mut self.renderer, box_mesh_id, box_mat, transform, 1.0)
+                            .expect("insert box");
 
-                    let body = RigidBodyBuilder::dynamic().translation([pos.x, pos.y, pos.z].into()).build();
+                    let body = RigidBodyBuilder::dynamic()
+                        .translation([pos.x, pos.y, pos.z].into())
+                        .build();
                     let body_handle = self.physics_bodies.insert(body);
-                    let collider = ColliderBuilder::cuboid(0.5,0.5,0.5).restitution(0.1).friction(0.7).build();
-                    let collider_handle = self.physics_colliders.insert_with_parent(collider, body_handle, &mut self.physics_bodies);
+                    let collider = ColliderBuilder::cuboid(0.5, 0.5, 0.5)
+                        .restitution(0.1)
+                        .friction(0.7)
+                        .build();
+                    let collider_handle = self.physics_colliders.insert_with_parent(
+                        collider,
+                        body_handle,
+                        &mut self.physics_bodies,
+                    );
 
-                    self.boxes.push(BoxItem { id: obj, body_handle, collider_handle });
+                    self.boxes.push(BoxItem {
+                        id: obj,
+                        body_handle,
+                        collider_handle,
+                    });
                 }
             }
         }
 
-        let ground_body = RigidBodyBuilder::fixed().translation([0.0, 0.0, 0.0].into()).build();
+        let ground_body = RigidBodyBuilder::fixed()
+            .translation([0.0, 0.0, 0.0].into())
+            .build();
         let ground_handle = self.physics_bodies.insert(ground_body);
-        let ground_collider = ColliderBuilder::cuboid(25.0, 0.5, 25.0).friction(0.9).restitution(0.2).build();
-        self.physics_colliders.insert_with_parent(ground_collider, ground_handle, &mut self.physics_bodies);
+        let ground_collider = ColliderBuilder::cuboid(25.0, 0.5, 25.0)
+            .friction(0.9)
+            .restitution(0.2)
+            .build();
+        self.physics_colliders.insert_with_parent(
+            ground_collider,
+            ground_handle,
+            &mut self.physics_bodies,
+        );
     }
 
     fn step_physics(&mut self, dt: f32) {
@@ -273,10 +481,22 @@ impl AppState {
         for item in &self.boxes {
             if let Some(body) = self.physics_bodies.get(item.body_handle) {
                 let position = body.position();
-                let pos = glam::Vec3::new(position.translation.x, position.translation.y, position.translation.z);
-                let rot = glam::Quat::from_xyzw(position.rotation.i, position.rotation.j, position.rotation.k, position.rotation.w);
+                let pos = glam::Vec3::new(
+                    position.translation.x,
+                    position.translation.y,
+                    position.translation.z,
+                );
+                let rot = glam::Quat::from_xyzw(
+                    position.rotation.i,
+                    position.rotation.j,
+                    position.rotation.k,
+                    position.rotation.w,
+                );
                 let transform = glam::Mat4::from_translation(pos) * glam::Mat4::from_quat(rot); // no scale
-                let _ = self.renderer.scene_mut().update_object_transform(item.id, transform);
+                let _ = self
+                    .renderer
+                    .scene_mut()
+                    .update_object_transform(item.id, transform);
             }
         }
     }
@@ -293,16 +513,36 @@ impl AppState {
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let right = glam::Vec3::new(cy, 0.0, sy);
 
-        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
-        if self.keys.contains(&KeyCode::Space) { self.cam_pos.y += SPEED * dt; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos.y -= SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyW) {
+            self.cam_pos += forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyS) {
+            self.cam_pos -= forward * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyA) {
+            self.cam_pos -= right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::KeyD) {
+            self.cam_pos += right * SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::Space) {
+            self.cam_pos.y += SPEED * dt;
+        }
+        if self.keys.contains(&KeyCode::ShiftLeft) {
+            self.cam_pos.y -= SPEED * dt;
+        }
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let camera = Camera::perspective_look_at(self.cam_pos, self.cam_pos + forward, glam::Vec3::Y, std::f32::consts::FRAC_PI_4, aspect, 0.1, 300.0);
+        let camera = Camera::perspective_look_at(
+            self.cam_pos,
+            self.cam_pos + forward,
+            glam::Vec3::Y,
+            std::f32::consts::FRAC_PI_4,
+            aspect,
+            0.1,
+            300.0,
+        );
 
         if self.physics_enabled {
             self.step_physics(dt);
@@ -311,18 +551,30 @@ impl AppState {
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => { log::warn!("Surface error: {:?}", e); return; }
+            Err(e) => {
+                log::warn!("Surface error: {:?}", e);
+                return;
+            }
         };
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
 
-        if let Err(e) = self.renderer.render(&camera, &view) { log::error!("Render error: {:?}", e); }
+        if let Err(e) = self.renderer.render(&camera, &view) {
+            log::error!("Render error: {:?}", e);
+        }
         output.present();
 
         self.frame_count += 1;
         self.time_render_end = Some(std::time::Instant::now());
 
         if self.frame_count % 60 == 0 {
-            eprintln!("Rapier Stack: frame {} bodies={} sim={}", self.frame_count, self.boxes.len(), self.physics_enabled);
+            eprintln!(
+                "Rapier Stack: frame {} bodies={} sim={}",
+                self.frame_count,
+                self.boxes.len(),
+                self.physics_enabled
+            );
         }
     }
 }

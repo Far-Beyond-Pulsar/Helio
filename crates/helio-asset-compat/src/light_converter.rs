@@ -133,4 +133,3 @@ mod tests {
         assert_eq!(scene_light.color_intensity[3], 100.0);
     }
 }
-

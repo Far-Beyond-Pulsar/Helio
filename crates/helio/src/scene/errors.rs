@@ -43,4 +43,3 @@ pub type Result<T> = std::result::Result<T, SceneError>;
 pub(super) fn invalid(resource: &'static str) -> SceneError {
     SceneError::InvalidHandle { resource }
 }
-

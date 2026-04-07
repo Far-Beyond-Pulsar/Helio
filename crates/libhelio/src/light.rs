@@ -56,4 +56,3 @@ pub struct GpuShadowMatrix {
     /// Light-space view-projection matrix (64 bytes, matches `LightMatrix { mat: mat4x4<f32> }`)
     pub light_view_proj: [f32; 16],
 }
-

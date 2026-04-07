@@ -19,7 +19,8 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, build_hlfs_graph, Camera, HelioAction, HelioCommandBridge, LightId, MeshId, Renderer, RendererConfig,
+    build_hlfs_graph, required_wgpu_features, required_wgpu_limits, Camera, HelioAction,
+    HelioCommandBridge, LightId, MeshId, Renderer, RendererConfig,
 };
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
 
@@ -214,14 +215,67 @@ impl ApplicationHandler for App {
 
         // Nave + aisles: total width = 22m (x: -11..+11), length = 60m (z: -28..+28), height = 21m
         // Expand floor to cover full cathedral footprint. 32m radius = 64m square.
-        let _floor =            renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 32.0))).as_mesh().unwrap();
-        let _wall_back =        renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]))).as_mesh().unwrap();
-        let _wall_front =       renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [11.0, 10.5, 0.25]))).as_mesh().unwrap();
-        let _aisle_ceil_l =     renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]))).as_mesh().unwrap();
-        let _nave_ceiling =     renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [6.0, 0.18, 28.0]))).as_mesh().unwrap();
-        let _aisle_ceil_r =     renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [2.5, 0.15, 28.0]))).as_mesh().unwrap();
-        let _wall_left_outer =  renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]))).as_mesh().unwrap();
-        let _wall_right_outer = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]))).as_mesh().unwrap();
+        let _floor = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 32.0)))
+            .as_mesh()
+            .unwrap();
+        let _wall_back = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [11.0, 10.5, 0.25],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _wall_front = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [11.0, 10.5, 0.25],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _aisle_ceil_l = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 0.15, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _nave_ceiling = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [6.0, 0.18, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _aisle_ceil_r = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [2.5, 0.15, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _wall_left_outer = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.25, 7.0, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _wall_right_outer = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.25, 7.0, 28.0],
+            )))
+            .as_mesh()
+            .unwrap();
         let _ =
             v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
         let _ = v3_demo_common::insert_object(
@@ -287,8 +341,12 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9; // gap for column
-                let id = renderer.scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)])))
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.25, 5.5, half_len.max(0.1)],
+                    )))
                     .as_mesh()
                     .unwrap();
                 let _ = v3_demo_common::insert_object(
@@ -306,8 +364,12 @@ impl ApplicationHandler for App {
             .map(|w| {
                 let mid_z = (w[0] + w[1]) * 0.5;
                 let half_len = (w[1] - w[0]) * 0.5 - 0.9;
-                let id = renderer.scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)])))
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.25, 5.5, half_len.max(0.1)],
+                    )))
                     .as_mesh()
                     .unwrap();
                 let _ = v3_demo_common::insert_object(
@@ -325,7 +387,14 @@ impl ApplicationHandler for App {
         let _columns: Vec<MeshId> = COLUMN_Z
             .iter()
             .flat_map(|&z| {
-                let l = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]))).as_mesh().unwrap();
+                let l = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.65, 10.0, 0.65],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     l,
@@ -333,7 +402,14 @@ impl ApplicationHandler for App {
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
                     10.0,
                 );
-                let r = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]))).as_mesh().unwrap();
+                let r = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.65, 10.0, 0.65],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     r,
@@ -346,10 +422,38 @@ impl ApplicationHandler for App {
             .collect();
 
         // Altar: at far end (z = -26)
-        let _altar_step = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [5.5, 0.20, 3.0]))).as_mesh().unwrap();
-        let _altar_plinth = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.45, 1.5]))).as_mesh().unwrap();
-        let _cross_vert = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.18, 2.2, 0.18]))).as_mesh().unwrap();
-        let _cross_horiz = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.18, 0.18]))).as_mesh().unwrap();
+        let _altar_step = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [5.5, 0.20, 3.0],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _altar_plinth = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [3.0, 0.45, 1.5],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cross_vert = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [0.18, 2.2, 0.18],
+            )))
+            .as_mesh()
+            .unwrap();
+        let _cross_horiz = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [1.0, 0.18, 0.18],
+            )))
+            .as_mesh()
+            .unwrap();
         let _ = v3_demo_common::insert_object(
             &mut renderer,
             _altar_step,
@@ -383,7 +487,14 @@ impl ApplicationHandler for App {
         let _pews_left: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [1.5, 0.45, 0.5],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -397,7 +508,14 @@ impl ApplicationHandler for App {
         let _pews_right: Vec<MeshId> = (0..PEW_COUNT)
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [1.5, 0.45, 0.5],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -420,7 +538,14 @@ impl ApplicationHandler for App {
         let _chandelier_chains: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.06, 2.0, 0.06]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [0.06, 2.0, 0.06],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -434,7 +559,14 @@ impl ApplicationHandler for App {
         let _chandelier_rings: Vec<MeshId> = CHANDELIER_Z
             .iter()
             .map(|&z| {
-                let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 1.2]))).as_mesh().unwrap();
+                let id = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [1.2, 0.12, 1.2],
+                    )))
+                    .as_mesh()
+                    .unwrap();
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     id,
@@ -449,25 +581,44 @@ impl ApplicationHandler for App {
         // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
         let mut chandelier_light_ids = Vec::new();
         for &z in CHANDELIER_Z {
-            chandelier_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [0.0_f32, 15.0, z],
-                [1.0, 0.92, 0.78],
-                8.0,
-                22.0,
-            ))).as_light().unwrap());
+            chandelier_light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(point_light(
+                        [0.0_f32, 15.0, z],
+                        [1.0, 0.92, 0.78],
+                        8.0,
+                        22.0,
+                    )))
+                    .as_light()
+                    .unwrap(),
+            );
         }
         // Stained glass shafts — static, no need to store ids
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([x, y, z], [r, g, b], 1.8, 8.0)));
+            let _ = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [x, y, z],
+                    [r, g, b],
+                    1.8,
+                    8.0,
+                )));
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {
-            candle_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [x, y, z],
-                [1.0, 0.6, 0.15],
-                1.2,
-                4.0,
-            ))).as_light().unwrap());
+            candle_light_ids.push(
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(point_light(
+                        [x, y, z],
+                        [1.0, 0.6, 0.15],
+                        1.2,
+                        4.0,
+                    )))
+                    .as_light()
+                    .unwrap(),
+            );
         }
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
@@ -502,12 +653,10 @@ impl ApplicationHandler for App {
                 let stdin = io::stdin();
                 for line in stdin.lock().lines() {
                     match line {
-                        Ok(cmd) if !cmd.trim().is_empty() => {
-                            match bridge.run(&cmd) {
-                                Ok(()) => println!("OK: {}", cmd),
-                                Err(e) => println!("ERR: {} -> {}", cmd, e),
-                            }
-                        }
+                        Ok(cmd) if !cmd.trim().is_empty() => match bridge.run(&cmd) {
+                            Ok(()) => println!("OK: {}", cmd),
+                            Err(e) => println!("ERR: {} -> {}", cmd, e),
+                        },
                         _ => {}
                     }
                 }
@@ -755,6 +904,3 @@ impl AppState {
         output.present();
     }
 }
-
-
-

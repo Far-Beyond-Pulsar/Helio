@@ -177,4 +177,3 @@ impl super::super::Scene {
         }
     }
 }
-

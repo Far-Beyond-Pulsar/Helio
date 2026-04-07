@@ -10,7 +10,6 @@
 //!   Mouse drag           — look (click to grab cursor)
 //!   Escape               — release cursor / exit
 
-
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
 
 use winit::{
@@ -278,50 +277,81 @@ impl AppState {
 
         // Circle
         let ring_radius = 2.5;
-        self.renderer.debug_circle([0.0, 0.5, 0.0], ring_radius, [1.0, 0.4, 0.1, 1.0], 64);
+        self.renderer
+            .debug_circle([0.0, 0.5, 0.0], ring_radius, [1.0, 0.4, 0.1, 1.0], 64);
 
         // Sphere
         let sphere_center = glam::Vec3::new((t * 0.6).cos() * 3.0, 1.0, (t * 0.6).sin() * 3.0);
-        self.renderer.debug_sphere(sphere_center.to_array(), 1.0, [0.2,0.8,0.6,1.0], 32);
+        self.renderer
+            .debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
 
         // Torus
         let torus_center = glam::Vec3::new((t * 0.4).sin() * 3.0, 1.5, (t * 0.4).cos() * 3.0);
-        self.renderer.debug_torus(torus_center.to_array(), [0.0,1.0,0.0], 1.2, 0.35, [1.0,0.6,0.7,1.0], 24, 16);
+        self.renderer.debug_torus(
+            torus_center.to_array(),
+            [0.0, 1.0, 0.0],
+            1.2,
+            0.35,
+            [1.0, 0.6, 0.7, 1.0],
+            24,
+            16,
+        );
 
         // Cylinder
         let cyl_base = glam::Vec3::new(-3.5, 0.0, (t * 0.7).sin() * 3.0);
-        self.renderer.debug_cylinder(cyl_base.to_array(), [0.0,1.0,0.0], 2.0, 0.45, [0.4,0.4,1.0,1.0], 28);
+        self.renderer.debug_cylinder(
+            cyl_base.to_array(),
+            [0.0, 1.0, 0.0],
+            2.0,
+            0.45,
+            [0.4, 0.4, 1.0, 1.0],
+            28,
+        );
 
         // Cone
         let cone_apex = glam::Vec3::new(3.5, 1.5, (t * 0.7).cos() * 3.0);
-        self.renderer.debug_cone(cone_apex.to_array(), [0.0,-1.0,0.0], 2.0, 0.8, [0.8,0.5,0.2,1.0], 32);
+        self.renderer.debug_cone(
+            cone_apex.to_array(),
+            [0.0, -1.0, 0.0],
+            2.0,
+            0.8,
+            [0.8, 0.5, 0.2, 1.0],
+            32,
+        );
 
         // Frustum
         let frustum_origin = glam::Vec3::new(0.0, 0.5, 0.0);
-        let frustum_dir = glam::Vec3::new((t*0.2).sin(), -0.15, (t*0.2).cos()).normalize_or_zero();
+        let frustum_dir =
+            glam::Vec3::new((t * 0.2).sin(), -0.15, (t * 0.2).cos()).normalize_or_zero();
         self.renderer.debug_frustum(
             frustum_origin.to_array(),
             frustum_dir.to_array(),
-            glam::Vec3::new(0.0,1.0,0.0).to_array(),
+            glam::Vec3::new(0.0, 1.0, 0.0).to_array(),
             65.0_f32.to_radians(),
-            16.0/9.0,
+            16.0 / 9.0,
             0.8,
             3.2,
-            [0.2,1.0,0.2,1.0],
+            [0.2, 1.0, 0.2, 1.0],
         );
 
         // rotating crosses
         let rot = t * 0.8;
         let p = glam::Vec3::new(rot.cos() * 2.0, 0.0, rot.sin() * 2.0);
         let col = [0.2 + 0.8 * ((rot * 1.23).sin() * 0.5 + 0.5), 0.80, 0.2, 1.0];
-        self.renderer.debug_line([p.x, 0.0, p.z], [p.x, 1.2, p.z], col);
-        self.renderer.debug_line([p.x - 0.6, 0.6, p.z], [p.x + 0.6, 0.6, p.z], col);
-        self.renderer.debug_line([p.x, 0.6, p.z - 0.6], [p.x, 0.6, p.z + 0.6], col);
+        self.renderer
+            .debug_line([p.x, 0.0, p.z], [p.x, 1.2, p.z], col);
+        self.renderer
+            .debug_line([p.x - 0.6, 0.6, p.z], [p.x + 0.6, 0.6, p.z], col);
+        self.renderer
+            .debug_line([p.x, 0.6, p.z - 0.6], [p.x, 0.6, p.z + 0.6], col);
 
         // Guaranteed major axis lines (must be visible if debug pass is working)
-        self.renderer.debug_line([-40.0, 0.0, 0.0], [40.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
-        self.renderer.debug_line([0.0, 0.0, -40.0], [0.0, 0.0, 40.0], [0.0, 1.0, 0.0, 1.0]);
-        self.renderer.debug_line([0.0, 0.0, 0.0], [0.0, 40.0, 0.0], [0.0, 0.0, 1.0, 1.0]);
+        self.renderer
+            .debug_line([-40.0, 0.0, 0.0], [40.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
+        self.renderer
+            .debug_line([0.0, 0.0, -40.0], [0.0, 0.0, 40.0], [0.0, 1.0, 0.0, 1.0]);
+        self.renderer
+            .debug_line([0.0, 0.0, 0.0], [0.0, 40.0, 0.0], [0.0, 0.0, 1.0, 1.0]);
 
         // Always draw a camera-forward debug vector so the line system is visually verifiable.
         let (sy, cy) = self.cam_yaw.sin_cos();
@@ -338,9 +368,21 @@ impl AppState {
         // Extra near-camera cross marker in world space, absolutely should be visible.
         let world_cam_mark = self.cam_pos + fwd * 2.0;
         let cross = 0.5;
-        self.renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + glam::Vec3::new(cross,0.,0.)).to_array(), [1.0,0.5,0.0,1.0]);
-        self.renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + glam::Vec3::new(0.,cross,0.)).to_array(), [1.0,0.5,0.0,1.0]);
-        self.renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + glam::Vec3::new(0.,0.,cross)).to_array(), [1.0,0.5,0.0,1.0]);
+        self.renderer.debug_line(
+            world_cam_mark.to_array(),
+            (world_cam_mark + glam::Vec3::new(cross, 0., 0.)).to_array(),
+            [1.0, 0.5, 0.0, 1.0],
+        );
+        self.renderer.debug_line(
+            world_cam_mark.to_array(),
+            (world_cam_mark + glam::Vec3::new(0., cross, 0.)).to_array(),
+            [1.0, 0.5, 0.0, 1.0],
+        );
+        self.renderer.debug_line(
+            world_cam_mark.to_array(),
+            (world_cam_mark + glam::Vec3::new(0., 0., cross)).to_array(),
+            [1.0, 0.5, 0.0, 1.0],
+        );
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
@@ -371,5 +413,3 @@ impl AppState {
         output.present();
     }
 }
-
-

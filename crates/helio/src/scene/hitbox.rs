@@ -6,11 +6,9 @@
 
 use crate::handles::WaterHitboxId;
 use crate::scene::actor::WaterHitboxDescriptor;
-use crate::arena::DenseRemove;
 use crate::scene::errors::{invalid, Result};
 use crate::scene::types::WaterHitboxRecord;
 use crate::scene::Scene;
-use bytemuck;
 use libhelio::GpuWaterHitbox;
 
 impl Scene {
@@ -25,26 +23,17 @@ impl Scene {
     pub fn insert_water_hitbox(&mut self, desc: WaterHitboxDescriptor) -> Result<WaterHitboxId> {
         let gpu = desc.to_gpu();
         let record = WaterHitboxRecord { gpu };
-        let (id, index) = self.water_hitboxes.insert(record);
+        let (id, _) = self.water_hitboxes.insert(record);
         self.water_hitboxes_dirty = true;
-        self.water_hitboxes_dirty_range = Some((index, index + 1));
         Ok(id)
     }
 
     /// Remove a water hitbox from the scene.
     pub fn remove_water_hitbox(&mut self, id: WaterHitboxId) -> Result<()> {
-        let DenseRemove { dense_index, moved, .. } = self
-            .water_hitboxes
+        self.water_hitboxes
             .remove(id)
             .ok_or_else(|| invalid("water hitbox"))?;
         self.water_hitboxes_dirty = true;
-        if let Some((_, moved_index)) = moved {
-            let start = dense_index.min(moved_index);
-            let end = dense_index.max(moved_index) + 1;
-            self.water_hitboxes_dirty_range = Some((start, end));
-        } else {
-            self.water_hitboxes_dirty_range = Some((dense_index, dense_index + 1));
-        }
         Ok(())
     }
 
@@ -57,18 +46,12 @@ impl Scene {
         id: WaterHitboxId,
         desc: WaterHitboxDescriptor,
     ) -> Result<()> {
-        let (index, record) = self
+        let (_index, record) = self
             .water_hitboxes
             .get_mut_with_index(id)
             .ok_or_else(|| invalid("water hitbox"))?;
         record.gpu = desc.to_gpu();
         self.water_hitboxes_dirty = true;
-        match self.water_hitboxes_dirty_range {
-            Some((start, end)) => {
-                self.water_hitboxes_dirty_range = Some((start.min(index), (end.max(index + 1))));
-            }
-            None => self.water_hitboxes_dirty_range = Some((index, index + 1)),
-        }
         Ok(())
     }
 
@@ -78,24 +61,6 @@ impl Scene {
             .filter_map(|i| self.water_hitboxes.get_dense(i))
             .map(|record| record.gpu)
             .collect()
-    }
-
-    /// Get a zero-allocation view of the GPU hitbox array.
-    ///
-    /// This avoids constructing a temporary `Vec` each frame when hitboxes
-    /// are uploaded to the GPU from the renderer.
-    pub fn get_water_hitboxes_gpu_slice(&self) -> &[GpuWaterHitbox] {
-        bytemuck::cast_slice(self.water_hitboxes.dense.as_slice())
-    }
-
-    /// Returns the current dirty hitbox upload range, if any.
-    pub fn water_hitboxes_dirty_range(&self) -> Option<(usize, usize)> {
-        self.water_hitboxes_dirty_range
-    }
-
-    /// Consume the current dirty hitbox range and clear it.
-    pub(crate) fn consume_water_hitboxes_dirty_range(&mut self) -> Option<(usize, usize)> {
-        self.water_hitboxes_dirty_range.take()
     }
 
     /// Number of active water hitboxes.

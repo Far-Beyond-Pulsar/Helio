@@ -47,11 +47,11 @@ const HALTON_JITTER: [[f32; 2]; 16] = [
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TaaUniform {
-    feedback_min: f32,   // unused — kept for struct-layout compatibility
-    feedback_max: f32,   // unused — kept for struct-layout compatibility
+    feedback_min: f32, // unused — kept for struct-layout compatibility
+    feedback_max: f32, // unused — kept for struct-layout compatibility
     jitter: [f32; 2],
-    reset: u32,          // 1 on the very first frame so RESET path runs
-    _pad: u32,           // pad to match WGSL struct alignment (vec2 → align-8 → 24 bytes)
+    reset: u32, // 1 on the very first frame so RESET path runs
+    _pad: u32,  // pad to match WGSL struct alignment (vec2 → align-8 → 24 bytes)
 }
 
 /// Post-TAA sharpening blit.
@@ -130,6 +130,8 @@ pub struct TaaPass {
     point_sampler: wgpu::Sampler,
     velocity_fallback_texture: wgpu::Texture,
     velocity_fallback_view: wgpu::TextureView,
+    /// Texture format used for history/output (needed for on_resize recreation).
+    format: wgpu::TextureFormat,
     /// Set to true on construction; cleared after the first prepare() so the
     /// shader's RESET path runs exactly once to prime the history texture.
     first_frame: bool,
@@ -189,23 +191,35 @@ impl TaaPass {
         // a lower internal resolution.
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: output_width,
+                height: output_height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | extra,
             view_formats: &[],
         };
 
-        let history_texture = device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        let history_texture =
+            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
         let history_view = history_texture.create_view(&Default::default());
-        let output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        let output_texture =
+            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         let output_view = output_texture.create_view(&Default::default());
 
         let velocity_fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("TAA Velocity Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -302,7 +316,10 @@ impl TaaPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -334,7 +351,10 @@ impl TaaPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -358,6 +378,7 @@ impl TaaPass {
             point_sampler,
             velocity_fallback_texture,
             velocity_fallback_view,
+            format,
             first_frame: true,
         }
     }
@@ -377,21 +398,29 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 }
 
 impl RenderPass for TaaPass {
-    fn name(&self) -> &'static str { "TAA" }
+    fn name(&self) -> &'static str {
+        "TAA"
+    }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let jitter_idx = (ctx.frame_num % 16) as usize;
         let raw = HALTON_JITTER[jitter_idx];
         // Consume the first_frame flag so RESET runs on exactly one frame.
-        let reset = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
+        let reset = if self.first_frame {
+            self.first_frame = false;
+            1u32
+        } else {
+            0u32
+        };
         let uniforms = TaaUniform {
-            feedback_min: 0.88,  // unused but kept for layout
-            feedback_max: 0.97,  // unused but kept for layout
+            feedback_min: 0.88, // unused but kept for layout
+            feedback_max: 0.97, // unused but kept for layout
             jitter: [raw[0] - 0.5, raw[1] - 0.5],
             reset,
             _pad: 0,
         };
-        ctx.queue.write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        ctx.queue
+            .write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
 
@@ -402,19 +431,43 @@ impl RenderPass for TaaPass {
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )
         })?;
-        let key = (pre_aa_view as *const _ as usize, ctx.depth as *const _ as usize);
+        let key = (
+            pre_aa_view as *const _ as usize,
+            ctx.depth as *const _ as usize,
+        );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TAA BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.history_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.velocity_fallback_view) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ctx.depth) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
-                    wgpu::BindGroupEntry { binding: 6, resource: self.taa_uniform_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.history_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&self.velocity_fallback_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.point_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.taa_uniform_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -426,7 +479,10 @@ impl RenderPass for TaaPass {
                 view: &self.output_view,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TAA Resolve"),
@@ -445,7 +501,11 @@ impl RenderPass for TaaPass {
         ctx.encoder.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
-            wgpu::Extent3d { width: ctx.width, height: ctx.height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: ctx.width,
+                height: ctx.height,
+                depth_or_array_layers: 1,
+            },
         );
 
         // ── 4. Blit output_view → ctx.target ─────────────────────────────────
@@ -454,7 +514,10 @@ impl RenderPass for TaaPass {
                 view: ctx.target,
                 resolve_target: None,
                 depth_slice: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })];
             let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TAA Blit"),
@@ -470,5 +533,54 @@ impl RenderPass for TaaPass {
         }
 
         Ok(())
+    }
+
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let format = self.format;
+        let tex_desc =
+            |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | extra,
+                view_formats: &[],
+            };
+
+        self.history_texture =
+            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        self.history_view = self.history_texture.create_view(&Default::default());
+        self.output_texture =
+            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        self.output_view = self.output_texture.create_view(&Default::default());
+
+        // Recreate the blit bind group since output_view changed.
+        self.blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TAA Blit BG"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+            ],
+        });
+
+        // Invalidate lazy bind group so it's rebuilt with the new textures.
+        self.bind_group = None;
+        self.bind_group_key = None;
+        self.first_frame = true;
     }
 }

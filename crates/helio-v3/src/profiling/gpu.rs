@@ -221,7 +221,8 @@ impl GpuProfiler {
 
     /// Resolve query set to buffer (call after frame submit)
     pub fn resolve_queries(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if let (Some(ref query_set), Some(ref query_buffer)) = (&self.query_set, &self.query_buffer) {
+        if let (Some(ref query_set), Some(ref query_buffer)) = (&self.query_set, &self.query_buffer)
+        {
             if self.next_index > 0 {
                 encoder.resolve_query_set(query_set, 0..self.next_index, query_buffer, 0);
             }
@@ -230,9 +231,17 @@ impl GpuProfiler {
 
     /// Copy resolved queries to CPU-readable buffer
     pub fn copy_to_resolve_buffer(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if let (Some(ref query_buffer), Some(ref resolve_buffer)) = (&self.query_buffer, &self.resolve_buffer) {
+        if let (Some(ref query_buffer), Some(ref resolve_buffer)) =
+            (&self.query_buffer, &self.resolve_buffer)
+        {
             if self.next_index > 0 {
-                encoder.copy_buffer_to_buffer(query_buffer, 0, resolve_buffer, 0, (self.next_index as u64) * 8);
+                encoder.copy_buffer_to_buffer(
+                    query_buffer,
+                    0,
+                    resolve_buffer,
+                    0,
+                    (self.next_index as u64) * 8,
+                );
             }
         }
     }
@@ -284,4 +293,3 @@ pub struct GpuTimestamp {
     /// Convert to milliseconds: `duration_ns as f64 / 1_000_000.0`
     pub duration_ns: u64,
 }
-

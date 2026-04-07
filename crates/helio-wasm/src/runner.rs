@@ -444,4 +444,3 @@ pub fn launch<T: HelioWasmApp>() {
         event_loop.spawn_app(runner);
     }
 }
-

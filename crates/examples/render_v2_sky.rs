@@ -159,32 +159,104 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
-        let cube2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4))).as_mesh().unwrap();
-        let cube3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3))).as_mesh().unwrap();
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0))).as_mesh().unwrap();
-        let roof = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [4.5, 0.15, 4.5]))).as_mesh().unwrap();
+        let cube1 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
+            .as_mesh()
+            .unwrap();
+        let cube2 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
+            .as_mesh()
+            .unwrap();
+        let cube3 = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
+            .as_mesh()
+            .unwrap();
+        let ground = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)))
+            .as_mesh()
+            .unwrap();
+        let roof = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 0.0, 0.0],
+                [4.5, 0.15, 4.5],
+            )))
+            .as_mesh()
+            .unwrap();
 
-        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::from_translation(glam::Vec3::new( 0.0,  0.5,  0.0)), 0.5);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::from_translation(glam::Vec3::new(-2.0,  0.4, -1.0)), 0.4);
-        let _ = v3_demo_common::insert_object(&mut renderer, cube3, mat, glam::Mat4::from_translation(glam::Vec3::new( 2.0,  0.3,  0.5)), 0.3);
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            cube1,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
+            0.5,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            cube2,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
+            0.4,
+        );
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            cube3,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
+            0.3,
+        );
         let _ =
             v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 20.0);
-        let _ = v3_demo_common::insert_object(&mut renderer, roof, mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.85, 0.0)), 4.5);
+        let _ = v3_demo_common::insert_object(
+            &mut renderer,
+            roof,
+            mat,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 2.85, 0.0)),
+            4.5,
+        );
 
         // Compute initial sun direction from starting sun_angle=1.0
         let init_sun_dir = glam::Vec3::new(1.0_f32.cos() * 0.3, 1.0_f32.sin(), 0.5).normalize();
         let init_light_dir = [-init_sun_dir.x, -init_sun_dir.y, -init_sun_dir.z];
         let init_elev = init_sun_dir.y.clamp(-1.0, 1.0);
         let init_lux = (init_elev * 3.0).clamp(0.0, 1.0);
-        let sun_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
-            init_light_dir,
-            [1.0, 0.85, 0.7],
-            (init_lux * 0.35).max(0.01),
-        ))).as_light().unwrap();
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 2.5, 0.0], [1.0, 0.85, 0.6], 4.0, 8.0)));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-2.5, 2.0, -1.5], [0.4, 0.6, 1.0], 3.5, 7.0)));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([2.5, 1.8, 1.5], [1.0, 0.3, 0.3], 3.0, 6.0)));
+        let sun_light_id = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(directional_light(
+                init_light_dir,
+                [1.0, 0.85, 0.7],
+                (init_lux * 0.35).max(0.01),
+            )))
+            .as_light()
+            .unwrap();
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [0.0, 2.5, 0.0],
+                [1.0, 0.85, 0.6],
+                4.0,
+                8.0,
+            )));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [-2.5, 2.0, -1.5],
+                [0.4, 0.6, 1.0],
+                3.5,
+                7.0,
+            )));
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::light(point_light(
+                [2.5, 1.8, 1.5],
+                [1.0, 0.3, 0.3],
+                3.0,
+                6.0,
+            )));
         renderer.set_ambient([0.15, 0.18, 0.25], 0.08);
 
         renderer.scene_mut().insert_actor(helio::SceneActor::Sky(
@@ -197,7 +269,7 @@ impl ApplicationHandler for App {
                 wind_z: 0.2,
                 speed: 1.3,
                 skylight_intensity: 0.25,
-            })
+            }),
         ));
 
         self.state = Some(AppState {
@@ -417,6 +489,3 @@ impl AppState {
         output.present();
     }
 }
-
-
-

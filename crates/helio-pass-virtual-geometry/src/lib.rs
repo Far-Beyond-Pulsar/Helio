@@ -117,7 +117,7 @@ pub struct VirtualGeometryPass {
     // ── VG data buffers (owned; rebuilt when buffer_version changes) ──────────
     meshlet_buf: wgpu::Buffer,
     instance_buf: wgpu::Buffer,
-    /// Compacted visible-only draw commands (approach: written by atomic appending).
+    /// Compacted visible-only draw commands (AAA approach: written by atomic appending).
     indirect_buf: wgpu::Buffer,
     /// Single u32 written by the cull shader via atomicAdd — the visible meshlet count.
     /// Passed as the count argument to multi_draw_indexed_indirect_count.
@@ -901,7 +901,7 @@ impl RenderPass for VirtualGeometryPass {
                 wgpu::IndexFormat::Uint32,
             );
             if self.use_count_indirect {
-                // compaction path: GPU-written count drives how many compact
+                // AAA compaction path: GPU-written count drives how many compact
                 // draw commands the hardware reads — zero wasted command reads.
                 rpass.multi_draw_indexed_indirect_count(
                     &self.indirect_buf,
@@ -978,4 +978,3 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         ],
     })
 }
-

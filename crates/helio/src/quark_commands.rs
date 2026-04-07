@@ -94,10 +94,12 @@ impl Command for SetDebugModeCommand {
             });
         }
 
-        let mode = args[0].parse::<u32>().map_err(|_| CommandError::TypeConversionError {
-            arg: args[0].clone(),
-            target_type: "u32",
-        })?;
+        let mode = args[0]
+            .parse::<u32>()
+            .map_err(|_| CommandError::TypeConversionError {
+                arg: args[0].clone(),
+                target_type: "u32",
+            })?;
 
         self.sender
             .send(HelioAction::SetDebugMode(mode))
@@ -136,10 +138,12 @@ impl Command for SetEditorModeCommand {
             });
         }
 
-        let enabled = args[0].parse::<bool>().map_err(|_| CommandError::TypeConversionError {
-            arg: args[0].clone(),
-            target_type: "bool",
-        })?;
+        let enabled = args[0]
+            .parse::<bool>()
+            .map_err(|_| CommandError::TypeConversionError {
+                arg: args[0].clone(),
+                target_type: "bool",
+            })?;
 
         self.sender
             .send(HelioAction::SetEditorMode(enabled))
@@ -178,10 +182,12 @@ impl Command for SetDebugDepthTestCommand {
             });
         }
 
-        let enabled = args[0].parse::<bool>().map_err(|_| CommandError::TypeConversionError {
-            arg: args[0].clone(),
-            target_type: "bool",
-        })?;
+        let enabled = args[0]
+            .parse::<bool>()
+            .map_err(|_| CommandError::TypeConversionError {
+                arg: args[0].clone(),
+                target_type: "bool",
+            })?;
 
         self.sender
             .send(HelioAction::SetDebugDepthTest(enabled))
@@ -265,4 +271,3 @@ impl Command for HelpCommand {
         Ok(())
     }
 }
-

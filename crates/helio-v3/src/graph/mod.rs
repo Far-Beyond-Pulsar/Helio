@@ -52,4 +52,3 @@ pub use executor::RenderGraph;
 pub use resource::{
     ResourceAccess, ResourceBuilder, ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize,
 };
-

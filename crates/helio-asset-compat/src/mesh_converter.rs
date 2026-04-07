@@ -269,4 +269,3 @@ mod tests {
         assert_eq!(packed.tex_coords1, [0.0, 0.0]);
     }
 }
-

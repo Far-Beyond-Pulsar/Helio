@@ -5,7 +5,7 @@
 //!
 //! # Design Pattern: GPU-Native Scene
 //!
-//! Helio v3 follows the **GPU-driven pattern**:
+//! Helio v3 follows the **AAA GPU-driven pattern**:
 //!
 //! 1. **All data on GPU**: Lights, meshes, materials stored in GPU buffers
 //! 2. **Dirty tracking**: CPU mirrors track changes, upload only deltas
@@ -159,18 +159,6 @@ pub struct GpuScene {
     /// Render target height in pixels.
     pub height: u32,
 
-    /// Generation counter for movable objects - increments when any Movable object moves.
-    /// Used by shadow caching to detect movement.
-    pub movable_objects_generation: u64,
-
-    /// Generation counter for movable lights - increments when any Movable light moves.
-    /// Used by shadow caching to detect movement.
-    pub movable_lights_generation: u64,
-
-    /// Generation counter for camera - increments every time the camera is updated.
-    /// Used by HiZ and light-cull passes to detect camera movement.
-    pub camera_generation: u64,
-
     pub camera: GpuCameraBuffer,
     pub instances: GpuInstanceBuffer,
     pub aabbs: GpuAabbBuffer,
@@ -180,30 +168,6 @@ pub struct GpuScene {
     pub shadow_matrices: GpuShadowMatrixBuffer,
     pub indirect: GpuIndirectBuffer,
     pub visibility: GpuVisibilityBuffer,
-
-    // ── Shadow partition buffers (Unreal-style static/dynamic split) ──────────
-    // NOTE: Both pass kinds use `instances` (the main transforms buffer) at binding 1.
-    // We only partition the INDIRECT DRAW CALL buffers so that each atlas can be
-    // rendered with a single `multi_draw_indexed_indirect` call. This means
-    // `first_instance` in each indirect entry is the object's dense_index into
-    // `instances`, keeping transform data in a single place that stays in sync
-    // when `update_object_transform` writes to it.
-    //
-    // Obsolete approach (DO NOT restore): splitting instance data into two copies
-    // (shadow_static_instances / shadow_movable_instances) caused dynamic shadows to
-    // freeze because the copies were never updated on `update_object_transform`.
-
-    /// Indirect draw commands for Static/Stationary objects (indexes into `instances`).
-    pub shadow_static_indirect: GpuIndirectBuffer,
-    /// Indirect draw commands for Movable objects (indexes into `instances`).
-    pub shadow_movable_indirect: GpuIndirectBuffer,
-    /// Number of draw calls in shadow_static_indirect.
-    pub shadow_static_draw_count: u32,
-    /// Number of draw calls in shadow_movable_indirect.
-    pub shadow_movable_draw_count: u32,
-    /// Increments when the static object set changes (add/remove of Static/Stationary objects).
-    /// Used by ShadowPass to know when to re-render the static shadow atlas.
-    pub static_objects_generation: u64,
 }
 
 impl GpuScene {
@@ -243,18 +207,12 @@ impl GpuScene {
         let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
         let indirect = GpuIndirectBuffer::new(device.clone());
         let visibility = GpuVisibilityBuffer::new(device.clone());
-        let shadow_static_indirect = GpuIndirectBuffer::new(device.clone());
-        let shadow_movable_indirect = GpuIndirectBuffer::new(device.clone());
         Self {
             device,
             queue,
             frame_count: 0,
             width: 0,
             height: 0,
-            movable_objects_generation: 0,
-            movable_lights_generation: 0,
-            camera_generation: 0,
-            static_objects_generation: 0,
             camera,
             instances,
             aabbs,
@@ -264,10 +222,6 @@ impl GpuScene {
             shadow_matrices,
             indirect,
             visibility,
-            shadow_static_indirect,
-            shadow_movable_indirect,
-            shadow_static_draw_count: 0,
-            shadow_movable_draw_count: 0,
         }
     }
 
@@ -311,14 +265,6 @@ impl GpuScene {
             draw_count: self.draw_calls.len() as u32,
             light_count: self.lights.len() as u32,
             shadow_count: self.shadow_matrices.len() as u32,
-            movable_objects_generation: self.movable_objects_generation,
-            movable_lights_generation: self.movable_lights_generation,
-            camera_generation: self.camera_generation,
-            shadow_static_indirect: self.shadow_static_indirect.buffer(),
-            shadow_movable_indirect: self.shadow_movable_indirect.buffer(),
-            shadow_static_draw_count: self.shadow_static_draw_count,
-            shadow_movable_draw_count: self.shadow_movable_draw_count,
-            static_objects_generation: self.static_objects_generation,
         }
     }
 
@@ -380,8 +326,5 @@ impl GpuScene {
         self.shadow_matrices.flush(queue);
         self.indirect.flush(queue);
         self.visibility.flush(queue);
-        self.shadow_static_indirect.flush(queue);
-        self.shadow_movable_indirect.flush(queue);
     }
 }
-

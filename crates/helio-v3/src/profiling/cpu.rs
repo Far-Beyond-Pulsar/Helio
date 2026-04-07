@@ -65,6 +65,7 @@ use std::time::Instant;
 /// } // Timing recorded automatically
 /// ```
 use std::collections::HashMap;
+#[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
 use std::time::Duration;
 
 pub struct CpuProfiler {
@@ -126,8 +127,6 @@ impl CpuProfiler {
             profiler: self,
             #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
             name,
-            #[cfg(not(all(not(target_arch = "wasm32"), feature = "profiling")))]
-            _phantom: std::marker::PhantomData,
         }
     }
 }
@@ -172,9 +171,6 @@ pub struct ScopeGuard<'a> {
     profiler: &'a mut CpuProfiler,
     #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
     name: &'static str,
-    // Keeps the lifetime valid when profiling fields are compiled out.
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "profiling")))]
-    _phantom: std::marker::PhantomData<&'a ()>,
 }
 
 impl Drop for ScopeGuard<'_> {
@@ -191,4 +187,3 @@ impl Drop for ScopeGuard<'_> {
         }
     }
 }
-

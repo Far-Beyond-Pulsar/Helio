@@ -170,4 +170,3 @@ fn hiz_build_pass_exposes_hiz_view_method() {
     const HAS_HIZ_VIEW_METHOD: bool = true;
     assert!(HAS_HIZ_VIEW_METHOD);
 }
-

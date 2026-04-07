@@ -41,8 +41,11 @@ fn halton(base: u32, index: u32) -> f32 {
 #[test]
 fn halton_x_matches_base2_entry_0() {
     let expected = halton(2, 1);
-    assert!((HALTON_JITTER[0][0] - expected).abs() < 1e-5f32,
-        "got {}, expected {expected}", HALTON_JITTER[0][0]);
+    assert!(
+        (HALTON_JITTER[0][0] - expected).abs() < 1e-5f32,
+        "got {}, expected {expected}",
+        HALTON_JITTER[0][0]
+    );
 }
 
 #[test]
@@ -67,8 +70,11 @@ fn halton_x_matches_base2_entry_3() {
 fn halton_x_matches_base2_all_16() {
     for i in 0..16usize {
         let expected = halton(2, i as u32 + 1);
-        assert!((HALTON_JITTER[i][0] - expected).abs() < 1e-5f32,
-            "entry[{i}].x = {}, expected {expected}", HALTON_JITTER[i][0]);
+        assert!(
+            (HALTON_JITTER[i][0] - expected).abs() < 1e-5f32,
+            "entry[{i}].x = {}, expected {expected}",
+            HALTON_JITTER[i][0]
+        );
     }
 }
 
@@ -81,7 +87,10 @@ fn halton_base2_values_are_binary_fractions() {
         // Multiply by 32 (= 2^5) and check it's near an integer
         let scaled = x * 32.0f32;
         let rounded = scaled.round();
-        assert!((scaled - rounded).abs() < 1e-3f32, "entry[{i}].x = {x} not a clean binary fraction");
+        assert!(
+            (scaled - rounded).abs() < 1e-3f32,
+            "entry[{i}].x = {x} not a clean binary fraction"
+        );
     }
 }
 
@@ -90,8 +99,11 @@ fn halton_base2_values_are_binary_fractions() {
 #[test]
 fn halton_y_matches_base3_entry_0() {
     let expected = halton(3, 1);
-    assert!((HALTON_JITTER[0][1] - expected).abs() < 1e-4f32,
-        "got {}, expected {expected}", HALTON_JITTER[0][1]);
+    assert!(
+        (HALTON_JITTER[0][1] - expected).abs() < 1e-4f32,
+        "got {}, expected {expected}",
+        HALTON_JITTER[0][1]
+    );
 }
 
 #[test]
@@ -110,8 +122,11 @@ fn halton_y_matches_base3_entry_2() {
 fn halton_y_matches_base3_all_16() {
     for i in 0..16usize {
         let expected = halton(3, i as u32 + 1);
-        assert!((HALTON_JITTER[i][1] - expected).abs() < 1e-4f32,
-            "entry[{i}].y = {}, expected {expected}", HALTON_JITTER[i][1]);
+        assert!(
+            (HALTON_JITTER[i][1] - expected).abs() < 1e-4f32,
+            "entry[{i}].y = {}, expected {expected}",
+            HALTON_JITTER[i][1]
+        );
     }
 }
 
@@ -137,7 +152,8 @@ fn all_y_strictly_between_0_and_1() {
 
 #[test]
 fn x_values_all_unique() {
-    let xs: Vec<u32> = HALTON_JITTER.iter()
+    let xs: Vec<u32> = HALTON_JITTER
+        .iter()
         .map(|e| (e[0] * 1_000_000.0f32) as u32)
         .collect();
     let uniq: std::collections::HashSet<_> = xs.iter().copied().collect();
@@ -146,7 +162,8 @@ fn x_values_all_unique() {
 
 #[test]
 fn y_values_all_unique() {
-    let ys: Vec<u32> = HALTON_JITTER.iter()
+    let ys: Vec<u32> = HALTON_JITTER
+        .iter()
         .map(|e| (e[1] * 1_000_000.0f32) as u32)
         .collect();
     let uniq: std::collections::HashSet<_> = ys.iter().copied().collect();
@@ -176,9 +193,12 @@ fn x_covers_both_halves_of_0_1() {
 
 #[test]
 fn y_covers_multiple_thirds() {
-    let t0 = HALTON_JITTER.iter().filter(|e| e[1] < 1.0/3.0).count();
-    let t1 = HALTON_JITTER.iter().filter(|e| e[1] >= 1.0/3.0 && e[1] < 2.0/3.0).count();
-    let t2 = HALTON_JITTER.iter().filter(|e| e[1] >= 2.0/3.0).count();
+    let t0 = HALTON_JITTER.iter().filter(|e| e[1] < 1.0 / 3.0).count();
+    let t1 = HALTON_JITTER
+        .iter()
+        .filter(|e| e[1] >= 1.0 / 3.0 && e[1] < 2.0 / 3.0)
+        .count();
+    let t2 = HALTON_JITTER.iter().filter(|e| e[1] >= 2.0 / 3.0).count();
     // All three thirds should be represented
     assert!(t0 > 0 && t1 > 0 && t2 > 0, "t0={t0} t1={t1} t2={t2}");
 }
@@ -186,9 +206,11 @@ fn y_covers_multiple_thirds() {
 #[test]
 fn sequence_variance_x_is_reasonable() {
     let mean = HALTON_JITTER.iter().map(|e| e[0]).sum::<f32>() / 16.0;
-    let var = HALTON_JITTER.iter()
+    let var = HALTON_JITTER
+        .iter()
         .map(|e| (e[0] - mean) * (e[0] - mean))
-        .sum::<f32>() / 16.0;
+        .sum::<f32>()
+        / 16.0;
     // Low-discrepancy; variance should be roughly 1/12 (uniform distribution variance)
     let expected_var = 1.0f32 / 12.0f32;
     assert!((var - expected_var).abs() < 0.05f32, "var_x = {var}");
@@ -201,7 +223,10 @@ fn halton_base2_produces_van_der_corput_sequence() {
     // Expected: 0.5, 0.25, 0.75, 0.125, 0.625, 0.375, 0.875, 0.0625
     let expected = [0.5f32, 0.25, 0.75, 0.125, 0.625, 0.375, 0.875, 0.0625];
     for (i, (&c, &e)) in computed.iter().zip(expected.iter()).enumerate() {
-        assert!((c - e).abs() < 1e-5f32, "index {i}: computed {c}, expected {e}");
+        assert!(
+            (c - e).abs() < 1e-5f32,
+            "index {i}: computed {c}, expected {e}"
+        );
     }
 }
 

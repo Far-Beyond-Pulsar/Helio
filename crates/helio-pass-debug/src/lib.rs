@@ -313,4 +313,3 @@ impl RenderPass for DebugPass {
         self.execute_on_target(ctx, ctx.target)
     }
 }
-
