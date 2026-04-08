@@ -4,32 +4,16 @@ import { renderNodeGraph } from './nodeGraph.js';
 const statusEl = document.getElementById('status');
 const frameEl = document.getElementById('frame');
 const frameMsEl = document.getElementById('frameMs');
-const ftfMsEl = document.getElementById('ftfMs');
 const gpuTotalEl = document.getElementById('gpuTotal');
 const cpuTotalEl = document.getElementById('cpuTotal');
 const objCountEl = document.getElementById('objCount');
 const lightCountEl = document.getElementById('lightCount');
 const bbCountEl = document.getElementById('bbCount');
+const drawCallsEl = document.getElementById('drawCalls');
 const rowsEl = document.getElementById('rows');
-const viewTop = document.getElementById('viewTop');
-const viewFront = document.getElementById('viewFront');
-const viewSide = document.getElementById('viewSide');
 
 let lastSnapshot = null;
-
-// Ring buffer of the last 10 complete frame snapshots (scene_delta excluded
-// to keep the payload readable — full scene data can be large).
-const MAX_HISTORY = 10;
-const frameHistory = [];
-const historyCountEl = document.getElementById('historyCount');
-
-function pushHistory(snapshot) {
-  // Store a lightweight copy: omit scene_delta (can be huge) but keep everything else.
-  const { scene_delta: _omit, ...rest } = snapshot;
-  frameHistory.push(rest);
-  if (frameHistory.length > MAX_HISTORY) frameHistory.shift();
-  if (historyCountEl) historyCountEl.textContent = frameHistory.length;
-}
+let cyInstance = null;
 
 // ── copy helpers ─────────────────────────────────────────────────────────────
 
@@ -48,9 +32,8 @@ async function copyJson(data, btn) {
   const json = JSON.stringify(data, null, 2);
   try {
     await navigator.clipboard.writeText(json);
-    showToast('Copied stats + graph to clipboard ✓');
+    showToast('Copied frame data to clipboard ✓');
     if (btn) {
-      const orig = btn.querySelector('.btn-label') ? btn.querySelector('.btn-label').textContent : btn.textContent;
       btn.classList.add('copied');
       setTimeout(() => btn.classList.remove('copied'), 1200);
     }
@@ -68,7 +51,6 @@ async function copyJson(data, btn) {
 }
 
 const btnCopyFrame = document.getElementById('btnCopyFrame');
-const btnCopyHistory = document.getElementById('btnCopyHistory');
 
 if (btnCopyFrame) {
   btnCopyFrame.addEventListener('click', () => {
@@ -78,81 +60,75 @@ if (btnCopyFrame) {
   });
 }
 
-if (btnCopyHistory) {
-  btnCopyHistory.addEventListener('click', () => {
-    if (!frameHistory.length) return;
-    copyJson(frameHistory, btnCopyHistory);
-  });
-}
-
 // ── render ────────────────────────────────────────────────────────────────────
-
-let cyInstance = null;
-const searchBox = document.getElementById('searchBox');
 
 function render(snapshot) {
   lastSnapshot = snapshot;
-  pushHistory(snapshot);
 
+  // Update stat cards
   frameEl.textContent = snapshot.frame;
-  frameMsEl.textContent = snapshot.frame_time_ms.toFixed(2);
-  ftfMsEl.textContent = snapshot.frame_to_frame_ms.toFixed(2);
-  gpuTotalEl.textContent = snapshot.total_gpu_ms.toFixed(2);
-  cpuTotalEl.textContent = snapshot.total_cpu_ms.toFixed(2);
+  frameMsEl.innerHTML = `${snapshot.frame_time_ms.toFixed(2)}<span class="stat-unit">ms</span>`;
+  gpuTotalEl.innerHTML = `${snapshot.total_gpu_ms.toFixed(2)}<span class="stat-unit">ms</span>`;
+  cpuTotalEl.innerHTML = `${snapshot.total_cpu_ms.toFixed(2)}<span class="stat-unit">ms</span>`;
 
-  // draw call metrics (added 3/2026)
-  const drawCallsEl = document.getElementById('drawCalls');
-  const drawDetailEl = document.getElementById('drawDetail');
-  if (drawCallsEl) drawCallsEl.textContent = snapshot.draw_calls.total;
-  if (drawDetailEl) drawDetailEl.textContent = `opaque ${snapshot.draw_calls.opaque}, transparent ${snapshot.draw_calls.transparent}`;
-
-  // scene counts
   if (objCountEl) objCountEl.textContent = snapshot.object_count;
   if (lightCountEl) lightCountEl.textContent = snapshot.light_count;
   if (bbCountEl) bbCountEl.textContent = snapshot.billboard_count;
+  if (drawCallsEl) drawCallsEl.textContent = snapshot.draw_calls.total;
 
-  // ignore scene data for now
-
+  // Update timings table (in modal)
   const totalGpu = snapshot.total_gpu_ms || 0;
   const totalCpu = snapshot.total_cpu_ms || 0;
 
   rowsEl.innerHTML = '';
   for (const t of snapshot.pass_timings || []) {
-    const gpuPct = totalGpu > 0 ? ((t.gpu_ms / totalGpu) * 100).toFixed(1) : '0';
-    const cpuPct = totalCpu > 0 ? ((t.cpu_ms / totalCpu) * 100).toFixed(1) : '0';
+    const gpuPct = totalGpu > 0 ? ((t.gpu_ms / totalGpu) * 100).toFixed(1) : '0.0';
+    const cpuPct = totalCpu > 0 ? ((t.cpu_ms / totalCpu) * 100).toFixed(1) : '0.0';
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${t.name}</td><td class="gpu">${t.gpu_ms.toFixed(3)}</td><td class="cpu">${cpuPct}%</td><td class="gpu">${gpuPct}%</td>`;
+    tr.innerHTML = `
+      <td class="pass-name">${t.name}</td>
+      <td class="gpu">${t.gpu_ms.toFixed(3)}</td>
+      <td class="cpu">${t.cpu_ms.toFixed(3)}</td>
+      <td class="gpu">${gpuPct}%</td>
+      <td class="cpu">${cpuPct}%</td>
+    `;
     rowsEl.appendChild(tr);
   }
 
-  const filter = searchBox ? searchBox.value.toLowerCase() : '';
-  cyInstance = renderNodeGraph(snapshot, filter);
-  if (window.renderTimingTreeGraph) window.renderTimingTreeGraph(snapshot);
-  // skip scene projections
+  // Render pipeline graph (full screen)
+  cyInstance = renderNodeGraph(snapshot, '');
+
+  // Render timing tree if available
+  if (window.renderTimingTreeGraph) {
+    window.renderTimingTreeGraph(snapshot);
+  }
 
   const dt = new Date(snapshot.timestamp_ms).toLocaleTimeString();
-  statusEl.textContent = `Connected · last update ${dt}`;
+  statusEl.textContent = `Connected · ${dt}`;
 }
 
-if (searchBox) {
-  searchBox.addEventListener('input', (e) => {
-    const q = e.target.value.toLowerCase();
-    if (lastSnapshot) {
-      cyInstance = renderNodeGraph(lastSnapshot, q);
-    }
-  });
-}
+// ── WebSocket connection ──────────────────────────────────────────────────────
 
 const proto = location.protocol === 'https:' ? 'wss' : 'ws';
 const ws = new WebSocket(`${proto}://${location.host}/ws`);
-ws.onopen = () => { statusEl.textContent = 'Connected · waiting for first frame...'; };
-ws.onclose = () => { statusEl.textContent = 'Disconnected'; };
-ws.onerror = () => { statusEl.textContent = 'Socket error'; };
+
+ws.onopen = () => {
+  statusEl.textContent = 'Connected · waiting for first frame...';
+};
+
+ws.onclose = () => {
+  statusEl.textContent = 'Disconnected';
+};
+
+ws.onerror = () => {
+  statusEl.textContent = 'Socket error';
+};
+
 ws.onmessage = (evt) => {
   try {
     const data = JSON.parse(evt.data);
     if (Array.isArray(data)) {
-      // batch of snapshots sent at once; process them in order
+      // Batch of snapshots sent at once; process them in order
       for (const snap of data) {
         render(snap);
       }
@@ -162,4 +138,14 @@ ws.onmessage = (evt) => {
   } catch (e) {
     console.error('parse error', e);
   }
+};
+
+// ── Search functionality (optional - can be added later) ─────────────────────
+// Search is currently removed from the new design to focus on the graph
+// Can be added back as a modal or overlay feature if needed
+
+// ── Export for debugging ──────────────────────────────────────────────────────
+window.helioPortal = {
+  getLastSnapshot: () => lastSnapshot,
+  getGraphInstance: () => cyInstance,
 };
