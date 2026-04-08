@@ -10,7 +10,6 @@ const objCountEl = document.getElementById('objCount');
 const lightCountEl = document.getElementById('lightCount');
 const bbCountEl = document.getElementById('bbCount');
 const drawCallsEl = document.getElementById('drawCalls');
-const rowsEl = document.getElementById('rows');
 
 let lastSnapshot = null;
 let cyInstance = null;
@@ -80,19 +79,29 @@ function render(snapshot) {
   const totalGpu = snapshot.total_gpu_ms || 0;
   const totalCpu = snapshot.total_cpu_ms || 0;
 
-  rowsEl.innerHTML = '';
-  for (const t of snapshot.pass_timings || []) {
-    const gpuPct = totalGpu > 0 ? ((t.gpu_ms / totalGpu) * 100).toFixed(1) : '0.0';
-    const cpuPct = totalCpu > 0 ? ((t.cpu_ms / totalCpu) * 100).toFixed(1) : '0.0';
-    const tr = document.createElement('tr');
-    tr.innerHTML = `
-      <td class="pass-name">${t.name}</td>
-      <td class="gpu">${t.gpu_ms.toFixed(3)}</td>
-      <td class="cpu">${t.cpu_ms.toFixed(3)}</td>
-      <td class="gpu">${gpuPct}%</td>
-      <td class="cpu">${cpuPct}%</td>
-    `;
-    rowsEl.appendChild(tr);
+  // Prepare data for table (expose to global scope for sorting)
+  window.timingsData = (snapshot.pass_timings || []).map(t => ({
+    name: t.name,
+    gpu: t.gpu_ms,
+    cpu: t.cpu_ms,
+    gpuPct: totalGpu > 0 ? parseFloat(((t.gpu_ms / totalGpu) * 100).toFixed(1)) : 0,
+    cpuPct: totalCpu > 0 ? parseFloat(((t.cpu_ms / totalCpu) * 100).toFixed(1)) : 0,
+  }));
+
+  // Render table (respects current sort)
+  if (window.renderTimingsTable) {
+    const sorted = window.sortColumn
+      ? [...window.timingsData].sort((a, b) => {
+          const aVal = a[window.sortColumn];
+          const bVal = b[window.sortColumn];
+          const dir = window.sortDirection === 'asc' ? 1 : -1;
+          if (typeof aVal === 'string') {
+            return dir * aVal.toLowerCase().localeCompare(bVal.toLowerCase());
+          }
+          return dir * (aVal - bVal);
+        })
+      : window.timingsData;
+    window.renderTimingsTable(sorted);
   }
 
   // Render pipeline graph (full screen)

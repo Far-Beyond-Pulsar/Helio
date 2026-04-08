@@ -429,6 +429,46 @@
     td.gpu { color: var(--gpu-color); }
     td.cpu { color: var(--cpu-color); }
 
+    /* ── sortable table headers ── */
+    thead th.sortable {
+      cursor: pointer;
+      -webkit-user-select: none;
+      user-select: none;
+      position: relative;
+      padding-right: 24px;
+    }
+    thead th.sortable:hover {
+      color: var(--accent);
+    }
+    thead th.sortable::after {
+      content: '⇅';
+      position: absolute;
+      right: 8px;
+      opacity: 0.3;
+      font-size: 10px;
+    }
+    thead th.sortable.sorted-asc::after {
+      content: '↑';
+      opacity: 1;
+      color: var(--accent);
+    }
+    thead th.sortable.sorted-desc::after {
+      content: '↓';
+      opacity: 1;
+      color: var(--accent);
+    }
+
+    /* ── clickable table rows ── */
+    tbody tr {
+      cursor: pointer;
+    }
+    tbody tr:hover {
+      background: rgba(56, 139, 253, 0.12) !important;
+    }
+    tbody tr:active {
+      background: rgba(56, 139, 253, 0.18) !important;
+    }
+
     /* ── tree graph container ── */
     .tree-container {
       border: 1px solid var(--border);
@@ -726,14 +766,14 @@
     </div>
     <div class="modal-body">
       <div class="table-container" style="height: 100%; overflow-y: auto;">
-        <table>
+        <table id="timingsTable">
           <thead>
             <tr>
-              <th>Pass</th>
-              <th>GPU ms</th>
-              <th>CPU ms</th>
-              <th>GPU %</th>
-              <th>CPU %</th>
+              <th class="sortable" data-sort="name">Pass</th>
+              <th class="sortable" data-sort="gpu">GPU ms</th>
+              <th class="sortable" data-sort="cpu">CPU ms</th>
+              <th class="sortable" data-sort="gpuPct">GPU %</th>
+              <th class="sortable" data-sort="cpuPct">CPU %</th>
             </tr>
           </thead>
           <tbody id="rows"></tbody>
@@ -1026,6 +1066,81 @@
       const connected = _origStatus.textContent.toLowerCase().includes('connected');
       _dot.classList.toggle('connected', connected);
     }).observe(_origStatus, { childList: true, subtree: true, characterData: true });
+
+    // ── Table sorting and navigation ──────────────────────────────────────────
+    window.timingsData = [];
+    window.sortColumn = null;
+    window.sortDirection = 'asc';
+
+    function sortTable(column) {
+      if (window.sortColumn === column) {
+        window.sortDirection = window.sortDirection === 'asc' ? 'desc' : 'asc';
+      } else {
+        window.sortColumn = column;
+        window.sortDirection = 'asc';
+      }
+
+      // Update header indicators
+      document.querySelectorAll('#timingsTable thead th').forEach(th => {
+        th.classList.remove('sorted-asc', 'sorted-desc');
+        if (th.dataset.sort === column) {
+          th.classList.add(window.sortDirection === 'asc' ? 'sorted-asc' : 'sorted-desc');
+        }
+      });
+
+      // Sort data
+      const sorted = [...window.timingsData].sort((a, b) => {
+        let aVal = a[column];
+        let bVal = b[column];
+
+        // For string comparison (name)
+        if (typeof aVal === 'string') {
+          aVal = aVal.toLowerCase();
+          bVal = bVal.toLowerCase();
+          return window.sortDirection === 'asc'
+            ? aVal.localeCompare(bVal)
+            : bVal.localeCompare(aVal);
+        }
+
+        // For numeric comparison
+        return window.sortDirection === 'asc' ? aVal - bVal : bVal - aVal;
+      });
+
+      // Re-render table
+      window.renderTimingsTable(sorted);
+    }
+
+    window.renderTimingsTable = function(data) {
+      const rowsEl = document.getElementById('rows');
+      if (!rowsEl) return;
+
+      rowsEl.innerHTML = '';
+      for (const row of data) {
+        const tr = document.createElement('tr');
+        tr.dataset.passName = row.name;
+        tr.innerHTML = `
+          <td class="pass-name">${row.name}</td>
+          <td class="gpu">${row.gpu.toFixed(3)}</td>
+          <td class="cpu">${row.cpu.toFixed(3)}</td>
+          <td class="gpu">${row.gpuPct}%</td>
+          <td class="cpu">${row.cpuPct}%</td>
+        `;
+        tr.addEventListener('click', () => {
+          const graph = window.helioPortal?.getGraphInstance();
+          if (graph && graph.focusNode) {
+            graph.focusNode(row.name);
+          }
+        });
+        rowsEl.appendChild(tr);
+      }
+    };
+
+    // Initialize table sorting
+    document.querySelectorAll('#timingsTable thead th.sortable').forEach(th => {
+      th.addEventListener('click', () => {
+        sortTable(th.dataset.sort);
+      });
+    });
   </script>
 </body>
 </html>

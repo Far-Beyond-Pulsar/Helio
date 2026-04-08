@@ -78,6 +78,7 @@
     const _historyData = new Map(); // id → number[]  (ring-buffer of timing values)
     let reactRoot    = null;
     let structureKey = '';
+    let reactFlowInstance = null;
 
     function _pushHistory(id, timeStr) {
       const m = (timeStr || '').match(/[\d.]+/);
@@ -263,13 +264,63 @@
 
     const nodeTypes = { pipeline: PipelineNode, pass: PipelineNode };
 
+    // ── Load/Save viewport state ────────────────────────────────────────────
+    function loadViewport(containerId) {
+      try {
+        const saved = localStorage.getItem(`helio-viewport-${containerId}`);
+        if (saved) {
+          const viewport = JSON.parse(saved);
+          return { x: viewport.x || 0, y: viewport.y || 0, zoom: viewport.zoom || 1 };
+        }
+      } catch (e) {
+        console.warn('Failed to load viewport:', e);
+      }
+      return null;
+    }
+
+    function saveViewport(containerId, viewport) {
+      try {
+        localStorage.setItem(`helio-viewport-${containerId}`, JSON.stringify(viewport));
+      } catch (e) {
+        console.warn('Failed to save viewport:', e);
+      }
+    }
+
     // ── GraphInner — zero state, never re-renders ───────────────────────────
-    function GraphInner({ initNodes, initEdges }) {
+    function GraphInner({ initNodes, initEdges, containerId, onReactFlowInit }) {
+      const [isFirstRender, setIsFirstRender] = React.useState(true);
+      const savedViewport = React.useMemo(() => loadViewport(containerId), [containerId]);
+
+      // Debounced viewport save to avoid spamming localStorage
+      const saveTimer = React.useRef(null);
+      const handleMove = React.useCallback((event, viewport) => {
+        clearTimeout(saveTimer.current);
+        saveTimer.current = setTimeout(() => {
+          saveViewport(containerId, viewport);
+        }, 300);
+      }, [containerId]);
+
+      React.useEffect(() => {
+        if (isFirstRender) {
+          setIsFirstRender(false);
+        }
+      }, [isFirstRender]);
+
+      const handleInit = React.useCallback((reactFlowInstance) => {
+        if (onReactFlowInit) {
+          onReactFlowInit(reactFlowInstance);
+        }
+      }, [onReactFlowInit]);
+
       return React.createElement(ReactFlowComp, {
         nodes: initNodes, edges: initEdges,
         onNodesChange: () => {}, onEdgesChange: () => {},
-        nodeTypes, edgeTypes, fitView: true,
+        nodeTypes, edgeTypes,
+        fitView: isFirstRender && !savedViewport,
         fitViewOptions: { padding: 0.15 },
+        defaultViewport: savedViewport || undefined,
+        onMove: handleMove,
+        onInit: handleInit,
         nodesDraggable: true, nodesConnectable: false, elementsSelectable: true,
         proOptions: { hideAttribution: true },
         style: { background: '#0d1117' },
@@ -290,7 +341,8 @@
         // Structure changed — full mount; seed history for immediate expand
         for (const n of nodes) { _nodeData.set(n.id, n.data); _pushHistory(n.id, n.data.time); }
         structureKey = key;
-        reactRoot.render(React.createElement(GraphInner, { initNodes: nodes, initEdges: edges }));
+        const onReactFlowInit = (instance) => { reactFlowInstance = instance; };
+        reactRoot.render(React.createElement(GraphInner, { initNodes: nodes, initEdges: edges, containerId, onReactFlowInit }));
       } else {
         // Data-only update — push directly to each node's state, never re-render the graph
         for (const n of nodes) {
@@ -302,7 +354,26 @@
       }
     }
 
-    return { render };
+    // ── public API for controlling the graph ───────────────────────────────
+    function focusNode(nodeId) {
+      if (!reactFlowInstance) {
+        console.warn('ReactFlow instance not initialized yet');
+        return;
+      }
+      const node = reactFlowInstance.getNode(nodeId);
+      if (!node) {
+        console.warn(`Node ${nodeId} not found`);
+        return;
+      }
+      // Center on the node with animation
+      reactFlowInstance.setCenter(
+        node.position.x + NODE_W / 2,
+        node.position.y + NODE_H / 2,
+        { zoom: 1.2, duration: 600 }
+      );
+    }
+
+    return { render, focusNode };
   }
 
   window.HelioGraph = { createGraph, NODE_W, NODE_H, H_GAP, V_GAP, BULGE_R };
