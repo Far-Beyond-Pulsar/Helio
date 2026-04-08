@@ -6,26 +6,23 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Per-instance data for GPU-driven rendering. 128 bytes.
+/// Per-instance data for GPU-driven rendering. 144 bytes.
 ///
 /// Uploaded once when instances change (dirty tracking), then read-only on GPU.
 /// The vertex shader uses `instance_index` to look up this data from a storage buffer.
 ///
 /// # WGSL equivalent
 /// ```wgsl
-/// struct GpuInstance {
-///     model_0:      vec4<f32>,  // column 0 of model matrix
-///     model_1:      vec4<f32>,  // column 1
-///     model_2:      vec4<f32>,  // column 2
-///     model_3:      vec4<f32>,  // column 3
-///     normal_0:     vec4<f32>,  // column 0 of normal matrix (inverse-transpose of model 3x3)
-///     normal_1:     vec4<f32>,  // column 1
-///     normal_2:     vec4<f32>,  // column 2 (padding in w)
-///     bounds:       vec4<f32>,  // xyz = sphere center (world space), w = sphere radius
-///     mesh_id:      u32,
-///     material_id:  u32,
-///     flags:        u32,        // bit 0 = casts shadow
-///     _pad:         u32,
+/// struct GpuInstanceData {
+///     transform:    mat4x4<f32>,  // 64 bytes — model matrix
+///     normal_mat_0: vec4<f32>,    // 16 bytes — row 0 of normal matrix
+///     normal_mat_1: vec4<f32>,    // 16 bytes — row 1
+///     normal_mat_2: vec4<f32>,    // 16 bytes — row 2
+///     bounds:       vec4<f32>,    // 16 bytes — bounding sphere
+///     mesh_id:      u32,          //  4 bytes
+///     material_id:  u32,          //  4 bytes
+///     flags:        u32,          //  4 bytes
+///     lightmap_index: u32,        //  4 bytes — index into lightmap atlas regions buffer
 /// }
 /// ```
 #[repr(C)]
@@ -43,7 +40,8 @@ pub struct GpuInstanceData {
     pub material_id: u32,
     /// Flags (bit 0 = casts_shadow, bit 1 = receives_shadow)
     pub flags: u32,
-    pub _pad: u32,
+    /// Index into the lightmap atlas regions buffer (0xFFFFFFFF = no lightmap)
+    pub lightmap_index: u32,
 }
 
 /// Per-instance AABB in world space for GPU culling. 32 bytes.

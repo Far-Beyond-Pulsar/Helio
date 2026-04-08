@@ -63,14 +63,26 @@ pub use helio_bake::{
 /// ```rust,ignore
 /// let mut scene = SceneGeometry::new();
 /// scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [5.0,0.1,5.0]),
-///                                    glam::Mat4::IDENTITY));
+///                                    glam::Mat4::IDENTITY, None));
 /// renderer.configure_bake(BakeRequest { scene, config: BakeConfig::fast("my_scene") });
 /// ```
-pub fn mesh_upload_to_bake(upload: &MeshUpload, transform: glam::Mat4) -> BakeMesh {
+pub fn mesh_upload_to_bake(upload: &MeshUpload, transform: glam::Mat4, mesh_slot: Option<u32>) -> BakeMesh {
     fn unpack_snorm8(b: u8) -> f32 { (b as i8) as f32 / 127.0 }
     let normal_mat = glam::Mat3::from_mat4(transform).inverse().transpose();
+    
+    // Generate deterministic ID from mesh slot (if provided).
+    // Encode as a UUID with (slot as u64) in bytes 0..8 (little-endian) and zeros in bytes 8..16.
+    // Bake recovery: mesh_id[0] == slot as u64, mesh_id[1] == 0.
+    let id = if let Some(slot) = mesh_slot {
+        let mut id_bytes = [0u8; 16];
+        id_bytes[0..8].copy_from_slice(&(slot as u64).to_le_bytes());
+        uuid::Uuid::from_bytes(id_bytes)
+    } else {
+        uuid::Uuid::nil()
+    };
+    
     BakeMesh {
-        id: Default::default(),
+        id,
         positions: upload.vertices.iter().map(|v| {
             transform.transform_point3(glam::Vec3::from_array(v.position)).to_array()
         }).collect(),

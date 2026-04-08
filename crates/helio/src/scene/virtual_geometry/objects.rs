@@ -74,7 +74,7 @@ impl super::super::Scene {
             mesh_id: record.mesh_ids[0].slot(),
             material_id: desc.material_id,
             flags: desc.flags,
-            _pad: 0,
+            lightmap_index: 0xFFFFFFFF,  // Virtual geometry doesn't use lightmaps
         };
         let (id, _) = self.vg_objects.insert(VirtualObjectRecord {
             virtual_mesh: desc.virtual_mesh,

@@ -113,6 +113,8 @@ struct ShadowConfig {
 // Bound to a 1×1 white fallback texture when neither SSAO nor baked AO is available.
 @group(1) @binding(5) var screen_ao:     texture_2d<f32>;
 @group(1) @binding(6) var screen_ao_samp: sampler;
+// Lightmap UVs from GBuffer (Rg16Float, contains atlas UV coordinates for lightmap lookup)
+@group(1) @binding(7) var gbuf_lightmap_uv: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -127,6 +129,9 @@ struct ShadowConfig {
 @group(2) @binding(8) var water_caustics: texture_2d<f32>;  // Caustics texture from WaterCausticsPass
 @group(2) @binding(9) var caustics_sampler: sampler;  // Sampler for caustics
 @group(2) @binding(10) var<storage, read> water_volumes: array<GpuWaterVolume>;  // Water volumes
+// Baked lightmap atlas (Rgba16Float, pre-baked indirect illumination for Static geometry)
+@group(2) @binding(12) var baked_lightmap: texture_2d<f32>;
+@group(2) @binding(13) var baked_lightmap_sampler: sampler;
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -795,6 +800,14 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let F_ibl    = fresnel_schlick_roughness(NdV, F0, roughness);
     let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
     let diff_ind = kD_ibl * rc_irr * albedo;
+    
+    // ── Baked lightmap indirect diffuse ───────────────────────────────────────
+    // For static geometry: pre-computed multi-bounce GI from offline baking.
+    // Lightmap UVs are (0,0) for movable objects → samples corner of atlas (black).
+    // Static objects have valid UVs mapping into their atlas region.
+    let lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let lightmap_sample = textureSample(baked_lightmap, baked_lightmap_sampler, lightmap_uv).rgb;
+    let lightmap_indirect = lightmap_sample * albedo;  // Apply albedo (lightmap stores illumination, not reflectance)
 
     // ── Indirect specular: environment cubemap ────────────────────────────────
     let R            = reflect(-V, N);
@@ -820,11 +833,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // RC weight: 0 = no RC data, 1 = full RC coverage
     let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
 
-    // Blend between hemisphere fallback and RC-based GI
-    let ambient_fallback = mix(hemi, diff_ind, rc_weight);
+    // Baked lightmap weight: use lightmap if UVs are non-zero (static geometry with baked lighting)
+    // Lightmap atlas has (0,0) corner filled with black so movable objects (lightmap_uv=0) get 0 contribution.
+    let has_lightmap   = max(lightmap_uv.x, lightmap_uv.y) > 0.01;
+    let lm_weight      = select(0.0, 1.0, has_lightmap);
+
+    // Blend between hemisphere fallback, RC-based GI, and baked lightmap:
+    // Priority: lightmap > RC > hemisphere
+    // 1. Start with hemisphere (always-on fallback)
+    // 2. Blend in RC when available (runtime dynamic GI)
+    // 3. Blend in lightmap when available (pre-baked static GI, highest quality)
+    var ambient_final = mix(hemi, diff_ind, rc_weight);
+    ambient_final     = mix(ambient_final, lightmap_indirect, lm_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
-    let indirect  = (ambient_fallback + spec_ind) * ao_combined;
+    let indirect  = (ambient_final + spec_ind) * ao_combined;
     var color     = Lo + indirect;
     color        += emissive;               // emissive from G-buffer
 

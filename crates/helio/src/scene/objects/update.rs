@@ -232,5 +232,80 @@ impl super::super::Scene {
         }
         Ok(())
     }
+
+    /// Update lightmap indices for all static objects based on baked lightmap atlas regions.
+    ///
+    /// Called automatically by the renderer after baking completes. Maps each static object's
+    /// mesh_id to its corresponding lightmap atlas region index.
+    ///
+    /// # Parameters
+    /// - `regions`: Lightmap atlas regions from `BakedData::lightmap_atlas_regions()`
+    ///
+    /// # Algorithm
+    /// 1. Build a `mesh_slot → region_index` hashmap from the atlas regions
+    /// 2. Iterate all objects in the scene
+    /// 3. For each Static object, look up its mesh slot in the map
+    /// 4. Update `instance.lightmap_index` to the found index (or 0xFFFFFFFF if not found)
+    /// 5. Upload updated instance data to GPU
+    ///
+    /// # Performance
+    /// - CPU cost: O(N + M) where N = object count, M = region count
+    /// - GPU cost: O(N) writes to instance buffer (only for static objects)
+    pub fn update_lightmap_indices(
+        &mut self,
+        regions: &[helio_bake::CachedAtlasRegion],
+    ) {
+        use std::collections::HashMap;
+
+        // Build mesh_slot -> region_index lookup map
+        // mesh_id is stored as [slot_u64, 0] where slot_u64 encodes the Helio MeshId slot
+        let region_map: HashMap<u32, u32> = regions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, r)| {
+                // Extract mesh slot from UUID [slot_u64, 0]
+                let mesh_slot = r.mesh_id[0] as u32;
+                if r.mesh_id[1] == 0 {
+                    Some((mesh_slot, idx as u32))
+                } else {
+                    None // Skip entries with non-zero second component
+                }
+            })
+            .collect();
+
+        let mut updated_count = 0;
+
+        // Iterate all objects and update lightmap indices for static objects.
+        // DenseArena exposes its `dense: Vec<T>` as a public field — iterate directly.
+        for record in self.objects.dense.iter_mut() {
+            // Only static objects are baked (Stationary lights are baked but objects are not)
+            if record.movability != libhelio::Movability::Static {
+                continue;
+            }
+
+            // Get mesh slot from MeshId
+            let mesh_slot = record.mesh.slot();
+
+            // Lookup region index for this mesh
+            let lightmap_index = region_map.get(&mesh_slot).copied().unwrap_or(0xFFFFFFFF);
+
+            // Update instance data
+            record.instance.lightmap_index = lightmap_index;
+
+            // Upload to GPU if layout is stable
+            if !self.objects_dirty {
+                let slot = record.gpu_slot as usize;
+                self.gpu_scene.instances.update(slot, record.instance);
+            }
+
+            updated_count += 1;
+        }
+
+        log::info!(
+            "[Scene] Updated lightmap indices for {} static objects ({} regions in atlas)",
+            updated_count,
+            regions.len()
+        );
+    }
 }
 

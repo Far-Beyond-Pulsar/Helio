@@ -184,7 +184,7 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = ctx.scene.light_count;
+        let count = ctx.scene.movable_light_count; // Only movable lights (static/stationary shadows are baked)
         if count == 0 {
             return Ok(());
         }

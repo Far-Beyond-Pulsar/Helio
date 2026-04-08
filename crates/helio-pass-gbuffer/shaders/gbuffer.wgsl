@@ -75,20 +75,27 @@ struct MaterialTextureData {
 
 /// Per-instance data (144 bytes). Must match `GpuInstanceData` in libhelio.
 struct GpuInstanceData {
-    transform:    mat4x4<f32>,  // offset   0  (64 bytes)
-    normal_mat_0: vec4<f32>,    // offset  64  — row 0 of inv-transpose 3×3
-    normal_mat_1: vec4<f32>,    // offset  80
-    normal_mat_2: vec4<f32>,    // offset  96
-    bounds:       vec4<f32>,    // offset 112
-    mesh_id:      u32,          // offset 128
-    material_id:  u32,          // offset 132
-    flags:        u32,          // offset 136
-    _pad:         u32,          // offset 140
+    transform:      mat4x4<f32>,  // offset   0  (64 bytes)
+    normal_mat_0:   vec4<f32>,    // offset  64  — row 0 of inv-transpose 3×3
+    normal_mat_1:   vec4<f32>,    // offset  80
+    normal_mat_2:   vec4<f32>,    // offset  96
+    bounds:         vec4<f32>,    // offset 112
+    mesh_id:        u32,          // offset 128
+    material_id:    u32,          // offset 132
+    flags:          u32,          // offset 136
+    lightmap_index: u32,          // offset 140 — index into lightmap_atlas_regions, 0xFFFFFFFF = no lightmap
 }
 
-@group(0) @binding(0) var<uniform>          camera:        Camera;
-@group(0) @binding(1) var<uniform>          globals:       Globals;
-@group(0) @binding(2) var<storage, read>    instance_data: array<GpuInstanceData>;
+/// Lightmap atlas region for a mesh (16 bytes).
+struct LightmapAtlasRegion {
+    uv_offset: vec2<f32>,  // Top-left corner in atlas [0,1] space
+    uv_scale:  vec2<f32>,  // Size in atlas [0,1] space
+}
+
+@group(0) @binding(0) var<uniform>          camera:                 Camera;
+@group(0) @binding(1) var<uniform>          globals:                Globals;
+@group(0) @binding(2) var<storage, read>    instance_data:          array<GpuInstanceData>;
+@group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -111,6 +118,7 @@ struct VertexOutput {
     @location(3) world_tangent:  vec3<f32>,
     @location(4) bitangent_sign: f32,
     @location(5) @interpolate(flat) material_id:    u32,
+    @location(6) lightmap_uv:    vec2<f32>,  // Lightmap atlas UV (or (0,0) if no lightmap)
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -145,16 +153,26 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     out.bitangent_sign = v.bitangent_sign;
     out.tex_coords     = v.tex_coords;
     out.material_id    = inst.material_id;
+    
+    // Compute lightmap UV from atlas region
+    let lightmap_idx = inst.lightmap_index;
+    if lightmap_idx != 0xFFFFFFFFu {
+        let region = lightmap_atlas_regions[lightmap_idx];
+        out.lightmap_uv = region.uv_offset + v.tex_coords * region.uv_scale;
+    } else {
+        out.lightmap_uv = vec2<f32>(0.0, 0.0);  // No lightmap
+    }
     return out;
 }
 
 // ── Fragment ─────────────────────────────────────────────────────────────────
 
 struct GBufferOutput {
-    @location(0) albedo:   vec4<f32>,
-    @location(1) normal:   vec4<f32>,
-    @location(2) orm:      vec4<f32>,
-    @location(3) emissive: vec4<f32>,
+    @location(0) albedo:      vec4<f32>,
+    @location(1) normal:      vec4<f32>,
+    @location(2) orm:         vec4<f32>,
+    @location(3) emissive:    vec4<f32>,
+    @location(4) lightmap_uv: vec2<f32>,
 }
 
 const NO_TEXTURE: u32 = 0xffffffffu;
@@ -218,7 +236,8 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(uv.x, uv.y, 0.0, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
-            vec4<f32>(0.0)
+            vec4<f32>(0.0),
+            vec2<f32>(0.0)
         );
     }
 
@@ -230,7 +249,8 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(tex_sample.rgb, 1.0),
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
-            vec4<f32>(0.0)
+            vec4<f32>(0.0),
+            vec2<f32>(0.0)
         );
     }
 
@@ -286,5 +306,6 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.normal = vec4<f32>(N, specular_f0.r);
     out.orm = vec4<f32>(ao, roughness, metallic, specular_f0.g);
     out.emissive = vec4<f32>(emissive, specular_f0.b);
+    out.lightmap_uv = input.lightmap_uv;
     return out;
 }

@@ -57,12 +57,21 @@ impl super::super::Scene {
         light: GpuLight,
         movability: Option<libhelio::Movability>,
     ) -> LightId {
+        // Default lights to Movable (most common case for real-time lighting).
+        // Static lights are opt-in for baking scenarios.
+        let movability = movability.unwrap_or(libhelio::Movability::Movable);
         let (id, dense_index) = self.lights.insert(LightRecord {
             gpu: light,
-            movability: movability.unwrap_or_default(), // Default to Static
+            movability,
         });
         let pushed = self.gpu_scene.lights.push(light);
         debug_assert_eq!(pushed, dense_index);
+        
+        // Invalidate any previous bake if this is a static/stationary light
+        if !movability.can_move() {
+            self.bake_invalidated = true;
+        }
+        
         id
     }
 

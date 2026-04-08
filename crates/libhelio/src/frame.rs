@@ -70,6 +70,9 @@ pub struct MainSceneResources<'a> {
 pub struct FrameResources<'a> {
     /// GBuffer textures (populated after GBufferPass)
     pub gbuffer: Option<GBufferViews<'a>>,
+    /// GBuffer lightmap UV texture (Rg16Float) populated by GBufferPass.
+    /// Contains per-pixel lightmap atlas UVs for sampling baked_lightmap.
+    pub gbuffer_lightmap_uv: Option<&'a wgpu::TextureView>,
     /// Shadow atlas (2D array texture view) — populated after ShadowPass (dynamic/Movable objects)
     pub shadow_atlas: Option<&'a wgpu::TextureView>,
     /// Static shadow atlas (2D array texture view) — cached until Static/Stationary topology changes.
@@ -245,6 +248,7 @@ impl<'a> FrameResources<'a> {
     pub fn empty() -> Self {
         Self {
             gbuffer: None,
+            gbuffer_lightmap_uv: None,
             shadow_atlas: None,
             static_shadow_atlas: None,
             shadow_sampler: None,

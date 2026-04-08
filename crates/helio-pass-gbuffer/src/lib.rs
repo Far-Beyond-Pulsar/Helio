@@ -85,6 +85,10 @@ pub struct GBufferPass {
     pub orm_view: wgpu::TextureView,
     pub emissive_tex: wgpu::Texture,
     pub emissive_view: wgpu::TextureView,
+    pub lightmap_uv_tex: wgpu::Texture,
+    pub lightmap_uv_view: wgpu::TextureView,
+    /// Lightmap atlas regions buffer (empty until bake data is loaded)
+    lightmap_atlas_regions_buf: wgpu::Buffer,
 }
 
 impl GBufferPass {
@@ -165,6 +169,17 @@ impl GBufferPass {
                     // binding 2: instance_data (storage read, VERTEX)
                     wgpu::BindGroupLayoutEntry {
                         binding: 2,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 3: lightmap_atlas_regions (storage read, VERTEX)
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -257,6 +272,11 @@ impl GBufferPass {
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
                 ],
             }),
             primitive: wgpu::PrimitiveState {
@@ -310,6 +330,21 @@ impl GBufferPass {
             wgpu::TextureFormat::Rgba16Float,
             "GBuffer/Emissive",
         );
+        let (lightmap_uv_tex, lightmap_uv_view) = gbuffer_texture(
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rg16Float,
+            "GBuffer/LightmapUV",
+        );
+        
+        // Create empty lightmap atlas regions buffer (populated when bake data is loaded)
+        let lightmap_atlas_regions_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Lightmap Atlas Regions"),
+            size: 16,  // Start with minimal size (1 empty region); will be resized when bake data loads
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         Self {
             pipeline,
@@ -331,6 +366,9 @@ impl GBufferPass {
             orm_view,
             emissive_tex,
             emissive_view,
+            lightmap_uv_tex,
+            lightmap_uv_view,
+            lightmap_atlas_regions_buf,
         }
     }
 }
@@ -347,6 +385,7 @@ impl RenderPass for GBufferPass {
             orm: &self.orm_view,
             emissive: &self.emissive_view,
         });
+        frame.gbuffer_lightmap_uv = Some(&self.lightmap_uv_view);
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -417,6 +456,10 @@ impl RenderPass for GBufferPass {
                     wgpu::BindGroupEntry {
                         binding: 2,
                         resource: ctx.scene.instances.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.lightmap_atlas_regions_buf.as_entire_binding(),
                     },
                 ],
             }));
@@ -523,6 +566,15 @@ impl RenderPass for GBufferPass {
                         store: wgpu::StoreOp::Store,
                     },
                 }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: &self.lightmap_uv_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
             ],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: ctx.depth,
@@ -586,6 +638,13 @@ impl GBufferPass {
             wgpu::TextureFormat::Rgba16Float,
             "GBuffer/Emissive",
         );
+        let (lightmap_uv_tex, lightmap_uv_view) = gbuffer_texture(
+            device,
+            width,
+            height,
+            wgpu::TextureFormat::Rg16Float,
+            "GBuffer/LightmapUV",
+        );
         self.albedo_tex = albedo_tex;
         self.albedo_view = albedo_view;
         self.normal_tex = normal_tex;
@@ -594,6 +653,51 @@ impl GBufferPass {
         self.orm_view = orm_view;
         self.emissive_tex = emissive_tex;
         self.emissive_view = emissive_view;
+        self.lightmap_uv_tex = lightmap_uv_tex;
+        self.lightmap_uv_view = lightmap_uv_view;
+    }
+
+    /// Populate the lightmap atlas regions buffer from baked data.
+    ///
+    /// Called by the renderer after a successful bake to upload per-mesh UV atlas regions.
+    /// Each region maps a mesh_id to its (uv_offset, uv_scale) in the lightmap atlas.
+    ///
+    /// # Arguments
+    /// * `queue` - GPU queue for buffer uploads
+    /// * `regions` - Slice of [uv_offset.x, uv_offset.y, uv_scale.x, uv_scale.y] per mesh
+    pub fn upload_lightmap_atlas_regions(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        regions: &[[f32; 4]],
+    ) {
+        if regions.is_empty() {
+            return;
+        }
+
+        // Each region is 16 bytes: uv_offset (vec2<f32>) + uv_scale (vec2<f32>)
+        let buf_size = (regions.len() * 16) as u64;
+
+        // Recreate buffer if size changed
+        if self.lightmap_atlas_regions_buf.size() < buf_size {
+            self.lightmap_atlas_regions_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Lightmap Atlas Regions"),
+                size: buf_size.max(16),  // At least 16 bytes
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            
+            // Invalidate bind group since buffer changed
+            self.bind_group_0_key = None;
+        }
+
+        queue.write_buffer(&self.lightmap_atlas_regions_buf, 0, bytemuck::cast_slice(regions));
+
+        log::info!(
+            "[GBufferPass] Uploaded {} lightmap atlas regions ({} bytes)",
+            regions.len(),
+            buf_size
+        );
     }
 }
 

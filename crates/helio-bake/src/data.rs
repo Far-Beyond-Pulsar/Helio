@@ -21,6 +21,8 @@ pub struct BakedData {
     pub(crate) lightmap_texture: Option<wgpu::Texture>,
     pub(crate) lightmap_view: Option<Arc<wgpu::TextureView>>,
     pub(crate) lightmap_sampler: Option<Arc<wgpu::Sampler>>,
+    /// Per-mesh UV atlas regions (for GBuffer shader lightmap lookup)
+    pub(crate) lightmap_atlas_regions: Vec<crate::cache::CachedAtlasRegion>,
 
     // ── Reflection cubemap (pre-filtered specular IBL) ─────────────────────────
     // First probe only for now; multi-probe blending is future work.
@@ -82,6 +84,20 @@ impl BakedData {
         self.lightmap_sampler.as_deref()
     }
 
+    /// Returns the lightmap atlas regions (UV offset/scale per-mesh).
+    pub fn lightmap_atlas_regions(&self) -> &[crate::cache::CachedAtlasRegion] {
+        &self.lightmap_atlas_regions
+    }
+
+    /// Convert lightmap atlas regions to GPU format: [uv_offset.x, uv_offset.y, uv_scale.x, uv_scale.y]
+    ///
+    /// Drops the mesh_id field (only used for CPU-side mapping), keeping only UV data.
+    pub fn lightmap_atlas_regions_gpu(&self) -> Vec<[f32; 4]> {
+        self.lightmap_atlas_regions.iter().map(|r| {
+            [r.uv_offset[0], r.uv_offset[1], r.uv_scale[0], r.uv_scale[1]]
+        }).collect()
+    }
+
     /// Borrowed reflection cubemap view (zero-copy).
     pub fn reflection_view_ref(&self) -> Option<&wgpu::TextureView> {
         self.reflection_view.as_deref()
@@ -127,6 +143,7 @@ impl BakedData {
             lightmap_texture: None,
             lightmap_view: None,
             lightmap_sampler: None,
+            lightmap_atlas_regions: Vec::new(),
             reflection_texture: None,
             reflection_view: None,
             reflection_sampler: None,
@@ -238,6 +255,7 @@ impl BakedData {
         self.lightmap_texture = Some(tex);
         self.lightmap_view = Some(view);
         self.lightmap_sampler = Some(sampler);
+        self.lightmap_atlas_regions = lm.atlas_regions;
         self
     }
 

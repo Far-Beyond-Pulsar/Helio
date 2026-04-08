@@ -146,5 +146,7 @@ pub struct SceneResources<'a> {
     pub shadow_movable_draw_count: u32,
     /// Increments when static object topology changes; triggers static atlas re-render.
     pub static_objects_generation: u64,
+    /// Number of movable lights in the lights buffer (static/stationary excluded from runtime).
+    pub movable_light_count: u32,
 }
 

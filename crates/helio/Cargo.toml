@@ -42,6 +42,7 @@ pollster = "0.3"
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 helio-live-portal = { path = "../helio-live-portal", optional = true }
 helio-bake = { path = "../helio-bake" }
+uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = ["profiling", "live-portal"]

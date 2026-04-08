@@ -9,7 +9,7 @@ use std::sync::Arc;
 use bytemuck::Zeroable;
 use glam::Mat4;
 use helio_v3::{scene::GrowableBuffer, GpuCameraUniforms, GpuScene};
-use libhelio::GpuShadowMatrix;
+use libhelio::{GpuLight, GpuShadowMatrix};
 use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, SparsePool};
@@ -75,6 +75,11 @@ pub struct Scene {
     /// True when a Static or Stationary object has been added or removed since the last
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
     pub(in crate::scene) static_objects_dirty: bool,
+
+    /// True when static/stationary geometry or lights have been added since the last bake.
+    /// When this is true and a bake was previously configured, the user must explicitly
+    /// call auto_bake() again to rebake the scene with the new static content.
+    pub(in crate::scene) bake_invalidated: bool,
 
     /// True when objects have been added or removed via persistent-mode delta operations.
     /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
@@ -228,6 +233,7 @@ impl Scene {
             objects_dirty: true,             // rebuild on first flush
             objects_layout_optimized: false, // start in persistent mode
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
+            bake_invalidated: false,         // no bake configured yet
             shadow_partition_dirty: false,   // full rebuild on first flush handles this
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
@@ -259,6 +265,15 @@ impl Scene {
     /// A reference to the [`GpuScene`].
     pub fn gpu_scene(&self) -> &GpuScene {
         &self.gpu_scene
+    }
+
+    /// Returns true if static geometry or lights have been added since the last bake.
+    ///
+    /// When this returns true after a bake has been configured, the baked lighting
+    /// is out of date and `auto_bake()` should be called again to rebake with the
+    /// new static content.
+    pub fn is_bake_invalidated(&self) -> bool {
+        self.bake_invalidated
     }
 
     /// Insert a custom trait-based scene actor.
@@ -401,6 +416,34 @@ impl Scene {
     /// renderer.render(&scene, target)?;
     /// ```
     pub fn flush(&mut self) {
+        // ── Rebuild lights buffer to only contain movable lights ─────────────
+        // Static/stationary lights are baked and should not contribute to real-time lighting.
+        // This dramatically improves performance when scenes have many baked lights.
+        {
+            let light_rec_count = self.lights.dense_len();
+            let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
+            
+            for i in 0..light_rec_count {
+                if let Some(record) = self.lights.get_dense(i) {
+                    if record.movability.can_move() {
+                        movable_lights.push(record.gpu);
+                    }
+                }
+            }
+            
+            // Replace the lights buffer with only movable lights
+            self.gpu_scene.lights.set_data(movable_lights.clone());
+            self.gpu_scene.movable_light_count = movable_lights.len() as u32;
+            
+            if movable_lights.len() < light_rec_count {
+                log::debug!(
+                    "[helio] Filtered lights for runtime: {} movable, {} static/stationary (baked)",
+                    movable_lights.len(),
+                    light_rec_count - movable_lights.len()
+                );
+            }
+        }
+        
         // Assign sequential shadow atlas base layers to each shadow-casting light.
         // Convention: shadow_index == u32::MAX  → no shadow.
         // Always 6 slots per light (matches FACES_PER_LIGHT in shadow_matrices.wgsl):
@@ -497,6 +540,137 @@ impl Scene {
         }
 
         self.gpu_scene.frame_count = self.gpu_scene.frame_count.wrapping_add(1);
+    }
+
+    /// Build a [`SceneGeometry`](helio_bake::SceneGeometry) from all static objects and lights.
+    ///
+    /// Automatically extracts all objects and lights marked as Static or Stationary
+    /// (i.e., not Movable) and converts them to bake-ready geometry. This eliminates
+    /// the need to manually duplicate scene information for baking.
+    ///
+    /// # Returns
+    /// A `SceneGeometry` containing:
+    /// - All static object meshes with their world transforms applied
+    /// - All static lights configured for baking
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After building your scene normally...
+    /// let bake_scene = scene.build_static_bake_scene();
+    /// renderer.configure_bake(BakeRequest {
+    ///     scene: bake_scene,
+    ///     config: BakeConfig::fast("my_scene"),
+    /// });
+    /// ```
+    pub fn build_static_bake_scene(&mut self) -> helio_bake::SceneGeometry {
+        use helio_bake::{LightSource, LightSourceKind, SceneGeometry};
+        use libhelio::{LightType, Movability};
+        
+        let mut bake_scene = SceneGeometry::new();
+        let mut static_object_count = 0;
+        let mut static_light_count = 0;
+        
+        // Extract all static objects
+        for i in 0..self.objects.dense_len() {
+            let Some(object_record) = self.objects.get_dense(i) else {
+                continue;
+            };
+            
+            // Skip movable objects - only bake static and stationary geometry
+            if object_record.movability == Movability::Movable {
+                continue;
+            }
+            
+            // Extract mesh data from the pool
+            let Some(mesh_upload) = self.mesh_pool.extract_mesh_data(object_record.mesh) else {
+                continue;
+            };
+            
+            // Convert to bake mesh with world transform applied
+            // Pass mesh slot to generate deterministic UUID for lightmap region mapping
+            let transform = Mat4::from_cols_array(&object_record.instance.model);
+            let mesh_slot = object_record.mesh.slot();
+            let bake_mesh = crate::mesh_upload_to_bake(&mesh_upload, transform, Some(mesh_slot));
+            bake_scene.add_mesh(bake_mesh);
+            static_object_count += 1;
+        }
+        
+        // Extract all static lights
+        for i in 0..self.lights.dense_len() {
+            let Some(light_record) = self.lights.get_dense(i) else {
+                continue;
+            };
+            
+            // Skip movable lights - only bake static and stationary lights
+            if light_record.movability == Movability::Movable {
+                continue;
+            }
+            
+            let gpu_light = &light_record.gpu;
+            let light_type = gpu_light.light_type;
+            
+            // Determine light kind from type
+            let kind = if light_type == LightType::Directional as u32 {
+                LightSourceKind::Directional {
+                    direction: [
+                        gpu_light.direction_outer[0],
+                        gpu_light.direction_outer[1],
+                        gpu_light.direction_outer[2],
+                    ],
+                }
+            } else if light_type == LightType::Point as u32 {
+                LightSourceKind::Point {
+                    position: [
+                        gpu_light.position_range[0],
+                        gpu_light.position_range[1],
+                        gpu_light.position_range[2],
+                    ],
+                    range: gpu_light.position_range[3],
+                }
+            } else if light_type == LightType::Spot as u32 {
+                LightSourceKind::Spot {
+                    position: [
+                        gpu_light.position_range[0],
+                        gpu_light.position_range[1],
+                        gpu_light.position_range[2],
+                    ],
+                    direction: [
+                        gpu_light.direction_outer[0],
+                        gpu_light.direction_outer[1],
+                        gpu_light.direction_outer[2],
+                    ],
+                    range: gpu_light.position_range[3],
+                    inner_angle: gpu_light.inner_angle.acos(),
+                    outer_angle: gpu_light.direction_outer[3].acos(),
+                }
+            } else {
+                continue; // Unknown light type
+            };
+            
+            bake_scene.add_light(LightSource {
+                kind,
+                color: [
+                    gpu_light.color_intensity[0],
+                    gpu_light.color_intensity[1],
+                    gpu_light.color_intensity[2],
+                ],
+                intensity: gpu_light.color_intensity[3],
+                bake_enabled: true,
+                casts_shadows: gpu_light.shadow_index != u32::MAX,
+            });
+            static_light_count += 1;
+        }
+        
+        log::info!(
+            "[helio-bake] Auto-extracted {} static/stationary objects and {} lights for baking",
+            static_object_count,
+            static_light_count
+        );
+        
+        // Clear the invalidation flag - scene is now synced with bake data
+        self.bake_invalidated = false;
+        
+        bake_scene
     }
 }
 

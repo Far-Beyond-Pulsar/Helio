@@ -531,7 +531,7 @@ impl RenderPass for HlfsPass {
         let globals = HlfsGlobals {
             frame: ctx.frame_num as u32,
             sample_count: SAMPLES_PER_PIXEL,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
             screen_width: self.width,
             screen_height: self.height,
             near_field_size: 50.0,      // 50m near field

@@ -227,7 +227,7 @@ impl RenderPass for TransparentPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: 0.0,
-            light_count: ctx.scene.lights.len() as u32,
+            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
             ambient_intensity: 0.1,
             ambient_color: [0.1, 0.1, 0.15, 1.0],
             rc_world_min: [0.0; 4],

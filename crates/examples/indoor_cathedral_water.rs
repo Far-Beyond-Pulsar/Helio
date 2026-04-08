@@ -25,9 +25,9 @@ mod demo_portal;
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge,
     LightId, MeshId, ObjectId, PerfOverlayMode, Renderer, RendererConfig, WaterHitboxDescriptor,
-    WaterHitboxId, BakeConfig, BakeRequest, SceneGeometry, LightSource, LightSourceKind,
-    mesh_upload_to_bake,
+    WaterHitboxId, BakeConfig,
 };
+use helio::Movability;
 use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
 
 use std::io::{self, BufRead};
@@ -389,55 +389,62 @@ impl ApplicationHandler for App {
         let _wall_left_outer =  renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]))).as_mesh().unwrap();
         let _wall_right_outer = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 7.0, 28.0]))).as_mesh().unwrap();
         let _ =
-            v3_demo_common::insert_object(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0);
-        let _ = v3_demo_common::insert_object(
+            v3_demo_common::insert_object_with_movability(&mut renderer, _floor, mat, glam::Mat4::IDENTITY, 11.0, Some(Movability::Static));
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _nave_ceiling,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 21.0, 0.0)),
             28.0,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _aisle_ceil_l,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-8.5, 11.0, 0.0)),
             28.0,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _aisle_ceil_r,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(8.5, 11.0, 0.0)),
             28.0,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _wall_left_outer,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(-11.0, 7.0, 0.0)),
             28.0,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _wall_right_outer,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(11.0, 7.0, 0.0)),
             28.0,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _wall_front,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, 28.0)),
             11.0,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _wall_back,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.5, -28.0)),
             11.0,
+            Some(Movability::Static),
         );
 
         // Colonnade: short wall segments between columns (between column z-positions)
@@ -457,12 +464,13 @@ impl ApplicationHandler for App {
                     .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)])))
                     .as_mesh()
                     .unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 5.5, mid_z)),
                     5.5,
+                    Some(Movability::Static),
                 );
                 id
             })
@@ -476,12 +484,13 @@ impl ApplicationHandler for App {
                     .insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len.max(0.1)])))
                     .as_mesh()
                     .unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(5.5, 5.5, mid_z)),
                     5.5,
+                    Some(Movability::Static),
                 );
                 id
             })
@@ -492,20 +501,22 @@ impl ApplicationHandler for App {
             .iter()
             .flat_map(|&z| {
                 let l = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]))).as_mesh().unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     l,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-5.5, 10.0, z)),
                     10.0,
+                    Some(Movability::Static),
                 );
                 let r = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.65, 10.0, 0.65]))).as_mesh().unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     r,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(5.5, 10.0, z)),
                     10.0,
+                    Some(Movability::Static),
                 );
                 [l, r]
             })
@@ -516,33 +527,37 @@ impl ApplicationHandler for App {
         let _altar_plinth = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [3.0, 0.45, 1.5]))).as_mesh().unwrap();
         let _cross_vert = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.18, 2.2, 0.18]))).as_mesh().unwrap();
         let _cross_horiz = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.0, 0.18, 0.18]))).as_mesh().unwrap();
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _altar_step,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.2, -24.5)),
             5.5,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _altar_plinth,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.65, -25.5)),
             3.0,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _cross_vert,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 3.2, -25.8)),
             2.2,
+            Some(Movability::Static),
         );
-        let _ = v3_demo_common::insert_object(
+        let _ = v3_demo_common::insert_object_with_movability(
             &mut renderer,
             _cross_horiz,
             mat,
             glam::Mat4::from_translation(glam::Vec3::new(0.0, 4.5, -25.8)),
             1.0,
+            Some(Movability::Static),
         );
 
         // Pews: long narrow rect3d per row, 6 rows each side
@@ -550,12 +565,13 @@ impl ApplicationHandler for App {
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
                 let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]))).as_mesh().unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(-3.2, 0.45, z)),
                     1.5,
+                    Some(Movability::Static),
                 );
                 id
             })
@@ -564,12 +580,13 @@ impl ApplicationHandler for App {
             .map(|i| {
                 let z = PEW_Z_START + i as f32 * PEW_Z_STEP;
                 let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]))).as_mesh().unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
                     mat,
                     glam::Mat4::from_translation(glam::Vec3::new(3.2, 0.45, z)),
                     1.5,
+                    Some(Movability::Static),
                 );
                 id
             })
@@ -587,12 +604,13 @@ impl ApplicationHandler for App {
             .iter()
             .map(|&z| {
                 let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.06, 2.0, 0.06]))).as_mesh().unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
                     chandelier_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(0.0, 17.5, z)),
                     2.0,
+                    Some(Movability::Static),
                 );
                 id
             })
@@ -601,12 +619,13 @@ impl ApplicationHandler for App {
             .iter()
             .map(|&z| {
                 let id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [1.2, 0.12, 1.2]))).as_mesh().unwrap();
-                let _ = v3_demo_common::insert_object(
+                let _ = v3_demo_common::insert_object_with_movability(
                     &mut renderer,
                     id,
                     chandelier_mat,
                     glam::Mat4::from_translation(glam::Vec3::new(0.0, 15.2, z)),
                     1.2,
+                    Some(Movability::Static),
                 );
                 id
             })
@@ -615,131 +634,42 @@ impl ApplicationHandler for App {
         // Register lights (chandelier & candle light_ids stored for per-frame flicker updates)
         let mut chandelier_light_ids = Vec::new();
         for &z in CHANDELIER_Z {
-            chandelier_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [0.0_f32, 15.0, z],
-                [1.0, 0.92, 0.78],
-                8.0,
-                22.0,
-            ))).as_light().unwrap());
+            chandelier_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
+                point_light(
+                    [0.0_f32, 15.0, z],
+                    [1.0, 0.92, 0.78],
+                    8.0,
+                    22.0,
+                ),
+                Some(Movability::Static), // Static for high-quality baking
+            )).as_light().unwrap());
         }
-        // Stained glass shafts — static, no need to store ids
+        // Stained glass shafts — static for baking, no need to store ids for updates
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([x, y, z], [r, g, b], 1.8, 8.0)));
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
+                point_light([x, y, z], [r, g, b], 1.8, 8.0),
+                Some(Movability::Static), // Static for baking
+            ));
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {
-            candle_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [x, y, z],
-                [1.0, 0.6, 0.15],
-                1.2,
-                4.0,
-            ))).as_light().unwrap());
+            candle_light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
+                point_light(
+                    [x, y, z],
+                    [1.0, 0.6, 0.15],
+                    1.2,
+                    4.0,
+                ),
+                Some(Movability::Static), // Static for high-quality baking
+            )).as_light().unwrap());
         }
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
         // ── Configure baking ──────────────────────────────────────────────
-        // Build a SceneGeometry that mirrors every static surface so Nebula
-        // can bake AO + lightmap on first launch.  Results are cached to
-        // disk; subsequent launches skip all GPU work and load from cache.
-        {
-            let t = |dx: f32, dy: f32, dz: f32| {
-                glam::Mat4::from_translation(glam::Vec3::new(dx, dy, dz))
-            };
-            let mut bake_scene = SceneGeometry::new();
-
-            // ── Shell geometry ────────────────────────────────────────────
-            bake_scene.add_mesh(mesh_upload_to_bake(&plane_mesh([0.0, 0.0, 0.0], 32.0), glam::Mat4::IDENTITY));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [6.0,0.18,28.0]),  t(0.0,21.0,0.0)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [2.5,0.15,28.0]),  t(-8.5,11.0,0.0)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [2.5,0.15,28.0]),  t(8.5,11.0,0.0)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.25,7.0,28.0]),  t(-11.0,7.0,0.0)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.25,7.0,28.0]),  t(11.0,7.0,0.0)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,28.0)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [11.0,10.5,0.25]), t(0.0,10.5,-28.0)));
-
-            // ── Colonnade inner walls ─────────────────────────────────────
-            {
-                let col_z_all: Vec<f32> = {
-                    let mut v = vec![-28.0_f32];
-                    v.extend_from_slice(COLUMN_Z);
-                    v.push(28.0);
-                    v
-                };
-                for w in col_z_all.windows(2) {
-                    let mid_z   = (w[0] + w[1]) * 0.5;
-                    let half_len = ((w[1] - w[0]) * 0.5 - 0.9_f32).max(0.1);
-                    let seg = box_mesh([0.0, 0.0, 0.0], [0.25, 5.5, half_len]);
-                    bake_scene.add_mesh(mesh_upload_to_bake(&seg, t(-5.5, 5.5, mid_z)));
-                    bake_scene.add_mesh(mesh_upload_to_bake(&seg, t( 5.5, 5.5, mid_z)));
-                }
-            }
-
-            // ── Columns ───────────────────────────────────────────────────
-            for &z in COLUMN_Z {
-                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(-5.5,10.0,z)));
-                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.65,10.0,0.65]), t(5.5,10.0,z)));
-            }
-
-            // ── Altar ─────────────────────────────────────────────────────
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [5.5, 0.20, 3.0]),  t(0.0, 0.2, -24.5)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [3.0, 0.45, 1.5]),  t(0.0, 0.65, -25.5)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.18, 2.2, 0.18]), t(0.0, 3.2, -25.8)));
-            bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [1.0, 0.18, 0.18]), t(0.0, 4.5, -25.8)));
-
-            // ── Pews ──────────────────────────────────────────────────────
-            for i in 0..PEW_COUNT {
-                let pz = PEW_Z_START + i as f32 * PEW_Z_STEP;
-                let pew = box_mesh([0.0, 0.0, 0.0], [1.5, 0.45, 0.5]);
-                bake_scene.add_mesh(mesh_upload_to_bake(&pew, t(-3.2, 0.45, pz)));
-                bake_scene.add_mesh(mesh_upload_to_bake(&pew, t( 3.2, 0.45, pz)));
-            }
-
-            // ── Chandelier hardware ───────────────────────────────────────
-            for &z in CHANDELIER_Z {
-                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [0.06, 2.0, 0.06]), t(0.0, 17.5, z)));
-                bake_scene.add_mesh(mesh_upload_to_bake(&box_mesh([0.0,0.0,0.0], [1.2, 0.12, 1.2]),  t(0.0, 15.2, z)));
-            }
-
-            // ── Lights ───────────────────────────────────────────────────
-            // Chandelier (warm white, shadow-casting)
-            for &z in CHANDELIER_Z {
-                bake_scene.add_light(LightSource {
-                    kind: LightSourceKind::Point { position: [0.0, 15.0, z], range: 22.0 },
-                    color: [1.0, 0.92, 0.78],
-                    intensity: 8.0,
-                    bake_enabled: true,
-                    casts_shadows: true,
-                });
-            }
-
-            // Stained-glass accent lights (coloured fill, no hard shadows)
-            for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-                bake_scene.add_light(LightSource {
-                    kind: LightSourceKind::Point { position: [x, y, z], range: 8.0 },
-                    color: [r, g, b],
-                    intensity: 1.8,
-                    bake_enabled: true,
-                    casts_shadows: false,
-                });
-            }
-
-            // Altar candles (warm orange, soft shadow)
-            for &(x, y, z) in CANDLES {
-                bake_scene.add_light(LightSource {
-                    kind: LightSourceKind::Point { position: [x, y, z], range: 4.0 },
-                    color: [1.0, 0.6, 0.15],
-                    intensity: 1.2,
-                    bake_enabled: true,
-                    casts_shadows: false,
-                });
-            }
-
-            renderer.configure_bake(BakeRequest {
-                scene: bake_scene,
-                config: BakeConfig::fast("indoor_cathedral_water"),
-            });
-        }
+        // Helio automatically extracts all static objects and lights for baking.
+        // No need to manually duplicate scene geometry - just specify the config.
+        renderer.auto_bake(BakeConfig::fast("indoor_cathedral_water"));
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();

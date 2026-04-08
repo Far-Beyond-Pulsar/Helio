@@ -204,6 +204,10 @@ pub struct GpuScene {
     /// Increments when the static object set changes (add/remove of Static/Stationary objects).
     /// Used by ShadowPass to know when to re-render the static shadow atlas.
     pub static_objects_generation: u64,
+    
+    /// Number of movable lights in the lights buffer (at runtime, only movable lights are uploaded).
+    /// Static/stationary lights are baked and excluded from real-time lighting calculations.
+    pub movable_light_count: u32,
 }
 
 impl GpuScene {
@@ -268,6 +272,7 @@ impl GpuScene {
             shadow_movable_indirect,
             shadow_static_draw_count: 0,
             shadow_movable_draw_count: 0,
+            movable_light_count: 0,
         }
     }
 
@@ -318,6 +323,7 @@ impl GpuScene {
             shadow_movable_indirect: self.shadow_movable_indirect.buffer(),
             shadow_static_draw_count: self.shadow_static_draw_count,
             shadow_movable_draw_count: self.shadow_movable_draw_count,
+            movable_light_count: self.movable_light_count,
             static_objects_generation: self.static_objects_generation,
         }
     }

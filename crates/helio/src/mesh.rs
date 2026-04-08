@@ -133,5 +133,27 @@ impl MeshPool {
         self.vertices.flush(queue);
         self.indices.flush(queue);
     }
+
+    /// Extracts a mesh's vertex and index data from the pool.
+    ///
+    /// Returns None if the mesh ID is invalid. Used internally for baking.
+    pub(crate) fn extract_mesh_data(&self, id: MeshId) -> Option<MeshUpload> {
+        let record = self.meshes.get(id)?;
+        let slice = &record.slice;
+        
+        let vertex_start = slice.first_vertex as usize;
+        let vertex_end = vertex_start + slice.vertex_count as usize;
+        let index_start = slice.first_index as usize;
+        let index_end = index_start + slice.index_count as usize;
+        
+        let vertices = self.vertices.as_slice()
+            .get(vertex_start..vertex_end)?
+            .to_vec();
+        let indices = self.indices.as_slice()
+            .get(index_start..index_end)?
+            .to_vec();
+        
+        Some(MeshUpload { vertices, indices })
+    }
 }
 

@@ -37,6 +37,7 @@ mod data;
 mod inject;
 
 pub use bake::{run_bake_blocking, BakeError};
+pub use cache::CachedAtlasRegion;
 pub use config::{BakeConfig, ProbeSpec};
 pub use data::BakedData;
 pub use inject::BakeInjectPass;

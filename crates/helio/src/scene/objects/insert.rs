@@ -105,6 +105,8 @@ impl super::super::Scene {
             .unwrap_or_default();
         if !inserted_movability.can_move() {
             self.static_objects_dirty = true;
+            // Invalidate any previous bake - static geometry has changed
+            self.bake_invalidated = true;
         }
 
         if self.objects_layout_optimized {

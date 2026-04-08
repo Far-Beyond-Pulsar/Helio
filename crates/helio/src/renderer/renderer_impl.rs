@@ -638,6 +638,28 @@ impl Renderer {
         self.bake_pending = Some(request);
     }
 
+    /// Automatically configure baking using all static objects and lights in the scene.
+    ///
+    /// This is a convenience method that extracts static geometry from the scene
+    /// automatically, eliminating the need to manually build a `SceneGeometry`.
+    /// Equivalent to calling `scene.build_static_bake_scene()` and then
+    /// `configure_bake()`, but with a cleaner API.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // After populating your scene normally with insert_object, insert_light, etc...
+    /// renderer.auto_bake(BakeConfig::fast("indoor_cathedral_water"));
+    /// ```
+    ///
+    /// # See Also
+    /// - [`Scene::build_static_bake_scene`] - for manual control over what gets baked
+    /// - [`configure_bake`](Self::configure_bake) - for explicit scene geometry specification
+    pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) {
+        let scene = self.scene.build_static_bake_scene();
+        self.configure_bake(helio_bake::BakeRequest { scene, config });
+    }
+
+
     pub fn set_billboard_instances(&mut self, instances: &[helio_pass_billboard::BillboardInstance]) {
         self.billboard_instances.clear();
         self.billboard_instances.extend_from_slice(instances);
@@ -646,11 +668,16 @@ impl Renderer {
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         // ── Baking: run once, blocking, before the first drawn frame ──────
         if let Some(request) = self.bake_pending.take() {
+            let obj_count = request.scene.meshes.len();
+            let light_count = request.scene.lights.len();
+            
             log::info!(
                 "[helio-bake] Starting pre-frame-1 bake for scene '{}' (cache: {})…",
                 request.config.scene_name,
                 request.config.cache_dir.display(),
             );
+            
+            let bake_start = std::time::Instant::now();
             let baked = helio_bake::run_bake_blocking(
                 &self.device,
                 &self.queue,
@@ -658,14 +685,42 @@ impl Renderer {
                 &request.config,
             )
             .map_err(|e| helio_v3::Error::InvalidPassConfig(e.to_string()))?;
+            let bake_duration = bake_start.elapsed();
+            
             let baked = std::sync::Arc::new(baked);
             // Bypass per-frame SSAO — SsaoPass holds an Arc to the baked AO view
             // and skips GPU execution while that override is set.
             if let Some(pass) = self.graph.find_pass_mut::<helio_pass_ssao::SsaoPass>() {
                 pass.set_baked_ao(baked.ao_view());
             }
-            log::info!("[helio-bake] Bake complete — all resources uploaded to GPU.");
-            self.baked_data = Some(baked);
+            
+            // Log detailed stats
+            log::info!(
+                "[helio-bake] ✓ Bake complete in {:.2}s — {} objects, {} lights (avg {:.1}ms/obj)",
+                bake_duration.as_secs_f32(),
+                obj_count,
+                light_count,
+                if obj_count > 0 { bake_duration.as_millis() as f32 / obj_count as f32 } else { 0.0 }
+            );
+            
+            self.baked_data = Some(baked.clone());
+
+            // Upload lightmap atlas regions to GBuffer pass
+            if let Some(gbuffer_pass) = self.graph.find_pass_mut::<helio_pass_gbuffer::GBufferPass>() {
+                let regions_gpu = baked.lightmap_atlas_regions_gpu();
+                gbuffer_pass.upload_lightmap_atlas_regions(&self.device, &self.queue, &regions_gpu);
+            }
+
+            // Update lightmap indices in scene objects
+            self.scene.update_lightmap_indices(baked.lightmap_atlas_regions());
+        }
+
+        // ── Check for invalidated bake ────────────────────────────────────
+        if self.baked_data.is_some() && self.scene.is_bake_invalidated() {
+            log::warn!(
+                "[helio-bake] ⚠️  Static geometry or lights have been added since the last bake!\n\
+                 The baked lighting is now out of date. Call renderer.auto_bake() again to rebake the scene."
+            );
         }
 
         // Compute real frame delta, capped at 100 ms to avoid spiral-of-death on
@@ -788,6 +843,7 @@ impl Renderer {
 
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
+            gbuffer_lightmap_uv: None,
             shadow_atlas: None,
             static_shadow_atlas: None,
             shadow_sampler: None,

@@ -161,7 +161,7 @@ impl LightCullPass {
         let tile_light_lists = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightLists"),
             size: list_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -169,7 +169,7 @@ impl LightCullPass {
         let tile_light_counts = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("TileLightCounts"),
             size: count_buf_size.max(4),
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -204,7 +204,7 @@ impl RenderPass for LightCullPass {
         let params = LightCullParams {
             num_tiles_x: self.num_tiles_x,
             num_tiles_y: self.num_tiles_y,
-            num_lights: ctx.scene.lights.len() as u32,
+            num_lights: ctx.scene.movable_light_count, // Only process movable lights (static lights are baked)
             screen_width: self.width,
             screen_height: self.height,
             _pad0: 0,
@@ -217,8 +217,9 @@ impl RenderPass for LightCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.scene.light_count == 0 {
-            // No active lights: clear light lists/counts to avoid stale data usage.
+        if ctx.scene.movable_light_count == 0 {
+            // No active movable lights: clear light lists/counts to avoid stale data usage.
+            // Static/stationary lights are baked and don't need runtime culling.
             ctx.encoder.clear_buffer(&self.tile_light_lists, 0, None);
             ctx.encoder.clear_buffer(&self.tile_light_counts, 0, None);
             self.cull_cache_key = None; // Invalidate cache
@@ -230,7 +231,7 @@ impl RenderPass for LightCullPass {
         let camera_gen = ctx.scene.camera_generation;
         let lights_gen = ctx.scene.movable_lights_generation;
 
-        let cache_key = (camera_gen, lights_gen, ctx.scene.light_count);
+        let cache_key = (camera_gen, lights_gen, ctx.scene.movable_light_count);
 
         // Check if resolution changed (window resize invalidates tile grid)
         let resolution_changed = ctx.width != self.width || ctx.height != self.height;
