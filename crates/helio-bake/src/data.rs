@@ -209,12 +209,26 @@ impl BakedData {
     fn with_lightmap(mut self, device: &wgpu::Device, queue: &wgpu::Queue, lm: Option<CachedLightmap>) -> Self {
         let Some(lm) = lm else { return self };
 
-        let format = if lm.is_f32 {
-            wgpu::TextureFormat::Rgba32Float
+        // Always upload as Rgba16Float — universally filterable on all backends (Vulkan, DX12,
+        // Metal, WebGPU) without requiring FLOAT32_FILTERABLE. Full HDR range up to ~65504
+        // is more than sufficient for lightmap irradiance values in any practical scene.
+        // This also halves VRAM usage vs Rgba32Float.
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let bytes_per_row = lm.width * 8; // 4 channels × 2 bytes (f16)
+
+        // If the bake cache stored f32 data, convert each channel to f16 before upload.
+        // Otherwise the texels are already f16 bytes and can be used directly.
+        let converted: Vec<u8>;
+        let texels: &[u8] = if lm.is_f32 {
+            let src: &[f32] = bytemuck::cast_slice(&lm.texels);
+            let dst: Vec<u16> = src.iter()
+                .map(|&v| half::f16::from_f32(v).to_bits())
+                .collect();
+            converted = bytemuck::cast_slice::<u16, u8>(&dst).to_vec();
+            &converted
         } else {
-            wgpu::TextureFormat::Rgba16Float
+            &lm.texels
         };
-        let bytes_per_row = lm.width * if lm.is_f32 { 16 } else { 8 };
 
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Baked Lightmap"),
@@ -233,7 +247,7 @@ impl BakedData {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &lm.texels,
+            texels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),
