@@ -2182,6 +2182,7 @@ dependencies = [
  "helio",
  "helio-asset-compat",
  "helio-pass-sdf",
+ "helio-pass-terra-forge",
  "image",
  "log",
  "pollster 0.4.0",
@@ -2667,7 +2668,7 @@ dependencies = [
 
 [[package]]
 name = "helio"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "arrayvec",
  "bytemuck",
@@ -2973,6 +2974,17 @@ dependencies = [
  "bytemuck",
  "helio-v3",
  "libhelio",
+ "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-pass-terra-forge"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.29.3",
+ "helio-v3",
+ "log",
  "wgpu 28.0.0",
 ]
 
