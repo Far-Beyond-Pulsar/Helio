@@ -238,11 +238,50 @@ impl GpuProfiler {
     }
 
     /// Read back GPU timestamps (blocking, call after frame completion)
-    pub fn read_timestamps_blocking(&mut self, _device: &wgpu::Device) -> &[GpuTimestamp] {
+    pub fn read_timestamps_blocking(&mut self, device: &wgpu::Device) -> &[GpuTimestamp] {
         self.last_timings.clear();
 
-        // TODO: GPU timestamp readback disabled - buffer mapping API needs investigation
-        // For now, only CPU profiling is available
+        if let Some(ref resolve_buffer) = self.resolve_buffer {
+            if !self.pending_queries.is_empty() {
+                // Map the buffer for reading
+                let buffer_slice = resolve_buffer.slice(..);
+
+                // Create a channel to wait for the mapping
+                let (tx, rx) = std::sync::mpsc::channel();
+                buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+                    let _ = tx.send(result);
+                });
+
+                // Poll the device until mapping completes
+                let _ = device.poll(wgpu::PollType::wait_indefinitely());
+
+                // Wait for the mapping to complete
+                if let Ok(Ok(())) = rx.recv() {
+                    // Read the timestamp data
+                    let data = buffer_slice.get_mapped_range();
+                    let timestamps: &[u64] = bytemuck::cast_slice(&data);
+
+                    // Calculate deltas for each pass
+                    for (name, start_idx, end_idx) in &self.pending_queries {
+                        if (*end_idx as usize) < timestamps.len() && (*start_idx as usize) < timestamps.len() {
+                            let start = timestamps[*start_idx as usize];
+                            let end = timestamps[*end_idx as usize];
+                            let duration_ticks = end.saturating_sub(start);
+                            let duration_ns = (duration_ticks as f32 * self.timestamp_period) as u64;
+
+                            self.last_timings.push(GpuTimestamp {
+                                name: name.to_string(),
+                                duration_ns,
+                            });
+                        }
+                    }
+
+                    // Unmap the buffer
+                    drop(data);
+                    resolve_buffer.unmap();
+                }
+            }
+        }
 
         // Reset for next frame
         self.pending_queries.clear();
