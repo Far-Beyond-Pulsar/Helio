@@ -25,22 +25,6 @@ Sample model from https://sketchfab.com/mohamedhussien
 
 Helio is a GPU-driven deferred rendering engine written in Rust on top of `wgpu`. It is designed around a **handle-based scene API** (inspired by Unreal's FScene model) layered over a modular, pass-oriented render graph with zero-copy per-frame contexts. Every CPU-side operation that touches the GPU buffer is bounded — typically O(1) — and the GPU does the heavy lifting for culling, indirect draw dispatch, and light evaluation.
 
-<div align="center">
-    <table style="border-collapse: collapse; border: none;">
-        <tr>
-            <td style="border: none;"><img src="media/image1.png" alt="Screenshot 1" width="100%"/></td>
-            <td style="border: none;"><img src="media/image2.png" alt="Screenshot 2" width="100%"/></td>
-        </tr>
-        <tr>
-            <td style="border: none;"><img src="media/image3.png" alt="Screenshot 3" width="100%"/></td>
-            <td style="border: none;"><img src="media/image4.png" alt="Screenshot 4" width="100%"/></td>
-        </tr>
-        <tr>
-            <td style="border: none;"><img src="media/image5.png" alt="Screenshot 5" width="100%"/></td>
-            <td style="border: none;"><img src="media/image6.png" alt="Screenshot 6" width="100%"/></td>
-        </tr>
-    </table>
-</div>
 <img width="1262" height="707" alt="image" src="https://github.com/user-attachments/assets/7787f33a-5e82-44ba-a1f8-a5342da5090d" />
 <img width="2555" height="1340" alt="image" src="https://github.com/user-attachments/assets/f3f9f878-9a64-4f7b-b4fa-29f14d78250c" />
 
