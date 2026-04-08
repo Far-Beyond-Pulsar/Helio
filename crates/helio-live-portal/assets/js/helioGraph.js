@@ -365,12 +365,32 @@
         console.warn(`Node ${nodeId} not found`);
         return;
       }
-      // Center on the node with animation
-      reactFlowInstance.setCenter(
-        node.position.x + NODE_W / 2,
-        node.position.y + NODE_H / 2,
-        { zoom: 1.2, duration: 600 }
-      );
+
+      console.log('Focusing on node:', nodeId, node);
+
+      // Try ReactFlow's setCenter API first
+      if (typeof reactFlowInstance.setCenter === 'function') {
+        const x = node.position.x + NODE_W / 2;
+        const y = node.position.y + NODE_H / 2;
+        console.log('Using setCenter:', x, y);
+        reactFlowInstance.setCenter(x, y, { zoom: 1.2, duration: 800 });
+      }
+      // Fallback: use setViewport directly
+      else if (typeof reactFlowInstance.setViewport === 'function') {
+        const x = node.position.x + NODE_W / 2;
+        const y = node.position.y + NODE_H / 2;
+        const viewport = reactFlowInstance.getViewport();
+        console.log('Using setViewport fallback');
+        reactFlowInstance.setViewport({
+          x: -x * 1.2 + window.innerWidth / 2,
+          y: -y * 1.2 + window.innerHeight / 2,
+          zoom: 1.2,
+        }, { duration: 800 });
+      }
+      // Last resort: instant jump
+      else {
+        console.warn('No viewport animation API available, checking available methods:', Object.keys(reactFlowInstance));
+      }
     }
 
     return { render, focusNode };

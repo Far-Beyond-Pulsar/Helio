@@ -334,34 +334,39 @@ impl Profiler {
         let mut total_cpu_ms = 0.0;
         let mut total_gpu_ms = 0.0;
 
-        // Merge CPU and GPU timings by pass name
-        let mut pass_map = std::collections::HashMap::new();
-
-        // Add CPU timings
-        for (name, duration) in self.cpu.get_timings() {
-            let ms = duration.as_secs_f64() * 1000.0;
-            pass_map.insert(*name, (ms as f32, 0.0f32));
-            total_cpu_ms += ms as f32;
-        }
-
-        // Add GPU timings
+        // Build GPU timings map for lookup
+        let mut gpu_map = std::collections::HashMap::new();
         for ts in self.gpu.get_last_timings() {
             let ms = ts.duration_ns as f64 / 1_000_000.0;
-            pass_map.entry(ts.name.as_str()).or_insert((0.0, 0.0)).1 = ms as f32;
+            gpu_map.insert(ts.name.as_str(), ms as f32);
             total_gpu_ms += ms as f32;
         }
 
-        // Convert to Vec
-        for (name, (cpu_ms, gpu_ms)) in pass_map {
+        // Preserve CPU timing order (execution order) and merge with GPU timings
+        for (name, duration) in self.cpu.get_timings() {
+            let cpu_ms = duration.as_secs_f64() * 1000.0;
+            let gpu_ms = gpu_map.get(name).copied().unwrap_or(0.0);
+
             pass_timings.push(PassTiming {
                 name: name.to_string(),
-                cpu_ms,
+                cpu_ms: cpu_ms as f32,
                 gpu_ms,
             });
+
+            total_cpu_ms += cpu_ms as f32;
         }
 
-        // Sort by name for consistent ordering
-        pass_timings.sort_by(|a, b| a.name.cmp(&b.name));
+        // Add any GPU-only passes that don't have CPU timings (shouldn't happen in practice)
+        for ts in self.gpu.get_last_timings() {
+            if !pass_timings.iter().any(|pt| pt.name == ts.name) {
+                let ms = ts.duration_ns as f64 / 1_000_000.0;
+                pass_timings.push(PassTiming {
+                    name: ts.name.clone(),
+                    cpu_ms: 0.0,
+                    gpu_ms: ms as f32,
+                });
+            }
+        }
 
         (pass_timings, total_cpu_ms, total_gpu_ms)
     }
