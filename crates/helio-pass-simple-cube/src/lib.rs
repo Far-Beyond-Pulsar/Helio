@@ -265,3 +265,4 @@ impl RenderPass for SimpleCubePass {
         Ok(())
     }
 }
+

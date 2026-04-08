@@ -72,3 +72,4 @@ impl AnimationState {
         &self.bone_matrices
     }
 }
+

@@ -150,22 +150,16 @@ fn neg_z_face_color_is_yellow() {
 #[test]
 fn all_face_colors_are_in_0_1_range() {
     let colors: [[f32; 3]; 6] = [
-        [1.0, 0.25, 0.25], // +X red
-        [0.25, 1.0, 1.0],  // -X cyan
-        [0.25, 1.0, 0.25], // +Y green
-        [1.0, 0.25, 1.0],  // -Y magenta
-        [0.3, 0.5, 1.0],   // +Z blue
-        [1.0, 1.0, 0.25],  // -Z yellow
+        [1.0, 0.25, 0.25],  // +X red
+        [0.25, 1.0, 1.0],   // -X cyan
+        [0.25, 1.0, 0.25],  // +Y green
+        [1.0, 0.25, 1.0],   // -Y magenta
+        [0.3, 0.5, 1.0],    // +Z blue
+        [1.0, 1.0, 0.25],   // -Z yellow
     ];
     for (i, color) in colors.iter().enumerate() {
         for (j, &c) in color.iter().enumerate() {
-            assert!(
-                c >= 0.0 && c <= 1.0,
-                "face {} channel {} = {} out of [0,1]",
-                i,
-                j,
-                c
-            );
+            assert!(c >= 0.0 && c <= 1.0, "face {} channel {} = {} out of [0,1]", i, j, c);
         }
     }
 }
@@ -173,12 +167,12 @@ fn all_face_colors_are_in_0_1_range() {
 #[test]
 fn all_face_colors_are_distinct() {
     let colors: [[u32; 3]; 6] = [
-        [1000, 250, 250],  // +X  (scaled to avoid fp comparison)
-        [250, 1000, 1000], // -X
-        [250, 1000, 250],  // +Y
-        [1000, 250, 1000], // -Y
-        [300, 500, 1000],  // +Z
-        [1000, 1000, 250], // -Z
+        [1000, 250, 250],   // +X  (scaled to avoid fp comparison)
+        [250, 1000, 1000],  // -X
+        [250, 1000, 250],   // +Y
+        [1000, 250, 1000],  // -Y
+        [300, 500, 1000],   // +Z
+        [1000, 1000, 250],  // -Z
     ];
     for i in 0..6 {
         for j in (i + 1)..6 {
@@ -194,13 +188,7 @@ fn all_face_base_indices_are_below_vertex_count() {
     // Each face's base vertex index = face * 4; must be < 24.
     for face in 0..FACES {
         let base = face * VERTS_PER_FACE;
-        assert!(
-            base < VERTEX_COUNT,
-            "face {} base {} >= {}",
-            face,
-            base,
-            VERTEX_COUNT
-        );
+        assert!(base < VERTEX_COUNT, "face {} base {} >= {}", face, base, VERTEX_COUNT);
     }
 }
 
@@ -228,12 +216,12 @@ fn index_stride_between_faces_is_six() {
 #[test]
 fn face_normals_are_unit_length() {
     let normals: [[f32; 3]; 6] = [
-        [1.0, 0.0, 0.0],  // +X
-        [-1.0, 0.0, 0.0], // -X
-        [0.0, 1.0, 0.0],  // +Y
-        [0.0, -1.0, 0.0], // -Y
-        [0.0, 0.0, 1.0],  // +Z
-        [0.0, 0.0, -1.0], // -Z
+        [1.0, 0.0, 0.0],   // +X
+        [-1.0, 0.0, 0.0],  // -X
+        [0.0, 1.0, 0.0],   // +Y
+        [0.0, -1.0, 0.0],  // -Y
+        [0.0, 0.0, 1.0],   // +Z
+        [0.0, 0.0, -1.0],  // -Z
     ];
     for (i, n) in normals.iter().enumerate() {
         let len_sq = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
@@ -262,9 +250,7 @@ fn face_vertex_coordinates_are_half_unit() {
             assert!(
                 valid_coords.contains(&coord),
                 "vertex {} coord[{}] = {} is not ±0.5",
-                vi,
-                ci,
-                coord
+                vi, ci, coord
             );
         }
     }

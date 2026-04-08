@@ -1,7 +1,7 @@
 // Tests for helio-pass-ssao: SSAO kernel sample distribution, Halton sampling, noise rotation.
 // All tests are pure math — no GPU device required.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{PI, FRAC_PI_2};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
@@ -86,9 +86,7 @@ fn kernel_sample_length_lte_1() {
 
 #[test]
 fn kernel_sample_count_is_64() {
-    let samples: Vec<_> = (0..KERNEL_SIZE)
-        .map(|i| kernel_sample(i, KERNEL_SIZE))
-        .collect();
+    let samples: Vec<_> = (0..KERNEL_SIZE).map(|i| kernel_sample(i, KERNEL_SIZE)).collect();
     assert_eq!(samples.len(), 64);
 }
 
@@ -156,10 +154,8 @@ fn halton_all_values_in_open_01() {
     for base in [2u32, 3] {
         for idx in 1u32..=64 {
             let h = halton(base, idx);
-            assert!(
-                h > 0.0f32 && h < 1.0f32,
-                "halton({base},{idx}) = {h} not in (0,1)"
-            );
+            assert!(h > 0.0f32 && h < 1.0f32,
+                "halton({base},{idx}) = {h} not in (0,1)");
         }
     }
 }
@@ -229,8 +225,6 @@ fn hemisphere_samples_concentrate_near_origin() {
         .sum::<f32>()
         / (KERNEL_SIZE / 4) as f32;
 
-    assert!(
-        mean_near < mean_far,
-        "near_mean={mean_near} far_mean={mean_far}"
-    );
+    assert!(mean_near < mean_far,
+        "near_mean={mean_near} far_mean={mean_far}");
 }

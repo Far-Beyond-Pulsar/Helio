@@ -111,11 +111,13 @@ impl ApplicationHandler for App {
             force_fallback_adapter: false,
         }))
         .expect("no adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            ..Default::default()
-        }))
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            },
+        ))
         .expect("no device");
 
         let device = Arc::new(device);
@@ -170,27 +172,21 @@ impl ApplicationHandler for App {
                         .iter()
                         .map(|v| Vec3::from_array(v.position).length())
                         .fold(0.5, f32::max);
-                    let mesh_id = renderer
-                        .scene_mut()
-                        .insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
-                            vertices: mesh.vertices,
-                            indices: mesh.indices,
-                        }))
-                        .as_mesh()
-                        .unwrap();
+                    let mesh_id = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(helio::MeshUpload {
+                        vertices: mesh.vertices,
+                        indices: mesh.indices,
+                    })).as_mesh().unwrap();
                     let material = mesh
                         .material_index
                         .and_then(|index| material_ids.get(index).copied())
                         .unwrap_or_else(|| {
-                            renderer
-                                .scene_mut()
-                                .insert_material(v3_demo_common::make_material(
-                                    [0.7, 0.7, 0.75, 1.0],
-                                    0.6,
-                                    0.0,
-                                    [0.0, 0.0, 0.0],
-                                    0.0,
-                                ))
+                            renderer.scene_mut().insert_material(v3_demo_common::make_material(
+                                [0.7, 0.7, 0.75, 1.0],
+                                0.6,
+                                0.0,
+                                [0.0, 0.0, 0.0],
+                                0.0,
+                            ))
                         });
                     let _ = v3_demo_common::insert_object(
                         &mut renderer,
@@ -207,20 +203,14 @@ impl ApplicationHandler for App {
                     scene_path,
                     error
                 );
-                let mesh = renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-                    .as_mesh()
-                    .unwrap();
-                let material = renderer
-                    .scene_mut()
-                    .insert_material(v3_demo_common::make_material(
-                        [0.55, 0.68, 0.9, 1.0],
-                        0.35,
-                        0.15,
-                        [0.0, 0.0, 0.0],
-                        0.0,
-                    ));
+                let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
+                let material = renderer.scene_mut().insert_material(v3_demo_common::make_material(
+                    [0.55, 0.68, 0.9, 1.0],
+                    0.35,
+                    0.15,
+                    [0.0, 0.0, 0.0],
+                    0.0,
+                ));
                 let _ = v3_demo_common::insert_object(
                     &mut renderer,
                     mesh,
@@ -232,16 +222,15 @@ impl ApplicationHandler for App {
         }
 
         let point_light_pos = Vec3::new(0.0, 3.0, 0.0);
-        let point_light_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
+        let point_light_id = renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
+            point_light(
                 point_light_pos.to_array(),
                 [1.0, 0.95, 0.8],
                 12.0,
                 18.0,
-            )))
-            .as_light()
-            .unwrap();
+            ),
+            Some(helio::Movability::Movable),
+        )).as_light().unwrap();
 
         self.state = Some(AppState {
             window,
@@ -420,3 +409,6 @@ fn main() {
     let mut app = App::new();
     event_loop.run_app(&mut app).expect("event loop error");
 }
+
+
+

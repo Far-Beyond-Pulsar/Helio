@@ -179,3 +179,4 @@ fn struct_is_copy() {
     let g2 = g; // Copy
     assert_eq!(g.frame, g2.frame);
 }
+

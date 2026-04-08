@@ -241,7 +241,7 @@ fn screen_radius_scales_linearly_with_object_size() {
 fn lod_quality_medium_active_at_5_percent_screen_coverage() {
     let (s0, _) = LodQuality::Medium.thresholds();
     let sr = 0.06f32; // 6% screen coverage
-                      // LOD 0 is active when screen_radius >= s0
+    // LOD 0 is active when screen_radius >= s0
     assert!(sr >= s0, "sr={sr} s0={s0}");
 }
 

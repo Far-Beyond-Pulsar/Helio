@@ -118,3 +118,4 @@ impl Camera {
         Self::from_matrices(view, proj, position, near, far)
     }
 }
+

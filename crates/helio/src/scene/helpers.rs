@@ -117,6 +117,7 @@ pub(super) fn object_gpu_data(
         mesh,
         material: desc.material,
         groups: desc.groups,
+        movability: desc.movability.unwrap_or_default(),
         instance: GpuInstanceData {
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),
@@ -225,3 +226,4 @@ where
         f(texture);
     }
 }
+

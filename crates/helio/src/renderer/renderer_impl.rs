@@ -1,10 +1,11 @@
 use std::sync::{Arc, Mutex};
 
 use arrayvec::ArrayVec;
-use helio_pass_debug::DebugCameraUniform;
-use helio_pass_debug::DebugVertex;
+use helio_pass_debug::{DebugVertex};
 use helio_pass_deferred_light::DeferredLightPass;
+use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
+use helio_pass_debug::DebugCameraUniform;
 const MAX_TEXTURES: usize = crate::material::MAX_TEXTURES;
 
 use crate::groups::GroupId;
@@ -15,35 +16,24 @@ use super::config::{GiConfig, RendererConfig};
 use super::debug::{DebugDrawPass, DebugDrawState};
 use super::graph::{build_default_graph, build_simple_graph, create_depth_resources};
 
-type CustomGraphBuilder = Arc<
-    dyn Fn(
-            &Arc<wgpu::Device>,
-            &Arc<wgpu::Queue>,
-            &Scene,
-            RendererConfig,
-            Arc<Mutex<DebugDrawState>>,
-            &wgpu::Buffer,
-        ) -> RenderGraph
-        + Send
-        + Sync,
->;
+type CustomGraphBuilder = Arc<dyn Fn(&Arc<wgpu::Device>, &Arc<wgpu::Queue>, &Scene, RendererConfig, Arc<Mutex<DebugDrawState>>, &wgpu::Buffer) -> RenderGraph + Send + Sync>;
 
 const HALTON_JITTER: [[f32; 2]; 16] = [
-    [0.5, 0.333333],
-    [0.25, 0.666667],
-    [0.75, 0.111111],
-    [0.125, 0.444444],
-    [0.625, 0.777778],
-    [0.375, 0.222222],
-    [0.875, 0.555556],
-    [0.0625, 0.888889],
-    [0.5625, 0.037037],
-    [0.3125, 0.37037],
-    [0.8125, 0.703704],
-    [0.1875, 0.148148],
-    [0.6875, 0.481481],
-    [0.4375, 0.814815],
-    [0.9375, 0.259259],
+    [0.5,     0.333333],
+    [0.25,    0.666667],
+    [0.75,    0.111111],
+    [0.125,   0.444444],
+    [0.625,   0.777778],
+    [0.375,   0.222222],
+    [0.875,   0.555556],
+    [0.0625,  0.888889],
+    [0.5625,  0.037037],
+    [0.3125,  0.37037 ],
+    [0.8125,  0.703704],
+    [0.1875,  0.148148],
+    [0.6875,  0.481481],
+    [0.4375,  0.814815],
+    [0.9375,  0.259259],
     [0.03125, 0.592593],
 ];
 
@@ -68,6 +58,7 @@ pub struct Renderer {
     gi_config: GiConfig,
     shadow_quality: libhelio::ShadowQuality,
     debug_mode: u32,
+    perf_overlay_mode: PerfOverlayMode,
     debug_depth_test: bool,
     editor_mode: bool,
     custom_graph_builder: Option<CustomGraphBuilder>,
@@ -88,6 +79,14 @@ pub struct Renderer {
     /// Optional live portal handle for non-blocking profiling telemetry
     #[cfg(feature = "live-portal")]
     portal_handle: Option<helio_live_portal::LivePortalHandle>,
+
+    // ── Baking ────────────────────────────────────────────────────────────
+    /// Pending bake configuration.  Consumed in the first call to `render()`,
+    /// blocking until all passes complete before the first draw.
+    bake_pending: Option<helio_bake::BakeRequest>,
+    /// GPU-resident baked data (AO, lightmaps, probes, PVS).
+    /// Populated once, published into `FrameResources` every subsequent frame.
+    baked_data: Option<std::sync::Arc<helio_bake::BakedData>>,
 }
 
 enum GraphKind {
@@ -122,17 +121,13 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let graph = build_default_graph(
-            &device,
-            &queue,
-            &scene,
-            config,
-            debug_state.clone(),
-            &debug_camera_buffer,
-        );
+        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer);
 
-        let (depth_texture, depth_view) =
-            create_depth_resources(&device, config.internal_width(), config.internal_height());
+        let (depth_texture, depth_view) = create_depth_resources(
+            &device,
+            config.internal_width(),
+            config.internal_height(),
+        );
 
         let (full_res_depth_texture, full_res_depth_view) = if config.render_scale < 1.0 {
             let (t, v) = create_depth_resources(&device, config.width, config.height);
@@ -182,11 +177,12 @@ impl Renderer {
             clear_color: [0.02, 0.02, 0.03, 1.0],
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
-            debug_mode: 0,
+            debug_mode: config.debug_mode,
             debug_depth_test: true,
             editor_mode: false,
             custom_graph_builder: None,
             custom_graph_config: None,
+            perf_overlay_mode: config.perf_overlay_mode,
             debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
@@ -198,6 +194,9 @@ impl Renderer {
             jitter_cache_height: internal_h,
             #[cfg(feature = "live-portal")]
             portal_handle: None,
+
+            bake_pending: None,
+            baked_data: None,
         };
 
         // Automatically start live performance dashboard if feature is enabled
@@ -243,6 +242,15 @@ impl Renderer {
         }
     }
 
+    pub fn set_perf_overlay_mode(&mut self, mode: PerfOverlayMode) {
+        self.perf_overlay_mode = mode;
+        if matches!(self.graph_kind, GraphKind::Default) {
+            if let Some(pass) = self.graph.find_pass_mut::<PerfOverlayPass>() {
+                pass.set_mode(mode);
+            }
+        }
+    }
+
     pub fn set_debug_depth_test(&mut self, enabled: bool) {
         self.debug_depth_test = enabled;
         // Both pipelines are pre-compiled inside DebugPass; toggling the flag is O(1)
@@ -276,23 +284,13 @@ impl Renderer {
 
     pub fn debug_line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
         if let Ok(mut s) = self.debug_state.lock() {
-            s.user_lines.push(DebugVertex {
-                position: from,
-                _pad: 0.0,
-                color,
-            });
-            s.user_lines.push(DebugVertex {
-                position: to,
-                _pad: 0.0,
-                color,
-            });
+            s.user_lines.push(DebugVertex { position: from, _pad: 0.0, color });
+            s.user_lines.push(DebugVertex { position: to, _pad: 0.0, color });
         }
     }
 
     pub fn debug_circle(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 {
-            return;
-        }
+        if segments < 3 { return; }
         let (cx, cy, cz) = (center[0], center[1], center[2]);
         let step = std::f32::consts::TAU / segments as f32;
         let mut last = (cx + radius, cy, cz);
@@ -305,9 +303,7 @@ impl Renderer {
     }
 
     pub fn debug_sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 4 {
-            return;
-        }
+        if segments < 4 { return; }
         for plane in 0..3 {
             let mut prev = glam::Vec3::ZERO;
             for i in 0..=segments {
@@ -325,26 +321,11 @@ impl Renderer {
         }
     }
 
-    pub fn debug_torus(
-        &mut self,
-        center: [f32; 3],
-        normal: [f32; 3],
-        major_radius: f32,
-        minor_radius: f32,
-        color: [f32; 4],
-        major_segments: u32,
-        minor_segments: u32,
-    ) {
-        if major_segments < 3 || minor_segments < 3 {
-            return;
-        }
+    pub fn debug_torus(&mut self, center: [f32; 3], normal: [f32; 3], major_radius: f32, minor_radius: f32, color: [f32; 4], major_segments: u32, minor_segments: u32) {
+        if major_segments < 3 || minor_segments < 3 { return; }
         let c = glam::Vec3::from(center);
         let n = glam::Vec3::from(normal).normalize_or_zero();
-        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-6) {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
+        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-6) { glam::Vec3::X } else { glam::Vec3::Y };
         let tangent = n.cross(up).normalize_or_zero();
         let bitangent = n.cross(tangent).normalize_or_zero();
 
@@ -358,15 +339,9 @@ impl Renderer {
             let mut pprev1 = center1 + (n * minor_radius);
             for i in 1..=minor_segments {
                 let phi = 2.0 * std::f32::consts::TAU * (i as f32) / (minor_segments as f32);
-                let offset = (n * phi.cos()
-                    + (tangent * theta0.cos() + bitangent * theta0.sin()) * phi.sin())
-                .normalize_or_zero()
-                    * minor_radius;
+                let offset = (n * phi.cos() + (tangent * theta0.cos() + bitangent * theta0.sin()) * phi.sin()).normalize_or_zero() * minor_radius;
                 let cur0 = center0 + offset;
-                let offset1 = (n * phi.cos()
-                    + (tangent * theta1.cos() + bitangent * theta1.sin()) * phi.sin())
-                .normalize_or_zero()
-                    * minor_radius;
+                let offset1 = (n * phi.cos() + (tangent * theta1.cos() + bitangent * theta1.sin()) * phi.sin()).normalize_or_zero() * minor_radius;
                 let cur1 = center1 + offset1;
 
                 self.debug_line(pprev0.to_array(), cur0.to_array(), color);
@@ -379,26 +354,12 @@ impl Renderer {
         }
     }
 
-    pub fn debug_cylinder(
-        &mut self,
-        base_center: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
-        if segments < 3 {
-            return;
-        }
+    pub fn debug_cylinder(&mut self, base_center: [f32; 3], axis: [f32; 3], height: f32, radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
         let base = glam::Vec3::from(base_center);
         let dir = glam::Vec3::from(axis).normalize_or_zero();
         let top = base + dir * height;
-        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
+        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
         let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev_base = base + tangent * radius;
@@ -416,26 +377,12 @@ impl Renderer {
         }
     }
 
-    pub fn debug_cone(
-        &mut self,
-        apex: [f32; 3],
-        axis: [f32; 3],
-        height: f32,
-        base_radius: f32,
-        color: [f32; 4],
-        segments: u32,
-    ) {
-        if segments < 3 {
-            return;
-        }
+    pub fn debug_cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
         let apex_v = glam::Vec3::from(apex);
         let dir = glam::Vec3::from(axis).normalize_or_zero();
         let base = apex_v + dir * height;
-        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) {
-            glam::Vec3::X
-        } else {
-            glam::Vec3::Y
-        };
+        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
         let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev = base + tangent * base_radius;
@@ -448,17 +395,7 @@ impl Renderer {
         }
     }
 
-    pub fn debug_frustum(
-        &mut self,
-        origin: [f32; 3],
-        forward: [f32; 3],
-        up: [f32; 3],
-        fov_y: f32,
-        aspect: f32,
-        near: f32,
-        far: f32,
-        color: [f32; 4],
-    ) {
+    pub fn debug_frustum(&mut self, origin: [f32; 3], forward: [f32; 3], up: [f32; 3], fov_y: f32, aspect: f32, near: f32, far: f32, color: [f32; 4]) {
         let o = glam::Vec3::from(origin);
         let fwd = glam::Vec3::from(forward).normalize_or_zero();
         let upv = glam::Vec3::from(up).normalize_or_zero();
@@ -554,6 +491,7 @@ impl Renderer {
             shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
+            perf_overlay_mode: self.perf_overlay_mode,
         };
         let (depth_texture, depth_view) = create_depth_resources(
             &self.device,
@@ -669,6 +607,7 @@ impl Renderer {
             shadow_quality: self.shadow_quality,
             debug_mode: self.debug_mode,
             render_scale: self.render_scale,
+            perf_overlay_mode: self.perf_overlay_mode,
         };
         self.graph = build_default_graph(
             &self.device,
@@ -685,22 +624,54 @@ impl Renderer {
         self.scene.optimize_scene_layout();
     }
 
-    pub fn set_billboard_instances(
-        &mut self,
-        instances: &[helio_pass_billboard::BillboardInstance],
-    ) {
+    /// Queue a bake to run **once**, blocking before the first rendered frame.
+    ///
+    /// Helio will call [`helio_bake::run_bake_blocking`] at the top of the next
+    /// `render()` invocation, writing cache files to `request.config.cache_dir`
+    /// (skipping any pass whose cache file already exists).  After the bake,
+    /// baked AO is injected directly into `SsaoPass` so that pass skips its
+    /// per-frame screen-space computation, and all baked resources are available
+    /// via `FrameResources` fields for use by downstream passes.
+    ///
+    /// Calling this a second time replaces any previous pending request.
+    pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
+        self.bake_pending = Some(request);
+    }
+
+    pub fn set_billboard_instances(&mut self, instances: &[helio_pass_billboard::BillboardInstance]) {
         self.billboard_instances.clear();
         self.billboard_instances.extend_from_slice(instances);
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
+        // ── Baking: run once, blocking, before the first drawn frame ──────
+        if let Some(request) = self.bake_pending.take() {
+            log::info!(
+                "[helio-bake] Starting pre-frame-1 bake for scene '{}' (cache: {})…",
+                request.config.scene_name,
+                request.config.cache_dir.display(),
+            );
+            let baked = helio_bake::run_bake_blocking(
+                &self.device,
+                &self.queue,
+                &request.scene,
+                &request.config,
+            )
+            .map_err(|e| helio_v3::Error::InvalidPassConfig(e.to_string()))?;
+            let baked = std::sync::Arc::new(baked);
+            // Bypass per-frame SSAO — SsaoPass holds an Arc to the baked AO view
+            // and skips GPU execution while that override is set.
+            if let Some(pass) = self.graph.find_pass_mut::<helio_pass_ssao::SsaoPass>() {
+                pass.set_baked_ao(baked.ao_view());
+            }
+            log::info!("[helio-bake] Bake complete — all resources uploaded to GPU.");
+            self.baked_data = Some(baked);
+        }
+
         // Compute real frame delta, capped at 100 ms to avoid spiral-of-death on
         // slow frames (e.g. first frame, window unfocus/refocus, GPU stalls).
         let now = std::time::Instant::now();
-        let dt = now
-            .duration_since(self.last_render_time)
-            .as_secs_f32()
-            .min(0.1);
+        let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
         self.last_render_time = now;
         self.graph.set_delta_time(dt);
 
@@ -742,8 +713,7 @@ impl Renderer {
         self.scene.flush();
 
         self.billboard_scratch.clear();
-        self.billboard_scratch
-            .extend_from_slice(&self.billboard_instances);
+        self.billboard_scratch.extend_from_slice(&self.billboard_instances);
         if !self.scene.is_group_hidden(GroupId::EDITOR) {
             for light in self.scene.gpu_scene().lights.as_slice() {
                 if light.light_type == libhelio::LightType::Point as u32
@@ -751,55 +721,53 @@ impl Renderer {
                 {
                     let [x, y, z, _] = light.position_range;
                     let [r, g, b, _] = light.color_intensity;
-                    self.billboard_scratch
-                        .push(helio_pass_billboard::BillboardInstance {
-                            world_pos: [x, y, z, 0.0],
-                            scale_flags: [0.25, 0.25, 0.0, 0.0],
-                            color: [r, g, b, 1.0],
-                        });
+                    self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
+                        world_pos: [x, y, z, 0.0],
+                        scale_flags: [0.25, 0.25, 0.0, 0.0],
+                        color: [r, g, b, 1.0],
+                    });
                 }
             }
         }
 
         // Upload water volumes to GPU only when the descriptor has changed.
-        // get_water_volumes_gpu() allocates a Vec; skipping it at steady state
-        // eliminates the per-frame heap allocation and GPU write.
+        // get_water_volumes_gpu_slice() avoids heap allocations at steady state.
         // NOTE: must happen before the `texture_views` ArrayVec is built, since
         // clear_water_volumes_dirty() requires `&mut self.scene` and cannot
         // coexist with the immutable borrows held by that ArrayVec.
         let water_volume_count = self.scene.water_volumes_count();
         if water_volume_count > 0 && self.scene.water_volumes_dirty() {
-            let water_volumes = self.scene.get_water_volumes_gpu();
-            // Bridge descriptor sim/wind params into WaterSimPass so the update
-            // shader sees them. The descriptor is the source of truth — the pass's
-            // own fields are updated when the volume descriptor changes.
-            if let Some(pass) = self
-                .graph
-                .find_pass_mut::<helio_pass_water_sim::WaterSimPass>()
-            {
+            let water_volumes = self.scene.get_water_volumes_gpu_slice();
+            let water_volume_dirty_range = self.scene.water_volumes_dirty_range();
+            if let Some(pass) = self.graph.find_pass_mut::<helio_pass_water_sim::WaterSimPass>() {
                 let vol = &water_volumes[0];
                 pass.set_sim_dynamics(vol.sim_dynamics[0], vol.sim_dynamics[1]);
                 pass.set_wave_scale(vol.sim_dynamics[2]);
                 pass.set_wave_speed(vol.wave_params[2]);
                 pass.set_wind([vol.wind_params[0], vol.wind_params[1]], vol.wind_params[2]);
             }
-            self.queue.write_buffer(
-                &self.water_volumes_buffer,
-                0,
-                bytemuck::cast_slice(&water_volumes),
-            );
+            if let Some((start, end)) = water_volume_dirty_range {
+                self.queue.write_buffer(
+                    &self.water_volumes_buffer,
+                    (start * std::mem::size_of::<libhelio::GpuWaterVolume>()) as u64,
+                    bytemuck::cast_slice(&water_volumes[start..end]),
+                );
+            }
             self.scene.clear_water_volumes_dirty();
         }
 
         // Upload water hitboxes to GPU only when they have changed.
         let water_hitbox_count = self.scene.water_hitboxes_count();
         if water_hitbox_count > 0 && self.scene.water_hitboxes_dirty() {
-            let water_hitboxes = self.scene.get_water_hitboxes_gpu();
-            self.queue.write_buffer(
-                &self.water_hitboxes_buffer,
-                0,
-                bytemuck::cast_slice(&water_hitboxes),
-            );
+            let water_hitboxes = self.scene.get_water_hitboxes_gpu_slice();
+            let water_hitbox_dirty_range = self.scene.water_hitboxes_dirty_range();
+            if let Some((start, end)) = water_hitbox_dirty_range {
+                self.queue.write_buffer(
+                    &self.water_hitboxes_buffer,
+                    (start * std::mem::size_of::<libhelio::GpuWaterHitbox>()) as u64,
+                    bytemuck::cast_slice(&water_hitboxes[start..end]),
+                );
+            }
             self.scene.clear_water_hitboxes_dirty();
         }
 
@@ -815,23 +783,18 @@ impl Renderer {
             state.camera_position = camera.position;
         }
         let rc_radius = self.gi_config.rc_radius;
-        let rc_min = [
-            camera.position.x - rc_radius,
-            camera.position.y - rc_radius,
-            camera.position.z - rc_radius,
-        ];
-        let rc_max = [
-            camera.position.x + rc_radius,
-            camera.position.y + rc_radius,
-            camera.position.z + rc_radius,
-        ];
+        let rc_min = [camera.position.x - rc_radius, camera.position.y - rc_radius, camera.position.z - rc_radius];
+        let rc_max = [camera.position.x + rc_radius, camera.position.y + rc_radius, camera.position.z + rc_radius];
 
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
             shadow_atlas: None,
+            static_shadow_atlas: None,
             shadow_sampler: None,
             hiz: None,
             hiz_sampler: None,
+            static_hiz: None,
+            static_hiz_sampler: None,
             sky_lut: None,
             sky_lut_sampler: None,
             ssao: None,
@@ -855,10 +818,8 @@ impl Renderer {
             }),
             tile_light_lists: None,
             tile_light_counts: None,
-            full_res_depth: self
-                .full_res_depth_view
-                .as_ref()
-                .map(|v| v as &wgpu::TextureView),
+            full_res_depth: self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView),
+            full_res_depth_texture: self.full_res_depth_texture.as_ref().map(|t| t as &wgpu::Texture),
             sky: self.scene.sky_context(),
             billboards: if self.billboard_scratch.is_empty() {
                 None
@@ -885,6 +846,15 @@ impl Renderer {
             },
             water_hitbox_count,
             depth_texture: Some(&self.depth_texture),
+            // Baked data — populated after configure_bake() completes.
+            baked_ao: self.baked_data.as_deref().and_then(|d| d.ao_view_ref()),
+            baked_ao_sampler: self.baked_data.as_deref().and_then(|d| d.ao_sampler_ref()),
+            baked_lightmap: self.baked_data.as_deref().and_then(|d| d.lightmap_view_ref()),
+            baked_lightmap_sampler: self.baked_data.as_deref().and_then(|d| d.lightmap_sampler_ref()),
+            baked_reflection: self.baked_data.as_deref().and_then(|d| d.reflection_view_ref()),
+            baked_reflection_sampler: self.baked_data.as_deref().and_then(|d| d.reflection_sampler_ref()),
+            baked_irradiance_sh: self.baked_data.as_deref().and_then(|d| d.irradiance_sh_buf_ref()),
+            baked_pvs: self.baked_data.as_deref().and_then(|d| d.pvs_ref()),
         };
 
         self.graph.execute_with_frame_resources(
@@ -900,24 +870,25 @@ impl Renderer {
             let (pass_timings, total_cpu_ms, total_gpu_ms) = self.graph.profiler().export_timings();
 
             // Convert helio_v3::PassTiming to helio_live_portal::PortalPassTiming
-            let portal_timings: Vec<_> = pass_timings
-                .iter()
-                .map(|pt| helio_live_portal::PortalPassTiming {
+            let portal_timings: Vec<_> = pass_timings.iter().map(|pt| {
+                helio_live_portal::PortalPassTiming {
                     name: pt.name.clone(),
                     gpu_ms: pt.gpu_ms,
                     cpu_ms: pt.cpu_ms,
-                })
-                .collect();
+                }
+            }).collect();
 
             // Create stage timing hierarchy for node graph visualization
             // Top-level stage represents the entire GPU render pipeline
             let render_stage_id = "gpu_render";
-            let stage_timings = vec![helio_live_portal::PortalStageTiming {
-                id: render_stage_id.to_string(),
-                name: "GPU Render".to_string(),
-                ms: total_gpu_ms,
-                children: Vec::new(),
-            }];
+            let stage_timings = vec![
+                helio_live_portal::PortalStageTiming {
+                    id: render_stage_id.to_string(),
+                    name: "GPU Render".to_string(),
+                    ms: total_gpu_ms,
+                    children: Vec::new(),
+                }
+            ];
 
             let snapshot = helio_live_portal::PortalFrameSnapshot {
                 frame: self.scene.gpu_scene().frame_count,

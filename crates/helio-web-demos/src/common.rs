@@ -96,6 +96,7 @@ pub fn insert_object(
         ],
         flags: 0,
         groups: helio::GroupMask::NONE,
+        movability: None, // Default to Static
     }));
     object_actor_id
         .as_object()

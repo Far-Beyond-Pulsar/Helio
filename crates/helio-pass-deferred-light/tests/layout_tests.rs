@@ -151,3 +151,4 @@ fn globals_buf_size_96_satisfies_min_uniform_binding_size_multiple() {
     // and total size to be a multiple of 16 (WGSL vec4 alignment).
     assert_eq!(96 % 16, 0);
 }
+

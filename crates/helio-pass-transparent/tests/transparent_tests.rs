@@ -103,7 +103,7 @@ fn blend_transparent_source_leaves_destination() {
 #[test]
 fn blend_half_alpha_is_average() {
     let src = [1.0f32, 1.0, 1.0, 0.5]; // white, 50% alpha
-    let dst = [0.0f32, 0.0, 0.0]; // black
+    let dst = [0.0f32, 0.0, 0.0];       // black
     let result = blend_over(src, dst);
     for (i, &r) in result.iter().enumerate() {
         assert!((r - 0.5f32).abs() < 1e-6f32, "channel {i}: {r}");
@@ -128,14 +128,8 @@ fn blend_not_commutative_for_different_alpha() {
     let ab = blend_over(a, [b[0], b[1], b[2]]);
     let ba = blend_over(b, [a[0], a[1], a[2]]);
     // Color channels should differ due asymmetric alpha.
-    assert!(
-        (ab[0] - ba[0]).abs() > 0.1f32,
-        "red channel should differ for order-dependent blend"
-    );
-    assert!(
-        (ab[2] - ba[2]).abs() > 0.1f32,
-        "blue channel should differ for order-dependent blend"
-    );
+    assert!((ab[0] - ba[0]).abs() > 0.1f32, "red channel should differ for order-dependent blend");
+    assert!((ab[2] - ba[2]).abs() > 0.1f32, "blue channel should differ for order-dependent blend");
 }
 
 #[test]
@@ -146,10 +140,7 @@ fn blend_alpha_linearity() {
     let blend_a = blend_over([src_color[0], src_color[1], src_color[2], 0.3], dst);
     let blend_2a = blend_over([src_color[0], src_color[1], src_color[2], 0.6], dst);
     // Simple check: higher alpha = more source color
-    assert!(
-        blend_2a[0] > blend_a[0],
-        "higher alpha should give more source contribution"
-    );
+    assert!(blend_2a[0] > blend_a[0], "higher alpha should give more source contribution");
 }
 
 // ── Porter-Duff "over" operator tests ────────────────────────────────────────
@@ -209,10 +200,7 @@ fn oit_would_eliminate_sort_requirement() {
 #[test]
 fn gbuffer_globals_csm_splits_can_hold_four_cascade_depths() {
     let g = GBufferGlobals {
-        frame: 0,
-        delta_time: 0.016,
-        light_count: 1,
-        ambient_intensity: 0.1,
+        frame: 0, delta_time: 0.016, light_count: 1, ambient_intensity: 0.1,
         ambient_color: [0.1, 0.1, 0.1, 1.0],
         rc_world_min: [-100.0, -10.0, -100.0, 0.0],
         rc_world_max: [100.0, 50.0, 100.0, 0.0],

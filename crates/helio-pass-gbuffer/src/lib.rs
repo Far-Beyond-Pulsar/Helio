@@ -355,25 +355,10 @@ impl RenderPass for GBufferPass {
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
             if let Some(ref ms) = ctx.frame_resources.main_scene {
                 (
-                    [
-                        ms.ambient_color[0],
-                        ms.ambient_color[1],
-                        ms.ambient_color[2],
-                        1.0,
-                    ],
+                    [ms.ambient_color[0], ms.ambient_color[1], ms.ambient_color[2], 1.0],
                     ms.ambient_intensity,
-                    [
-                        ms.rc_world_min[0],
-                        ms.rc_world_min[1],
-                        ms.rc_world_min[2],
-                        0.0,
-                    ],
-                    [
-                        ms.rc_world_max[0],
-                        ms.rc_world_max[1],
-                        ms.rc_world_max[2],
-                        0.0,
-                    ],
+                    [ms.rc_world_min[0], ms.rc_world_min[1], ms.rc_world_min[2], 0.0],
+                    [ms.rc_world_max[0], ms.rc_world_max[1], ms.rc_world_max[2], 0.0],
                 )
             } else {
                 // Fallback for headless / test usage without a full renderer.
@@ -697,3 +682,4 @@ fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         ],
     })
 }
+

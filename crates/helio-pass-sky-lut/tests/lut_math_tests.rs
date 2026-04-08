@@ -1,7 +1,7 @@
 // Tests for helio-pass-sky-lut: panoramic UV ↔ azimuth/elevation math.
 // All tests are pure math — no GPU device required.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{PI, FRAC_PI_2};
 
 const LUT_WIDTH: u32 = 192;
 const LUT_HEIGHT: u32 = 108;
@@ -45,10 +45,7 @@ fn uv_corners_stay_in_range() {
         for &v in &[0.0f32, 0.5, 1.0] {
             let (az, el) = uv_to_azimuth_elevation(u, v);
             assert!(az >= 0.0 && az <= 2.0 * PI + 1e-5, "az = {az}");
-            assert!(
-                el >= -FRAC_PI_2 - 1e-5 && el <= FRAC_PI_2 + 1e-5,
-                "el = {el}"
-            );
+            assert!(el >= -FRAC_PI_2 - 1e-5 && el <= FRAC_PI_2 + 1e-5, "el = {el}");
         }
     }
 }
@@ -96,14 +93,7 @@ fn round_trip_uv_to_az_el_back_to_uv() {
 
 #[test]
 fn direction_is_unit_length_at_various_uvs() {
-    let uvs = [
-        (0.0, 0.5),
-        (0.25, 0.5),
-        (0.5, 0.5),
-        (0.75, 0.5),
-        (0.5, 0.0),
-        (0.5, 1.0),
-    ];
+    let uvs = [(0.0, 0.5), (0.25, 0.5), (0.5, 0.5), (0.75, 0.5), (0.5, 0.0), (0.5, 1.0)];
     for (u, v) in uvs {
         let d = uv_to_direction(u, v);
         let len = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
@@ -225,9 +215,9 @@ fn sun_direction_normalization_check() {
 
 #[test]
 fn opposite_azimuths_produce_mirrored_x_z() {
-    let d1 = uv_to_direction(0.0, 0.5); // azimuth = 0
-    let d2 = uv_to_direction(0.5, 0.5); // azimuth = π
-                                        // x components should have opposite signs
+    let d1 = uv_to_direction(0.0, 0.5);  // azimuth = 0
+    let d2 = uv_to_direction(0.5, 0.5);  // azimuth = π
+    // x components should have opposite signs
     assert!(d1[0] > 0.0, "d1.x = {}", d1[0]);
     assert!(d2[0] < 0.0, "d2.x = {}", d2[0]);
 }

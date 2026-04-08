@@ -69,9 +69,10 @@ use std::collections::HashMap;
 ///
 /// Registered via `RenderGraph::register_transient_route`.
 type TransientRoute = Box<
-    dyn for<'frame> Fn(&'frame wgpu::TextureView, &mut libhelio::FrameResources<'frame>)
-        + Send
-        + Sync,
+    dyn for<'frame> Fn(
+        &'frame wgpu::TextureView,
+        &mut libhelio::FrameResources<'frame>,
+    ) + Send + Sync,
 >;
 
 /// Transient texture managed by the render graph.
@@ -242,9 +243,9 @@ impl RenderGraph {
         // Pre-register the three built-in transient routes so existing graphs
         // that rely on these names continue to work without any changes.
         let mut resource_routes: Vec<(&'static str, TransientRoute)> = Vec::new();
-        resource_routes.push(("pre_aa", Box::new(|view, fr| fr.pre_aa = Some(view))));
+        resource_routes.push(("pre_aa",  Box::new(|view, fr| fr.pre_aa  = Some(view))));
         resource_routes.push(("sky_lut", Box::new(|view, fr| fr.sky_lut = Some(view))));
-        resource_routes.push(("ssao", Box::new(|view, fr| fr.ssao = Some(view))));
+        resource_routes.push(("ssao",    Box::new(|view, fr| fr.ssao    = Some(view))));
 
         Self {
             passes: Vec::new(),
@@ -293,14 +294,17 @@ impl RenderGraph {
     /// ```
     pub fn register_transient_route<F>(&mut self, name: &'static str, route: F)
     where
-        F: for<'frame> Fn(&'frame wgpu::TextureView, &mut libhelio::FrameResources<'frame>)
-            + Send
-            + Sync
-            + 'static,
+        F: for<'frame> Fn(
+                &'frame wgpu::TextureView,
+                &mut libhelio::FrameResources<'frame>,
+            ) + Send + Sync + 'static,
     {
         self.resource_routes.push((name, Box::new(route)));
     }
 
+    // TODO: Automate the additional calls of this method internally such that
+    //       the end user only ever calls it at resize time. Document this when
+    //       it is confirmed to be the case.
     /// Sets the render target size and recreates transient textures.
     ///
     /// Must be called after adding passes and before first execute().
@@ -384,9 +388,7 @@ impl RenderGraph {
         // and textures created in set_render_size() by iterating all passes.
         let type_id = pass.as_any().type_id();
         // Only store the first occurrence so find_pass() returns the first matching pass.
-        self.pass_index_map
-            .entry(type_id)
-            .or_insert(self.passes.len());
+        self.pass_index_map.entry(type_id).or_insert(self.passes.len());
         self.passes.push(pass);
     }
 
@@ -626,3 +628,4 @@ impl RenderGraph {
         self.transient_textures.clear();
     }
 }
+

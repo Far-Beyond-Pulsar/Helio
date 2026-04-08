@@ -20,29 +20,20 @@
 //!   Escape — release cursor / exit
 
 mod v3_demo_common;
-use v3_demo_common::{box_mesh, insert_object, make_material, point_light, sphere_mesh};
+use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, point_light, sphere_mesh};
 
-use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, MaterialId, MeshId, ObjectId, Renderer,
-    RendererConfig,
-};
+use helio::{required_wgpu_features, required_wgpu_limits, Camera, MaterialId, MeshId, ObjectId, Renderer, RendererConfig};
 use salva3d::{
     kernel::CubicSplineKernel,
     object::{Boundary, Fluid},
-    solver::{Akinci2013SurfaceTension, DFSPHSolver, XSPHViscosity},
+    solver::{Akinci2013SurfaceTension, XSPHViscosity, DFSPHSolver},
     LiquidWorld,
 };
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use winit::{
-    application::ApplicationHandler,
-    event::*,
-    event_loop::{ActiveEventLoop, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{CursorGrabMode, Window, WindowId},
-};
+use winit::{application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::{CursorGrabMode, Window, WindowId}};
 
 struct FluidParticle {
     id: ObjectId,
@@ -58,13 +49,7 @@ struct PhysicsSharedState {
     last_physics_update: Mutex<std::time::Instant>,
 
     // Command state (checked directly by physics thread)
-    pending_spawns: Mutex<
-        Vec<(
-            Vec<salva3d::math::Point<f32>>,
-            Vec<salva3d::math::Vector<f32>>,
-            std::time::Instant,
-        )>,
-    >,
+    pending_spawns: Mutex<Vec<(Vec<salva3d::math::Point<f32>>, Vec<salva3d::math::Vector<f32>>, std::time::Instant)>>,
     reset_requested: std::sync::atomic::AtomicBool,
     exit_requested: std::sync::atomic::AtomicBool,
 }
@@ -72,7 +57,10 @@ struct PhysicsSharedState {
 impl PhysicsSharedState {
     fn new() -> Self {
         Self {
-            position_buffers: [Mutex::new(Vec::new()), Mutex::new(Vec::new())],
+            position_buffers: [
+                Mutex::new(Vec::new()),
+                Mutex::new(Vec::new()),
+            ],
             read_index: AtomicUsize::new(0),
             last_physics_update: Mutex::new(std::time::Instant::now()),
             pending_spawns: Mutex::new(Vec::new()),
@@ -103,26 +91,12 @@ impl PhysicsSharedState {
     }
 
     // Main thread: request spawn (timestamp for latency tracking)
-    fn request_spawn(
-        &self,
-        positions: Vec<salva3d::math::Point<f32>>,
-        velocities: Vec<salva3d::math::Vector<f32>>,
-    ) {
-        self.pending_spawns.lock().unwrap().push((
-            positions,
-            velocities,
-            std::time::Instant::now(),
-        ));
+    fn request_spawn(&self, positions: Vec<salva3d::math::Point<f32>>, velocities: Vec<salva3d::math::Vector<f32>>) {
+        self.pending_spawns.lock().unwrap().push((positions, velocities, std::time::Instant::now()));
     }
 
     // Physics thread: drain pending spawns
-    fn take_pending_spawns(
-        &self,
-    ) -> Vec<(
-        Vec<salva3d::math::Point<f32>>,
-        Vec<salva3d::math::Vector<f32>>,
-        std::time::Instant,
-    )> {
+    fn take_pending_spawns(&self) -> Vec<(Vec<salva3d::math::Point<f32>>, Vec<salva3d::math::Vector<f32>>, std::time::Instant)> {
         std::mem::take(&mut *self.pending_spawns.lock().unwrap())
     }
 }
@@ -165,12 +139,13 @@ struct AppState {
     tap_duration: f32,
 }
 
-struct App {
-    state: Option<AppState>,
-}
+struct App { state: Option<AppState> }
 
 // Physics thread function - direct shared state, no message passing
-fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
+fn physics_thread(
+    shared_state: Arc<PhysicsSharedState>,
+    particle_radius: f32,
+) {
     let smoothing_factor = 2.0;
     let mut liquid_world = LiquidWorld::new(
         DFSPHSolver::<CubicSplineKernel>::new(),
@@ -195,9 +170,7 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
 
     // Wall boundary particles
     for y in (0..=30).map(|i| i as f32 * spacing) {
-        if y > wall_height {
-            break;
-        }
+        if y > wall_height { break; }
         for z in (-100..=100).map(|i| i as f32 * spacing) {
             if z.abs() <= container_size {
                 boundary_positions.push(salva3d::math::Point::new(-container_size, y, z));
@@ -259,9 +232,7 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
                 }
             }
             for y in (0..=30).map(|i| i as f32 * spacing) {
-                if y > wall_height {
-                    break;
-                }
+                if y > wall_height { break; }
                 for z in (-100..=100).map(|i| i as f32 * spacing) {
                     if z.abs() <= container_size {
                         boundary_positions.push(salva3d::math::Point::new(-container_size, y, z));
@@ -293,12 +264,8 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
                 total_spawned += positions.len();
 
                 let mut fluid = Fluid::new(positions, particle_radius, 1000.0);
-                fluid
-                    .nonpressure_forces
-                    .push(Box::new(XSPHViscosity::new(0.5, 0.0)));
-                fluid
-                    .nonpressure_forces
-                    .push(Box::new(Akinci2013SurfaceTension::new(0.5, 0.0)));
+                fluid.nonpressure_forces.push(Box::new(XSPHViscosity::new(0.5, 0.0)));
+                fluid.nonpressure_forces.push(Box::new(Akinci2013SurfaceTension::new(0.5, 0.0)));
 
                 let fluid_handle = liquid_world.add_fluid(fluid);
 
@@ -312,15 +279,9 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
                 }
             }
 
-            let total_particles: usize = liquid_world
-                .fluids()
-                .iter()
-                .map(|(_, f)| f.positions.len())
-                .sum();
-            eprintln!(
-                "[Physics] Spawned {} particles | Max latency: {:?} | Total: {}",
-                total_spawned, max_latency, total_particles
-            );
+            let total_particles: usize = liquid_world.fluids().iter().map(|(_, f)| f.positions.len()).sum();
+            eprintln!("[Physics] Spawned {} particles | Max latency: {:?} | Total: {}",
+                total_spawned, max_latency, total_particles);
         }
 
         // Fixed timestep accumulator pattern (limit to 2 steps max to prevent bursts)
@@ -335,10 +296,7 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
 
         // If we're falling behind, just drop the accumulated time
         if accumulator > fixed_dt * 3.0 {
-            eprintln!(
-                "[Physics] WARNING: Dropping accumulated time ({:.3}s) - physics too slow!",
-                accumulator
-            );
+            eprintln!("[Physics] WARNING: Dropping accumulated time ({:.3}s) - physics too slow!", accumulator);
             accumulator = 0.0;
         }
 
@@ -346,11 +304,7 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
 
         // Debug: Log physics steps with timing (less frequently)
         if steps_this_frame > 0 && total_steps % 120 == 0 {
-            let particle_count = liquid_world
-                .fluids()
-                .iter()
-                .map(|(_, f)| f.positions.len())
-                .sum::<usize>();
+            let particle_count = liquid_world.fluids().iter().map(|(_, f)| f.positions.len()).sum::<usize>();
             eprintln!("[Physics] Stepped {} times in {:?} | Total steps: {} | Particles: {} | Per-step: {:?}",
                 steps_this_frame, step_duration, total_steps, particle_count,
                 step_duration / steps_this_frame.max(1) as u32);
@@ -369,10 +323,8 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
 
         // Log write timing periodically
         if loop_count % 60 == 0 && particle_count > 0 {
-            eprintln!(
-                "[Physics] Wrote {} positions in {:?} | Loop: {}",
-                particle_count, write_duration, loop_count
-            );
+            eprintln!("[Physics] Wrote {} positions in {:?} | Loop: {}",
+                particle_count, write_duration, loop_count);
         }
 
         // Yield to prevent CPU starvation, but keep loop running fast
@@ -383,133 +335,39 @@ fn physics_thread(shared_state: Arc<PhysicsSharedState>, particle_radius: f32) {
 fn main() {
     env_logger::init();
     log::info!("Starting Salva3d Fluid Demo");
-    EventLoop::new()
-        .expect("event loop")
-        .run_app(&mut App { state: None })
-        .expect("run");
+    EventLoop::new().expect("event loop").run_app(&mut App { state: None }).expect("run");
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
+        if self.state.is_some() { return; }
 
-        let window = Arc::new(
-            event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("Helio — Faucet Fill Box (Salva3d)")
-                        .with_inner_size(winit::dpi::LogicalSize::new(1600u32, 900u32)),
-                )
-                .expect("window"),
-        );
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            flags: wgpu::InstanceFlags::empty(),
-            ..Default::default()
-        });
+        let window = Arc::new(event_loop.create_window(Window::default_attributes().with_title("Helio — Faucet Fill Box (Salva3d)").with_inner_size(winit::dpi::LogicalSize::new(1600u32, 900u32))).expect("window"));
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), flags: wgpu::InstanceFlags::empty(), ..Default::default() });
         let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            ..Default::default()
-        }))
-        .expect("device");
-        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| panic!("[GPU] {:?}", e)));
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false })).expect("adapter");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: required_wgpu_features(adapter.features()), required_limits: required_wgpu_limits(adapter.limits()), ..Default::default() })).expect("device");
+        device.on_uncaptured_error(Arc::new(|e: wgpu::Error| { panic!("[GPU] {:?}", e) }));
         let device = Arc::new(device);
         let queue = Arc::new(queue);
 
         let caps = surface.get_capabilities(&adapter);
-        let fmt = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let fmt = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format: fmt,
-                width: size.width,
-                height: size.height,
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 1,
-            },
-        );
+        surface.configure(&device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt, width: size.width, height: size.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: caps.alpha_modes[0], view_formats: vec![], desired_maximum_frame_latency: 1 });
 
-        let mut renderer = Renderer::new(
-            device.clone(),
-            queue.clone(),
-            RendererConfig::new(size.width, size.height, fmt),
-        );
+        let mut renderer = Renderer::new(device.clone(), queue.clone(), RendererConfig::new(size.width, size.height, fmt));
         renderer.set_ambient([0.08, 0.08, 0.1], 1.0);
 
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [15.0, 25.0, 15.0],
-                [0.9, 0.9, 0.85],
-                20.0,
-                80.0,
-            )))
-            .as_light()
-            .unwrap();
-        let _ = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                [-15.0, 20.0, -10.0],
-                [0.7, 0.8, 1.0],
-                15.0,
-                70.0,
-            )))
-            .as_light()
-            .unwrap();
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([15.0, 25.0, 15.0], [0.9, 0.9, 0.85], 20.0, 80.0))).as_light().unwrap();
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-15.0, 20.0, -10.0], [0.7, 0.8, 1.0], 15.0, 70.0))).as_light().unwrap();
 
-        let floor_mat = renderer.scene_mut().insert_material(make_material(
-            [0.3, 0.3, 0.35, 1.0],
-            0.8,
-            0.05,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let wall_mat = renderer.scene_mut().insert_material(make_material(
-            [0.35, 0.3, 0.28, 1.0],
-            0.7,
-            0.02,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let water_material = renderer.scene_mut().insert_material(make_material(
-            [0.15, 0.4, 0.75, 0.85],
-            0.1,
-            0.0,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
-        let faucet_mat = renderer.scene_mut().insert_material(make_material(
-            [0.6, 0.6, 0.65, 1.0],
-            0.3,
-            0.6,
-            [0.0, 0.0, 0.0],
-            0.0,
-        ));
+        let floor_mat = renderer.scene_mut().insert_material(make_material([0.3, 0.3, 0.35, 1.0], 0.8, 0.05, [0.0, 0.0, 0.0], 0.0));
+        let wall_mat = renderer.scene_mut().insert_material(make_material([0.35, 0.3, 0.28, 1.0], 0.7, 0.02, [0.0, 0.0, 0.0], 0.0));
+        let water_material = renderer.scene_mut().insert_material(make_material([0.15, 0.4, 0.75, 0.85], 0.1, 0.0, [0.0, 0.0, 0.0], 0.0));
+        let faucet_mat = renderer.scene_mut().insert_material(make_material([0.6, 0.6, 0.65, 1.0], 0.3, 0.6, [0.0, 0.0, 0.0], 0.0));
 
-        let sphere_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0)))
-            .as_mesh()
-            .unwrap();
+        let sphere_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(sphere_mesh([0.0, 0.0, 0.0], 1.0))).as_mesh().unwrap();
 
         let particle_radius = 0.2;
         let fluid_density = 1000.0;
@@ -533,125 +391,31 @@ impl ApplicationHandler for App {
         let wall_thickness = 0.5;
 
         // Render container floor
-        let floor_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [20.0, 0.5, 20.0],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
-            floor_mesh,
-            floor_mat,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)),
-            20.0,
-        );
+        let floor_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [20.0, 0.5, 20.0]))).as_mesh().unwrap();
+        let _ = insert_object(&mut renderer, floor_mesh, floor_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, -0.5, 0.0)), 20.0);
 
         // Render container walls
         let wall_thickness = 0.5;
 
         // Right wall
-        let wall_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [wall_thickness * 0.5, wall_height * 0.5, container_size],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
-            wall_mesh,
-            wall_mat,
-            glam::Mat4::from_translation(glam::Vec3::new(
-                container_size + wall_thickness * 0.5,
-                wall_height * 0.5,
-                0.0,
-            )),
-            10.0,
-        );
+        let wall_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [wall_thickness * 0.5, wall_height * 0.5, container_size]))).as_mesh().unwrap();
+        let _ = insert_object(&mut renderer, wall_mesh, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(container_size + wall_thickness * 0.5, wall_height * 0.5, 0.0)), 10.0);
 
         // Left wall
-        let wall_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [wall_thickness * 0.5, wall_height * 0.5, container_size],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
-            wall_mesh,
-            wall_mat,
-            glam::Mat4::from_translation(glam::Vec3::new(
-                -container_size - wall_thickness * 0.5,
-                wall_height * 0.5,
-                0.0,
-            )),
-            10.0,
-        );
+        let wall_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [wall_thickness * 0.5, wall_height * 0.5, container_size]))).as_mesh().unwrap();
+        let _ = insert_object(&mut renderer, wall_mesh, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(-container_size - wall_thickness * 0.5, wall_height * 0.5, 0.0)), 10.0);
 
         // Back wall
-        let wall_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [container_size, wall_height * 0.5, wall_thickness * 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
-            wall_mesh,
-            wall_mat,
-            glam::Mat4::from_translation(glam::Vec3::new(
-                0.0,
-                wall_height * 0.5,
-                container_size + wall_thickness * 0.5,
-            )),
-            10.0,
-        );
+        let wall_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [container_size, wall_height * 0.5, wall_thickness * 0.5]))).as_mesh().unwrap();
+        let _ = insert_object(&mut renderer, wall_mesh, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, wall_height * 0.5, container_size + wall_thickness * 0.5)), 10.0);
 
         // Front wall
-        let wall_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [container_size, wall_height * 0.5, wall_thickness * 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
-            wall_mesh,
-            wall_mat,
-            glam::Mat4::from_translation(glam::Vec3::new(
-                0.0,
-                wall_height * 0.5,
-                -container_size - wall_thickness * 0.5,
-            )),
-            10.0,
-        );
+        let wall_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [container_size, wall_height * 0.5, wall_thickness * 0.5]))).as_mesh().unwrap();
+        let _ = insert_object(&mut renderer, wall_mesh, wall_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, wall_height * 0.5, -container_size - wall_thickness * 0.5)), 10.0);
 
         // Render simple faucet indicator
-        let faucet_mesh = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(box_mesh(
-                [0.0, 0.0, 0.0],
-                [0.5, 0.5, 0.5],
-            )))
-            .as_mesh()
-            .unwrap();
-        let _ = insert_object(
-            &mut renderer,
-            faucet_mesh,
-            faucet_mat,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.0, 0.0)),
-            1.0,
-        );
+        let faucet_mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [0.5, 0.5, 0.5]))).as_mesh().unwrap();
+        let _ = insert_object(&mut renderer, faucet_mesh, faucet_mat, glam::Mat4::from_translation(glam::Vec3::new(0.0, 10.0, 0.0)), 1.0);
 
         let state = AppState {
             window,
@@ -690,15 +454,7 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Escape),
-                        ..
-                    },
-                ..
-            } => {
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Escape), ..}, .. } => {
                 if state.cursor_grabbed {
                     state.cursor_grabbed = false;
                     let _ = state.window.set_cursor_grab(CursorGrabMode::None);
@@ -707,74 +463,28 @@ impl ApplicationHandler for App {
                     event_loop.exit();
                 }
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::KeyC),
-                        ..
-                    },
-                ..
-            } => {
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::KeyC), ..}, .. } => {
                 state.physics_enabled = !state.physics_enabled;
                 eprintln!("physics enabled={}", state.physics_enabled);
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::KeyR),
-                        ..
-                    },
-                ..
-            } => {
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::KeyR), ..}, .. } => {
                 state.reset_scene();
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Equal),
-                        ..
-                    },
-                ..
-            } => {
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ElementState::Pressed, physical_key: PhysicalKey::Code(KeyCode::Equal), ..}, .. } => {
                 state.tap_active = true;
                 state.tap_timer = 0.0;
                 state.spawn_timer = 0.0; // Reset spawn timer so particles start immediately
-                eprintln!(
-                    "Tap activated for {} seconds (particles: {})",
-                    state.tap_duration,
-                    state.fluid_particles.len()
-                );
+                eprintln!("Tap activated for {} seconds (particles: {})", state.tap_duration, state.fluid_particles.len());
             }
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ks,
-                        physical_key: PhysicalKey::Code(key),
-                        ..
-                    },
-                ..
-            } => match ks {
-                ElementState::Pressed => {
-                    state.keys.insert(key);
+            WindowEvent::KeyboardInput { event: KeyEvent { state: ks, physical_key: PhysicalKey::Code(key), ..}, .. } => {
+                match ks {
+                    ElementState::Pressed => { state.keys.insert(key); }
+                    ElementState::Released => { state.keys.remove(&key); }
                 }
-                ElementState::Released => {
-                    state.keys.remove(&key);
-                }
-            },
-            WindowEvent::MouseInput {
-                state: ElementState::Pressed,
-                button: MouseButton::Left,
-                ..
-            } => {
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 if !state.cursor_grabbed {
-                    let ok = state
-                        .window
-                        .set_cursor_grab(CursorGrabMode::Confined)
-                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
-                        .is_ok();
+                    let ok = state.window.set_cursor_grab(CursorGrabMode::Confined).or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked)).is_ok();
                     if ok {
                         state.window.set_cursor_visible(false);
                         state.cursor_grabbed = true;
@@ -782,19 +492,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
-                state.surface.configure(
-                    &state.device,
-                    &wgpu::SurfaceConfiguration {
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                        format: state.surface_format,
-                        width: s.width,
-                        height: s.height,
-                        present_mode: wgpu::PresentMode::Fifo,
-                        alpha_mode: wgpu::CompositeAlphaMode::Auto,
-                        view_formats: vec![],
-                        desired_maximum_frame_latency: 1,
-                    },
-                );
+                state.surface.configure(&state.device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: state.surface_format, width: s.width, height: s.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: wgpu::CompositeAlphaMode::Auto, view_formats: vec![], desired_maximum_frame_latency: 1 });
                 state.renderer.set_render_size(s.width, s.height);
             }
             WindowEvent::RedrawRequested => {
@@ -827,9 +525,7 @@ impl ApplicationHandler for App {
 impl Drop for AppState {
     fn drop(&mut self) {
         // Tell physics thread to exit (direct state access)
-        self.physics_state
-            .exit_requested
-            .store(true, Ordering::Relaxed);
+        self.physics_state.exit_requested.store(true, Ordering::Relaxed);
     }
 }
 
@@ -843,9 +539,7 @@ impl AppState {
         }
 
         // Request reset (direct state access)
-        self.physics_state
-            .reset_requested
-            .store(true, Ordering::Relaxed);
+        self.physics_state.reset_requested.store(true, Ordering::Relaxed);
 
         self.pending_spawn_count = 0;
         self.spawn_timer = 0.0;
@@ -854,10 +548,7 @@ impl AppState {
     fn spawn_fluid_parcel(&mut self) {
         if self.fluid_particles.len() + self.pending_spawn_count >= self.max_particles {
             if self.tap_active {
-                eprintln!(
-                    "Max particles ({}) reached! Press R to reset.",
-                    self.max_particles
-                );
+                eprintln!("Max particles ({}) reached! Press R to reset.", self.max_particles);
                 self.tap_active = false; // Stop trying to spawn
             }
             return;
@@ -878,9 +569,7 @@ impl AppState {
 
         for x in 0..horizontal_size {
             for z in 0..horizontal_size {
-                if self.fluid_particles.len() + self.pending_spawn_count + positions.len()
-                    >= self.max_particles
-                {
+                if self.fluid_particles.len() + self.pending_spawn_count + positions.len() >= self.max_particles {
                     break;
                 }
 
@@ -901,12 +590,10 @@ impl AppState {
 
         let particle_count = positions.len();
 
-        eprintln!(
-            "[Main] Spawning {} particles at tap position | Total visual: {} | Pending: {}",
+        eprintln!("[Main] Spawning {} particles at tap position | Total visual: {} | Pending: {}",
             particle_count,
             self.fluid_particles.len(),
-            self.pending_spawn_count
-        );
+            self.pending_spawn_count);
 
         // Request spawn (direct state access - no channel latency!)
         self.physics_state.request_spawn(positions, velocities);
@@ -929,28 +616,20 @@ impl AppState {
 
         // Log every 60 frames
         if self.frame_count % 60 == 0 {
-            eprintln!(
-                "[Render] Latency: {:?} | Read {} positions in {:?} | Visual: {} | First pos: {:?}",
+            eprintln!("[Render] Latency: {:?} | Read {} positions in {:?} | Visual: {} | First pos: {:?}",
                 physics_latency,
                 physics_particle_count,
                 read_duration,
                 self.fluid_particles.len(),
-                positions.first().map(|p| (p.x, p.y, p.z))
-            );
+                positions.first().map(|p| (p.x, p.y, p.z)));
         }
 
         // Create visual particles for new physics particles
         let initial_visual_count = self.fluid_particles.len();
         while self.fluid_particles.len() < physics_particle_count {
             let transform = glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
-            let obj = insert_object(
-                &mut self.renderer,
-                self.sphere_mesh,
-                self.water_material,
-                transform,
-                self.particle_radius,
-            )
-            .expect("insert particle");
+            let obj = insert_object_with_movability(&mut self.renderer, self.sphere_mesh, self.water_material, transform, self.particle_radius, Some(helio::Movability::Movable))
+                .expect("insert particle");
             self.fluid_particles.push(FluidParticle { id: obj });
 
             if self.pending_spawn_count > 0 {
@@ -959,39 +638,31 @@ impl AppState {
         }
 
         if self.fluid_particles.len() != initial_visual_count {
-            eprintln!(
-                "[Render] Created {} new visual particles (total: {})",
+            eprintln!("[Render] Created {} new visual particles (total: {})",
                 self.fluid_particles.len() - initial_visual_count,
-                self.fluid_particles.len()
-            );
+                self.fluid_particles.len());
         }
 
         // Update transforms using the same positions snapshot (consistent data!)
         let update_start = std::time::Instant::now();
         for (i, pos) in positions.iter().enumerate() {
             if i >= self.fluid_particles.len() {
-                eprintln!(
-                    "[Render] WARNING: Position index {} >= visual particles {}",
-                    i,
-                    self.fluid_particles.len()
-                );
+                eprintln!("[Render] WARNING: Position index {} >= visual particles {}", i, self.fluid_particles.len());
                 break;
             }
 
             let transform = glam::Mat4::from_translation(glam::Vec3::new(pos.x, pos.y, pos.z))
                 * glam::Mat4::from_scale(glam::Vec3::splat(self.particle_radius));
-            let _ = self
-                .renderer
-                .scene_mut()
-                .update_object_transform(self.fluid_particles[i].id, transform);
+            let _ = self.renderer.scene_mut().update_object_transform(
+                self.fluid_particles[i].id,
+                transform
+            );
         }
 
         if self.frame_count % 60 == 0 {
-            eprintln!(
-                "[Render] Updated {} transforms in {:?}",
+            eprintln!("[Render] Updated {} transforms in {:?}",
                 positions.len().min(self.fluid_particles.len()),
-                update_start.elapsed()
-            );
+                update_start.elapsed());
         }
     }
 
@@ -1008,24 +679,12 @@ impl AppState {
         let forward = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let right = glam::Vec3::new(cy, 0.0, sy);
 
-        if self.keys.contains(&KeyCode::KeyW) {
-            self.cam_pos += forward * SPEED * dt;
-        }
-        if self.keys.contains(&KeyCode::KeyS) {
-            self.cam_pos -= forward * SPEED * dt;
-        }
-        if self.keys.contains(&KeyCode::KeyA) {
-            self.cam_pos -= right * SPEED * dt;
-        }
-        if self.keys.contains(&KeyCode::KeyD) {
-            self.cam_pos += right * SPEED * dt;
-        }
-        if self.keys.contains(&KeyCode::Space) {
-            self.cam_pos.y += SPEED * dt;
-        }
-        if self.keys.contains(&KeyCode::ShiftLeft) {
-            self.cam_pos.y -= SPEED * dt;
-        }
+        if self.keys.contains(&KeyCode::KeyW) { self.cam_pos += forward * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyS) { self.cam_pos -= forward * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyA) { self.cam_pos -= right * SPEED * dt; }
+        if self.keys.contains(&KeyCode::KeyD) { self.cam_pos += right * SPEED * dt; }
+        if self.keys.contains(&KeyCode::Space) { self.cam_pos.y += SPEED * dt; }
+        if self.keys.contains(&KeyCode::ShiftLeft) { self.cam_pos.y -= SPEED * dt; }
 
         if self.physics_enabled {
             // Update tap timer
@@ -1034,10 +693,7 @@ impl AppState {
                 if self.tap_timer >= self.tap_duration {
                     self.tap_active = false;
                     self.tap_timer = 0.0;
-                    eprintln!(
-                        "Tap deactivated (total particles: {})",
-                        self.fluid_particles.len()
-                    );
+                    eprintln!("Tap deactivated (total particles: {})", self.fluid_particles.len());
                 }
             }
 
@@ -1052,11 +708,7 @@ impl AppState {
                     if (self.tap_timer * 2.0) as i32 != ((self.tap_timer - dt) * 2.0) as i32 {
                         let remaining = self.tap_duration - self.tap_timer;
                         if remaining > 0.0 {
-                            eprintln!(
-                                "  Tap running: {:.1}s remaining, {} particles",
-                                remaining,
-                                self.fluid_particles.len()
-                            );
+                            eprintln!("  Tap running: {:.1}s remaining, {} particles", remaining, self.fluid_particles.len());
                         }
                     }
                 }
@@ -1068,26 +720,13 @@ impl AppState {
 
         let size = self.window.inner_size();
         let aspect = size.width as f32 / size.height.max(1) as f32;
-        let camera = Camera::perspective_look_at(
-            self.cam_pos,
-            self.cam_pos + forward,
-            glam::Vec3::Y,
-            std::f32::consts::FRAC_PI_3,
-            aspect,
-            0.1,
-            300.0,
-        );
+        let camera = Camera::perspective_look_at(self.cam_pos, self.cam_pos + forward, glam::Vec3::Y, std::f32::consts::FRAC_PI_3, aspect, 0.1, 300.0);
 
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
-            Err(e) => {
-                log::warn!("Surface error: {:?}", e);
-                return;
-            }
+            Err(e) => { log::warn!("Surface error: {:?}", e); return; }
         };
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("Render error: {:?}", e);
@@ -1097,12 +736,8 @@ impl AppState {
         self.frame_count += 1;
 
         if self.frame_count % 120 == 0 {
-            let fps = 120.0
-                / (std::time::Instant::now() - self.last_frame
-                    + std::time::Duration::from_secs_f32(dt * 119.0))
-                .as_secs_f32();
-            eprintln!(
-                "[Render] Frame {} | Particles: {} | FPS: {:.1} | Physics: {}",
+            let fps = 120.0 / (std::time::Instant::now() - self.last_frame + std::time::Duration::from_secs_f32(dt * 119.0)).as_secs_f32();
+            eprintln!("[Render] Frame {} | Particles: {} | FPS: {:.1} | Physics: {}",
                 self.frame_count,
                 self.fluid_particles.len(),
                 fps,

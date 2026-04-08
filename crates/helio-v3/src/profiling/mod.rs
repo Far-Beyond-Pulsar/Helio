@@ -294,29 +294,17 @@ impl Profiler {
             println!("  {:<30} {:>8.2}ms", name, duration.as_secs_f64() * 1000.0);
             total_cpu += *duration;
         }
-        println!(
-            "  {:<30} {:>8.2}ms",
-            "TOTAL CPU",
-            total_cpu.as_secs_f64() * 1000.0
-        );
+        println!("  {:<30} {:>8.2}ms", "TOTAL CPU", total_cpu.as_secs_f64() * 1000.0);
 
         // GPU timings
         if !self.gpu.get_last_timings().is_empty() {
             println!("\nGPU:");
             let mut total_gpu = 0u64;
             for ts in self.gpu.get_last_timings() {
-                println!(
-                    "  {:<30} {:>8.2}ms",
-                    ts.name,
-                    ts.duration_ns as f64 / 1_000_000.0
-                );
+                println!("  {:<30} {:>8.2}ms", ts.name, ts.duration_ns as f64 / 1_000_000.0);
                 total_gpu += ts.duration_ns;
             }
-            println!(
-                "  {:<30} {:>8.2}ms",
-                "TOTAL GPU",
-                total_gpu as f64 / 1_000_000.0
-            );
+            println!("  {:<30} {:>8.2}ms", "TOTAL GPU", total_gpu as f64 / 1_000_000.0);
         }
 
         println!("====================\n");
@@ -386,3 +374,4 @@ pub struct PassTiming {
     pub cpu_ms: f32,
     pub gpu_ms: f32,
 }
+

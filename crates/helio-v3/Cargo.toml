@@ -3,7 +3,7 @@ name = "helio-v3"
 version = "0.1.0"
 edition = "2021"
 authors = ["Helio Contributors"]
-description = "AAA GPU-driven rendering core with trait-based architecture"
+description = "GPU-driven rendering core with trait-based architecture"
 license = "MIT OR Apache-2.0"
 
 [dependencies]

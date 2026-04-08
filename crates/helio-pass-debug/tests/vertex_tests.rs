@@ -256,3 +256,4 @@ fn vertex_as_f32_slice_via_cast_has_eight_elements() {
     let floats: &[f32] = bytemuck::cast_slice(bytes);
     assert_eq!(floats.len(), 8);
 }
+

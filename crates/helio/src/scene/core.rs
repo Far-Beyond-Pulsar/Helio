@@ -14,9 +14,7 @@ use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
-use crate::handles::{
-    LightId, MaterialId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
-};
+use crate::handles::{LightId, MaterialId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 use crate::mesh::MeshPool;
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
@@ -74,12 +72,29 @@ pub struct Scene {
     /// When true, objects are sorted for cache coherency (instanced batching).
     pub(in crate::scene) objects_layout_optimized: bool,
 
+    /// True when a Static or Stationary object has been added or removed since the last
+    /// shadow atlas render. Triggers a re-render of the static shadow atlas.
+    pub(in crate::scene) static_objects_dirty: bool,
+
+    /// True when objects have been added or removed via persistent-mode delta operations.
+    /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
+    /// indirect buffers must be explicitly rebuilt on the next flush.
+    pub(in crate::scene) shadow_partition_dirty: bool,
+
     /// Previous frame's view-projection matrix (for temporal effects)
     pub(in crate::scene) prev_view_proj: Mat4,
 
     /// Bitmask of currently hidden groups — bit N = GroupId(N) is hidden.
     /// An object is invisible if any of its groups intersects this mask.
     pub(in crate::scene) group_hidden: GroupMask,
+
+    /// Generation counter for movable objects - increments when any Movable object's transform changes.
+    /// Used by shadow caching to detect when Movable objects move.
+    pub(in crate::scene) movable_objects_generation: u64,
+
+    /// Generation counter for movable lights - increments when any Movable light's position/direction changes.
+    /// Used by shadow caching to detect when Movable lights move.
+    pub(in crate::scene) movable_lights_generation: u64,
 
     /// Per-frame custom trait-based scene actors.
     pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
@@ -114,12 +129,18 @@ pub struct Scene {
     /// Set when water volumes are added/removed/updated
     pub(in crate::scene) water_volumes_dirty: bool,
 
+    /// Dirty range of water volumes that need GPU upload.
+    pub(in crate::scene) water_volumes_dirty_range: Option<(usize, usize)>,
+
     // ── Water hitboxes ────────────────────────────────────────────────────────
     /// AABB hitboxes that displace the water heightfield simulation
     pub(in crate::scene) water_hitboxes: DenseArena<WaterHitboxRecord, WaterHitboxId>,
 
     /// Set when hitboxes are added/removed/updated
     pub(in crate::scene) water_hitboxes_dirty: bool,
+
+    /// Dirty range of water hitboxes that need GPU upload.
+    pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
 }
 
 impl Scene {
@@ -206,8 +227,12 @@ impl Scene {
             objects: DenseArena::new(),
             objects_dirty: true,             // rebuild on first flush
             objects_layout_optimized: false, // start in persistent mode
+            static_objects_dirty: true,      // rebuild static shadow atlas on first flush
+            shadow_partition_dirty: false,   // full rebuild on first flush handles this
             prev_view_proj: Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
+            movable_objects_generation: 0,
+            movable_lights_generation: 0,
             custom_actors: Vec::new(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
@@ -218,8 +243,10 @@ impl Scene {
             vg_cpu_instances: Vec::new(),
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
+            water_volumes_dirty_range: None,
             water_hitboxes: DenseArena::new(),
             water_hitboxes_dirty: false,
+            water_hitboxes_dirty_range: None,
         }
     }
 
@@ -237,10 +264,7 @@ impl Scene {
     /// Insert a custom trait-based scene actor.
     ///
     /// This can be e.g. `SceneActor::Sky`, `MeshActor`, `LightActor`, or other custom actors.
-    pub fn insert_actor<A: SceneActorTrait + 'static>(
-        &mut self,
-        mut actor: A,
-    ) -> crate::scene::actor::SceneActorId {
+    pub fn insert_actor<A: SceneActorTrait + 'static>(&mut self, mut actor: A) -> crate::scene::actor::SceneActorId {
         actor.on_attach(self);
         let id = actor.inserted_id();
         self.custom_actors.push(Box::new(actor));
@@ -325,11 +349,13 @@ impl Scene {
         );
         // Store the UNJITTERED view_proj so next frame's motion-vector
         // reprojection (prev_view_proj) is not contaminated by this frame's jitter.
-        let inv_jitter =
-            Mat4::from_translation(glam::Vec3::new(-camera.jitter[0], -camera.jitter[1], 0.0));
+        let inv_jitter = Mat4::from_translation(glam::Vec3::new(
+            -camera.jitter[0], -camera.jitter[1], 0.0,
+        ));
         let unjittered_proj = inv_jitter * camera.proj;
         self.prev_view_proj = unjittered_proj * camera.view;
         self.gpu_scene.camera.update(uniforms);
+        self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
     }
 
     /// Flush pending changes to GPU buffers.
@@ -425,6 +451,14 @@ impl Scene {
                 self.rebuild_instance_buffers_persistent();
             }
             self.objects_dirty = false;
+            // Full rebuild already called rebuild_shadow_partition_buffers().
+            self.shadow_partition_dirty = false;
+        }
+        // Persistent-mode delta inserts/removes bypass the full rebuild, so shadow
+        // partition indirect buffers need an explicit rebuild here.
+        if self.shadow_partition_dirty {
+            self.rebuild_shadow_partition_buffers();
+            self.shadow_partition_dirty = false;
         }
         // Rebuild virtual geometry CPU buffers when VG topology or transforms changed.
         if self.vg_objects_dirty {
@@ -485,11 +519,13 @@ mod tests {
         }))
         .expect("No adapter found");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: wgpu::Features::empty(),
-            required_limits: wgpu::Limits::downlevel_defaults(),
-            ..Default::default()
-        }))
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                ..Default::default()
+            },
+        ))
         .expect("Failed to create device");
 
         (Arc::new(device), Arc::new(queue))
@@ -502,10 +538,7 @@ mod tests {
 
         let sky_ctx = scene.sky_context();
         assert!(!sky_ctx.has_sky, "Default scene should have no sky");
-        assert!(
-            sky_ctx.clouds.is_none(),
-            "Default scene should have no clouds"
-        );
+        assert!(sky_ctx.clouds.is_none(), "Default scene should have no clouds");
     }
 
     #[test]
@@ -521,21 +554,15 @@ mod tests {
                     coverage: 0.6,
                     density: 0.8,
                     ..Default::default()
-                }),
+                })
         ));
 
         let sky_ctx = scene.sky_context();
         assert!(sky_ctx.has_sky, "Sky actor should be detected");
-        assert!(
-            sky_ctx.clouds.is_some(),
-            "Cloud settings should be detected"
-        );
+        assert!(sky_ctx.clouds.is_some(), "Cloud settings should be detected");
 
         if let Some(clouds) = sky_ctx.clouds {
-            assert!(
-                (clouds.coverage - 0.6).abs() < 0.01,
-                "Coverage should match"
-            );
+            assert!((clouds.coverage - 0.6).abs() < 0.01, "Coverage should match");
             assert!((clouds.density - 0.8).abs() < 0.01, "Density should match");
         }
     }
@@ -547,19 +574,17 @@ mod tests {
 
         // Insert first sky actor
         scene.insert_actor(SceneActor::Sky(
-            SkyActor::new().with_sky_color([1.0, 0.0, 0.0]),
+            SkyActor::new().with_sky_color([1.0, 0.0, 0.0])
         ));
 
         // Insert second sky actor (should be ignored)
         scene.insert_actor(SceneActor::Sky(
-            SkyActor::new().with_sky_color([0.0, 1.0, 0.0]),
+            SkyActor::new().with_sky_color([0.0, 1.0, 0.0])
         ));
 
         let sky_ctx = scene.sky_context();
         // First actor wins
-        assert!(
-            (sky_ctx.sky_color[0] - 1.0).abs() < 0.01,
-            "Should use first actor's color"
-        );
+        assert!((sky_ctx.sky_color[0] - 1.0).abs() < 0.01, "Should use first actor's color");
     }
 }
+

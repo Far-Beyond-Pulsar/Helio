@@ -203,23 +203,17 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = r
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [hx, hy, hz],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = insert_object(
-                r,
-                m,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
-                (hx * hx + hy * hy + hz * hz).sqrt(),
-            );
-        };
+        let add =
+            |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
+                let m = r.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]))).as_mesh().unwrap();
+                let _ = insert_object(
+                    r,
+                    m,
+                    mat,
+                    glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
+                    (hx * hx + hy * hy + hz * hz).sqrt(),
+                );
+            };
 
         add(&mut renderer, 0.0, -0.05, 0.0, 20.0, 0.05, 20.0, mat_floor);
 
@@ -263,13 +257,7 @@ impl ApplicationHandler for App {
         let light_ids: Vec<LightId> = base_lights
             .iter()
             .map(|&(pos, col, intensity, range)| {
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        pos, col, intensity, range,
-                    )))
-                    .as_light()
-                    .unwrap()
+                renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, col, intensity, range))).as_light().unwrap()
             })
             .collect();
 
@@ -550,10 +538,7 @@ impl AppState {
         let multiplier = self.light_intensity_multiplier * time_fade;
         for (i, &id) in self.light_ids.iter().enumerate() {
             let (pos, col, intensity, range) = self.base_lights[i];
-            let _ = self
-                .renderer
-                .scene_mut()
-                .update_light(id, point_light(pos, col, intensity * multiplier, range));
+            let _ = self.renderer.scene_mut().update_light(id, point_light(pos, col, intensity * multiplier, range));
         }
 
         let scene_build_ms = scene_build_start.elapsed().as_secs_f32() * 1000.0;
@@ -585,3 +570,6 @@ impl AppState {
         }
     }
 }
+
+
+

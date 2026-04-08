@@ -57,3 +57,4 @@ impl GpuMaterial {
     /// Index used to indicate "no texture bound"
     pub const NO_TEXTURE: u32 = u32::MAX;
 }
+

@@ -153,3 +153,4 @@ pub(crate) fn material_asset_from_converted(
         },
     }
 }
+

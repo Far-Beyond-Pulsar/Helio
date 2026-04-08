@@ -172,3 +172,4 @@ fn mip_1920x1080_driven_by_width() {
     // 1920 > 1080, so the result equals mip_levels(1920, 1920).
     assert_eq!(mip_levels(1920, 1080), mip_levels(1920, 1920));
 }
+

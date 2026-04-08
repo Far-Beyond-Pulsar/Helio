@@ -119,3 +119,4 @@ impl super::super::Scene {
         self.move_group(group, Mat4::from_translation(delta));
     }
 }
+

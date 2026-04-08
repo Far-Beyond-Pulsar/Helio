@@ -79,9 +79,7 @@ impl SkyActor {
 
     /// Create a default sky actor (no sky, default ambient color).
     pub fn new() -> Self {
-        SkyActor {
-            context: SkyContext::default(),
-        }
+        SkyActor { context: SkyContext::default() }
     }
 
     /// Enable atmospheric sky rendering with this sky color.
@@ -160,3 +158,4 @@ mod tests {
         assert_eq!(ctx.sky_color, [0.3, 0.4, 0.5]);
     }
 }
+

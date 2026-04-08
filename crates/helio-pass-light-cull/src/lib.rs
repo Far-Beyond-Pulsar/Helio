@@ -51,6 +51,8 @@ pub struct LightCullPass {
     bind_group: Option<wgpu::BindGroup>,
     /// Key: (camera_ptr, lights_ptr) — used to skip needless bind-group rebuilds.
     bind_group_key: Option<(usize, usize)>,
+    /// Light culling cache key: (camera_generation, lights_generation, light_count) — used to skip culling compute when scene static.
+    cull_cache_key: Option<(u64, u64, u32)>,
     num_tiles_x: u32,
     num_tiles_y: u32,
     width: u32,
@@ -61,11 +63,15 @@ impl LightCullPass {
     pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let num_tiles_x = width.div_ceil(TILE_SIZE);
         let num_tiles_y = height.div_ceil(TILE_SIZE);
-        let num_tiles = num_tiles_x * num_tiles_y;
+        let num_tiles = num_tiles_x
+            .checked_mul(num_tiles_y)
+            .expect("tile grid overflow: viewport dimensions too large");
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("LightCull Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/light_cull.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/light_cull.wgsl").into(),
+            ),
         });
 
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -175,6 +181,7 @@ impl LightCullPass {
             tile_light_counts,
             bind_group: None,
             bind_group_key: None,
+            cull_cache_key: None,
             num_tiles_x,
             num_tiles_y,
             width,
@@ -214,8 +221,28 @@ impl RenderPass for LightCullPass {
             // No active lights: clear light lists/counts to avoid stale data usage.
             ctx.encoder.clear_buffer(&self.tile_light_lists, 0, None);
             ctx.encoder.clear_buffer(&self.tile_light_counts, 0, None);
+            self.cull_cache_key = None; // Invalidate cache
             return Ok(());
         }
+
+        // ── Light culling cache: skip compute if scene static ─────────────────
+        // Use generation counters to detect actual data changes (not pointer addresses).
+        let camera_gen = ctx.scene.camera_generation;
+        let lights_gen = ctx.scene.movable_lights_generation;
+
+        let cache_key = (camera_gen, lights_gen, ctx.scene.light_count);
+
+        // Check if resolution changed (window resize invalidates tile grid)
+        let resolution_changed = ctx.width != self.width || ctx.height != self.height;
+
+        // Check if we can reuse previous frame's culling results
+        if self.cull_cache_key == Some(cache_key) && !resolution_changed {
+            // Camera, lights, and resolution unchanged - reuse cached tile culling results
+            return Ok(());
+        }
+
+        // Update cache key
+        self.cull_cache_key = Some(cache_key);
 
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let lights_ptr = ctx.scene.lights as *const _ as usize;

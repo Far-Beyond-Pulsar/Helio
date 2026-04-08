@@ -39,20 +39,10 @@ pub struct GpuBvhNode {
 
 impl GpuBvhNode {
     pub fn leaf(min: [f32; 3], max: [f32; 3], edit_idx: u32) -> Self {
-        Self {
-            aabb_min: min,
-            left_or_edit_idx: edit_idx,
-            aabb_max: max,
-            right_or_leaf: LEAF_SENTINEL,
-        }
+        Self { aabb_min: min, left_or_edit_idx: edit_idx, aabb_max: max, right_or_leaf: LEAF_SENTINEL }
     }
     pub fn internal(min: [f32; 3], max: [f32; 3], left: u32, right: u32) -> Self {
-        Self {
-            aabb_min: min,
-            left_or_edit_idx: left,
-            aabb_max: max,
-            right_or_leaf: right,
-        }
+        Self { aabb_min: min, left_or_edit_idx: left, aabb_max: max, right_or_leaf: right }
     }
     pub fn is_leaf(&self) -> bool {
         self.right_or_leaf == LEAF_SENTINEL

@@ -21,9 +21,13 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
-use helio::RenderGraph;
 use helio::{required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig};
-use helio_pass_sdf::{BooleanOp, SdfEdit, SdfPass, SdfShapeParams, SdfShapeType, TerrainConfig};
+use helio::{
+    RenderGraph,
+};
+use helio_pass_sdf::{
+    BooleanOp, SdfEdit, SdfPass, SdfShapeParams, SdfShapeType, TerrainConfig,
+};
 use winit::{
     application::ApplicationHandler,
     event::*,
@@ -73,24 +77,12 @@ impl AppState {
         let right = orientation * Vec3::X;
 
         let mut accel = Vec3::ZERO;
-        if self.keys.contains(&KeyCode::KeyW) {
-            accel += forward;
-        }
-        if self.keys.contains(&KeyCode::KeyS) {
-            accel -= forward;
-        }
-        if self.keys.contains(&KeyCode::KeyA) {
-            accel -= right;
-        }
-        if self.keys.contains(&KeyCode::KeyD) {
-            accel += right;
-        }
-        if self.keys.contains(&KeyCode::Space) {
-            accel += Vec3::Y;
-        }
-        if self.keys.contains(&KeyCode::ShiftLeft) {
-            accel -= Vec3::Y;
-        }
+        if self.keys.contains(&KeyCode::KeyW) { accel += forward; }
+        if self.keys.contains(&KeyCode::KeyS) { accel -= forward; }
+        if self.keys.contains(&KeyCode::KeyA) { accel -= right; }
+        if self.keys.contains(&KeyCode::KeyD) { accel += right; }
+        if self.keys.contains(&KeyCode::Space) { accel += Vec3::Y; }
+        if self.keys.contains(&KeyCode::ShiftLeft) { accel -= Vec3::Y; }
 
         self.velocity += accel * FLY_SPEED * dt;
         self.velocity /= 1.0 + DRAG * dt;
@@ -118,13 +110,7 @@ impl AppState {
             .expect("SdfPass not found in render graph")
     }
 
-    fn place_edit(
-        &mut self,
-        shape: SdfShapeType,
-        op: BooleanOp,
-        params: SdfShapeParams,
-        blend: f32,
-    ) {
+    fn place_edit(&mut self, shape: SdfShapeType, op: BooleanOp, params: SdfShapeParams, blend: f32) {
         let orientation = Quat::from_euler(EulerRot::YXZ, self.yaw, self.pitch, 0.0);
         let forward = orientation * -Vec3::Z;
         let pos = self.cam_pos + forward * 5.0;
@@ -143,9 +129,7 @@ impl AppState {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
-            return;
-        }
+        if self.state.is_some() { return; }
 
         let attrs = Window::default_attributes()
             .with_title("Helio SDF Demo")
@@ -162,11 +146,13 @@ impl ApplicationHandler for App {
         }))
         .expect("No suitable GPU adapter");
 
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            required_features: required_wgpu_features(adapter.features()),
-            required_limits: required_wgpu_limits(adapter.limits()),
-            ..Default::default()
-        }))
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: required_wgpu_features(adapter.features()),
+                required_limits: required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            },
+        ))
         .expect("Device request failed");
 
         let device = Arc::new(device);
@@ -179,9 +165,7 @@ impl ApplicationHandler for App {
 
         let size = window.inner_size();
         let caps = surface.get_capabilities(&adapter);
-        let surface_format = caps
-            .formats
-            .iter()
+        let surface_format = caps.formats.iter()
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
@@ -206,11 +190,7 @@ impl ApplicationHandler for App {
 
         // Build a minimal graph: SDF pass only
         let mut graph = RenderGraph::new(&device, &queue);
-        graph.add_pass(Box::new(SdfPass::new(
-            &device,
-            surface_format,
-            Some(TerrainConfig::rolling()),
-        )));
+        graph.add_pass(Box::new(SdfPass::new(&device, surface_format, Some(TerrainConfig::rolling()))));
         renderer.set_graph(graph);
 
         self.state = Some(AppState {
@@ -237,12 +217,11 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::Escape),
-                        ..
-                    },
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(KeyCode::Escape),
+                    ..
+                },
                 ..
             } => {
                 if state.cursor_grabbed {
@@ -256,67 +235,57 @@ impl ApplicationHandler for App {
 
             // ── SDF edit keys ─────────────────────────────────────────────────
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(code),
-                        repeat: false,
-                        ..
-                    },
+                event: KeyEvent {
+                    state: ElementState::Pressed,
+                    physical_key: PhysicalKey::Code(code),
+                    repeat: false,
+                    ..
+                },
                 ..
-            } => match code {
-                KeyCode::Digit1 => {
-                    state.place_edit(
-                        SdfShapeType::Sphere,
-                        BooleanOp::Union,
-                        SdfShapeParams::sphere(2.0),
-                        0.0,
-                    );
+            } => {
+                match code {
+                    KeyCode::Digit1 => {
+                        state.place_edit(
+                            SdfShapeType::Sphere, BooleanOp::Union,
+                            SdfShapeParams::sphere(2.0), 0.0,
+                        );
+                    }
+                    KeyCode::Digit2 => {
+                        state.place_edit(
+                            SdfShapeType::Sphere, BooleanOp::Subtraction,
+                            SdfShapeParams::sphere(3.0), 0.5,
+                        );
+                    }
+                    KeyCode::Digit3 => {
+                        state.place_edit(
+                            SdfShapeType::Cube, BooleanOp::Union,
+                            SdfShapeParams::cube(1.5, 1.5, 1.5), 0.0,
+                        );
+                    }
+                    KeyCode::Digit4 => {
+                        state.place_edit(
+                            SdfShapeType::Sphere, BooleanOp::Union,
+                            SdfShapeParams::sphere(2.5), 1.5,
+                        );
+                    }
+                    KeyCode::Digit5 => {
+                        state.sdf().toggle_debug();
+                        log::info!("Debug clip-level vis toggled");
+                    }
+                    KeyCode::KeyR => {
+                        state.sdf().clear_edits();
+                        log::info!("All SDF edits cleared");
+                    }
+                    _ => { state.keys.insert(code); }
                 }
-                KeyCode::Digit2 => {
-                    state.place_edit(
-                        SdfShapeType::Sphere,
-                        BooleanOp::Subtraction,
-                        SdfShapeParams::sphere(3.0),
-                        0.5,
-                    );
-                }
-                KeyCode::Digit3 => {
-                    state.place_edit(
-                        SdfShapeType::Cube,
-                        BooleanOp::Union,
-                        SdfShapeParams::cube(1.5, 1.5, 1.5),
-                        0.0,
-                    );
-                }
-                KeyCode::Digit4 => {
-                    state.place_edit(
-                        SdfShapeType::Sphere,
-                        BooleanOp::Union,
-                        SdfShapeParams::sphere(2.5),
-                        1.5,
-                    );
-                }
-                KeyCode::Digit5 => {
-                    state.sdf().toggle_debug();
-                    log::info!("Debug clip-level vis toggled");
-                }
-                KeyCode::KeyR => {
-                    state.sdf().clear_edits();
-                    log::info!("All SDF edits cleared");
-                }
-                _ => {
-                    state.keys.insert(code);
-                }
-            },
+            }
 
             WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        physical_key: PhysicalKey::Code(code),
-                        state: ElementState::Released,
-                        ..
-                    },
+                event: KeyEvent {
+                    physical_key: PhysicalKey::Code(code),
+                    state: ElementState::Released,
+                    ..
+                },
                 ..
             } => {
                 state.keys.remove(&code);
@@ -345,8 +314,7 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 if !state.cursor_grabbed {
-                    let ok = state
-                        .window
+                    let ok = state.window
                         .set_cursor_grab(CursorGrabMode::Confined)
                         .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                         .is_ok();
@@ -373,9 +341,7 @@ impl ApplicationHandler for App {
                         return;
                     }
                 };
-                let view = output
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default());
+                let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }

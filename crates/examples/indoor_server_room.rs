@@ -210,23 +210,17 @@ impl ApplicationHandler for App {
         ));
 
         // ── Geometry ───────────────────────────────────────────────────────────────
-        let add = |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
-            let m = r
-                .scene_mut()
-                .insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0],
-                    [hx, hy, hz],
-                )))
-                .as_mesh()
-                .unwrap();
-            let _ = insert_object(
-                r,
-                m,
-                mat,
-                glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
-                (hx * hx + hy * hy + hz * hz).sqrt(),
-            );
-        };
+        let add =
+            |r: &mut Renderer, cx: f32, cy: f32, cz: f32, hx: f32, hy: f32, hz: f32, mat| {
+                let m = r.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], [hx, hy, hz]))).as_mesh().unwrap();
+                let _ = insert_object(
+                    r,
+                    m,
+                    mat,
+                    glam::Mat4::from_translation(glam::Vec3::new(cx, cy, cz)),
+                    (hx * hx + hy * hy + hz * hz).sqrt(),
+                );
+            };
 
         // Room shell: 24 m × 4 m × 12 m
         add(&mut renderer, 0.0, -0.05, 0.0, 12.0, 0.05, 6.0, mat_floor);
@@ -287,62 +281,23 @@ impl ApplicationHandler for App {
 
         // Overhead fluorescent panel spots (8)
         for &(px, pz) in CEILING_PANEL_XZ {
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(spot_light(
-                        [px, 3.78, pz],
-                        [0.0, -1.0, 0.0],
-                        [0.88, 0.93, 1.0],
-                        4.5,
-                        7.0,
-                        1.22,
-                        1.48,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
+                [px, 3.78, pz],
+                [0.0, -1.0, 0.0],
+                [0.88, 0.93, 1.0],
+                4.5,
+                7.0,
+                1.22,
+                1.48,
+            ))).as_light().unwrap());
         }
 
         // Per-row status LED strips
         for &(rx, tag) in RACK_ROWS {
             let col = row_color(tag);
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [rx, 2.1, 0.0],
-                        col,
-                        2.5,
-                        6.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [rx, 2.1, -4.5],
-                        col,
-                        1.0,
-                        3.5,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [rx, 2.1, 4.5],
-                        col,
-                        1.0,
-                        3.5,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([rx, 2.1, 0.0], col, 2.5, 6.0))).as_light().unwrap());
+            light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([rx, 2.1, -4.5], col, 1.0, 3.5))).as_light().unwrap());
+            light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([rx, 2.1, 4.5], col, 1.0, 3.5))).as_light().unwrap());
         }
 
         // Cooling unit indicators
@@ -352,18 +307,7 @@ impl ApplicationHandler for App {
             } else {
                 [0.0, 0.6, 1.0]
             };
-            light_ids.push(
-                renderer
-                    .scene_mut()
-                    .insert_actor(helio::SceneActor::light(point_light(
-                        [cx, 2.8, -5.6],
-                        col,
-                        0.8,
-                        3.0,
-                    )))
-                    .as_light()
-                    .unwrap(),
-            );
+            light_ids.push(renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([cx, 2.8, -5.6], col, 0.8, 3.0))).as_light().unwrap());
         }
 
         self.state = Some(AppState {
@@ -550,3 +494,6 @@ impl AppState {
         output.present();
     }
 }
+
+
+

@@ -1,6 +1,6 @@
-//! # Helio v3: AAA GPU-Driven Rendering Core
+//! # Helio v3: GPU-Driven Rendering Core
 //!
-//! **Helio v3** is a production-grade, modular rendering framework designed for AAA game engines.
+//! **Helio v3** is a production-grade, modular rendering framework designed for game engines.
 //! It provides a zero-overhead abstraction for building complex GPU-driven render pipelines with
 //! automatic profiling, zero-copy resource access, and constant-time performance guarantees.
 //!
@@ -20,9 +20,9 @@
 //! 4. **Trait-Based Modularity**: Render passes are separate crates implementing core traits.
 //!    This enables compile-time polymorphism and hot-swappable pipelines without runtime overhead.
 //!
-//! ## AAA Performance Guarantees
+//! ## Performance Guarantees
 //!
-//! Helio v3 enforces strict performance guarantees that match AAA engine standards:
+//! Helio v3 enforces strict performance guarantees that match engine standards:
 //!
 //! - **Zero per-frame allocations** in the render path (all buffers pre-allocated)
 //! - **Zero clones** in the render path (all access is by reference)
@@ -394,3 +394,4 @@ pub use graph::RenderGraph;
 pub use profiling::Profiler;
 pub use scene::{GpuScene, SceneResources};
 pub use traits::{AsAny, MaybeSend, MaybeSync, RenderPass};
+

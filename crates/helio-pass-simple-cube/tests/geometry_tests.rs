@@ -14,53 +14,49 @@ struct CubeVertex {
 }
 
 fn v(position: [f32; 3], normal: [f32; 3], color: [f32; 3]) -> CubeVertex {
-    CubeVertex {
-        position,
-        normal,
-        color,
-    }
+    CubeVertex { position, normal, color }
 }
 
 /// Exact mirror of the private `cube_vertices()` function in lib.rs.
 fn cube_vertices() -> [CubeVertex; 24] {
     let r = [1.0_f32, 0.25, 0.25]; // +X  red
-    let c = [0.25_f32, 1.0, 1.0]; // -X  cyan
+    let c = [0.25_f32, 1.0, 1.0];  // -X  cyan
     let g = [0.25_f32, 1.0, 0.25]; // +Y  green
-    let m = [1.0_f32, 0.25, 1.0]; // -Y  magenta
-    let b = [0.3_f32, 0.5, 1.0]; // +Z  blue
-    let y = [1.0_f32, 1.0, 0.25]; // -Z  yellow
+    let m = [1.0_f32, 0.25, 1.0];  // -Y  magenta
+    let b = [0.3_f32, 0.5, 1.0];   // +Z  blue
+    let y = [1.0_f32, 1.0, 0.25];  // -Z  yellow
 
     [
         // +X face (verts 0–3)
         v([0.5, -0.5, -0.5], [1., 0., 0.], r),
-        v([0.5, 0.5, -0.5], [1., 0., 0.], r),
-        v([0.5, 0.5, 0.5], [1., 0., 0.], r),
-        v([0.5, -0.5, 0.5], [1., 0., 0.], r),
+        v([0.5,  0.5, -0.5], [1., 0., 0.], r),
+        v([0.5,  0.5,  0.5], [1., 0., 0.], r),
+        v([0.5, -0.5,  0.5], [1., 0., 0.], r),
         // -X face (verts 4–7)
-        v([-0.5, -0.5, 0.5], [-1., 0., 0.], c),
-        v([-0.5, 0.5, 0.5], [-1., 0., 0.], c),
-        v([-0.5, 0.5, -0.5], [-1., 0., 0.], c),
+        v([-0.5, -0.5,  0.5], [-1., 0., 0.], c),
+        v([-0.5,  0.5,  0.5], [-1., 0., 0.], c),
+        v([-0.5,  0.5, -0.5], [-1., 0., 0.], c),
         v([-0.5, -0.5, -0.5], [-1., 0., 0.], c),
         // +Y face (verts 8–11)
         v([-0.5, 0.5, -0.5], [0., 1., 0.], g),
-        v([-0.5, 0.5, 0.5], [0., 1., 0.], g),
-        v([0.5, 0.5, 0.5], [0., 1., 0.], g),
-        v([0.5, 0.5, -0.5], [0., 1., 0.], g),
+        v([-0.5, 0.5,  0.5], [0., 1., 0.], g),
+        v([ 0.5, 0.5,  0.5], [0., 1., 0.], g),
+        v([ 0.5, 0.5, -0.5], [0., 1., 0.], g),
         // -Y face (verts 12–15)
-        v([-0.5, -0.5, 0.5], [0., -1., 0.], m),
+        v([-0.5, -0.5,  0.5], [0., -1., 0.], m),
         v([-0.5, -0.5, -0.5], [0., -1., 0.], m),
-        v([0.5, -0.5, -0.5], [0., -1., 0.], m),
-        v([0.5, -0.5, 0.5], [0., -1., 0.], m),
+        v([ 0.5, -0.5, -0.5], [0., -1., 0.], m),
+        v([ 0.5, -0.5,  0.5], [0., -1., 0.], m),
         // +Z face (verts 16–19)
         v([-0.5, -0.5, 0.5], [0., 0., 1.], b),
-        v([0.5, -0.5, 0.5], [0., 0., 1.], b),
-        v([0.5, 0.5, 0.5], [0., 0., 1.], b),
-        v([-0.5, 0.5, 0.5], [0., 0., 1.], b),
+        v([ 0.5, -0.5, 0.5], [0., 0., 1.], b),
+        v([ 0.5,  0.5, 0.5], [0., 0., 1.], b),
+        v([-0.5,  0.5, 0.5], [0., 0., 1.], b),
         // -Z face (verts 20–23)
-        v([0.5, -0.5, -0.5], [0., 0., -1.], y),
+        v([ 0.5, -0.5, -0.5], [0., 0., -1.], y),
         v([-0.5, -0.5, -0.5], [0., 0., -1.], y),
-        v([-0.5, 0.5, -0.5], [0., 0., -1.], y),
-        v([0.5, 0.5, -0.5], [0., 0., -1.], y),
+        v([-0.5,  0.5, -0.5], [0., 0., -1.], y),
+        v([ 0.5,  0.5, -0.5], [0., 0., -1.], y),
     ]
 }
 
@@ -70,7 +66,7 @@ fn cube_indices() -> [u16; 36] {
     for face in 0..6u16 {
         let b = face * 4;
         let o = (face * 6) as usize;
-        idx[o] = b;
+        idx[o]     = b;
         idx[o + 1] = b + 1;
         idx[o + 2] = b + 2;
         idx[o + 3] = b;
@@ -273,8 +269,7 @@ fn all_indices_are_below_24() {
         assert!(
             (index as usize) < 24,
             "index {} at position {} is out of range",
-            index,
-            i
+            index, i
         );
     }
 }
@@ -288,11 +283,11 @@ fn each_face_quad_split_shares_diagonal() {
         let o = face * 6;
         let b = (face * 4) as u16;
         // First tri: b, b+1, b+2
-        assert_eq!(idx[o], b, "face {} tri0[0]", face);
+        assert_eq!(idx[o],     b,     "face {} tri0[0]", face);
         assert_eq!(idx[o + 1], b + 1, "face {} tri0[1]", face);
         assert_eq!(idx[o + 2], b + 2, "face {} tri0[2]", face);
         // Second tri: b, b+2, b+3 (shares diagonal b → b+2)
-        assert_eq!(idx[o + 3], b, "face {} tri1[0]", face);
+        assert_eq!(idx[o + 3], b,     "face {} tri1[0]", face);
         assert_eq!(idx[o + 4], b + 2, "face {} tri1[1]", face);
         assert_eq!(idx[o + 5], b + 3, "face {} tri1[2]", face);
     }
@@ -322,9 +317,7 @@ fn all_positions_within_unit_half_extents() {
             assert!(
                 coord >= -0.5 && coord <= 0.5,
                 "vertex {} coord[{}] = {} outside [-0.5, 0.5]",
-                i,
-                j,
-                coord
+                i, j, coord
             );
         }
     }
@@ -340,16 +333,16 @@ fn six_faces_have_six_distinct_normals() {
         .map(|f| {
             let n = verts[f * 4].normal;
             // Map to integers to avoid fp equality issues
-            [n[0].to_bits(), n[1].to_bits(), n[2].to_bits()]
+            [
+                n[0].to_bits(),
+                n[1].to_bits(),
+                n[2].to_bits(),
+            ]
         })
         .collect();
     for i in 0..6 {
         for j in (i + 1)..6 {
-            assert_ne!(
-                face_normals[i], face_normals[j],
-                "faces {} and {} share normal",
-                i, j
-            );
+            assert_ne!(face_normals[i], face_normals[j], "faces {} and {} share normal", i, j);
         }
     }
 }

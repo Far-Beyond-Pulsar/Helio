@@ -228,3 +228,4 @@ impl RenderPass for RadianceCascadesPass {
         Ok(())
     }
 }
+

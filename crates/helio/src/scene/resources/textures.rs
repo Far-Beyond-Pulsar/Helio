@@ -186,3 +186,4 @@ impl super::super::Scene {
             .unwrap_or(&self.placeholder_sampler)
     }
 }
+

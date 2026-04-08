@@ -153,48 +153,14 @@ impl ApplicationHandler for App {
             0.0,
         ));
 
-        let cube1 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5)))
-            .as_mesh()
-            .unwrap();
-        let cube2 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4)))
-            .as_mesh()
-            .unwrap();
-        let cube3 = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3)))
-            .as_mesh()
-            .unwrap();
-        let ground = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)))
-            .as_mesh()
-            .unwrap();
+        let cube1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.5))).as_mesh().unwrap();
+        let cube2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.4))).as_mesh().unwrap();
+        let cube3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.0, 0.0], 0.3))).as_mesh().unwrap();
+        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0))).as_mesh().unwrap();
 
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            cube1,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.5, 0.0)),
-            0.5,
-        );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            cube2,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(-2.0, 0.4, -1.0)),
-            0.4,
-        );
-        let _ = v3_demo_common::insert_object(
-            &mut renderer,
-            cube3,
-            mat,
-            glam::Mat4::from_translation(glam::Vec3::new(2.0, 0.3, 0.5)),
-            0.3,
-        );
+        let _ = v3_demo_common::insert_object(&mut renderer, cube1, mat, glam::Mat4::from_translation(glam::Vec3::new( 0.0,  0.5,  0.0)), 0.5);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube2, mat, glam::Mat4::from_translation(glam::Vec3::new(-2.0,  0.4, -1.0)), 0.4);
+        let _ = v3_demo_common::insert_object(&mut renderer, cube3, mat, glam::Mat4::from_translation(glam::Vec3::new( 2.0,  0.3,  0.5)), 0.3);
         let _ =
             v3_demo_common::insert_object(&mut renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
 
@@ -202,32 +168,9 @@ impl ApplicationHandler for App {
         let p0_init = [0.0f32, 2.2, 0.0];
         let p1 = [-3.5f32, 2.0, -1.5];
         let p2 = [3.5f32, 1.5, 1.5];
-        let light_p0_id = renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                p0_init,
-                [1.0, 0.55, 0.15],
-                6.0,
-                5.0,
-            )))
-            .as_light()
-            .unwrap();
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                p1,
-                [0.25, 0.5, 1.0],
-                5.0,
-                6.0,
-            )));
-        renderer
-            .scene_mut()
-            .insert_actor(helio::SceneActor::light(point_light(
-                p2,
-                [1.0, 0.3, 0.5],
-                5.0,
-                6.0,
-            )));
+        let light_p0_id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p0_init, [1.0, 0.55, 0.15], 6.0, 5.0))).as_light().unwrap();
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p1, [0.25, 0.5, 1.0], 5.0, 6.0)));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(p2, [1.0, 0.3, 0.5], 5.0, 6.0)));
         self.state = Some(AppState {
             window,
             surface,
@@ -438,3 +381,6 @@ impl AppState {
         output.present();
     }
 }
+
+
+

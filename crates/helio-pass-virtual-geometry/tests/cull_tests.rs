@@ -2,8 +2,8 @@
 // meshlet visibility, screen coverage, LOD transitions, backface cone culling.
 // Uses the actual public LodQuality API + locally mirrored private types.
 
-use helio_pass_virtual_geometry::LodQuality;
 use std::mem;
+use helio_pass_virtual_geometry::LodQuality;
 
 // ── Mirror private types ──────────────────────────────────────────────────────
 
@@ -66,11 +66,8 @@ fn cull_uniforms_four_fields_of_four_bytes() {
 
 #[test]
 fn vg_globals_size_is_96() {
-    assert_eq!(
-        mem::size_of::<VgGlobals>(),
-        96,
-        "16 (scalars) + 64 (4×vec4) + 16 (debug_mode + 3 pads) = 96"
-    );
+    assert_eq!(mem::size_of::<VgGlobals>(), 96,
+        "16 (scalars) + 64 (4×vec4) + 16 (debug_mode + 3 pads) = 96");
 }
 
 #[test]
@@ -136,9 +133,7 @@ fn workgroup_size_is_power_of_two() {
 #[test]
 fn dispatch_groups_ceil_division() {
     // dispatch_count = ceil(meshlet_count / WORKGROUP_SIZE)
-    fn ceil_div(n: u32, d: u32) -> u32 {
-        (n + d - 1) / d
-    }
+    fn ceil_div(n: u32, d: u32) -> u32 { (n + d - 1) / d }
     assert_eq!(ceil_div(64, 64), 1);
     assert_eq!(ceil_div(65, 64), 2);
     assert_eq!(ceil_div(128, 64), 2);
@@ -239,12 +234,7 @@ fn screen_radius_inversely_proportional_to_distance() {
 
 #[test]
 fn all_quality_levels_have_positive_thresholds() {
-    for q in [
-        LodQuality::Low,
-        LodQuality::Medium,
-        LodQuality::High,
-        LodQuality::Ultra,
-    ] {
+    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
         let (s0, s1) = q.thresholds();
         assert!(s0 > 0.0f32, "{:?} s0={s0}", q);
         assert!(s1 > 0.0f32, "{:?} s1={s1}", q);
@@ -253,12 +243,7 @@ fn all_quality_levels_have_positive_thresholds() {
 
 #[test]
 fn all_quality_levels_thresholds_below_1() {
-    for q in [
-        LodQuality::Low,
-        LodQuality::Medium,
-        LodQuality::High,
-        LodQuality::Ultra,
-    ] {
+    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
         let (s0, s1) = q.thresholds();
         assert!(s0 < 1.0f32, "{:?} s0={s0} >= 1.0", q);
         assert!(s1 < 1.0f32, "{:?} s1={s1} >= 1.0", q);
@@ -269,7 +254,9 @@ fn all_quality_levels_thresholds_below_1() {
 
 /// Backface check: dot(view_dir, cone_axis) + cos_half_angle <= 0.
 fn is_backfacing_cone(view_dir: [f32; 3], cone_axis: [f32; 3], cos_half_angle: f32) -> bool {
-    let dot = view_dir[0] * cone_axis[0] + view_dir[1] * cone_axis[1] + view_dir[2] * cone_axis[2];
+    let dot = view_dir[0] * cone_axis[0]
+        + view_dir[1] * cone_axis[1]
+        + view_dir[2] * cone_axis[2];
     dot + cos_half_angle <= 0.0
 }
 
@@ -305,7 +292,7 @@ fn cone_culling_boundary_exactly_zero() {
 #[test]
 fn cone_culling_narrow_cone_more_aggressive() {
     // A narrower cone (larger cos_half) culls more aggressively
-    let view_dir = [0.0f32, 0.0, -0.8]; // mostly backward
+    let view_dir = [0.0f32, 0.0, -0.8];   // mostly backward
     let cone_axis = [0.0f32, 0.0, 1.0];
     let cos_half_narrow = 0.9f32;
     let cos_half_wide = 0.1f32;

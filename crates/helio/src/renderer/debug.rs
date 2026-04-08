@@ -93,109 +93,29 @@ impl DebugDrawPass {
             for i in -count..=count {
                 let x = center_x + i as f32 * grid_step;
                 let z = center_z + i as f32 * grid_step;
-                let x_color = if i.rem_euclid(5) == 0 {
-                    major_color
-                } else {
-                    minor_color
-                };
-                let z_color = if i.rem_euclid(5) == 0 {
-                    major_color
-                } else {
-                    minor_color
-                };
+                let x_color = if i.rem_euclid(5) == 0 { major_color } else { minor_color };
+                let z_color = if i.rem_euclid(5) == 0 { major_color } else { minor_color };
 
-                output.push(DebugVertex {
-                    position: [x, 0.0, center_z - range],
-                    _pad: 0.0,
-                    color: if x.abs() < 0.01 {
-                        axis_color_x
-                    } else {
-                        x_color
-                    },
-                });
-                output.push(DebugVertex {
-                    position: [x, 0.0, center_z + range],
-                    _pad: 0.0,
-                    color: if x.abs() < 0.01 {
-                        axis_color_x
-                    } else {
-                        x_color
-                    },
-                });
-                output.push(DebugVertex {
-                    position: [center_x - range, 0.0, z],
-                    _pad: 0.0,
-                    color: if z.abs() < 0.01 {
-                        axis_color_z
-                    } else {
-                        z_color
-                    },
-                });
-                output.push(DebugVertex {
-                    position: [center_x + range, 0.0, z],
-                    _pad: 0.0,
-                    color: if z.abs() < 0.01 {
-                        axis_color_z
-                    } else {
-                        z_color
-                    },
-                });
+                output.push(DebugVertex { position: [x, 0.0, center_z - range], _pad: 0.0, color: if x.abs() < 0.01 { axis_color_x } else { x_color } });
+                output.push(DebugVertex { position: [x, 0.0, center_z + range], _pad: 0.0, color: if x.abs() < 0.01 { axis_color_x } else { x_color } });
+                output.push(DebugVertex { position: [center_x - range, 0.0, z], _pad: 0.0, color: if z.abs() < 0.01 { axis_color_z } else { z_color } });
+                output.push(DebugVertex { position: [center_x + range, 0.0, z], _pad: 0.0, color: if z.abs() < 0.01 { axis_color_z } else { z_color } });
             }
 
             let origin_color = [1.0, 1.0, 0.0, 1.0];
-            output.push(DebugVertex {
-                position: [-3.0, 0.0, 0.0],
-                _pad: 0.0,
-                color: origin_color,
-            });
-            output.push(DebugVertex {
-                position: [3.0, 0.0, 0.0],
-                _pad: 0.0,
-                color: origin_color,
-            });
-            output.push(DebugVertex {
-                position: [0.0, 0.0, -3.0],
-                _pad: 0.0,
-                color: origin_color,
-            });
-            output.push(DebugVertex {
-                position: [0.0, 0.0, 3.0],
-                _pad: 0.0,
-                color: origin_color,
-            });
+            output.push(DebugVertex { position: [-3.0, 0.0, 0.0], _pad: 0.0, color: origin_color });
+            output.push(DebugVertex { position: [3.0, 0.0, 0.0], _pad: 0.0, color: origin_color });
+            output.push(DebugVertex { position: [0.0, 0.0, -3.0], _pad: 0.0, color: origin_color });
+            output.push(DebugVertex { position: [0.0, 0.0, 3.0], _pad: 0.0, color: origin_color });
 
             let camera_marker_color = [0.0, 1.0, 1.0, 1.0];
             let mark = cam;
-            output.push(DebugVertex {
-                position: [mark.x - 0.3, mark.y, mark.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            });
-            output.push(DebugVertex {
-                position: [mark.x + 0.3, mark.y, mark.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            });
-            output.push(DebugVertex {
-                position: [mark.x, mark.y - 0.3, mark.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            });
-            output.push(DebugVertex {
-                position: [mark.x, mark.y + 0.3, mark.z],
-                _pad: 0.0,
-                color: camera_marker_color,
-            });
-            output.push(DebugVertex {
-                position: [mark.x, mark.y, mark.z - 0.3],
-                _pad: 0.0,
-                color: camera_marker_color,
-            });
-            output.push(DebugVertex {
-                position: [mark.x, mark.y, mark.z + 0.3],
-                _pad: 0.0,
-                color: camera_marker_color,
-            });
+            output.push(DebugVertex { position: [mark.x - 0.3, mark.y, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x + 0.3, mark.y, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y - 0.3, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y + 0.3, mark.z], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y, mark.z - 0.3], _pad: 0.0, color: camera_marker_color });
+            output.push(DebugVertex { position: [mark.x, mark.y, mark.z + 0.3], _pad: 0.0, color: camera_marker_color });
         }
 
         output
@@ -229,4 +149,5 @@ impl RenderPass for DebugDrawPass {
 
         res
     }
+
 }

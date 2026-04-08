@@ -88,10 +88,7 @@ fn lut_pixel_count() {
 #[test]
 fn lut_aspect_ratio_approx_16_over_9() {
     let ratio = LUT_WIDTH as f32 / LUT_HEIGHT as f32;
-    assert!(
-        (ratio - 16.0f32 / 9.0f32).abs() < 1e-4f32,
-        "ratio = {ratio}"
-    );
+    assert!((ratio - 16.0f32 / 9.0f32).abs() < 1e-4f32, "ratio = {ratio}");
 }
 
 #[test]
@@ -118,11 +115,8 @@ fn shader_sky_uniforms_size_is_112() {
 
 #[test]
 fn shader_sky_uniforms_size_divisible_by_16() {
-    assert_eq!(
-        mem::size_of::<ShaderSkyUniforms>() % 16,
-        0,
-        "Uniforms must be 16-byte aligned for WGSL"
-    );
+    assert_eq!(mem::size_of::<ShaderSkyUniforms>() % 16, 0,
+        "Uniforms must be 16-byte aligned for WGSL");
 }
 
 #[test]

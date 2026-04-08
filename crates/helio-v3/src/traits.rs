@@ -117,13 +117,9 @@ pub trait AsAny: std::any::Any {
 /// Blanket implementation — every concrete type gets this for free.
 impl<T: std::any::Any> AsAny for T {
     #[inline]
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    fn as_any(&self) -> &dyn std::any::Any { self }
     #[inline]
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
 }
 
 /// Core trait for all rendering passes.
@@ -354,4 +350,6 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Override to recreate size-dependent resources (pipelines, textures, bind groups).
     /// The default is a no-op, so passes that don't need resize handling can ignore it.
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
+
 }
+

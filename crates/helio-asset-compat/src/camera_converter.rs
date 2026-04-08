@@ -40,3 +40,4 @@ pub fn extract_camera_data(camera: &Camera) -> CameraData {
         }
     }
 }
+

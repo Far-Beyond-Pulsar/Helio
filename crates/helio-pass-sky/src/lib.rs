@@ -265,11 +265,7 @@ impl SkyPass {
     ) -> (wgpu::Texture, wgpu::TextureView) {
         let tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Sky pre_aa"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
+            size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -280,6 +276,7 @@ impl SkyPass {
         let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
         (tex, view)
     }
+
 }
 
 impl RenderPass for SkyPass {
@@ -350,4 +347,6 @@ impl RenderPass for SkyPass {
             frame.pre_aa = Some(&self.pre_aa_view);
         }
     }
+
 }
+

@@ -186,3 +186,4 @@ fn fxaa_skips_edge_below_min_threshold() {
         "tiny contrast {tiny_contrast} should be below min threshold"
     );
 }
+

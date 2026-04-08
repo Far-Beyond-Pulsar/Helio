@@ -90,12 +90,7 @@ fn hg_phase_isotropic_g0() {
     // g = 0 → isotropic: f = 1/(4π) ≈ 0.07957747.
     let f = hg_phase(0.0, 0.0);
     let expected = 1.0 / (4.0 * PI);
-    assert!(
-        (f - expected).abs() < EPSILON,
-        "f={} expected={}",
-        f,
-        expected
-    );
+    assert!((f - expected).abs() < EPSILON, "f={} expected={}", f, expected);
 }
 
 #[test]
@@ -104,26 +99,16 @@ fn hg_phase_isotropic_g0_all_angles() {
     let expected = 1.0 / (4.0 * PI);
     for &cos_theta in &[-1.0_f32, -0.5, 0.0, 0.5, 1.0] {
         let f = hg_phase(0.0, cos_theta);
-        assert!(
-            (f - expected).abs() < EPSILON,
-            "cos_θ={} f={}",
-            cos_theta,
-            f
-        );
+        assert!((f - expected).abs() < EPSILON, "cos_θ={} f={}", cos_theta, f);
     }
 }
 
 #[test]
 fn hg_phase_forward_greater_than_backward_for_positive_g() {
     let g: f32 = 0.76; // earth_like() mie_g
-    let forward = hg_phase(g, 1.0); // cos_θ = 1
+    let forward = hg_phase(g, 1.0);   // cos_θ = 1
     let backward = hg_phase(g, -1.0); // cos_θ = -1
-    assert!(
-        forward > backward,
-        "forward={} backward={}",
-        forward,
-        backward
-    );
+    assert!(forward > backward, "forward={} backward={}", forward, backward);
 }
 
 #[test]
@@ -132,11 +117,7 @@ fn hg_mie_g_076_forward_peak_is_large() {
     let g: f32 = 0.76;
     let forward = hg_phase(g, 1.0);
     let isotropic = 1.0 / (4.0 * PI);
-    assert!(
-        forward > 10.0 * isotropic,
-        "forward={} (expected > 10×isotropic)",
-        forward
-    );
+    assert!(forward > 10.0 * isotropic, "forward={} (expected > 10×isotropic)", forward);
 }
 
 #[test]
@@ -145,12 +126,7 @@ fn hg_mie_g_076_backward_peak_is_small() {
     let g: f32 = 0.76;
     let backward = hg_phase(g, -1.0);
     let isotropic = 1.0 / (4.0 * PI);
-    assert!(
-        backward < isotropic,
-        "backward={} (expected < isotropic={})",
-        backward,
-        isotropic
-    );
+    assert!(backward < isotropic, "backward={} (expected < isotropic={})", backward, isotropic);
 }
 
 #[test]
@@ -283,12 +259,7 @@ fn sun_disk_cos_corresponds_to_half_degree_radius() {
     let half_angle_rad = half_angle_deg * PI / 180.0;
     let expected_cos = half_angle_rad.cos();
     let actual_cos = 0.9998_f32;
-    assert!(
-        (actual_cos - expected_cos).abs() < 0.0002,
-        "expected {} got {}",
-        expected_cos,
-        actual_cos
-    );
+    assert!((actual_cos - expected_cos).abs() < 0.0002, "expected {} got {}", expected_cos, actual_cos);
 }
 
 #[test]
