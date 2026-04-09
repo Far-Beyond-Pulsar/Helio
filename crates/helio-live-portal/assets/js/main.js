@@ -185,39 +185,49 @@ function render(snapshot) {
 
 // ── WebSocket connection ──────────────────────────────────────────────────────
 
-const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-const ws = new WebSocket(`${proto}://${location.host}/ws`);
+let ws = null;
 
-ws.onopen = () => {
-  statusEl.textContent = 'Connected · waiting for first frame...';
-};
+if (window.HELIO_STATIC_MODE) {
+  // Static profiler mode — no live server, load recordings from file
+  statusEl.textContent = 'Offline viewer · drop a .helio-recording file or click Upload';
+  // Automatically surface the drop zone so users know what to do
+  const dropZoneEl = document.getElementById('uploadDropZone');
+  if (dropZoneEl) dropZoneEl.classList.add('active');
+} else {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
 
-ws.onclose = () => {
-  statusEl.textContent = 'Disconnected';
-};
+  ws.onopen = () => {
+    statusEl.textContent = 'Connected · waiting for first frame...';
+  };
 
-ws.onerror = () => {
-  statusEl.textContent = 'Socket error';
-};
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected';
+  };
 
-ws.onmessage = (evt) => {
-  // Ignore WebSocket messages when in replay mode
-  if (currentDataSource === 'replay') return;
+  ws.onerror = () => {
+    statusEl.textContent = 'Socket error';
+  };
 
-  try {
-    const data = JSON.parse(evt.data);
-    if (Array.isArray(data)) {
-      // Batch of snapshots sent at once; process them in order
-      for (const snap of data) {
-        processSnapshot(snap);
+  ws.onmessage = (evt) => {
+    // Ignore WebSocket messages when in replay mode
+    if (currentDataSource === 'replay') return;
+
+    try {
+      const data = JSON.parse(evt.data);
+      if (Array.isArray(data)) {
+        // Batch of snapshots sent at once; process them in order
+        for (const snap of data) {
+          processSnapshot(snap);
+        }
+      } else {
+        processSnapshot(data);
       }
-    } else {
-      processSnapshot(data);
+    } catch (e) {
+      console.error('parse error', e);
     }
-  } catch (e) {
-    console.error('parse error', e);
-  }
-};
+  };
+} // end !HELIO_STATIC_MODE
 
 // Process a snapshot from either live or replay source
 function processSnapshot(snapshot) {
@@ -283,6 +293,10 @@ function updateRecordingUI() {
 }
 
 function startRecording() {
+  if (window.HELIO_STATIC_MODE) {
+    showToast('Recording is not available in offline viewer mode');
+    return;
+  }
   try {
     // Create recording worker
     recordingState.worker = new Worker('./js/recordingWorker.js');
@@ -577,8 +591,15 @@ function exitReplayMode() {
   centralStore.mode = 'live';
   currentDataSource = 'live';
 
-  // Reconnect WebSocket
-  location.reload(); // Reload to reconnect WebSocket
+  if (window.HELIO_STATIC_MODE) {
+    // In static mode there is no server to reconnect to — just show the upload prompt
+    statusEl.textContent = 'Offline viewer · drop a .helio-recording file or click Upload';
+    const dropZoneEl = document.getElementById('uploadDropZone');
+    if (dropZoneEl) dropZoneEl.classList.add('active');
+  } else {
+    // Reconnect WebSocket
+    location.reload();
+  }
 }
 
 // ── File upload handling ──────────────────────────────────────────────────────
