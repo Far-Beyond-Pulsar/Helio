@@ -112,6 +112,8 @@ function render(snapshot) {
     window.renderTimingTreeGraph(snapshot);
   }
 
+  window.perfWindows?.update(snapshot);
+
   const dt = new Date(snapshot.timestamp_ms).toLocaleTimeString();
   statusEl.textContent = `Connected · ${dt}`;
 }

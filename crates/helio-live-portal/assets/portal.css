@@ -636,3 +636,154 @@ canvas {
   .actions-card { flex-direction: column; }
   .search-input { width: 200px; }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Perf tool-window additions
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── chart body: position-absolute fill canvas ── */
+.chart-body {
+  overflow: hidden;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--canvas-inset);
+}
+.chart-body > canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border-radius: 0;
+  border: none;
+}
+
+/* ── chart legend bar below a chart-body ── */
+.chart-legend-bar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 5px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  background: rgba(13, 17, 23, 0.5);
+  letter-spacing: 0.02em;
+}
+.chart-legend-bar span { display: flex; align-items: center; gap: 5px; }
+
+/* ── scrollable flamegraph canvas wrapper ── */
+.flamegraph-body {
+  overflow-y: auto;
+  overflow-x: hidden;
+  flex: 1;
+  min-height: 0;
+  background: var(--canvas-inset);
+}
+.flamegraph-body > canvas {
+  display: block;
+  width: 100%;
+  /* height managed by JS */
+  background: transparent;
+  border-radius: 0;
+  border: none;
+}
+
+/* ── alert badge on toolbar icons ── */
+.btn-icon .alert-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 15px;
+  height: 15px;
+  background: var(--danger);
+  color: #fff;
+  border-radius: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  line-height: 1;
+  pointer-events: none;
+  border: 1px solid var(--canvas-inset);
+}
+.btn-icon .alert-badge:empty { display: none; }
+
+/* ── alerts modal: toolbar strip + scrollable list ── */
+.alert-toolbar {
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+  background: var(--canvas-subtle);
+}
+.alert-clear-btn {
+  margin-left: auto;
+  background: var(--canvas);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.alert-clear-btn:hover {
+  color: var(--fg);
+  border-color: var(--danger);
+  background: rgba(248, 81, 73, 0.08);
+}
+.alert-list {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.alert-row {
+  display: flex;
+  gap: 10px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border-muted);
+  font-size: 11px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  align-items: flex-start;
+}
+.alert-row:last-child { border-bottom: none; }
+.alert-critical {
+  background: rgba(248, 81, 73, 0.07);
+  border-left: 3px solid var(--danger);
+  padding-left: 11px;
+}
+.alert-warning {
+  background: rgba(210, 153, 34, 0.07);
+  border-left: 3px solid var(--attention);
+  padding-left: 11px;
+}
+.alert-time {
+  color: var(--fg-subtle);
+  flex-shrink: 0;
+  font-size: 10px;
+  margin-top: 1px;
+  white-space: nowrap;
+}
+.alert-msg { color: var(--fg); word-break: break-all; }
+.alert-critical .alert-msg { color: #f98585; }
+.alert-warning  .alert-msg { color: #d29922; }
+
+/* ── btn separator in actions-card ── */
+.btn-sep {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 2px;
+  flex-shrink: 0;
+}
