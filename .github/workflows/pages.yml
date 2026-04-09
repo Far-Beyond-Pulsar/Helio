@@ -66,6 +66,15 @@ jobs:
         shell: pwsh
         run: ./build-wasm.ps1 --release
 
+      - name: Bundle static profiler viewer
+        run: |
+          mkdir -p target/wasm-prebuilt/profiler
+          cp -r crates/helio-live-portal/assets/. target/wasm-prebuilt/profiler/
+          # Inject static-mode flag before the main module script so main.js
+          # skips the WebSocket connection and shows the file upload prompt.
+          sed -i 's|<script type="module" src="./js/main.js"></script>|<script>window.HELIO_STATIC_MODE = true;</script>\n  <script type="module" src="./js/main.js"></script>|' \
+            target/wasm-prebuilt/profiler/index.html
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
