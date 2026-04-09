@@ -133,6 +133,8 @@ pub struct TaaPass {
     /// Set to true on construction; cleared after the first prepare() so the
     /// shader's RESET path runs exactly once to prime the history texture.
     first_frame: bool,
+    /// Format of output / history textures (needed to recreate them on resize).
+    output_format: wgpu::TextureFormat,
 }
 
 impl TaaPass {
@@ -359,6 +361,7 @@ impl TaaPass {
             velocity_fallback_texture,
             velocity_fallback_view,
             first_frame: true,
+            output_format: format,
         }
     }
 }
@@ -378,6 +381,47 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 
 impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
+
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let fmt = self.output_format;
+        let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: fmt,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+            view_formats: &[],
+        };
+
+        self.history_texture = device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        self.history_view = self.history_texture.create_view(&Default::default());
+        self.output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        self.output_view = self.output_texture.create_view(&Default::default());
+
+        // blit_bind_group references output_view — must be rebuilt.
+        self.blit_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TAA Blit BG"),
+            layout: &self.blit_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.output_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                },
+            ],
+        });
+
+        // TAA bind group references history_view — invalidate so it is rebuilt in execute().
+        self.bind_group = None;
+        self.bind_group_key = None;
+        // Reset history so the old (stale) history texture is not accumulated.
+        self.first_frame = true;
+    }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let jitter_idx = (ctx.frame_num % 16) as usize;

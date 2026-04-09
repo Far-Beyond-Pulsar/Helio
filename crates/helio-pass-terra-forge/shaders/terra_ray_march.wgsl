@@ -29,6 +29,9 @@ struct Uniforms {
     indir_origin:     vec3<i32>,
     ff_cell_size:     f32,
     camera_offset:    vec3<f32>,
+    _pad_cam:         f32,
+    jitter:           vec2<f32>,
+    _jitter_pad:      vec2<f32>,
 }
 
 struct BrickMeta {
@@ -440,7 +443,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Generate ray from camera — direct computation avoids the ill-conditioned
     // inv_view_proj matrix (condition number ~10^7 with near=0.01, far=100000).
-    let uv = (vec2<f32>(f32(px) + 0.5, f32(py) + 0.5)
+    // Apply TAA Halton subpixel jitter so each frame covers a different subpixel,
+    // enabling TaaPass to reconstruct high-quality temporal supersampling.
+    let uv = (vec2<f32>(f32(px) + 0.5 + u.jitter.x, f32(py) + 0.5 + u.jitter.y)
               / vec2<f32>(f32(u.width), f32(u.height))) * 2.0 - 1.0;
     let ndc = vec2<f32>(uv.x, -uv.y);
 

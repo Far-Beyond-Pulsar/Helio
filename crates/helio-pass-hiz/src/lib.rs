@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use wgpu::util::DeviceExt;
 
 const WORKGROUP_SIZE: u32 = 8;
 const MAX_MIP_LEVELS: u32 = 12;
@@ -47,7 +48,9 @@ pub struct HiZBuildPass {
     #[allow(dead_code)]
     mip_bgl: wgpu::BindGroupLayout,
     mip_bind_groups: Vec<wgpu::BindGroup>,
-    mip_uniforms: Vec<wgpu::Buffer>,
+    #[allow(dead_code)]
+    mip_uniforms: Vec<wgpu::Buffer>, // own the buffers so bind groups remain valid
+    mip_dispatch_groups: Vec<(u32, u32)>,
 
     // Depth-copy pipeline (Depth32Float -> R32Float mip-0)
     copy_pipeline: wgpu::ComputePipeline,
@@ -183,13 +186,22 @@ impl HiZBuildPass {
         // Build per-mip bind groups for mip[i]->mip[i+1] downsampling
         let mut mip_bind_groups = Vec::with_capacity((mip_count - 1) as usize);
         let mut mip_uniforms = Vec::with_capacity((mip_count - 1) as usize);
+        let mut mip_dispatch_groups = Vec::with_capacity((mip_count - 1) as usize);
         for mip in 0..(mip_count - 1) {
-            let ub = device.create_buffer(&wgpu::BufferDescriptor {
+            let src_w = (width >> mip).max(1);
+            let src_h = (height >> mip).max(1);
+            let dst_w = (width >> (mip + 1)).max(1);
+            let dst_h = (height >> (mip + 1)).max(1);
+
+            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("HiZ Mip Uniform"),
-                size: std::mem::size_of::<HiZUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
+                contents: bytemuck::bytes_of(&HiZUniforms {
+                    src_size: [src_w, src_h],
+                    dst_size: [dst_w, dst_h],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
             });
+
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("HiZ Mip BG"),
                 layout: &mip_bgl,
@@ -212,6 +224,7 @@ impl HiZBuildPass {
             });
             mip_uniforms.push(ub);
             mip_bind_groups.push(bg);
+            mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
         }
 
         // Phase 1: depth-copy pipeline
@@ -268,6 +281,7 @@ impl HiZBuildPass {
             mip_bgl,
             mip_bind_groups,
             mip_uniforms,
+            mip_dispatch_groups,
             copy_pipeline,
             copy_bgl,
             copy_bind_group: None,
@@ -414,24 +428,9 @@ impl RenderPass for HiZBuildPass {
         "HiZBuild"
     }
 
-    fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let w = self.width;
-        let h = self.height;
-        for (mip, ub) in self.mip_uniforms.iter().enumerate() {
-            let mip = mip as u32;
-            let src_w = (w >> mip).max(1);
-            let src_h = (h >> mip).max(1);
-            let dst_w = (w >> (mip + 1)).max(1);
-            let dst_h = (h >> (mip + 1)).max(1);
-            ctx.write_buffer(
-                ub,
-                0,
-                bytemuck::bytes_of(&HiZUniforms {
-                    src_size: [src_w, src_h],
-                    dst_size: [dst_w, dst_h],
-                }),
-            );
-        }
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        // Static HiZ mip uniforms are initialized once in `new()` and do not
+        // need to be re-uploaded every frame unless the pass is recreated.
         Ok(())
     }
 
@@ -496,12 +495,11 @@ impl RenderPass for HiZBuildPass {
                 timestamp_writes: None,
             });
             pass.set_pipeline(&self.mip_pipeline);
-            for (mip, bg) in self.mip_bind_groups.iter().enumerate() {
-                let mip = mip as u32;
-                let dst_w = (ctx.width >> (mip + 1)).max(1);
-                let dst_h = (ctx.height >> (mip + 1)).max(1);
-                let wg_x = dst_w.div_ceil(WORKGROUP_SIZE);
-                let wg_y = dst_h.div_ceil(WORKGROUP_SIZE);
+            for (bg, &(wg_x, wg_y)) in self
+                .mip_bind_groups
+                .iter()
+                .zip(self.mip_dispatch_groups.iter())
+            {
                 pass.set_bind_group(0, bg, &[]);
                 pass.dispatch_workgroups(wg_x, wg_y, 1);
             }

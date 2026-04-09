@@ -40,11 +40,9 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
 
 @fragment
 fn fs_main(inp: VsOut) -> @location(0) vec4<f32> {
-    let coord = vec2<i32>(inp.pos.xy);
-
-    // Read from full-res textures directly.
-    let sample_coord = vec2<i32>(clamp(coord, vec2<i32>(0),
-        vec2<i32>(textureDimensions(in_material)) - vec2<i32>(1)));
+    let uv = clamp(inp.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    let dims = vec2<f32>(textureDimensions(in_material));
+    let sample_coord = vec2<i32>(clamp(vec2<i32>(floor(uv * dims)), vec2<i32>(0), vec2<i32>(textureDimensions(in_material)) - vec2<i32>(1)));
 
     let mat_raw = textureLoad(in_material, sample_coord, 0).r;
     if mat_raw == 0u {

@@ -28,6 +28,27 @@ pub const DEFAULT_PLANET_RADIUS: f32 = 1000.0;
 /// Max chunks to generate per frame (streaming budget).
 const CHUNKS_PER_FRAME: usize = 8;
 
+/// Halton base-2/base-3 jitter sequence — matches TaaPass exactly so that
+/// the ray march applies the same subpixel offset TaaPass expects.
+const HALTON_JITTER: [[f32; 2]; 16] = [
+    [0.500000, 0.333333],
+    [0.250000, 0.666667],
+    [0.750000, 0.111111],
+    [0.125000, 0.444444],
+    [0.625000, 0.777778],
+    [0.375000, 0.222222],
+    [0.875000, 0.555556],
+    [0.062500, 0.888889],
+    [0.562500, 0.037037],
+    [0.312500, 0.370370],
+    [0.812500, 0.703704],
+    [0.187500, 0.148148],
+    [0.687500, 0.481481],
+    [0.437500, 0.814815],
+    [0.937500, 0.259259],
+    [0.031250, 0.592593],
+];
+
 // ── Brick-map sphere generation (CPU, kept for unit tests) ───────────────────
 
 /// Result of CPU brick-map generation (used only in tests).
@@ -197,9 +218,13 @@ pub struct TerraForgePass {
     #[allow(dead_code)]
     mat_tex: wgpu::Texture,
     mat_view: wgpu::TextureView,
+    mat_tex_half: wgpu::Texture,
+    mat_view_half: wgpu::TextureView,
     #[allow(dead_code)]
     norm_tex: wgpu::Texture,
     norm_view: wgpu::TextureView,
+    norm_tex_half: wgpu::Texture,
+    norm_view_half: wgpu::TextureView,
 
     // Ray march pipeline
     ray_march_pipeline: wgpu::ComputePipeline,
@@ -229,6 +254,11 @@ pub struct TerraForgePass {
     edits: Vec<EditOp>,
     edits_dirty: bool,
 
+    // Pre-AA render target (published to frame resources so TaaPass can accumulate)
+    pre_aa_texture: wgpu::Texture,
+    pre_aa_view: wgpu::TextureView,
+    surface_format: wgpu::TextureFormat,
+
     // Config
     voxel_size: f32,
     planet_radius: f32,
@@ -237,6 +267,8 @@ pub struct TerraForgePass {
     indir_origin: [i32; 3],
     ray_w: u32,
     ray_h: u32,
+    ray_w_half: u32,
+    ray_h_half: u32,
 }
 
 impl TerraForgePass {
@@ -445,6 +477,9 @@ impl TerraForgePass {
         // Full-res textures (no half-res to avoid nearest-neighbor upsample flicker).
         let ray_w = width;
         let ray_h = height;
+        let ray_w_half = (ray_w + 1) / 2;
+        let ray_h_half = (ray_h + 1) / 2;
+
         let (mat_tex, mat_view) = Self::create_tex(
             device,
             ray_w,
@@ -459,6 +494,33 @@ impl TerraForgePass {
             wgpu::TextureFormat::Rgba16Float,
             "Normal",
         );
+        let (mat_tex_half, mat_view_half) = Self::create_tex(
+            device,
+            ray_w_half,
+            ray_h_half,
+            wgpu::TextureFormat::R32Uint,
+            "Material Half",
+        );
+        let (norm_tex_half, norm_view_half) = Self::create_tex(
+            device,
+            ray_w_half,
+            ray_h_half,
+            wgpu::TextureFormat::Rgba16Float,
+            "Normal Half",
+        );
+
+        // Pre-AA texture: shade output at full resolution, published to TAA.
+        let pre_aa_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TerraForge PreAA"),
+            size: wgpu::Extent3d { width: ray_w, height: ray_h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let pre_aa_view = pre_aa_texture.create_view(&Default::default());
 
         // ── Ray march compute pipeline (9 bindings: +edit_buf) ──────────
 
@@ -568,16 +630,16 @@ impl TerraForgePass {
             &indir_grid_buf,
             &brick_pool_buf,
             &voxel_pool_buf,
-            &mat_view,
-            &norm_view,
+            &mat_view_half,
+            &norm_view_half,
             &edit_buf,
         );
         let shade_bind_group = Self::mk_shade_bg(
             device,
             &shade_bgl,
             &camera_buf,
-            &mat_view,
-            &norm_view,
+            &mat_view_half,
+            &norm_view_half,
             &palette_buf,
         );
 
@@ -621,6 +683,15 @@ impl TerraForgePass {
             indir_origin: [0; 3],
             ray_w,
             ray_h,
+            ray_w_half,
+            ray_h_half,
+            mat_tex_half,
+            mat_view_half,
+            norm_tex_half,
+            norm_view_half,
+            pre_aa_texture,
+            pre_aa_view,
+            surface_format,
         }
     }
 
@@ -1180,6 +1251,12 @@ impl RenderPass for TerraForgePass {
         "TerraForge"
     }
 
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        if frame.pre_aa.is_none() {
+            frame.pre_aa = Some(&self.pre_aa_view);
+        }
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
         let cam_pos = ctx.scene.camera.position();
         let frame = ctx.scene.frame_count;
@@ -1284,9 +1361,11 @@ impl RenderPass for TerraForgePass {
         let raw_cell = (0.001 * surface_dist).max(0.8);
         let ff_cell_size = 2.0f32.powi(raw_cell.log2().ceil() as i32);
 
+        let jitter_idx = (ctx.frame_num % 16) as usize;
+        let raw = HALTON_JITTER[jitter_idx];
         let uniforms = GpuUniforms {
-            width: self.ray_w,
-            height: self.ray_h,
+            width: self.ray_w_half,
+            height: self.ray_h_half,
             brick_dim: BRICK_DIM,
             chunk_dim_bricks: CHUNK_DIM_BRICKS,
             voxel_size: self.voxel_size,
@@ -1297,6 +1376,8 @@ impl RenderPass for TerraForgePass {
             ff_cell_size,
             camera_offset: cam_pos,
             _pad_cam: 0.0,
+            jitter: [raw[0] - 0.5, raw[1] - 0.5],
+            _jitter_pad: [0.0; 2],
         };
         ctx.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
@@ -1339,16 +1420,16 @@ impl RenderPass for TerraForgePass {
             &self.indir_grid_buf,
             &self.brick_pool_buf,
             &self.voxel_pool_buf,
-            &self.mat_view,
-            &self.norm_view,
+            &self.mat_view_half,
+            &self.norm_view_half,
             &self.edit_buf,
         );
         self.shade_bind_group = Self::mk_shade_bg(
             ctx.device,
             &self.shade_bgl,
             &self.camera_buf,
-            &self.mat_view,
-            &self.norm_view,
+            &self.mat_view_half,
+            &self.norm_view_half,
             &self.palette_buf,
         );
         Ok(())
@@ -1365,15 +1446,15 @@ impl RenderPass for TerraForgePass {
                 });
             cpass.set_pipeline(&self.ray_march_pipeline);
             cpass.set_bind_group(0, &self.ray_march_bind_group, &[]);
-            cpass.dispatch_workgroups((self.ray_w + 7) / 8, (self.ray_h + 7) / 8, 1);
+            cpass.dispatch_workgroups((self.ray_w_half + 7) / 8, (self.ray_h_half + 7) / 8, 1);
         }
 
-        // Fullscreen shade → swapchain target.
+        // Fullscreen shade → pre_aa (published so TaaPass can accumulate this frame).
         {
             let mut rpass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TerraForge Shade"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: ctx.target,
+                    view: &self.pre_aa_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1399,6 +1480,8 @@ impl RenderPass for TerraForgePass {
         }
         self.ray_w = width;
         self.ray_h = height;
+        self.ray_w_half = (width + 1) / 2;
+        self.ray_h_half = (height + 1) / 2;
         let (mt, mv) = Self::create_tex(
             device,
             width,
@@ -1413,10 +1496,41 @@ impl RenderPass for TerraForgePass {
             wgpu::TextureFormat::Rgba16Float,
             "Normal",
         );
+        let (mth, mvh) = Self::create_tex(
+            device,
+            self.ray_w_half,
+            self.ray_h_half,
+            wgpu::TextureFormat::R32Uint,
+            "Material Half",
+        );
+        let (nth, nvh) = Self::create_tex(
+            device,
+            self.ray_w_half,
+            self.ray_h_half,
+            wgpu::TextureFormat::Rgba16Float,
+            "Normal Half",
+        );
         self.mat_tex = mt;
         self.mat_view = mv;
         self.norm_tex = nt;
         self.norm_view = nv;
+        self.mat_tex_half = mth;
+        self.mat_view_half = mvh;
+        self.norm_tex_half = nth;
+        self.norm_view_half = nvh;
+
+        // Recreate pre_aa texture at new full resolution.
+        self.pre_aa_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("TerraForge PreAA"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.surface_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        self.pre_aa_view = self.pre_aa_texture.create_view(&Default::default());
     }
 }
 
@@ -1478,7 +1592,7 @@ mod tests {
 
     #[test]
     fn uniforms_size() {
-        assert_eq!(std::mem::size_of::<GpuUniforms>(), 64);
+        assert_eq!(std::mem::size_of::<GpuUniforms>(), 80);
         assert_eq!(std::mem::size_of::<GenUniforms>(), 48);
         assert_eq!(std::mem::size_of::<ChunkInfo>(), 32);
     }

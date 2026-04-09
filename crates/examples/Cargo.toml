@@ -138,6 +138,7 @@ helio = { path = "../helio", features = ["live-portal"] }
 helio-asset-compat = { path = "../helio-asset-compat" }
 helio-pass-sdf = { path = "../helio-pass-sdf" }
 helio-pass-terra-forge = { path = "../helio-pass-terra-forge" }
+helio-pass-taa = { path = "../helio-pass-taa" }
 rapier3d = "0.24"
 rapier_testbed3d = "0.24"
 image = { version = "0.25", default-features = false, features = ["png"] }

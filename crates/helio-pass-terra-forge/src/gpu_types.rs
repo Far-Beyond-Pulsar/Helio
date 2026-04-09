@@ -94,7 +94,7 @@ pub struct EditOp {
 
 // ── Per-frame uniforms for the ray marcher (48 bytes) ────────────────────────
 
-/// Ray march uniforms (48 bytes, matches WGSL alignment).
+/// Ray march uniforms (80 bytes, matches WGSL alignment).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Debug)]
 pub struct GpuUniforms {
@@ -114,6 +114,9 @@ pub struct GpuUniforms {
     /// Camera world-space position, subtracted from all coordinates for precision.
     pub camera_offset: [f32; 3],
     pub _pad_cam: f32,
+    /// TAA Halton subpixel jitter in pixel space [-0.5, 0.5); matches TaaPass sequence.
+    pub jitter: [f32; 2],
+    pub _jitter_pad: [f32; 2],
 }
 
 // ── Gen uniforms for per-chunk SDF generation (48 bytes) ─────────────────────
@@ -143,7 +146,7 @@ pub struct GenUniforms {
 
 // ── Static assertions ────────────────────────────────────────────────────────
 
-const _: () = assert!(std::mem::size_of::<GpuUniforms>() == 64);
+const _: () = assert!(std::mem::size_of::<GpuUniforms>() == 80);
 const _: () = assert!(std::mem::size_of::<BrickMeta>() == 8);
 const _: () = assert!(std::mem::size_of::<GpuMaterial>() == 16);
 const _: () = assert!(std::mem::size_of::<GenUniforms>() == 48);

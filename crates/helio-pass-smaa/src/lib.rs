@@ -8,19 +8,33 @@
 //!
 //! ## O(1) guarantee
 //! `execute()` records exactly **3** `draw(0..3, 0..1)` calls regardless of scene size.
+//!
+//! ## Lazy bind groups
+//! `edge` and `neighbor` bind groups are rebuilt when `frame.pre_aa` changes pointer
+//! (e.g. after resize). `blend` bind group is rebuilt in `on_resize()` since it references
+//! the internal `edge_view` which is recreated then.
 
 use helio_v3::{PassContext, RenderPass, Result as HelioResult};
 
 /// SMAA pass (3 sequential fullscreen draws).
 pub struct SmaaPass {
     edge_pipeline: wgpu::RenderPipeline,
-    edge_bind_group: wgpu::BindGroup,
+    edge_bgl: wgpu::BindGroupLayout,
+    /// Lazy — rebuilt when `pre_aa` view pointer changes.
+    edge_bind_group: Option<wgpu::BindGroup>,
 
     blend_pipeline: wgpu::RenderPipeline,
-    blend_bind_group: wgpu::BindGroup,
+    blend_bgl: wgpu::BindGroupLayout,
+    /// Lazy — rebuilt in `on_resize()` when `edge_view` is recreated.
+    blend_bind_group: Option<wgpu::BindGroup>,
 
     neighbor_pipeline: wgpu::RenderPipeline,
-    neighbor_bind_group: wgpu::BindGroup,
+    neighbor_bgl: wgpu::BindGroupLayout,
+    /// Lazy — shares the same key as `edge_bind_group`.
+    neighbor_bind_group: Option<wgpu::BindGroup>,
+
+    /// Key for `edge_bind_group` / `neighbor_bind_group`: pointer to the pre_aa TextureView.
+    input_key: Option<usize>,
 
     pub edge_texture: wgpu::Texture,
     pub edge_view: wgpu::TextureView,
@@ -34,13 +48,12 @@ pub struct SmaaPass {
 impl SmaaPass {
     /// Create the SMAA pass.
     ///
-    /// `input_view` — the pre-AA colour buffer (same view used by both edge and neighbor passes).
     /// `target_format` — format of `ctx.target`.
+    /// Input is read from `frame.pre_aa` each frame (published by the geometry pass).
     pub fn new(
         device: &wgpu::Device,
         width: u32,
         height: u32,
-        input_view: &wgpu::TextureView,
         target_format: wgpu::TextureFormat,
     ) -> Self {
         let edge_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -74,42 +87,11 @@ impl SmaaPass {
             ..Default::default()
         });
 
-        // Intermediate textures
-        let edge_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SMAA Edge Texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            // Rg16Float: 2-channel float, sufficient for vec2<f32> edge output
-            format: wgpu::TextureFormat::Rg16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let edge_view = edge_texture.create_view(&Default::default());
-
-        let blend_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("SMAA Blend Texture"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let blend_view = blend_texture.create_view(&Default::default());
+        let (edge_texture, edge_view, blend_texture, blend_view) =
+            Self::create_intermediate_textures(device, width, height);
 
         // All three shaders share the same BGL layout (tex + linear + point)
-        let bgl = |label: &'static str, tex_filterable: bool| -> wgpu::BindGroupLayout {
+        let make_bgl = |label: &'static str, tex_filterable: bool| -> wgpu::BindGroupLayout {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some(label),
                 entries: &[
@@ -136,30 +118,6 @@ impl SmaaPass {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                         count: None,
-                    },
-                ],
-            })
-        };
-
-        let make_bg = |layout: &wgpu::BindGroupLayout,
-                       label: &'static str,
-                       tex: &wgpu::TextureView|
-         -> wgpu::BindGroup {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some(label),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(tex),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&linear_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(&point_sampler),
                     },
                 ],
             })
@@ -205,9 +163,7 @@ impl SmaaPass {
             })
         };
 
-        // Edge detection: input (filterable) → Rg16Float
-        let edge_bgl = bgl("SMAA Edge BGL", true);
-        let edge_bind_group = make_bg(&edge_bgl, "SMAA Edge BG", input_view);
+        let edge_bgl = make_bgl("SMAA Edge BGL", true);
         let edge_pipeline = make_pipeline(
             "SMAA Edge Pipeline",
             &edge_shader,
@@ -215,9 +171,7 @@ impl SmaaPass {
             wgpu::TextureFormat::Rg16Float,
         );
 
-        // Blend weight: edge_view → Rgba8Unorm
-        let blend_bgl = bgl("SMAA Blend BGL", true);
-        let blend_bind_group = make_bg(&blend_bgl, "SMAA Blend BG", &edge_view);
+        let blend_bgl = make_bgl("SMAA Blend BGL", true);
         let blend_pipeline = make_pipeline(
             "SMAA Blend Pipeline",
             &blend_shader,
@@ -225,9 +179,7 @@ impl SmaaPass {
             wgpu::TextureFormat::Rgba8Unorm,
         );
 
-        // Neighborhood blending: input → ctx.target format
-        let neighbor_bgl = bgl("SMAA Neighbor BGL", true);
-        let neighbor_bind_group = make_bg(&neighbor_bgl, "SMAA Neighbor BG", input_view);
+        let neighbor_bgl = make_bgl("SMAA Neighbor BGL", true);
         let neighbor_pipeline = make_pipeline(
             "SMAA Neighbor Pipeline",
             &neighbor_shader,
@@ -237,11 +189,15 @@ impl SmaaPass {
 
         Self {
             edge_pipeline,
-            edge_bind_group,
+            edge_bgl,
+            edge_bind_group: None,
             blend_pipeline,
-            blend_bind_group,
+            blend_bgl,
+            blend_bind_group: None,
             neighbor_pipeline,
-            neighbor_bind_group,
+            neighbor_bgl,
+            neighbor_bind_group: None,
+            input_key: None,
             edge_texture,
             edge_view,
             blend_texture,
@@ -249,6 +205,66 @@ impl SmaaPass {
             linear_sampler,
             point_sampler,
         }
+    }
+
+    fn create_intermediate_textures(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+        let edge_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SMAA Edge Texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let edge_view = edge_texture.create_view(&Default::default());
+
+        let blend_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("SMAA Blend Texture"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let blend_view = blend_texture.create_view(&Default::default());
+
+        (edge_texture, edge_view, blend_texture, blend_view)
+    }
+
+    fn make_bg(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        label: &'static str,
+        tex: &wgpu::TextureView,
+        linear_sampler: &wgpu::Sampler,
+        point_sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(tex),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(point_sampler),
+                },
+            ],
+        })
     }
 }
 
@@ -259,6 +275,34 @@ impl RenderPass for SmaaPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): exactly 3 fullscreen draws regardless of scene size.
+
+        // ── Lazy bind group rebuild ───────────────────────────────────────────
+        // Edge and neighbor bind groups reference the pre_aa view from frame resources.
+        // They are rebuilt whenever that view's pointer changes (e.g. after resize).
+        let pre_aa = ctx.resources.pre_aa.ok_or_else(|| {
+            helio_v3::Error::InvalidPassConfig(
+                "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
+            )
+        })?;
+        let input_key = pre_aa as *const _ as usize;
+        if self.input_key != Some(input_key) {
+            self.edge_bind_group = Some(Self::make_bg(
+                ctx.device, &self.edge_bgl, "SMAA Edge BG",
+                pre_aa, &self.linear_sampler, &self.point_sampler,
+            ));
+            self.neighbor_bind_group = Some(Self::make_bg(
+                ctx.device, &self.neighbor_bgl, "SMAA Neighbor BG",
+                pre_aa, &self.linear_sampler, &self.point_sampler,
+            ));
+            self.input_key = Some(input_key);
+        }
+        // Blend bind group references the internal edge_view; rebuilt in on_resize() when None.
+        if self.blend_bind_group.is_none() {
+            self.blend_bind_group = Some(Self::make_bg(
+                ctx.device, &self.blend_bgl, "SMAA Blend BG",
+                &self.edge_view, &self.linear_sampler, &self.point_sampler,
+            ));
+        }
 
         // Pass 1 — edge detection → edge_view
         {
@@ -281,7 +325,7 @@ impl RenderPass for SmaaPass {
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.edge_pipeline);
-            pass.set_bind_group(0, &self.edge_bind_group, &[]);
+            pass.set_bind_group(0, self.edge_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -306,7 +350,7 @@ impl RenderPass for SmaaPass {
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.blend_pipeline);
-            pass.set_bind_group(0, &self.blend_bind_group, &[]);
+            pass.set_bind_group(0, self.blend_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
 
@@ -332,11 +376,25 @@ impl RenderPass for SmaaPass {
             };
             let mut pass = ctx.encoder.begin_render_pass(&desc);
             pass.set_pipeline(&self.neighbor_pipeline);
-            pass.set_bind_group(0, &self.neighbor_bind_group, &[]);
+            pass.set_bind_group(0, self.neighbor_bind_group.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
 
         Ok(())
+    }
+
+    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let (et, ev, bt, bv) = Self::create_intermediate_textures(device, width, height);
+        self.edge_texture = et;
+        self.edge_view = ev;
+        self.blend_texture = bt;
+        self.blend_view = bv;
+        // Invalidate all bind groups — edge_view changed (blend), and pre_aa will
+        // have a new address after the upstream pass recreates its texture.
+        self.edge_bind_group = None;
+        self.blend_bind_group = None;
+        self.neighbor_bind_group = None;
+        self.input_key = None;
     }
 }
 

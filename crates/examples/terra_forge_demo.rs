@@ -17,6 +17,7 @@ use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, RenderGraph, Renderer, RendererConfig,
 };
+use helio_pass_taa::TaaPass;
 use helio_pass_terra_forge::{TerraForgePass, DEFAULT_PLANET_RADIUS};
 use winit::{
     application::ApplicationHandler,
@@ -172,9 +173,11 @@ impl ApplicationHandler for App {
         let mut renderer = Renderer::new(device.clone(), queue.clone(), config);
 
         let pass = TerraForgePass::new(&device, &queue, size.width, size.height, surface_format);
+        let taa = TaaPass::new(&device, size.width, size.height, size.width, size.height, surface_format);
 
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(pass));
+        graph.add_pass(Box::new(taa));
         renderer.set_graph(graph);
 
         // Start camera just above the planet surface (not 2× radius away!).

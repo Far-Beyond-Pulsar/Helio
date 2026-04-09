@@ -174,7 +174,8 @@ pub struct PerfOverlayPass {
     visualize_bgl: wgpu::BindGroupLayout,
     visualize_params_buf: wgpu::Buffer,
     visualize_bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize)>,
+    aggregate_bind_group_key: Option<(usize, usize)>,
+    visualize_bind_group_key: Option<usize>,
 }
 
 /// Analyzer pass that runs after render passes and compares the current depth
@@ -1119,7 +1120,8 @@ impl PerfOverlayPass {
             visualize_bgl,
             visualize_params_buf,
             visualize_bind_group: None,
-            bind_group_key: None,
+            aggregate_bind_group_key: None,
+            visualize_bind_group_key: None,
         }
     }
 
@@ -1146,12 +1148,24 @@ impl RenderPass for PerfOverlayPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let shared = self.shared.lock().unwrap();
+        let mode = *shared.mode.lock().unwrap();
+        if mode == PerfOverlayMode::Disabled {
+            return Ok(());
+        }
+
+        let num_tiles_x = shared.num_tiles_x;
+        let num_tiles_y = shared.num_tiles_y;
+        let internal_width = shared.internal_width;
+        let internal_height = shared.internal_height;
+        let display_width = shared.display_width;
+        let display_height = shared.display_height;
+
         let aggregate_params = AggregateParams {
-            num_tiles_x: shared.num_tiles_x,
-            num_tiles_y: shared.num_tiles_y,
-            num_tiles: shared.num_tiles_x * shared.num_tiles_y,
-            screen_width: shared.internal_width,
-            screen_height: shared.internal_height,
+            num_tiles_x,
+            num_tiles_y,
+            num_tiles: num_tiles_x * num_tiles_y,
+            screen_width: internal_width,
+            screen_height: internal_height,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,
@@ -1163,13 +1177,13 @@ impl RenderPass for PerfOverlayPass {
         );
 
         let visualize_params = VisualizeParams {
-            mode: shared.mode.lock().unwrap().clone() as u32,
-            num_tiles_x: shared.num_tiles_x,
-            num_tiles_y: shared.num_tiles_y,
-            internal_width: shared.internal_width,
-            internal_height: shared.internal_height,
-            display_width: shared.display_width,
-            display_height: shared.display_height,
+            mode: mode as u32,
+            num_tiles_x,
+            num_tiles_y,
+            internal_width,
+            internal_height,
+            display_width,
+            display_height,
             heatmap_scale: 5.0,
             _pad0: 0,
             _pad1: 0,
@@ -1186,16 +1200,17 @@ impl RenderPass for PerfOverlayPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let shared = self.shared.lock().unwrap();
-        if *shared.mode.lock().unwrap() == PerfOverlayMode::Disabled {
+        let mode = *shared.mode.lock().unwrap();
+        if mode == PerfOverlayMode::Disabled {
             return Ok(());
         }
 
         if let (Some(gbuffer), Some(tile_light_counts)) = (ctx.resources.gbuffer, ctx.resources.tile_light_counts) {
             let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
-            let key = (gbuffer_orm_ptr, tile_light_counts_ptr, 0);
+            let key = (gbuffer_orm_ptr, tile_light_counts_ptr);
 
-            if self.bind_group_key != Some(key) {
+            if self.aggregate_bind_group_key != Some(key) {
                 self.aggregate_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("PerfOverlay Aggregate BG"),
                     layout: &self.aggregate_bgl,
@@ -1222,7 +1237,7 @@ impl RenderPass for PerfOverlayPass {
                         },
                     ],
                 }));
-                self.bind_group_key = Some(key);
+                self.aggregate_bind_group_key = Some(key);
             }
 
             let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1237,9 +1252,9 @@ impl RenderPass for PerfOverlayPass {
 
         if let (Some(_pre_aa), Some(gbuffer)) = (ctx.resources.pre_aa, ctx.resources.gbuffer) {
             let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
-            let key = (gbuffer_orm_ptr, 0, 0);
+            let key = gbuffer_orm_ptr;
 
-            if self.bind_group_key != Some(key) || self.visualize_bind_group.is_none() {
+            if self.visualize_bind_group_key != Some(key) || self.visualize_bind_group.is_none() {
                 self.visualize_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("PerfOverlay Visualize BG"),
                     layout: &self.visualize_bgl,
@@ -1266,6 +1281,7 @@ impl RenderPass for PerfOverlayPass {
                         },
                     ],
                 }));
+                self.visualize_bind_group_key = Some(key);
             }
 
             let color_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -1309,7 +1325,8 @@ impl RenderPass for PerfOverlayPass {
 
         self.aggregate_bind_group = None;
         self.visualize_bind_group = None;
-        self.bind_group_key = None;
+        self.aggregate_bind_group_key = None;
+        self.visualize_bind_group_key = None;
     }
 }
 
