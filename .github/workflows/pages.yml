@@ -71,6 +71,14 @@ jobs:
         run: |
           mkdir -p target/wasm-prebuilt/profiler
           cp -r crates/helio-live-portal/assets/. target/wasm-prebuilt/profiler/
+          # Fix absolute asset paths → relative, so the page works at /profiler/
+          # /vendor/foo  →  ./vendor/foo
+          # /assets/portal.css  →  ./portal.css  (assets/ IS the profiler root)
+          sed -i \
+            -e 's|href="/vendor/|href="./vendor/|g' \
+            -e 's|src="/vendor/|src="./vendor/|g' \
+            -e 's|href="/assets/portal\.css"|href="./portal.css"|g' \
+            target/wasm-prebuilt/profiler/index.html
           # Inject static-mode flag before the main module script so main.js
           # skips the WebSocket connection and shows the file upload prompt.
           sed -i 's|<script type="module" src="./js/main.js"></script>|<script>window.HELIO_STATIC_MODE = true;</script>\n  <script type="module" src="./js/main.js"></script>|' \
