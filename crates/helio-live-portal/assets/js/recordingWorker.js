@@ -1,147 +1,68 @@
-// recordingWorker.js - Background worker for non-blocking recording
+// recordingWorker.js - Extreme performance in-memory recording
 'use strict';
 
-const CHUNK_SIZE = 100;
-
-let db = null;
-let buffer = [];
-let chunks = [];
+// Pure in-memory storage (no IndexedDB during recording!)
+let snapshots = [];
 let frameCount = 0;
 
-// Initialize IndexedDB
-async function initDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open('HelioRecordings', 1);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains('chunks')) {
-        db.createObjectStore('chunks', { keyPath: 'id' });
-      }
-    };
-  });
-}
-
-// Flush buffer to IndexedDB
-async function flushChunk() {
-  if (buffer.length === 0 || !db) return;
-
-  const chunkId = chunks.length;
-  const chunk = { id: chunkId, snapshots: buffer.slice() };
-
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(['chunks'], 'readwrite');
-    const store = transaction.objectStore('chunks');
-    const request = store.add(chunk);
-    request.onsuccess = () => {
-      chunks.push(chunkId);
-      buffer = [];
-      resolve();
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-// Clear all chunks
-async function clearDB() {
-  if (!db) return;
-  return new Promise((resolve, reject) => {
-    const transaction = db.transaction(['chunks'], 'readwrite');
-    const store = transaction.objectStore('chunks');
-    const request = store.clear();
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-  });
-}
-
-// Retrieve all chunks
-async function getAllSnapshots() {
-  const allSnapshots = [];
-  for (const chunkId of chunks) {
-    const chunk = await new Promise((resolve, reject) => {
-      const transaction = db.transaction(['chunks'], 'readonly');
-      const store = transaction.objectStore('chunks');
-      const request = store.get(chunkId);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
-    if (chunk && chunk.snapshots) {
-      allSnapshots.push(...chunk.snapshots);
-    }
-  }
-  return allSnapshots;
-}
-
 // Message handler
-self.onmessage = async (e) => {
+self.onmessage = (e) => {
   const { type, payload } = e.data;
 
   try {
     switch (type) {
       case 'init':
-        db = await initDB();
-        await clearDB();
-        buffer = [];
-        chunks = [];
+        // Reset state
+        snapshots = [];
         frameCount = 0;
         self.postMessage({ type: 'init-complete' });
         break;
 
-      case 'capture':
-        buffer.push(payload);
-        frameCount++;
+      case 'capture-batch':
+        // Receive batched snapshots for minimal message overhead
+        if (Array.isArray(payload)) {
+          snapshots.push(...payload);
+          frameCount += payload.length;
 
-        // Flush chunk when full
-        if (buffer.length >= CHUNK_SIZE) {
-          await flushChunk();
-        }
-
-        // Send progress update (throttled)
-        if (frameCount % 30 === 0) {
+          // Send progress update
           self.postMessage({ type: 'progress', count: frameCount });
         }
         break;
 
       case 'stop':
-        // Flush remaining buffer
-        if (buffer.length > 0) {
-          await flushChunk();
-        }
-
-        // Retrieve all snapshots
-        const allSnapshots = await getAllSnapshots();
-
-        if (allSnapshots.length === 0) {
-          self.postMessage({ type: 'stop-complete', snapshots: [] });
+        if (snapshots.length === 0) {
+          self.postMessage({ type: 'stop-complete', parts: [] });
           return;
         }
 
-        // Build recording with metadata
-        const duration = allSnapshots[allSnapshots.length - 1].timestamp_ms - allSnapshots[0].timestamp_ms;
-        const recording = {
-          version: 1,
-          meta: {
-            recorded_at: new Date().toISOString(),
-            total_frames: allSnapshots.length,
-            duration_ms: duration
-          },
-          snapshots: allSnapshots
+        // Serialize in chunks with yield points
+        const first = snapshots[0];
+        const last = snapshots[snapshots.length - 1];
+        const duration = last.timestamp_ms - first.timestamp_ms;
+
+        const meta = {
+          recorded_at: new Date().toISOString(),
+          total_frames: snapshots.length,
+          duration_ms: duration
         };
 
-        // Serialize in chunks (non-blocking)
-        const jsonStart = '{"version":1,"meta":' + JSON.stringify(recording.meta) + ',"snapshots":[';
+        // Stream serialization
+        const jsonStart = '{"version":1,"meta":' + JSON.stringify(meta) + ',"snapshots":[';
         const parts = [jsonStart];
 
-        for (let i = 0; i < allSnapshots.length; i++) {
-          if (i > 0) parts.push(',');
-          parts.push(JSON.stringify(allSnapshots[i]));
+        // Serialize in batches
+        const BATCH_SIZE = 50;
+        for (let i = 0; i < snapshots.length; i += BATCH_SIZE) {
+          const end = Math.min(i + BATCH_SIZE, snapshots.length);
 
-          // Report progress every 100 frames
-          if (i % 100 === 0) {
-            const progress = Math.round((i / allSnapshots.length) * 100);
-            self.postMessage({ type: 'serialize-progress', progress });
+          for (let j = i; j < end; j++) {
+            if (j > 0) parts.push(',');
+            parts.push(JSON.stringify(snapshots[j]));
           }
+
+          // Report progress
+          const progress = Math.round((end / snapshots.length) * 100);
+          self.postMessage({ type: 'serialize-progress', progress });
         }
 
         parts.push(']}');
@@ -149,8 +70,12 @@ self.onmessage = async (e) => {
         self.postMessage({
           type: 'stop-complete',
           parts,
-          totalFrames: allSnapshots.length
+          totalFrames: snapshots.length
         });
+
+        // Clear memory
+        snapshots = [];
+        frameCount = 0;
         break;
 
       default:

@@ -18,10 +18,13 @@ let cyInstance = null;
 let currentDataSource = 'live'; // 'live' or 'replay'
 
 // ── Recording state ───────────────────────────────────────────────────────────
+const BATCH_SIZE = 10; // Send frames in batches of 10
 const recordingState = {
   isRecording: false,
   worker: null,
-  frameCount: 0
+  frameCount: 0,
+  batchBuffer: [],       // Accumulate frames before sending to worker
+  uiUpdateScheduled: false
 };
 
 // ── Replay state ──────────────────────────────────────────────────────────────
@@ -176,9 +179,28 @@ ws.onmessage = (evt) => {
 
 // Process a snapshot from either live or replay source
 function processSnapshot(snapshot) {
-  // Record if active (send to worker)
+  // Record if active (batch and send to worker)
   if (recordingState.isRecording && recordingState.worker) {
-    recordingState.worker.postMessage({ type: 'capture', payload: snapshot });
+    recordingState.batchBuffer.push(snapshot);
+    recordingState.frameCount++;
+
+    // Flush batch when full
+    if (recordingState.batchBuffer.length >= BATCH_SIZE) {
+      recordingState.worker.postMessage({
+        type: 'capture-batch',
+        payload: recordingState.batchBuffer.slice()
+      });
+      recordingState.batchBuffer = [];
+    }
+
+    // Schedule UI update using requestIdleCallback (non-blocking)
+    if (!recordingState.uiUpdateScheduled) {
+      recordingState.uiUpdateScheduled = true;
+      (requestIdleCallback || requestAnimationFrame)(() => {
+        updateRecordingUI();
+        recordingState.uiUpdateScheduled = false;
+      });
+    }
   }
 
   // Render to UI
@@ -215,10 +237,12 @@ function startRecording() {
     // Create recording worker
     recordingState.worker = new Worker('./js/recordingWorker.js');
     recordingState.frameCount = 0;
+    recordingState.batchBuffer = [];
+    recordingState.uiUpdateScheduled = false;
 
     // Handle worker messages
     recordingState.worker.onmessage = (e) => {
-      const { type, count, progress, parts, totalFrames, error } = e.data;
+      const { type, progress, parts, totalFrames, error } = e.data;
 
       switch (type) {
         case 'init-complete':
@@ -226,8 +250,7 @@ function startRecording() {
           break;
 
         case 'progress':
-          recordingState.frameCount = count;
-          updateRecordingUI();
+          // Worker confirms batch received (optional logging)
           break;
 
         case 'serialize-progress':
@@ -251,6 +274,12 @@ function startRecording() {
             showToast(`Downloaded ${totalFrames.toLocaleString()} frames`);
           } else {
             showToast('No frames recorded');
+          }
+
+          // Cleanup worker
+          if (recordingState.worker) {
+            recordingState.worker.terminate();
+            recordingState.worker = null;
           }
           break;
 
@@ -276,7 +305,7 @@ function startRecording() {
     if (btn) btn.classList.add('recording');
     if (badge) badge.textContent = '●';
 
-    console.log('Recording started (worker-based)');
+    console.log('Recording started (batched in-memory mode)');
   } catch (err) {
     showToast(`Failed to start recording: ${err.message}`);
     console.error('Recording initialization failed:', err);
@@ -292,6 +321,15 @@ function stopRecording() {
   const badge = document.getElementById('recordingBadge');
   if (btn) btn.classList.remove('recording');
   if (badge) badge.textContent = '';
+
+  // Flush any remaining batched frames
+  if (recordingState.batchBuffer.length > 0) {
+    recordingState.worker.postMessage({
+      type: 'capture-batch',
+      payload: recordingState.batchBuffer.slice()
+    });
+    recordingState.batchBuffer = [];
+  }
 
   console.log(`Recording stopped: ${recordingState.frameCount} frames`);
 
