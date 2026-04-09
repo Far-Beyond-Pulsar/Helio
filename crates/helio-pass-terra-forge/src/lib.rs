@@ -1358,7 +1358,9 @@ impl RenderPass for TerraForgePass {
         let surface_dist = (cam_dist_to_planet - self.planet_radius).abs().max(1.0);
         // Snap to discrete power-of-2 levels to prevent the far-field virtual grid
         // from continuously shifting as the camera moves.
-        let raw_cell = (0.001 * surface_dist).max(0.8);
+        // Coefficient controls how quickly cells get coarser with altitude:
+        // smaller value = finer grid at greater distances (higher detail distance).
+        let raw_cell = (0.0004 * surface_dist).max(0.8);
         let ff_cell_size = 2.0f32.powi(raw_cell.log2().ceil() as i32);
 
         let jitter_idx = (ctx.frame_num % 16) as usize;

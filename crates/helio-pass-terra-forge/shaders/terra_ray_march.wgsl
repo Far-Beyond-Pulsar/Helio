@@ -359,7 +359,7 @@ fn trace_far_field(ro: vec3<f32>, rd: vec3<f32>, t_start: f32, t_end: f32,
     // Phase 1: Sphere-trace to find vicinity of the surface.
     var t_sdf = t_lo;
     var near_surface = false;
-    for (var i = 0; i < 96; i++) {
+    for (var i = 0; i < 192; i++) {
         // SDF needs world-space position (offset from planet center).
         let pos_world = ro + rd * t_sdf + u.camera_offset;
         let d = ff_sdf_terrain(pos_world);
@@ -399,7 +399,7 @@ fn trace_far_field(ro: vec3<f32>, rd: vec3<f32>, t_start: f32, t_end: f32,
     var normal = vec3<f32>(0.0, 1.0, 0.0);
     var t_cell_enter = dda_start;
 
-    for (var i = 0; i < 64; i++) {
+    for (var i = 0; i < 128; i++) {
         // Cell center in world space for SDF evaluation.
         let voxel_center = (vec3<f32>(cell) + 0.5) * cell_size;
         // Conservative occupancy: treat a cell as solid if the surface might

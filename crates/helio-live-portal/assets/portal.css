@@ -787,3 +787,261 @@ canvas {
   margin: 0 2px;
   flex-shrink: 0;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Recording & Replay Controls
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Recording button states ── */
+.btn-icon.recording {
+  background: rgba(248, 81, 73, 0.15);
+  border-color: var(--danger);
+  color: var(--danger);
+  animation: recordingPulse 2s ease-in-out infinite;
+}
+
+@keyframes recordingPulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(248, 81, 73, 0.7); }
+  50% { opacity: 0.85; box-shadow: 0 0 0 6px rgba(248, 81, 73, 0); }
+}
+
+.recording-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 18px;
+  height: 18px;
+  background: var(--danger);
+  color: #fff;
+  border-radius: 10px;
+  font-size: 9px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  line-height: 1;
+  pointer-events: none;
+  border: 2px solid var(--canvas-inset);
+  box-shadow: 0 2px 8px rgba(248, 81, 73, 0.5);
+}
+.recording-badge:empty { display: none; }
+
+/* ── Replay bar at bottom ── */
+.replay-bar {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
+  background: rgba(22, 27, 34, 0.98);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  backdrop-filter: blur(16px) saturate(180%);
+  border-top: 1px solid var(--border);
+  display: none;
+  align-items: center;
+  gap: 12px;
+  padding: 0 20px;
+  z-index: 1000;
+  box-shadow: 0 -4px 16px rgba(1, 4, 9, 0.6);
+}
+.replay-bar.active {
+  display: flex;
+}
+
+.replay-mode-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--danger);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  padding: 5px 10px;
+  background: rgba(248, 81, 73, 0.15);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  animation: badgePulse 2s ease-in-out infinite;
+}
+
+@keyframes badgePulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.replay-btn {
+  background: var(--canvas-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--fg-muted);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  min-width: 36px;
+  height: 36px;
+}
+.replay-btn:hover {
+  background: var(--canvas);
+  color: var(--fg);
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(56, 139, 253, 0.2);
+}
+.replay-btn svg {
+  flex-shrink: 0;
+}
+
+.replay-pause-icon {
+  display: none;
+}
+
+.replay-speed-btn {
+  background: var(--canvas-subtle);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+  color: var(--accent);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  font-size: 12px;
+  font-weight: 600;
+  font-family: 'JetBrains Mono', monospace;
+  min-width: 42px;
+  height: 36px;
+}
+.replay-speed-btn:hover {
+  background: var(--canvas);
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(56, 139, 253, 0.2);
+}
+
+#replaySlider {
+  flex: 1;
+  height: 6px;
+  background: var(--canvas-subtle);
+  border-radius: 3px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--border);
+}
+
+#replaySlider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid var(--canvas-inset);
+  box-shadow: 0 2px 8px rgba(56, 139, 253, 0.5);
+  transition: transform 0.12s ease;
+}
+
+#replaySlider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+#replaySlider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: var(--accent);
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid var(--canvas-inset);
+  box-shadow: 0 2px 8px rgba(56, 139, 253, 0.5);
+  transition: transform 0.12s ease;
+}
+
+#replaySlider::-moz-range-thumb:hover {
+  transform: scale(1.2);
+}
+
+.replay-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 140px;
+  font-size: 11px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+#replayTime {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+#replayDuration {
+  color: var(--fg-subtle);
+  font-size: 10px;
+}
+
+/* ── File upload input (hidden) ── */
+.file-upload-hidden {
+  display: none;
+}
+
+/* ── Upload drop zone overlay ── */
+.upload-drop-zone {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 17, 23, 0.95);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  cursor: pointer;
+}
+
+.upload-drop-zone.active {
+  display: flex;
+}
+
+.upload-drop-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  padding: 48px;
+  background: rgba(22, 27, 34, 0.9);
+  border: 2px dashed var(--accent);
+  border-radius: 16px;
+  pointer-events: none;
+  animation: dropZonePulse 2s ease-in-out infinite;
+}
+
+@keyframes dropZonePulse {
+  0%, 100% { transform: scale(1); border-color: var(--accent); }
+  50% { transform: scale(1.02); border-color: var(--success); }
+}
+
+.upload-drop-content svg {
+  color: var(--accent);
+  width: 48px;
+  height: 48px;
+}
+
+.upload-drop-text {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--fg);
+  text-align: center;
+}
+
+.upload-drop-hint {
+  font-size: 13px;
+  color: var(--fg-muted);
+  text-align: center;
+}
+
+/* ── Adjust main content when replay bar is active ── */
+.replay-bar.active ~ #cy {
+  height: calc(100vh - 48px - 56px);
+}

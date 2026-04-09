@@ -22,7 +22,7 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, HelioAction, HelioCommandBridge, LightId, MeshId, PerfOverlayMode, Renderer, RendererConfig,
+    required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, HelioAction, HelioCommandBridge, LightId, MeshId, Movability, PerfOverlayMode, Renderer, RendererConfig,
 };
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
 
@@ -486,9 +486,14 @@ impl ApplicationHandler for App {
                 22.0,
             ))).as_light().unwrap());
         }
-        // Stained glass shafts — static, no need to store ids
+        // Stained glass shafts — Stationary: they never animate, so they're excluded
+        // from the real-time deferred-light loop once baked lighting is loaded.
+        // Without this they were running full tiled PCF every frame despite being "baked".
         for &(x, y, z, r, g, b) in GLASS_LIGHTS {
-            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([x, y, z], [r, g, b], 1.8, 8.0)));
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::light_with_movability(
+                point_light([x, y, z], [r, g, b], 1.8, 8.0),
+                Some(Movability::Stationary),
+            ));
         }
         let mut candle_light_ids = Vec::new();
         for &(x, y, z) in CANDLES {
@@ -501,6 +506,11 @@ impl ApplicationHandler for App {
         }
         renderer.set_ambient([0.65, 0.7, 0.85], 0.015);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
+
+        // Bake static/stationary lights so they're excluded from the real-time
+        // deferred-light loop. Without this, all 9 glass window lights + environment
+        // run full tiled PCF every frame even though they're fixed.
+        renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();

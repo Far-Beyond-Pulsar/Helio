@@ -119,6 +119,15 @@
       <button id="btnDrawCalls" class="btn-icon" data-tooltip="Draw Calls" aria-label="Draw call inspector">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M7.679 1.25a.25.25 0 0 1 .642 0l6.25 2.5c.253.101.253.48 0 .582l-6.25 2.5a.25.25 0 0 1-.642 0l-6.25-2.5c-.253-.101-.253-.48 0-.582ZM1.351 5.233l5.658 2.264a1.75 1.75 0 0 0 1.282 0l5.658-2.264.949.385c.259.105.259.469 0 .574l-6.25 2.5a.25.25 0 0 1-.296 0l-6.25-2.5c-.259-.105-.259-.469 0-.574Zm0 4l5.658 2.264a1.75 1.75 0 0 0 1.282 0l5.658-2.264.949.385c.259.105.259.469 0 .574l-6.25 2.5a.25.25 0 0 1-.296 0l-6.25-2.5c-.259-.105-.259-.469 0-.574Z"/></svg>
       </button>
+      <div class="btn-sep"></div>
+      <!-- Recording Controls -->
+      <button id="btnRecord" class="btn-icon" data-tooltip="Record" aria-label="Start recording session">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><circle cx="8" cy="8" r="5"/></svg>
+        <span id="recordingBadge" class="recording-badge"></span>
+      </button>
+      <button id="btnUpload" class="btn-icon" data-tooltip="Upload" aria-label="Upload recorded session">
+        <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z"/><path d="M11.78 4.72a.749.749 0 1 1-1.06 1.06L8.75 3.811V9.5a.75.75 0 0 1-1.5 0V3.811L5.28 5.78a.749.749 0 1 1-1.06-1.06l3.25-3.25a.749.749 0 0 1 1.06 0l3.25 3.25Z"/></svg>
+      </button>
     </div>
   </div>
 
@@ -349,6 +358,43 @@
 
   <!-- ── minimized window tabs ── -->
   <div id="minimizedTabs" class="minimized-tabs"></div>
+
+  <!-- ── Replay Controls Bar ── -->
+  <div id="replayControls" class="replay-bar">
+    <div class="replay-mode-badge">REPLAY MODE</div>
+    <button type="button" id="replayStepBack" class="replay-btn" title="Previous frame">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.78 12.78a.75.75 0 0 1-1.06 0L4.47 8.53a.75.75 0 0 1 0-1.06l4.25-4.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L6.06 8l3.72 3.72a.75.75 0 0 1 0 1.06Z"/></svg>
+    </button>
+    <button type="button" id="replayPlay" class="replay-btn" title="Play/Pause">
+      <svg id="replayPlayIcon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3.81 3.387c0-.567.584-.954 1.106-.736l8.5 3.5a.75.75 0 0 1 0 1.398l-8.5 3.5A.75.75 0 0 1 3.81 10.5V3.387Z"/></svg>
+      <svg id="replayPauseIcon" class="replay-pause-icon" width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 3.5A1.5 1.5 0 0 1 7 2h1.5a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 12.5v-9Z"/></svg>
+    </button>
+    <button type="button" id="replayStepForward" class="replay-btn" title="Next frame">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z"/></svg>
+    </button>
+    <input id="replaySlider" type="range" min="0" max="100" value="0" step="1" aria-label="Timeline position">
+    <div class="replay-info">
+      <span id="replayTime">Frame 0 / 0</span>
+      <span id="replayDuration">0.00s / 0.00s</span>
+    </div>
+    <button type="button" id="replaySpeed" class="replay-speed-btn" title="Playback speed">1×</button>
+    <button type="button" id="replayExit" class="replay-btn" title="Exit replay mode">
+      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/></svg>
+      Exit
+    </button>
+  </div>
+
+  <!-- ── File Upload Input (hidden) ── -->
+  <input type="file" id="fileUploadInput" accept=".helio-recording,.json" aria-label="Upload recording file" class="file-upload-hidden">
+
+  <!-- ── Upload Drop Zone Overlay ── -->
+  <div id="uploadDropZone" class="upload-drop-zone">
+    <div class="upload-drop-content">
+      <svg width="48" height="48" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z"/><path d="M11.78 4.72a.749.749 0 1 1-1.06 1.06L8.75 3.811V9.5a.75.75 0 0 1-1.5 0V3.811L5.28 5.78a.749.749 0 1 1-1.06-1.06l3.25-3.25a.749.749 0 0 1 1.06 0l3.25 3.25Z"/></svg>
+      <div class="upload-drop-text">Drop recording file here</div>
+      <div class="upload-drop-hint">or click to browse</div>
+    </div>
+  </div>
 
   <script>
     // ── Window management with persistence ──────────────────────────────────
