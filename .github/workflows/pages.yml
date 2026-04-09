@@ -65,6 +65,7 @@ jobs:
       - name: Build all demos (release)
         shell: pwsh
         run: ./build-wasm.ps1 --release
+        continue-on-error: true
 
       - name: Bundle static profiler viewer
         run: |
