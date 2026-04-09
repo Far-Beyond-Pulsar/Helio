@@ -14,8 +14,50 @@ const drawCallsEl = document.getElementById('drawCalls');
 let lastSnapshot = null;
 let cyInstance = null;
 
-// ── Data Source Pattern ──────────────────────────────────────────────────────
-let currentDataSource = 'live'; // 'live' or 'replay'
+// ── Central Data Store (Single Source of Truth) ──────────────────────────────
+// All UI elements MUST read from this central store instead of maintaining their own state
+const centralStore = {
+  mode: 'live', // 'live' or 'replay'
+
+  // Rolling history for charts (last 256 frames) - SINGLE SOURCE OF TRUTH
+  history: {
+    maxSize: 256,
+    snapshots: []
+  },
+
+  // Add snapshot to rolling history (only in live mode)
+  addSnapshot(snapshot) {
+    this.history.snapshots.push(snapshot);
+    if (this.history.snapshots.length > this.history.maxSize) {
+      this.history.snapshots.shift();
+    }
+  },
+
+  // Set history from replay (replaces entire history)
+  setHistory(snapshots, currentIndex) {
+    // Take a window of snapshots centered around currentIndex
+    const start = Math.max(0, currentIndex - this.history.maxSize + 1);
+    const end = currentIndex + 1;
+    this.history.snapshots = snapshots.slice(start, end);
+  },
+
+  // Clear all state
+  clear() {
+    this.history.snapshots = [];
+  },
+
+  // Get rolling history (for all UI components to read)
+  getHistory() {
+    return this.history.snapshots;
+  },
+
+  // Get current snapshot (last in history)
+  getCurrent() {
+    return this.history.snapshots[this.history.snapshots.length - 1] || null;
+  }
+};
+
+let currentDataSource = 'live'; // 'live' or 'replay' (deprecated, use centralStore.mode)
 
 // ── Recording state ───────────────────────────────────────────────────────────
 const BATCH_SIZE = 10; // Send frames in batches of 10
@@ -179,6 +221,11 @@ ws.onmessage = (evt) => {
 
 // Process a snapshot from either live or replay source
 function processSnapshot(snapshot) {
+  // Add to central store (single source of truth)
+  if (centralStore.mode === 'live') {
+    centralStore.addSnapshot(snapshot);
+  }
+
   // Record if active (batch and send to worker)
   if (recordingState.isRecording && recordingState.worker) {
     recordingState.batchBuffer.push(snapshot);
@@ -203,7 +250,7 @@ function processSnapshot(snapshot) {
     }
   }
 
-  // Render to UI
+  // Render to UI (reads from central store)
   render(snapshot);
 }
 
@@ -211,7 +258,10 @@ function processSnapshot(snapshot) {
 
 // Clear all accumulated UI state (for replay mode switch)
 function clearUIState() {
-  // Clear perf windows state if available
+  // Clear central store (single source of truth)
+  centralStore.clear();
+
+  // Clear perf windows state if available (will be deprecated - should read from centralStore)
   if (window.perfWindows && window.perfWindows.clear) {
     window.perfWindows.clear();
   }
@@ -219,7 +269,7 @@ function clearUIState() {
   // Clear global timing data
   window.timingsData = [];
 
-  console.log('UI state cleared');
+  console.log('UI state cleared (central store + legacy)');
 }
 
 // ── Recording functions (Web Worker based) ───────────────────────────────────
@@ -354,7 +404,8 @@ function loadRecording(recording) {
     // CRITICAL: Clear all accumulated UI state
     clearUIState();
 
-    // Switch to replay data source
+    // Switch to replay mode in central store
+    centralStore.mode = 'replay';
     currentDataSource = 'replay';
     replayState.isActive = true;
     replayState.snapshots = recording.snapshots;
@@ -377,7 +428,7 @@ function loadRecording(recording) {
       slider.value = 0;
     }
 
-    // Render first frame (this will start fresh state)
+    // Render first frame (this will populate central store with replay history)
     renderReplayFrame(0);
 
     showToast(`Loaded recording: ${recording.snapshots.length.toLocaleString()} frames`);
@@ -394,10 +445,13 @@ function renderReplayFrame(index) {
   replayState.currentIndex = index;
   const snapshot = replayState.snapshots[index];
 
-  // Render the frame
+  // Update central store with replay history (window of snapshots up to current index)
+  centralStore.setHistory(replayState.snapshots, index);
+
+  // Render the frame (UI reads from central store)
   render(snapshot);
 
-  // Update UI
+  // Update replay UI
   updateReplayUI();
 }
 
@@ -519,7 +573,8 @@ function exitReplayMode() {
   // Clear UI state before switching back to live
   clearUIState();
 
-  // Switch back to live data source
+  // Switch back to live data source in central store
+  centralStore.mode = 'live';
   currentDataSource = 'live';
 
   // Reconnect WebSocket
@@ -675,10 +730,12 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-// ── Export for debugging ──────────────────────────────────────────────────────
+// ── Export for debugging and cross-module access ─────────────────────────────
+window.centralStore = centralStore; // Export central store globally for perf.js and other modules
 window.helioPortal = {
   getLastSnapshot: () => lastSnapshot,
   getGraphInstance: () => cyInstance,
   recording: recordingState,
   replay: replayState,
+  store: centralStore, // Access central store
 };

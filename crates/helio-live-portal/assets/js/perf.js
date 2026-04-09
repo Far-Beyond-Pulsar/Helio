@@ -24,6 +24,8 @@
   Ring.prototype.count = function () { return this.buf.length; };
 
   // ── Shared state ────────────────────────────────────────────────────────────
+  // NOTE: Ring buffers are DEPRECATED - now reading from window.centralStore.getHistory()
+  // These are kept for backwards compatibility but should not accumulate data
   const N        = 256;          // history depth
   const frameMs  = new Ring(N);
   const f2fMs    = new Ring(N);
@@ -35,7 +37,7 @@
   const ALPHA   = 0.05;          // EMA smoothing factor
 
   const alerts     = [];
-  const MAX_ALERTS = 1000;
+  const MAX_ALERTS = 100;        // Limit to last 100 alerts
 
   let lastPassTimings = [];
 
@@ -485,18 +487,27 @@
   //  Main update — called from main.js render()
   // ════════════════════════════════════════════════════════════════════════════
   function update(snapshot) {
-    // Push ring buffers
-    frameMs.push(snapshot.frame_time_ms      || 0);
-    f2fMs.push(snapshot.frame_to_frame_ms    || 0);
-    const dc = snapshot.draw_calls || {};
-    dcTotal.push(dc.total       || 0);
-    dcOpaque.push(dc.opaque     || 0);
-    dcTrans.push(dc.transparent || 0);
+    // CRITICAL: Read from central store instead of accumulating our own data
+    // This fixes wonky rewind behavior in replay mode
+    const history = window.centralStore ? window.centralStore.getHistory() : [];
+
+    // Rebuild ring buffers from central store (do NOT accumulate!)
+    frameMs.buf = history.map(s => s.frame_time_ms || 0);
+    f2fMs.buf = history.map(s => s.frame_to_frame_ms || 0);
+    dcTotal.buf = history.map(s => (s.draw_calls && s.draw_calls.total) || 0);
+    dcOpaque.buf = history.map(s => (s.draw_calls && s.draw_calls.opaque) || 0);
+    dcTrans.buf = history.map(s => (s.draw_calls && s.draw_calls.transparent) || 0);
 
     lastPassTimings = snapshot.pass_timings || [];
 
-    // Alerts first (also updates passAvg EMA)
-    checkAlerts(snapshot);
+    // Alerts first (also updates passAvg EMA) - only in live mode
+    if (!window.centralStore || window.centralStore.mode === 'live') {
+      checkAlerts(snapshot);
+      // Limit alerts to MAX_ALERTS
+      if (alerts.length > MAX_ALERTS) {
+        alerts.splice(0, alerts.length - MAX_ALERTS);
+      }
+    }
 
     // Charts
     drawFrameHistory();
