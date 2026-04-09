@@ -435,6 +435,10 @@ function loadRecording(recording) {
     const replayBar = document.getElementById('replayControls');
     if (replayBar) replayBar.classList.add('active');
 
+    // Hide the upload drop zone now that a recording is loaded
+    const dropZoneEl = document.getElementById('uploadDropZone');
+    if (dropZoneEl) dropZoneEl.classList.remove('active');
+
     // Update slider max
     const slider = document.getElementById('replaySlider');
     if (slider) {
