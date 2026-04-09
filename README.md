@@ -27,6 +27,8 @@ Helio is a GPU-driven deferred rendering engine written in Rust on top of `wgpu`
 
 <img width="1262" height="707" alt="image" src="https://github.com/user-attachments/assets/7787f33a-5e82-44ba-a1f8-a5342da5090d" />
 <img width="2555" height="1340" alt="image" src="https://github.com/user-attachments/assets/f3f9f878-9a64-4f7b-b4fa-29f14d78250c" />
+<img width="1868" height="1017" alt="image" src="https://github.com/user-attachments/assets/46c36b06-1e49-40f4-9bbc-edf4a6d003a7" />
+
 
 ## Architecture
 
