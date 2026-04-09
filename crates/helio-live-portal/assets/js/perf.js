@@ -504,5 +504,27 @@
     drawDrawCalls();
   }
 
-  window.perfWindows = { update, clearAlerts };
+  // Clear all accumulated state (for replay mode switch)
+  function clear() {
+    // Clear ring buffers
+    frameMs.buf = [];
+    f2fMs.buf = [];
+    dcTotal.buf = [];
+    dcOpaque.buf = [];
+    dcTrans.buf = [];
+
+    // Clear pass averages
+    Object.keys(passAvg).forEach(key => delete passAvg[key]);
+
+    // Clear alerts
+    alerts.length = 0;
+    renderAlerts();
+
+    // Clear last pass timings
+    lastPassTimings = [];
+
+    console.log('Perf windows state cleared');
+  }
+
+  window.perfWindows = { update, clearAlerts, clear };
 })();

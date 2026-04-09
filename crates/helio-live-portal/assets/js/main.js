@@ -14,16 +14,14 @@ const drawCallsEl = document.getElementById('drawCalls');
 let lastSnapshot = null;
 let cyInstance = null;
 
+// ── Data Source Pattern ──────────────────────────────────────────────────────
+let currentDataSource = 'live'; // 'live' or 'replay'
+
 // ── Recording state ───────────────────────────────────────────────────────────
-const CHUNK_SIZE = 100; // Flush to IndexedDB every 100 frames
 const recordingState = {
   isRecording: false,
-  buffer: [],           // Temporary buffer (max CHUNK_SIZE frames)
-  chunks: [],           // Array of chunk metadata
-  startTime: null,
-  frameCount: 0,
-  db: null,             // IndexedDB instance
-  lastBadgeUpdate: 0    // Throttle badge updates
+  worker: null,
+  frameCount: 0
 };
 
 // ── Replay state ──────────────────────────────────────────────────────────────
@@ -159,135 +157,134 @@ ws.onerror = () => {
 
 ws.onmessage = (evt) => {
   // Ignore WebSocket messages when in replay mode
-  if (replayState.isActive) return;
+  if (currentDataSource === 'replay') return;
 
   try {
     const data = JSON.parse(evt.data);
     if (Array.isArray(data)) {
       // Batch of snapshots sent at once; process them in order
       for (const snap of data) {
-        // Capture to recording buffer if recording is active
-        if (recordingState.isRecording) {
-          captureFrame(snap);
-        }
-        render(snap);
+        processSnapshot(snap);
       }
     } else {
-      if (recordingState.isRecording) {
-        captureFrame(data);
-      }
-      render(data);
+      processSnapshot(data);
     }
   } catch (e) {
     console.error('parse error', e);
   }
 };
 
-// ── Recording functions (chunked with IndexedDB) ─────────────────────────────
-
-// Initialize IndexedDB for recording storage
-async function initRecordingDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open('HelioRecordings', 1);
-
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains('chunks')) {
-        db.createObjectStore('chunks', { keyPath: 'id' });
-      }
-    };
-  });
-}
-
-// Capture a single frame (buffered, flushes to IndexedDB when chunk is full)
-async function captureFrame(snapshot) {
-  recordingState.buffer.push(snapshot);
-  recordingState.frameCount++;
-
-  // Throttle badge updates (every 30 frames)
-  if (recordingState.frameCount - recordingState.lastBadgeUpdate >= 30) {
-    updateRecordingUI();
-    recordingState.lastBadgeUpdate = recordingState.frameCount;
+// Process a snapshot from either live or replay source
+function processSnapshot(snapshot) {
+  // Record if active (send to worker)
+  if (recordingState.isRecording && recordingState.worker) {
+    recordingState.worker.postMessage({ type: 'capture', payload: snapshot });
   }
 
-  // Flush chunk to IndexedDB when buffer is full
-  if (recordingState.buffer.length >= CHUNK_SIZE) {
-    await flushChunk();
+  // Render to UI
+  render(snapshot);
+}
+
+// ── UI State Management ──────────────────────────────────────────────────────
+
+// Clear all accumulated UI state (for replay mode switch)
+function clearUIState() {
+  // Clear perf windows state if available
+  if (window.perfWindows && window.perfWindows.clear) {
+    window.perfWindows.clear();
   }
+
+  // Clear global timing data
+  window.timingsData = [];
+
+  console.log('UI state cleared');
 }
 
-// Flush current buffer to IndexedDB
-async function flushChunk() {
-  if (recordingState.buffer.length === 0 || !recordingState.db) return;
+// ── Recording functions (Web Worker based) ───────────────────────────────────
 
-  const chunkId = recordingState.chunks.length;
-  const chunk = {
-    id: chunkId,
-    snapshots: recordingState.buffer.slice()
-  };
-
-  return new Promise((resolve, reject) => {
-    const transaction = recordingState.db.transaction(['chunks'], 'readwrite');
-    const store = transaction.objectStore('chunks');
-    const request = store.add(chunk);
-
-    request.onsuccess = () => {
-      recordingState.chunks.push(chunkId);
-      recordingState.buffer = [];
-      resolve();
-    };
-    request.onerror = () => reject(request.error);
-  });
-}
-
-// Update recording UI (throttled)
 function updateRecordingUI() {
   const badge = document.getElementById('recordingBadge');
   if (badge && recordingState.isRecording) {
-    // Show frame count in K for large numbers
     const count = recordingState.frameCount;
     badge.textContent = count >= 10000 ? `${(count / 1000).toFixed(1)}K` : count;
   }
 }
 
-async function startRecording() {
+function startRecording() {
   try {
-    // Initialize IndexedDB
-    recordingState.db = await initRecordingDB();
+    // Create recording worker
+    recordingState.worker = new Worker('./js/recordingWorker.js');
+    recordingState.frameCount = 0;
 
-    // Clear previous recording data
-    const transaction = recordingState.db.transaction(['chunks'], 'readwrite');
-    const store = transaction.objectStore('chunks');
-    await new Promise((resolve, reject) => {
-      const request = store.clear();
-      request.onsuccess = () => resolve();
-      request.onerror = () => reject(request.error);
-    });
+    // Handle worker messages
+    recordingState.worker.onmessage = (e) => {
+      const { type, count, progress, parts, totalFrames, error } = e.data;
+
+      switch (type) {
+        case 'init-complete':
+          console.log('Recording worker initialized');
+          break;
+
+        case 'progress':
+          recordingState.frameCount = count;
+          updateRecordingUI();
+          break;
+
+        case 'serialize-progress':
+          showToast(`Serializing... ${progress}%`);
+          break;
+
+        case 'stop-complete':
+          if (parts && parts.length > 0) {
+            // Download the recording
+            const blob = new Blob(parts, { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `helio-recording-${Date.now()}.helio-recording`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+            showToast(`Downloaded ${totalFrames.toLocaleString()} frames`);
+          } else {
+            showToast('No frames recorded');
+          }
+          break;
+
+        case 'error':
+          showToast(`Recording error: ${error}`);
+          console.error('Recording error:', error);
+          break;
+      }
+    };
+
+    recordingState.worker.onerror = (err) => {
+      showToast(`Worker error: ${err.message}`);
+      console.error('Worker error:', err);
+    };
+
+    // Initialize worker
+    recordingState.worker.postMessage({ type: 'init' });
 
     recordingState.isRecording = true;
-    recordingState.buffer = [];
-    recordingState.chunks = [];
-    recordingState.startTime = Date.now();
-    recordingState.frameCount = 0;
-    recordingState.lastBadgeUpdate = 0;
 
     const btn = document.getElementById('btnRecord');
     const badge = document.getElementById('recordingBadge');
     if (btn) btn.classList.add('recording');
     if (badge) badge.textContent = '●';
 
-    console.log('Recording started');
+    console.log('Recording started (worker-based)');
   } catch (err) {
     showToast(`Failed to start recording: ${err.message}`);
     console.error('Recording initialization failed:', err);
   }
 }
 
-async function stopRecording() {
-  if (!recordingState.isRecording) return;
+function stopRecording() {
+  if (!recordingState.isRecording || !recordingState.worker) return;
 
   recordingState.isRecording = false;
 
@@ -298,95 +295,9 @@ async function stopRecording() {
 
   console.log(`Recording stopped: ${recordingState.frameCount} frames`);
 
-  // Flush remaining buffer
-  if (recordingState.buffer.length > 0) {
-    await flushChunk();
-  }
-
-  // Auto-download the recording
-  if (recordingState.frameCount > 0) {
-    await downloadRecording();
-  } else {
-    showToast('No frames recorded');
-  }
-}
-
-async function downloadRecording() {
-  try {
-    showToast('Preparing download...');
-
-    // Collect all chunks from IndexedDB
-    const allSnapshots = [];
-
-    for (const chunkId of recordingState.chunks) {
-      const chunk = await new Promise((resolve, reject) => {
-        const transaction = recordingState.db.transaction(['chunks'], 'readonly');
-        const store = transaction.objectStore('chunks');
-        const request = store.get(chunkId);
-        request.onsuccess = () => resolve(request.result);
-        request.onerror = () => reject(request.error);
-      });
-
-      if (chunk && chunk.snapshots) {
-        allSnapshots.push(...chunk.snapshots);
-      }
-    }
-
-    if (allSnapshots.length === 0) {
-      showToast('No frames to download');
-      return;
-    }
-
-    const duration = allSnapshots[allSnapshots.length - 1].timestamp_ms - allSnapshots[0].timestamp_ms;
-
-    const recording = {
-      version: 1,
-      meta: {
-        recorded_at: new Date().toISOString(),
-        total_frames: allSnapshots.length,
-        duration_ms: duration
-      },
-      snapshots: allSnapshots
-    };
-
-    // Stream download using chunked JSON serialization
-    const jsonStart = '{"version":1,"meta":' + JSON.stringify(recording.meta) + ',"snapshots":[';
-    const jsonEnd = ']}';
-
-    const parts = [jsonStart];
-
-    // Add snapshots in chunks to avoid blocking
-    for (let i = 0; i < allSnapshots.length; i++) {
-      if (i > 0) parts.push(',');
-      parts.push(JSON.stringify(allSnapshots[i]));
-
-      // Yield to UI every 100 frames
-      if (i % 100 === 0) {
-        await new Promise(resolve => setTimeout(resolve, 0));
-        showToast(`Serializing... ${Math.round((i / allSnapshots.length) * 100)}%`);
-      }
-    }
-
-    parts.push(jsonEnd);
-
-    const blob = new Blob(parts, { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `helio-recording-${Date.now()}.helio-recording`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-
-    // Cleanup after a delay
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-
-    showToast(`Downloaded ${allSnapshots.length.toLocaleString()} frames`);
-  } catch (err) {
-    showToast(`Download failed: ${err.message}`);
-    console.error('Download failed:', err);
-  }
+  // Tell worker to stop and prepare download
+  showToast('Preparing download...');
+  recordingState.worker.postMessage({ type: 'stop' });
 }
 
 // ── Replay functions ──────────────────────────────────────────────────────────
@@ -402,7 +313,11 @@ function loadRecording(recording) {
       throw new Error('Recording is empty');
     }
 
-    // Enter replay mode
+    // CRITICAL: Clear all accumulated UI state
+    clearUIState();
+
+    // Switch to replay data source
+    currentDataSource = 'replay';
     replayState.isActive = true;
     replayState.snapshots = recording.snapshots;
     replayState.currentIndex = 0;
@@ -424,10 +339,10 @@ function loadRecording(recording) {
       slider.value = 0;
     }
 
-    // Render first frame
+    // Render first frame (this will start fresh state)
     renderReplayFrame(0);
 
-    showToast(`Loaded recording: ${recording.snapshots.length} frames`);
+    showToast(`Loaded recording: ${recording.snapshots.length.toLocaleString()} frames`);
     console.log('Replay mode activated', recording.meta);
   } catch (e) {
     showToast(`Error loading recording: ${e.message}`);
@@ -563,8 +478,14 @@ function exitReplayMode() {
   const replayBar = document.getElementById('replayControls');
   if (replayBar) replayBar.classList.remove('active');
 
+  // Clear UI state before switching back to live
+  clearUIState();
+
+  // Switch back to live data source
+  currentDataSource = 'live';
+
   // Reconnect WebSocket
-  location.reload(); // Simple approach: reload to reconnect
+  location.reload(); // Reload to reconnect WebSocket
 }
 
 // ── File upload handling ──────────────────────────────────────────────────────
