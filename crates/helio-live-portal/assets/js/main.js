@@ -611,6 +611,10 @@ function exitReplayMode() {
 function handleFileUpload(file) {
   if (!file) return;
 
+  // Hide the drop zone immediately — don't wait for the async FileReader to finish
+  const dropZoneEl = document.getElementById('uploadDropZone');
+  if (dropZoneEl) dropZoneEl.classList.remove('active');
+
   const reader = new FileReader();
   reader.onload = (e) => {
     try {
