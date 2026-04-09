@@ -63,9 +63,16 @@ async fn serve_vendor(axum::extract::Path(file): axum::extract::Path<String>) ->
 async fn serve_static(axum::extract::Path(file): axum::extract::Path<String>) -> impl IntoResponse {
     let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets");
     let path = base.join(&file);
+    let mime = match path.extension().and_then(|e| e.to_str()) {
+        Some("css")  => "text/css",
+        Some("js")   => "application/javascript",
+        Some("html") => "text/html",
+        Some("svg")  => "image/svg+xml",
+        _            => "application/octet-stream",
+    };
     match tokio::fs::read(&path).await {
         Ok(data) => (
-            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            [(axum::http::header::CONTENT_TYPE, mime)],
             data,
         )
             .into_response(),
