@@ -188,11 +188,20 @@ function render(snapshot) {
 let ws = null;
 
 if (window.HELIO_STATIC_MODE) {
-  // Static profiler mode — no live server, load recordings from file
-  statusEl.textContent = 'Offline viewer · drop a .helio-recording file or click Upload';
-  // Automatically surface the drop zone so users know what to do
-  const dropZoneEl = document.getElementById('uploadDropZone');
-  if (dropZoneEl) dropZoneEl.classList.add('active');
+  // Static profiler mode — no live server, load recordings from file or URL
+  const _staticProfileParam = new URLSearchParams(location.search).get('profile');
+  if (_staticProfileParam) {
+    // ?profile= present — load it immediately, skip the upload screen
+    statusEl.textContent = 'Loading profile…';
+    // loadRemoteProfile is defined later; defer one microtask so all top-level
+    // code (including the function definition) has run before we call it.
+    Promise.resolve().then(() => loadRemoteProfile(_staticProfileParam));
+  } else {
+    statusEl.textContent = 'Offline viewer · drop a .helio-recording file or click Upload';
+    // Automatically surface the drop zone so users know what to do
+    const dropZoneEl = document.getElementById('uploadDropZone');
+    if (dropZoneEl) dropZoneEl.classList.add('active');
+  }
 } else {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -1059,14 +1068,13 @@ document.getElementById('replayExit')?.addEventListener('click', () => {
   history.replaceState(null, '', location.pathname);
 }, true /* capture: runs before the existing exit listener */);
 
-// Check for ?profile= on load
-(function checkProfileParam() {
+// Check for ?profile= on load (live/server mode only — static mode handles this above)
+if (!window.HELIO_STATIC_MODE) {
   const profileParam = new URLSearchParams(location.search).get('profile');
   if (profileParam) {
-    // Defer so the rest of the page finishes initial setup first
     requestAnimationFrame(() => loadRemoteProfile(profileParam));
   }
-})();
+}
 
 // ── Export for debugging and cross-module access ─────────────────────────────
 window.centralStore = centralStore; // Export central store globally for perf.js and other modules
