@@ -1110,7 +1110,7 @@ canvas {
   50% { transform: scale(1.02); border-color: var(--success); }
 }
 
-.upload-drop-content svg {
+.upload-drop-content > svg {
   color: var(--accent);
   width: 48px;
   height: 48px;
