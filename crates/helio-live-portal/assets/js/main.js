@@ -455,6 +455,10 @@ function loadRecording(recording) {
       slider.value = 0;
     }
 
+    // Pre-compute all alerts across the full recording so replay seek is
+    // bi-directional (rewind removes future alerts; forward adds them back).
+    window.perfWindows?.precomputeAlerts?.(recording.snapshots);
+
     // Render first frame (this will populate central store with replay history)
     renderReplayFrame(0);
 
@@ -477,6 +481,9 @@ function renderReplayFrame(index) {
 
   // Render the frame (UI reads from central store)
   render(snapshot);
+
+  // Sync alert log to current replay position (rewind clears future alerts)
+  window.perfWindows?.syncReplayAlerts?.(index);
 
   // Update replay UI
   updateReplayUI();

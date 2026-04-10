@@ -38,6 +38,7 @@
 
   const alerts     = [];
   const MAX_ALERTS = 100;        // Limit to last 100 alerts
+  let   allReplayAlerts = [];    // Pre-computed per-frame alerts for bi-directional replay seek
 
   let lastPassTimings = [];
 
@@ -489,6 +490,72 @@
     if (badge) badge.textContent = '';
   }
 
+  // Pre-compute every alert that would fire across the full recording.
+  // Called once when a recording is loaded so that replay seek is O(1) and
+  // works correctly in both forward and backward directions.
+  function precomputeAlerts(snapshots) {
+    allReplayAlerts = [];
+    // Use a fresh EMA table — do NOT pollute the live `passAvg` state
+    const localAvg = {};
+
+    snapshots.forEach((snapshot, frameIndex) => {
+      const ts = snapshot.timestamp_ms
+        ? new Date(snapshot.timestamp_ms).toLocaleTimeString()
+        : `Frame ${frameIndex + 1}`;
+
+      // Frame budget overrun
+      if (snapshot.frame_time_ms > ALERT_FRAME_BUDGET) {
+        allReplayAlerts.push({
+          frameIndex, time: ts, level: 'critical',
+          msg: `Frame budget overrun: ${snapshot.frame_time_ms.toFixed(2)} ms  ` +
+               `(${(snapshot.frame_time_ms / BUDGET * 100).toFixed(0)}% of 60fps budget)`,
+        });
+      }
+
+      // Per-pass spikes vs rolling EMA
+      for (const p of (snapshot.pass_timings || [])) {
+        const prev  = localAvg[p.name];
+        const warm  = prev !== undefined && prev > 0.05;
+        const spike = warm && p.gpu_ms > prev * ALERT_SPIKE_FACTOR;
+        if (spike) {
+          allReplayAlerts.push({
+            frameIndex, time: ts,
+            level: severityOf(p.gpu_ms, prev),
+            msg: `${p.name}: ${p.gpu_ms.toFixed(2)} ms GPU   ` +
+                 `(${(p.gpu_ms / prev).toFixed(1)}\u00d7 avg of ${prev.toFixed(2)} ms)`,
+          });
+        }
+        localAvg[p.name] = prev === undefined ? p.gpu_ms : prev + ALPHA * (p.gpu_ms - prev);
+      }
+    });
+  }
+
+  // Show only alerts whose frameIndex <= currentIndex (newest frame first).
+  // Called by main.js on every renderReplayFrame so rewind clears future alerts.
+  function syncReplayAlerts(currentIndex) {
+    // Filter and reverse so the most-recently-triggered alerts appear at the top
+    const visible = [];
+    for (let i = allReplayAlerts.length - 1; i >= 0; i--) {
+      if (allReplayAlerts[i].frameIndex <= currentIndex) visible.push(allReplayAlerts[i]);
+      if (visible.length >= MAX_ALERTS) break;
+    }
+
+    const list    = document.getElementById('alertList');
+    const countEl = document.getElementById('alertCount');
+    const badge   = document.getElementById('alertBadge');
+
+    if (countEl) countEl.textContent = `${visible.length} alert${visible.length !== 1 ? 's' : ''}`;
+    if (badge)   badge.textContent   = visible.length > 0 ? (visible.length > 99 ? '99+' : visible.length) : '';
+    if (!list)   return;
+
+    list.innerHTML = visible.map(a =>
+      `<div class="alert-row alert-${a.level}">` +
+        `<span class="alert-time">${a.time}</span>` +
+        `<span class="alert-msg">${a.msg}</span>` +
+      `</div>`
+    ).join('');
+  }
+
   // ════════════════════════════════════════════════════════════════════════════
   //  4.  Draw Call Inspector
   // ════════════════════════════════════════════════════════════════════════════
@@ -621,6 +688,7 @@
 
     // Clear alerts
     alerts.length = 0;
+    allReplayAlerts = [];
     renderAlerts();
 
     // Clear last pass timings
@@ -629,5 +697,5 @@
     console.log('Perf windows state cleared');
   }
 
-  window.perfWindows = { update, clearAlerts, clear };
+  window.perfWindows = { update, clearAlerts, clear, precomputeAlerts, syncReplayAlerts };
 })();
