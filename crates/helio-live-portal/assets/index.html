@@ -431,7 +431,22 @@
     <div class="upload-drop-content">
       <svg width="48" height="48" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z"/><path d="M11.78 4.72a.749.749 0 1 1-1.06 1.06L8.75 3.811V9.5a.75.75 0 0 1-1.5 0V3.811L5.28 5.78a.749.749 0 1 1-1.06-1.06l3.25-3.25a.749.749 0 0 1 1.06 0l3.25 3.25Z"/></svg>
       <div class="upload-drop-text">Drop recording file here</div>
-      <div class="upload-drop-hint">or click to browse</div>
+      <div class="upload-drop-hint">or click anywhere to browse from device</div>
+      <div class="upload-drop-divider">
+        <span class="upload-drop-divider-line"></span>
+        <span class="upload-drop-divider-text">or load from GitHub</span>
+        <span class="upload-drop-divider-line"></span>
+      </div>
+      <div class="upload-drop-url-row" id="dropZoneUrlRow">
+        <input type="url" id="dropZoneUrlInput"
+          class="upload-drop-url-input"
+          placeholder="https://github.com/owner/repo/blob/main/file.helio-recording"
+          aria-label="GitHub file URL" />
+        <button class="upload-drop-url-btn" id="dropZoneUrlGo" aria-label="Load from URL">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8.22 2.97a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.275-.326.749.749 0 0 1 .215-.734l2.72-2.72H3.75a.75.75 0 0 1 0-1.5h7.19L8.22 4.03a.75.75 0 0 1 0-1.06Z"/></svg>
+          Load
+        </button>
+      </div>
     </div>
   </div>
 

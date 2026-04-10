@@ -821,9 +821,37 @@ if (dropZone) {
   });
 
   // Click on drop zone to trigger file picker
-  dropZone.addEventListener('click', () => {
+  // (but not when clicking the URL row — it has its own pointer-events)
+  dropZone.addEventListener('click', (e) => {
+    const urlRow = document.getElementById('dropZoneUrlRow');
+    if (urlRow && urlRow.contains(e.target)) return; // let URL row handle itself
     if (fileInput) fileInput.click();
   });
+
+  // Drop zone GitHub URL submit
+  const dropZoneUrlInput = document.getElementById('dropZoneUrlInput');
+  const dropZoneUrlGo    = document.getElementById('dropZoneUrlGo');
+
+  async function submitDropZoneUrl() {
+    const raw = dropZoneUrlInput?.value.trim();
+    if (!raw) return;
+    dropZone.classList.remove('active');
+    await loadRemoteProfile(raw);
+    if (remoteProfileUrl) {
+      const newUrl = `${location.pathname}?profile=${encodeURIComponent(remoteProfileUrl)}`;
+      history.replaceState(null, '', newUrl);
+    }
+  }
+
+  if (dropZoneUrlGo) {
+    dropZoneUrlGo.addEventListener('click', (e) => { e.stopPropagation(); submitDropZoneUrl(); });
+  }
+  if (dropZoneUrlInput) {
+    dropZoneUrlInput.addEventListener('click', (e) => e.stopPropagation());
+    dropZoneUrlInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.stopPropagation(); submitDropZoneUrl(); }
+    });
+  }
 }
 
 // Replay controls
