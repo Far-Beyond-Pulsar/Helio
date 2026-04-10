@@ -41,6 +41,27 @@
 
   let lastPassTimings = [];
 
+  // ── Frame history crosshair state ───────────────────────────────────────────
+  const fhMouse = { x: null, y: null };   // CSS-pixel coords within canvas
+  let   fhListenerAttached = false;
+
+  function wireFhMouse() {
+    if (fhListenerAttached) return;
+    const canvas = document.getElementById('frameHistoryCanvas');
+    if (!canvas) return;
+    fhListenerAttached = true;
+    canvas.addEventListener('mousemove', e => {
+      fhMouse.x = e.offsetX;
+      fhMouse.y = e.offsetY;
+      drawFrameHistory();
+    });
+    canvas.addEventListener('mouseleave', () => {
+      fhMouse.x = null;
+      fhMouse.y = null;
+      drawFrameHistory();
+    });
+  }
+
   // ── CSS token cache ─────────────────────────────────────────────────────────
   let _css = null;
   function css() {
@@ -141,6 +162,7 @@
   function drawFrameHistory() {
     const canvas = document.getElementById('frameHistoryCanvas');
     if (!isActive(canvas)) return;
+    wireFhMouse();
     const r = fitCanvas(canvas);
     if (!r) return;
     const { ctx, W, H } = r;
@@ -236,6 +258,76 @@
     ctx.textAlign = 'right';
     ctx.fillText(label, W - 8, 20);
     ctx.textAlign = 'left';
+
+    // ── mouse crosshair ──
+    if (fhMouse.x !== null) {
+      const mx = Math.max(0, Math.min(W, fhMouse.x));
+
+      // Snap to nearest data sample
+      const idx     = Math.round((mx / W) * (n - 1));
+      const clampedIdx = Math.max(0, Math.min(n - 1, idx));
+      const snapVal = fmv[clampedIdx] ?? 0;
+      const snapX   = (clampedIdx / (n - 1)) * W;
+      const snapY   = H - (snapVal / maxV) * H;
+
+      ctx.save();
+      ctx.setLineDash([4, 4]);
+      ctx.lineWidth   = 1;
+      ctx.strokeStyle = 'rgba(139,148,158,0.55)';  // --fg-muted tinted
+
+      // Vertical line
+      ctx.beginPath();
+      ctx.moveTo(snapX, 0);
+      ctx.lineTo(snapX, H);
+      ctx.stroke();
+
+      // Horizontal line
+      ctx.beginPath();
+      ctx.moveTo(0, snapY);
+      ctx.lineTo(W, snapY);
+      ctx.stroke();
+
+      ctx.setLineDash([]);
+
+      // Intersection dot
+      const dotCol = snapVal > BUDGET2X ? c.danger : snapVal > BUDGET ? c.attention : c.success;
+      ctx.beginPath();
+      ctx.arc(snapX, snapY, 4, 0, Math.PI * 2);
+      ctx.fillStyle   = dotCol;
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(13,17,23,0.8)';
+      ctx.lineWidth   = 1.5;
+      ctx.stroke();
+
+      // Value tooltip
+      const tipMs  = snapVal.toFixed(2);
+      const tipFps = snapVal > 0 ? Math.round(1000 / snapVal) : 0;
+      const tipTxt = `${tipMs} ms  ·  ${tipFps} fps`;
+      ctx.font = 'bold 11px JetBrains Mono, monospace';
+      const tw  = ctx.measureText(tipTxt).width;
+      const PAD = 6;
+      const th  = 18;
+      let tx = snapX + 10;
+      let ty = snapY - th - 6;
+      if (tx + tw + PAD * 2 > W) tx = snapX - tw - PAD * 2 - 10;
+      if (ty < 0) ty = snapY + 6;
+
+      ctx.fillStyle = 'rgba(22,27,34,0.92)';
+      ctx.beginPath();
+      ctx.roundRect(tx - PAD, ty - 1, tw + PAD * 2, th, 4);
+      ctx.fill();
+      ctx.strokeStyle = dotCol;
+      ctx.lineWidth   = 1;
+      ctx.stroke();
+
+      ctx.fillStyle   = dotCol;
+      ctx.textAlign   = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(tipTxt, tx, ty + th / 2);
+      ctx.textBaseline = 'alphabetic';
+
+      ctx.restore();
+    }
   }
 
   // ════════════════════════════════════════════════════════════════════════════
