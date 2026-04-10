@@ -168,6 +168,20 @@ html, body {
   transform: translateY(0);
 }
 .btn-icon svg { flex-shrink: 0; }
+
+/* ── Lucide icon sizing ──────────────────────────────────────────────────── */
+/* Lucide replaces <i data-lucide> with <svg>; scope sizing by context       */
+.btn-icon svg                              { width: 15px; height: 15px; }
+.modal-title svg                           { width: 14px; height: 14px; }
+.modal-btn svg                             { width: 12px; height: 12px; }
+.replay-btn svg, .replay-speed-btn svg     { width: 14px; height: 14px; }
+.upload-menu-item svg                      { width: 14px; height: 14px; }
+.upload-menu-url-go svg                    { width: 12px; height: 12px; }
+.upload-drop-url-btn svg                   { width: 12px; height: 12px; }
+.upload-drop-content > svg                 { width: 48px; height: 48px; }
+.minimized-tab svg                         { width: 14px; height: 14px; }
+/* Record button: fill the circle (Lucide uses stroke by default)           */
+#btnRecord svg                             { fill: currentColor; stroke: none; }
 .btn-icon.copied {
   color: var(--success);
   border-color: var(--success);
