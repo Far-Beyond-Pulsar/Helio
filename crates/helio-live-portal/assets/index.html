@@ -624,10 +624,48 @@
         }
       });
 
+      // ── Touch drag support (mobile) ────────────────────────────────────
+      header.addEventListener('touchstart', (e) => {
+        if (e.target.closest('.modal-controls')) return;
+        const touch = e.touches[0];
+        isDragging = true;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        const rect = modal.getBoundingClientRect();
+        initialLeft = rect.left;
+        initialTop  = rect.top;
+        modal.style.zIndex = ++zIndexCounter;
+      }, { passive: true });
+
+      // touchmove follows the finger; preventDefault stops page scroll while dragging
+      header.addEventListener('touchmove', (e) => {
+        if (!isDragging) return;
+        const touch = e.touches[0];
+        const dx = touch.clientX - startX;
+        const dy = touch.clientY - startY;
+        modal.style.left   = `${initialLeft + dx}px`;
+        modal.style.top    = `${initialTop  + dy}px`;
+        modal.style.right  = 'auto';
+        modal.style.bottom = 'auto';
+        e.preventDefault();
+      }, { passive: false });
+
+      header.addEventListener('touchend', () => {
+        if (isDragging) {
+          isDragging = false;
+          saveWindowState(modal.id);
+        }
+      });
+
       // Bring to front on click
       modal.addEventListener('mousedown', () => {
         modal.style.zIndex = ++zIndexCounter;
       });
+
+      // Bring to front on touch
+      modal.addEventListener('touchstart', () => {
+        modal.style.zIndex = ++zIndexCounter;
+      }, { passive: true });
 
       // Save state on resize (using ResizeObserver)
       const resizeObserver = new ResizeObserver(() => {

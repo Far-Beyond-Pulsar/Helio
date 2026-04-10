@@ -306,6 +306,7 @@ html, body {
   -webkit-user-select: none;
   user-select: none;
   background: rgba(13, 17, 23, 0.4);
+  touch-action: none; /* allow JS touch-drag without browser interference */
 }
 .modal-header:active {
   cursor: grabbing;
@@ -619,6 +620,68 @@ canvas {
 
 @media (max-width: 768px) {
   .search-input { width: 200px; }
+}
+
+/* ── Touch / mobile — does NOT affect pointer-mouse (desktop) desktop ────── */
+@media (pointer: coarse) {
+  /* Taller drag handle so it's easy to grab with a finger */
+  .modal-header {
+    padding: 14px;
+    min-height: 52px;
+  }
+
+  /* Minimum 44 × 44 tap targets for modal control buttons */
+  .modal-btn {
+    width: 36px;
+    height: 36px;
+    padding: 6px;
+  }
+
+  /* Slightly larger nav icon buttons */
+  .btn-icon {
+    width: 40px;
+    height: 40px;
+    padding: 10px;
+  }
+
+  /* Touch can't use the resize corner — hide it */
+  .modal-container {
+    resize: none;
+    /* Prevent any modal from overflowing the viewport */
+    max-width:  calc(100vw - 16px);
+    max-height: calc(100vh - 72px);
+  }
+
+  /* Replay bar — taller buttons for fingers */
+  .replay-btn {
+    height: 44px;
+    min-width: 44px;
+    padding: 10px 16px;
+  }
+
+  /* Larger slider thumb on touch */
+  #replaySlider::-webkit-slider-thumb {
+    width: 24px;
+    height: 24px;
+  }
+  #replaySlider::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+  }
+
+  /* Upload menu items — taller for tap */
+  .upload-menu-item {
+    padding: 12px 16px;
+  }
+}
+
+/* Narrow phones: force modals to fill the viewport width */
+@media (max-width: 600px) {
+  .modal-container {
+    left:      8px !important;
+    width:     calc(100vw - 16px) !important;
+    min-width: unset;
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

@@ -168,6 +168,20 @@ html, body {
   transform: translateY(0);
 }
 .btn-icon svg { flex-shrink: 0; }
+
+/* ── Lucide icon sizing ──────────────────────────────────────────────────── */
+/* Lucide replaces <i data-lucide> with <svg>; scope sizing by context       */
+.btn-icon svg                              { width: 15px; height: 15px; }
+.modal-title svg                           { width: 14px; height: 14px; }
+.modal-btn svg                             { width: 12px; height: 12px; }
+.replay-btn svg, .replay-speed-btn svg     { width: 14px; height: 14px; }
+.upload-menu-item svg                      { width: 14px; height: 14px; }
+.upload-menu-url-go svg                    { width: 12px; height: 12px; }
+.upload-drop-url-btn svg                   { width: 12px; height: 12px; }
+.upload-drop-content > svg                 { width: 48px; height: 48px; }
+.minimized-tab svg                         { width: 14px; height: 14px; }
+/* Record button: fill the circle (Lucide uses stroke by default)           */
+#btnRecord svg                             { fill: currentColor; stroke: none; }
 .btn-icon.copied {
   color: var(--success);
   border-color: var(--success);
@@ -1096,7 +1110,7 @@ canvas {
   50% { transform: scale(1.02); border-color: var(--success); }
 }
 
-.upload-drop-content svg {
+.upload-drop-content > svg {
   color: var(--accent);
   width: 48px;
   height: 48px;
@@ -1114,6 +1128,74 @@ canvas {
   color: var(--fg-muted);
   text-align: center;
 }
+
+.upload-drop-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  max-width: 420px;
+  pointer-events: none;
+}
+.upload-drop-divider-line {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+.upload-drop-divider-text {
+  font-size: 11px;
+  color: var(--fg-subtle);
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.upload-drop-url-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 420px;
+  pointer-events: auto;
+}
+
+.upload-drop-url-input {
+  flex: 1;
+  background: var(--canvas-inset);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--fg);
+  outline: none;
+  min-width: 0;
+  transition: border-color 0.12s, box-shadow 0.12s;
+}
+.upload-drop-url-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(56,139,253,0.2);
+}
+.upload-drop-url-input::placeholder { color: var(--fg-subtle); }
+
+.upload-drop-url-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  padding: 9px 14px;
+  color: #fff;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.12s;
+  white-space: nowrap;
+}
+.upload-drop-url-btn:hover { opacity: 0.85; transform: translateY(-1px); }
+.upload-drop-url-btn:active { transform: translateY(0); }
 
 /* ── Load progress overlay ── */
 .load-overlay {
@@ -1191,4 +1273,3 @@ canvas {
 .replay-bar.active ~ #cy {
   height: calc(100vh - 48px - 56px);
 }
-
