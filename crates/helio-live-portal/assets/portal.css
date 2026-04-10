@@ -749,6 +749,110 @@ canvas {
 .alert-critical .alert-msg { color: #f98585; }
 .alert-warning  .alert-msg { color: #d29922; }
 
+/* ── Upload dropdown menu ── */
+.upload-menu-wrap {
+  position: relative;
+}
+
+.upload-menu {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  right: 0;
+  min-width: 220px;
+  background: rgba(22, 27, 34, 0.98);
+  -webkit-backdrop-filter: blur(16px) saturate(180%);
+  backdrop-filter: blur(16px) saturate(180%);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(1, 4, 9, 0.7), 0 0 0 1px rgba(255,255,255,0.04);
+  padding: 4px;
+  display: none;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 20000;
+  animation: slideIn 0.12s ease;
+}
+.upload-menu.open {
+  display: flex;
+}
+
+.upload-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-muted);
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s, color 0.1s;
+}
+.upload-menu-item:hover {
+  background: rgba(56, 139, 253, 0.12);
+  color: var(--fg);
+}
+.upload-menu-item--github:hover {
+  background: rgba(56, 139, 253, 0.12);
+}
+
+.upload-menu-sep {
+  height: 1px;
+  background: var(--border-muted);
+  margin: 2px 4px;
+}
+
+.upload-menu-url-row {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 8px;
+}
+.upload-menu-url-row.visible {
+  display: flex;
+}
+
+.upload-menu-url-input {
+  flex: 1;
+  background: var(--canvas-inset);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--fg);
+  outline: none;
+  min-width: 0;
+  transition: border-color 0.12s;
+}
+.upload-menu-url-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(56,139,253,0.18);
+}
+.upload-menu-url-input::placeholder { color: var(--fg-subtle); }
+
+.upload-menu-url-go {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  transition: opacity 0.12s, transform 0.12s;
+}
+.upload-menu-url-go:hover { opacity: 0.85; transform: translateX(1px); }
+.upload-menu-url-go:active { transform: translateX(0); }
+
 /* ── btn separator in actions-card ── */
 .btn-sep {
   width: 1px;

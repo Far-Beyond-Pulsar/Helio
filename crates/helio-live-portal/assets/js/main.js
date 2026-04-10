@@ -642,21 +642,92 @@ if (btnRecord) {
   });
 }
 
-// Upload button
-const btnUpload = document.getElementById('btnUpload');
-const fileInput = document.getElementById('fileUploadInput');
-if (btnUpload && fileInput) {
-  btnUpload.addEventListener('click', () => {
+// ── Upload menu ──────────────────────────────────────────────────────────────
+const fileInput      = document.getElementById('fileUploadInput');
+const btnUpload      = document.getElementById('btnUpload');
+const uploadMenu     = document.getElementById('uploadMenu');
+const uploadMenuWrap = document.getElementById('uploadMenuWrap');
+const menuDevice     = document.getElementById('uploadMenuDevice');
+const menuGithub     = document.getElementById('uploadMenuGithub');
+const menuUrlRow     = document.getElementById('uploadMenuUrlRow');
+const menuUrlInput   = document.getElementById('uploadMenuUrlInput');
+const menuUrlGo      = document.getElementById('uploadMenuUrlGo');
+
+function openUploadMenu() {
+  if (!uploadMenu) return;
+  uploadMenu.classList.add('open');
+  btnUpload.setAttribute('aria-expanded', 'true');
+  // Reset URL row each open unless GitHub was already selected
+  menuUrlRow.classList.remove('visible');
+  menuUrlInput.value = '';
+}
+
+function closeUploadMenu() {
+  if (!uploadMenu) return;
+  uploadMenu.classList.remove('open');
+  btnUpload.setAttribute('aria-expanded', 'false');
+  menuUrlRow.classList.remove('visible');
+}
+
+if (btnUpload) {
+  btnUpload.addEventListener('click', (e) => {
+    e.stopPropagation();
+    uploadMenu.classList.contains('open') ? closeUploadMenu() : openUploadMenu();
+  });
+}
+
+// "From device" option
+if (menuDevice && fileInput) {
+  menuDevice.addEventListener('click', () => {
+    closeUploadMenu();
     fileInput.click();
   });
+}
 
+// "From GitHub URL" option — reveal the URL row
+if (menuGithub) {
+  menuGithub.addEventListener('click', () => {
+    menuUrlRow.classList.add('visible');
+    menuUrlInput.focus();
+  });
+}
+
+// Load URL and update the page URL
+async function submitGithubUrl() {
+  const raw = menuUrlInput.value.trim();
+  if (!raw) return;
+  closeUploadMenu();
+  await loadRemoteProfile(raw);
+  // Update browser URL so the page is now shareable
+  if (remoteProfileUrl) {
+    const newUrl = `${location.pathname}?profile=${encodeURIComponent(remoteProfileUrl)}`;
+    history.replaceState(null, '', newUrl);
+  }
+}
+
+if (menuUrlGo) {
+  menuUrlGo.addEventListener('click', submitGithubUrl);
+}
+if (menuUrlInput) {
+  menuUrlInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); submitGithubUrl(); }
+    if (e.key === 'Escape') closeUploadMenu();
+  });
+}
+
+// File-input change handler
+if (fileInput) {
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (file) handleFileUpload(file);
-    // Reset input so the same file can be selected again
     e.target.value = '';
   });
 }
+
+// Close menu when clicking outside
+document.addEventListener('click', (e) => {
+  if (uploadMenuWrap && !uploadMenuWrap.contains(e.target)) closeUploadMenu();
+});
 
 // Drag and drop upload
 const dropZone = document.getElementById('uploadDropZone');
@@ -758,6 +829,118 @@ document.addEventListener('keydown', (e) => {
       break;
   }
 });
+
+// ── Remote profile loading via ?profile= URL param ─────────────────────────
+// Allows sharing profiles stored on GitHub (or any CORS-accessible URL) by
+// encoding the raw file URL as the `profile` query parameter.
+// Example:
+//   ?profile=https%3A%2F%2Fraw.githubusercontent.com%2Fuser%2Frepo%2Fmain%2Frun.helio-recording
+//
+// GitHub blob URLs are automatically converted to raw URLs:
+//   https://github.com/user/repo/blob/main/file → https://raw.githubusercontent.com/user/repo/main/file
+
+// Track which URL the current profile was loaded from (for share-link copying)
+let remoteProfileUrl = null;
+
+/**
+ * Convert a github.com blob URL to its raw.githubusercontent.com equivalent.
+ * All other URLs are returned unchanged.
+ */
+function toRawUrl(url) {
+  // https://github.com/{owner}/{repo}/blob/{ref}/{path}
+  const m = url.match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/blob\/(.+)$/);
+  if (m) return `https://raw.githubusercontent.com/${m[1]}/${m[2]}`;
+  return url;
+}
+
+/**
+ * Validate that a URL is safe to fetch: must be a valid absolute HTTPS URL.
+ */
+function validateProfileUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch { throw new Error('Invalid URL'); }
+  if (parsed.protocol !== 'https:') throw new Error('Only HTTPS URLs are supported');
+  return parsed.href;
+}
+
+async function loadRemoteProfile(rawInput) {
+  let resolvedUrl;
+  try {
+    resolvedUrl = validateProfileUrl(toRawUrl(rawInput));
+  } catch (e) {
+    showToast(`Invalid profile URL: ${e.message}`);
+    return;
+  }
+
+  statusEl.textContent = 'Fetching remote profile\u2026';
+  const dotEl = document.getElementById('statusDot');
+  if (dotEl) dotEl.className = 'status-dot';
+
+  try {
+    const res = await fetch(resolvedUrl, { credentials: 'omit' });
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+
+    let recording;
+    try { recording = JSON.parse(await res.text()); }
+    catch { throw new Error('Response is not valid JSON'); }
+
+    remoteProfileUrl = resolvedUrl;
+    loadRecording(recording);
+
+    // Update the browser URL so the loaded profile is directly shareable
+    const newUrl = `${location.pathname}?profile=${encodeURIComponent(resolvedUrl)}`;
+    history.replaceState(null, '', newUrl);
+
+    // Show the share-link button in the replay bar
+    const shareBtn = document.getElementById('replayCopyLink');
+    if (shareBtn) shareBtn.style.display = '';
+  } catch (e) {
+    statusEl.textContent = 'Failed to load remote profile';
+    showToast(`Remote profile error: ${e.message}`);
+    console.error('loadRemoteProfile failed:', e);
+  }
+}
+
+function copyShareLink() {
+  if (!remoteProfileUrl) return;
+  const shareUrl =
+    `${location.origin}${location.pathname}?profile=${encodeURIComponent(remoteProfileUrl)}`;
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(shareUrl).then(() => showToast('Share link copied \u2713'));
+  } else {
+    const ta = document.createElement('textarea');
+    ta.value = shareUrl;
+    ta.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    showToast('Share link copied \u2713');
+  }
+}
+
+const replayCopyLinkBtn = document.getElementById('replayCopyLink');
+if (replayCopyLinkBtn) {
+  replayCopyLinkBtn.addEventListener('click', copyShareLink);
+}
+
+// Hide the share button and clear remoteProfileUrl when exiting replay
+document.getElementById('replayExit')?.addEventListener('click', () => {
+  remoteProfileUrl = null;
+  const shareBtn = document.getElementById('replayCopyLink');
+  if (shareBtn) shareBtn.style.display = 'none';
+  // Strip the ?profile= param from the URL
+  history.replaceState(null, '', location.pathname);
+}, true /* capture: runs before the existing exit listener */);
+
+// Check for ?profile= on load
+(function checkProfileParam() {
+  const profileParam = new URLSearchParams(location.search).get('profile');
+  if (profileParam) {
+    // Defer so the rest of the page finishes initial setup first
+    requestAnimationFrame(() => loadRemoteProfile(profileParam));
+  }
+})();
 
 // ── Export for debugging and cross-module access ─────────────────────────────
 window.centralStore = centralStore; // Export central store globally for perf.js and other modules
