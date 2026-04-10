@@ -411,6 +411,21 @@
   <!-- ── File Upload Input (hidden) ── -->
   <input type="file" id="fileUploadInput" accept=".helio-recording,.json" aria-label="Upload recording file" class="file-upload-hidden">
 
+  <!-- ── Load Progress Overlay ── -->
+  <div id="loadOverlay" class="load-overlay" role="status" aria-live="polite">
+    <div class="load-overlay-card">
+      <svg class="load-overlay-spinner" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+        <circle cx="12" cy="12" r="10" stroke="var(--border)" stroke-width="2"/>
+        <path d="M12 2a10 10 0 0 1 10 10" stroke="var(--accent)" stroke-width="2"/>
+      </svg>
+      <div id="loadOverlayLabel" class="load-overlay-label">Loading…</div>
+      <div class="load-overlay-track">
+        <div id="loadOverlayFill" class="load-overlay-fill" style="width:0%"></div>
+      </div>
+      <div id="loadOverlayPct" class="load-overlay-pct">0%</div>
+    </div>
+  </div>
+
   <!-- ── Upload Drop Zone Overlay ── -->
   <div id="uploadDropZone" class="upload-drop-zone">
     <div class="upload-drop-content">

@@ -606,25 +606,82 @@ function exitReplayMode() {
   }
 }
 
+// ── Load progress helpers ─────────────────────────────────────────────────────
+
+function formatBytes(n) {
+  if (n < 1024)    return `${n} B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
+
+function showLoadProgress(label) {
+  const overlay = document.getElementById('loadOverlay');
+  if (!overlay) return;
+  document.getElementById('loadOverlayLabel').textContent = label;
+  document.getElementById('loadOverlayFill').style.width = '0%';
+  document.getElementById('loadOverlayPct').textContent = '0%';
+  overlay.classList.add('active');
+}
+
+function updateLoadProgress(fraction, label) {
+  const pct = Math.round(Math.min(Math.max(fraction, 0), 1) * 100);
+  const fill = document.getElementById('loadOverlayFill');
+  const pctEl = document.getElementById('loadOverlayPct');
+  if (fill) fill.style.width = pct + '%';
+  if (pctEl) pctEl.textContent = pct + '%';
+  if (label != null) {
+    const lbl = document.getElementById('loadOverlayLabel');
+    if (lbl) lbl.textContent = label;
+  }
+}
+
+function hideLoadProgress() {
+  const overlay = document.getElementById('loadOverlay');
+  if (overlay) overlay.classList.remove('active');
+}
+
 // ── File upload handling ──────────────────────────────────────────────────────
 
 function handleFileUpload(file) {
   if (!file) return;
 
-  // Hide the drop zone immediately — don't wait for the async FileReader to finish
+  // Hide the drop zone immediately
   const dropZoneEl = document.getElementById('uploadDropZone');
   if (dropZoneEl) dropZoneEl.classList.remove('active');
 
+  showLoadProgress(`Reading ${file.name}…`);
+
   const reader = new FileReader();
-  reader.onload = (e) => {
-    try {
-      const recording = JSON.parse(e.target.result);
-      loadRecording(recording);
-    } catch (err) {
-      showToast(`Failed to parse recording: ${err.message}`);
-      console.error('File parse error:', err);
+
+  reader.onprogress = (e) => {
+    if (e.lengthComputable) {
+      // Reserve 0–80% for reading, 80–100% for parsing
+      updateLoadProgress((e.loaded / e.total) * 0.8,
+        `Reading ${file.name}… (${formatBytes(e.loaded)} / ${formatBytes(e.total)})`);
     }
   };
+
+  reader.onload = (e) => {
+    updateLoadProgress(0.85, 'Parsing…');
+    // Yield to the browser so the progress UI updates before JSON.parse blocks
+    setTimeout(() => {
+      try {
+        const recording = JSON.parse(e.target.result);
+        updateLoadProgress(1, 'Done');
+        setTimeout(() => { hideLoadProgress(); loadRecording(recording); }, 200);
+      } catch (err) {
+        hideLoadProgress();
+        showToast(`Failed to parse recording: ${err.message}`);
+        console.error('File parse error:', err);
+      }
+    }, 16);
+  };
+
+  reader.onerror = () => {
+    hideLoadProgress();
+    showToast('Failed to read file');
+  };
+
   reader.readAsText(file);
 }
 
@@ -872,17 +929,57 @@ async function loadRemoteProfile(rawInput) {
     return;
   }
 
-  statusEl.textContent = 'Fetching remote profile\u2026';
+  statusEl.textContent = 'Fetching remote profile…';
   const dotEl = document.getElementById('statusDot');
   if (dotEl) dotEl.className = 'status-dot';
+
+  showLoadProgress('Connecting…');
 
   try {
     const res = await fetch(resolvedUrl, { credentials: 'omit' });
     if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
 
+    // Stream the response body so we can track download progress
+    const contentLength = +res.headers.get('Content-Length') || 0;
+    const bodyReader = res.body.getReader();
+    const chunks = [];
+    let received = 0;
+
+    while (true) {
+      const { done, value } = await bodyReader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+      if (contentLength) {
+        updateLoadProgress(
+          (received / contentLength) * 0.8,
+          `Downloading… ${formatBytes(received)} / ${formatBytes(contentLength)}`
+        );
+      } else {
+        // Content-Length unavailable — show bytes received, indeterminate bar
+        updateLoadProgress(
+          0.4,
+          `Downloading… ${formatBytes(received)}`
+        );
+      }
+    }
+
+    // Assemble chunks into a single buffer
+    updateLoadProgress(0.85, 'Parsing…');
+    await new Promise(r => setTimeout(r, 16)); // let UI update before blocking parse
+
     let recording;
-    try { recording = JSON.parse(await res.text()); }
-    catch { throw new Error('Response is not valid JSON'); }
+    try {
+      const total = chunks.reduce((s, c) => s + c.length, 0);
+      const buf = new Uint8Array(total);
+      let pos = 0;
+      for (const chunk of chunks) { buf.set(chunk, pos); pos += chunk.length; }
+      recording = JSON.parse(new TextDecoder().decode(buf));
+    } catch { throw new Error('Response is not valid JSON'); }
+
+    updateLoadProgress(1, 'Done');
+    await new Promise(r => setTimeout(r, 200));
+    hideLoadProgress();
 
     remoteProfileUrl = resolvedUrl;
     loadRecording(recording);
@@ -895,6 +992,7 @@ async function loadRemoteProfile(rawInput) {
     const shareBtn = document.getElementById('replayCopyLink');
     if (shareBtn) shareBtn.style.display = '';
   } catch (e) {
+    hideLoadProgress();
     statusEl.textContent = 'Failed to load remote profile';
     showToast(`Remote profile error: ${e.message}`);
     console.error('loadRemoteProfile failed:', e);

@@ -1115,6 +1115,78 @@ canvas {
   text-align: center;
 }
 
+/* ── Load progress overlay ── */
+.load-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(13, 17, 23, 0.95);
+  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(20px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 10001;
+}
+.load-overlay.active {
+  display: flex;
+  animation: fadeIn 0.15s ease;
+}
+
+.load-overlay-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 48px 56px;
+  background: rgba(22, 27, 34, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: 0 16px 48px rgba(1,4,9,0.8);
+  min-width: 320px;
+}
+
+.load-overlay-spinner {
+  width: 40px;
+  height: 40px;
+  animation: spinnerRotate 0.9s linear infinite;
+  flex-shrink: 0;
+}
+@keyframes spinnerRotate {
+  to { transform: rotate(360deg); }
+}
+
+.load-overlay-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  text-align: center;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.load-overlay-track {
+  width: 280px;
+  height: 4px;
+  background: var(--canvas-inset);
+  border-radius: 99px;
+  overflow: hidden;
+}
+
+.load-overlay-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #58a6ff);
+  border-radius: 99px;
+  transition: width 0.12s ease;
+}
+
+.load-overlay-pct {
+  font-size: 11px;
+  color: var(--fg-subtle);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── Adjust main content when replay bar is active ── */
 .replay-bar.active ~ #cy {
   height: calc(100vh - 48px - 56px);
