@@ -31,65 +31,49 @@
     </a>
     <span class="gh-nav-divider">/</span>
     <span class="gh-nav-sub">Live Portal</span>
-    <div class="gh-nav-status">
-      <div class="status-dot" id="statusDot"></div>
-      <span id="status">Connecting…</span>
+
+    <!-- ── inline stat chips ── -->
+    <div class="nav-stat-sep"></div>
+    <div class="nav-stats-group">
+      <div class="nav-stat">
+        <span class="nav-stat-label">Frame</span>
+        <span class="nav-stat-value accent" id="frame">—</span>
+      </div>
+      <div class="nav-stat">
+        <span class="nav-stat-label">Time</span>
+        <span class="nav-stat-value" id="frameMs">—<span class="nav-stat-unit">ms</span></span>
+      </div>
+      <div class="nav-stat">
+        <span class="nav-stat-label">GPU</span>
+        <span class="nav-stat-value gpu" id="gpuTotal">—<span class="nav-stat-unit">ms</span></span>
+      </div>
+      <div class="nav-stat">
+        <span class="nav-stat-label">CPU</span>
+        <span class="nav-stat-value cpu" id="cpuTotal">—<span class="nav-stat-unit">ms</span></span>
+      </div>
     </div>
-  </nav>
-
-  <!-- ── full screen pipeline graph ── -->
-  <div id="cy"></div>
-
-  <!-- ── floating stat cards overlay ── -->
-  <div class="stats-overlay">
-    <!-- Frame metrics card -->
-    <div class="stat-card">
-      <div class="stat-card-title">Frame Metrics</div>
-      <div class="stat-grid">
-        <div class="stat-item">
-          <span class="stat-label">Frame</span>
-          <span class="stat-value accent" id="frame">—</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">Frame time</span>
-          <span class="stat-value" id="frameMs">—<span class="stat-unit">ms</span></span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">GPU total</span>
-          <span class="stat-value gpu" id="gpuTotal">—<span class="stat-unit">ms</span></span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">CPU total</span>
-          <span class="stat-value cpu" id="cpuTotal">—<span class="stat-unit">ms</span></span>
-        </div>
+    <div class="nav-stat-sep"></div>
+    <div class="nav-stats-group">
+      <div class="nav-stat">
+        <span class="nav-stat-label">Obj</span>
+        <span class="nav-stat-value success" id="objCount">—</span>
+      </div>
+      <div class="nav-stat">
+        <span class="nav-stat-label">Lights</span>
+        <span class="nav-stat-value success" id="lightCount">—</span>
+      </div>
+      <div class="nav-stat">
+        <span class="nav-stat-label">BB</span>
+        <span class="nav-stat-value" id="bbCount">—</span>
+      </div>
+      <div class="nav-stat">
+        <span class="nav-stat-label">DC</span>
+        <span class="nav-stat-value" id="drawCalls">—</span>
       </div>
     </div>
 
-    <!-- Scene metrics card -->
-    <div class="stat-card">
-      <div class="stat-card-title">Scene Stats</div>
-      <div class="stat-grid">
-        <div class="stat-item">
-          <span class="stat-label">Objects</span>
-          <span class="stat-value success" id="objCount">—</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">Lights</span>
-          <span class="stat-value success" id="lightCount">—</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">Billboards</span>
-          <span class="stat-value" id="bbCount">—</span>
-        </div>
-        <div class="stat-item">
-          <span class="stat-label">Draw calls</span>
-          <span class="stat-value" id="drawCalls">—</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Actions card -->
-    <div class="actions-card">
+    <!-- ── applet icon buttons ── -->
+    <div class="nav-actions">
       <button id="btnTimings" class="btn-icon" data-tooltip="Timings" aria-label="View per-pass timings">
         <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v12.5A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V1.75a.25.25 0 0 0-.25-.25ZM3.5 6.25a.75.75 0 0 1 .75-.75h7a.75.75 0 0 1 0 1.5h-7a.75.75 0 0 1-.75-.75Zm.75 2.25h4a.75.75 0 0 1 0 1.5h-4a.75.75 0 0 1 0-1.5Z"/></svg>
       </button>
@@ -130,7 +114,13 @@
         <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor"><path d="M2.75 14A1.75 1.75 0 0 1 1 12.25v-2.5a.75.75 0 0 1 1.5 0v2.5c0 .138.112.25.25.25h10.5a.25.25 0 0 0 .25-.25v-2.5a.75.75 0 0 1 1.5 0v2.5A1.75 1.75 0 0 1 13.25 14Z"/><path d="M11.78 4.72a.749.749 0 1 1-1.06 1.06L8.75 3.811V9.5a.75.75 0 0 1-1.5 0V3.811L5.28 5.78a.749.749 0 1 1-1.06-1.06l3.25-3.25a.749.749 0 0 1 1.06 0l3.25 3.25Z"/></svg>
       </button>
     </div>
-  </div>
+
+    <!-- ── connection status ── -->
+    <div class="gh-nav-status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="status">Connecting…</span>
+    </div>
+  </nav>
 
   <!-- ── floating windows ── -->
   <div class="modal-backdrop"></div>

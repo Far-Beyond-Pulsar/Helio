@@ -31,13 +31,13 @@ html, body {
 
 /* ── top nav ── */
 .gh-nav {
-  height: 48px;
+  height: 56px;
   background: var(--canvas-inset);
   border-bottom: 1px solid var(--border);
   display: flex;
   align-items: center;
-  padding: 0 20px;
-  gap: 12px;
+  padding: 0 16px;
+  gap: 10px;
   position: relative;
   z-index: 100;
 }
@@ -54,12 +54,72 @@ html, body {
 .gh-nav-divider { color: var(--fg-subtle); font-size: 16px; font-weight: 300; }
 .gh-nav-sub { font-size: 13px; font-weight: 400; color: var(--fg-muted); }
 .gh-nav-status {
-  margin-left: auto;
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 11px;
   color: var(--fg-muted);
+  padding-left: 10px;
+  border-left: 1px solid var(--border-muted);
+}
+
+/* ── nav inline stat chips ── */
+.nav-stat-sep {
+  width: 1px;
+  height: 28px;
+  background: var(--border-muted);
+  flex-shrink: 0;
+  margin: 0 4px;
+}
+
+.nav-stats-group {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.nav-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  align-items: flex-start;
+}
+
+.nav-stat-label {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--fg-subtle);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  line-height: 1;
+}
+
+.nav-stat-value {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--fg);
+  letter-spacing: -0.02em;
+  line-height: 1;
+}
+.nav-stat-value.accent { color: var(--accent); }
+.nav-stat-value.gpu    { color: var(--gpu-color); }
+.nav-stat-value.cpu    { color: var(--cpu-color); }
+.nav-stat-value.success { color: var(--success); }
+
+.nav-stat-unit {
+  font-size: 9px;
+  color: var(--fg-subtle);
+  margin-left: 2px;
+}
+
+/* ── nav applet buttons strip ── */
+.nav-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+  padding-right: 8px;
 }
 .status-dot {
   width: 6px; height: 6px;
@@ -72,103 +132,15 @@ html, body {
 /* ── full screen pipeline graph ── */
 #cy {
   position: fixed;
-  top: 48px;
+  top: 56px;
   left: 0;
   width: 100vw;
-  height: calc(100vh - 48px);
+  height: calc(100vh - 56px);
   background: var(--canvas);
   z-index: 0;
 }
 
-/* ── floating stat cards (overlay) ── */
-.stats-overlay {
-  position: fixed;
-  top: 64px;
-  left: 16px;
-  right: 16px;
-  z-index: 10;
-  display: flex;
-  gap: 12px;
-  pointer-events: none;
-  flex-wrap: wrap;
-}
-
-.stat-card {
-  background: rgba(22, 27, 34, 0.92);
-  -webkit-backdrop-filter: blur(12px) saturate(180%);
-  backdrop-filter: blur(12px) saturate(180%);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 16px;
-  box-shadow: 0 4px 12px rgba(1, 4, 9, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
-  pointer-events: auto;
-  transition: transform 0.15s ease, box-shadow 0.15s ease;
-}
-.stat-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 6px 20px rgba(1, 4, 9, 0.7), 0 0 0 1px rgba(255, 255, 255, 0.05);
-}
-
-.stat-card-title {
-  font-size: 10px;
-  font-weight: 600;
-  color: var(--fg-subtle);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 6px;
-}
-
-.stat-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 8px;
-}
-
-.stat-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.stat-label {
-  font-size: 10px;
-  color: var(--fg-muted);
-  font-weight: 500;
-}
-
-.stat-value {
-  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--fg);
-  letter-spacing: -0.02em;
-}
-
-.stat-value.accent { color: var(--accent); }
-.stat-value.gpu { color: var(--gpu-color); }
-.stat-value.cpu { color: var(--cpu-color); }
-.stat-value.success { color: var(--success); }
-
-.stat-unit {
-  font-size: 10px;
-  color: var(--fg-subtle);
-  margin-left: 3px;
-}
-
-/* ── action buttons card ── */
-.actions-card {
-  background: rgba(22, 27, 34, 0.92);
-  -webkit-backdrop-filter: blur(12px) saturate(180%);
-  backdrop-filter: blur(12px) saturate(180%);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 6px;
-  box-shadow: 0 4px 12px rgba(1, 4, 9, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.03);
-  pointer-events: auto;
-  display: flex;
-  gap: 4px;
-  margin-left: auto;
-}
+/* (stats-overlay and stat-card removed — stats are now inline in the nav) */
 
 .btn-icon {
   position: relative;
@@ -201,13 +173,13 @@ html, body {
   border-color: var(--success);
 }
 
-/* ── custom tooltip ── */
+/* ── custom tooltip (appears below — buttons live in top nav) ── */
 .btn-icon::before {
   content: attr(data-tooltip);
   position: absolute;
-  bottom: 100%;
+  top: calc(100% + 6px);
   left: 50%;
-  transform: translateX(-50%) translateY(-6px);
+  transform: translateX(-50%);
   background: rgba(22, 27, 34, 0.98);
   -webkit-backdrop-filter: blur(8px);
   backdrop-filter: blur(8px);
@@ -226,7 +198,7 @@ html, body {
 }
 .btn-icon:hover::before {
   opacity: 1;
-  transform: translateX(-50%) translateY(-8px);
+  transform: translateX(-50%) translateY(2px);
 }
 
 /* ── search box overlay ── */
@@ -297,7 +269,7 @@ html, body {
   display: flex;
 }
 .modal-container.maximized {
-  top: 64px !important;
+  top: 60px !important;
   left: 16px !important;
   right: 16px !important;
   bottom: 16px !important;
@@ -627,13 +599,11 @@ canvas {
 }
 
 @media (max-width: 1024px) {
-  .stats-overlay { flex-direction: column; }
-  .stat-grid { grid-template-columns: 1fr; }
   .scene-grid { grid-template-columns: 1fr; }
+  .nav-stats-group { display: none; }
 }
 
 @media (max-width: 768px) {
-  .actions-card { flex-direction: column; }
   .search-input { width: 200px; }
 }
 
