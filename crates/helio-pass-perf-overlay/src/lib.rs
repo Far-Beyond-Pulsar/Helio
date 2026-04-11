@@ -485,8 +485,16 @@ impl MaterialProfiler {
     
     /// Read back current sample timing from GPU and accumulate it.
     ///
-    /// This blocks until GPU results are available. Call after each profile_next().
-    pub fn read_current_sample_blocking(&mut self, device: &wgpu::Device) {
+    /// When `owns_device` is `true`, blocks until GPU results are available.
+    /// When `false` (external device), the poll is skipped and the sample is
+    /// discarded — the device owner drives polling and a concurrent
+    /// `poll(wait_indefinitely)` would corrupt driver state.
+    pub fn read_current_sample_blocking(&mut self, device: &wgpu::Device, owns_device: bool) {
+        if !owns_device {
+            // Cannot poll a device we don't own. Discard this sample; profiling
+            // in ShaderComplexity mode is unavailable when using an external device.
+            return;
+        }
         // Map buffer and read timestamps
         let buffer_slice = self.resolve_buffer.slice(..);
         buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -1538,7 +1546,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
                 );
                 
                 // Read back the sample we just profiled
-                profiler.read_current_sample_blocking(ctx.device);
+                profiler.read_current_sample_blocking(ctx.device, ctx.owns_device);
             }
         }
 

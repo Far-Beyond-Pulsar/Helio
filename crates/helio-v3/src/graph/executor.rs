@@ -622,6 +622,7 @@ impl RenderGraph {
                     height: scene.height,
                     device: &scene.device,
                     resources: &visible_frame_resources,
+                    owns_device: self.owns_device,
                 };
 
                 pass.execute(&mut ctx)?;

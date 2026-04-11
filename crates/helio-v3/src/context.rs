@@ -209,6 +209,12 @@ pub struct PassContext<'a> {
 
     /// Per-frame transient resource views (GBuffer, HiZ, shadow atlas, sky LUT, etc.)
     pub resources: &'a libhelio::FrameResources<'a>,
+
+    /// When `false`, Helio does **not** own the wgpu device (e.g. it is owned
+    /// by GPUI).  Passes must not call `device.poll(wait_indefinitely)` in
+    /// this mode — the device owner drives its own polling loop and a
+    /// concurrent poll from the render thread will corrupt driver state.
+    pub owns_device: bool,
 }
 
 impl<'a> PassContext<'a> {
