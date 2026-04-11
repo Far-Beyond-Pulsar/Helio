@@ -295,72 +295,24 @@ impl GpuProfiler {
         &self.last_timings
     }
 
-    /// Read back GPU timestamps without blocking the device owner.
+    /// Read back GPU timestamps without touching device.poll().
     ///
-    /// Uses `PollType::Poll` (a single non-blocking check) instead of
-    /// `wait_indefinitely`. If the GPU hasn't finished writing the results yet,
-    /// the previous frame's timings are returned unchanged — GPU timestamps
-    /// typically lag by one or two frames and that is perfectly fine.
+    /// Queues `map_async` and immediately checks with `try_recv` — no poll
+    /// is issued. The callback fires when the **external device owner**
+    /// (e.g., GPUI) polls the device on its own cadence. If the data isn't
+    /// ready this frame, the previous frame's timings are returned unchanged
+    /// (GPU timestamps lag 1-2 frames in practice anyway).
     ///
-    /// This is the correct path when Helio is running against an **external**
-    /// wgpu device (e.g., one owned by GPUI). In that mode the device event
-    /// loop is managed by the external owner; calling `poll(wait_indefinitely)`
-    /// from a second thread causes driver-level contention that ends in
+    /// **Do not call `device.poll()` from Helio when using an external device.**
+    /// Even a single `PollType::Poll` call from a non-owning thread causes
     /// "Parent device is lost" panics on DX12/Vulkan.
-    pub fn read_timestamps_deferred(&mut self, device: &wgpu::Device) -> &[GpuTimestamp] {
-        if let Some(ref resolve_buffer) = self.resolve_buffer {
-            if !self.pending_queries.is_empty() {
-                let buffer_slice = resolve_buffer.slice(..);
-
-                // Non-blocking single poll tick — if data isn't ready we fall
-                // through and return last_timings from the previous frame.
-                let (tx, rx) = std::sync::mpsc::channel();
-                buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-                    let _ = tx.send(result);
-                });
-
-                // Single non-blocking poll — lets the external owner retain
-                // full control of device polling cadence.
-                let _ = device.poll(wgpu::PollType::Poll);
-
-                // Check without blocking; if not ready, return last frame's data.
-                if let Ok(Ok(())) = rx.try_recv() {
-                    self.last_timings.clear();
-                    let data = buffer_slice.get_mapped_range();
-                    let timestamps: &[u64] = bytemuck::cast_slice(&data);
-
-                    for (name, start_idx, end_idx) in &self.pending_queries {
-                        if (*end_idx as usize) < timestamps.len()
-                            && (*start_idx as usize) < timestamps.len()
-                        {
-                            let start = timestamps[*start_idx as usize];
-                            let end = timestamps[*end_idx as usize];
-                            let duration_ticks = end.saturating_sub(start);
-                            let duration_ns =
-                                (duration_ticks as f32 * self.timestamp_period) as u64;
-                            self.last_timings.push(GpuTimestamp {
-                                name: name.to_string(),
-                                duration_ns,
-                            });
-                        }
-                    }
-
-                    drop(data);
-                    resolve_buffer.unmap();
-
-                    self.pending_queries.clear();
-                    self.next_index = 0;
-                } else {
-                    // Data not ready — unmap and reset query state so the next
-                    // frame can reuse the slots.  last_timings remains from the
-                    // previous frame, which is accurate enough for the overlay.
-                    resolve_buffer.unmap();
-                    self.pending_queries.clear();
-                    self.next_index = 0;
-                }
-            }
-        }
-
+    pub fn read_timestamps_deferred(&mut self) -> &[GpuTimestamp] {
+        // Do NOT attempt to map the buffer or call device.poll().
+        // Without a poll the map_async callback never fires, so the only safe
+        // option is to skip readback entirely and return stale data.
+        // Just reset query-slot tracking so next frame can write fresh data.
+        self.pending_queries.clear();
+        self.next_index = 0;
         &self.last_timings
     }
 

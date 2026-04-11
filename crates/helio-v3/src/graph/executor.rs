@@ -639,13 +639,13 @@ impl RenderGraph {
 
         // Read back GPU timestamps.
         // When Helio owns the device it is safe to block until the GPU is done.
-        // When the device is external (e.g. GPUI) a blocking poll would race
-        // with the owner's event loop and corrupt driver state — use a single
-        // non-blocking tick instead; the owner polls the device on its own cadence.
+        // When the device is external (e.g. GPUI) never call device.poll() —
+        // the device owner drives its own polling loop. Use deferred readback
+        // which relies on the owner's poll to deliver the map_async callback.
         if self.owns_device {
             self.profiler.read_gpu_timestamps_blocking(&scene.device);
         } else {
-            self.profiler.read_gpu_timestamps_deferred(&scene.device);
+            self.profiler.read_gpu_timestamps_deferred();
         }
 
         Ok(())
