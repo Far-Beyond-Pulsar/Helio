@@ -87,6 +87,9 @@ pub struct Renderer {
     /// GPU-resident baked data (AO, lightmaps, probes, PVS).
     /// Populated once, published into `FrameResources` every subsequent frame.
     baked_data: Option<std::sync::Arc<helio_bake::BakedData>>,
+    /// Whether Helio owns the wgpu device (true) or is using an externally-owned
+    /// device (false, e.g. GPUI). When false, device.poll() must never be called.
+    owns_device: bool,
 }
 
 enum GraphKind {
@@ -197,6 +200,7 @@ impl Renderer {
 
             bake_pending: None,
             baked_data: None,
+            owns_device: true,
         };
 
         // Automatically start live performance dashboard if feature is enabled
@@ -337,6 +341,7 @@ impl Renderer {
 
             bake_pending: None,
             baked_data: None,
+            owns_device: false,
         }
     }
 
@@ -635,14 +640,25 @@ impl Renderer {
 
         match self.graph_kind {
             GraphKind::Default => {
-                self.graph = build_default_graph(
-                    &self.device,
-                    &self.queue,
-                    &self.scene,
-                    config,
-                    self.debug_state.clone(),
-                    &self.debug_camera_buffer,
-                );
+                self.graph = if self.owns_device {
+                    build_default_graph(
+                        &self.device,
+                        &self.queue,
+                        &self.scene,
+                        config,
+                        self.debug_state.clone(),
+                        &self.debug_camera_buffer,
+                    )
+                } else {
+                    super::graph::build_default_graph_external(
+                        &self.device,
+                        &self.queue,
+                        &self.scene,
+                        config,
+                        self.debug_state.clone(),
+                        &self.debug_camera_buffer,
+                    )
+                };
                 // The new graph contains a fresh WaterSimPass with default (no-wind)
                 // settings. Re-dirty the water volumes so the next frame re-applies
                 // the descriptor's wind/sim params to the new pass.
@@ -733,14 +749,25 @@ impl Renderer {
             render_scale: self.render_scale,
             perf_overlay_mode: self.perf_overlay_mode,
         };
-        self.graph = build_default_graph(
-            &self.device,
-            &self.queue,
-            &self.scene,
-            config,
-            self.debug_state.clone(),
-            &self.debug_camera_buffer,
-        );
+        self.graph = if self.owns_device {
+            build_default_graph(
+                &self.device,
+                &self.queue,
+                &self.scene,
+                config,
+                self.debug_state.clone(),
+                &self.debug_camera_buffer,
+            )
+        } else {
+            super::graph::build_default_graph_external(
+                &self.device,
+                &self.queue,
+                &self.scene,
+                config,
+                self.debug_state.clone(),
+                &self.debug_camera_buffer,
+            )
+        };
         self.graph_kind = GraphKind::Default;
     }
 
