@@ -195,6 +195,13 @@ pub struct RenderGraph {
     /// - **Zero-copy**: Views borrowed via FrameResources
     transient_textures: HashMap<&'static str, TransientTexture>,
 
+    /// Prebuilt render bundles for GPU-only passes.
+    ///
+    /// Passes may optionally record static GPU draw commands once at graph
+    /// initialization/resize. These bundles are replayed every frame, avoiding
+    /// the per-pass CPU execute dispatch for pure GPU work.
+    gpu_render_bundles: Vec<Option<wgpu::RenderBundle>>,
+
     /// GPU device (needed for creating transient textures)
     device: std::sync::Arc<wgpu::Device>,
 
@@ -267,6 +274,7 @@ impl RenderGraph {
             height: 0, // Set via set_render_size() before first execute()
             delta_time: 0.0,
             resource_routes,
+            gpu_render_bundles: Vec::new(),
             owns_device: true,
         }
     }
@@ -371,6 +379,7 @@ impl RenderGraph {
             pass.on_resize(&self.device, width, height);
         }
         self.recreate_transient_textures();
+        self.rebuild_gpu_render_bundles();
     }
 
     /// Adds a render pass to the graph.
@@ -420,6 +429,7 @@ impl RenderGraph {
         // Only store the first occurrence so find_pass() returns the first matching pass.
         self.pass_index_map.entry(type_id).or_insert(self.passes.len());
         self.passes.push(pass);
+        self.gpu_render_bundles.push(None);
     }
 
     /// Returns a mutable reference to the first pass of type `T`, if present.
@@ -567,25 +577,44 @@ impl RenderGraph {
         // Apply resource routes once (transient texture pointer → FrameResources field).
         // Routes are stable across passes, so there is no reason to re-apply them inside
         // the per-pass loop (previously O(passes × routes), now O(routes)).
-        let mut base_frame_resources = *frame_resources;
+        let mut visible_frame_resources = *frame_resources;
         for (name, route) in &self.resource_routes {
             if let Some(tex) = self.transient_textures.get(name) {
-                route(&tex.view, &mut base_frame_resources);
+                route(&tex.view, &mut visible_frame_resources);
             }
         }
 
-        for pass_index in 0..self.passes.len() {
-            let (published_passes, pending_passes) = self.passes.split_at_mut(pass_index);
-            let (pass, _) = pending_passes
-                .split_first_mut()
-                .expect("pass_index within bounds");
+        for (pass_index, pass) in self.passes.iter_mut().enumerate() {
+            // GPU-only prebuilt path: replay a render bundle if the pass opted in.
+            if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
+                let pass_name = pass.name();
+                self.profiler.begin_gpu_pass(&mut encoder, pass_name);
 
-            // Populate frame resources with transient textures + pass-published resources
-            let mut visible_frame_resources = base_frame_resources;
+                if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
+                    let mut pass_encoder = encoder.begin_render_pass(&desc);
+                    pass_encoder.execute_bundles(std::iter::once(bundle));
+                } else {
+                    // Fallback to dynamic execution if the render bundle cannot be replayed.
+                    let scene_resources = scene.resources();
+                    let mut ctx = PassContext {
+                        encoder: &mut encoder,
+                        target,
+                        depth,
+                        scene: scene_resources,
+                        profiler: &mut self.profiler,
+                        frame_num: scene.frame_count,
+                        width: scene.width,
+                        height: scene.height,
+                        device: &scene.device,
+                        resources: &visible_frame_resources,
+                        owns_device: self.owns_device,
+                    };
+                    pass.execute(&mut ctx)?;
+                }
 
-            // Add pass-published resources (e.g., GBufferPass publishes gbuffer views)
-            for published_pass in published_passes {
-                published_pass.publish(&mut visible_frame_resources);
+                self.profiler.end_gpu_pass(&mut encoder, pass_name);
+                pass.publish(&mut visible_frame_resources);
+                continue;
             }
 
             // CPU profiling scope for prepare()
@@ -611,11 +640,12 @@ impl RenderGraph {
 
             // execute() with GPU profiling (handled via PassContext)
             {
+                let scene_resources = scene.resources();
                 let mut ctx = PassContext {
                     encoder: &mut encoder,
                     target,
                     depth,
-                    scene: scene.resources(),
+                    scene: scene_resources,
                     profiler: &mut self.profiler,
                     frame_num: scene.frame_count,
                     width: scene.width,
@@ -630,6 +660,9 @@ impl RenderGraph {
 
             // GPU profiling: write end timestamp
             self.profiler.end_gpu_pass(&mut encoder, pass_name);
+
+            // Publish resources for downstream passes.
+            pass.publish(&mut visible_frame_resources);
         }
 
         // Resolve GPU timestamp queries
@@ -665,6 +698,27 @@ impl RenderGraph {
     fn recreate_transient_textures(&mut self) {
         // Clear existing textures
         self.transient_textures.clear();
+    }
+
+    /// Rebuilds prebuilt GPU render bundles for GPU-only passes.
+    ///
+    /// This is called after size/texture changes so any pass that can fully
+    /// describe its work ahead of time can avoid dynamic per-frame execution.
+    fn rebuild_gpu_render_bundles(&mut self) {
+        self.gpu_render_bundles.clear();
+
+        let mut base_frame_resources = libhelio::FrameResources::empty();
+        for (name, route) in &self.resource_routes {
+            if let Some(tex) = self.transient_textures.get(name) {
+                route(&tex.view, &mut base_frame_resources);
+            }
+        }
+
+        for pass in &mut self.passes {
+            let bundle = pass.build_gpu_render_bundle(&self.device, &base_frame_resources);
+            self.gpu_render_bundles.push(bundle);
+            pass.publish(&mut base_frame_resources);
+        }
     }
 }
 

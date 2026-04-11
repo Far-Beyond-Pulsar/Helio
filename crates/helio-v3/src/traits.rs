@@ -301,6 +301,36 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// shadow atlas, SSAO, pre-AA) rather than pass-specific implementation types.
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
+    /// Build a reusable render bundle for passes that require no per-frame CPU work.
+    ///
+    /// If the pass can record all GPU draw commands in advance, return `Some(bundle)`.
+    /// The graph will skip `prepare()` / `execute()` at runtime and replay the bundle
+    /// inside the pass's render pass descriptor.
+    ///
+    /// The default implementation returns `None`, which means the pass will execute
+    /// dynamically every frame.
+    fn build_gpu_render_bundle(
+        &mut self,
+        _device: &wgpu::Device,
+        _resources: &libhelio::FrameResources<'_>,
+    ) -> Option<wgpu::RenderBundle> {
+        None
+    }
+
+    /// Returns a render pass descriptor for replaying a prebuilt render bundle.
+    ///
+    /// This is only used for passes that return `Some` from
+    /// `build_gpu_render_bundle()`. The descriptor is created at runtime using
+    /// the current `target`, `depth`, and resource views.
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     /// Optionally prepares per-frame data before GPU execution.
     ///
     /// Called once per frame **before** `execute()`. Use this to upload per-frame uniforms
