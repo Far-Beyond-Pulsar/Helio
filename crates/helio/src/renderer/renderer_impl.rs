@@ -216,6 +216,130 @@ impl Renderer {
         renderer
     }
 
+    /// Create a `Renderer` backed by a **externally-owned** wgpu device.
+    ///
+    /// Use this when the `device` and `queue` are owned by another system —
+    /// e.g., when Helio is embedded inside a UI framework such as GPUI that
+    /// already manages the wgpu device lifecycle and event loop.
+    ///
+    /// The key difference from [`new`](Self::new) is that this renderer will
+    /// **never** call `device.poll(wait_indefinitely)`.  Anything that requires
+    /// blocking readback (GPU timestamp queries) falls back to a single
+    /// non-blocking `PollType::Poll` tick per frame; if the data is not yet
+    /// ready the previous frame's values are reused.  The device owner is
+    /// responsible for calling `device.poll` at an appropriate cadence — GPUI
+    /// does this through winit's `RedrawRequested` handler.
+    ///
+    /// # Example (GPUI integration)
+    ///
+    /// ```rust,ignore
+    /// let surface = window.create_wgpu_surface(width, height, format)?;
+    /// let device = Arc::new(surface.device().clone());
+    /// let queue  = Arc::new(surface.queue().clone());
+    ///
+    /// let renderer = Renderer::new_with_external_device(
+    ///     device,
+    ///     queue,
+    ///     RendererConfig::new(width, height, format),
+    /// );
+    /// ```
+    pub fn new_with_external_device(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        config: RendererConfig,
+    ) -> Self {
+        let mut scene = Scene::new(device.clone(), queue.clone());
+        scene.set_render_size(config.width, config.height);
+
+        let debug_state = Arc::new(Mutex::new(DebugDrawState::default()));
+
+        let debug_camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Camera Buffer"),
+            size: std::mem::size_of::<DebugCameraUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let graph = super::graph::build_default_graph_external(
+            &device,
+            &queue,
+            &scene,
+            config,
+            debug_state.clone(),
+            &debug_camera_buffer,
+        );
+
+        let (depth_texture, depth_view) =
+            super::graph::create_depth_resources(&device, config.internal_width(), config.internal_height());
+
+        let (full_res_depth_texture, full_res_depth_view) = if config.render_scale < 1.0 {
+            let (t, v) = super::graph::create_depth_resources(&device, config.width, config.height);
+            (Some(t), Some(v))
+        } else {
+            (None, None)
+        };
+
+        let water_volumes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water Volumes Buffer"),
+            size: 256 * 256,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let water_hitboxes_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Water Hitboxes Buffer"),
+            size: 256 * 80,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let internal_w = config.internal_width();
+        let internal_h = config.internal_height();
+        let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
+
+        Self {
+            device,
+            queue,
+            graph,
+            graph_kind: GraphKind::Default,
+            scene,
+            depth_texture,
+            depth_view,
+            output_width: config.width,
+            output_height: config.height,
+            render_scale: config.render_scale,
+            full_res_depth_texture,
+            full_res_depth_view,
+            surface_format: config.surface_format,
+            debug_camera_buffer,
+            ambient_color: [0.05, 0.05, 0.08],
+            ambient_intensity: 1.0,
+            clear_color: [0.02, 0.02, 0.03, 1.0],
+            gi_config: config.gi_config,
+            shadow_quality: config.shadow_quality,
+            debug_mode: config.debug_mode,
+            debug_depth_test: true,
+            editor_mode: false,
+            custom_graph_builder: None,
+            custom_graph_config: None,
+            perf_overlay_mode: config.perf_overlay_mode,
+            debug_state,
+            billboard_instances: Vec::new(),
+            billboard_scratch: Vec::new(),
+            water_volumes_buffer,
+            water_hitboxes_buffer,
+            last_render_time: std::time::Instant::now(),
+            jitter_matrices,
+            jitter_cache_width: internal_w,
+            jitter_cache_height: internal_h,
+            #[cfg(feature = "live-portal")]
+            portal_handle: None,
+
+            bake_pending: None,
+            baked_data: None,
+        }
+    }
+
     pub fn set_gi_config(&mut self, gi_config: GiConfig) {
         self.gi_config = gi_config;
     }

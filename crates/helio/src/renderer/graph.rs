@@ -34,8 +34,39 @@ pub fn build_default_graph(
     debug_state: Arc<std::sync::Mutex<crate::renderer::debug::DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
 ) -> RenderGraph {
+    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, true)
+}
+
+/// Same as `build_default_graph` but marks the graph as operating against an
+/// externally-owned device.  Blocking `device.poll` calls are replaced with a
+/// single non-blocking tick so Helio never races with the device owner's event
+/// loop (e.g. GPUI's winit event loop).
+pub fn build_default_graph_external(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<crate::renderer::debug::DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+) -> RenderGraph {
+    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, false)
+}
+
+fn build_default_graph_internal(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<crate::renderer::debug::DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    owns_device: bool,
+) -> RenderGraph {
     let gpu_scene = scene.gpu_scene();
-    let mut graph = RenderGraph::new(device, queue);
+    let mut graph = if owns_device {
+        RenderGraph::new(device, queue)
+    } else {
+        RenderGraph::new_with_external_device(device, queue)
+    };
 
     let camera_buf = gpu_scene.camera.buffer();
 

@@ -258,6 +258,21 @@ impl Profiler {
         }
     }
 
+    /// Read back GPU timestamps without blocking the device owner.
+    ///
+    /// Use this instead of `read_gpu_timestamps_blocking` whenever the wgpu
+    /// device is owned externally (e.g., by GPUI).  A single non-blocking
+    /// `PollType::Poll` tick is issued; if the GPU hasn't finished yet the
+    /// previous frame's timings are returned unchanged.  The external owner's
+    /// event loop is responsible for regular `device.poll` calls.
+    pub fn read_gpu_timestamps_deferred(&mut self, device: &wgpu::Device) -> &[GpuTimestamp] {
+        if self.enabled {
+            self.gpu.read_timestamps_deferred(device)
+        } else {
+            &[]
+        }
+    }
+
     /// Get CPU timings
     pub fn get_cpu_timings(&self) -> &std::collections::HashMap<&'static str, std::time::Duration> {
         self.cpu.get_timings()

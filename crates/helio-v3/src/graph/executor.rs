@@ -215,6 +215,16 @@ pub struct RenderGraph {
     /// The three legacy names ("pre_aa", "sky_lut", "ssao") are pre-registered in
     /// `new()`.  Custom passes add their own routes via `register_transient_route()`.
     resource_routes: Vec<(&'static str, TransientRoute)>,
+
+    /// Whether Helio owns the wgpu device (`true`) or it was provided externally
+    /// (`false`, e.g. by GPUI).
+    ///
+    /// When `false`, blocking `device.poll(wait_indefinitely)` calls are
+    /// replaced with a single non-blocking `PollType::Poll` tick.  The
+    /// external owner is responsible for driving the device event loop and
+    /// must call `device.poll` regularly (GPUI does this through winit's
+    /// `RedrawRequested` handler).
+    owns_device: bool,
 }
 
 impl RenderGraph {
@@ -257,7 +267,27 @@ impl RenderGraph {
             height: 0, // Set via set_render_size() before first execute()
             delta_time: 0.0,
             resource_routes,
+            owns_device: true,
         }
+    }
+
+    /// Creates a render graph that operates against an **externally-owned** wgpu device.
+    ///
+    /// Identical to [`new`](Self::new) except that blocking `device.poll` calls
+    /// are replaced with a single non-blocking tick.  The caller (e.g. GPUI) is
+    /// responsible for driving the device event loop; Helio must never call
+    /// `poll(wait_indefinitely)` on a device it does not own or it will race
+    /// with the owner's event loop and corrupt driver state ("Parent device is
+    /// lost" on DX12/Vulkan).
+    ///
+    /// # When to use
+    ///
+    /// Use this whenever you pass `surface_handle.device().clone()` (or any
+    /// device you did not create yourself) to `Renderer::new_with_external_device`.
+    pub fn new_with_external_device(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
+        let mut graph = Self::new(device, queue);
+        graph.owns_device = false;
+        graph
     }
 
     /// Sets the elapsed frame time (seconds) forwarded to `PrepareContext::delta_time`.
@@ -607,8 +637,16 @@ impl RenderGraph {
         scene.queue.submit([encoder.finish()]);
         crate::upload::finish_frame();
 
-        // Read back GPU timestamps (blocks until GPU completes)
-        self.profiler.read_gpu_timestamps_blocking(&scene.device);
+        // Read back GPU timestamps.
+        // When Helio owns the device it is safe to block until the GPU is done.
+        // When the device is external (e.g. GPUI) a blocking poll would race
+        // with the owner's event loop and corrupt driver state — use a single
+        // non-blocking tick instead; the owner polls the device on its own cadence.
+        if self.owns_device {
+            self.profiler.read_gpu_timestamps_blocking(&scene.device);
+        } else {
+            self.profiler.read_gpu_timestamps_deferred(&scene.device);
+        }
 
         Ok(())
     }
