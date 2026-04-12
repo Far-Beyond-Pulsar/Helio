@@ -2708,6 +2708,7 @@ dependencies = [
  "thiserror 2.0.18",
  "uuid",
  "wgpu 28.0.0",
+ "windows 0.62.2",
 ]
 
 [[package]]

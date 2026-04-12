@@ -87,6 +87,8 @@ struct AppState {
     picker: ScenePicker,
     /// Whether the grid overlay is visible.
     grid_enabled: bool,
+    /// True while the window is in borderless-fullscreen mode.
+    is_fullscreen: bool,
 }
 
 impl ApplicationHandler for App {
@@ -403,6 +405,15 @@ impl ApplicationHandler for App {
                     ElementState::Pressed => {
                         state.keys.insert(code);
                         match code {
+                            // ── Fullscreen toggle ────────────────────────────
+                            KeyCode::F11 => state.toggle_fullscreen(),
+                            KeyCode::Return | KeyCode::NumpadEnter
+                                if state.keys.contains(&KeyCode::AltLeft)
+                                    || state.keys.contains(&KeyCode::AltRight) =>
+                            {
+                                state.toggle_fullscreen();
+                            }
+                            // ─────────────────────────────────────────────────
                             KeyCode::Escape => {
                                 if state.editor.selected().is_some() {
                                     state.editor.deselect();
@@ -588,6 +599,68 @@ impl AppState {
             }
         }
         self.mouse_delta = (0.0, 0.0);
+    }
+
+    /// Toggle between borderless fullscreen and windowed mode.
+    ///
+    /// On Windows this also calls `request_exclusive_fullscreen` so DXGI can
+    /// use a direct hardware flip, bypassing DWM composition.
+    fn toggle_fullscreen(&mut self) {
+        use winit::window::Fullscreen;
+        if self.is_fullscreen {
+            self.window.set_fullscreen(None);
+            self.is_fullscreen = false;
+        } else {
+            // Borderless fullscreen — covers the current monitor without a
+            // mode switch, avoiding the flicker of exclusive fullscreen while
+            // still allowing DXGI hardware flips (see request_exclusive_fullscreen).
+            let monitor = self.window.current_monitor();
+            self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
+            // Lift DXGI's window-association locks so the driver can flip directly.
+            #[cfg(target_os = "windows")]
+            {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = self.window.window_handle() {
+                    if let RawWindowHandle::Win32(h) = handle.as_raw() {
+                        let hwnd = h.hwnd.get() as *mut std::ffi::c_void;
+                        // SAFETY: hwnd is valid for the lifetime of this window.
+                        unsafe { self.renderer.request_exclusive_fullscreen(hwnd); }
+                    }
+                }
+            }
+            self.is_fullscreen = true;
+        }
+    }
+
+    /// Toggle between borderless fullscreen and windowed mode.
+    ///
+    /// On Windows this also calls `request_exclusive_fullscreen` so DXGI can
+    /// use a direct hardware flip, bypassing DWM composition.
+    fn toggle_fullscreen(&mut self) {
+        use winit::window::Fullscreen;
+        if self.is_fullscreen {
+            self.window.set_fullscreen(None);
+            self.is_fullscreen = false;
+        } else {
+            // Borderless fullscreen — covers the current monitor without a
+            // mode switch, avoiding the flicker of exclusive fullscreen while
+            // still allowing DXGI hardware flips (see request_exclusive_fullscreen).
+            let monitor = self.window.current_monitor();
+            self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
+            // Lift DXGI's window-association locks so the driver can flip directly.
+            #[cfg(target_os = "windows")]
+            {
+                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+                if let Ok(handle) = self.window.window_handle() {
+                    if let RawWindowHandle::Win32(h) = handle.as_raw() {
+                        let hwnd = h.hwnd.get() as *mut std::ffi::c_void;
+                        // SAFETY: hwnd is valid for the lifetime of this window.
+                        unsafe { self.renderer.request_exclusive_fullscreen(hwnd); }
+                    }
+                }
+            }
+            self.is_fullscreen = true;
+        }
     }
 
     fn render(&mut self) {

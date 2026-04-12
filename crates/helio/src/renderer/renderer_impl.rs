@@ -1271,4 +1271,88 @@ impl Renderer {
         self.portal_handle = Some(handle);
         Ok(url)
     }
+
+    /// Attempt to enter exclusive fullscreen mode for the window this renderer
+    /// is presenting to, bypassing DWM composition for maximum display performance.
+    ///
+    /// # Platform behaviour
+    ///
+    /// | Platform | Backend | Effect |
+    /// |---|---|---|
+    /// | Windows | DX12 | Walks `ID3D12Device → IDXGIDevice → IDXGIAdapter → IDXGIFactory1` and calls `MakeWindowAssociation` with no restriction flags. This lifts DXGI's default `DXGI_MWA_NO_ALT_ENTER` / `DXGI_MWA_NO_WINDOW_CHANGES` locks, granting the driver permission to perform a hardware exclusive display flip and bypass the DWM. Pair with `PresentMode::Immediate` and a borderless window covering the full monitor. |
+    /// | Windows | Vulkan | Logs a warning — `VK_EXT_full_screen_exclusive` must be requested at instance-creation time and cannot be enabled after the fact. |
+    /// | Non-Windows | any | Logs an unsupported warning. |
+    ///
+    /// Returns `true` when the platform call succeeded.
+    ///
+    /// # Safety
+    /// On Windows `raw_hwnd` must be a valid, non-null `HWND` for the window
+    /// this renderer is presenting to.  A stale or dangling handle is undefined
+    /// behaviour.
+    pub unsafe fn request_exclusive_fullscreen(&self, raw_hwnd: *mut std::ffi::c_void) -> bool {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = raw_hwnd;
+            log::warn!("helio: request_exclusive_fullscreen is not supported on this platform");
+            return false;
+        }
+
+        #[cfg(target_os = "windows")]
+        exclusive_fullscreen_win(&self.device, raw_hwnd)
+    }
+}
+
+// ── Exclusive fullscreen — Windows DX12 / Vulkan ─────────────────────────────
+
+/// Inner implementation, compiled only on Windows.
+///
+/// Confirms the backend is DX12 via the wgpu HAL, then creates an
+/// `IDXGIFactory1` and calls `MakeWindowAssociation(hwnd, 0)` to lift DXGI's
+/// default `DXGI_MWA_NO_ALT_ENTER` / `DXGI_MWA_NO_WINDOW_CHANGES` locks.
+/// Per MSDN, this call is effective regardless of which factory created the
+/// underlying swap chain.
+#[cfg(target_os = "windows")]
+fn exclusive_fullscreen_win(device: &wgpu::Device, raw_hwnd: *mut std::ffi::c_void) -> bool {
+    use windows::Win32::{
+        Foundation::HWND,
+        Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_MWA_FLAGS},
+    };
+
+    let hwnd = HWND(raw_hwnd);
+
+    // ── DX12 path ────────────────────────────────────────────────────────────
+    // as_hal returns Option<impl Deref<Target = hal::dx12::Device>>; we only
+    // need to confirm DX12 is active — no need to touch the raw device.
+    let is_dx12 = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }.is_some();
+    if is_dx12 {
+        let result: windows::core::Result<()> = (|| unsafe {
+            // CreateDXGIFactory1 works for MakeWindowAssociation even if wgpu
+            // used a different internal factory instance (MSDN guarantee).
+            let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+            // DXGI_MWA_FLAGS(0) clears DXGI_MWA_NO_ALT_ENTER (2) and
+            // DXGI_MWA_NO_WINDOW_CHANGES (1), granting DXGI permission to
+            // perform a hardware exclusive fullscreen flip on this HWND.
+            factory.MakeWindowAssociation(hwnd, DXGI_MWA_FLAGS(0))
+        })();
+        return match result {
+            Ok(()) => true,
+            Err(e) => {
+                log::warn!("helio: DX12 exclusive fullscreen setup failed: {e}");
+                false
+            }
+        };
+    }
+
+    // ── Vulkan path ──────────────────────────────────────────────────────────
+    let is_vulkan = unsafe { device.as_hal::<wgpu::hal::api::Vulkan>() }.is_some();
+    if is_vulkan {
+        log::warn!(
+            "helio: exclusive fullscreen on Vulkan requires VK_EXT_full_screen_exclusive \
+             to be enabled at instance-creation time; it cannot be activated post-hoc"
+        );
+        return false;
+    }
+
+    log::warn!("helio: request_exclusive_fullscreen: unrecognised or unsupported backend");
+    false
 }

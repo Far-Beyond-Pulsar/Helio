@@ -37,7 +37,7 @@ helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 libhelio = { path = "../libhelio" }
 log = "0.4"
 thiserror = "2.0"
-wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl"] }
+wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
 pollster = "0.3"
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 helio-live-portal = { path = "../helio-live-portal", optional = true }
@@ -48,3 +48,9 @@ uuid = { version = "1", features = ["v4"] }
 default = ["profiling", "live-portal"]
 profiling = ["helio-v3/profiling"]
 live-portal = ["helio-live-portal"]
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Used for DXGI exclusive-fullscreen path (IDXGIFactory1::MakeWindowAssociation).
+# Version must match wgpu-hal's transitive dep so types are unified.
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
+
