@@ -478,7 +478,8 @@ impl Renderer {
         let apex_v = glam::Vec3::from(apex);
         let dir    = glam::Vec3::from(axis).normalize_or_zero();
         let base   = apex_v + dir * height;
-        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
+        // Use cross-product length to detect parallel-to-Y in either direction (+Y or -Y).
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
         let tangent   = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev = base + tangent * base_radius;
@@ -616,7 +617,8 @@ impl Renderer {
         let apex_v = glam::Vec3::from(apex);
         let dir = glam::Vec3::from(axis).normalize_or_zero();
         let base = apex_v + dir * height;
-        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
+        // Use cross-product length to detect parallel-to-Y in either direction (+Y or -Y).
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
         let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev = base + tangent * base_radius;
