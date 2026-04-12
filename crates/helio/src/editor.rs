@@ -392,12 +392,11 @@ impl EditorState {
         let Some((center, gizmo_size, local_axes)) =
             object_gizmo_info(id, renderer.scene()) else { return };
 
-        // Selection highlight: wire sphere around the bounding volume.
-        if let Ok(b) = renderer.scene().get_object_bounds(id) {
-            let radius = b[3].max(0.3_f32);
-            let bc     = Vec3::new(b[0], b[1], b[2]);
-            renderer.debug_sphere(bc.to_array(), radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
-        }
+        // Selection highlight: wire sphere at the transform origin (center), radius from bounds.
+        let sphere_radius = renderer.scene().get_object_bounds(id)
+            .map(|b| b[3].max(0.3_f32))
+            .unwrap_or(0.3_f32);
+        renderer.debug_sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
 
         let hov = self.hovered_axis;
         match self.gizmo_mode {
