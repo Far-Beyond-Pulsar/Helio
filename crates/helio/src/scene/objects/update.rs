@@ -278,8 +278,10 @@ impl super::super::Scene {
         // Iterate all objects and update lightmap indices for static objects.
         // DenseArena exposes its `dense: Vec<T>` as a public field — iterate directly.
         for record in self.objects.dense.iter_mut() {
-            // Only static objects are baked (Stationary lights are baked but objects are not)
-            if record.movability != libhelio::Movability::Static {
+            // Only non-movable objects are baked (Static + Stationary).
+            // build_static_bake_scene includes both, so lightmap indices must
+            // be assigned for both here to avoid a silent mismatch.
+            if record.movability == libhelio::Movability::Movable {
                 continue;
             }
 

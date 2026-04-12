@@ -23,6 +23,8 @@ pub struct BakedData {
     pub(crate) lightmap_sampler: Option<Arc<wgpu::Sampler>>,
     /// Per-mesh UV atlas regions (for GBuffer shader lightmap lookup)
     pub(crate) lightmap_atlas_regions: Vec<crate::cache::CachedAtlasRegion>,
+    /// Atlas pixel dimensions — needed to compute half-texel UV clamp bounds.
+    pub(crate) lightmap_atlas_dims: Option<(u32, u32)>,
 
     // ── Reflection cubemap (pre-filtered specular IBL) ─────────────────────────
     // First probe only for now; multi-probe blending is future work.
@@ -89,12 +91,28 @@ impl BakedData {
         &self.lightmap_atlas_regions
     }
 
-    /// Convert lightmap atlas regions to GPU format: [uv_offset.x, uv_offset.y, uv_scale.x, uv_scale.y]
+    /// Convert lightmap atlas regions to GPU format:
+    /// `[uv_offset.x, uv_offset.y, uv_scale.x, uv_scale.y,
+    ///   uv_clamp_min.x, uv_clamp_min.y, uv_clamp_max.x, uv_clamp_max.y]`
     ///
-    /// Drops the mesh_id field (only used for CPU-side mapping), keeping only UV data.
-    pub fn lightmap_atlas_regions_gpu(&self) -> Vec<[f32; 4]> {
+    /// `uv_clamp_min/max` are half-texel-inset bounds that prevent bilinear filtering
+    /// from sampling across adjacent atlas region boundaries (atlas bleed / light leak).
+    /// They are precomputed here on the CPU so the vertex shader only needs a `clamp()`.
+    pub fn lightmap_atlas_regions_gpu(&self) -> Vec<[f32; 8]> {
+        let (atlas_w, atlas_h) = self.lightmap_atlas_dims.unwrap_or((1, 1));
+        // Half-texel in normalised UV space.  Clamping by this amount ensures the
+        // bilinear kernel never reaches beyond the region boundary.
+        let half_u = 0.5 / atlas_w as f32;
+        let half_v = 0.5 / atlas_h as f32;
         self.lightmap_atlas_regions.iter().map(|r| {
-            [r.uv_offset[0], r.uv_offset[1], r.uv_scale[0], r.uv_scale[1]]
+            [
+                r.uv_offset[0], r.uv_offset[1],
+                r.uv_scale[0],  r.uv_scale[1],
+                r.uv_offset[0] + half_u,
+                r.uv_offset[1] + half_v,
+                r.uv_offset[0] + r.uv_scale[0] - half_u,
+                r.uv_offset[1] + r.uv_scale[1] - half_v,
+            ]
         }).collect()
     }
 
@@ -144,6 +162,7 @@ impl BakedData {
             lightmap_view: None,
             lightmap_sampler: None,
             lightmap_atlas_regions: Vec::new(),
+            lightmap_atlas_dims: None,
             reflection_texture: None,
             reflection_view: None,
             reflection_sampler: None,
@@ -270,6 +289,7 @@ impl BakedData {
         self.lightmap_view = Some(view);
         self.lightmap_sampler = Some(sampler);
         self.lightmap_atlas_regions = lm.atlas_regions;
+        self.lightmap_atlas_dims = Some((lm.width, lm.height));
         self
     }
 

@@ -81,6 +81,27 @@ pub fn mesh_upload_to_bake(upload: &MeshUpload, transform: glam::Mat4, mesh_slot
         uuid::Uuid::nil()
     };
     
+    // Select which UV channel to pass to Nebula for baking.
+    //
+    // If the mesh has a dedicated lightmap UV channel (UV1, non-overlapping [0,1]),
+    // pass it explicitly so the bake uses the same coordinates the runtime shader
+    // will use.  Detection: at least one vertex must have a clearly non-zero UV1
+    // value (|u| or |v| > 1e-4).
+    //
+    // If UV1 is absent (all-zero — the common case when a mesh ships with only one
+    // UV channel), fall back to UV0.  The runtime shader also falls back to UV0
+    // (clamped to [0,1]) in this case, so both sides agree.
+    let has_uv1 = upload.vertices.iter()
+        .any(|v| v.tex_coords1[0].abs() > 1e-4 || v.tex_coords1[1].abs() > 1e-4);
+    let lightmap_uvs = if has_uv1 {
+        Some(upload.vertices.iter().map(|v| v.tex_coords1).collect::<Vec<_>>())
+    } else {
+        // Explicitly pass UV0 so Nebula bakes to it.  Passing None might
+        // cause some Nebula versions to auto-generate UVs that the runtime
+        // cannot recover, leading to a UV mismatch and zero lightmap effect.
+        Some(upload.vertices.iter().map(|v| v.tex_coords0).collect::<Vec<_>>())
+    };
+
     BakeMesh {
         id,
         positions: upload.vertices.iter().map(|v| {
@@ -96,7 +117,7 @@ pub fn mesh_upload_to_bake(upload: &MeshUpload, transform: glam::Mat4, mesh_slot
             (normal_mat * n).normalize_or_zero().to_array()
         }).collect(),
         uvs: upload.vertices.iter().map(|v| v.tex_coords0).collect(),
-        lightmap_uvs: None,
+        lightmap_uvs,
         indices: upload.indices.clone(),
         material_ids: vec![0u32; upload.indices.len() / 3],
         world_transform: Default::default(),

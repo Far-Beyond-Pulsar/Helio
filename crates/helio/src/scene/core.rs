@@ -601,11 +601,11 @@ impl Scene {
                 continue;
             };
             
-            // Skip movable lights - only bake static and stationary lights
-            if light_record.movability == Movability::Movable {
-                continue;
-            }
-            
+            // Include ALL lights in the bake regardless of movability.
+            // Lights default to Movable even for static scenes; filtering them out
+            // would result in a zero-light bake and an all-black lightmap.
+            // If a user wants a light to be purely dynamic (never baked), they
+            // should set bake_enabled = false on the BakeMesh's LightSource.
             let gpu_light = &light_record.gpu;
             let light_type = gpu_light.light_type;
             
@@ -661,6 +661,46 @@ impl Scene {
             static_light_count += 1;
         }
         
+        // ── Transform lightmap UVs into atlas space ────────────────────────────
+        //
+        // Nebula's `build_atlas_regions` assigns each mesh an equal-area cell in
+        // the atlas using a ceil(sqrt(N)) × ceil(sqrt(N)) grid.  The bake WGSL
+        // shader at each texel searches ALL mesh triangles to find which triangle
+        // contains that atlas-space `lm_uv`.  For correctness, vertex `lm_uv`
+        // values must therefore be in ATLAS UV space, NOT in per-mesh [0,1]² UV
+        // space.
+        //
+        // Without this transform every mesh's UV0 covers [0,1]², so for every
+        // texel all N meshes' triangles match — mesh 0 always wins (listed first),
+        // its lighting bleeds into every other mesh's atlas cell, and meshes 1…N-1
+        // all show mesh 0's lighting at runtime.  Three-way correctness chain:
+        //   bake:    `lm_uv_atlas = uv_offset + UV0 * uv_scale`  → unique range per mesh
+        //   runtime: `atlas_uv   = uv_offset + UV0 * uv_scale`   → same atlas address
+        //   result:  runtime UV  == bake UV                        → correct texel lookup
+        let n = bake_scene.meshes.len();
+        if n > 1 {
+            let cols = (n as f64).sqrt().ceil() as u32;
+            let rows = (n as u32).div_ceil(cols);
+            let cell_w = 1.0_f32 / cols as f32;
+            let cell_h = 1.0_f32 / rows as f32;
+            for (i, mesh) in bake_scene.meshes.iter_mut().enumerate() {
+                let col = (i as u32) % cols;
+                let row = (i as u32) / cols;
+                let uo = col as f32 * cell_w;
+                let vo = row as f32 * cell_h;
+                if let Some(uvs) = mesh.lightmap_uvs.as_mut() {
+                    for uv in uvs.iter_mut() {
+                        uv[0] = uo + uv[0] * cell_w;
+                        uv[1] = vo + uv[1] * cell_h;
+                    }
+                }
+            }
+            log::debug!(
+                "[helio-bake] Transformed lightmap UVs to atlas space: {} meshes → {}×{} grid ({:.4}×{:.4} cells)",
+                n, cols, rows, cell_w, cell_h
+            );
+        }
+
         log::info!(
             "[helio-bake] Auto-extracted {} static/stationary objects and {} lights for baking",
             static_object_count,

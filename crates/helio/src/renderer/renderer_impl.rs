@@ -66,6 +66,14 @@ pub struct Renderer {
     debug_state: Arc<Mutex<DebugDrawState>>,
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
     billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
+    /// True when billboard_instances was updated since the last rebuild.
+    billboard_dirty: bool,
+    /// Cached light count at last rebuild — detects add/remove.
+    billboard_cached_light_count: usize,
+    /// Cached movable_lights_generation at last rebuild — detects light updates.
+    billboard_cached_light_gen: u64,
+    /// Cached editor-hidden state at last rebuild.
+    billboard_cached_editor_hidden: bool,
     water_volumes_buffer: wgpu::Buffer,
     water_hitboxes_buffer: wgpu::Buffer,
     /// Instant of the previous `render()` call, used to compute real `delta_time`.
@@ -189,6 +197,10 @@ impl Renderer {
             debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
+            billboard_dirty: true,
+            billboard_cached_light_count: usize::MAX,
+            billboard_cached_light_gen: u64::MAX,
+            billboard_cached_editor_hidden: false,
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: std::time::Instant::now(),
@@ -330,6 +342,10 @@ impl Renderer {
             debug_state,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
+            billboard_dirty: true,
+            billboard_cached_light_count: usize::MAX,
+            billboard_cached_light_gen: u64::MAX,
+            billboard_cached_editor_hidden: false,
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: std::time::Instant::now(),
@@ -814,6 +830,7 @@ impl Renderer {
     pub fn set_billboard_instances(&mut self, instances: &[helio_pass_billboard::BillboardInstance]) {
         self.billboard_instances.clear();
         self.billboard_instances.extend_from_slice(instances);
+        self.billboard_dirty = true;
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
@@ -918,22 +935,35 @@ impl Renderer {
         self.scene.update_camera(jittered_camera);
         self.scene.flush();
 
-        self.billboard_scratch.clear();
-        self.billboard_scratch.extend_from_slice(&self.billboard_instances);
-        if !self.scene.is_group_hidden(GroupId::EDITOR) {
-            for light in self.scene.gpu_scene().lights.as_slice() {
-                if light.light_type == libhelio::LightType::Point as u32
-                    || light.light_type == libhelio::LightType::Spot as u32
-                {
-                    let [x, y, z, _] = light.position_range;
-                    let [r, g, b, _] = light.color_intensity;
-                    self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
-                        world_pos: [x, y, z, 0.0],
-                        scale_flags: [0.25, 0.25, 0.0, 0.0],
-                        color: [r, g, b, 1.0],
-                    });
+        let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
+        let light_count = self.scene.gpu_scene().lights.len();
+        let light_gen = self.scene.gpu_scene().movable_lights_generation;
+        if self.billboard_dirty
+            || light_count != self.billboard_cached_light_count
+            || light_gen != self.billboard_cached_light_gen
+            || editor_hidden != self.billboard_cached_editor_hidden
+        {
+            self.billboard_scratch.clear();
+            self.billboard_scratch.extend_from_slice(&self.billboard_instances);
+            if !editor_hidden {
+                for light in self.scene.gpu_scene().lights.as_slice() {
+                    if light.light_type == libhelio::LightType::Point as u32
+                        || light.light_type == libhelio::LightType::Spot as u32
+                    {
+                        let [x, y, z, _] = light.position_range;
+                        let [r, g, b, _] = light.color_intensity;
+                        self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
+                            world_pos: [x, y, z, 0.0],
+                            scale_flags: [0.25, 0.25, 0.0, 0.0],
+                            color: [r, g, b, 1.0],
+                        });
+                    }
                 }
             }
+            self.billboard_dirty = false;
+            self.billboard_cached_light_count = light_count;
+            self.billboard_cached_light_gen = light_gen;
+            self.billboard_cached_editor_hidden = editor_hidden;
         }
 
         // Upload water volumes to GPU only when the descriptor has changed.

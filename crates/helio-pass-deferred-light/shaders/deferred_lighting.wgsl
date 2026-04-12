@@ -803,11 +803,19 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     
     // ── Baked lightmap indirect diffuse ───────────────────────────────────────
     // For static geometry: pre-computed multi-bounce GI from offline baking.
-    // Lightmap UVs are (0,0) for movable objects → samples corner of atlas (black).
-    // Static objects have valid UVs mapping into their atlas region.
-    let lightmap_uv = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    //
+    // The GBuffer vertex shader writes a sentinel of (-1, -1) into the lightmap UV
+    // channel for instances that have no lightmap (lightmap_index == 0xFFFFFFFF).
+    // We detect this sentinel here to skip the lightmap contribution entirely,
+    // rather than checking `uv > 0.01` which would incorrectly skip valid atlas
+    // regions whose top-left corner happens to be near (0, 0).
+    //
+    // The UV is already clamped to the region's half-texel-inset boundary in the
+    // vertex shader, so textureSample cannot bleed into adjacent atlas regions.
+    let lightmap_uv     = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let has_lightmap    = lightmap_uv.x >= 0.0;  // sentinel: negative x = no lightmap
     let lightmap_sample = textureSample(baked_lightmap, baked_lightmap_sampler, lightmap_uv).rgb;
-    let lightmap_indirect = lightmap_sample * albedo;  // Apply albedo (lightmap stores illumination, not reflectance)
+    let lightmap_indirect = lightmap_sample * albedo;  // lightmap stores irradiance; modulate by albedo
 
     // ── Indirect specular: environment cubemap ────────────────────────────────
     let R            = reflect(-V, N);
@@ -833,9 +841,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // RC weight: 0 = no RC data, 1 = full RC coverage
     let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
 
-    // Baked lightmap weight: use lightmap if UVs are non-zero (static geometry with baked lighting)
-    // Lightmap atlas has (0,0) corner filled with black so movable objects (lightmap_uv=0) get 0 contribution.
-    let has_lightmap   = max(lightmap_uv.x, lightmap_uv.y) > 0.01;
+    // Baked lightmap weight: 1.0 for static objects with valid lightmap, 0.0 otherwise.
     let lm_weight      = select(0.0, 1.0, has_lightmap);
 
     // Blend between hemisphere fallback, RC-based GI, and baked lightmap:

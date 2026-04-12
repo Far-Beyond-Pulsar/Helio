@@ -211,8 +211,8 @@ impl GBufferPass {
                 // Full vertex layout (stride = 40 bytes, matching shared mesh buffer).
                 //   offset  0 — position       Float32x3  location 0
                 //   offset 12 — bitangent_sign Float32    location 1
-                //   offset 16 — tex_coords0   Float32x2  location 2
-                //   offset 24 — tex_coords1   Float32x2  (unused, skipped)
+                //   offset 16 — tex_coords0   Float32x2  location 2  (UV0: material/albedo)
+                //   offset 24 — tex_coords1   Float32x2  location 5  (UV1: lightmap)
                 //   offset 32 — normal        Uint32     location 3
                 //   offset 36 — tangent       Uint32     location 4
                 buffers: &[wgpu::VertexBufferLayout {
@@ -233,6 +233,13 @@ impl GBufferPass {
                             format: wgpu::VertexFormat::Float32x2,
                             offset: 16,
                             shader_location: 2,
+                        },
+                        // UV1 — dedicated lightmap UV channel (non-overlapping, [0,1] per mesh).
+                        // Previously marked "unused, skipped"; now wired to shader location 5.
+                        wgpu::VertexAttribute {
+                            format: wgpu::VertexFormat::Float32x2,
+                            offset: 24,
+                            shader_location: 5,
                         },
                         wgpu::VertexAttribute {
                             format: wgpu::VertexFormat::Uint32,
@@ -338,10 +345,11 @@ impl GBufferPass {
             "GBuffer/LightmapUV",
         );
         
-        // Create empty lightmap atlas regions buffer (populated when bake data is loaded)
+        // Create empty lightmap atlas regions buffer (populated when bake data is loaded).
+        // Each region is 32 bytes: uv_offset(8) + uv_scale(8) + uv_clamp_min(8) + uv_clamp_max(8).
         let lightmap_atlas_regions_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Lightmap Atlas Regions"),
-            size: 16,  // Start with minimal size (1 empty region); will be resized when bake data loads
+            size: 32,  // One empty region sentinel; recreated when real data loads.
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -660,29 +668,32 @@ impl GBufferPass {
     /// Populate the lightmap atlas regions buffer from baked data.
     ///
     /// Called by the renderer after a successful bake to upload per-mesh UV atlas regions.
-    /// Each region maps a mesh_id to its (uv_offset, uv_scale) in the lightmap atlas.
+    /// Each region maps a mesh_id to its atlas location with precomputed clamp bounds that
+    /// prevent bilinear filtering from bleeding across adjacent atlas region boundaries.
     ///
     /// # Arguments
-    /// * `queue` - GPU queue for buffer uploads
-    /// * `regions` - Slice of [uv_offset.x, uv_offset.y, uv_scale.x, uv_scale.y] per mesh
+    /// * `queue`   - GPU queue for buffer uploads
+    /// * `regions` - `[uv_offset.x, uv_offset.y, uv_scale.x, uv_scale.y,
+    ///                uv_clamp_min.x, uv_clamp_min.y, uv_clamp_max.x, uv_clamp_max.y]`
+    ///              per mesh (32 bytes each, matching `LightmapAtlasRegion` in gbuffer.wgsl)
     pub fn upload_lightmap_atlas_regions(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        regions: &[[f32; 4]],
+        regions: &[[f32; 8]],
     ) {
         if regions.is_empty() {
             return;
         }
 
-        // Each region is 16 bytes: uv_offset (vec2<f32>) + uv_scale (vec2<f32>)
-        let buf_size = (regions.len() * 16) as u64;
+        // Each region is 32 bytes: uv_offset(8) + uv_scale(8) + uv_clamp_min(8) + uv_clamp_max(8).
+        let buf_size = (regions.len() * 32) as u64;
 
         // Recreate buffer if size changed
         if self.lightmap_atlas_regions_buf.size() < buf_size {
             self.lightmap_atlas_regions_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Lightmap Atlas Regions"),
-                size: buf_size.max(16),  // At least 16 bytes
+                size: buf_size.max(32),
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });

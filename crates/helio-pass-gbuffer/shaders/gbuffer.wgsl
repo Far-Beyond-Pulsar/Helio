@@ -86,10 +86,15 @@ struct GpuInstanceData {
     lightmap_index: u32,          // offset 140 — index into lightmap_atlas_regions, 0xFFFFFFFF = no lightmap
 }
 
-/// Lightmap atlas region for a mesh (16 bytes).
+/// Lightmap atlas region for a mesh (32 bytes).
+///
+/// uv_clamp_min/max are precomputed half-texel-inset bounds that prevent bilinear
+/// filtering from bleeding across neighbouring atlas region boundaries at runtime.
 struct LightmapAtlasRegion {
-    uv_offset: vec2<f32>,  // Top-left corner in atlas [0,1] space
-    uv_scale:  vec2<f32>,  // Size in atlas [0,1] space
+    uv_offset:    vec2<f32>,  // Top-left corner in atlas [0,1] space
+    uv_scale:     vec2<f32>,  // Extent in atlas [0,1] space
+    uv_clamp_min: vec2<f32>,  // uv_offset + 0.5/atlas_size  (half-texel inner inset)
+    uv_clamp_max: vec2<f32>,  // uv_offset + uv_scale - 0.5/atlas_size
 }
 
 @group(0) @binding(0) var<uniform>          camera:                 Camera;
@@ -105,9 +110,10 @@ struct LightmapAtlasRegion {
 struct Vertex {
     @location(0) position:       vec3<f32>,
     @location(1) bitangent_sign: f32,
-    @location(2) tex_coords:     vec2<f32>,
+    @location(2) tex_coords:     vec2<f32>,  // UV0 — material/albedo channel (may tile)
     @location(3) normal:         u32,
     @location(4) tangent:        u32,
+    @location(5) lightmap_uv:    vec2<f32>,  // UV1 — dedicated lightmap channel, non-overlapping [0,1]
 }
 
 struct VertexOutput {
@@ -154,13 +160,41 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     out.tex_coords     = v.tex_coords;
     out.material_id    = inst.material_id;
     
-    // Compute lightmap UV from atlas region
+    // Compute lightmap UV from atlas region.
+    //
+    // UV CHANNEL SELECTION STRATEGY
+    // ──────────────────────────────
+    // If the mesh has a dedicated lightmap UV channel (UV1, non-zero), use it.
+    // UV1 is artist-authored or tool-generated to be non-overlapping and in [0,1],
+    // exactly what offline bakers need. Nebula receives UV1 explicitly via
+    // `lightmap_uvs: Some(...)` in mesh_upload_to_bake when UV1 is non-trivial.
+    //
+    // If UV1 is all-zero (mesh has only one UV channel), fall back to UV0
+    // clamped to [0,1].  UV0 is what Nebula baked with in that case
+    // (mesh_upload_to_bake passes UV0 as lightmap_uvs when UV1 is absent).
+    // Clamping prevents tiled UV0 values (e.g. 2.3) from mapping outside
+    // the atlas region and hitting neighbouring meshes' texels (the original
+    // "random dim slivers" bug).
+    //
+    // The computed atlas UV is then half-texel-inset clamped to [uv_clamp_min,
+    // uv_clamp_max] to prevent bilinear filtering from bleeding across atlas
+    // region boundaries regardless of which UV channel was chosen.
     let lightmap_idx = inst.lightmap_index;
     if lightmap_idx != 0xFFFFFFFFu {
         let region = lightmap_atlas_regions[lightmap_idx];
-        out.lightmap_uv = region.uv_offset + v.tex_coords * region.uv_scale;
+        // Use UV1 if any component is clearly non-zero; otherwise fall back to UV0.
+        let use_uv1 = any(abs(v.lightmap_uv) > vec2<f32>(0.001));
+        let lm_input = select(
+            clamp(v.tex_coords, vec2<f32>(0.0), vec2<f32>(1.0)),  // UV0 path: clamp to [0,1]
+            v.lightmap_uv,                                           // UV1 path: already in [0,1]
+            use_uv1,
+        );
+        let raw_uv = region.uv_offset + lm_input * region.uv_scale;
+        out.lightmap_uv = clamp(raw_uv, region.uv_clamp_min, region.uv_clamp_max);
     } else {
-        out.lightmap_uv = vec2<f32>(0.0, 0.0);  // No lightmap
+        // Sentinel: negative UV signals "no lightmap" to the deferred pass.
+        // Cannot use (0,0) because a valid atlas region can start at (0,0).
+        out.lightmap_uv = vec2<f32>(-1.0, -1.0);
     }
     return out;
 }
