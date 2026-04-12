@@ -309,5 +309,42 @@ impl super::super::Scene {
             regions.len()
         );
     }
+
+    // ── Editor query API ─────────────────────────────────────────────────────
+
+    /// Return the world-space model matrix of an object.
+    ///
+    /// Returns `Err` if the handle is invalid.
+    pub fn get_object_transform(&self, id: ObjectId) -> Result<Mat4> {
+        let Some((_, record)) = self.objects.get_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        Ok(Mat4::from_cols_array(&record.instance.model))
+    }
+
+    /// Return the world-space bounding sphere `[cx, cy, cz, radius]` of an object.
+    ///
+    /// Returns `Err` if the handle is invalid.
+    pub fn get_object_bounds(&self, id: ObjectId) -> Result<[f32; 4]> {
+        let Some((_, record)) = self.objects.get_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        Ok(record.instance.bounds)
+    }
+
+    /// Iterate every live object, yielding `(id, world_transform, bounds_sphere)`.
+    ///
+    /// `bounds_sphere` is `[cx, cy, cz, radius]` in world space — suitable for
+    /// ray-sphere picking.
+    ///
+    /// This iterator is O(N) in the number of live objects; do not call it per-vertex.
+    pub fn iter_objects_for_editor(
+        &self,
+    ) -> impl Iterator<Item = (ObjectId, Mat4, [f32; 4])> + '_ {
+        self.objects.iter_with_handles().map(|(id, rec)| {
+            let transform = Mat4::from_cols_array(&rec.instance.model);
+            (id, transform, rec.instance.bounds)
+        })
+    }
 }
 

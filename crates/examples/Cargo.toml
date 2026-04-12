@@ -131,6 +131,10 @@ path = "oil_rig_night.rs"
 name = "terra_forge_demo"
 path = "terra_forge_demo.rs"
 
+[[bin]]
+name = "editor_demo"
+path = "editor_demo.rs"
+
 
 
 [dependencies]

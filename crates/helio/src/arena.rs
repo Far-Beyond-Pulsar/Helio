@@ -167,6 +167,18 @@ impl<T, H: Handle> DenseArena<T, H> {
             moved,
         })
     }
+
+    /// Iterate all live items, yielding `(handle, &value)` in dense-array order.
+    ///
+    /// Reconstructs each handle from the stored slot index and current generation.
+    /// This is O(N) over live items.
+    pub fn iter_with_handles(&self) -> impl Iterator<Item = (H, &T)> + '_ {
+        self.dense.iter().enumerate().map(|(dense_idx, value)| {
+            let slot_idx = self.dense_to_slot[dense_idx];
+            let gen = self.slots[slot_idx as usize].generation;
+            (H::from_parts(slot_idx, gen), value)
+        })
+    }
 }
 
 #[derive(Debug)]
