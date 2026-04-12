@@ -354,6 +354,17 @@ impl EditorState {
         self.drag = DragState::Idle;
     }
 
+    /// Delete the selected object from the scene and clear the selection.
+    ///
+    /// Returns `true` if an object was deleted. Rebuild `ScenePicker` afterwards
+    /// so the deleted object can no longer be picked.
+    pub fn delete_selected(&mut self, scene: &mut Scene) -> bool {
+        let Some(id) = self.selected.take() else { return false };
+        self.hovered_axis = None;
+        self.drag         = DragState::Idle;
+        scene.remove_object(id).is_ok()
+    }
+
     /// Duplicate the selected object at the same transform, select the new copy,
     /// and return its [`ObjectId`].
     ///

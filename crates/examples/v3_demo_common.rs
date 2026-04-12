@@ -213,8 +213,9 @@ pub fn sphere_mesh(center: [f32; 3], radius: f32) -> MeshUpload {
         for j in 0..lon_steps {
             let a = (i * (lon_steps + 1) + j) as u32;
             let b = a + (lon_steps + 1) as u32;
-            indices.extend_from_slice(&[a, b, a + 1]);
-            indices.extend_from_slice(&[b, b + 1, a + 1]);
+            // CCW winding when viewed from outside (outward normals).
+            indices.extend_from_slice(&[a, a + 1, b]);
+            indices.extend_from_slice(&[b, a + 1, b + 1]);
         }
     }
 

@@ -16,6 +16,7 @@
 //! | R               | Switch to **Rotate** gizmo (cursor free)      |
 //! | S               | Switch to **Scale** gizmo (cursor free)       |
 //! | Ctrl+D          | **Duplicate** selected object                 |
+//! | Delete          | **Delete** selected object                    |
 //! | Tab             | Toggle editor grid                            |
 //! | Escape          | Deselect → exit                               |
 //!
@@ -407,6 +408,11 @@ impl ApplicationHandler for App {
                                     state.editor.deselect();
                                 } else {
                                     event_loop.exit();
+                                }
+                            }
+                            KeyCode::Delete if !state.right_mouse_held => {
+                                if state.editor.delete_selected(state.renderer.scene_mut()) {
+                                    state.picker.rebuild_instances(state.renderer.scene());
                                 }
                             }
                             // Gizmo keys only fire when the cursor is free
