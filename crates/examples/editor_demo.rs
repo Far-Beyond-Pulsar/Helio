@@ -378,6 +378,14 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_pos = (position.x as f32, position.y as f32);
+                // Update hover highlight and, if dragging, apply drag.
+                if !state.right_mouse_held {
+                    let (ray_o, ray_d) = state.build_ray();
+                    state.editor.update_hover(ray_o, ray_d, state.renderer.scene());
+                    if state.editor.is_dragging() {
+                        state.editor.update_drag(ray_o, ray_d, state.renderer.scene_mut());
+                    }
+                }
             }
 
             WindowEvent::KeyboardInput {
@@ -451,50 +459,35 @@ impl ApplicationHandler for App {
                 state.right_mouse_held = false;
             }
 
-            // Left-click → pick object (only when cursor is free).
+            // Left-click → try to drag a gizmo handle, else pick an object.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
                 if !state.right_mouse_held {
-                    let sz = state.window.inner_size();
-                    let width = sz.width as f32;
-                    let height = sz.height as f32;
+                    let (ray_o, ray_d) = state.build_ray();
 
-                    // Reconstruct the current view-projection matrix.
-                    let (sy, cy) = state.cam_yaw.sin_cos();
-                    let (sp, cp) = state.cam_pitch.sin_cos();
-                    let fwd = glam::Vec3::new(sy * cp, sp, -cy * cp);
-                    let aspect = width / height.max(1.0);
-                    let proj = glam::Mat4::perspective_rh(
-                        std::f32::consts::FRAC_PI_4,
-                        aspect,
-                        0.1,
-                        500.0,
-                    );
-                    let view = glam::Mat4::look_at_rh(
-                        state.cam_pos,
-                        state.cam_pos + fwd,
-                        glam::Vec3::Y,
-                    );
-                    let vp_inv = (proj * view).inverse();
-
-                    let (ray_o, ray_d) = EditorState::ray_from_screen(
-                        state.cursor_pos.0,
-                        state.cursor_pos.1,
-                        width,
-                        height,
-                        vp_inv,
-                    );
-
-                    // BVH ray cast — exact triangle intersection.
-                    if let Some(hit) = state.picker.cast_ray(ray_o, ray_d) {
-                        state.editor.select(hit.object_id);
-                    } else {
-                        state.editor.deselect();
+                    // Gizmo drag has priority over scene picking.
+                    if !state.editor.try_start_drag(ray_o, ray_d, state.renderer.scene()) {
+                        // BVH ray cast — exact triangle intersection.
+                        state.picker.rebuild_instances(state.renderer.scene());
+                        if let Some(hit) = state.picker.cast_ray(ray_o, ray_d) {
+                            state.editor.select(hit.object_id);
+                        } else {
+                            state.editor.deselect();
+                        }
                     }
                 }
+            }
+
+            // Left-click RELEASE → finish any active gizmo drag.
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => {
+                state.editor.end_drag();
             }
 
             WindowEvent::RedrawRequested => {
@@ -537,6 +530,21 @@ impl ApplicationHandler for App {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl AppState {
+    /// Compute a world-space ray from the current cursor position.
+    fn build_ray(&self) -> (glam::Vec3, glam::Vec3) {
+        let sz     = self.window.inner_size();
+        let width  = sz.width as f32;
+        let height = sz.height as f32;
+        let (sy, cy) = self.cam_yaw.sin_cos();
+        let (sp, cp) = self.cam_pitch.sin_cos();
+        let fwd    = glam::Vec3::new(sy * cp, sp, -cy * cp);
+        let aspect = width / height.max(1.0);
+        let proj   = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 500.0);
+        let view   = glam::Mat4::look_at_rh(self.cam_pos, self.cam_pos + fwd, glam::Vec3::Y);
+        let vp_inv = (proj * view).inverse();
+        EditorState::ray_from_screen(self.cursor_pos.0, self.cursor_pos.1, width, height, vp_inv)
+    }
+
     fn update_camera(&mut self, dt: f32) {
         const LOOK: f32 = 0.0025;
         const MOVE: f32 = 6.0;

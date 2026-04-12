@@ -1,50 +1,34 @@
-//! Editor-mode utilities: object selection and transform gizmos.
+//! Editor-mode utilities: object selection and interactive transform gizmos.
 //!
 //! # Overview
 //!
-//! [`EditorState`] is a lightweight runtime struct you keep in your application.
-//! Each frame call [`EditorState::draw_gizmos`] to overlay transform handles on
-//! the selected object. On left-click call [`EditorState::pick`] to select the
-//! nearest object under the cursor.
+//! [`EditorState`] tracks selection, gizmo mode, hover, and drag state.
+//! Each frame call [`EditorState::draw_gizmos`] to overlay filled transform
+//! handles on the selected object. On cursor move call [`EditorState::update_hover`]
+//! so handles highlight when the cursor is near them. On left-click call
+//! [`EditorState::try_start_drag`] first — if it returns `true` the user
+//! clicked a gizmo handle; otherwise fall through to normal object picking.
+//! While the left button is held call [`EditorState::update_drag`] every frame
+//! to move / rotate / scale the object. On release call [`EditorState::end_drag`].
 //!
 //! # Gizmo modes
 //!
 //! | Mode | Key (demo) | Visual |
 //! |------|-----------|--------|
-//! | [`GizmoMode::Translate`] | G | XYZ arrows with cone tips |
-//! | [`GizmoMode::Rotate`]    | R | XYZ circles (rings) |
-//! | [`GizmoMode::Scale`]     | S | XYZ axes with box end-caps |
+//! | [`GizmoMode::Translate`] | G | XYZ arrows — shaft + filled cone tip |
+//! | [`GizmoMode::Rotate`]    | R | XYZ rings — line ring, hover highlights |
+//! | [`GizmoMode::Scale`]     | S | XYZ axes — shaft + filled box end-cap |
 //!
-//! # Picking
+//! # Interactive controls (wired up in editor_demo.rs)
 //!
-//! [`EditorState::pick`] performs a CPU-side ray vs bounding-sphere sweep over
-//! all scene objects.  It is O(N) where N is the live object count; do not call
-//! it every frame — only call it on click events.
-//!
-//! # Example
-//!
-//! ```ignore
-//! use helio::{EditorState, GizmoMode};
-//!
-//! // In your AppState:
-//! let mut editor = EditorState::new();
-//!
-//! // On left-click (cursor not grabbed):
-//! let (ray_o, ray_d) = EditorState::ray_from_screen(
-//!     mouse_x, mouse_y, width, height, view_proj_inv,
-//! );
-//! editor.pick(renderer.scene(), ray_o, ray_d);
-//!
-//! // Switch gizmo with keyboard:
-//! if keys.contains(&KeyCode::KeyG) { editor.set_gizmo_mode(GizmoMode::Translate); }
-//! if keys.contains(&KeyCode::KeyR) { editor.set_gizmo_mode(GizmoMode::Rotate); }
-//! if keys.contains(&KeyCode::KeyS) { editor.set_gizmo_mode(GizmoMode::Scale); }
-//!
-//! // Every frame, after debug_clear():
-//! editor.draw_gizmos(&mut renderer);
-//! ```
+//! 1. `update_hover(ray_o, ray_d, scene)` on every `CursorMoved` when cursor free.
+//! 2. On left-click press: `try_start_drag(ray_o, ray_d, scene)`.
+//!    - Returns `true`  → drag started, suppress normal pick.
+//!    - Returns `false` → forward to `ScenePicker::cast_ray` for object selection.
+//! 3. On `CursorMoved` while dragging: `update_drag(ray_o, ray_d, scene_mut)`.
+//! 4. On left-click release: `end_drag()`.
 
-use glam::{Mat4, Vec3};
+use glam::{Mat3, Mat4, Vec3};
 
 use crate::handles::ObjectId;
 use crate::renderer::Renderer;
@@ -66,14 +50,66 @@ pub enum GizmoMode {
     Scale,
 }
 
-/// Per-frame editor state.
-///
-/// Holds the currently-selected object and active gizmo mode. Call
-/// [`draw_gizmos`](EditorState::draw_gizmos) every frame and
-/// [`pick`](EditorState::pick) on click events.
+/// Which axis of the active transform gizmo is hovered or being dragged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl GizmoAxis {
+    /// Unit vector for this axis in world space.
+    fn vec3(self) -> Vec3 {
+        match self {
+            GizmoAxis::X => Vec3::X,
+            GizmoAxis::Y => Vec3::Y,
+            GizmoAxis::Z => Vec3::Z,
+        }
+    }
+
+    /// Tangent + bitangent spanning the plane perpendicular to this axis.
+    fn ring_frame(self) -> (Vec3, Vec3) {
+        match self {
+            GizmoAxis::X => (Vec3::Y, Vec3::Z),
+            GizmoAxis::Y => (Vec3::X, Vec3::Z),
+            GizmoAxis::Z => (Vec3::X, Vec3::Y),
+        }
+    }
+
+    /// Column index in a matrix (0 = X, 1 = Y, 2 = Z).
+    fn col(self) -> usize {
+        match self {
+            GizmoAxis::X => 0,
+            GizmoAxis::Y => 1,
+            GizmoAxis::Z => 2,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Internal drag state
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum DragState {
+    Idle,
+    Active {
+        axis: GizmoAxis,
+        /// Full object transform captured when the drag started.
+        initial_transform: Mat4,
+        /// For Translate/Scale: signed t along axis at drag-start.
+        /// For Rotate: angle in radians at drag-start.
+        axis_t_start: f32,
+    },
+}
+
+/// Per-frame editor state: selection, gizmo mode, hover, and drag.
 pub struct EditorState {
     selected: Option<ObjectId>,
     gizmo_mode: GizmoMode,
+    /// Set by `update_hover` — the gizmo axis the cursor is currently over.
+    hovered_axis: Option<GizmoAxis>,
+    drag: DragState,
 }
 
 impl Default for EditorState {
@@ -87,20 +123,26 @@ impl EditorState {
     pub fn new() -> Self {
         Self {
             selected: None,
-            gizmo_mode: GizmoMode::Translate,
+            gizmo_mode: GizmoMode::default(),
+            hovered_axis: None,
+            drag: DragState::Idle,
         }
     }
 
-    // ── Selection ────────────────────────────────────────────────────────────
+    // ── Selection ─────────────────────────────────────────────────────────────
 
     /// Explicitly select an object by handle.
     pub fn select(&mut self, id: ObjectId) {
-        self.selected = Some(id);
+        self.selected     = Some(id);
+        self.hovered_axis = None;
+        self.drag         = DragState::Idle;
     }
 
     /// Clear the current selection.
     pub fn deselect(&mut self) {
-        self.selected = None;
+        self.selected     = None;
+        self.hovered_axis = None;
+        self.drag         = DragState::Idle;
     }
 
     /// Returns the currently selected object, if any.
@@ -108,7 +150,7 @@ impl EditorState {
         self.selected
     }
 
-    // ── Gizmo mode ───────────────────────────────────────────────────────────
+    // ── Gizmo mode ────────────────────────────────────────────────────────────
 
     /// Returns the active gizmo mode.
     pub fn gizmo_mode(&self) -> GizmoMode {
@@ -117,20 +159,28 @@ impl EditorState {
 
     /// Switch the active gizmo mode.
     pub fn set_gizmo_mode(&mut self, mode: GizmoMode) {
-        self.gizmo_mode = mode;
+        self.gizmo_mode   = mode;
+        self.hovered_axis = None;
+        self.drag         = DragState::Idle;
     }
 
-    // ── Ray unprojection ─────────────────────────────────────────────────────
+    // ── Hover & drag accessors ────────────────────────────────────────────────
+
+    /// The gizmo axis currently under the cursor (set by `update_hover`).
+    pub fn hovered_axis(&self) -> Option<GizmoAxis> {
+        self.hovered_axis
+    }
+
+    /// Whether an axis drag is currently in progress.
+    pub fn is_dragging(&self) -> bool {
+        matches!(self.drag, DragState::Active { .. })
+    }
+
+    // ── Ray unprojection ──────────────────────────────────────────────────────
 
     /// Convert a screen-space pixel coordinate to a world-space ray.
     ///
-    /// # Parameters
-    /// - `px`, `py` — pixel coordinate in `[0 .. width)` × `[0 .. height)`
-    /// - `width`, `height` — framebuffer size
-    /// - `view_proj_inv` — inverse of `proj * view` for the current frame
-    ///
-    /// # Returns
-    /// `(ray_origin, ray_direction)` — both in world space, direction normalized.
+    /// Returns `(ray_origin, ray_direction)` both in world space, direction normalized.
     pub fn ray_from_screen(
         px: f32,
         py: f32,
@@ -140,23 +190,163 @@ impl EditorState {
     ) -> (Vec3, Vec3) {
         let ndc_x = (px / width) * 2.0 - 1.0;
         let ndc_y = 1.0 - (py / height) * 2.0;
-        let near = view_proj_inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
-        let far  = view_proj_inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
-        let dir = (far - near).normalize_or_zero();
+        let near  = view_proj_inv.project_point3(Vec3::new(ndc_x, ndc_y, 0.0));
+        let far   = view_proj_inv.project_point3(Vec3::new(ndc_x, ndc_y, 1.0));
+        let dir   = (far - near).normalize_or_zero();
         (near, dir)
     }
 
-    // ── Picking ───────────────────────────────────────────────────────────────
+    // ── Hover ─────────────────────────────────────────────────────────────────
+
+    /// Update the hovered-axis state from the current cursor ray.
+    ///
+    /// Call on every `CursorMoved` event when the cursor is not grabbed.
+    /// Returns `true` if the cursor is over any gizmo handle.
+    pub fn update_hover(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &Scene) -> bool {
+        if self.is_dragging() {
+            return true; // keep hover alive while dragging
+        }
+        let Some(id) = self.selected else {
+            self.hovered_axis = None;
+            return false;
+        };
+        let Some((center, size)) = gizmo_params(id, scene) else {
+            self.hovered_axis = None;
+            return false;
+        };
+        self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode);
+        self.hovered_axis.is_some()
+    }
+
+    // ── Drag start / update / end ─────────────────────────────────────────────
+
+    /// Try to begin a gizmo drag.  Call on left-click press.
+    ///
+    /// Returns `true` if the cursor was over a gizmo handle and the drag has
+    /// started (the caller should skip normal scene picking in that case).
+    /// Returns `false` when the cursor was not over any handle.
+    pub fn try_start_drag(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &Scene) -> bool {
+        let axis = match self.hovered_axis {
+            Some(a) => a,
+            None    => return false,
+        };
+        let Some(id) = self.selected else { return false };
+        let Some((center, _)) = gizmo_params(id, scene) else { return false };
+        let Ok(initial_transform) = scene.get_object_transform(id) else { return false };
+
+        let axis_dir    = axis.vec3();
+        let axis_t_start = match self.gizmo_mode {
+            GizmoMode::Translate | GizmoMode::Scale => {
+                match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                    Some(t) => t,
+                    None    => return false,
+                }
+            }
+            GizmoMode::Rotate => {
+                let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
+                    Some(h) => h,
+                    None    => return false,
+                };
+                let (tan, bitan) = axis.ring_frame();
+                let to_hit = hit - center;
+                to_hit.dot(bitan).atan2(to_hit.dot(tan))
+            }
+        };
+
+        self.drag = DragState::Active { axis, initial_transform, axis_t_start };
+        true
+    }
+
+    /// Apply the gizmo drag to the selected object given the current ray.
+    ///
+    /// Call on every `CursorMoved` event while the left button is held.
+    pub fn update_drag(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &mut Scene) {
+        let (axis, initial_transform, axis_t_start) = match &self.drag {
+            DragState::Active { axis, initial_transform, axis_t_start } => {
+                (*axis, *initial_transform, *axis_t_start)
+            }
+            DragState::Idle => return,
+        };
+        let Some(id) = self.selected else { return };
+        let Some((center, gizmo_size)) = gizmo_params(id, scene) else { return };
+        let axis_dir = axis.vec3();
+
+        let new_transform = match self.gizmo_mode {
+            GizmoMode::Translate => {
+                let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                    Some(t) => t,
+                    None    => return,
+                };
+                let delta = t_now - axis_t_start;
+                Mat4::from_translation(axis_dir * delta) * initial_transform
+            }
+
+            GizmoMode::Scale => {
+                let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                    Some(t) => t,
+                    None    => return,
+                };
+                // World-unit drag → scale fraction relative to gizmo size.
+                let delta       = t_now - axis_t_start;
+                let sensitivity = 1.5 / gizmo_size.max(0.01);
+                let scale_factor = (1.0 + delta * sensitivity).max(0.01_f32);
+
+                // Re-scale the column that corresponds to this axis.
+                let ci      = axis.col();
+                let col     = initial_transform.col(ci);
+                let old_len = col.truncate().length();
+                let new_len = (old_len * scale_factor).max(0.001);
+                let col_n   = if old_len > 1e-8 { col / old_len } else { col };
+                let new_col = col_n * new_len;
+
+                let cols = [
+                    if ci == 0 { new_col } else { initial_transform.col(0) },
+                    if ci == 1 { new_col } else { initial_transform.col(1) },
+                    if ci == 2 { new_col } else { initial_transform.col(2) },
+                    initial_transform.col(3),
+                ];
+                Mat4::from_cols(cols[0], cols[1], cols[2], cols[3])
+            }
+
+            GizmoMode::Rotate => {
+                let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
+                    Some(h) => h,
+                    None    => return,
+                };
+                let (tan, bitan) = axis.ring_frame();
+                let to_hit      = hit - center;
+                let angle_now   = to_hit.dot(bitan).atan2(to_hit.dot(tan));
+                let angle_delta = angle_now - axis_t_start;
+
+                // Rotate orientation/scale columns, keep translation.
+                let rot       = Mat3::from_axis_angle(axis_dir, angle_delta);
+                let upper     = Mat3::from_mat4(initial_transform);
+                let new_upper = rot * upper;
+                Mat4::from_cols(
+                    new_upper.col(0).extend(0.0),
+                    new_upper.col(1).extend(0.0),
+                    new_upper.col(2).extend(0.0),
+                    initial_transform.col(3),
+                )
+            }
+        };
+
+        let _ = scene.update_object_transform(id, new_transform);
+    }
+
+    /// Finish the current drag (call on left-button release).
+    pub fn end_drag(&mut self) {
+        self.drag = DragState::Idle;
+    }
+
+    // ── Legacy sphere-based pick ──────────────────────────────────────────────
 
     /// Cast `(ray_origin, ray_dir)` against all objects' bounding spheres.
     ///
-    /// Selects the closest intersected object, or clears the selection if no
-    /// object was hit.  The scene's bounding sphere is in world space
-    /// (`[cx, cy, cz, radius]`).
-    ///
-    /// Call this on click events only — it is O(N) over live objects.
+    /// Selects the closest intersected object, or clears the selection.
+    /// Prefer using `ScenePicker::cast_ray` + `select()` for accurate BVH picking.
     pub fn pick(&mut self, scene: &Scene, ray_origin: Vec3, ray_dir: Vec3) {
-        let mut best_t = f32::MAX;
+        let mut best_t  = f32::MAX;
         let mut best_id = None;
 
         for (id, _transform, bounds) in scene.iter_objects_for_editor() {
@@ -164,134 +354,150 @@ impl EditorState {
             let radius = bounds[3];
             if let Some(t) = ray_sphere_intersect(ray_origin, ray_dir, center, radius) {
                 if t < best_t {
-                    best_t = t;
+                    best_t  = t;
                     best_id = Some(id);
                 }
             }
         }
 
-        self.selected = best_id;
+        self.selected     = best_id;
+        self.hovered_axis = None;
+        self.drag         = DragState::Idle;
     }
 
     // ── Gizmo rendering ───────────────────────────────────────────────────────
 
-    /// Draw the selection highlight and active transform gizmo for the selected object.
+    /// Draw the selection highlight and active transform gizmo.
     ///
-    /// Call this every frame after [`Renderer::debug_clear`] and before
-    /// submitting the frame.  No-op when nothing is selected.
+    /// Call every frame after [`Renderer::debug_clear`] and before frame submission.
+    /// No-op when nothing is selected.
     pub fn draw_gizmos(&self, renderer: &mut Renderer) {
         let Some(id) = self.selected else { return };
 
-        // Gather data under an immutable borrow that ends before any debug draw.
         let bounds = match renderer.scene().get_object_bounds(id) {
-            Ok(b) => b,
+            Ok(b)  => b,
             Err(_) => return,
         };
-        let center = Vec3::new(bounds[0], bounds[1], bounds[2]);
-        let radius = bounds[3].max(0.3_f32);
+        let center     = Vec3::new(bounds[0], bounds[1], bounds[2]);
+        let radius     = bounds[3].max(0.3_f32);
+        let gizmo_size = (radius * 1.8_f32).max(0.8_f32);
 
-        let gizmo_size: f32 = (radius * 1.8_f32).max(0.8_f32);
-
-        // Selection highlight: thin yellow sphere wrapped around the object.
+        // Selection highlight: thin yellow wire sphere.
         renderer.debug_sphere(center.to_array(), radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
 
+        let hov = self.hovered_axis;
         match self.gizmo_mode {
-            GizmoMode::Translate => draw_translate_gizmo(renderer, center, gizmo_size),
-            GizmoMode::Rotate    => draw_rotate_gizmo(renderer, center, gizmo_size),
-            GizmoMode::Scale     => draw_scale_gizmo(renderer, center, gizmo_size),
+            GizmoMode::Translate => draw_translate_gizmo(renderer, center, gizmo_size, hov),
+            GizmoMode::Rotate    => draw_rotate_gizmo   (renderer, center, gizmo_size, hov),
+            GizmoMode::Scale     => draw_scale_gizmo    (renderer, center, gizmo_size, hov),
         }
     }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Internal math helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Ray vs sphere intersection.  Returns the first positive `t` along the ray,
-/// or `None` if the ray misses or the sphere is fully behind the origin.
-fn ray_sphere_intersect(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32> {
-    let oc = origin - center;
-    let b = oc.dot(dir);
-    let c = oc.dot(oc) - radius * radius;
-    let disc = b * b - c;
-    if disc < 0.0 {
-        return None;
-    }
-    let sqrt_disc = disc.sqrt();
-    let t0 = -b - sqrt_disc;
-    let t1 = -b + sqrt_disc;
-    if t1 < 0.0 {
-        return None;
-    }
-    Some(if t0 >= 0.0 { t0 } else { t1 })
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Gizmo drawing helpers
+// Color helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 const RED:   [f32; 4] = [1.00, 0.15, 0.15, 1.0];
 const GREEN: [f32; 4] = [0.15, 1.00, 0.15, 1.0];
 const BLUE:  [f32; 4] = [0.15, 0.35, 1.00, 1.0];
 
-/// Translate gizmo: three coloured axes with cone arrow-heads.
-///
-/// ```text
-/// Red   arrow → +X
-/// Green arrow → +Y
-/// Blue  arrow → +Z
-/// ```
-fn draw_translate_gizmo(renderer: &mut Renderer, center: Vec3, size: f32) {
-    let shaft   = size * 0.75;
-    let cone_h  = size * 0.22;
-    let cone_r  = size * 0.06;
+/// Bright gold-yellow used for hovered/active handles (Blender convention).
+const HOVER: [f32; 4] = [1.0, 0.85, 0.05, 1.0];
 
-    // +X  (red)
-    let x_end = center + Vec3::X * shaft;
-    renderer.debug_line(center.to_array(), x_end.to_array(), RED);
-    renderer.debug_cone(
-        (x_end + Vec3::X * cone_h).to_array(),
-        [-1.0, 0.0, 0.0],
-        cone_h, cone_r, RED, 12,
-    );
-
-    // +Y  (green)
-    let y_end = center + Vec3::Y * shaft;
-    renderer.debug_line(center.to_array(), y_end.to_array(), GREEN);
-    renderer.debug_cone(
-        (y_end + Vec3::Y * cone_h).to_array(),
-        [0.0, -1.0, 0.0],
-        cone_h, cone_r, GREEN, 12,
-    );
-
-    // +Z  (blue)
-    let z_end = center + Vec3::Z * shaft;
-    renderer.debug_line(center.to_array(), z_end.to_array(), BLUE);
-    renderer.debug_cone(
-        (z_end + Vec3::Z * cone_h).to_array(),
-        [0.0, 0.0, -1.0],
-        cone_h, cone_r, BLUE, 12,
-    );
+/// Solid color for a handle, switching to HOVER when hovered.
+fn line_col(base: [f32; 4], hovered: bool) -> [f32; 4] {
+    if hovered { HOVER } else { base }
 }
 
-/// Rotate gizmo: one ring per axis, drawn in the plane perpendicular to that axis.
-///
-/// ```text
-/// Red   ring → rotates around X (ring lies in YZ plane)
-/// Green ring → rotates around Y (ring lies in XZ plane)
-/// Blue  ring → rotates around Z (ring lies in XY plane)
-/// ```
-fn draw_rotate_gizmo(renderer: &mut Renderer, center: Vec3, size: f32) {
-    const SEGS: u32 = 48;
-    // Ring around X: tangent=Y, bitangent=Z
-    draw_ring(renderer, center, Vec3::Y, Vec3::Z, size, RED,   SEGS);
-    // Ring around Y: tangent=X, bitangent=Z
-    draw_ring(renderer, center, Vec3::X, Vec3::Z, size, GREEN, SEGS);
-    // Ring around Z: tangent=X, bitangent=Y
-    draw_ring(renderer, center, Vec3::X, Vec3::Y, size, BLUE,  SEGS);
+/// Semi-transparent fill color for a handle (alpha 0.35 normal, 0.65 hovered).
+fn fill_col(base: [f32; 4], hovered: bool) -> [f32; 4] {
+    if hovered {
+        [HOVER[0], HOVER[1], HOVER[2], 0.65]
+    } else {
+        [base[0], base[1], base[2], 0.35]
+    }
 }
 
-/// Draw a planar ring using two perpendicular tangent vectors.
+// ─────────────────────────────────────────────────────────────────────────────
+// Gizmo drawing helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn draw_translate_gizmo(
+    renderer: &mut Renderer,
+    center: Vec3,
+    size: f32,
+    hovered: Option<GizmoAxis>,
+) {
+    let shaft  = size * 0.75;
+    let cone_h = size * 0.22;
+    let cone_r = size * 0.06;
+    const SEGS: u32 = 16;
+
+    for (axis, base) in [(GizmoAxis::X, RED), (GizmoAxis::Y, GREEN), (GizmoAxis::Z, BLUE)] {
+        let h          = axis.vec3();
+        let tip        = center + h * shaft;
+        let apex       = tip + h * cone_h;
+        let is_hov     = hovered == Some(axis);
+        let lc         = line_col(base, is_hov);
+        let fc         = fill_col(base, is_hov);
+
+        renderer.debug_line(center.to_array(), tip.to_array(), lc);
+        // Filled cone then wireframe outline for crispness.
+        renderer.debug_filled_cone(apex.to_array(), (-h).to_array(), cone_h, cone_r, fc, SEGS);
+        renderer.debug_cone       (apex.to_array(), (-h).to_array(), cone_h, cone_r, lc, SEGS);
+    }
+}
+
+fn draw_rotate_gizmo(
+    renderer: &mut Renderer,
+    center: Vec3,
+    size: f32,
+    hovered: Option<GizmoAxis>,
+) {
+    const SEGS: u32 = 64;
+    const BAND: f32 = 0.055; // annulus half-width as fraction of gizmo size
+
+    for (axis, base) in [(GizmoAxis::X, RED), (GizmoAxis::Y, GREEN), (GizmoAxis::Z, BLUE)] {
+        let (tan, bitan) = axis.ring_frame();
+        let is_hov       = hovered == Some(axis);
+        let lc           = line_col(base, is_hov);
+        let fc           = fill_col(base, is_hov);
+
+        draw_ring(renderer, center, tan, bitan, size, lc, SEGS);
+
+        // Filled annulus band around the line ring.
+        let inner = size * (1.0 - BAND);
+        let outer = size * (1.0 + BAND);
+        draw_annulus(renderer, center, tan, bitan, inner, outer, fc, SEGS);
+    }
+}
+
+fn draw_scale_gizmo(
+    renderer: &mut Renderer,
+    center: Vec3,
+    size: f32,
+    hovered: Option<GizmoAxis>,
+) {
+    let shaft    = size * 0.82;
+    let box_half = size * 0.07;
+
+    for (axis, base) in [(GizmoAxis::X, RED), (GizmoAxis::Y, GREEN), (GizmoAxis::Z, BLUE)] {
+        let h      = axis.vec3();
+        let tip    = center + h * shaft;
+        let is_hov = hovered == Some(axis);
+        let lc     = line_col(base, is_hov);
+        let fc     = fill_col(base, is_hov);
+
+        renderer.debug_line(center.to_array(), tip.to_array(), lc);
+        // Filled box cap then wireframe outline.
+        renderer.debug_filled_box(tip.to_array(), box_half, fc);
+        draw_box_wire(renderer, tip, box_half, lc);
+    }
+}
+
+// ── Ring / annulus helpers ───────────────────────────────────────────────────
+
 fn draw_ring(
     renderer: &mut Renderer,
     center: Vec3,
@@ -305,52 +511,186 @@ fn draw_ring(
     let mut prev = center + tangent * radius;
     for i in 1..=segs {
         let theta = i as f32 * step;
-        let next = center + (tangent * theta.cos() + bitangent * theta.sin()) * radius;
+        let next  = center + (tangent * theta.cos() + bitangent * theta.sin()) * radius;
         renderer.debug_line(prev.to_array(), next.to_array(), color);
         prev = next;
     }
 }
 
-/// Scale gizmo: three coloured axes with cube end-caps.
-///
-/// ```text
-/// Red   axis → +X
-/// Green axis → +Y
-/// Blue  axis → +Z
-/// ```
-fn draw_scale_gizmo(renderer: &mut Renderer, center: Vec3, size: f32) {
-    let shaft    = size * 0.82;
-    let box_half = size * 0.07;
-
-    let x_end = center + Vec3::X * shaft;
-    renderer.debug_line(center.to_array(), x_end.to_array(), RED);
-    draw_box_marker(renderer, x_end, box_half, RED);
-
-    let y_end = center + Vec3::Y * shaft;
-    renderer.debug_line(center.to_array(), y_end.to_array(), GREEN);
-    draw_box_marker(renderer, y_end, box_half, GREEN);
-
-    let z_end = center + Vec3::Z * shaft;
-    renderer.debug_line(center.to_array(), z_end.to_array(), BLUE);
-    draw_box_marker(renderer, z_end, box_half, BLUE);
+/// Filled flat annulus (ring band) using triangle quads per sector.
+fn draw_annulus(
+    renderer: &mut Renderer,
+    center: Vec3,
+    tangent: Vec3,
+    bitangent: Vec3,
+    inner: f32,
+    outer: f32,
+    color: [f32; 4],
+    segs: u32,
+) {
+    let step = std::f32::consts::TAU / segs as f32;
+    let mut pi = center + tangent * inner;
+    let mut po = center + tangent * outer;
+    for i in 1..=segs {
+        let theta = i as f32 * step;
+        let dir   = tangent * theta.cos() + bitangent * theta.sin();
+        let ci    = center + dir * inner;
+        let co    = center + dir * outer;
+        renderer.debug_tri(po.to_array(), pi.to_array(), ci.to_array(), color);
+        renderer.debug_tri(po.to_array(), ci.to_array(), co.to_array(), color);
+        pi = ci;
+        po = co;
+    }
 }
 
-/// Draw a small wire-frame cube centred at `center` with the given `half` size.
-fn draw_box_marker(renderer: &mut Renderer, center: Vec3, half: f32, color: [f32; 4]) {
+// ── Box helpers ──────────────────────────────────────────────────────────────
+
+/// 12-edge wireframe cube.
+fn draw_box_wire(renderer: &mut Renderer, center: Vec3, half: f32, color: [f32; 4]) {
     let c = [
-        center + Vec3::new(-half, -half, -half), // 0 lbf
-        center + Vec3::new( half, -half, -half), // 1 rbf
-        center + Vec3::new( half,  half, -half), // 2 rtf
-        center + Vec3::new(-half,  half, -half), // 3 ltf
-        center + Vec3::new(-half, -half,  half), // 4 lbn
-        center + Vec3::new( half, -half,  half), // 5 rbn
-        center + Vec3::new( half,  half,  half), // 6 rtn
-        center + Vec3::new(-half,  half,  half), // 7 ltn
+        center + Vec3::new(-half, -half, -half),
+        center + Vec3::new( half, -half, -half),
+        center + Vec3::new( half,  half, -half),
+        center + Vec3::new(-half,  half, -half),
+        center + Vec3::new(-half, -half,  half),
+        center + Vec3::new( half, -half,  half),
+        center + Vec3::new( half,  half,  half),
+        center + Vec3::new(-half,  half,  half),
     ];
-    // Four bottom edges, four top edges, four vertical pillars.
     for i in 0..4 {
         renderer.debug_line(c[i].to_array(),     c[(i + 1) % 4].to_array(),     color);
         renderer.debug_line(c[i + 4].to_array(), c[(i + 1) % 4 + 4].to_array(), color);
         renderer.debug_line(c[i].to_array(),     c[i + 4].to_array(),            color);
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gizmo hit-testing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Gizmo world-space centre + uniform size.
+fn gizmo_params(id: ObjectId, scene: &Scene) -> Option<(Vec3, f32)> {
+    let b      = scene.get_object_bounds(id).ok()?;
+    let center = Vec3::new(b[0], b[1], b[2]);
+    let radius = b[3].max(0.3);
+    let size   = (radius * 1.8).max(0.8);
+    Some((center, size))
+}
+
+/// Return which gizmo axis handle (if any) contains the cursor ray.
+fn hit_gizmo(
+    ray_o: Vec3,
+    ray_d: Vec3,
+    center: Vec3,
+    size: f32,
+    mode: GizmoMode,
+) -> Option<GizmoAxis> {
+    let threshold = size * 0.12;
+
+    match mode {
+        GizmoMode::Translate | GizmoMode::Scale => {
+            let len = if matches!(mode, GizmoMode::Translate) {
+                size * (0.75 + 0.22)
+            } else {
+                size * (0.82 + 0.14)
+            };
+
+            let mut best_d = threshold;
+            let mut best   = None;
+            for axis in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
+                let end = center + axis.vec3() * len;
+                let d   = ray_to_segment_dist(ray_o, ray_d, center, end);
+                if d < best_d {
+                    best_d = d;
+                    best   = Some(axis);
+                }
+            }
+            best
+        }
+
+        GizmoMode::Rotate => {
+            let ring_r    = size;
+            let ring_band = size * 0.15;
+
+            let mut best_d = ring_band;
+            let mut best   = None;
+            for axis in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
+                let normal = axis.vec3();
+                let denom  = ray_d.dot(normal);
+                if denom.abs() < 1e-6 { continue; }
+                let t = (center - ray_o).dot(normal) / denom;
+                if t < 0.001 { continue; }
+                let hit  = ray_o + ray_d * t;
+                let dist = ((hit - center).length() - ring_r).abs();
+                if dist < best_d {
+                    best_d = dist;
+                    best   = Some(axis);
+                }
+            }
+            best
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Math helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Minimum distance from a world ray to a finite line segment.
+fn ray_to_segment_dist(ray_o: Vec3, ray_d: Vec3, seg_a: Vec3, seg_b: Vec3) -> f32 {
+    let d     = seg_b - seg_a;
+    let w     = ray_o - seg_a;
+    let a     = d.dot(d);
+    let b     = d.dot(ray_d);
+    let e     = d.dot(w);
+    let f     = ray_d.dot(w);
+    let denom = a - b * b;
+
+    let (sc, tc) = if denom.abs() > 1e-8 {
+        let sc = ((b * f - e) / denom).clamp(0.0, 1.0);
+        let tc = ((a * f - b * e) / denom).max(0.0);
+        (sc, tc)
+    } else {
+        (0.5, 0.5)
+    };
+
+    let closest_seg = seg_a + d * sc;
+    let closest_ray = ray_o + ray_d * tc;
+    (closest_ray - closest_seg).length()
+}
+
+/// Signed position along an infinite axis line at the closest approach to the ray.
+///
+/// Returns `None` when the ray is nearly parallel to the axis.
+fn ray_to_axis_t(ray_o: Vec3, ray_d: Vec3, axis_origin: Vec3, axis_dir: Vec3) -> Option<f32> {
+    let w     = ray_o - axis_origin;
+    let b     = axis_dir.dot(ray_d);
+    let d     = axis_dir.dot(w);
+    let e     = ray_d.dot(w);
+    let denom = 1.0 - b * b;
+    if denom.abs() < 1e-8 { return None; }
+    Some((b * e - d) / denom)
+}
+
+/// Ray–plane intersection; returns world hit point or `None` if parallel/behind.
+fn ray_plane_hit(ray_o: Vec3, ray_d: Vec3, plane_pt: Vec3, plane_n: Vec3) -> Option<Vec3> {
+    let denom = ray_d.dot(plane_n);
+    if denom.abs() < 1e-6 { return None; }
+    let t = (plane_pt - ray_o).dot(plane_n) / denom;
+    if t < 0.001 { return None; }
+    Some(ray_o + ray_d * t)
+}
+
+/// Ray vs sphere — returns first positive `t`, or `None`.
+fn ray_sphere_intersect(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let oc   = origin - center;
+    let b    = oc.dot(dir);
+    let c    = oc.dot(oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 { return None; }
+    let sq = disc.sqrt();
+    let t0 = -b - sq;
+    let t1 = -b + sq;
+    if t1 < 0.0 { return None; }
+    Some(if t0 >= 0.0 { t0 } else { t1 })
 }

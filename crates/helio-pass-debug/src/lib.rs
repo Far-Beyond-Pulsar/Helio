@@ -8,6 +8,7 @@ use bytemuck::{Pod, Zeroable};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 const MAX_DEBUG_VERTS: u32 = 65536;
+const MAX_DEBUG_TRIS: u32 = 65536;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -31,6 +32,9 @@ pub struct DebugVertex {
 pub struct DebugPass {
     pipeline_depth: wgpu::RenderPipeline,
     pipeline_no_depth: wgpu::RenderPipeline,
+    /// Filled-triangle pipeline — TriangleList, alpha blending, depth-test-only.
+    pipeline_tri_depth: wgpu::RenderPipeline,
+    pipeline_tri_no_depth: wgpu::RenderPipeline,
     #[allow(dead_code)]
     bgl: wgpu::BindGroupLayout,
     camera_buf: wgpu::Buffer,
@@ -38,6 +42,9 @@ pub struct DebugPass {
     bind_group_key: Option<usize>,
     vertex_buf: wgpu::Buffer,
     pub vertex_count: u32,
+    /// Separate buffer for filled triangles (TriangleList topology).
+    tri_buf: wgpu::Buffer,
+    pub tri_count: u32,
     depth_test_enabled: bool,
 }
 
@@ -182,15 +189,97 @@ impl DebugPass {
             cache: None,
         });
 
+        // ── Filled-triangle pipelines (TriangleList + alpha blend, no depth write) ──
+        let tri_attribs = [
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0,  shader_location: 0 },
+            wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x4, offset: 16, shader_location: 1 },
+        ];
+        let tri_vbl = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<DebugVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &tri_attribs,
+        };
+        let tri_target = wgpu::ColorTargetState {
+            format: target_format,
+            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+            write_mask: wgpu::ColorWrites::ALL,
+        };
+        let tri_prim = wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None, // double-sided so gizmos visible from any angle
+            ..Default::default()
+        };
+
+        let pipeline_tri_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug Tri Pipeline Depth"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[tri_vbl.clone()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(tri_target.clone())],
+            }),
+            primitive: tri_prim,
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false), // don't occlude lines behind fills
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let pipeline_tri_no_depth = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Debug Tri Pipeline NoDepth"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[tri_vbl],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(tri_target)],
+            }),
+            primitive: tri_prim,
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let tri_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Debug Tri Buffer"),
+            size: (MAX_DEBUG_TRIS as usize * std::mem::size_of::<DebugVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline_depth,
             pipeline_no_depth,
+            pipeline_tri_depth,
+            pipeline_tri_no_depth,
             bgl,
             camera_buf: camera_buf.clone(),
             bind_group: None,
             bind_group_key: None,
             vertex_buf,
             vertex_count: 0,
+            tri_buf,
+            tri_count: 0,
             depth_test_enabled: depth_test,
         }
     }
@@ -211,9 +300,26 @@ impl DebugPass {
         self.vertex_count = count as u32;
     }
 
+    /// Upload filled-triangle vertices. Every three consecutive vertices form one triangle.
+    ///
+    /// Call this from the game loop before `execute()`. O(n) upload, O(1) GPU draw.
+    pub fn update_tris(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
+        let count = verts.len().min(MAX_DEBUG_TRIS as usize);
+        if count > 0 {
+            helio_v3::upload::write_buffer(
+                queue,
+                &self.tri_buf,
+                0,
+                bytemuck::cast_slice(&verts[..count]),
+            );
+        }
+        self.tri_count = count as u32;
+    }
+
     /// Clear all queued debug geometry (no-ops the next execute).
     pub fn clear(&mut self) {
         self.vertex_count = 0;
+        self.tri_count = 0;
     }
 
     /// Toggle depth-test at runtime — no pipeline rebuild required, both
@@ -231,7 +337,7 @@ impl DebugPass {
         target: &wgpu::TextureView,
     ) -> HelioResult<()> {
         // O(1): single draw call — completely skipped when nothing is queued.
-        if self.vertex_count == 0 {
+        if self.vertex_count == 0 && self.tri_count == 0 {
             return Ok(());
         }
 
@@ -288,14 +394,30 @@ impl DebugPass {
         };
 
         let mut pass = ctx.encoder.begin_render_pass(&desc);
-        if self.depth_test_enabled {
-            pass.set_pipeline(&self.pipeline_depth);
-        } else {
-            pass.set_pipeline(&self.pipeline_no_depth);
-        }
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        pass.draw(0..self.vertex_count, 0..1); // O(1) — single draw call
+
+        // ── Lines ─────────────────────────────────────────────────────────────
+        if self.vertex_count > 0 {
+            if self.depth_test_enabled {
+                pass.set_pipeline(&self.pipeline_depth);
+            } else {
+                pass.set_pipeline(&self.pipeline_no_depth);
+            }
+            pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
+            pass.draw(0..self.vertex_count, 0..1);
+        }
+
+        // ── Filled triangles (alpha-blended) ───────────────────────────────────
+        if self.tri_count > 0 {
+            if self.depth_test_enabled {
+                pass.set_pipeline(&self.pipeline_tri_depth);
+            } else {
+                pass.set_pipeline(&self.pipeline_tri_no_depth);
+            }
+            pass.set_vertex_buffer(0, self.tri_buf.slice(..));
+            pass.draw(0..self.tri_count, 0..1);
+        }
+
         Ok(())
     }
 }

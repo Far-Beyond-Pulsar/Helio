@@ -21,7 +21,7 @@ mod renderer;
 mod scene;
 mod vg;
 
-pub use editor::{EditorState, GizmoMode};
+pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use picking::{PickHit, ScenePicker};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};

@@ -424,6 +424,7 @@ impl Renderer {
     pub fn debug_clear(&mut self) {
         if let Ok(mut s) = self.debug_state.lock() {
             s.user_lines.clear();
+            s.user_tris.clear();
         }
     }
 
@@ -431,6 +432,94 @@ impl Renderer {
         if let Ok(mut s) = self.debug_state.lock() {
             s.user_lines.push(DebugVertex { position: from, _pad: 0.0, color });
             s.user_lines.push(DebugVertex { position: to, _pad: 0.0, color });
+        }
+    }
+
+    /// Submit a single filled triangle.  Every call queues 3 vertices.
+    ///
+    /// Triangles are rendered with alpha blending in a separate pass after all
+    /// lines, so semi-transparent fills don't occlude one another in paint order.
+    ///
+    /// Vertex winding: CCW = front face (but cull_mode is None so both sides render).
+    pub fn debug_tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
+        if let Ok(mut s) = self.debug_state.lock() {
+            s.user_tris.push(DebugVertex { position: v0, _pad: 0.0, color });
+            s.user_tris.push(DebugVertex { position: v1, _pad: 0.0, color });
+            s.user_tris.push(DebugVertex { position: v2, _pad: 0.0, color });
+        }
+    }
+
+    /// Fill a disk (flat circle) with triangles.
+    ///
+    /// `normal` is the outward-facing side direction.  The disk lies in the
+    /// plane perpendicular to `normal` centred at `center`.
+    pub fn debug_filled_disk(&mut self, center: [f32; 3], normal: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
+        let c = glam::Vec3::from(center);
+        let n = glam::Vec3::from(normal).normalize_or_zero();
+        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
+        let tangent   = n.cross(up).normalize_or_zero();
+        let bitangent = n.cross(tangent).normalize_or_zero();
+        let mut prev = c + tangent * radius;
+        for i in 1..=segments {
+            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let cur = c + (tangent * theta.cos() + bitangent * theta.sin()) * radius;
+            self.debug_tri(c.to_array(), prev.to_array(), cur.to_array(), color);
+            prev = cur;
+        }
+    }
+
+    /// Fill a cone with triangles.  Solid sides + base cap.
+    ///
+    /// `apex` is the tip.  `axis` points from apex toward the base.
+    /// `height` is the apex-to-base distance.  `base_radius` is the base circle radius.
+    pub fn debug_filled_cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
+        let apex_v = glam::Vec3::from(apex);
+        let dir    = glam::Vec3::from(axis).normalize_or_zero();
+        let base   = apex_v + dir * height;
+        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
+        let tangent   = dir.cross(up).normalize_or_zero();
+        let bitangent = dir.cross(tangent).normalize_or_zero();
+        let mut prev = base + tangent * base_radius;
+        for i in 1..=segments {
+            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
+            // Lateral face: apex + two base-ring points (CCW outward).
+            self.debug_tri(apex_v.to_array(), prev.to_array(), cur.to_array(), color);
+            // Base cap: reverse winding so cap faces away from apex.
+            self.debug_tri(base.to_array(), cur.to_array(), prev.to_array(), color);
+            prev = cur;
+        }
+    }
+
+    /// Fill an axis-aligned box with triangles.  `half` is the half-extent on each side.
+    pub fn debug_filled_box(&mut self, center: [f32; 3], half: f32, color: [f32; 4]) {
+        let c = glam::Vec3::from(center);
+        let h = half;
+        // 8 corners: naming convention is (±x, ±y, ±z)
+        let corners = [
+            c + glam::Vec3::new(-h, -h, -h), // 0
+            c + glam::Vec3::new( h, -h, -h), // 1
+            c + glam::Vec3::new( h,  h, -h), // 2
+            c + glam::Vec3::new(-h,  h, -h), // 3
+            c + glam::Vec3::new(-h, -h,  h), // 4
+            c + glam::Vec3::new( h, -h,  h), // 5
+            c + glam::Vec3::new( h,  h,  h), // 6
+            c + glam::Vec3::new(-h,  h,  h), // 7
+        ];
+        // 6 faces, 2 triangles each.  Winding is CCW when viewed from outside.
+        let quads: [[usize; 4]; 6] = [
+            [0, 3, 2, 1], // -Z (front)
+            [4, 5, 6, 7], // +Z (back)
+            [0, 4, 7, 3], // -X (left)
+            [1, 2, 6, 5], // +X (right)
+            [0, 1, 5, 4], // -Y (bottom)
+            [3, 7, 6, 2], // +Y (top)
+        ];
+        for [a, b, cc, d] in quads {
+            self.debug_tri(corners[a].to_array(), corners[b].to_array(), corners[cc].to_array(), color);
+            self.debug_tri(corners[a].to_array(), corners[cc].to_array(), corners[d].to_array(), color);
         }
     }
 

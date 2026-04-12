@@ -7,6 +7,8 @@ pub struct DebugDrawState {
     pub editor_enabled: bool,
     pub camera_position: glam::Vec3,
     pub user_lines: Vec<DebugVertex>,
+    /// Filled triangles (TriangleList) from the current frame — cleared by `debug_clear`.
+    pub user_tris: Vec<DebugVertex>,
 }
 
 impl Default for DebugDrawState {
@@ -15,6 +17,7 @@ impl Default for DebugDrawState {
             editor_enabled: false,
             camera_position: glam::Vec3::ZERO,
             user_lines: Vec::new(),
+            user_tris: Vec::new(),
         }
     }
 }
@@ -47,7 +50,8 @@ impl DebugDrawPass {
         self.pass.set_depth_test(enabled);
     }
 
-    fn build_frame_vertices(&self) -> Vec<DebugVertex> {
+    /// Collect line vertices that should be drawn this frame.
+    fn build_frame_lines(&self) -> Vec<DebugVertex> {
         let state = self.state.lock().unwrap();
 
         // Editor pass only draws grid + camera gizmo (no user lines).
@@ -120,6 +124,18 @@ impl DebugDrawPass {
 
         output
     }
+
+    /// Collect filled-triangle vertices for this frame.
+    /// The editor pass doesn't emit tris (just the grid); user tris always go to the user pass.
+    fn build_frame_tris(&self) -> Vec<DebugVertex> {
+        if self.editor_mode {
+            return Vec::new();
+        }
+        let state = self.state.lock().unwrap();
+        let mut v = Vec::with_capacity(state.user_tris.len());
+        v.extend_from_slice(&state.user_tris);
+        v
+    }
 }
 
 impl RenderPass for DebugDrawPass {
@@ -128,8 +144,10 @@ impl RenderPass for DebugDrawPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let lines = self.build_frame_vertices();
+        let lines = self.build_frame_lines();
         self.pass.update_lines(ctx.queue, &lines);
+        let tris = self.build_frame_tris();
+        self.pass.update_tris(ctx.queue, &tris);
         Ok(())
     }
 
