@@ -354,24 +354,17 @@ impl EditorState {
         self.drag = DragState::Idle;
     }
 
-    /// Duplicate the selected object, offset it slightly, select the new copy,
+    /// Duplicate the selected object at the same transform, select the new copy,
     /// and return its [`ObjectId`].
     ///
-    /// Pass a mutable reference to the renderer so the new object can be
-    /// inserted and the picker can be rebuilt by the caller afterward.
+    /// Pass a mutable reference to the renderer so the new object can be inserted.
+    /// Rebuild `ScenePicker` afterwards so the copy is immediately pickable.
     pub fn duplicate_selected(
         &mut self,
         renderer: &mut crate::renderer::Renderer,
     ) -> Option<crate::handles::ObjectId> {
-        let id = self.selected?;
-        let mut desc = renderer.scene().get_object_descriptor(id).ok()?;
-
-        // Shift the duplicate slightly so it doesn't sit exactly on the original.
-        let offset = Vec3::new(0.5, 0.0, 0.5);
-        desc.transform = Mat4::from_translation(offset) * desc.transform;
-        // Keep the bounding sphere centred on the new position.
-        desc.bounds[0] += offset.x;
-        desc.bounds[2] += offset.z;
+        let id   = self.selected?;
+        let desc = renderer.scene().get_object_descriptor(id).ok()?;
 
         let new_actor = renderer.scene_mut().insert_actor(
             crate::scene::SceneActor::object(desc)
