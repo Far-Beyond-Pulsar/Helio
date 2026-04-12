@@ -77,15 +77,48 @@ impl Default for BakeConfig {
 }
 
 impl BakeConfig {
-    /// Fast preset: AO + lightmap at reduced quality, no probes or PVS.
+    /// Fast preset: direct-only lightmap (no GI bounces), no probes or PVS.
     ///
-    /// Good for development iteration. Bake times are seconds to low minutes.
+    /// Uses `bounce_count = 0` — Nebula evaluates analytic per-light shadow
+    /// rays only (deterministic, no Monte Carlo randomness).  The result is
+    /// clean and noise-free because no hemisphere samples are fired.  Bake
+    /// times are very fast (seconds).
+    ///
+    /// Use [`BakeConfig::medium`] for multi-bounce GI, or [`BakeConfig::ultra`]
+    /// for production quality.
     pub fn fast(scene_name: impl Into<String>) -> Self {
         Self {
             scene_name: scene_name.into(),
             cache_dir: "bake_cache".into(),
             ao: Some(nebula::ao::AoConfig::fast()),
-            lightmap: Some(nebula::light::LightmapConfig::fast()),
+            lightmap: Some(nebula::light::LightmapConfig {
+                resolution:         1024,
+                samples_per_texel:  1,    // direct-only → 1 sample suffices (deterministic)
+                bounce_count:       0,    // no indirect bounces → zero Monte Carlo noise
+                denoise:            false, // nothing to denoise
+                ..nebula::light::LightmapConfig::default()
+            }),
+            probes: None,
+            pvs: None,
+        }
+    }
+
+    /// Medium preset: multi-bounce GI lightmap with denoising.
+    ///
+    /// 64 spp, 2 bounces, spatial denoising — good balance of quality and
+    /// bake time (seconds to low minutes).  Suitable for playtesting.
+    pub fn medium(scene_name: impl Into<String>) -> Self {
+        Self {
+            scene_name: scene_name.into(),
+            cache_dir: "bake_cache".into(),
+            ao: Some(nebula::ao::AoConfig::default()),
+            lightmap: Some(nebula::light::LightmapConfig {
+                resolution:         1024,
+                samples_per_texel:  64,
+                bounce_count:       2,
+                denoise:            true,
+                ..nebula::light::LightmapConfig::default()
+            }),
             probes: None,
             pvs: None,
         }
