@@ -18,6 +18,8 @@
 //! | Ctrl+D          | **Duplicate** selected object                 |
 //! | Delete          | **Delete** selected object                    |
 //! | Tab             | Toggle editor grid                            |
+//! | **F11**         | Toggle fullscreen                             |
+//! | **Alt+Enter**   | Toggle fullscreen                             |
 //! | Escape          | Deselect → exit                               |
 //!
 //! Picking uses a two-phase BVH ray caster (broad-phase AABB + per-mesh
@@ -349,6 +351,7 @@ impl ApplicationHandler for App {
             editor: EditorState::new(),
             picker,
             grid_enabled: true,
+            is_fullscreen: false,
         });
     }
 
@@ -407,7 +410,7 @@ impl ApplicationHandler for App {
                         match code {
                             // ── Fullscreen toggle ────────────────────────────
                             KeyCode::F11 => state.toggle_fullscreen(),
-                            KeyCode::Return | KeyCode::NumpadEnter
+                            KeyCode::Enter | KeyCode::NumpadEnter
                                 if state.keys.contains(&KeyCode::AltLeft)
                                     || state.keys.contains(&KeyCode::AltRight) =>
                             {
@@ -599,37 +602,6 @@ impl AppState {
             }
         }
         self.mouse_delta = (0.0, 0.0);
-    }
-
-    /// Toggle between borderless fullscreen and windowed mode.
-    ///
-    /// On Windows this also calls `request_exclusive_fullscreen` so DXGI can
-    /// use a direct hardware flip, bypassing DWM composition.
-    fn toggle_fullscreen(&mut self) {
-        use winit::window::Fullscreen;
-        if self.is_fullscreen {
-            self.window.set_fullscreen(None);
-            self.is_fullscreen = false;
-        } else {
-            // Borderless fullscreen — covers the current monitor without a
-            // mode switch, avoiding the flicker of exclusive fullscreen while
-            // still allowing DXGI hardware flips (see request_exclusive_fullscreen).
-            let monitor = self.window.current_monitor();
-            self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
-            // Lift DXGI's window-association locks so the driver can flip directly.
-            #[cfg(target_os = "windows")]
-            {
-                use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-                if let Ok(handle) = self.window.window_handle() {
-                    if let RawWindowHandle::Win32(h) = handle.as_raw() {
-                        let hwnd = h.hwnd.get() as *mut std::ffi::c_void;
-                        // SAFETY: hwnd is valid for the lifetime of this window.
-                        unsafe { self.renderer.request_exclusive_fullscreen(hwnd); }
-                    }
-                }
-            }
-            self.is_fullscreen = true;
-        }
     }
 
     /// Toggle between borderless fullscreen and windowed mode.
