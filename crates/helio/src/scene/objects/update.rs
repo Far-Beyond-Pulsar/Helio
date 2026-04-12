@@ -348,6 +348,27 @@ impl super::super::Scene {
         })
     }
 
+    /// Return an [`crate::ObjectDescriptor`] that can be passed straight back to
+    /// [`crate::Scene::insert_object`] to create an identical copy.
+    ///
+    /// Returns `Err` if the handle is invalid.
+    pub fn get_object_descriptor(&self, id: ObjectId) -> Result<crate::scene::types::ObjectDescriptor> {
+        use crate::scene::types::ObjectDescriptor;
+        use crate::groups::GroupMask;
+        let Some((_, record)) = self.objects.get_with_index(id) else {
+            return Err(invalid("object"));
+        };
+        Ok(ObjectDescriptor {
+            mesh:        record.mesh,
+            material:    record.material,
+            transform:   Mat4::from_cols_array(&record.instance.model),
+            bounds:      record.instance.bounds,
+            flags:       record.instance.flags,
+            groups:      GroupMask(record.groups.0),
+            movability:  Some(record.movability),
+        })
+    }
+
     /// Iterate every live object, yielding a [`PickableObject`] descriptor.
     ///
     /// The [`crate::ScenePicker`] uses this to sync its instance list after objects

@@ -354,6 +354,35 @@ impl EditorState {
         self.drag = DragState::Idle;
     }
 
+    /// Duplicate the selected object, offset it slightly, select the new copy,
+    /// and return its [`ObjectId`].
+    ///
+    /// Pass a mutable reference to the renderer so the new object can be
+    /// inserted and the picker can be rebuilt by the caller afterward.
+    pub fn duplicate_selected(
+        &mut self,
+        renderer: &mut crate::renderer::Renderer,
+    ) -> Option<crate::handles::ObjectId> {
+        let id = self.selected?;
+        let mut desc = renderer.scene().get_object_descriptor(id).ok()?;
+
+        // Shift the duplicate slightly so it doesn't sit exactly on the original.
+        let offset = Vec3::new(0.5, 0.0, 0.5);
+        desc.transform = Mat4::from_translation(offset) * desc.transform;
+        // Keep the bounding sphere centred on the new position.
+        desc.bounds[0] += offset.x;
+        desc.bounds[2] += offset.z;
+
+        let new_actor = renderer.scene_mut().insert_actor(
+            crate::scene::SceneActor::object(desc)
+        );
+        let new_id = new_actor.as_object()?;
+        self.selected     = Some(new_id);
+        self.hovered_axis = None;
+        self.drag         = DragState::Idle;
+        Some(new_id)
+    }
+
     // ── Legacy sphere-based pick ──────────────────────────────────────────────
 
     /// Cast `(ray_origin, ray_dir)` against all objects' bounding spheres.

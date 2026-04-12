@@ -15,6 +15,7 @@
 //! | G               | Switch to **Translate** gizmo (cursor free)   |
 //! | R               | Switch to **Rotate** gizmo (cursor free)      |
 //! | S               | Switch to **Scale** gizmo (cursor free)       |
+//! | D               | **Duplicate** selected object                 |
 //! | Tab             | Toggle editor grid                            |
 //! | Escape          | Deselect → exit                               |
 //!
@@ -418,6 +419,13 @@ impl ApplicationHandler for App {
                             }
                             KeyCode::KeyS if !state.right_mouse_held => {
                                 state.editor.set_gizmo_mode(GizmoMode::Scale)
+                            }
+                            KeyCode::KeyD if !state.right_mouse_held => {
+                                if let Some(new_id) = state.editor.duplicate_selected(&mut state.renderer) {
+                                    // Keep the picker in sync with the new object.
+                                    state.picker.rebuild_instances(state.renderer.scene());
+                                    let _ = new_id; // selected automatically
+                                }
                             }
                             KeyCode::Tab => {
                                 state.grid_enabled = !state.grid_enabled;
