@@ -604,30 +604,43 @@ impl AppState {
         self.mouse_delta = (0.0, 0.0);
     }
 
-    /// Toggle between borderless fullscreen and windowed mode.
+    /// Toggle between borderless fullscreen and true DXGI exclusive fullscreen.
     ///
-    /// On Windows this also calls `request_exclusive_fullscreen` so DXGI can
-    /// use a direct hardware flip, bypassing DWM composition.
+    /// On Windows, entering fullscreen:
+    ///   1. Moves the window to borderless fullscreen (no mode change = no flicker).
+    ///   2. Calls `SetFullscreenState(TRUE)` on the DXGI swap chain, which
+    ///      transitions the display into true hardware-exclusive mode and
+    ///      completely bypasses DWM composition.
+    ///
+    /// On exit, `SetFullscreenState(FALSE)` is called first (DXGI requirement)
+    /// before the window returns to windowed mode.
     fn toggle_fullscreen(&mut self) {
         use winit::window::Fullscreen;
         if self.is_fullscreen {
+            // DXGI requires SetFullscreenState(FALSE) before we give the window
+            // back to the desktop compositor.
+            #[cfg(target_os = "windows")]
+            unsafe { self.renderer.exit_exclusive_fullscreen(&self.surface); }
             self.window.set_fullscreen(None);
             self.is_fullscreen = false;
         } else {
-            // Borderless fullscreen — covers the current monitor without a
-            // mode switch, avoiding the flicker of exclusive fullscreen while
-            // still allowing DXGI hardware flips (see request_exclusive_fullscreen).
+            // First: move to borderless fullscreen so the window covers the full
+            // monitor. DXGI's SetFullscreenState works best when the client area
+            // already matches the display resolution.
             let monitor = self.window.current_monitor();
             self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
-            // Lift DXGI's window-association locks so the driver can flip directly.
+            // Second: enter hardware-exclusive mode via DXGI.
             #[cfg(target_os = "windows")]
             {
                 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 if let Ok(handle) = self.window.window_handle() {
                     if let RawWindowHandle::Win32(h) = handle.as_raw() {
                         let hwnd = h.hwnd.get() as *mut std::ffi::c_void;
-                        // SAFETY: hwnd is valid for the lifetime of this window.
-                        unsafe { self.renderer.request_exclusive_fullscreen(hwnd); }
+                        // SAFETY: hwnd is valid for the lifetime of this window;
+                        // surface is configured and associated with this hwnd.
+                        unsafe {
+                            self.renderer.request_exclusive_fullscreen(&self.surface, hwnd);
+                        }
                     }
                 }
             }

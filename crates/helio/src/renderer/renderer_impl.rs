@@ -1272,47 +1272,78 @@ impl Renderer {
         Ok(url)
     }
 
-    /// Attempt to enter exclusive fullscreen mode for the window this renderer
-    /// is presenting to, bypassing DWM composition for maximum display performance.
+    /// Enter true DXGI exclusive fullscreen, bypassing DWM composition entirely.
     ///
     /// # Platform behaviour
     ///
     /// | Platform | Backend | Effect |
     /// |---|---|---|
-    /// | Windows | DX12 | Walks `ID3D12Device → IDXGIDevice → IDXGIAdapter → IDXGIFactory1` and calls `MakeWindowAssociation` with no restriction flags. This lifts DXGI's default `DXGI_MWA_NO_ALT_ENTER` / `DXGI_MWA_NO_WINDOW_CHANGES` locks, granting the driver permission to perform a hardware exclusive display flip and bypass the DWM. Pair with `PresentMode::Immediate` and a borderless window covering the full monitor. |
-    /// | Windows | Vulkan | Logs a warning — `VK_EXT_full_screen_exclusive` must be requested at instance-creation time and cannot be enabled after the fact. |
+    /// | Windows | DX12 | 1. Calls `MakeWindowAssociation(hwnd, 0)` to lift DXGI's default Alt-Enter / window-change locks. 2. Obtains the `IDXGISwapChain3` from the HAL surface and calls `SetFullscreenState(TRUE, None)` to enter hardware exclusive mode, bypassing DWM. |
+    /// | Windows | Vulkan | Logs a warning — `VK_EXT_full_screen_exclusive` must be requested at instance-creation time. |
     /// | Non-Windows | any | Logs an unsupported warning. |
     ///
-    /// Returns `true` when the platform call succeeded.
+    /// Call `exit_exclusive_fullscreen` before the window is destroyed or
+    /// minimised, as DXGI requires `SetFullscreenState(FALSE)` before the
+    /// swap chain is released.
+    ///
+    /// Returns `true` when all platform calls succeeded.
     ///
     /// # Safety
-    /// On Windows `raw_hwnd` must be a valid, non-null `HWND` for the window
-    /// this renderer is presenting to.  A stale or dangling handle is undefined
-    /// behaviour.
-    pub unsafe fn request_exclusive_fullscreen(&self, raw_hwnd: *mut std::ffi::c_void) -> bool {
+    /// - `raw_hwnd` must be a valid, live `HWND` for the window this renderer
+    ///   is presenting to.
+    /// - `surface` must be the `wgpu::Surface` associated with that window and
+    ///   must already be configured (i.e. `surface.configure()` has been called).
+    pub unsafe fn request_exclusive_fullscreen(
+        &self,
+        surface: &wgpu::Surface<'_>,
+        raw_hwnd: *mut std::ffi::c_void,
+    ) -> bool {
         #[cfg(not(target_os = "windows"))]
         {
-            let _ = raw_hwnd;
+            let _ = (surface, raw_hwnd);
             log::warn!("helio: request_exclusive_fullscreen is not supported on this platform");
             return false;
         }
 
         #[cfg(target_os = "windows")]
-        exclusive_fullscreen_win(&self.device, raw_hwnd)
+        exclusive_fullscreen_win(&self.device, surface, raw_hwnd)
+    }
+
+    /// Exit DXGI exclusive fullscreen.
+    ///
+    /// Must be called before the window is closed or minimised when exclusive
+    /// fullscreen is active.  Safe to call even if not currently in exclusive
+    /// fullscreen — DXGI will simply no-op.
+    ///
+    /// # Safety
+    /// `surface` must be the `wgpu::Surface` that was passed to
+    /// `request_exclusive_fullscreen`.
+    pub unsafe fn exit_exclusive_fullscreen(&self, surface: &wgpu::Surface<'_>) {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = surface;
+        }
+
+        #[cfg(target_os = "windows")]
+        exit_exclusive_fullscreen_win(surface);
     }
 }
 
 // ── Exclusive fullscreen — Windows DX12 / Vulkan ─────────────────────────────
 
-/// Inner implementation, compiled only on Windows.
+/// Enter DXGI exclusive fullscreen on Windows.
 ///
-/// Confirms the backend is DX12 via the wgpu HAL, then creates an
-/// `IDXGIFactory1` and calls `MakeWindowAssociation(hwnd, 0)` to lift DXGI's
-/// default `DXGI_MWA_NO_ALT_ENTER` / `DXGI_MWA_NO_WINDOW_CHANGES` locks.
-/// Per MSDN, this call is effective regardless of which factory created the
-/// underlying swap chain.
+/// Steps:
+/// 1. `MakeWindowAssociation(hwnd, 0)` — lifts DXGI's default Alt-Enter /
+///    window-change locks so the driver is *permitted* to flip.
+/// 2. `IDXGISwapChain::SetFullscreenState(TRUE, None)` — actually transitions
+///    the display into exclusive mode, bypassing DWM entirely.
 #[cfg(target_os = "windows")]
-fn exclusive_fullscreen_win(device: &wgpu::Device, raw_hwnd: *mut std::ffi::c_void) -> bool {
+fn exclusive_fullscreen_win(
+    device: &wgpu::Device,
+    surface: &wgpu::Surface<'_>,
+    raw_hwnd: *mut std::ffi::c_void,
+) -> bool {
     use windows::Win32::{
         Foundation::HWND,
         Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1, DXGI_MWA_FLAGS},
@@ -1321,23 +1352,30 @@ fn exclusive_fullscreen_win(device: &wgpu::Device, raw_hwnd: *mut std::ffi::c_vo
     let hwnd = HWND(raw_hwnd);
 
     // ── DX12 path ────────────────────────────────────────────────────────────
-    // as_hal returns Option<impl Deref<Target = hal::dx12::Device>>; we only
-    // need to confirm DX12 is active — no need to touch the raw device.
     let is_dx12 = unsafe { device.as_hal::<wgpu::hal::api::Dx12>() }.is_some();
     if is_dx12 {
         let result: windows::core::Result<()> = (|| unsafe {
-            // CreateDXGIFactory1 works for MakeWindowAssociation even if wgpu
-            // used a different internal factory instance (MSDN guarantee).
+            // Step 1: lift DXGI window-association restrictions.
+            // CreateDXGIFactory1 is correct here — MakeWindowAssociation is
+            // effective regardless of which factory owns the swap chain (MSDN).
             let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
-            // DXGI_MWA_FLAGS(0) clears DXGI_MWA_NO_ALT_ENTER (2) and
-            // DXGI_MWA_NO_WINDOW_CHANGES (1), granting DXGI permission to
-            // perform a hardware exclusive fullscreen flip on this HWND.
-            factory.MakeWindowAssociation(hwnd, DXGI_MWA_FLAGS(0))
+            factory.MakeWindowAssociation(hwnd, DXGI_MWA_FLAGS(0))?;
+
+            // Step 2: call SetFullscreenState(TRUE) on the actual swap chain.
+            // This is the call that makes the transition hardware-exclusive.
+            let swap_chain = surface
+                .as_hal::<wgpu::hal::api::Dx12>()
+                .and_then(|s| s.swap_chain())
+                .ok_or_else(|| windows::core::Error::from(
+                    windows::Win32::Foundation::E_FAIL,
+                ))?;
+            // None → let DXGI pick the output (current monitor).
+            swap_chain.SetFullscreenState(true, None)
         })();
         return match result {
             Ok(()) => true,
             Err(e) => {
-                log::warn!("helio: DX12 exclusive fullscreen setup failed: {e}");
+                log::warn!("helio: DX12 exclusive fullscreen failed: {e}");
                 false
             }
         };
@@ -1355,4 +1393,22 @@ fn exclusive_fullscreen_win(device: &wgpu::Device, raw_hwnd: *mut std::ffi::c_vo
 
     log::warn!("helio: request_exclusive_fullscreen: unrecognised or unsupported backend");
     false
+}
+
+/// Exit DXGI exclusive fullscreen on Windows.
+///
+/// Calls `SetFullscreenState(FALSE)` on the swap chain.
+/// DXGI requires this before the swap chain is destroyed.
+#[cfg(target_os = "windows")]
+fn exit_exclusive_fullscreen_win(surface: &wgpu::Surface<'_>) {
+    unsafe {
+        if let Some(swap_chain) = surface
+            .as_hal::<wgpu::hal::api::Dx12>()
+            .and_then(|s| s.swap_chain())
+        {
+            if let Err(e) = swap_chain.SetFullscreenState(false, None) {
+                log::warn!("helio: exit_exclusive_fullscreen: SetFullscreenState(FALSE) failed: {e}");
+            }
+        }
+    }
 }
