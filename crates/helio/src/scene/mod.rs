@@ -89,5 +89,5 @@ pub use actor::{
 pub use camera::Camera;
 pub use core::Scene;
 pub use errors::*;
-pub use types::ObjectDescriptor;
+pub use types::{ObjectDescriptor, PickableObject};
 

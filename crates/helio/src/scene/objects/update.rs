@@ -5,10 +5,11 @@
 
 use glam::Mat4;
 
-use crate::handles::{MaterialId, ObjectId};
+use crate::handles::{MaterialId, MeshId, ObjectId};
 
 use super::super::errors::{invalid, Result};
 use super::super::helpers::{normal_matrix, sphere_to_aabb};
+use super::super::types::PickableObject;
 
 impl super::super::Scene {
     /// Update an object's world transform.
@@ -344,6 +345,19 @@ impl super::super::Scene {
         self.objects.iter_with_handles().map(|(id, rec)| {
             let transform = Mat4::from_cols_array(&rec.instance.model);
             (id, transform, rec.instance.bounds)
+        })
+    }
+
+    /// Iterate every live object, yielding a [`PickableObject`] descriptor.
+    ///
+    /// The [`crate::ScenePicker`] uses this to sync its instance list after objects
+    /// are added or removed.  O(N) over live objects — call on scene change, not
+    /// per frame.
+    pub fn iter_pickable_objects(&self) -> impl Iterator<Item = PickableObject> + '_ {
+        self.objects.iter_with_handles().map(|(id, rec)| PickableObject {
+            id,
+            mesh_id: rec.mesh,
+            transform: Mat4::from_cols_array(&rec.instance.model),
         })
     }
 }

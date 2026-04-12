@@ -6,7 +6,7 @@ use libhelio::{GpuMeshletEntry, GpuWaterHitbox, GpuWaterVolume};
 use bytemuck::{Pod, Zeroable};
 
 use crate::groups::GroupMask;
-use crate::handles::{MaterialId, MeshId};
+use crate::handles::{MaterialId, MeshId, ObjectId};
 use crate::material::MaterialTextures;
 use crate::vg::VirtualMeshId;
 
@@ -70,6 +70,22 @@ pub struct ObjectDescriptor {
     /// Movability mode. Defaults to Static when None.
     /// Set to Some(Movability::Movable) for objects that will update their transforms at runtime.
     pub movability: Option<libhelio::Movability>,
+}
+
+/// A scene object exposed for CPU-side picking queries.
+///
+/// Returned by [`crate::Scene::iter_pickable_objects`].  The caller builds a
+/// [`crate::ScenePicker`] by registering meshes and then syncing instances.
+#[derive(Debug, Clone, Copy)]
+pub struct PickableObject {
+    /// Stable handle to the object.
+    pub id: ObjectId,
+
+    /// Mesh handle — used to look up the per-mesh BVH in [`crate::ScenePicker`].
+    pub mesh_id: MeshId,
+
+    /// Current world-space model matrix (updated by `update_object_transform`).
+    pub transform: Mat4,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

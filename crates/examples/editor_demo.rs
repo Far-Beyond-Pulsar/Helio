@@ -1,34 +1,32 @@
 //! Editor Demo — Helio v3
 //!
-//! Demonstrates the editor API: object selection via ray-picking and
+//! Demonstrates the editor API: object selection via BVH ray-picking and
 //! transform gizmo overlay (translate / rotate / scale).
 //!
 //! # Controls
 //!
-//! | Input | Action |
-//! |-------|--------|
-//! | Right-click | Grab cursor for free-fly camera |
-//! | Escape | Release cursor / deselect / exit |
-//! | WASD | Fly forward/left/back/right (cursor grabbed) |
-//! | Space / Shift-L | Fly up / down (cursor grabbed) |
-//! | Left-click | Pick object under cursor (cursor *not* grabbed) |
-//! | G | Translate gizmo |
-//! | R | Rotate gizmo |
-//! | S | Scale gizmo |
-//! | Tab | Toggle editor grid |
+//! | Input           | Action                                        |
+//! |-----------------|-----------------------------------------------|
+//! | **Right-click hold** | Capture cursor for free-fly camera       |
+//! | **Right-click release** | Release cursor for object picking      |
+//! | WASD            | Fly forward / left / back / right (hold RMB)  |
+//! | Space / L-Shift | Fly up / down (hold RMB)                      |
+//! | **Left-click**  | Pick object under cursor (cursor free)        |
+//! | G               | Switch to **Translate** gizmo (cursor free)   |
+//! | R               | Switch to **Rotate** gizmo (cursor free)      |
+//! | S               | Switch to **Scale** gizmo (cursor free)       |
+//! | Tab             | Toggle editor grid                            |
+//! | Escape          | Deselect → exit                               |
 //!
-//! **Selected object** is highlighted with a yellow wireframe sphere and
-//! the active transform gizmo drawn on top:
-//!
-//! * **Translate** — red/green/blue arrows (+X/+Y/+Z)
-//! * **Rotate**    — red/green/blue rings (YZ / XZ / XY planes)
-//! * **Scale**     — red/green/blue axes with cube end-caps
+//! Picking uses a two-phase BVH ray caster (broad-phase AABB + per-mesh
+//! Möller-Trumbore triangle intersection) — no sphere approximations.
+
 
 mod v3_demo_common;
 
 use helio::{
     Camera, EditorState, GizmoMode, Movability, Renderer, RendererConfig,
-    SceneActor, required_wgpu_features, required_wgpu_limits,
+    SceneActor, ScenePicker, required_wgpu_features, required_wgpu_limits,
 };
 use v3_demo_common::{
     box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
@@ -74,13 +72,17 @@ struct AppState {
     cam_yaw: f32,
     cam_pitch: f32,
     keys: HashSet<KeyCode>,
-    cursor_grabbed: bool,
+    /// True while the right mouse button is held — cursor is grabbed and camera
+    /// is in fly mode.  Released to allow free-cursor object picking.
+    right_mouse_held: bool,
     mouse_delta: (f32, f32),
-    /// Last known cursor position in logical pixels (for ray picking).
+    /// Last known cursor position in logical pixels (only valid when cursor is free).
     cursor_pos: (f32, f32),
 
     // ── Editor ───────────────────────────────────────────────────────────────
     editor: EditorState,
+    /// BVH-accelerated ray picker; rebuilt once after scene construction.
+    picker: ScenePicker,
     /// Whether the grid overlay is visible.
     grid_enabled: bool,
 }
@@ -162,6 +164,10 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.12, 0.14, 0.18], 0.25);
 
         // ── Scene geometry ────────────────────────────────────────────────────
+        // ScenePicker is built alongside the scene so mesh BVHs are registered
+        // with the same upload data consumed by the renderer.
+        let mut picker = ScenePicker::new();
+
         // Materials
         let mat_floor = renderer
             .scene_mut()
@@ -182,37 +188,55 @@ impl ApplicationHandler for App {
             .scene_mut()
             .insert_material(make_material([0.8, 0.5, 0.9, 1.0], 0.35, 0.15, [0.0; 3], 0.0));
 
-        // Meshes
+        // Meshes — clone each upload so we can register it with the picker
+        // (the scene takes ownership of the original, picker keeps the clone).
+        let floor_upload = plane_mesh([0.0; 3], 8.0);
         let floor_mesh = renderer
             .scene_mut()
-            .insert_actor(SceneActor::mesh(plane_mesh([0.0; 3], 8.0)))
+            .insert_actor(SceneActor::mesh(floor_upload.clone()))
             .as_mesh()
             .unwrap();
+        picker.register_mesh(floor_mesh, &floor_upload);
+
+        let box_a_upload = box_mesh([0.0; 3], [0.55, 0.55, 0.55]);
         let box_a = renderer
             .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh([0.0; 3], [0.55, 0.55, 0.55])))
+            .insert_actor(SceneActor::mesh(box_a_upload.clone()))
             .as_mesh()
             .unwrap();
+        picker.register_mesh(box_a, &box_a_upload);
+
+        let box_b_upload = box_mesh([0.0; 3], [0.4, 0.75, 0.4]);
         let box_b = renderer
             .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh([0.0; 3], [0.4, 0.75, 0.4])))
+            .insert_actor(SceneActor::mesh(box_b_upload.clone()))
             .as_mesh()
             .unwrap();
+        picker.register_mesh(box_b, &box_b_upload);
+
+        let box_c_upload = box_mesh([0.0; 3], [0.6, 0.35, 0.6]);
         let box_c = renderer
             .scene_mut()
-            .insert_actor(SceneActor::mesh(box_mesh([0.0; 3], [0.6, 0.35, 0.6])))
+            .insert_actor(SceneActor::mesh(box_c_upload.clone()))
             .as_mesh()
             .unwrap();
+        picker.register_mesh(box_c, &box_c_upload);
+
+        let cube_gold_upload = cube_mesh([0.0; 3], 0.45);
         let cube_gold = renderer
             .scene_mut()
-            .insert_actor(SceneActor::mesh(cube_mesh([0.0; 3], 0.45)))
+            .insert_actor(SceneActor::mesh(cube_gold_upload.clone()))
             .as_mesh()
             .unwrap();
+        picker.register_mesh(cube_gold, &cube_gold_upload);
+
+        let sphere_a_upload = sphere_mesh([0.0; 3], 0.65);
         let sphere_a = renderer
             .scene_mut()
-            .insert_actor(SceneActor::mesh(sphere_mesh([0.0; 3], 0.65)))
+            .insert_actor(SceneActor::mesh(sphere_a_upload.clone()))
             .as_mesh()
             .unwrap();
+        picker.register_mesh(sphere_a, &sphere_a_upload);
 
         // Floor (Static — not selectable for transform, but still visible)
         let _ = insert_object_with_movability(
@@ -275,6 +299,9 @@ impl ApplicationHandler for App {
         )
         .expect("sphere");
 
+        // Sync the picker with all just-inserted objects.
+        picker.rebuild_instances(renderer.scene());
+
         // ── Lights ────────────────────────────────────────────────────────────
         renderer
             .scene_mut()
@@ -312,10 +339,11 @@ impl ApplicationHandler for App {
             cam_yaw: 0.0,
             cam_pitch: -0.35,
             keys: HashSet::new(),
-            cursor_grabbed: false,
+            right_mouse_held: false,
             mouse_delta: (0.0, 0.0),
             cursor_pos: (640.0, 360.0),
             editor: EditorState::new(),
+            picker,
             grid_enabled: true,
         });
     }
@@ -368,17 +396,19 @@ impl ApplicationHandler for App {
                             KeyCode::Escape => {
                                 if state.editor.selected().is_some() {
                                     state.editor.deselect();
-                                } else if state.cursor_grabbed {
-                                    let _ = state.window.set_cursor_grab(CursorGrabMode::None);
-                                    state.window.set_cursor_visible(true);
-                                    state.cursor_grabbed = false;
                                 } else {
                                     event_loop.exit();
                                 }
                             }
-                            KeyCode::KeyG => state.editor.set_gizmo_mode(GizmoMode::Translate),
-                            KeyCode::KeyR => state.editor.set_gizmo_mode(GizmoMode::Rotate),
-                            KeyCode::KeyS if !state.cursor_grabbed => {
+                            // Gizmo keys only fire when the cursor is free
+                            // (not flying the camera) to avoid clashes with WASD.
+                            KeyCode::KeyG if !state.right_mouse_held => {
+                                state.editor.set_gizmo_mode(GizmoMode::Translate)
+                            }
+                            KeyCode::KeyR if !state.right_mouse_held => {
+                                state.editor.set_gizmo_mode(GizmoMode::Rotate)
+                            }
+                            KeyCode::KeyS if !state.right_mouse_held => {
                                 state.editor.set_gizmo_mode(GizmoMode::Scale)
                             }
                             KeyCode::Tab => {
@@ -394,23 +424,31 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // Right-click → grab cursor for flying.
+            // Right-click PRESS → grab cursor and enter fly mode.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
                 ..
             } => {
-                if !state.cursor_grabbed {
-                    if state
+                if !state.right_mouse_held {
+                    let _ = state
                         .window
                         .set_cursor_grab(CursorGrabMode::Confined)
-                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
-                        .is_ok()
-                    {
-                        state.window.set_cursor_visible(false);
-                        state.cursor_grabbed = true;
-                    }
+                        .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked));
+                    state.window.set_cursor_visible(false);
+                    state.right_mouse_held = true;
                 }
+            }
+
+            // Right-click RELEASE → restore cursor for object picking.
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Right,
+                ..
+            } => {
+                let _ = state.window.set_cursor_grab(CursorGrabMode::None);
+                state.window.set_cursor_visible(true);
+                state.right_mouse_held = false;
             }
 
             // Left-click → pick object (only when cursor is free).
@@ -419,12 +457,12 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                if !state.cursor_grabbed {
+                if !state.right_mouse_held {
                     let sz = state.window.inner_size();
                     let width = sz.width as f32;
                     let height = sz.height as f32;
 
-                    // Rebuild the camera to get the current view-proj.
+                    // Reconstruct the current view-projection matrix.
                     let (sy, cy) = state.cam_yaw.sin_cos();
                     let (sp, cp) = state.cam_pitch.sin_cos();
                     let fwd = glam::Vec3::new(sy * cp, sp, -cy * cp);
@@ -449,7 +487,13 @@ impl ApplicationHandler for App {
                         height,
                         vp_inv,
                     );
-                    state.editor.pick(state.renderer.scene(), ray_o, ray_d);
+
+                    // BVH ray cast — exact triangle intersection.
+                    if let Some(hit) = state.picker.cast_ray(ray_o, ray_d) {
+                        state.editor.select(hit.object_id);
+                    } else {
+                        state.editor.deselect();
+                    }
                 }
             }
 
@@ -474,7 +518,7 @@ impl ApplicationHandler for App {
     ) {
         let Some(s) = &mut self.state else { return };
         if let DeviceEvent::MouseMotion { delta } = event {
-            if s.cursor_grabbed {
+            if s.right_mouse_held {
                 s.mouse_delta.0 += delta.0 as f32;
                 s.mouse_delta.1 += delta.1 as f32;
             }
@@ -497,29 +541,30 @@ impl AppState {
         const LOOK: f32 = 0.0025;
         const MOVE: f32 = 6.0;
 
-        if self.cursor_grabbed {
+        // Only rotate and move when the right mouse button is held.
+        if self.right_mouse_held {
             self.cam_yaw += self.mouse_delta.0 * LOOK;
             self.cam_pitch -= self.mouse_delta.1 * LOOK;
             self.cam_pitch = self
                 .cam_pitch
                 .clamp(-std::f32::consts::FRAC_PI_2 * 0.99, std::f32::consts::FRAC_PI_2 * 0.99);
+
+            let (sy, cy) = self.cam_yaw.sin_cos();
+            let fwd = glam::Vec3::new(sy, 0.0, -cy);
+            let right = glam::Vec3::new(cy, 0.0, sy);
+
+            let mut vel = glam::Vec3::ZERO;
+            if self.keys.contains(&KeyCode::KeyW) { vel += fwd; }
+            if self.keys.contains(&KeyCode::KeyS) { vel -= fwd; }
+            if self.keys.contains(&KeyCode::KeyD) { vel += right; }
+            if self.keys.contains(&KeyCode::KeyA) { vel -= right; }
+            if self.keys.contains(&KeyCode::Space)     { vel += glam::Vec3::Y; }
+            if self.keys.contains(&KeyCode::ShiftLeft) { vel -= glam::Vec3::Y; }
+            if vel.length_squared() > 0.0 {
+                self.cam_pos += vel.normalize() * MOVE * dt;
+            }
         }
         self.mouse_delta = (0.0, 0.0);
-
-        let (sy, cy) = self.cam_yaw.sin_cos();
-        let fwd = glam::Vec3::new(sy, 0.0, -cy);
-        let right = glam::Vec3::new(cy, 0.0, sy);
-
-        let mut vel = glam::Vec3::ZERO;
-        if self.keys.contains(&KeyCode::KeyW) { vel += fwd; }
-        if self.keys.contains(&KeyCode::KeyS) { vel -= fwd; }
-        if self.keys.contains(&KeyCode::KeyD) { vel += right; }
-        if self.keys.contains(&KeyCode::KeyA) { vel -= right; }
-        if self.keys.contains(&KeyCode::Space) { vel += glam::Vec3::Y; }
-        if self.keys.contains(&KeyCode::ShiftLeft) { vel -= glam::Vec3::Y; }
-        if vel.length_squared() > 0.0 {
-            self.cam_pos += vel.normalize() * MOVE * dt;
-        }
     }
 
     fn render(&mut self) {
@@ -544,8 +589,8 @@ impl AppState {
         self.renderer.debug_clear();
         self.editor.draw_gizmos(&mut self.renderer);
 
-        // Draw a small cross at the screen centre when cursor is free (pick aid).
-        if !self.cursor_grabbed {
+        // Draw a small crosshair at the screen centre when cursor is free (pick aid).
+        if !self.right_mouse_held {
             let hit_point = self.cam_pos + fwd * 0.1;
             let r = 0.004;
             self.renderer.debug_line(
