@@ -59,31 +59,27 @@ pub enum GizmoAxis {
 }
 
 impl GizmoAxis {
-    /// Unit vector for this axis in world space.
-    fn vec3(self) -> Vec3 {
-        match self {
-            GizmoAxis::X => Vec3::X,
-            GizmoAxis::Y => Vec3::Y,
-            GizmoAxis::Z => Vec3::Z,
-        }
-    }
-
-    /// Tangent + bitangent spanning the plane perpendicular to this axis.
-    fn ring_frame(self) -> (Vec3, Vec3) {
-        match self {
-            GizmoAxis::X => (Vec3::Y, Vec3::Z),
-            GizmoAxis::Y => (Vec3::X, Vec3::Z),
-            GizmoAxis::Z => (Vec3::X, Vec3::Y),
-        }
-    }
-
-    /// Column index in a matrix (0 = X, 1 = Y, 2 = Z).
+    /// Column index in a matrix / local_axes array (0 = X, 1 = Y, 2 = Z).
     fn col(self) -> usize {
         match self {
             GizmoAxis::X => 0,
             GizmoAxis::Y => 1,
             GizmoAxis::Z => 2,
         }
+    }
+}
+
+/// Given a set of local axes and the axis we are rotating around, return the
+/// two tangent vectors that span the ring plane.
+fn ring_frame(axis: GizmoAxis, local_axes: [Vec3; 3]) -> (Vec3, Vec3) {
+    // Each pair must satisfy (tan × bitan) == axis_dir to keep right-handed winding.
+    //   X: Y × Z = X  ✓
+    //   Y: Z × X = Y  ✓  (reversed from X/Z order — X × Z = −Y which inverts drag)
+    //   Z: X × Y = Z  ✓
+    match axis {
+        GizmoAxis::X => (local_axes[1], local_axes[2]),
+        GizmoAxis::Y => (local_axes[2], local_axes[0]),
+        GizmoAxis::Z => (local_axes[0], local_axes[1]),
     }
 }
 
@@ -97,10 +93,11 @@ enum DragState {
         axis: GizmoAxis,
         /// Full object transform captured when the drag started.
         initial_transform: Mat4,
-        /// Gizmo centre frozen at drag-start. Using the live scene bounds would
-        /// drift because the object moves during the drag, shifting the reference
-        /// point and causing feedback instability.
+        /// Gizmo centre frozen at drag-start (transform origin, not bounds centroid).
         gizmo_center: Vec3,
+        /// Object-local axes frozen at drag-start so the drag constraint stays
+        /// consistent even as the object rotates underneath the cursor.
+        local_axes: [Vec3; 3],
         /// For Translate/Scale: signed t along the axis at drag-start.
         /// For Rotate: angle in radians at drag-start in the ring plane.
         axis_t_start: f32,
@@ -214,11 +211,11 @@ impl EditorState {
             self.hovered_axis = None;
             return false;
         };
-        let Some((center, size)) = gizmo_params(id, scene) else {
+        let Some((center, size, local_axes)) = object_gizmo_info(id, scene) else {
             self.hovered_axis = None;
             return false;
         };
-        self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode);
+        self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode, local_axes);
         self.hovered_axis.is_some()
     }
 
@@ -235,10 +232,10 @@ impl EditorState {
             None    => return false,
         };
         let Some(id) = self.selected else { return false };
-        let Some((center, _)) = gizmo_params(id, scene) else { return false };
+        let Some((center, _, local_axes)) = object_gizmo_info(id, scene) else { return false };
         let Ok(initial_transform) = scene.get_object_transform(id) else { return false };
 
-        let axis_dir     = axis.vec3();
+        let axis_dir     = local_axes[axis.col()];
         let axis_t_start = match self.gizmo_mode {
             GizmoMode::Translate | GizmoMode::Scale => {
                 match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
@@ -251,15 +248,17 @@ impl EditorState {
                     Some(h) => h,
                     None    => return false,
                 };
-                let (tan, bitan) = axis.ring_frame();
+                let (tan, bitan) = ring_frame(axis, local_axes);
                 let to_hit = hit - center;
                 to_hit.dot(bitan).atan2(to_hit.dot(tan))
             }
         };
 
-        // Freeze the gizmo centre so update_drag always measures against the same
-        // reference point regardless of how the object moves.
-        self.drag = DragState::Active { axis, initial_transform, gizmo_center: center, axis_t_start };
+        // Freeze centre and local axes so update_drag always measures against the
+        // same reference regardless of how the object moves.
+        self.drag = DragState::Active {
+            axis, initial_transform, gizmo_center: center, local_axes, axis_t_start,
+        };
         true
     }
 
@@ -267,20 +266,25 @@ impl EditorState {
     ///
     /// Call on every `CursorMoved` event while the left button is held.
     pub fn update_drag(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &mut Scene) {
-        let (axis, initial_transform, gizmo_center, axis_t_start, gizmo_size) = match &self.drag {
-            DragState::Active { axis, initial_transform, gizmo_center, axis_t_start } => {
-                // Re-fetch size from scene (cheap bounds query, size doesn't change much).
-                let id = match self.selected { Some(id) => id, None => return };
-                let size = gizmo_params(id, scene).map(|(_, s)| s).unwrap_or(1.0);
-                (*axis, *initial_transform, *gizmo_center, *axis_t_start, size)
-            }
-            DragState::Idle => return,
-        };
+        let (axis, initial_transform, gizmo_center, local_axes, axis_t_start, gizmo_size) =
+            match &self.drag {
+                DragState::Active {
+                    axis, initial_transform, gizmo_center, local_axes, axis_t_start,
+                } => {
+                    let id   = match self.selected { Some(id) => id, None => return };
+                    let size = scene.get_object_bounds(id)
+                        .map(|b| (b[3].max(0.3) * 1.8).max(0.8))
+                        .unwrap_or(1.0);
+                    (*axis, *initial_transform, *gizmo_center, *local_axes, *axis_t_start, size)
+                }
+                DragState::Idle => return,
+            };
         let Some(id) = self.selected else { return };
-        let axis_dir = axis.vec3();
-        // Always use the frozen gizmo_center — not the live scene bounds — so the
-        // reference point stays fixed while the object moves under the cursor.
-        let center = gizmo_center;
+
+        // Use the frozen local axis direction and frozen gizmo centre so the
+        // constraint doesn't shift as the object moves.
+        let axis_dir = local_axes[axis.col()];
+        let center   = gizmo_center;
 
         let new_transform = match self.gizmo_mode {
             GizmoMode::Translate => {
@@ -324,7 +328,7 @@ impl EditorState {
                     Some(h) => h,
                     None    => return,
                 };
-                let (tan, bitan) = axis.ring_frame();
+                let (tan, bitan) = ring_frame(axis, local_axes);
                 let to_hit      = hit - center;
                 let angle_now   = to_hit.dot(bitan).atan2(to_hit.dot(tan));
                 let angle_delta = angle_now - axis_t_start;
@@ -385,22 +389,21 @@ impl EditorState {
     pub fn draw_gizmos(&self, renderer: &mut Renderer) {
         let Some(id) = self.selected else { return };
 
-        let bounds = match renderer.scene().get_object_bounds(id) {
-            Ok(b)  => b,
-            Err(_) => return,
-        };
-        let center     = Vec3::new(bounds[0], bounds[1], bounds[2]);
-        let radius     = bounds[3].max(0.3_f32);
-        let gizmo_size = (radius * 1.8_f32).max(0.8_f32);
+        let Some((center, gizmo_size, local_axes)) =
+            object_gizmo_info(id, renderer.scene()) else { return };
 
-        // Selection highlight: thin yellow wire sphere.
-        renderer.debug_sphere(center.to_array(), radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
+        // Selection highlight: wire sphere around the bounding volume.
+        if let Ok(b) = renderer.scene().get_object_bounds(id) {
+            let radius = b[3].max(0.3_f32);
+            let bc     = Vec3::new(b[0], b[1], b[2]);
+            renderer.debug_sphere(bc.to_array(), radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
+        }
 
         let hov = self.hovered_axis;
         match self.gizmo_mode {
-            GizmoMode::Translate => draw_translate_gizmo(renderer, center, gizmo_size, hov),
-            GizmoMode::Rotate    => draw_rotate_gizmo   (renderer, center, gizmo_size, hov),
-            GizmoMode::Scale     => draw_scale_gizmo    (renderer, center, gizmo_size, hov),
+            GizmoMode::Translate => draw_translate_gizmo(renderer, center, gizmo_size, hov, local_axes),
+            GizmoMode::Rotate    => draw_rotate_gizmo   (renderer, center, gizmo_size, hov, local_axes),
+            GizmoMode::Scale     => draw_scale_gizmo    (renderer, center, gizmo_size, hov, local_axes),
         }
     }
 }
@@ -439,6 +442,7 @@ fn draw_translate_gizmo(
     center: Vec3,
     size: f32,
     hovered: Option<GizmoAxis>,
+    local_axes: [Vec3; 3],
 ) {
     let shaft  = size * 0.75;
     let cone_h = size * 0.22;
@@ -446,15 +450,14 @@ fn draw_translate_gizmo(
     const SEGS: u32 = 16;
 
     for (axis, base) in [(GizmoAxis::X, RED), (GizmoAxis::Y, GREEN), (GizmoAxis::Z, BLUE)] {
-        let h          = axis.vec3();
-        let tip        = center + h * shaft;
-        let apex       = tip + h * cone_h;
-        let is_hov     = hovered == Some(axis);
-        let lc         = line_col(base, is_hov);
-        let fc         = fill_col(base, is_hov);
+        let h      = local_axes[axis.col()];
+        let tip    = center + h * shaft;
+        let apex   = tip + h * cone_h;
+        let is_hov = hovered == Some(axis);
+        let lc     = line_col(base, is_hov);
+        let fc     = fill_col(base, is_hov);
 
         renderer.debug_line(center.to_array(), tip.to_array(), lc);
-        // Filled cone then wireframe outline for crispness.
         renderer.debug_filled_cone(apex.to_array(), (-h).to_array(), cone_h, cone_r, fc, SEGS);
         renderer.debug_cone       (apex.to_array(), (-h).to_array(), cone_h, cone_r, lc, SEGS);
     }
@@ -465,19 +468,19 @@ fn draw_rotate_gizmo(
     center: Vec3,
     size: f32,
     hovered: Option<GizmoAxis>,
+    local_axes: [Vec3; 3],
 ) {
     const SEGS: u32 = 64;
     const BAND: f32 = 0.055; // annulus half-width as fraction of gizmo size
 
     for (axis, base) in [(GizmoAxis::X, RED), (GizmoAxis::Y, GREEN), (GizmoAxis::Z, BLUE)] {
-        let (tan, bitan) = axis.ring_frame();
+        let (tan, bitan) = ring_frame(axis, local_axes);
         let is_hov       = hovered == Some(axis);
         let lc           = line_col(base, is_hov);
         let fc           = fill_col(base, is_hov);
 
         draw_ring(renderer, center, tan, bitan, size, lc, SEGS);
 
-        // Filled annulus band around the line ring.
         let inner = size * (1.0 - BAND);
         let outer = size * (1.0 + BAND);
         draw_annulus(renderer, center, tan, bitan, inner, outer, fc, SEGS);
@@ -489,19 +492,19 @@ fn draw_scale_gizmo(
     center: Vec3,
     size: f32,
     hovered: Option<GizmoAxis>,
+    local_axes: [Vec3; 3],
 ) {
     let shaft    = size * 0.82;
     let box_half = size * 0.07;
 
     for (axis, base) in [(GizmoAxis::X, RED), (GizmoAxis::Y, GREEN), (GizmoAxis::Z, BLUE)] {
-        let h      = axis.vec3();
+        let h      = local_axes[axis.col()];
         let tip    = center + h * shaft;
         let is_hov = hovered == Some(axis);
         let lc     = line_col(base, is_hov);
         let fc     = fill_col(base, is_hov);
 
         renderer.debug_line(center.to_array(), tip.to_array(), lc);
-        // Filled box cap then wireframe outline.
         renderer.debug_filled_box(tip.to_array(), box_half, fc);
         draw_box_wire(renderer, tip, box_half, lc);
     }
@@ -579,22 +582,39 @@ fn draw_box_wire(renderer: &mut Renderer, center: Vec3, half: f32, color: [f32; 
 // Gizmo hit-testing
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Gizmo world-space centre + uniform size.
-fn gizmo_params(id: ObjectId, scene: &Scene) -> Option<(Vec3, f32)> {
-    let b      = scene.get_object_bounds(id).ok()?;
-    let center = Vec3::new(b[0], b[1], b[2]);
-    let radius = b[3].max(0.3);
-    let size   = (radius * 1.8).max(0.8);
-    Some((center, size))
+/// Returns `(gizmo_center, size, local_axes)` for the given object.
+///
+/// * `gizmo_center` — world-space transform origin (`col(3).xyz`), i.e. the
+///   object's pivot point.  Deliberately *not* the bounding-sphere centroid so
+///   the gizmo sits exactly at the object's transform origin.
+/// * `size` — uniform visual scale derived from the bounding-sphere radius.
+/// * `local_axes` — normalized columns 0-2 of the object's world transform.
+///   These match the directions the gizmo handles point in so that all drawing,
+///   hit-testing, and drag math automatically follows the object's orientation.
+fn object_gizmo_info(id: ObjectId, scene: &Scene) -> Option<(Vec3, f32, [Vec3; 3])> {
+    let transform = scene.get_object_transform(id).ok()?;
+    let bounds    = scene.get_object_bounds(id).ok()?;
+    // Pivot: world-space position of the object's local origin.
+    let center = transform.col(3).truncate();
+    // Size from the bounding-sphere radius (independent of orientation).
+    let size = (bounds[3].max(0.3) * 1.8).max(0.8);
+    // Normalized local axes — these are the directions the gizmo arms point.
+    let local_axes = [
+        transform.col(0).truncate().normalize_or_zero(),
+        transform.col(1).truncate().normalize_or_zero(),
+        transform.col(2).truncate().normalize_or_zero(),
+    ];
+    Some((center, size, local_axes))
 }
 
-/// Return which gizmo axis handle (if any) contains the cursor ray.
+/// Return which gizmo axis handle (if any) the cursor ray intersects.
 fn hit_gizmo(
     ray_o: Vec3,
     ray_d: Vec3,
     center: Vec3,
     size: f32,
     mode: GizmoMode,
+    local_axes: [Vec3; 3],
 ) -> Option<GizmoAxis> {
     let threshold = size * 0.12;
 
@@ -609,7 +629,7 @@ fn hit_gizmo(
             let mut best_d = threshold;
             let mut best   = None;
             for axis in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
-                let end = center + axis.vec3() * len;
+                let end = center + local_axes[axis.col()] * len;
                 let d   = ray_to_segment_dist(ray_o, ray_d, center, end);
                 if d < best_d {
                     best_d = d;
@@ -626,7 +646,7 @@ fn hit_gizmo(
             let mut best_d = ring_band;
             let mut best   = None;
             for axis in [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z] {
-                let normal = axis.vec3();
+                let normal = local_axes[axis.col()];
                 let denom  = ray_d.dot(normal);
                 if denom.abs() < 1e-6 { continue; }
                 let t = (center - ray_o).dot(normal) / denom;
