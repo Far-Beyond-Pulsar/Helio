@@ -97,8 +97,12 @@ enum DragState {
         axis: GizmoAxis,
         /// Full object transform captured when the drag started.
         initial_transform: Mat4,
-        /// For Translate/Scale: signed t along axis at drag-start.
-        /// For Rotate: angle in radians at drag-start.
+        /// Gizmo centre frozen at drag-start. Using the live scene bounds would
+        /// drift because the object moves during the drag, shifting the reference
+        /// point and causing feedback instability.
+        gizmo_center: Vec3,
+        /// For Translate/Scale: signed t along the axis at drag-start.
+        /// For Rotate: angle in radians at drag-start in the ring plane.
         axis_t_start: f32,
     },
 }
@@ -234,7 +238,7 @@ impl EditorState {
         let Some((center, _)) = gizmo_params(id, scene) else { return false };
         let Ok(initial_transform) = scene.get_object_transform(id) else { return false };
 
-        let axis_dir    = axis.vec3();
+        let axis_dir     = axis.vec3();
         let axis_t_start = match self.gizmo_mode {
             GizmoMode::Translate | GizmoMode::Scale => {
                 match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
@@ -253,7 +257,9 @@ impl EditorState {
             }
         };
 
-        self.drag = DragState::Active { axis, initial_transform, axis_t_start };
+        // Freeze the gizmo centre so update_drag always measures against the same
+        // reference point regardless of how the object moves.
+        self.drag = DragState::Active { axis, initial_transform, gizmo_center: center, axis_t_start };
         true
     }
 
@@ -261,15 +267,20 @@ impl EditorState {
     ///
     /// Call on every `CursorMoved` event while the left button is held.
     pub fn update_drag(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &mut Scene) {
-        let (axis, initial_transform, axis_t_start) = match &self.drag {
-            DragState::Active { axis, initial_transform, axis_t_start } => {
-                (*axis, *initial_transform, *axis_t_start)
+        let (axis, initial_transform, gizmo_center, axis_t_start, gizmo_size) = match &self.drag {
+            DragState::Active { axis, initial_transform, gizmo_center, axis_t_start } => {
+                // Re-fetch size from scene (cheap bounds query, size doesn't change much).
+                let id = match self.selected { Some(id) => id, None => return };
+                let size = gizmo_params(id, scene).map(|(_, s)| s).unwrap_or(1.0);
+                (*axis, *initial_transform, *gizmo_center, *axis_t_start, size)
             }
             DragState::Idle => return,
         };
         let Some(id) = self.selected else { return };
-        let Some((center, gizmo_size)) = gizmo_params(id, scene) else { return };
         let axis_dir = axis.vec3();
+        // Always use the frozen gizmo_center — not the live scene bounds — so the
+        // reference point stays fixed while the object moves under the cursor.
+        let center = gizmo_center;
 
         let new_transform = match self.gizmo_mode {
             GizmoMode::Translate => {
@@ -287,8 +298,8 @@ impl EditorState {
                     None    => return,
                 };
                 // World-unit drag → scale fraction relative to gizmo size.
-                let delta       = t_now - axis_t_start;
-                let sensitivity = 1.5 / gizmo_size.max(0.01);
+                let delta        = t_now - axis_t_start;
+                let sensitivity  = 1.5 / gizmo_size.max(0.01);
                 let scale_factor = (1.0 + delta * sensitivity).max(0.01_f32);
 
                 // Re-scale the column that corresponds to this axis.
@@ -638,20 +649,26 @@ fn hit_gizmo(
 
 /// Minimum distance from a world ray to a finite line segment.
 fn ray_to_segment_dist(ray_o: Vec3, ray_d: Vec3, seg_a: Vec3, seg_b: Vec3) -> f32 {
+    // Dan Sunday's line-to-line closest-approach algorithm.
+    // w  = ray_o − seg_a  (vector between the two starting points)
+    // sc = parameter along segment [0,1]
+    // tc = parameter along ray     [0,∞)
     let d     = seg_b - seg_a;
     let w     = ray_o - seg_a;
-    let a     = d.dot(d);
-    let b     = d.dot(ray_d);
-    let e     = d.dot(w);
-    let f     = ray_d.dot(w);
-    let denom = a - b * b;
+    let a     = d.dot(d);       // squared length of segment
+    let b     = d.dot(ray_d);   // projection of ray_d onto segment dir
+    let e     = d.dot(w);       // projection of w onto segment dir
+    let f     = ray_d.dot(w);   // projection of w onto ray dir
+    let denom = a - b * b;      // = |d|²·|ray_d|²·sin²θ ≥ 0
 
     let (sc, tc) = if denom.abs() > 1e-8 {
-        let sc = ((b * f - e) / denom).clamp(0.0, 1.0);
-        let tc = ((a * f - b * e) / denom).max(0.0);
+        // sc = (e − b·f) / denom,  tc = (b·e − a·f) / denom  (Sunday 2001)
+        let sc = ((e - b * f) / denom).clamp(0.0, 1.0);
+        let tc = ((b * e - a * f) / denom).max(0.0);
         (sc, tc)
     } else {
-        (0.5, 0.5)
+        // Nearly parallel — project ray origin onto segment as fallback.
+        (e / a.max(1e-8), 0.0)
     };
 
     let closest_seg = seg_a + d * sc;
@@ -663,13 +680,17 @@ fn ray_to_segment_dist(ray_o: Vec3, ray_d: Vec3, seg_a: Vec3, seg_b: Vec3) -> f3
 ///
 /// Returns `None` when the ray is nearly parallel to the axis.
 fn ray_to_axis_t(ray_o: Vec3, ray_d: Vec3, axis_origin: Vec3, axis_dir: Vec3) -> Option<f32> {
+    // Returns the parameter s along the axis line such that (axis_origin + s·axis_dir)
+    // is the point on the axis closest to the ray.  Derivation: minimise the distance
+    // between P = axis_origin + s·axis_dir  and  Q = ray_o + t·ray_d.
+    // From ∂/∂s = 0: s·(1 − b²) = d − b·e   (Dan Sunday 2001)
     let w     = ray_o - axis_origin;
     let b     = axis_dir.dot(ray_d);
     let d     = axis_dir.dot(w);
     let e     = ray_d.dot(w);
     let denom = 1.0 - b * b;
     if denom.abs() < 1e-8 { return None; }
-    Some((b * e - d) / denom)
+    Some((d - b * e) / denom)
 }
 
 /// Ray–plane intersection; returns world hit point or `None` if parallel/behind.
