@@ -436,7 +436,7 @@ impl Scene {
             self.gpu_scene.movable_light_count = movable_lights.len() as u32;
             
             if movable_lights.len() < light_rec_count {
-                log::debug!(
+                log::trace!(
                     "[helio] Filtered lights for runtime: {} movable, {} static/stationary (baked)",
                     movable_lights.len(),
                     light_rec_count - movable_lights.len()
