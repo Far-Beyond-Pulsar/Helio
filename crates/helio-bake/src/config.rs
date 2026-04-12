@@ -1,5 +1,23 @@
 use std::path::PathBuf;
 
+/// Quality settings for the built-in CPU lightmap baker.
+///
+/// The CPU baker uses the **exact** attenuation formula from the runtime
+/// deferred shader, so baked and dynamic lights match in brightness.
+/// It only evaluates direct lighting (one shadow ray per light per texel),
+/// giving clean, noise-free results without a denoiser.
+#[derive(Clone, Debug)]
+pub struct CpuLightmapConfig {
+    /// Atlas width and height in texels.  Higher = more texel density.
+    pub resolution: u32,
+    /// Constant irradiance/π added to every lit texel.
+    ///
+    /// Prevents pitch-black shadows by acting as a dim ambient fill.
+    /// Stored in the same units as the lightmap (pre-divided by π).
+    /// Default: `[0.06, 0.06, 0.06]` (≈ 6 % white fill).
+    pub ambient_fill: [f32; 3],
+}
+
 /// Configuration for offline baking.
 ///
 /// Controls which passes run, their quality settings, and the cache directory.
@@ -25,6 +43,12 @@ pub struct BakeConfig {
     /// pre-computed AO that reads correctly on first frame.
     /// Set to `None` to skip (SSAO still runs at runtime).
     pub ao: Option<nebula::ao::AoConfig>,
+
+    /// Bake full-scene PBR lightmaps using the CPU direct-light baker.
+    ///
+    /// Uses the same attenuation formula as the runtime deferred shader;
+    /// no Nebula GPU path tracer is involved.  Set to `None` to skip.
+    pub cpu_lightmap: Option<CpuLightmapConfig>,
 
     /// Bake full-scene PBR lightmaps (direct + multi-bounce indirect illumination).
     ///
@@ -69,7 +93,11 @@ impl Default for BakeConfig {
             scene_name: "scene".into(),
             cache_dir: "bake_cache".into(),
             ao: Some(nebula::ao::AoConfig::default()),
-            lightmap: Some(nebula::light::LightmapConfig::fast()),
+            cpu_lightmap: Some(CpuLightmapConfig {
+                resolution:    1024,
+                ambient_fill:  [0.06, 0.06, 0.06],
+            }),
+            lightmap: None,
             probes: None,
             pvs: None,
         }
@@ -77,27 +105,21 @@ impl Default for BakeConfig {
 }
 
 impl BakeConfig {
-    /// Fast preset: direct-only lightmap (no GI bounces), no probes or PVS.
+    /// Fast preset: CPU direct-light baker, no probes or PVS.
     ///
-    /// Uses `bounce_count = 0` — Nebula evaluates analytic per-light shadow
-    /// rays only (deterministic, no Monte Carlo randomness).  The result is
-    /// clean and noise-free because no hemisphere samples are fired.  Bake
-    /// times are very fast (seconds).
-    ///
-    /// Use [`BakeConfig::medium`] for multi-bounce GI, or [`BakeConfig::ultra`]
-    /// for production quality.
+    /// Evaluates direct lighting with the same attenuation formula as the
+    /// runtime deferred shader.  One deterministic shadow ray per light per
+    /// texel — zero noise, no denoiser, sub-second bake times for typical scenes.
     pub fn fast(scene_name: impl Into<String>) -> Self {
         Self {
             scene_name: scene_name.into(),
             cache_dir: "bake_cache".into(),
             ao: Some(nebula::ao::AoConfig::fast()),
-            lightmap: Some(nebula::light::LightmapConfig {
-                resolution:         1024,
-                samples_per_texel:  1,    // direct-only → 1 sample suffices (deterministic)
-                bounce_count:       0,    // no indirect bounces → zero Monte Carlo noise
-                denoise:            false, // nothing to denoise
-                ..nebula::light::LightmapConfig::default()
+            cpu_lightmap: Some(CpuLightmapConfig {
+                resolution:   1024,
+                ambient_fill: [0.06, 0.06, 0.06],
             }),
+            lightmap: None,
             probes: None,
             pvs: None,
         }
@@ -112,6 +134,7 @@ impl BakeConfig {
             scene_name: scene_name.into(),
             cache_dir: "bake_cache".into(),
             ao: Some(nebula::ao::AoConfig::default()),
+            cpu_lightmap: None,
             lightmap: Some(nebula::light::LightmapConfig {
                 resolution:         1024,
                 samples_per_texel:  64,
@@ -132,6 +155,7 @@ impl BakeConfig {
             scene_name: scene_name.into(),
             cache_dir: "bake_cache".into(),
             ao: Some(nebula::ao::AoConfig::ultra()),
+            cpu_lightmap: None,
             lightmap: Some(nebula::light::LightmapConfig::ultra()),
             probes: Some(ProbeSpec {
                 positions: vec![[0.0, 2.0, 0.0]],

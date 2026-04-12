@@ -9,7 +9,7 @@ use crate::bake::BakeError;
 /// Magic header written at the start of every cache file.
 const CACHE_MAGIC: &[u8; 8] = b"HLBKCACH";
 /// Bump when the serialized layout changes so stale files are rejected.
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 
 // ── On-disk representations ────────────────────────────────────────────────────
 

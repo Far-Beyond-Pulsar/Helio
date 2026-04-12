@@ -6,6 +6,7 @@ use nebula::prelude::{BakeContext, BakePass, NullReporter, SceneGeometry};
 use crate::cache::{BakeCache, CachedAo, CachedAtlasRegion, CachedLightmap, CachedProbes, CachedPvs};
 use crate::config::BakeConfig;
 use crate::data::BakedData;
+use crate::cpu_lightmap;
 
 // ── Error type ─────────────────────────────────────────────────────────────────
 
@@ -50,18 +51,30 @@ pub fn run_bake_blocking(
     let cache = BakeCache::new(&config.cache_dir, &config.scene_name);
     cache.ensure_dir()?;
 
-    // ── Determine which passes need GPU work ───────────────────────────────────
-    let need_ao = config.ao.is_some() && cache.load_ao()?.is_none();
-    let need_lm = config.lightmap.is_some() && cache.load_lightmap()?.is_none();
-    let need_probes = config.probes.is_some() && cache.load_probes()?.is_none();
-    let need_pvs = config.pvs.is_some() && cache.load_pvs()?.is_none();
+    // ── Determine which passes need work ──────────────────────────────────────
+    let need_ao      = config.ao.is_some()          && cache.load_ao()?.is_none();
+    let need_cpu_lm  = config.cpu_lightmap.is_some() && cache.load_lightmap()?.is_none();
+    let need_lm      = config.lightmap.is_some()     && cache.load_lightmap()?.is_none() && !need_cpu_lm;
+    let need_probes  = config.probes.is_some()       && cache.load_probes()?.is_none();
+    let need_pvs     = config.pvs.is_some()          && cache.load_pvs()?.is_none();
 
-    // ── GPU baking (all cache misses in one Nebula context) ────────────────────
+    // ── CPU lightmap (our baker — no Nebula GPU context needed) ───────────────
+    if need_cpu_lm {
+        let cfg = config.cpu_lightmap.as_ref().unwrap();
+        log::info!("[helio-bake] CPU lightmap bake: {}×{} atlas…", cfg.resolution, cfg.resolution);
+        let cached = cpu_lightmap::bake_lightmap(scene, cfg.resolution, cfg.ambient_fill);
+        cache.save_lightmap(&cached)?;
+        log::info!("[helio-bake] CPU lightmap done.");
+    }
+
+    // ── GPU baking (all cache misses in one Nebula context) ───────────────────
     if !need_ao && !need_lm && !need_probes && !need_pvs {
-        log::info!(
-            "[helio-bake] '{}' — all passes loaded from disk cache, no GPU bake needed.",
-            config.scene_name
-        );
+        if !need_cpu_lm {
+            log::info!(
+                "[helio-bake] '{}' — all passes loaded from disk cache, no GPU bake needed.",
+                config.scene_name
+            );
+        }
     }
     if need_ao || need_lm || need_probes || need_pvs {
         log::info!(

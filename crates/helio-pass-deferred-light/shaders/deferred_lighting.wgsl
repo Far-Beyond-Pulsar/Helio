@@ -815,7 +815,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let lightmap_uv     = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
     let has_lightmap    = lightmap_uv.x >= 0.0;  // sentinel: negative x = no lightmap
     let lightmap_sample = textureSample(baked_lightmap, baked_lightmap_sampler, lightmap_uv).rgb;
-    let lightmap_indirect = lightmap_sample * albedo;  // lightmap stores irradiance; modulate by albedo
+    // Nebula stores Σ(radiance · NdotL) — the same weighted sum pbr_direct_light accumulates
+    // into Lo.  No extra 1/π factor here: Nebula does not divide by π in the bake shader,
+    // so neither do we.  This convention matches Unreal Engine's lightmap pipeline.
+    let lightmap_indirect = lightmap_sample * albedo;
 
     // ── Indirect specular: environment cubemap ────────────────────────────────
     let R            = reflect(-V, N);
@@ -850,11 +853,23 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // 2. Blend in RC when available (runtime dynamic GI)
     // 3. Blend in lightmap when available (pre-baked static GI, highest quality)
     var ambient_final = mix(hemi, diff_ind, rc_weight);
-    ambient_final     = mix(ambient_final, lightmap_indirect, lm_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
-    let indirect  = (ambient_final + spec_ind) * ao_combined;
-    var color     = Lo + indirect;
+    //
+    // Unreal-style "Static light" model:
+    //   • The baked lightmap encodes TOTAL LIGHTING (direct shadow + indirect GI)
+    //     from every baked light.  For lightmapped surfaces Lo is suppressed so the
+    //     same lights are not double-counted.
+    //   • AO is NOT applied to the lightmap.  The path-traced bake already accounts
+    //     for per-texel occlusion via shadow rays; applying screen-space AO on top
+    //     would double-darken the result.
+    //   • For un-lightmapped surfaces the normal dynamic path applies AO to the
+    //     hemisphere/RC ambient term as usual.
+    let lo_final      = Lo * (1.0 - lm_weight);          // suppress Lo for baked pixels
+    let indirect_dyn  = (ambient_final + spec_ind) * ao_combined;  // AO on dynamic GI
+    let indirect_bake =  lightmap_indirect + spec_ind;              // no AO on lightmap
+    let indirect      = select(indirect_dyn, indirect_bake, has_lightmap);
+    var color         = lo_final + indirect;
     color        += emissive;               // emissive from G-buffer
 
     // ── Water caustics ────────────────────────────────────────────────────────
