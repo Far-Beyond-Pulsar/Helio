@@ -18,8 +18,10 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
 
 pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
-        max_sampled_textures_per_shader_stage: MAX_TEXTURES as u32,
-        max_samplers_per_shader_stage: MAX_TEXTURES as u32,
+        max_sampled_textures_per_shader_stage: (MAX_TEXTURES as u32)
+            .min(adapter_limits.max_sampled_textures_per_shader_stage),
+        max_samplers_per_shader_stage: (MAX_TEXTURES as u32)
+            .min(adapter_limits.max_samplers_per_shader_stage),
         ..adapter_limits
     }
 }

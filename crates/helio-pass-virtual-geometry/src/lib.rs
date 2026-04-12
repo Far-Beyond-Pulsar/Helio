@@ -21,8 +21,9 @@ use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 /// Bindless texture array size per shader stage.
 /// Capped at 16 on wasm32 (WebGPU baseline); 256 on native.
 #[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
 const MAX_TEXTURES: usize = 256;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios"))]
 const MAX_TEXTURES: usize = 16;
 
 // ── Uniform types ─────────────────────────────────────────────────────────────
