@@ -45,7 +45,7 @@ helio-bake = { path = "../helio-bake" }
 uuid = { version = "1", features = ["v4"] }
 
 [features]
-default = ["profiling", "live-portal"]
+default = ["profiling"]
 profiling = ["helio-v3/profiling"]
 live-portal = ["helio-live-portal"]
 
