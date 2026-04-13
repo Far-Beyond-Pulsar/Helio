@@ -33,7 +33,7 @@ pub struct DebugDrawPass {
     cached_line_gen: u64,
     cached_tri_gen: u64,
     editor_grid_cache: Vec<DebugVertex>,
-    editor_frame_lines: Vec<DebugVertex>,
+    editor_marker_lines: [DebugVertex; 6],
     editor_last_key: Option<(bool, i32, i32, i32)>,
     editor_last_cam: Option<[f32; 3]>,
 }
@@ -54,7 +54,11 @@ impl DebugDrawPass {
             cached_line_gen: u64::MAX,
             cached_tri_gen: u64::MAX,
             editor_grid_cache: Vec::new(),
-            editor_frame_lines: Vec::new(),
+            editor_marker_lines: [DebugVertex {
+                position: [0.0, 0.0, 0.0],
+                _pad: 0.0,
+                color: [0.0, 1.0, 1.0, 1.0],
+            }; 6],
             editor_last_key: None,
             editor_last_cam: None,
         }
@@ -94,6 +98,18 @@ impl DebugDrawPass {
         self.editor_grid_cache.push(DebugVertex { position: [3.0, 0.0, 0.0], _pad: 0.0, color: origin_color });
         self.editor_grid_cache.push(DebugVertex { position: [0.0, 0.0, -3.0], _pad: 0.0, color: origin_color });
         self.editor_grid_cache.push(DebugVertex { position: [0.0, 0.0, 3.0], _pad: 0.0, color: origin_color });
+    }
+
+    fn update_editor_marker(&mut self, cam: glam::Vec3) {
+        let camera_marker_color = [0.0, 1.0, 1.0, 1.0];
+        self.editor_marker_lines = [
+            DebugVertex { position: [cam.x - 0.3, cam.y, cam.z], _pad: 0.0, color: camera_marker_color },
+            DebugVertex { position: [cam.x + 0.3, cam.y, cam.z], _pad: 0.0, color: camera_marker_color },
+            DebugVertex { position: [cam.x, cam.y - 0.3, cam.z], _pad: 0.0, color: camera_marker_color },
+            DebugVertex { position: [cam.x, cam.y + 0.3, cam.z], _pad: 0.0, color: camera_marker_color },
+            DebugVertex { position: [cam.x, cam.y, cam.z - 0.3], _pad: 0.0, color: camera_marker_color },
+            DebugVertex { position: [cam.x, cam.y, cam.z + 0.3], _pad: 0.0, color: camera_marker_color },
+        ];
     }
 }
 
@@ -144,27 +160,32 @@ impl RenderPass for DebugDrawPass {
                 (center_x * 1000.0) as i32,
                 (center_z * 1000.0) as i32,
             );
+            let mut grid_rebuilt = false;
             if self.editor_last_key != Some(key) {
                 self.rebuild_editor_grid_cache(center_x, center_z, grid_step);
                 self.editor_last_key = Some(key);
+                grid_rebuilt = true;
             }
 
             let cam_arr = [cam.x, cam.y, cam.z];
-            if self.editor_last_cam != Some(cam_arr) || self.cached_line_gen == u64::MAX {
-                self.editor_frame_lines.clear();
-                self.editor_frame_lines
-                    .extend_from_slice(&self.editor_grid_cache);
+            if self.editor_last_cam != Some(cam_arr) || self.cached_line_gen == u64::MAX || grid_rebuilt {
+                self.update_editor_marker(cam);
 
-                let camera_marker_color = [0.0, 1.0, 1.0, 1.0];
-                let mark = cam;
-                self.editor_frame_lines.push(DebugVertex { position: [mark.x - 0.3, mark.y, mark.z], _pad: 0.0, color: camera_marker_color });
-                self.editor_frame_lines.push(DebugVertex { position: [mark.x + 0.3, mark.y, mark.z], _pad: 0.0, color: camera_marker_color });
-                self.editor_frame_lines.push(DebugVertex { position: [mark.x, mark.y - 0.3, mark.z], _pad: 0.0, color: camera_marker_color });
-                self.editor_frame_lines.push(DebugVertex { position: [mark.x, mark.y + 0.3, mark.z], _pad: 0.0, color: camera_marker_color });
-                self.editor_frame_lines.push(DebugVertex { position: [mark.x, mark.y, mark.z - 0.3], _pad: 0.0, color: camera_marker_color });
-                self.editor_frame_lines.push(DebugVertex { position: [mark.x, mark.y, mark.z + 0.3], _pad: 0.0, color: camera_marker_color });
+                if grid_rebuilt || self.cached_line_gen == u64::MAX {
+                    let mut lines = Vec::with_capacity(self.editor_grid_cache.len() + self.editor_marker_lines.len());
+                    lines.extend_from_slice(&self.editor_grid_cache);
+                    lines.extend_from_slice(&self.editor_marker_lines);
+                    self.pass.update_lines(ctx.queue, &lines);
+                } else {
+                    self.pass.update_lines_at(
+                        ctx.queue,
+                        self.editor_grid_cache.len(),
+                        &self.editor_marker_lines,
+                    );
+                    self.pass
+                        .set_line_vertex_count(self.editor_grid_cache.len() + self.editor_marker_lines.len());
+                }
 
-                self.pass.update_lines(ctx.queue, &self.editor_frame_lines);
                 self.editor_last_cam = Some(cam_arr);
                 self.cached_line_gen = self.cached_line_gen.wrapping_add(1);
             }

@@ -300,6 +300,33 @@ impl DebugPass {
         self.vertex_count = count as u32;
     }
 
+    /// Upload line vertices at a specific vertex offset without changing topology.
+    ///
+    /// Useful for tiny dynamic regions (e.g. a camera marker) when most of the
+    /// debug line buffer is static.
+    pub fn update_lines_at(&mut self, queue: &wgpu::Queue, first_vertex: usize, verts: &[DebugVertex]) {
+        if verts.is_empty() || first_vertex >= MAX_DEBUG_VERTS as usize {
+            return;
+        }
+        let max_writable = (MAX_DEBUG_VERTS as usize).saturating_sub(first_vertex);
+        let count = verts.len().min(max_writable);
+        if count == 0 {
+            return;
+        }
+        let offset_bytes = (first_vertex * std::mem::size_of::<DebugVertex>()) as u64;
+        helio_v3::upload::write_buffer(
+            queue,
+            &self.vertex_buf,
+            offset_bytes,
+            bytemuck::cast_slice(&verts[..count]),
+        );
+    }
+
+    /// Set line vertex count without rewriting buffer contents.
+    pub fn set_line_vertex_count(&mut self, count: usize) {
+        self.vertex_count = count.min(MAX_DEBUG_VERTS as usize) as u32;
+    }
+
     /// Upload filled-triangle vertices. Every three consecutive vertices form one triangle.
     ///
     /// Call this from the game loop before `execute()`. O(n) upload, O(1) GPU draw.
