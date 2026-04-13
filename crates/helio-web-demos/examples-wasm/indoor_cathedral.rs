@@ -212,6 +212,8 @@ impl HelioWasmApp for Demo {
 
             fog_density: 0.015,
             god_rays_intensity: 0.2,
+
+            ..Default::default()
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
 
