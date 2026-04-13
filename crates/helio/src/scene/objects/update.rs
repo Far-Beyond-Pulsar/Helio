@@ -252,6 +252,7 @@ impl super::super::Scene {
     /// # Performance
     /// - CPU cost: O(N + M) where N = object count, M = region count
     /// - GPU cost: O(N) writes to instance buffer (only for static objects)
+    #[cfg(feature = "bake")]
     pub fn update_lightmap_indices(
         &mut self,
         regions: &[helio_bake::CachedAtlasRegion],

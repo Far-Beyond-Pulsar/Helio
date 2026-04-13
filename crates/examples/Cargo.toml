@@ -138,7 +138,7 @@ path = "editor_demo.rs"
 
 
 [dependencies]
-helio = { path = "../helio", features = ["live-portal"] }
+helio = { path = "../helio", features = ["live-portal", "bake"] }
 helio-asset-compat = { path = "../helio-asset-compat" }
 helio-pass-sdf = { path = "../helio-pass-sdf" }
 helio-pass-terra-forge = { path = "../helio-pass-terra-forge" }

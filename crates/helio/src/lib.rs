@@ -50,6 +50,7 @@ pub use helio_v3::{
     GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
 };
 pub use libhelio::{LightType, Movability, ShadowQuality, VolumetricClouds, SkyActor};
+#[cfg(feature = "bake")]
 pub use helio_bake::{
     BakeConfig, BakeRequest, BakedData, ProbeSpec,
     SceneGeometry, BakeMesh, LightSource, LightSourceKind,
@@ -70,6 +71,7 @@ pub use helio_bake::{
 ///                                    glam::Mat4::IDENTITY, None));
 /// renderer.configure_bake(BakeRequest { scene, config: BakeConfig::fast("my_scene") });
 /// ```
+#[cfg(feature = "bake")]
 pub fn mesh_upload_to_bake(upload: &MeshUpload, transform: glam::Mat4, mesh_slot: Option<u32>) -> BakeMesh {
     fn unpack_snorm8(b: u8) -> f32 { (b as i8) as f32 / 127.0 }
     let normal_mat = glam::Mat3::from_mat4(transform).inverse().transpose();

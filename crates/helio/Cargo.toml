@@ -41,13 +41,14 @@ wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e80173
 pollster = "0.3"
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 helio-live-portal = { path = "../helio-live-portal", optional = true }
-helio-bake = { path = "../helio-bake" }
-uuid = { version = "1", features = ["v4"] }
+helio-bake = { path = "../helio-bake", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
 
 [features]
 default = ["profiling"]
 profiling = ["helio-v3/profiling"]
 live-portal = ["helio-live-portal"]
+bake = ["helio-bake", "uuid"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 # Used for DXGI exclusive-fullscreen path (IDXGIFactory1::MakeWindowAssociation).

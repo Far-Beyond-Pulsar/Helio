@@ -91,9 +91,11 @@ pub struct Renderer {
     // ── Baking ────────────────────────────────────────────────────────────
     /// Pending bake configuration.  Consumed in the first call to `render()`,
     /// blocking until all passes complete before the first draw.
+    #[cfg(feature = "bake")]
     bake_pending: Option<helio_bake::BakeRequest>,
     /// GPU-resident baked data (AO, lightmaps, probes, PVS).
     /// Populated once, published into `FrameResources` every subsequent frame.
+    #[cfg(feature = "bake")]
     baked_data: Option<std::sync::Arc<helio_bake::BakedData>>,
     /// Whether Helio owns the wgpu device (true) or is using an externally-owned
     /// device (false, e.g. GPUI). When false, device.poll() must never be called.
@@ -210,7 +212,9 @@ impl Renderer {
             #[cfg(feature = "live-portal")]
             portal_handle: None,
 
+            #[cfg(feature = "bake")]
             bake_pending: None,
+            #[cfg(feature = "bake")]
             baked_data: None,
             owns_device: true,
         };
@@ -355,7 +359,9 @@ impl Renderer {
             #[cfg(feature = "live-portal")]
             portal_handle: None,
 
+            #[cfg(feature = "bake")]
             bake_pending: None,
+            #[cfg(feature = "bake")]
             baked_data: None,
             owns_device: false,
         }
@@ -892,6 +898,7 @@ impl Renderer {
     /// via `FrameResources` fields for use by downstream passes.
     ///
     /// Calling this a second time replaces any previous pending request.
+    #[cfg(feature = "bake")]
     pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
         self.bake_pending = Some(request);
     }
@@ -912,6 +919,7 @@ impl Renderer {
     /// # See Also
     /// - [`Scene::build_static_bake_scene`] - for manual control over what gets baked
     /// - [`configure_bake`](Self::configure_bake) - for explicit scene geometry specification
+    #[cfg(feature = "bake")]
     pub fn auto_bake(&mut self, config: helio_bake::BakeConfig) {
         let scene = self.scene.build_static_bake_scene();
         self.configure_bake(helio_bake::BakeRequest { scene, config });
@@ -926,6 +934,7 @@ impl Renderer {
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
         // ── Baking: run once, blocking, before the first drawn frame ──────
+        #[cfg(feature = "bake")]
         if let Some(request) = self.bake_pending.take() {
             let obj_count = request.scene.meshes.len();
             let light_count = request.scene.lights.len();
@@ -975,6 +984,7 @@ impl Renderer {
         }
 
         // ── Check for invalidated bake ────────────────────────────────────
+        #[cfg(feature = "bake")]
         if self.baked_data.is_some() && self.scene.is_bake_invalidated() {
             log::warn!(
                 "[helio-bake] ⚠️  Static geometry or lights have been added since the last bake!\n\
@@ -1113,6 +1123,40 @@ impl Renderer {
         let rc_min = [camera.position.x - rc_radius, camera.position.y - rc_radius, camera.position.z - rc_radius];
         let rc_max = [camera.position.x + rc_radius, camera.position.y + rc_radius, camera.position.z + rc_radius];
 
+        // Baked data references — None when bake feature is disabled.
+        #[cfg(feature = "bake")]
+        let baked_ao = self.baked_data.as_deref().and_then(|d| d.ao_view_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_ao = None;
+        #[cfg(feature = "bake")]
+        let baked_ao_sampler = self.baked_data.as_deref().and_then(|d| d.ao_sampler_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_ao_sampler = None;
+        #[cfg(feature = "bake")]
+        let baked_lightmap = self.baked_data.as_deref().and_then(|d| d.lightmap_view_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_lightmap = None;
+        #[cfg(feature = "bake")]
+        let baked_lightmap_sampler = self.baked_data.as_deref().and_then(|d| d.lightmap_sampler_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_lightmap_sampler = None;
+        #[cfg(feature = "bake")]
+        let baked_reflection = self.baked_data.as_deref().and_then(|d| d.reflection_view_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_reflection = None;
+        #[cfg(feature = "bake")]
+        let baked_reflection_sampler = self.baked_data.as_deref().and_then(|d| d.reflection_sampler_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_reflection_sampler = None;
+        #[cfg(feature = "bake")]
+        let baked_irradiance_sh = self.baked_data.as_deref().and_then(|d| d.irradiance_sh_buf_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_irradiance_sh = None;
+        #[cfg(feature = "bake")]
+        let baked_pvs = self.baked_data.as_deref().and_then(|d| d.pvs_ref());
+        #[cfg(not(feature = "bake"))]
+        let baked_pvs = None;
+
         let frame_resources = libhelio::FrameResources {
             gbuffer: None,
             gbuffer_lightmap_uv: None,
@@ -1175,14 +1219,14 @@ impl Renderer {
             water_hitbox_count,
             depth_texture: Some(&self.depth_texture),
             // Baked data — populated after configure_bake() completes.
-            baked_ao: self.baked_data.as_deref().and_then(|d| d.ao_view_ref()),
-            baked_ao_sampler: self.baked_data.as_deref().and_then(|d| d.ao_sampler_ref()),
-            baked_lightmap: self.baked_data.as_deref().and_then(|d| d.lightmap_view_ref()),
-            baked_lightmap_sampler: self.baked_data.as_deref().and_then(|d| d.lightmap_sampler_ref()),
-            baked_reflection: self.baked_data.as_deref().and_then(|d| d.reflection_view_ref()),
-            baked_reflection_sampler: self.baked_data.as_deref().and_then(|d| d.reflection_sampler_ref()),
-            baked_irradiance_sh: self.baked_data.as_deref().and_then(|d| d.irradiance_sh_buf_ref()),
-            baked_pvs: self.baked_data.as_deref().and_then(|d| d.pvs_ref()),
+            baked_ao,
+            baked_ao_sampler,
+            baked_lightmap,
+            baked_lightmap_sampler,
+            baked_reflection,
+            baked_reflection_sampler,
+            baked_irradiance_sh,
+            baked_pvs,
         };
 
         self.graph.execute_with_frame_resources(

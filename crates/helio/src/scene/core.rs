@@ -572,6 +572,7 @@ impl Scene {
     ///     config: BakeConfig::fast("my_scene"),
     /// });
     /// ```
+    #[cfg(feature = "bake")]
     pub fn build_static_bake_scene(&mut self) -> helio_bake::SceneGeometry {
         use helio_bake::{LightSource, LightSourceKind, SceneGeometry};
         use libhelio::{LightType, Movability};
