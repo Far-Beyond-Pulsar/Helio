@@ -112,7 +112,7 @@ impl HelioWasmApp for Demo {
             r * 0.62,
             0.20,
             0.38,
-        ));
+        )));
         renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
             fill.to_array(),
             (focus - fill).normalize().to_array(),
@@ -121,7 +121,7 @@ impl HelioWasmApp for Demo {
             r * 0.59,
             0.28,
             0.46,
-        ));
+        )));
         renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
             rim.to_array(),
             (focus - rim).normalize().to_array(),
@@ -130,12 +130,12 @@ impl HelioWasmApp for Demo {
             r * 0.57,
             0.22,
             0.40,
-        ));
+        )));
         renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
             [0.15, -1.0, 0.1],
             [0.07, 0.09, 0.14],
             0.3,
-        ));
+        )));
         renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
         renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
 

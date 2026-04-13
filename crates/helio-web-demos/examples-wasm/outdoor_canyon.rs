@@ -94,7 +94,7 @@ impl HelioWasmApp for Demo {
             [-0.0, -1.0, -0.5],
             [1.0, 0.9, 0.7],
             0.005,
-        ));
+        )));
         let fire_light =
             renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 0.5, 9.5], [1.0, 0.45, 0.1], 5.0, 12.0)));
         renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-0.4, 0.4, 9.2], [1.0, 0.35, 0.05], 1.5, 5.0)));
@@ -104,7 +104,7 @@ impl HelioWasmApp for Demo {
             [moon_dir.x, moon_dir.y, moon_dir.z],
             [0.5, 0.65, 1.0],
             0.05,
-        ));
+        )));
         renderer.set_ambient([0.6, 0.55, 0.45], 0.08);
         renderer.set_clear_color([0.45, 0.6, 0.85, 1.0]);
 

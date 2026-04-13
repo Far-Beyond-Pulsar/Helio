@@ -116,7 +116,7 @@ impl HelioWasmApp for Demo {
                 let ped = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                     [center.x, floor_y + radius * 0.05, center.z],
                     [radius * 0.62, radius * 0.05, radius * 0.62],
-                ));
+                )));
                 insert_object(renderer, ped, ped_m, glam::Mat4::IDENTITY, radius).unwrap();
 
                 let back_m = renderer.scene_mut().insert_material(make_material(
@@ -129,7 +129,7 @@ impl HelioWasmApp for Demo {
                 let back = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                     [center.x, floor_y + radius * 0.62, center.z - radius * 1.35],
                     [radius * 1.35, radius * 0.62, radius * 0.05],
-                ));
+                )));
                 insert_object(renderer, back, back_m, glam::Mat4::IDENTITY, radius * 1.5).unwrap();
 
                 let focus = center + Vec3::new(0.0, (max.y - min.y) * 0.18, 0.0);
@@ -145,7 +145,7 @@ impl HelioWasmApp for Demo {
                     r * 0.62,
                     0.20,
                     0.38,
-                ));
+                )));
                 renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
                     fill.to_array(),
                     (focus - fill).normalize().to_array(),
@@ -154,7 +154,7 @@ impl HelioWasmApp for Demo {
                     r * 0.59,
                     0.28,
                     0.46,
-                ));
+                )));
                 renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
                     rim.to_array(),
                     (focus - rim).normalize().to_array(),
@@ -163,12 +163,12 @@ impl HelioWasmApp for Demo {
                     r * 0.57,
                     0.22,
                     0.40,
-                ));
+                )));
                 renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
                     [0.15, -1.0, 0.1],
                     [0.07, 0.09, 0.14],
                     0.3,
-                ));
+                )));
                 renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
 
                 cam_pos = center + Vec3::new(r * 0.55, r * 0.28, r * 1.55);

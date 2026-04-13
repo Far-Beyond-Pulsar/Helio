@@ -113,13 +113,13 @@ impl HelioWasmApp for Demo {
             let gm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                 [*bx, h / 2.0, *bz],
                 [half[0] - 0.1, h - 0.2, half[2] - 0.1],
-            ));
+            )));
             insert_object(renderer, gm, glass_m, glam::Mat4::IDENTITY, *rad).unwrap();
             // Random lit windows strip
             let wm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                 [*bx, h * 0.6, *bz],
                 [half[0] - 0.15, h * 0.25, half[2] - 0.05],
-            ));
+            )));
             insert_object(
                 renderer,
                 wm,
@@ -147,7 +147,7 @@ impl HelioWasmApp for Demo {
                     [1.0, 0.92, 0.72],
                     80.0,
                     18.0,
-                ));
+                )));
                 window_ids.push(id);
             }
         }
@@ -159,7 +159,7 @@ impl HelioWasmApp for Demo {
                 [1.0, 0.1, 0.05],
                 5.0,
                 8.0,
-            ));
+            )));
             window_ids.push(id);
         }
 
@@ -169,7 +169,7 @@ impl HelioWasmApp for Demo {
             [moon.x, moon.y, moon.z],
             [0.4, 0.5, 0.9],
             0.003,
-        ));
+        )));
         renderer.set_ambient([0.1, 0.12, 0.2], 0.02);
         renderer.set_clear_color([0.02, 0.02, 0.06, 1.0]);
 

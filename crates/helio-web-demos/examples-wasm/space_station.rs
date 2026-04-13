@@ -126,7 +126,7 @@ impl HelioWasmApp for Demo {
                 let boom = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                     [0.0, 0.0, z_off * 0.5],
                     [0.12, 0.12, z_off.abs() - 2.0],
-                ));
+                )));
                 insert_object(renderer, boom, truss_m, glam::Mat4::IDENTITY, z_off.abs()).unwrap();
                 // Two solar panel rows per wing
                 for py in [-0.9_f32, 0.9] {
@@ -141,7 +141,7 @@ impl HelioWasmApp for Demo {
                         let grid = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                             [sx * 8.0, py, z_off + k as f32 * 0.35],
                             [6.0, 0.015, 0.01],
-                        ));
+                        )));
                         insert_object(renderer, grid, panel_m, glam::Mat4::IDENTITY, 6.0).unwrap();
                     }
                 }
@@ -180,7 +180,7 @@ impl HelioWasmApp for Demo {
             [sun_dir.x, sun_dir.y, sun_dir.z],
             [1.0, 0.98, 0.95],
             1.0,
-        ));
+        )));
         renderer.set_ambient([0.05, 0.06, 0.1], 0.005);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 

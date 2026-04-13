@@ -70,7 +70,7 @@ impl HelioWasmApp for Demo {
             let gw = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                 [pos[0], pos[1] * 2.0 - 1.0, pos[2]],
                 [ext[0], 0.4, ext[2]],
-            ));
+            )));
             let _ = insert_object(renderer, gw, glass, glam::Mat4::IDENTITY, 4.0);
         }
 

@@ -156,7 +156,7 @@ impl HelioWasmApp for Demo {
                 [1.0, 0.3, 0.02],
                 8.0,
                 10.0,
-            ));
+            )));
             lava_lights.push(id);
         }
         // Central lava lake glow
@@ -175,7 +175,7 @@ impl HelioWasmApp for Demo {
             [moon.x, moon.y, moon.z],
             [0.25, 0.3, 0.5],
             0.002,
-        ));
+        )));
         renderer.set_ambient([0.15, 0.06, 0.02], 0.04);
         renderer.set_clear_color([0.06, 0.02, 0.01, 1.0]);
 

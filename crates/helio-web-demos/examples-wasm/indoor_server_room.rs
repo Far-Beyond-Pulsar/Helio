@@ -170,7 +170,7 @@ impl HelioWasmApp for Demo {
             let cable = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
                 [pos[0] - 0.55, pos[1] + 0.4, pos[2]],
                 [0.12, 0.4, 0.8],
-            ));
+            )));
             insert_object(renderer, cable, cable_m, glam::Mat4::IDENTITY, 0.8).unwrap();
         }
 
@@ -191,7 +191,7 @@ impl HelioWasmApp for Demo {
                 [0.0, 0.9, 0.3],
                 3.0,
                 4.0,
-            ));
+            )));
             indicator_ids.push(id);
         }
 

@@ -179,7 +179,7 @@ impl HelioWasmApp for Demo {
             [moon_dir.x, moon_dir.y, moon_dir.z],
             [0.4, 0.5, 1.0],
             0.02,
-        ));
+        )));
         renderer.set_ambient([0.4, 0.45, 0.65], 0.015);
         renderer.set_clear_color([0.02, 0.01, 0.04, 1.0]);
 
