@@ -24,8 +24,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use helio::{Camera, EditorState, GizmoMode, Movability, Renderer, SceneActor, ScenePicker};
-use helio_wasm::{HelioWasmApp, InputState, KeyCode};
-use winit::event::MouseButton;
+use helio_wasm::{HelioWasmApp, InputState, KeyCode, MouseButton};
 
 use crate::common::{
     box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,

@@ -40,6 +40,7 @@ pub use runner::launch;
 
 use std::collections::HashSet;
 pub use winit::keyboard::KeyCode;
+pub use winit::event::MouseButton;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
