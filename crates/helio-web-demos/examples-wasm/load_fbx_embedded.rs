@@ -96,7 +96,7 @@ impl HelioWasmApp for Demo {
                     0.0,
                 ));
                 let floor =
-                    renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([center.x, floor_y, center.z], radius * 1.55));
+                    renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([center.x, floor_y, center.z], radius * 1.55)));
                 insert_object(
                     renderer,
                     floor,
@@ -178,7 +178,7 @@ impl HelioWasmApp for Demo {
             }
             Err(e) => {
                 log::warn!("Failed to load embedded FBX: {e:?}. Showing empty scene.");
-                renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.2, -1.0, 0.4], [1.0, 0.95, 0.85], 0.01));
+                renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.2, -1.0, 0.4], [1.0, 0.95, 0.85], 0.01)));
                 renderer.set_ambient([0.1, 0.12, 0.18], 0.05);
                 renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
             }

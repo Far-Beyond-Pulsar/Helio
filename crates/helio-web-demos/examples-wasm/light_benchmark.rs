@@ -60,7 +60,7 @@ impl HelioWasmApp for Demo {
         ));
 
         // Ground plane
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 64.0));
+        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 64.0)));
         insert_object(renderer, ground, ground_m, glam::Mat4::IDENTITY, 64.0).unwrap();
 
         // Grid of obstacle boxes
@@ -70,7 +70,7 @@ impl HelioWasmApp for Demo {
                 let x = -28.0 + ix as f32 * 8.0;
                 let z = -28.0 + iz as f32 * 8.0;
                 let h = 0.5 + (ix * n + iz) as f32 % 3.0;
-                let bm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([x, h / 2.0, z], [0.8, h, 0.8]));
+                let bm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([x, h / 2.0, z], [0.8, h, 0.8])));
                 insert_object(renderer, bm, box_m, glam::Mat4::IDENTITY, h).unwrap();
             }
         }
@@ -84,14 +84,14 @@ impl HelioWasmApp for Demo {
             let z = -28.0 + row as f32 * (56.0 / (LIGHT_COUNT / GRID_W - 1).max(1) as f32);
             let hue = i as f32 / LIGHT_COUNT as f32;
             let (r, g, b) = hsv_to_rgb(hue, 0.8, 1.0);
-            let bulb = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([x, 1.8, z], 0.07));
+            let bulb = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([x, 1.8, z], 0.07)));
             insert_object(renderer, bulb, light_m, glam::Mat4::IDENTITY, 0.07).unwrap();
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([x, 2.0, z], [r, g, b], 10.0, 8.0));
+            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([x, 2.0, z], [r, g, b], 10.0, 8.0)));
             light_ids.push(id);
         }
 
         // Faint directional ambient
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.2, -0.9, 0.4], [0.8, 0.85, 1.0], 0.002));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.2, -0.9, 0.4], [0.8, 0.85, 1.0], 0.002)));
         renderer.set_ambient([0.1, 0.1, 0.15], 0.01);
         renderer.set_clear_color([0.01, 0.01, 0.02, 1.0]);
 

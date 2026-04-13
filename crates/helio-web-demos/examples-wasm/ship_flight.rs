@@ -411,8 +411,8 @@ impl HelioWasmApp for Demo {
         )));
 
         // Distant stars (directional)
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.4, 0.8], [1.0, 0.98, 0.95], 0.8));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.6, 0.2, -0.7], [0.2, 0.25, 0.4], 0.04));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.4, 0.8], [1.0, 0.98, 0.95], 0.8)));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.6, 0.2, -0.7], [0.2, 0.25, 0.4], 0.04)));
         renderer.set_ambient([0.04, 0.05, 0.08], 0.003);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 

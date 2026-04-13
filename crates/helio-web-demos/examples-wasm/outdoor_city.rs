@@ -73,7 +73,7 @@ impl HelioWasmApp for Demo {
         ));
 
         // City ground plane
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 100.0));
+        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 100.0)));
         insert_object(renderer, ground, road_m, glam::Mat4::IDENTITY, 100.0).unwrap();
 
         // Buildings on a grid: 7x7 blocks
@@ -107,7 +107,7 @@ impl HelioWasmApp for Demo {
 
         for (bx, bz, half, rad) in building_data.iter() {
             let h = half[1];
-            let bm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([*bx, h / 2.0, *bz], *half));
+            let bm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([*bx, h / 2.0, *bz], *half)));
             insert_object(renderer, bm, concrete_m, glam::Mat4::IDENTITY, *rad).unwrap();
             // Glass facade panels
             let gm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
@@ -136,11 +136,11 @@ impl HelioWasmApp for Demo {
         let mut window_ids = Vec::new();
         for &lx in lamp_xs {
             for &lz in lamp_zs {
-                let pole = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([lx, 5.0, lz], [0.08, 5.0, 0.08]));
+                let pole = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([lx, 5.0, lz], [0.08, 5.0, 0.08])));
                 insert_object(renderer, pole, street_pole_m, glam::Mat4::IDENTITY, 5.0).unwrap();
-                let arm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([lx + 0.5, 9.8, lz], [0.5, 0.06, 0.06]));
+                let arm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([lx + 0.5, 9.8, lz], [0.5, 0.06, 0.06])));
                 insert_object(renderer, arm, street_pole_m, glam::Mat4::IDENTITY, 0.5).unwrap();
-                let lamp = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([lx + 0.9, 9.75, lz], [0.12, 0.12, 0.12]));
+                let lamp = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([lx + 0.9, 9.75, lz], [0.12, 0.12, 0.12])));
                 insert_object(renderer, lamp, lamp_m, glam::Mat4::IDENTITY, 0.12).unwrap();
                 let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
                     [lx + 0.9, 9.5, lz],

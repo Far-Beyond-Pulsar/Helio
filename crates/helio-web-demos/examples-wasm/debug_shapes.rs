@@ -55,7 +55,7 @@ impl HelioWasmApp for Demo {
             renderer.scene_mut().insert_material(make_material([0.8, 0.8, 0.9, 1.0], 0.2, 1.0, [0.0; 3], 0.0));
 
         // Floor
-        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, -0.1, 0.0], [10.0, 0.1, 10.0]));
+        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, -0.1, 0.0], [10.0, 0.1, 10.0])));
         let _ = insert_object(renderer, floor, white, glam::Mat4::IDENTITY, 12.0);
 
         // Gallery of shapes arranged in a grid

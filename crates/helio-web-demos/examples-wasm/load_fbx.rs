@@ -73,11 +73,11 @@ impl HelioWasmApp for Demo {
         ));
 
         // Floor
-        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0));
+        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 20.0)));
         insert_object(renderer, floor, floor_m, glam::Mat4::IDENTITY, 20.0).unwrap();
 
         // Pedestal
-        let ped = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.3, 0.0], [2.5, 0.3, 2.5]));
+        let ped = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.3, 0.0], [2.5, 0.3, 2.5])));
         insert_object(renderer, ped, pedestal_m, glam::Mat4::IDENTITY, 2.5).unwrap();
 
         // Placeholder "model" — stacked boxes suggesting a figure
@@ -86,16 +86,16 @@ impl HelioWasmApp for Demo {
             ([0.0, 2.1, 0.0], [0.35, 0.35, 0.35]),
             ([0.0, 1.0, 0.0], [1.2, 0.1, 0.5]),
         ] {
-            let m = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, half));
+            let m = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, half)));
             insert_object(renderer, m, cube_mat, glam::Mat4::IDENTITY, 1.2).unwrap();
         }
 
         // "FBX N/A" sign (emissive slab)
-        let sign = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 2.2, -4.5], [1.8, 0.4, 0.06]));
+        let sign = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 2.2, -4.5], [1.8, 0.4, 0.06])));
         insert_object(renderer, sign, text_m, glam::Mat4::IDENTITY, 1.8).unwrap();
 
         // Backdrop
-        let back = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 4.0, -9.5], [10.0, 4.0, 0.1]));
+        let back = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 4.0, -9.5], [10.0, 4.0, 0.1])));
         insert_object(renderer, back, backdrop_m, glam::Mat4::IDENTITY, 10.0).unwrap();
 
         // Three-point lighting (same as native showcase)

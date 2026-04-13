@@ -71,7 +71,7 @@ impl HelioWasmApp for Demo {
         ));
 
         // Lava plain (ground)
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 80.0));
+        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 80.0)));
         insert_object(renderer, ground, basalt_m, glam::Mat4::IDENTITY, 80.0).unwrap();
 
         // Crater rim
@@ -86,12 +86,12 @@ impl HelioWasmApp for Demo {
             ([14.0, 5.0, 14.0], [5.0, 5.0, 5.0]),
         ];
         for (pos, size) in rim_segs {
-            let m = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(*pos, *size));
+            let m = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(*pos, *size)));
             insert_object(renderer, m, rock_m, glam::Mat4::IDENTITY, size[1]).unwrap();
         }
 
         // Lava lake (inside crater)
-        let lava_lake = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.3, 0.0], [14.0, 0.3, 14.0]));
+        let lava_lake = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 0.3, 0.0], [14.0, 0.3, 14.0])));
         insert_object(renderer, lava_lake, lava_m, glam::Mat4::IDENTITY, 14.0).unwrap();
 
         // Hot lava vents
@@ -106,7 +106,7 @@ impl HelioWasmApp for Demo {
             [-7.0, 0.4, 0.0],
         ];
         for &pos in vent_positions {
-            let v = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, [1.5, 0.15, 1.5]));
+            let v = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, [1.5, 0.15, 1.5])));
             insert_object(renderer, v, lava_hot_m, glam::Mat4::IDENTITY, 1.5).unwrap();
         }
 
@@ -118,7 +118,7 @@ impl HelioWasmApp for Demo {
             ([5.0, 3.5, 21.0], [2.5, 3.5, 0.8]),
         ];
         for (pos, size) in flow_data {
-            let f = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(*pos, *size));
+            let f = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(*pos, *size)));
             insert_object(
                 renderer,
                 f,
@@ -137,7 +137,7 @@ impl HelioWasmApp for Demo {
             ([0.0, 3.5, 55.0], [25.0, 3.5, 8.0]),
         ];
         for (pos, size) in ash_dunes {
-            let d = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(*pos, *size));
+            let d = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(*pos, *size)));
             insert_object(
                 renderer,
                 d,
@@ -161,11 +161,11 @@ impl HelioWasmApp for Demo {
         }
         // Central lava lake glow
         let central =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 2.0, 0.0], [1.0, 0.2, 0.0], 100.0, 40.0));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 2.0, 0.0], [1.0, 0.2, 0.0], 100.0, 40.0)));
         lava_lights.push(central);
         // Flow lights
         for (pos, _) in flow_data {
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(*pos, [1.0, 0.25, 0.01], 15.0, 12.0));
+            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(*pos, [1.0, 0.25, 0.01], 15.0, 12.0)));
             lava_lights.push(id);
         }
 
