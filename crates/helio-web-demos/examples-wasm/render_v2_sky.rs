@@ -49,11 +49,11 @@ impl HelioWasmApp for Demo {
             0.0,
         ));
 
-        let cube1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5));
-        let cube2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4));
-        let cube3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3));
-        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0));
-        let roof = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 1.2, 0.0], [2.5, 0.1, 2.5]));
+        let cube1 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([0.0, 0.5, 0.0], 0.5)));
+        let cube2 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([-2.0, 0.4, -1.0], 0.4)));
+        let cube3 = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([2.0, 0.3, 0.5], 0.3)));
+        let ground = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 5.0)));
+        let roof = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 1.2, 0.0], [2.5, 0.1, 2.5])));
 
         let _ = insert_object(renderer, cube1, mat, glam::Mat4::IDENTITY, 0.5);
         let _ = insert_object(renderer, cube2, mat, glam::Mat4::IDENTITY, 0.4);
@@ -61,11 +61,11 @@ impl HelioWasmApp for Demo {
         let _ = insert_object(renderer, ground, mat, glam::Mat4::IDENTITY, 5.0);
         let _ = insert_object(renderer, roof, mat, glam::Mat4::IDENTITY, 2.5);
 
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-3.5, 2.0, -1.5], [0.25, 0.5, 1.0], 5.0, 6.0)));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([3.5, 1.5, 1.5], [1.0, 0.3, 0.5], 5.0, 6.0)));
 
         let sun_light =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.8, -0.3], [1.0, 0.9, 0.7], 1.0));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.8, -0.3], [1.0, 0.9, 0.7], 1.0)));
         renderer.set_ambient([0.2, 0.25, 0.35], 0.15);
         renderer.set_clear_color([0.53, 0.81, 0.98, 1.0]);
 

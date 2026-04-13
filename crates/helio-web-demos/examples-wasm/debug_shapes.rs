@@ -72,7 +72,7 @@ impl HelioWasmApp for Demo {
             ([6.0, 0.5, 0.0], [0.5, 0.5, 0.5], red),
         ];
         for (pos, ext, mat) in shapes_data {
-            let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, ext));
+            let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, ext)));
             let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, 2.0);
         }
 
@@ -82,8 +82,8 @@ impl HelioWasmApp for Demo {
             [1.0, 0.95, 0.85],
             1.5,
         ));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-6.0, 4.0, -6.0], [1.0, 0.2, 0.1], 8.0, 12.0));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([6.0, 4.0, 0.0], [0.2, 0.5, 1.0], 8.0, 12.0));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-6.0, 4.0, -6.0], [1.0, 0.2, 0.1], 8.0, 12.0)));
+        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([6.0, 4.0, 0.0], [0.2, 0.5, 1.0], 8.0, 12.0)));
         renderer.set_ambient([0.25, 0.28, 0.35], 0.1);
 
         Self {
