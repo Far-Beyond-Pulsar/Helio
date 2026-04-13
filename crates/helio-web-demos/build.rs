@@ -43,6 +43,7 @@ const DEMOS: &[Demo] = &[
     Demo { name: "ship_flight",         title: "Ship Flight",                description: "6-DoF spaceship through an asteroid field.",                      controls: "WASD — thrust &nbsp;·&nbsp; Q/E — roll &nbsp;·&nbsp; Space/Shift — lift &nbsp;·&nbsp; Mouse — aim" },
     Demo { name: "simple_graph",        title: "Simple Graph",               description: "Minimal fly-camera around a lit unit cube.",                      controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "outdoor_rocks",       title: "Outdoor Rocks",              description: "Scattered rocks with an embedded FBX ship and dynamic sun.",      controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Q/E — sun &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "editor_demo",          title: "Editor Demo",                description: "BVH ray-picking and transform gizmo (translate / rotate / scale).", controls: "RMB hold — fly &nbsp;·&nbsp; LMB — pick/drag &nbsp;·&nbsp; G/R/S — gizmo mode &nbsp;·&nbsp; Ctrl+D — duplicate &nbsp;·&nbsp; Del — delete &nbsp;·&nbsp; Tab — grid" },
 ];
 
 // ── HTML templates ─────────────────────────────────────────────────────────────

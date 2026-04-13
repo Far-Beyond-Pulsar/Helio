@@ -51,6 +51,7 @@ pub mod html {
     pub const SHIP_FLIGHT: &str = include_str!(concat!(env!("OUT_DIR"), "/ship_flight.html"));
     pub const SIMPLE_GRAPH: &str = include_str!(concat!(env!("OUT_DIR"), "/simple_graph.html"));
     pub const OUTDOOR_ROCKS: &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_rocks.html"));
+    pub const EDITOR_DEMO: &str = include_str!(concat!(env!("OUT_DIR"), "/editor_demo.html"));
     pub const INDEX: &str = include_str!(concat!(env!("OUT_DIR"), "/index.html"));
 
     /// Returns the HTML for the demo identified by slug (e.g. `"ship_flight"`).
@@ -77,6 +78,7 @@ pub mod html {
             "ship_flight" => Some(SHIP_FLIGHT),
             "simple_graph" => Some(SIMPLE_GRAPH),
             "outdoor_rocks" => Some(OUTDOOR_ROCKS),
+            "editor_demo" => Some(EDITOR_DEMO),
             _ => None,
         }
     }
@@ -163,6 +165,10 @@ mod simple_graph;
 #[cfg(feature = "outdoor_rocks")]
 #[path = "../examples-wasm/outdoor_rocks.rs"]
 mod outdoor_rocks;
+
+#[cfg(feature = "editor_demo")]
+#[path = "../examples-wasm/editor_demo.rs"]
+mod editor_demo;
 
 // ── WASM entry point ──────────────────────────────────────────────────────────
 // Exactly one feature is active per build; that branch calls `launch`.
@@ -270,6 +276,11 @@ pub fn start() {
         helio_wasm::launch::<outdoor_rocks::Demo>();
         return;
     }
+    #[cfg(feature = "editor_demo")]
+    {
+        helio_wasm::launch::<editor_demo::Demo>();
+        return;
+    }
 }
 
 // ── Native entry (for `cargo run -p helio-web-demos --features <name>`) ───────
@@ -374,6 +385,11 @@ pub fn main() {
     #[cfg(feature = "outdoor_rocks")]
     {
         helio_wasm::launch::<outdoor_rocks::Demo>();
+        return;
+    }
+    #[cfg(feature = "editor_demo")]
+    {
+        helio_wasm::launch::<editor_demo::Demo>();
         return;
     }
 

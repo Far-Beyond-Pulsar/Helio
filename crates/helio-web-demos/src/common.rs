@@ -170,3 +170,68 @@ pub fn plane_mesh(center: [f32; 3], half_extent: f32) -> MeshUpload {
         indices: vec![0, 2, 1, 0, 3, 2],
     }
 }
+
+pub fn insert_object_with_movability(
+    renderer: &mut Renderer,
+    mesh: MeshId,
+    material: MaterialId,
+    transform: Mat4,
+    radius: f32,
+    movability: Option<helio::Movability>,
+) -> helio::SceneResult<helio::ObjectId> {
+    let object_actor_id = renderer.scene_mut().insert_actor(helio::SceneActor::object(ObjectDescriptor {
+        mesh,
+        material,
+        transform,
+        bounds: [
+            transform.w_axis.x,
+            transform.w_axis.y,
+            transform.w_axis.z,
+            radius,
+        ],
+        flags: 0,
+        groups: helio::GroupMask::NONE,
+        movability,
+    }));
+    object_actor_id
+        .as_object()
+        .ok_or(helio::SceneError::InvalidHandle { resource: "object" })
+}
+
+pub fn sphere_mesh(center: [f32; 3], radius: f32) -> MeshUpload {
+    let center = Vec3::from_array(center);
+    let lat_steps = 16u32;
+    let lon_steps = 32u32;
+    let mut vertices = Vec::new();
+    let mut indices  = Vec::new();
+
+    for i in 0..=lat_steps {
+        let phi     = std::f32::consts::PI * (i as f32 / lat_steps as f32);
+        let y       = phi.cos();
+        let sin_phi = phi.sin();
+        for j in 0..=lon_steps {
+            let theta = 2.0 * std::f32::consts::PI * (j as f32 / lon_steps as f32);
+            let x = sin_phi * theta.cos();
+            let z = sin_phi * theta.sin();
+
+            let position = center + Vec3::new(x, y, z) * radius;
+            let normal   = [x, y, z];
+            let uv       = [j as f32 / lon_steps as f32, i as f32 / lat_steps as f32];
+            let tangent  = Vec3::new(-z, 0.0, x).normalize_or_zero().to_array();
+            vertices.push(PackedVertex::from_components(
+                position.to_array(), normal, uv, tangent, 1.0,
+            ));
+        }
+    }
+
+    for i in 0..lat_steps {
+        for j in 0..lon_steps {
+            let a = i * (lon_steps + 1) + j;
+            let b = a + (lon_steps + 1);
+            indices.extend_from_slice(&[a, a + 1, b]);
+            indices.extend_from_slice(&[b, a + 1, b + 1]);
+        }
+    }
+
+    MeshUpload { vertices, indices }
+}

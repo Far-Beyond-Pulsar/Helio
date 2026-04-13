@@ -57,6 +57,7 @@ declare -a ALL_EXAMPLES=(
     ship_flight
     simple_graph
     outdoor_rocks
+    editor_demo
 )
 
 if [[ -n "$FILTER_NAME" ]]; then

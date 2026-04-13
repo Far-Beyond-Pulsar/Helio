@@ -52,7 +52,8 @@ $all_examples = @(
     "load_fbx_embedded",
     "ship_flight",
     "simple_graph",
-    "outdoor_rocks"
+    "outdoor_rocks",
+    "editor_demo"
 )
 
 if ($filter_name) {

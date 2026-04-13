@@ -84,6 +84,9 @@ struct RunnerState<T: HelioWasmApp> {
     keys: HashSet<KeyCode>,
     mouse_delta: (f32, f32),
     cursor_grabbed: bool,
+    cursor_pos: (f32, f32),
+    mouse_left_just_pressed: bool,
+    mouse_left_just_released: bool,
 
     // Timing
     start_time: f64,
@@ -171,15 +174,38 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                 }
             },
 
-            WindowEvent::MouseInput {
-                button: MouseButton::Left,
-                state: ElementState::Pressed,
-                ..
-            } => {
-                if !state.cursor_grabbed {
-                    state.cursor_grabbed = true;
-                    grab_cursor(&state.window);
+            WindowEvent::MouseInput { button, state: elem_state, .. } => {
+                let grab_button = T::grab_cursor_button();
+
+                // Handle cursor grab / release via the configured button.
+                if button == grab_button {
+                    match elem_state {
+                        ElementState::Pressed => {
+                            if !state.cursor_grabbed {
+                                state.cursor_grabbed = true;
+                                grab_cursor(&state.window);
+                            }
+                        }
+                        ElementState::Released => {
+                            if state.cursor_grabbed && T::release_cursor_on_grab_button_release() {
+                                state.cursor_grabbed = false;
+                                release_cursor(&state.window);
+                            }
+                        }
+                    }
                 }
+
+                // Track left-button press/release for demos that need click events.
+                if button == MouseButton::Left {
+                    match elem_state {
+                        ElementState::Pressed  => { state.mouse_left_just_pressed  = true; }
+                        ElementState::Released => { state.mouse_left_just_released = true; }
+                    }
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                state.cursor_pos = (position.x as f32, position.y as f32);
             }
 
             WindowEvent::Resized(new_size) => {
@@ -330,6 +356,9 @@ async fn init_wgpu<T: HelioWasmApp>(
         keys: HashSet::new(),
         mouse_delta: (0.0, 0.0),
         cursor_grabbed: false,
+        cursor_pos: (0.0, 0.0),
+        mouse_left_just_pressed: false,
+        mouse_left_just_released: false,
         start_time: now,
         last_time: now,
     });
@@ -346,10 +375,18 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     let delta = state.mouse_delta;
     state.mouse_delta = (0.0, 0.0);
 
+    let just_left_pressed  = state.mouse_left_just_pressed;
+    let just_left_released = state.mouse_left_just_released;
+    state.mouse_left_just_pressed  = false;
+    state.mouse_left_just_released = false;
+
     let input = InputState {
         keys: state.keys.clone(),
         mouse_delta: delta,
         cursor_grabbed: state.cursor_grabbed,
+        cursor_pos: state.cursor_pos,
+        mouse_left_just_pressed: just_left_pressed,
+        mouse_left_just_released: just_left_released,
     };
 
     let camera = state.demo.update(&mut state.renderer, dt, elapsed, &input);

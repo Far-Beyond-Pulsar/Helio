@@ -32,6 +32,7 @@ load_fbx_embedded   = []
 ship_flight         = []
 simple_graph        = []
 outdoor_rocks       = []
+editor_demo         = []
 
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]

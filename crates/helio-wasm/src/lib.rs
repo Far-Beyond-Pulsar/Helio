@@ -52,6 +52,13 @@ pub struct InputState {
     pub mouse_delta: (f32, f32),
     /// Whether the cursor is currently captured/locked.
     pub cursor_grabbed: bool,
+    /// Current cursor position in logical pixels (x, y).
+    /// Updated every `CursorMoved` event; most useful when the cursor is free.
+    pub cursor_pos: (f32, f32),
+    /// True for exactly one frame after the left mouse button was pressed.
+    pub mouse_left_just_pressed: bool,
+    /// True for exactly one frame after the left mouse button was released.
+    pub mouse_left_just_released: bool,
 }
 
 /// Implement this trait to create a helio demo that runs on both native and web.
@@ -59,6 +66,22 @@ pub trait HelioWasmApp: Sized + 'static {
     /// Window/page title.
     fn title() -> &'static str {
         "Helio Demo"
+    }
+
+    /// Which mouse button grabs (locks) the cursor for fly-camera mode.
+    ///
+    /// Defaults to `Left` (the original behaviour). Override to `Right` for
+    /// editor-style demos where left-click is used for object picking.
+    fn grab_cursor_button() -> winit::event::MouseButton {
+        winit::event::MouseButton::Left
+    }
+
+    /// If `true`, releasing the grab button also releases the cursor.
+    ///
+    /// Defaults to `false`: cursor stays grabbed until `Escape` is pressed.
+    /// Override to `true` for "hold-to-fly" right-click behaviour.
+    fn release_cursor_on_grab_button_release() -> bool {
+        false
     }
 
     /// Called once after the wgpu device and renderer are ready.
