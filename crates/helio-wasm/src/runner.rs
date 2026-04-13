@@ -63,9 +63,19 @@ fn release_cursor(window: &Window) {
     }
     #[cfg(target_arch = "wasm32")]
     {
-        // Pointer lock release is triggered by pressing Escape in the browser
-        // — no explicit JS call needed here.
-        let _ = window;
+        use winit::platform::web::WindowExtWebSys;
+
+        if let Some(web_window) = web_sys::window() {
+            if let Some(document) = web_window.document() {
+                // Release pointer lock explicitly so demos can implement
+                // hold-to-fly behaviour on right mouse button release.
+                document.exit_pointer_lock();
+            }
+        }
+
+        if let Some(canvas) = window.canvas() {
+            let _ = canvas.style().set_property("cursor", "default");
+        }
     }
 }
 
