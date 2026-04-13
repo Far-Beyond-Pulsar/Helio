@@ -177,9 +177,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var m2 = vec3<f32>(0.0);
     for (var x = -1; x <= 1; x = x + 1) {
         for (var y = -1; y <= 1; y = y + 1) {
+            // textureSampleLevel: control flow is non-uniform here (history_uv depends on
+            // velocity which is a textureSample return value).
             let s = rgb_to_ycocg(tonemap(
-                textureSample(current_frame, point_sampler,
-                    cur_uv + vec2<f32>(f32(x), f32(y)) * in_texel).rgb));
+                textureSampleLevel(current_frame, point_sampler,
+                    cur_uv + vec2<f32>(f32(x), f32(y)) * in_texel, 0.0).rgb));
             m1 += s;
             m2 += s * s;
         }
