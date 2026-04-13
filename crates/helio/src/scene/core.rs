@@ -267,6 +267,16 @@ impl Scene {
         &self.gpu_scene
     }
 
+    /// Iterate over all live lights, yielding the handle and GPU light data.
+    pub(crate) fn iter_lights(&self) -> impl Iterator<Item = (LightId, &GpuLight)> + '_ {
+        self.lights.iter_with_handles().map(|(id, record)| (id, &record.gpu))
+    }
+
+    /// Get the GPU light data for a single light by its handle.
+    pub(crate) fn get_light(&self, id: LightId) -> Option<GpuLight> {
+        self.lights.get_with_index(id).map(|(_, record)| record.gpu)
+    }
+
     /// Returns true if static geometry or lights have been added since the last bake.
     ///
     /// When this returns true after a bake has been configured, the baked lighting

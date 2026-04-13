@@ -39,7 +39,7 @@
 //! // On left-click:
 //! let (ray_o, ray_d) = EditorState::ray_from_screen(mx, my, w, h, vp_inv);
 //! if let Some(hit) = picker.cast_ray(ray_o, ray_d) {
-//!     editor.select(hit.object_id);
+//!     editor.select(hit.actor_id);
 //! } else {
 //!     editor.deselect();
 //! }
@@ -50,9 +50,9 @@ use std::sync::Arc;
 
 use glam::{Mat3, Mat4, Vec3};
 
-use crate::handles::{MeshId, ObjectId};
+use crate::handles::{LightId, MeshId, ObjectId};
 use crate::mesh::MeshUpload;
-use crate::scene::Scene;
+use crate::scene::{Scene, SceneActorId};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tunables
@@ -336,8 +336,8 @@ impl MeshBvh {
 /// Result of a successful [`ScenePicker::cast_ray`] call.
 #[derive(Debug, Clone, Copy)]
 pub struct PickHit {
-    /// Handle of the hit scene object.
-    pub object_id: ObjectId,
+    /// Handle of the hit scene actor.
+    pub actor_id: SceneActorId,
 
     /// Distance along the ray to the hit point (in world units, assuming
     /// `direction` passed to `cast_ray` was unit length).
@@ -356,7 +356,7 @@ pub struct PickHit {
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct PickInstance {
-    object_id: ObjectId,
+    actor_id: SceneActorId,
     /// Compact key into `ScenePicker::mesh_bvhs`.
     mesh_key: u64,
     /// World transform (used to re-project local hit to world space).
@@ -457,7 +457,7 @@ impl ScenePicker {
             let normal_mat = Mat3::from_mat4(inv).transpose();
 
             self.instances.push(PickInstance {
-                object_id: obj.id,
+                actor_id: SceneActorId::Object(obj.id),
                 mesh_key: key,
                 transform: obj.transform,
                 inv_transform: inv,
@@ -491,7 +491,7 @@ impl ScenePicker {
     /// - Broad phase: O(N) AABB tests, then sort O(N log N).
     /// - Narrow phase: O(log T) BVH traversal per AABB hit.
     /// - No heap allocation per call (BVH traversal uses a stack-allocated array).
-    pub fn cast_ray(&self, origin: Vec3, dir: Vec3) -> Option<PickHit> {
+    pub fn cast_ray(&self, scene: &Scene, origin: Vec3, dir: Vec3) -> Option<PickHit> {
         if dir.length_squared() < 1e-20 {
             return None;
         }
@@ -553,13 +553,49 @@ impl ScenePicker {
                     };
 
                     best_hit = Some(PickHit {
-                        object_id: inst.object_id,
+                        actor_id: inst.actor_id,
                         t: world_t,
                         position: world_hit,
                         normal: world_normal,
                     });
                 }
             }
+        }
+
+        for (light_id, light_record) in scene.iter_lights() {
+            if light_record.light_type != libhelio::LightType::Point as u32
+                && light_record.light_type != libhelio::LightType::Spot as u32
+            {
+                continue;
+            }
+
+            let center = Vec3::new(
+                light_record.position_range[0],
+                light_record.position_range[1],
+                light_record.position_range[2],
+            );
+            let radius = 0.35;
+            let oc = origin - center;
+            let b = oc.dot(dir_n);
+            let c = oc.length_squared() - radius * radius;
+            let discriminant = b * b - c;
+            if discriminant < 0.0 {
+                continue;
+            }
+            let t = -b - discriminant.sqrt();
+            if t <= RAY_T_MIN || t >= best_t {
+                continue;
+            }
+
+            let world_hit = origin + dir_n * t;
+            let world_normal = (world_hit - center).normalize_or_zero();
+            best_t = t;
+            best_hit = Some(PickHit {
+                actor_id: SceneActorId::Light(light_id),
+                t,
+                position: world_hit,
+                normal: world_normal,
+            });
         }
 
         best_hit

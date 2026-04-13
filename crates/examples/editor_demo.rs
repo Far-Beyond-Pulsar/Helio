@@ -501,8 +501,8 @@ impl ApplicationHandler for App {
                     if !state.editor.try_start_drag(ray_o, ray_d, state.renderer.scene()) {
                         // BVH ray cast — exact triangle intersection.
                         state.picker.rebuild_instances(state.renderer.scene());
-                        if let Some(hit) = state.picker.cast_ray(ray_o, ray_d) {
-                            state.editor.select(hit.object_id);
+                        if let Some(hit) = state.picker.cast_ray(state.renderer.scene(), ray_o, ray_d) {
+                            state.editor.select(hit.actor_id);
                         } else {
                             state.editor.deselect();
                         }

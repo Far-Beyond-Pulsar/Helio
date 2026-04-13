@@ -32,7 +32,7 @@ use glam::{Mat3, Mat4, Vec3};
 
 use crate::handles::ObjectId;
 use crate::renderer::Renderer;
-use crate::scene::Scene;
+use crate::scene::{Scene, SceneActorId};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -87,6 +87,7 @@ fn ring_frame(axis: GizmoAxis, local_axes: [Vec3; 3]) -> (Vec3, Vec3) {
 // Internal drag state
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
 enum DragState {
     Idle,
     Active {
@@ -106,7 +107,7 @@ enum DragState {
 
 /// Per-frame editor state: selection, gizmo mode, hover, and drag.
 pub struct EditorState {
-    selected: Option<ObjectId>,
+    selected: Option<SceneActorId>,
     gizmo_mode: GizmoMode,
     /// Set by `update_hover` — the gizmo axis the cursor is currently over.
     hovered_axis: Option<GizmoAxis>,
@@ -132,8 +133,8 @@ impl EditorState {
 
     // ── Selection ─────────────────────────────────────────────────────────────
 
-    /// Explicitly select an object by handle.
-    pub fn select(&mut self, id: ObjectId) {
+    /// Explicitly select a scene actor by handle.
+    pub fn select(&mut self, id: SceneActorId) {
         self.selected     = Some(id);
         self.hovered_axis = None;
         self.drag         = DragState::Idle;
@@ -146,9 +147,14 @@ impl EditorState {
         self.drag         = DragState::Idle;
     }
 
-    /// Returns the currently selected object, if any.
-    pub fn selected(&self) -> Option<ObjectId> {
+    /// Returns the currently selected scene actor, if any.
+    pub fn selected(&self) -> Option<SceneActorId> {
         self.selected
+    }
+
+    /// Returns the selected scene object, if the current selection is an object.
+    pub fn selected_object(&self) -> Option<ObjectId> {
+        self.selected.and_then(|id| id.as_object())
     }
 
     // ── Gizmo mode ────────────────────────────────────────────────────────────
@@ -207,16 +213,34 @@ impl EditorState {
         if self.is_dragging() {
             return true; // keep hover alive while dragging
         }
-        let Some(id) = self.selected else {
-            self.hovered_axis = None;
-            return false;
-        };
-        let Some((center, size, local_axes)) = object_gizmo_info(id, scene) else {
-            self.hovered_axis = None;
-            return false;
-        };
-        self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode, local_axes);
-        self.hovered_axis.is_some()
+        match self.selected {
+            Some(SceneActorId::Object(id)) => {
+                let Some((center, size, local_axes)) = object_gizmo_info(id, scene) else {
+                    self.hovered_axis = None;
+                    return false;
+                };
+                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode, local_axes);
+                self.hovered_axis.is_some()
+            }
+            Some(SceneActorId::Light(id)) => {
+                let Some(light) = scene.get_light(id) else {
+                    self.hovered_axis = None;
+                    return false;
+                };
+                let center = Vec3::new(
+                    light.position_range[0],
+                    light.position_range[1],
+                    light.position_range[2],
+                );
+                // Lights only support translate gizmo.
+                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, 0.8, GizmoMode::Translate, [Vec3::X, Vec3::Y, Vec3::Z]);
+                self.hovered_axis.is_some()
+            }
+            _ => {
+                self.hovered_axis = None;
+                false
+            }
+        }
     }
 
     // ── Drag start / update / end ─────────────────────────────────────────────
@@ -231,122 +255,154 @@ impl EditorState {
             Some(a) => a,
             None    => return false,
         };
-        let Some(id) = self.selected else { return false };
-        let Some((center, _, local_axes)) = object_gizmo_info(id, scene) else { return false };
-        let Ok(initial_transform) = scene.get_object_transform(id) else { return false };
+        match self.selected {
+            Some(SceneActorId::Object(id)) => {
+                let Some((center, _, local_axes)) = object_gizmo_info(id, scene) else { return false };
+                let Ok(initial_transform) = scene.get_object_transform(id) else { return false };
 
-        let axis_dir     = local_axes[axis.col()];
-        let axis_t_start = match self.gizmo_mode {
-            GizmoMode::Translate | GizmoMode::Scale => {
-                match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
-                    Some(t) => t,
-                    None    => return false,
-                }
-            }
-            GizmoMode::Rotate => {
-                let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
-                    Some(h) => h,
-                    None    => return false,
+                let axis_dir     = local_axes[axis.col()];
+                let axis_t_start = match self.gizmo_mode {
+                    GizmoMode::Translate | GizmoMode::Scale => {
+                        match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                            Some(t) => t,
+                            None    => return false,
+                        }
+                    }
+                    GizmoMode::Rotate => {
+                        let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
+                            Some(h) => h,
+                            None    => return false,
+                        };
+                        let (tan, bitan) = ring_frame(axis, local_axes);
+                        let to_hit = hit - center;
+                        to_hit.dot(bitan).atan2(to_hit.dot(tan))
+                    }
                 };
-                let (tan, bitan) = ring_frame(axis, local_axes);
-                let to_hit = hit - center;
-                to_hit.dot(bitan).atan2(to_hit.dot(tan))
-            }
-        };
 
-        // Freeze centre and local axes so update_drag always measures against the
-        // same reference regardless of how the object moves.
-        self.drag = DragState::Active {
-            axis, initial_transform, gizmo_center: center, local_axes, axis_t_start,
-        };
-        true
+                self.drag = DragState::Active {
+                    axis, initial_transform, gizmo_center: center, local_axes, axis_t_start,
+                };
+                true
+            }
+            Some(SceneActorId::Light(id)) => {
+                let Some(light) = scene.get_light(id) else { return false };
+                let center = Vec3::new(
+                    light.position_range[0],
+                    light.position_range[1],
+                    light.position_range[2],
+                );
+                let local_axes = [Vec3::X, Vec3::Y, Vec3::Z];
+                let axis_dir   = local_axes[axis.col()];
+                let Some(t)    = ray_to_axis_t(ray_o, ray_d, center, axis_dir) else { return false };
+
+                self.drag = DragState::Active {
+                    axis,
+                    initial_transform: Mat4::from_translation(center),
+                    gizmo_center: center,
+                    local_axes,
+                    axis_t_start: t,
+                };
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Apply the gizmo drag to the selected object given the current ray.
     ///
     /// Call on every `CursorMoved` event while the left button is held.
     pub fn update_drag(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &mut Scene) {
-        let (axis, initial_transform, gizmo_center, local_axes, axis_t_start, gizmo_size) =
-            match &self.drag {
-                DragState::Active {
-                    axis, initial_transform, gizmo_center, local_axes, axis_t_start,
-                } => {
-                    let id   = match self.selected { Some(id) => id, None => return };
-                    let size = scene.get_object_bounds(id)
-                        .map(|b| (b[3].max(0.3) * 1.8).max(0.8))
-                        .unwrap_or(1.0);
-                    (*axis, *initial_transform, *gizmo_center, *local_axes, *axis_t_start, size)
-                }
-                DragState::Idle => return,
-            };
-        let Some(id) = self.selected else { return };
+        let DragState::Active { axis, initial_transform, gizmo_center, local_axes, axis_t_start } = self.drag else {
+            return;
+        };
 
         // Use the frozen local axis direction and frozen gizmo centre so the
         // constraint doesn't shift as the object moves.
         let axis_dir = local_axes[axis.col()];
         let center   = gizmo_center;
 
-        let new_transform = match self.gizmo_mode {
-            GizmoMode::Translate => {
-                let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
-                    Some(t) => t,
-                    None    => return,
+        match self.selected {
+            Some(SceneActorId::Object(object_id)) => {
+                let gizmo_size = scene.get_object_bounds(object_id)
+                    .map(|b| (b[3].max(0.3) * 1.8).max(0.8))
+                    .unwrap_or(1.0);
+
+                let new_transform = match self.gizmo_mode {
+                    GizmoMode::Translate => {
+                        let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                            Some(t) => t,
+                            None    => return,
+                        };
+                        let delta = t_now - axis_t_start;
+                        Mat4::from_translation(axis_dir * delta) * initial_transform
+                    }
+
+                    GizmoMode::Scale => {
+                        let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                            Some(t) => t,
+                            None    => return,
+                        };
+                        // World-unit drag → scale fraction relative to gizmo size.
+                        let delta        = t_now - axis_t_start;
+                        let sensitivity  = 1.5 / gizmo_size.max(0.01);
+                        let scale_factor = (1.0 + delta * sensitivity).max(0.01_f32);
+
+                        // Re-scale the column that corresponds to this axis.
+                        let ci      = axis.col();
+                        let col     = initial_transform.col(ci);
+                        let old_len = col.truncate().length();
+                        let new_len = (old_len * scale_factor).max(0.001);
+                        let col_n   = if old_len > 1e-8 { col / old_len } else { col };
+                        let new_col = col_n * new_len;
+
+                        let cols = [
+                            if ci == 0 { new_col } else { initial_transform.col(0) },
+                            if ci == 1 { new_col } else { initial_transform.col(1) },
+                            if ci == 2 { new_col } else { initial_transform.col(2) },
+                            initial_transform.col(3),
+                        ];
+                        Mat4::from_cols(cols[0], cols[1], cols[2], cols[3])
+                    }
+
+                    GizmoMode::Rotate => {
+                        let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
+                            Some(h) => h,
+                            None    => return,
+                        };
+                        let (tan, bitan) = ring_frame(axis, local_axes);
+                        let to_hit      = hit - center;
+                        let angle_now   = to_hit.dot(bitan).atan2(to_hit.dot(tan));
+                        let angle_delta = angle_now - axis_t_start;
+
+                        // Rotate orientation/scale columns, keep translation.
+                        let rot       = Mat3::from_axis_angle(axis_dir, angle_delta);
+                        let upper     = Mat3::from_mat4(initial_transform);
+                        let new_upper = rot * upper;
+                        Mat4::from_cols(
+                            new_upper.col(0).extend(0.0),
+                            new_upper.col(1).extend(0.0),
+                            new_upper.col(2).extend(0.0),
+                            initial_transform.col(3),
+                        )
+                    }
                 };
-                let delta = t_now - axis_t_start;
-                Mat4::from_translation(axis_dir * delta) * initial_transform
+
+                let _ = scene.update_object_transform(object_id, new_transform);
             }
+            Some(SceneActorId::Light(light_id)) => {
+                // Lights only support translate dragging.
+                let Some(t_now) = ray_to_axis_t(ray_o, ray_d, center, axis_dir) else { return };
+                let delta    = t_now - axis_t_start;
+                let new_pos  = initial_transform.col(3).truncate() + axis_dir * delta;
 
-            GizmoMode::Scale => {
-                let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
-                    Some(t) => t,
-                    None    => return,
-                };
-                // World-unit drag → scale fraction relative to gizmo size.
-                let delta        = t_now - axis_t_start;
-                let sensitivity  = 1.5 / gizmo_size.max(0.01);
-                let scale_factor = (1.0 + delta * sensitivity).max(0.01_f32);
-
-                // Re-scale the column that corresponds to this axis.
-                let ci      = axis.col();
-                let col     = initial_transform.col(ci);
-                let old_len = col.truncate().length();
-                let new_len = (old_len * scale_factor).max(0.001);
-                let col_n   = if old_len > 1e-8 { col / old_len } else { col };
-                let new_col = col_n * new_len;
-
-                let cols = [
-                    if ci == 0 { new_col } else { initial_transform.col(0) },
-                    if ci == 1 { new_col } else { initial_transform.col(1) },
-                    if ci == 2 { new_col } else { initial_transform.col(2) },
-                    initial_transform.col(3),
-                ];
-                Mat4::from_cols(cols[0], cols[1], cols[2], cols[3])
+                let Some(mut light) = scene.get_light(light_id) else { return };
+                light.position_range[0] = new_pos.x;
+                light.position_range[1] = new_pos.y;
+                light.position_range[2] = new_pos.z;
+                let _ = scene.update_light(light_id, light);
             }
-
-            GizmoMode::Rotate => {
-                let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
-                    Some(h) => h,
-                    None    => return,
-                };
-                let (tan, bitan) = ring_frame(axis, local_axes);
-                let to_hit      = hit - center;
-                let angle_now   = to_hit.dot(bitan).atan2(to_hit.dot(tan));
-                let angle_delta = angle_now - axis_t_start;
-
-                // Rotate orientation/scale columns, keep translation.
-                let rot       = Mat3::from_axis_angle(axis_dir, angle_delta);
-                let upper     = Mat3::from_mat4(initial_transform);
-                let new_upper = rot * upper;
-                Mat4::from_cols(
-                    new_upper.col(0).extend(0.0),
-                    new_upper.col(1).extend(0.0),
-                    new_upper.col(2).extend(0.0),
-                    initial_transform.col(3),
-                )
-            }
-        };
-
-        let _ = scene.update_object_transform(id, new_transform);
+            _ => {}
+        }
     }
 
     /// Finish the current drag (call on left-button release).
@@ -359,7 +415,7 @@ impl EditorState {
     /// Returns `true` if an object was deleted. Rebuild `ScenePicker` afterwards
     /// so the deleted object can no longer be picked.
     pub fn delete_selected(&mut self, scene: &mut Scene) -> bool {
-        let Some(id) = self.selected.take() else { return false };
+        let Some(SceneActorId::Object(id)) = self.selected.take() else { return false };
         self.hovered_axis = None;
         self.drag         = DragState::Idle;
         scene.remove_object(id).is_ok()
@@ -374,14 +430,14 @@ impl EditorState {
         &mut self,
         renderer: &mut crate::renderer::Renderer,
     ) -> Option<crate::handles::ObjectId> {
-        let id   = self.selected?;
+        let Some(SceneActorId::Object(id)) = self.selected else { return None };
         let desc = renderer.scene().get_object_descriptor(id).ok()?;
 
         let new_actor = renderer.scene_mut().insert_actor(
             crate::scene::SceneActor::object(desc)
         );
         let new_id = new_actor.as_object()?;
-        self.selected     = Some(new_id);
+        self.selected     = Some(SceneActorId::Object(new_id));
         self.hovered_axis = None;
         self.drag         = DragState::Idle;
         Some(new_id)
@@ -395,7 +451,7 @@ impl EditorState {
     /// Prefer using `ScenePicker::cast_ray` + `select()` for accurate BVH picking.
     pub fn pick(&mut self, scene: &Scene, ray_origin: Vec3, ray_dir: Vec3) {
         let mut best_t  = f32::MAX;
-        let mut best_id = None;
+        let mut best_id: Option<SceneActorId> = None;
 
         for (id, _transform, bounds) in scene.iter_objects_for_editor() {
             let center = Vec3::new(bounds[0], bounds[1], bounds[2]);
@@ -403,7 +459,7 @@ impl EditorState {
             if let Some(t) = ray_sphere_intersect(ray_origin, ray_dir, center, radius) {
                 if t < best_t {
                     best_t  = t;
-                    best_id = Some(id);
+                    best_id = Some(SceneActorId::Object(id));
                 }
             }
         }
@@ -420,22 +476,40 @@ impl EditorState {
     /// Call every frame after [`Renderer::debug_clear`] and before frame submission.
     /// No-op when nothing is selected.
     pub fn draw_gizmos(&self, renderer: &mut Renderer) {
-        let Some(id) = self.selected else { return };
+        match self.selected {
+            Some(SceneActorId::Object(id)) => {
+                let Some((center, gizmo_size, local_axes)) =
+                    object_gizmo_info(id, renderer.scene()) else { return };
 
-        let Some((center, gizmo_size, local_axes)) =
-            object_gizmo_info(id, renderer.scene()) else { return };
+                // Selection highlight: wire sphere at the transform origin (center), radius from bounds.
+                let sphere_radius = renderer.scene().get_object_bounds(id)
+                    .map(|b| b[3].max(0.3_f32))
+                    .unwrap_or(0.3_f32);
+                renderer.debug_sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
 
-        // Selection highlight: wire sphere at the transform origin (center), radius from bounds.
-        let sphere_radius = renderer.scene().get_object_bounds(id)
-            .map(|b| b[3].max(0.3_f32))
-            .unwrap_or(0.3_f32);
-        renderer.debug_sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
+                let hov = self.hovered_axis;
+                match self.gizmo_mode {
+                    GizmoMode::Translate => draw_translate_gizmo(renderer, center, gizmo_size, hov, local_axes),
+                    GizmoMode::Rotate    => draw_rotate_gizmo   (renderer, center, gizmo_size, hov, local_axes),
+                    GizmoMode::Scale     => draw_scale_gizmo    (renderer, center, gizmo_size, hov, local_axes),
+                }
+            }
+            Some(SceneActorId::Light(id)) => {
+                let Some(light) = renderer.scene().get_light(id) else { return };
+                let center = Vec3::new(
+                    light.position_range[0],
+                    light.position_range[1],
+                    light.position_range[2],
+                );
+                let gizmo_size = 0.8_f32;
+                let local_axes = [Vec3::X, Vec3::Y, Vec3::Z];
 
-        let hov = self.hovered_axis;
-        match self.gizmo_mode {
-            GizmoMode::Translate => draw_translate_gizmo(renderer, center, gizmo_size, hov, local_axes),
-            GizmoMode::Rotate    => draw_rotate_gizmo   (renderer, center, gizmo_size, hov, local_axes),
-            GizmoMode::Scale     => draw_scale_gizmo    (renderer, center, gizmo_size, hov, local_axes),
+                // Yellow circle highlight around billboard.
+                renderer.debug_sphere(center.to_array(), 0.38_f32, [1.0, 0.95, 0.0, 1.0], 24);
+
+                draw_translate_gizmo(renderer, center, gizmo_size, self.hovered_axis, local_axes);
+            }
+            _ => {}
         }
     }
 }
