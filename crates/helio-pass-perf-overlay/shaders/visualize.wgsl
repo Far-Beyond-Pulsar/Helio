@@ -27,7 +27,7 @@ struct TileMetrics {
 @group(0) @binding(1) var<storage, read> pass_overdraw: array<u32>;
 @group(0) @binding(2) var<storage, read> tile_metrics: array<TileMetrics>;
 @group(0) @binding(3) var gbuffer_orm: texture_2d<f32>;
-@group(0) @binding(4) var<storage, read> shader_cost: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> shader_cost: array<atomic<u32>>;
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,

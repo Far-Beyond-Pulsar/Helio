@@ -7,7 +7,7 @@
 // This shader is compiled into `helio-pass-virtual-geometry` and draws only
 // VG meshlets that survived the cull compute shader.
 
-enable primitive_index;
+// (primitive_index extension removed: not supported by WebGPU in browsers)
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -234,12 +234,12 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     return out;
 }
 
-// ── VG triangle debug (mode 20): solid colour per triangle via primitive_index ─
-// Lives in a separate entry point so the normal fs_main never pays the cost of
-// primitive_index tracking even when debug is inactive.
+// ── VG triangle debug (mode 20): solid colour per triangle ───────────────────
+// Uses material_id as a color seed (primitive_index is not available in
+// WebGPU browser environments).
 @fragment
-fn fs_debug(input: VertexOutput, @builtin(primitive_index) prim_id: u32) -> GBufferOutput {
-    var h = prim_id * 2747636419u;
+fn fs_debug(input: VertexOutput) -> GBufferOutput {
+    var h = (input.material_id * 2747636419u);
     h ^= h >> 16u;
     h *= 2654435769u;
     h ^= h >> 16u;

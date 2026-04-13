@@ -50,6 +50,9 @@ profiling = ["helio-v3/profiling"]
 live-portal = ["helio-live-portal"]
 bake = ["helio-bake", "uuid"]
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-time = "1"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # Used for DXGI exclusive-fullscreen path (IDXGIFactory1::MakeWindowAssociation).
 # Version must match wgpu-hal's transitive dep so types are unified.

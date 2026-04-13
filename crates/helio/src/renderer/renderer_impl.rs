@@ -1,5 +1,10 @@
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
 use arrayvec::ArrayVec;
 use helio_pass_debug::{DebugVertex};
 use helio_pass_deferred_light::DeferredLightPass;
@@ -77,7 +82,7 @@ pub struct Renderer {
     water_volumes_buffer: wgpu::Buffer,
     water_hitboxes_buffer: wgpu::Buffer,
     /// Instant of the previous `render()` call, used to compute real `delta_time`.
-    last_render_time: std::time::Instant,
+    last_render_time: Instant,
     /// Precomputed TAA jitter translation matrices (16-sample Halton sequence).
     /// Cached per resolution to avoid per-frame matrix construction overhead.
     jitter_matrices: [glam::Mat4; 16],
@@ -205,7 +210,7 @@ impl Renderer {
             billboard_cached_editor_hidden: false,
             water_volumes_buffer,
             water_hitboxes_buffer,
-            last_render_time: std::time::Instant::now(),
+            last_render_time: Instant::now(),
             jitter_matrices,
             jitter_cache_width: internal_w,
             jitter_cache_height: internal_h,
@@ -352,7 +357,7 @@ impl Renderer {
             billboard_cached_editor_hidden: false,
             water_volumes_buffer,
             water_hitboxes_buffer,
-            last_render_time: std::time::Instant::now(),
+            last_render_time: Instant::now(),
             jitter_matrices,
             jitter_cache_width: internal_w,
             jitter_cache_height: internal_h,
@@ -945,7 +950,7 @@ impl Renderer {
                 request.config.cache_dir.display(),
             );
             
-            let bake_start = std::time::Instant::now();
+            let bake_start = Instant::now();
             let baked = helio_bake::run_bake_blocking(
                 &self.device,
                 &self.queue,
@@ -994,7 +999,7 @@ impl Renderer {
 
         // Compute real frame delta, capped at 100 ms to avoid spiral-of-death on
         // slow frames (e.g. first frame, window unfocus/refocus, GPU stalls).
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
         self.last_render_time = now;
         self.graph.set_delta_time(dt);

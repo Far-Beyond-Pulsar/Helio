@@ -498,8 +498,8 @@ impl WaterSimPass {
         });
         let depth_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Water Depth Sampler"),
-            min_filter: wgpu::FilterMode::Linear,
-            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Nearest,
+            mag_filter: wgpu::FilterMode::Nearest,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
@@ -641,11 +641,11 @@ impl WaterSimPass {
                     },
                     count: None,
                 },
-                // depth_sampler: linear clamp sampler for depth
+                // depth_sampler: non-filtering sampler for depth (WebGPU requires NonFiltering for depth textures)
                 wgpu::BindGroupLayoutEntry {
                     binding: 9,
                     visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
                 // gbuffer_normal: scene normals for SSR quality (optional)

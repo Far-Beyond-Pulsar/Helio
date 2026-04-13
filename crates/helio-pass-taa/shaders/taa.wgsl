@@ -163,7 +163,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // ── History ─────────────────────────────────────────────────────────────
     // Read confidence from history alpha (point sampler — no filtering needed).
-    let raw_confidence = textureSample(history_frame, point_sampler, history_uv).a;
+    let raw_confidence = textureSampleLevel(history_frame, point_sampler, history_uv, 0.0).a;
 
     // Catmull-Rom reduces blur compared to bilinear.
     // History was written as original (non-tonemapped) colors; tonemap before blending.

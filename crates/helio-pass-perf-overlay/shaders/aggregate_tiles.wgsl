@@ -22,7 +22,7 @@ struct TileMetrics {
 }
 
 @group(0) @binding(0) var<uniform> params: AggregateParams;
-@group(0) @binding(1) var<storage, read> pass_overdraw_counters: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read_write> pass_overdraw_counters: array<atomic<u32>>;
 @group(0) @binding(2) var gbuffer_orm: texture_2d<f32>;
 @group(0) @binding(3) var<storage, read> tile_light_counts: array<u32>;
 @group(0) @binding(4) var<storage, read_write> tile_metrics: array<TileMetrics>;

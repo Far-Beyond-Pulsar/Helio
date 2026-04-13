@@ -2709,6 +2709,7 @@ dependencies = [
  "quark",
  "thiserror 2.0.18",
  "uuid",
+ "web-time",
  "wgpu 28.0.0",
  "windows 0.62.2",
 ]

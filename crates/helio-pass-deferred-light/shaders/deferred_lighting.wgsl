@@ -884,7 +884,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 // Sample caustics texture based on world XZ position
                 let caustics_scale = vol.caustics_params.z;
                 let caustics_uv = world_pos.xz / caustics_scale;
-                let caustic_value = textureSample(water_caustics, caustics_sampler, caustics_uv).r;
+                let caustic_value = textureSampleLevel(water_caustics, caustics_sampler, caustics_uv, 0.0).r;
 
                 // Apply caustics intensity
                 let caustics_intensity = vol.caustics_params.y;
