@@ -36,7 +36,7 @@ outdoor_rocks       = []
 # ── dependencies ─────────────────────────────────────────────────────────────
 [dependencies]
 helio-wasm          = { path = "../helio-wasm" }
-helio               = { path = "../helio" }
+helio               = { path = "../helio", default-features = false }
 helio-asset-compat  = { path = "../helio-asset-compat" }
 helio-pass-sdf      = { path = "../helio-pass-sdf" }
 wgpu                = { workspace = true }
@@ -45,6 +45,10 @@ log                 = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+# getrandom requires explicit js/wasm_js feature to work on wasm32-unknown-unknown.
+# Both v0.2 and v0.3 may appear in the dep graph (e.g. uuid uses 0.2, newer crates use 0.3).
+getrandom    = { version = "0.2", features = ["js"] }
+getrandom03  = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 env_logger = "0.11"
