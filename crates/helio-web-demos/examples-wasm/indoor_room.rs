@@ -80,11 +80,11 @@ impl HelioWasmApp for Demo {
             (sofa, wood_mat, 1.5),
         ] {
             let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, r);
-            meshes.push(mesh);
+            meshes.push(mesh.as_mesh().unwrap());
         }
 
         let overhead_light =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0, 7.0)));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 2.85, 0.0], [1.0, 0.85, 0.6], 4.0, 7.0))).as_light().unwrap();
         renderer.set_ambient([0.4, 0.35, 0.3], 0.05);
         renderer.set_clear_color([0.05, 0.05, 0.08, 1.0]);
 

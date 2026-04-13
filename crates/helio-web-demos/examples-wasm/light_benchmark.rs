@@ -86,7 +86,7 @@ impl HelioWasmApp for Demo {
             let (r, g, b) = hsv_to_rgb(hue, 0.8, 1.0);
             let bulb = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([x, 1.8, z], 0.07)));
             insert_object(renderer, bulb, light_m, glam::Mat4::IDENTITY, 0.07).unwrap();
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([x, 2.0, z], [r, g, b], 10.0, 8.0)));
+            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([x, 2.0, z], [r, g, b], 10.0, 8.0))).as_light().unwrap();
             light_ids.push(id);
         }
 

@@ -170,9 +170,9 @@ impl HelioWasmApp for Demo {
         insert_object(renderer, star_cube, green_m, glam::Mat4::IDENTITY, 0.08).unwrap();
 
         let port_light =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-22.5, 0.0, 0.0], [1.0, 0.05, 0.05], 12.0, 8.0)));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-22.5, 0.0, 0.0], [1.0, 0.05, 0.05], 12.0, 8.0))).as_light().unwrap();
         let star_light =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([22.5, 0.0, 0.0], [0.05, 1.0, 0.1], 12.0, 8.0)));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([22.5, 0.0, 0.0], [0.05, 1.0, 0.1], 12.0, 8.0))).as_light().unwrap();
 
         // Sunlight (directional, no atmosphere)
         let sun_dir = Vec3::new(-0.5, -0.4, 0.8).normalize();

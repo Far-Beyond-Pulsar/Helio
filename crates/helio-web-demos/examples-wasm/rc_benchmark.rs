@@ -77,8 +77,12 @@ impl HelioWasmApp for Demo {
 
         let mut ids_vec: Vec<LightId> = LIGHT_BASE
             .iter()
-            .map(|&(pos, col, int, rng)| renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
-            .collect());
+            .map(|&(pos, col, int, rng)| {
+                renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, col, int, rng)))
+                    .as_light()
+                    .unwrap()
+            })
+            .collect();
         let light_ids = [ids_vec.remove(0), ids_vec.remove(0), ids_vec.remove(0)];
 
         renderer.set_ambient([0.02, 0.02, 0.03], 1.0);

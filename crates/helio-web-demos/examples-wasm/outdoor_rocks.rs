@@ -162,7 +162,7 @@ impl HelioWasmApp for Demo {
 
         // Lighting
         let sun_light_id =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.8, 0.3], [1.0, 0.97, 0.88], 2.2)));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([-0.5, -0.8, 0.3], [1.0, 0.97, 0.88], 2.2))).as_light().unwrap();
         renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.3, 0.6, -0.8], [0.3, 0.4, 0.6], 0.05)));
         // Scatter a few warm rock pool lights
         let mut light_seed: u64 = 0xFEEDFACE;

@@ -169,7 +169,7 @@ impl HelioWasmApp for Demo {
 
         let mut candle_ids = Vec::new();
         for pos in &light_positions {
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(*pos, [1.0, 0.85, 0.5], 1.5, 10.0)));
+            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(*pos, [1.0, 0.85, 0.5], 1.5, 10.0))).as_light().unwrap();
             candle_ids.push(id);
         }
 
@@ -213,7 +213,7 @@ impl HelioWasmApp for Demo {
             fog_density: 0.015,
             god_rays_intensity: 0.2,
         };
-        renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool)));
+        renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
 
         Self {
             candle_ids,

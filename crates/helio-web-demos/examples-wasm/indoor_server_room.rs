@@ -180,7 +180,7 @@ impl HelioWasmApp for Demo {
         for &pos in strip_positions {
             let strip = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, [0.1, 0.05, 10.0])));
             insert_object(renderer, strip, strip_m, glam::Mat4::IDENTITY, 10.0).unwrap();
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, [0.65, 0.75, 0.95], 80.0, 12.0)));
+            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, [0.65, 0.75, 0.95], 80.0, 12.0))).as_light().unwrap();
             indicator_ids.push(id);
         }
 
@@ -191,7 +191,7 @@ impl HelioWasmApp for Demo {
                 [0.0, 0.9, 0.3],
                 3.0,
                 4.0,
-            )));
+            ))).as_light().unwrap();
             indicator_ids.push(id);
         }
 

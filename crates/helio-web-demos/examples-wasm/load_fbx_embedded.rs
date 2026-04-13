@@ -71,12 +71,12 @@ impl HelioWasmApp for Demo {
                     for (i, mesh_data) in scene.meshes.iter().enumerate() {
                         if let Some(mesh_id) = uploaded.mesh_ids.get(i).copied() {
                             let mat_id = uploaded
-                                .mesh_material(i, mesh_data)
+                                .mesh_material(mesh_data)
                                 .or_else(|| uploaded.material_ids.first().copied());
                             if let Some(mat_id) = mat_id {
                                 let _ = insert_object(
                                     renderer,
-                                    mesh_id,
+                                    helio::SceneActorId::Mesh(mesh_id),
                                     mat_id,
                                     glam::Mat4::IDENTITY,
                                     radius,

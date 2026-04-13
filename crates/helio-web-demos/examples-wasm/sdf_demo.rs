@@ -10,7 +10,7 @@ use helio_pass_sdf::{
     edit_list::{BooleanOp, SdfEdit},
     primitives::{SdfShapeParams, SdfShapeType},
     terrain::TerrainConfig,
-    SdfClipmapPass,
+    SdfPass,
 };
 use helio_wasm::{HelioWasmApp, InputState};
 
@@ -38,14 +38,10 @@ impl HelioWasmApp for Demo {
     ) -> Self {
         let _ = (w, h);
         let mut sdf = {
-            let camera_buf = renderer.camera_buffer();
-            // The surface format used by the runner is fixed; use a sRGB-compatible format.
-            // We use Bgra8UnormSrgb as a reasonable default; the pass itself will
-            // adapts if the renderer provides a different target format.
-            SdfClipmapPass::new(&device, camera_buf, wgpu::TextureFormat::Bgra8UnormSrgb)
+            SdfPass::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, None)
         };
 
-        sdf.set_terrain(TerrainConfig::rolling());
+        sdf.set_terrain(Some(TerrainConfig::rolling()));
 
         sdf.add_edit(SdfEdit {
             shape: SdfShapeType::Sphere,

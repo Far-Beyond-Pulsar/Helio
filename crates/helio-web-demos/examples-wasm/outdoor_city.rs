@@ -147,7 +147,7 @@ impl HelioWasmApp for Demo {
                     [1.0, 0.92, 0.72],
                     80.0,
                     18.0,
-                )));
+                ))).as_light().unwrap();
                 window_ids.push(id);
             }
         }
@@ -159,7 +159,7 @@ impl HelioWasmApp for Demo {
                 [1.0, 0.1, 0.05],
                 5.0,
                 8.0,
-            )));
+            ))).as_light().unwrap();
             window_ids.push(id);
         }
 

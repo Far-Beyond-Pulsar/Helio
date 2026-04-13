@@ -156,16 +156,16 @@ impl HelioWasmApp for Demo {
                 [1.0, 0.3, 0.02],
                 8.0,
                 10.0,
-            )));
+            ))).as_light().unwrap();
             lava_lights.push(id);
         }
         // Central lava lake glow
         let central =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 2.0, 0.0], [1.0, 0.2, 0.0], 100.0, 40.0)));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 2.0, 0.0], [1.0, 0.2, 0.0], 100.0, 40.0))).as_light().unwrap();
         lava_lights.push(central);
         // Flow lights
         for (pos, _) in flow_data {
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(*pos, [1.0, 0.25, 0.01], 15.0, 12.0)));
+            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(*pos, [1.0, 0.25, 0.01], 15.0, 12.0))).as_light().unwrap();
             lava_lights.push(id);
         }
 

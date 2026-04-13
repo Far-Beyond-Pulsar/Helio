@@ -94,9 +94,9 @@ impl HelioWasmApp for Demo {
             [-0.0, -1.0, -0.5],
             [1.0, 0.9, 0.7],
             0.005,
-        )));
+        ))).as_light().unwrap();
         let fire_light =
-            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 0.5, 9.5], [1.0, 0.45, 0.1], 5.0, 12.0)));
+            renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.0, 0.5, 9.5], [1.0, 0.45, 0.1], 5.0, 12.0))).as_light().unwrap();
         renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-0.4, 0.4, 9.2], [1.0, 0.35, 0.05], 1.5, 5.0)));
         renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([0.4, 0.4, 9.8], [1.0, 0.35, 0.05], 1.5, 5.0)));
         let moon_dir = Vec3::new(0.4, -0.7, 0.3).normalize();
