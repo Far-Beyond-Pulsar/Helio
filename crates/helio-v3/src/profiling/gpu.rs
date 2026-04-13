@@ -104,7 +104,11 @@ impl GpuProfiler {
     /// let profiler = GpuProfiler::new(&device, &queue);
     /// ```
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
-        let has_timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        // write_timestamp on a command encoder requires BOTH TIMESTAMP_QUERY and
+        // TIMESTAMP_QUERY_INSIDE_ENCODERS.  WebGPU browsers typically support neither;
+        // guard both so we never call write_timestamp on an unsupported backend.
+        let has_timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
+            && device.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
         let query_set = if has_timestamps {
             Some(device.create_query_set(&wgpu::QuerySetDescriptor {

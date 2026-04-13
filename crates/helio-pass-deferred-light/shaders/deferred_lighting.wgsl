@@ -814,7 +814,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // vertex shader, so textureSample cannot bleed into adjacent atlas regions.
     let lightmap_uv     = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
     let has_lightmap    = lightmap_uv.x >= 0.0;  // sentinel: negative x = no lightmap
-    let lightmap_sample = textureSample(baked_lightmap, baked_lightmap_sampler, lightmap_uv).rgb;
+    // textureSampleLevel instead of textureSample: control flow is non-uniform (depends on
+    // per-fragment world_pos via clip_pos), so WebGPU requires an explicit LOD variant.
+    let lightmap_sample = textureSampleLevel(baked_lightmap, baked_lightmap_sampler, lightmap_uv, 0.0).rgb;
     // Nebula stores Σ(radiance · NdotL) — the same weighted sum pbr_direct_light accumulates
     // into Lo.  No extra 1/π factor here: Nebula does not divide by π in the bake shader,
     // so neither do we.  This convention matches Unreal Engine's lightmap pipeline.

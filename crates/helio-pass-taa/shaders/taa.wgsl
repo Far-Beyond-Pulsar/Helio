@@ -80,18 +80,20 @@ fn sample_catmull_rom(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec
     let uv12 = (tex_pos + offset12) * texel_size;
     let uv3 = (tex_pos + 2.0) * texel_size;
     
+    // Use textureSampleLevel (explicit LOD=0) so this function may be called from
+    // non-uniform control flow (history_uv depends on velocity which is non-uniform).
     var result = vec3<f32>(0.0);
-    result = result + textureSample(tex, samp, vec2<f32>(uv0.x, uv0.y)).rgb * w0.x * w0.y;
-    result = result + textureSample(tex, samp, vec2<f32>(uv12.x, uv0.y)).rgb * w12.x * w0.y;
-    result = result + textureSample(tex, samp, vec2<f32>(uv3.x, uv0.y)).rgb * w3.x * w0.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv0.y), 0.0).rgb * w0.x * w0.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv0.y), 0.0).rgb * w12.x * w0.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv0.y), 0.0).rgb * w3.x * w0.y;
     
-    result = result + textureSample(tex, samp, vec2<f32>(uv0.x, uv12.y)).rgb * w0.x * w12.y;
-    result = result + textureSample(tex, samp, vec2<f32>(uv12.x, uv12.y)).rgb * w12.x * w12.y;
-    result = result + textureSample(tex, samp, vec2<f32>(uv3.x, uv12.y)).rgb * w3.x * w12.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv12.y), 0.0).rgb * w0.x * w12.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv12.y), 0.0).rgb * w12.x * w12.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv12.y), 0.0).rgb * w3.x * w12.y;
     
-    result = result + textureSample(tex, samp, vec2<f32>(uv0.x, uv3.y)).rgb * w0.x * w3.y;
-    result = result + textureSample(tex, samp, vec2<f32>(uv12.x, uv3.y)).rgb * w12.x * w3.y;
-    result = result + textureSample(tex, samp, vec2<f32>(uv3.x, uv3.y)).rgb * w3.x * w3.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv3.y), 0.0).rgb * w0.x * w3.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv3.y), 0.0).rgb * w12.x * w3.y;
+    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv3.y), 0.0).rgb * w3.x * w3.y;
     
     return max(result, vec3<f32>(0.0));
 }
