@@ -31,7 +31,7 @@
 use glam::{Mat3, Mat4, Vec3};
 
 use crate::handles::ObjectId;
-use crate::renderer::Renderer;
+use crate::renderer::{DebugBatch, Renderer};
 use crate::scene::{Scene, SceneActorId};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -485,14 +485,16 @@ impl EditorState {
                 let sphere_radius = renderer.scene().get_object_bounds(id)
                     .map(|b| b[3].max(0.3_f32))
                     .unwrap_or(0.3_f32);
-                renderer.debug_sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
-
                 let hov = self.hovered_axis;
-                match self.gizmo_mode {
-                    GizmoMode::Translate => draw_translate_gizmo(renderer, center, gizmo_size, hov, local_axes),
-                    GizmoMode::Rotate    => draw_rotate_gizmo   (renderer, center, gizmo_size, hov, local_axes),
-                    GizmoMode::Scale     => draw_scale_gizmo    (renderer, center, gizmo_size, hov, local_axes),
-                }
+                let mode = self.gizmo_mode;
+                renderer.debug_batch(|dbg| {
+                    dbg.sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
+                    match mode {
+                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, gizmo_size, hov, local_axes),
+                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, gizmo_size, hov, local_axes),
+                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, gizmo_size, hov, local_axes),
+                    }
+                });
             }
             Some(SceneActorId::Light(id)) => {
                 let Some(light) = renderer.scene().get_light(id) else { return };
@@ -503,11 +505,12 @@ impl EditorState {
                 );
                 let gizmo_size = 0.8_f32;
                 let local_axes = [Vec3::X, Vec3::Y, Vec3::Z];
-
-                // Yellow circle highlight around billboard.
-                renderer.debug_sphere(center.to_array(), 0.38_f32, [1.0, 0.95, 0.0, 1.0], 24);
-
-                draw_translate_gizmo(renderer, center, gizmo_size, self.hovered_axis, local_axes);
+                let hovered_axis = self.hovered_axis;
+                renderer.debug_batch(|dbg| {
+                    // Yellow circle highlight around billboard.
+                    dbg.sphere(center.to_array(), 0.38_f32, [1.0, 0.95, 0.0, 1.0], 24);
+                    draw_translate_gizmo(dbg, center, gizmo_size, hovered_axis, local_axes);
+                });
             }
             _ => {}
         }
@@ -544,7 +547,7 @@ fn fill_col(base: [f32; 4], hovered: bool) -> [f32; 4] {
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn draw_translate_gizmo(
-    renderer: &mut Renderer,
+    renderer: &mut DebugBatch<'_>,
     center: Vec3,
     size: f32,
     hovered: Option<GizmoAxis>,
@@ -563,14 +566,14 @@ fn draw_translate_gizmo(
         let lc     = line_col(base, is_hov);
         let fc     = fill_col(base, is_hov);
 
-        renderer.debug_line(center.to_array(), tip.to_array(), lc);
-        renderer.debug_filled_cone(apex.to_array(), (-h).to_array(), cone_h, cone_r, fc, SEGS);
-        renderer.debug_cone       (apex.to_array(), (-h).to_array(), cone_h, cone_r, lc, SEGS);
+        renderer.line(center.to_array(), tip.to_array(), lc);
+        renderer.filled_cone(apex.to_array(), (-h).to_array(), cone_h, cone_r, fc, SEGS);
+        renderer.cone       (apex.to_array(), (-h).to_array(), cone_h, cone_r, lc, SEGS);
     }
 }
 
 fn draw_rotate_gizmo(
-    renderer: &mut Renderer,
+    renderer: &mut DebugBatch<'_>,
     center: Vec3,
     size: f32,
     hovered: Option<GizmoAxis>,
@@ -594,7 +597,7 @@ fn draw_rotate_gizmo(
 }
 
 fn draw_scale_gizmo(
-    renderer: &mut Renderer,
+    renderer: &mut DebugBatch<'_>,
     center: Vec3,
     size: f32,
     hovered: Option<GizmoAxis>,
@@ -610,8 +613,8 @@ fn draw_scale_gizmo(
         let lc     = line_col(base, is_hov);
         let fc     = fill_col(base, is_hov);
 
-        renderer.debug_line(center.to_array(), tip.to_array(), lc);
-        renderer.debug_filled_box(tip.to_array(), box_half, fc);
+        renderer.line(center.to_array(), tip.to_array(), lc);
+        renderer.filled_box(tip.to_array(), box_half, fc);
         draw_box_wire(renderer, tip, box_half, lc);
     }
 }
@@ -619,7 +622,7 @@ fn draw_scale_gizmo(
 // ── Ring / annulus helpers ───────────────────────────────────────────────────
 
 fn draw_ring(
-    renderer: &mut Renderer,
+    renderer: &mut DebugBatch<'_>,
     center: Vec3,
     tangent: Vec3,
     bitangent: Vec3,
@@ -632,14 +635,14 @@ fn draw_ring(
     for i in 1..=segs {
         let theta = i as f32 * step;
         let next  = center + (tangent * theta.cos() + bitangent * theta.sin()) * radius;
-        renderer.debug_line(prev.to_array(), next.to_array(), color);
+        renderer.line(prev.to_array(), next.to_array(), color);
         prev = next;
     }
 }
 
 /// Filled flat annulus (ring band) using triangle quads per sector.
 fn draw_annulus(
-    renderer: &mut Renderer,
+    renderer: &mut DebugBatch<'_>,
     center: Vec3,
     tangent: Vec3,
     bitangent: Vec3,
@@ -656,8 +659,8 @@ fn draw_annulus(
         let dir   = tangent * theta.cos() + bitangent * theta.sin();
         let ci    = center + dir * inner;
         let co    = center + dir * outer;
-        renderer.debug_tri(po.to_array(), pi.to_array(), ci.to_array(), color);
-        renderer.debug_tri(po.to_array(), ci.to_array(), co.to_array(), color);
+        renderer.tri(po.to_array(), pi.to_array(), ci.to_array(), color);
+        renderer.tri(po.to_array(), ci.to_array(), co.to_array(), color);
         pi = ci;
         po = co;
     }
@@ -666,7 +669,7 @@ fn draw_annulus(
 // ── Box helpers ──────────────────────────────────────────────────────────────
 
 /// 12-edge wireframe cube.
-fn draw_box_wire(renderer: &mut Renderer, center: Vec3, half: f32, color: [f32; 4]) {
+fn draw_box_wire(renderer: &mut DebugBatch<'_>, center: Vec3, half: f32, color: [f32; 4]) {
     let c = [
         center + Vec3::new(-half, -half, -half),
         center + Vec3::new( half, -half, -half),
@@ -678,9 +681,9 @@ fn draw_box_wire(renderer: &mut Renderer, center: Vec3, half: f32, color: [f32; 
         center + Vec3::new(-half,  half,  half),
     ];
     for i in 0..4 {
-        renderer.debug_line(c[i].to_array(),     c[(i + 1) % 4].to_array(),     color);
-        renderer.debug_line(c[i + 4].to_array(), c[(i + 1) % 4 + 4].to_array(), color);
-        renderer.debug_line(c[i].to_array(),     c[i + 4].to_array(),            color);
+        renderer.line(c[i].to_array(),     c[(i + 1) % 4].to_array(),     color);
+        renderer.line(c[i + 4].to_array(), c[(i + 1) % 4 + 4].to_array(), color);
+        renderer.line(c[i].to_array(),     c[i + 4].to_array(),            color);
     }
 }
 

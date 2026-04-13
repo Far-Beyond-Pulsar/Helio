@@ -115,6 +115,118 @@ enum GraphKind {
     Custom,
 }
 
+pub struct DebugBatch<'a> {
+    state: &'a mut DebugDrawState,
+    lines_changed: bool,
+    tris_changed: bool,
+}
+
+impl<'a> DebugBatch<'a> {
+    pub fn line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
+        self.state.user_lines.push(DebugVertex { position: from, _pad: 0.0, color });
+        self.state.user_lines.push(DebugVertex { position: to, _pad: 0.0, color });
+        self.lines_changed = true;
+    }
+
+    pub fn tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
+        self.state.user_tris.push(DebugVertex { position: v0, _pad: 0.0, color });
+        self.state.user_tris.push(DebugVertex { position: v1, _pad: 0.0, color });
+        self.state.user_tris.push(DebugVertex { position: v2, _pad: 0.0, color });
+        self.tris_changed = true;
+    }
+
+    pub fn sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 4 { return; }
+        for plane in 0..3 {
+            let mut prev = glam::Vec3::ZERO;
+            for i in 0..=segments {
+                let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+                let pos = match plane {
+                    0 => glam::Vec3::new(radius * theta.cos(), radius * theta.sin(), 0.0),
+                    1 => glam::Vec3::new(radius * theta.cos(), 0.0, radius * theta.sin()),
+                    _ => glam::Vec3::new(0.0, radius * theta.cos(), radius * theta.sin()),
+                } + glam::Vec3::from(center);
+                if i > 0 {
+                    self.line(prev.to_array(), pos.to_array(), color);
+                }
+                prev = pos;
+            }
+        }
+    }
+
+    pub fn cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
+        let apex_v = glam::Vec3::from(apex);
+        let dir = glam::Vec3::from(axis).normalize_or_zero();
+        let base = apex_v + dir * height;
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
+        let tangent = dir.cross(up).normalize_or_zero();
+        let bitangent = dir.cross(tangent).normalize_or_zero();
+        let mut prev = base + tangent * base_radius;
+        for i in 1..=segments {
+            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
+            self.line(prev.to_array(), cur.to_array(), color);
+            self.line(cur.to_array(), apex_v.to_array(), color);
+            prev = cur;
+        }
+    }
+
+    pub fn filled_cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
+        if segments < 3 { return; }
+        let apex_v = glam::Vec3::from(apex);
+        let dir    = glam::Vec3::from(axis).normalize_or_zero();
+        let base   = apex_v + dir * height;
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
+        let tangent   = dir.cross(up).normalize_or_zero();
+        let bitangent = dir.cross(tangent).normalize_or_zero();
+        let mut prev = base + tangent * base_radius;
+        for i in 1..=segments {
+            let theta = i as f32 / segments as f32 * std::f32::consts::TAU;
+            let cur = base + (tangent * theta.cos() + bitangent * theta.sin()) * base_radius;
+            self.tri(apex_v.to_array(), prev.to_array(), cur.to_array(), color);
+            self.tri(base.to_array(), cur.to_array(), prev.to_array(), color);
+            prev = cur;
+        }
+    }
+
+    pub fn filled_box(&mut self, center: [f32; 3], half: f32, color: [f32; 4]) {
+        let c = glam::Vec3::from(center);
+        let h = half;
+        let corners = [
+            c + glam::Vec3::new(-h, -h, -h),
+            c + glam::Vec3::new( h, -h, -h),
+            c + glam::Vec3::new( h,  h, -h),
+            c + glam::Vec3::new(-h,  h, -h),
+            c + glam::Vec3::new(-h, -h,  h),
+            c + glam::Vec3::new( h, -h,  h),
+            c + glam::Vec3::new( h,  h,  h),
+            c + glam::Vec3::new(-h,  h,  h),
+        ];
+        let quads: [[usize; 4]; 6] = [
+            [0, 3, 2, 1],
+            [4, 5, 6, 7],
+            [0, 4, 7, 3],
+            [1, 2, 6, 5],
+            [0, 1, 5, 4],
+            [3, 7, 6, 2],
+        ];
+        for [a, b, cc, d] in quads {
+            self.tri(corners[a].to_array(), corners[b].to_array(), corners[cc].to_array(), color);
+            self.tri(corners[a].to_array(), corners[cc].to_array(), corners[d].to_array(), color);
+        }
+    }
+
+    fn finish(self) {
+        if self.lines_changed {
+            self.state.user_lines_generation = self.state.user_lines_generation.wrapping_add(1);
+        }
+        if self.tris_changed {
+            self.state.user_tris_generation = self.state.user_tris_generation.wrapping_add(1);
+        }
+    }
+}
+
 impl Renderer {
     /// Precompute all 16 TAA jitter translation matrices for the given resolution.
     /// This avoids per-frame matrix construction overhead in render().
@@ -446,6 +558,21 @@ impl Renderer {
                 s.user_tris_generation = s.user_tris_generation.wrapping_add(1);
             }
             s.user_tris.clear();
+        }
+    }
+
+    pub fn debug_batch<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut DebugBatch<'_>),
+    {
+        if let Ok(mut s) = self.debug_state.lock() {
+            let mut batch = DebugBatch {
+                state: &mut s,
+                lines_changed: false,
+                tris_changed: false,
+            };
+            f(&mut batch);
+            batch.finish();
         }
     }
 
