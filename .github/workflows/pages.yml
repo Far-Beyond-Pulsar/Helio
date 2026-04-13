@@ -43,24 +43,11 @@ jobs:
           restore-keys: wasm-${{ runner.os }}-
 
       - name: Install wasm-bindgen-cli
-        # Pin to the same version as the wasm-bindgen dep in Cargo.lock to
-        # avoid "version mismatch" errors at bindgen time.
+        # Pin to the exact version recorded in Cargo.lock to avoid
+        # "schema version mismatch" errors at bindgen time.
         run: |
-          VERSION=$(cargo metadata --format-version 1 --no-deps 2>/dev/null \
-            | python3 -c "
-          import sys, json
-          meta = json.load(sys.stdin)
-          for pkg in meta['packages']:
-              if pkg['name'] == 'wasm-bindgen':
-                  print(pkg['version'])
-                  break
-          " 2>/dev/null || echo "")
-          if [ -z "$VERSION" ]; then
-            # Fall back to latest if we couldn't detect it
-            cargo install wasm-bindgen-cli
-          else
-            cargo install wasm-bindgen-cli --version "$VERSION" --locked
-          fi
+          VERSION=$(awk '/^name = "wasm-bindgen"/{found=1} found && /^version =/{gsub(/"/, "", $3); print $3; exit}' Cargo.lock)
+          cargo install wasm-bindgen-cli --version "$VERSION" --locked
 
       - name: Build all demos (release)
         shell: pwsh
