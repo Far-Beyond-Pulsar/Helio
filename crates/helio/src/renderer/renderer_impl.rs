@@ -79,6 +79,8 @@ pub struct Renderer {
     billboard_cached_light_gen: u64,
     /// Cached editor-hidden state at last rebuild.
     billboard_cached_editor_hidden: bool,
+    /// Monotonic generation for billboard GPU uploads.
+    billboard_generation: u64,
     water_volumes_buffer: wgpu::Buffer,
     water_hitboxes_buffer: wgpu::Buffer,
     /// Instant of the previous `render()` call, used to compute real `delta_time`.
@@ -208,6 +210,7 @@ impl Renderer {
             billboard_cached_light_count: usize::MAX,
             billboard_cached_light_gen: u64::MAX,
             billboard_cached_editor_hidden: false,
+            billboard_generation: 0,
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
@@ -355,6 +358,7 @@ impl Renderer {
             billboard_cached_light_count: usize::MAX,
             billboard_cached_light_gen: u64::MAX,
             billboard_cached_editor_hidden: false,
+            billboard_generation: 0,
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
@@ -434,7 +438,13 @@ impl Renderer {
 
     pub fn debug_clear(&mut self) {
         if let Ok(mut s) = self.debug_state.lock() {
+            if !s.user_lines.is_empty() {
+                s.user_lines_generation = s.user_lines_generation.wrapping_add(1);
+            }
             s.user_lines.clear();
+            if !s.user_tris.is_empty() {
+                s.user_tris_generation = s.user_tris_generation.wrapping_add(1);
+            }
             s.user_tris.clear();
         }
     }
@@ -443,6 +453,7 @@ impl Renderer {
         if let Ok(mut s) = self.debug_state.lock() {
             s.user_lines.push(DebugVertex { position: from, _pad: 0.0, color });
             s.user_lines.push(DebugVertex { position: to, _pad: 0.0, color });
+            s.user_lines_generation = s.user_lines_generation.wrapping_add(1);
         }
     }
 
@@ -457,6 +468,7 @@ impl Renderer {
             s.user_tris.push(DebugVertex { position: v0, _pad: 0.0, color });
             s.user_tris.push(DebugVertex { position: v1, _pad: 0.0, color });
             s.user_tris.push(DebugVertex { position: v2, _pad: 0.0, color });
+            s.user_tris_generation = s.user_tris_generation.wrapping_add(1);
         }
     }
 
@@ -1066,6 +1078,7 @@ impl Renderer {
                     }
                 }
             }
+            self.billboard_generation = self.billboard_generation.wrapping_add(1);
             self.billboard_dirty = false;
             self.billboard_cached_light_count = light_count;
             self.billboard_cached_light_gen = light_gen;
@@ -1204,6 +1217,7 @@ impl Renderer {
                 Some(libhelio::BillboardFrameData {
                     instances: bytemuck::cast_slice(&self.billboard_scratch),
                     count: self.billboard_scratch.len() as u32,
+                    generation: self.billboard_generation,
                 })
             },
             vg: self.scene.vg_frame_data(),

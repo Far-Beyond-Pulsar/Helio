@@ -43,6 +43,7 @@ pub struct BillboardPass {
     pub instance_buf: wgpu::Buffer,
     quad_vertex_buf: wgpu::Buffer,
     pub instance_count: u32,
+    uploaded_generation: u64,
     occluded_by_geometry: bool,
     #[allow(dead_code)]
     white_texture: wgpu::Texture,
@@ -335,6 +336,7 @@ impl BillboardPass {
             instance_buf,
             quad_vertex_buf,
             instance_count: 0,
+            uploaded_generation: u64::MAX,
             occluded_by_geometry: true,
             white_texture,
             white_view,
@@ -444,10 +446,13 @@ impl RenderPass for BillboardPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Upload billboard instances from the high-level renderer's frame data.
         if let Some(data) = ctx.frame_resources.billboards {
-            let max_bytes = MAX_BILLBOARDS as usize * std::mem::size_of::<BillboardInstance>();
-            let upload_bytes = data.instances.len().min(max_bytes);
-            if upload_bytes > 0 {
-                ctx.write_buffer(&self.instance_buf, 0, &data.instances[..upload_bytes]);
+            if data.generation != self.uploaded_generation {
+                let max_bytes = MAX_BILLBOARDS as usize * std::mem::size_of::<BillboardInstance>();
+                let upload_bytes = data.instances.len().min(max_bytes);
+                if upload_bytes > 0 {
+                    ctx.write_buffer(&self.instance_buf, 0, &data.instances[..upload_bytes]);
+                }
+                self.uploaded_generation = data.generation;
             }
             self.instance_count = data.count.min(MAX_BILLBOARDS);
         } else {

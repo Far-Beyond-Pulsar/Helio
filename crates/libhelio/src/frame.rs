@@ -15,6 +15,8 @@ pub struct BillboardFrameData<'a> {
     pub instances: &'a [u8],
     /// Number of valid instances in the slice.
     pub count: u32,
+    /// Monotonic generation incremented only when billboard content changes.
+    pub generation: u64,
 }
 
 /// Views into the GBuffer textures.
