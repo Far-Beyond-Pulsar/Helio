@@ -35,13 +35,22 @@ pub struct LoadConfig {
     /// - true: DirectX convention (0,0 at top-left) → OpenGL (0,0 at bottom-left)
     /// - false: Use UVs as-is
     pub flip_uv_y: bool,
+    /// Merge all sub-meshes into a single mesh with vertex positions baked into
+    /// world space.  Useful when you want to treat the whole asset as one draw
+    /// call or one physics body.  The merged mesh gets `node_transform` = IDENTITY.
+    pub merge_meshes: bool,
+    /// Scale applied to the entire imported asset.  Applied before any other
+    /// transform so it acts as a unit-conversion factor (e.g. `Vec3::splat(0.01)`
+    /// to convert centimetres → metres).  Defaults to `Vec3::ONE` (no change).
+    pub import_scale: glam::Vec3,
 }
 
 impl Default for LoadConfig {
     fn default() -> Self {
         Self {
-            // Default: no flip - most modern exporters use OpenGL convention
             flip_uv_y: false,
+            merge_meshes: false,
+            import_scale: glam::Vec3::ONE,
         }
     }
 }
@@ -49,6 +58,16 @@ impl Default for LoadConfig {
 impl LoadConfig {
     pub fn with_uv_flip(mut self, flip: bool) -> Self {
         self.flip_uv_y = flip;
+        self
+    }
+
+    pub fn with_merge_meshes(mut self, merge: bool) -> Self {
+        self.merge_meshes = merge;
+        self
+    }
+
+    pub fn with_import_scale(mut self, scale: glam::Vec3) -> Self {
+        self.import_scale = scale;
         self
     }
 }

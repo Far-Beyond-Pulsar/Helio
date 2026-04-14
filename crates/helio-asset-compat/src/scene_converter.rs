@@ -296,7 +296,12 @@ pub fn convert_scene(
             log::debug!("Mesh '{}' has non-identity node transform", mesh.name);
         }
 
-        for &node_transform in world_transforms {
+        // Pre-multiply each node transform by the import scale so all vertex
+        // positions are expressed in the caller's chosen unit system.
+        let scale_mat = glam::Mat4::from_scale(config.import_scale);
+
+        for &raw_node_transform in world_transforms {
+            let node_transform = scale_mat * raw_node_transform;
             for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
                 let (vertices, indices) = mesh_converter::convert_primitive(mesh, primitive, config)?;
 
@@ -323,6 +328,82 @@ pub fn convert_scene(
         }
     }
 
+    // Merge all sub-meshes into a single flat mesh when requested.
+    // Each mesh's node_transform is baked into its vertex positions/normals/
+    // tangents so the merged result can live at IDENTITY.
+    if config.merge_meshes && !meshes.is_empty() {
+        // Group sub-meshes by material_index so each material keeps its own
+        // vertex/index buffer.  Sub-meshes within the same group are welded
+        // together with node_transform baked into the vertices.
+        //
+        // We use a Vec of (material_index, bucket_index) to preserve the order
+        // materials are first encountered (important for deterministic output).
+        let mut material_order: Vec<Option<usize>> = Vec::new();
+        let mut group_verts: Vec<Vec<PackedVertex>> = Vec::new();
+        let mut group_indices: Vec<Vec<u32>> = Vec::new();
+
+        for sub in &meshes {
+            // Find or create the bucket for this material.
+            let bucket = material_order
+                .iter()
+                .position(|&m| m == sub.material_index)
+                .unwrap_or_else(|| {
+                    let idx = material_order.len();
+                    material_order.push(sub.material_index);
+                    group_verts.push(Vec::new());
+                    group_indices.push(Vec::new());
+                    idx
+                });
+
+            let base = group_verts[bucket].len() as u32;
+            let xform = sub.node_transform;
+            // Normal matrix: inverse-transpose of upper-3×3 handles non-uniform scale.
+            let normal_mat = glam::Mat3::from_mat4(xform.inverse().transpose());
+            let tangent_mat = glam::Mat3::from_mat4(xform);
+            // If the transform flips handedness (det < 0) the bitangent sign flips too.
+            let handedness_sign = if xform.determinant() < 0.0 { -1.0_f32 } else { 1.0 };
+
+            for v in &sub.vertices {
+                let pos = xform.transform_point3(glam::Vec3::from(v.position));
+                let norm_raw = unpack_snorm4x8(v.normal);
+                let tan_raw = unpack_snorm4x8(v.tangent);
+                let norm = (normal_mat * glam::Vec3::new(norm_raw[0], norm_raw[1], norm_raw[2]))
+                    .normalize_or_zero();
+                let tan = (tangent_mat * glam::Vec3::new(tan_raw[0], tan_raw[1], tan_raw[2]))
+                    .normalize_or_zero();
+                let mut mv = PackedVertex::from_components(
+                    pos.into(),
+                    norm.into(),
+                    v.tex_coords0,
+                    tan.into(),
+                    v.bitangent_sign * handedness_sign,
+                );
+                mv.tex_coords1 = v.tex_coords1;
+                group_verts[bucket].push(mv);
+            }
+            for &idx in &sub.indices {
+                group_indices[bucket].push(base + idx);
+            }
+        }
+
+        let scene_name = scene.name.clone();
+        meshes = material_order
+            .into_iter()
+            .enumerate()
+            .map(|(i, mat_idx)| ConvertedMesh {
+                name: if group_verts.len() == 1 {
+                    scene_name.clone()
+                } else {
+                    format!("{}_mat{}", scene_name, i)
+                },
+                vertices: std::mem::take(&mut group_verts[i]),
+                indices: std::mem::take(&mut group_indices[i]),
+                material_index: mat_idx,
+                node_transform: glam::Mat4::IDENTITY,
+            })
+            .collect();
+    }
+
     let lights = scene
         .lights
         .iter()
@@ -342,6 +423,17 @@ pub fn convert_scene(
         lights,
         cameras,
     })
+}
+
+/// Unpack a `pack_snorm4x8` value back to four f32 components in [-1, 1].
+fn unpack_snorm4x8(packed: u32) -> [f32; 4] {
+    let bytes = packed.to_le_bytes();
+    [
+        bytes[0] as i8 as f32 / 127.0,
+        bytes[1] as i8 as f32 / 127.0,
+        bytes[2] as i8 as f32 / 127.0,
+        bytes[3] as i8 as f32 / 127.0,
+    ]
 }
 
 fn remap_texture_slot(

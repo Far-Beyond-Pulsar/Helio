@@ -349,7 +349,10 @@ impl ApplicationHandler for App {
                 CRATES_FBX,
                 "fbx",
                 Some(crates_base.as_path()),
-                LoadConfig::default().with_uv_flip(false),
+                LoadConfig::default()
+                    .with_uv_flip(false)
+                    .with_merge_meshes(true)
+                    .with_import_scale(glam::Vec3::splat(1.0 / 20.0)),
             ) {
                 Ok(scene) => {
                     eprintln!("[editor_demo] Crates.fbx Ok — {} meshes", scene.meshes.len());
