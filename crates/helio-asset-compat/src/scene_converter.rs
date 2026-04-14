@@ -10,11 +10,11 @@ use crate::texture_loader::{load_texture_upload, TextureSemantic};
 use crate::{camera_converter, light_converter, mesh_converter, CameraData, Result};
 
 /// Build a high-res checkerboard fallback matching Unreal Engine's style:
-///   • 512×512, 8×8 grid of 64px tiles, 1px hair-thin grout
-///   • 4px chamfered bevel at tile edges — normal map encodes the actual depth
+///   • 1024×1024, 8×8 grid of 128px tiles, 3px deep grout groove
+///   • Tiles curve smoothly down into the groove (cosine easing over 12px)
+///   • Normal map encodes the curved depression geometry
 ///   • Light tiles ~195 (metallic silver), ±3 noise
 ///   • Dark tiles ~55 (graphite), ±15 fine grain noise
-///   • Normal semantic gets a full 512×512 normal map matching the tile geometry
 fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
     let srgb = semantic.is_srgb();
 
@@ -32,10 +32,10 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
         _ => {}
     }
 
-    const SIZE: u32 = 512;
-    const TILE: u32 = 64;  // 8×8 grid
-    const GROUT: u32 = 1;  // 1px hairline grout
-    const BEVEL: u32 = 4;  // chamfer width (pixels), used for normal map tilt
+    const SIZE: u32 = 1024;
+    const TILE: u32 = 128; // 8×8 grid of 128px tiles
+    const GROUT: u32 = 1;  // 1px hairline groove (each boundary pixel)
+    const CURVE: u32 = 5;  // pixels over which tile curves down into groove
 
     let is_normal = semantic == TextureSemantic::Normal;
 
@@ -46,6 +46,21 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
         h = h.wrapping_mul(1274126177_u32);
         h ^= h >> 16;
         (h & 0xFF) as u8
+    };
+
+    // Smooth cosine curve: returns 0.0 at groove edge, 1.0 at tile centre.
+    // `edge` = pixel distance from nearest tile boundary (clamped to GROUT+CURVE).
+    let curve_t = |edge: u32| -> f32 {
+        if edge < GROUT { return 0.0; }
+        let d = (edge - GROUT).min(CURVE) as f32 / CURVE as f32;
+        // cosine ease-in: starts steep, flattens out
+        (1.0 - (d * std::f32::consts::PI).cos()) * 0.5
+    };
+
+    // Groove depth factor (0=groove bottom, 1=flat tile centre) used for colour darkening.
+    // In the curve zone it follows the same cosine profile.
+    let depth_factor = |edge: u32| -> f32 {
+        curve_t(edge)
     };
 
     let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
@@ -60,27 +75,27 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
             let edge = edge_x.min(edge_y);
 
             if is_normal {
-                // ── Normal map ────────────────────────────────────────────────
-                // Grout is the recessed groove; bevel region tilts the normal
-                // outward (toward tile center) creating a chamfered raised-tile look.
+                // ── Normal map: curved ramp into groove ───────────────────────
                 let pixel: [u8; 4] = if edge < GROUT {
-                    // Grout groove — shallow downward tilt.
-                    [128, 128, 200, 255]
-                } else if edge < GROUT + BEVEL {
-                    let t = (edge - GROUT) as f32 / BEVEL as f32; // 0=grout edge, 1=flat
-                    let tilt = (1.0_f32 - t) * 0.65;
-                    // Tilt toward the closer axis edge.
+                    // Groove floor — angled strongly downward.
+                    [128, 128, 100, 255]
+                } else if edge < GROUT + CURVE {
+                    // Curved slope: derivative of cosine ease = sin, gives the
+                    // tangent angle at this point on the ramp.
+                    let d = (edge - GROUT) as f32 / CURVE as f32;
+                    // slope steepness: sin(π·d) peaks at midpoint, zero at ends.
+                    let slope = (d * std::f32::consts::PI).sin() * 0.85;
                     let (nx, ny) = if edge_x <= edge_y {
                         let sign = if tx < TILE / 2 { 1.0_f32 } else { -1.0 };
-                        (sign * tilt, 0.0_f32)
+                        (sign * slope, 0.0_f32)
                     } else {
                         let sign = if ty < TILE / 2 { 1.0_f32 } else { -1.0 };
-                        (0.0_f32, sign * tilt)
+                        (0.0_f32, sign * slope)
                     };
                     let nz = (1.0 - nx * nx - ny * ny).max(0.001).sqrt();
                     [
-                        (128.0 + nx * 127.0) as u8,
-                        (128.0 + ny * 127.0) as u8,
+                        (128.0 + nx * 127.0).clamp(0.0, 255.0) as u8,
+                        (128.0 + ny * 127.0).clamp(0.0, 255.0) as u8,
                         (nz * 255.0).clamp(0.0, 255.0) as u8,
                         255,
                     ]
@@ -90,16 +105,24 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
                 data.extend_from_slice(&pixel);
             } else {
                 // ── Base colour / emissive / specular colour ──────────────────
+                let df = depth_factor(edge);
+
                 let v: u8 = if edge < GROUT {
-                    10 // very thin dark hairline grout
-                } else if checker {
-                    // Light tile — metallic silver, near-clean.
-                    let n = (hash(x, y) & 0x07) as i16 - 3;
-                    (195_i16 + n).clamp(0, 255) as u8
+                    // Groove — very dark (near-black pit).
+                    5
                 } else {
-                    // Dark tile — graphite with fine grain noise.
-                    let n = (hash(x ^ 0xA5A5, y ^ 0x5A5A) & 0x1F) as i16 - 15;
-                    (55_i16 + n).clamp(0, 255) as u8
+                    let flat_v: i16 = if checker {
+                        // Light tile: metallic silver, minimal noise.
+                        let n = (hash(x, y) & 0x07) as i16 - 3;
+                        195 + n
+                    } else {
+                        // Dark tile: graphite with fine grain.
+                        let n = (hash(x ^ 0xA5A5, y ^ 0x5A5A) & 0x1F) as i16 - 15;
+                        55 + n
+                    };
+                    // Darken toward groove by depth factor.
+                    let darkened = (flat_v as f32 * df + 5.0 * (1.0 - df)) as i16;
+                    darkened.clamp(0, 255) as u8
                 };
                 data.extend_from_slice(&[v, v, v, 255]);
             }
@@ -185,7 +208,28 @@ pub fn convert_scene(
             })
         })
         .collect();
-    let materials = materials?;
+    let mut materials = materials?;
+
+    // Inject a checkerboard normal map for any material whose normal slot was
+    // absent in the source file (e.g. FBX with no normal_texture reference).
+    // Without this the fallback_texture(Normal) path is never triggered for
+    // such materials and the groove depth is invisible.
+    let fallback_normal_index = textures.len();
+    let mut normal_fallback_pushed = false;
+    for mat in &mut materials {
+        if mat.textures.normal.is_none() {
+            if !normal_fallback_pushed {
+                textures.push(fallback_texture(TextureSemantic::Normal));
+                normal_fallback_pushed = true;
+            }
+            mat.textures.normal = Some(crate::material_converter::ConvertedTextureRef {
+                texture_index: fallback_normal_index,
+                uv_channel: 0,
+                transform: Default::default(),
+            });
+            mat.textures.normal_scale = 1.0;
+        }
+    }
 
     let mut meshes = Vec::new();
     for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
