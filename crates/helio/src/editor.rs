@@ -30,7 +30,7 @@
 
 use glam::{Mat3, Mat4, Vec3};
 
-use crate::handles::ObjectId;
+use crate::handles::{ObjectId, SectionedInstanceId};
 use crate::renderer::{DebugBatch, Renderer};
 use crate::scene::{Scene, SceneActorId};
 
@@ -222,6 +222,14 @@ impl EditorState {
                 self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode, local_axes);
                 self.hovered_axis.is_some()
             }
+            Some(SceneActorId::SectionedObject(id)) => {
+                let Some((center, size, local_axes)) = sectioned_gizmo_info(id, scene) else {
+                    self.hovered_axis = None;
+                    return false;
+                };
+                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode, local_axes);
+                self.hovered_axis.is_some()
+            }
             Some(SceneActorId::Light(id)) => {
                 let Some(light) = scene.get_light(id) else {
                     self.hovered_axis = None;
@@ -259,6 +267,34 @@ impl EditorState {
             Some(SceneActorId::Object(id)) => {
                 let Some((center, _, local_axes)) = object_gizmo_info(id, scene) else { return false };
                 let Ok(initial_transform) = scene.get_object_transform(id) else { return false };
+
+                let axis_dir     = local_axes[axis.col()];
+                let axis_t_start = match self.gizmo_mode {
+                    GizmoMode::Translate | GizmoMode::Scale => {
+                        match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                            Some(t) => t,
+                            None    => return false,
+                        }
+                    }
+                    GizmoMode::Rotate => {
+                        let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
+                            Some(h) => h,
+                            None    => return false,
+                        };
+                        let (tan, bitan) = ring_frame(axis, local_axes);
+                        let to_hit = hit - center;
+                        to_hit.dot(bitan).atan2(to_hit.dot(tan))
+                    }
+                };
+
+                self.drag = DragState::Active {
+                    axis, initial_transform, gizmo_center: center, local_axes, axis_t_start,
+                };
+                true
+            }
+            Some(SceneActorId::SectionedObject(id)) => {
+                let Some((center, _, local_axes)) = sectioned_gizmo_info(id, scene) else { return false };
+                let Some(initial_transform) = scene.get_sectioned_instance_transform(id) else { return false };
 
                 let axis_dir     = local_axes[axis.col()];
                 let axis_t_start = match self.gizmo_mode {
@@ -389,6 +425,70 @@ impl EditorState {
 
                 let _ = scene.update_object_transform(object_id, new_transform);
             }
+            Some(SceneActorId::SectionedObject(inst_id)) => {
+                let gizmo_size = scene.get_sectioned_instance_bounds(inst_id)
+                    .map(|b| (b[3].max(0.3) * 1.8).max(0.8))
+                    .unwrap_or(1.0);
+
+                let new_transform = match self.gizmo_mode {
+                    GizmoMode::Translate => {
+                        let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                            Some(t) => t,
+                            None    => return,
+                        };
+                        let delta = t_now - axis_t_start;
+                        Mat4::from_translation(axis_dir * delta) * initial_transform
+                    }
+
+                    GizmoMode::Scale => {
+                        let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
+                            Some(t) => t,
+                            None    => return,
+                        };
+                        let delta        = t_now - axis_t_start;
+                        let sensitivity  = 1.5 / gizmo_size.max(0.01);
+                        let scale_factor = (1.0 + delta * sensitivity).max(0.01_f32);
+
+                        let ci      = axis.col();
+                        let col     = initial_transform.col(ci);
+                        let old_len = col.truncate().length();
+                        let new_len = (old_len * scale_factor).max(0.001);
+                        let col_n   = if old_len > 1e-8 { col / old_len } else { col };
+                        let new_col = col_n * new_len;
+
+                        let cols = [
+                            if ci == 0 { new_col } else { initial_transform.col(0) },
+                            if ci == 1 { new_col } else { initial_transform.col(1) },
+                            if ci == 2 { new_col } else { initial_transform.col(2) },
+                            initial_transform.col(3),
+                        ];
+                        Mat4::from_cols(cols[0], cols[1], cols[2], cols[3])
+                    }
+
+                    GizmoMode::Rotate => {
+                        let hit = match ray_plane_hit(ray_o, ray_d, center, axis_dir) {
+                            Some(h) => h,
+                            None    => return,
+                        };
+                        let (tan, bitan) = ring_frame(axis, local_axes);
+                        let to_hit      = hit - center;
+                        let angle_now   = to_hit.dot(bitan).atan2(to_hit.dot(tan));
+                        let angle_delta = angle_now - axis_t_start;
+
+                        let rot       = Mat3::from_axis_angle(axis_dir, angle_delta);
+                        let upper     = Mat3::from_mat4(initial_transform);
+                        let new_upper = rot * upper;
+                        Mat4::from_cols(
+                            new_upper.col(0).extend(0.0),
+                            new_upper.col(1).extend(0.0),
+                            new_upper.col(2).extend(0.0),
+                            initial_transform.col(3),
+                        )
+                    }
+                };
+
+                let _ = scene.update_sectioned_object_transform(inst_id, new_transform);
+            }
             Some(SceneActorId::Light(light_id)) => {
                 // Lights only support translate dragging.
                 let Some(t_now) = ray_to_axis_t(ray_o, ray_d, center, axis_dir) else { return };
@@ -415,10 +515,13 @@ impl EditorState {
     /// Returns `true` if an object was deleted. Rebuild `ScenePicker` afterwards
     /// so the deleted object can no longer be picked.
     pub fn delete_selected(&mut self, scene: &mut Scene) -> bool {
-        let Some(SceneActorId::Object(id)) = self.selected.take() else { return false };
         self.hovered_axis = None;
         self.drag         = DragState::Idle;
-        scene.remove_object(id).is_ok()
+        match self.selected.take() {
+            Some(SceneActorId::Object(id)) => scene.remove_object(id).is_ok(),
+            Some(SceneActorId::SectionedObject(id)) => scene.remove_sectioned_object(id).is_ok(),
+            _ => false,
+        }
     }
 
     /// Duplicate the selected object at the same transform, select the new copy,
@@ -429,18 +532,28 @@ impl EditorState {
     pub fn duplicate_selected(
         &mut self,
         renderer: &mut crate::renderer::Renderer,
-    ) -> Option<crate::handles::ObjectId> {
-        let Some(SceneActorId::Object(id)) = self.selected else { return None };
-        let desc = renderer.scene().get_object_descriptor(id).ok()?;
-
-        let new_actor = renderer.scene_mut().insert_actor(
-            crate::scene::SceneActor::object(desc)
-        );
-        let new_id = new_actor.as_object()?;
-        self.selected     = Some(SceneActorId::Object(new_id));
-        self.hovered_axis = None;
-        self.drag         = DragState::Idle;
-        Some(new_id)
+    ) -> Option<SceneActorId> {
+        match self.selected? {
+            SceneActorId::Object(id) => {
+                let desc = renderer.scene().get_object_descriptor(id).ok()?;
+                let new_actor = renderer.scene_mut().insert_actor(
+                    crate::scene::SceneActor::object(desc)
+                );
+                let new_id = new_actor.as_object()?;
+                self.selected     = Some(SceneActorId::Object(new_id));
+                self.hovered_axis = None;
+                self.drag         = DragState::Idle;
+                Some(SceneActorId::Object(new_id))
+            }
+            SceneActorId::SectionedObject(id) => {
+                let new_id = renderer.scene_mut().duplicate_sectioned_object(id).ok()?;
+                self.selected     = Some(SceneActorId::SectionedObject(new_id));
+                self.hovered_axis = None;
+                self.drag         = DragState::Idle;
+                Some(SceneActorId::SectionedObject(new_id))
+            }
+            _ => None,
+        }
     }
 
     // ── Legacy sphere-based pick ──────────────────────────────────────────────
@@ -486,6 +599,23 @@ impl EditorState {
                     .map(|b| b[3].max(0.3_f32))
                     .unwrap_or(0.3_f32);
                 let hov = self.hovered_axis;
+                let mode = self.gizmo_mode;
+                renderer.debug_batch(|dbg| {
+                    dbg.sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
+                    match mode {
+                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, gizmo_size, hov, local_axes),
+                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, gizmo_size, hov, local_axes),
+                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, gizmo_size, hov, local_axes),
+                    }
+                });
+            }
+            Some(SceneActorId::SectionedObject(id)) => {
+                let Some((center, gizmo_size, local_axes)) =
+                    sectioned_gizmo_info(id, renderer.scene()) else { return };
+                let sphere_radius = renderer.scene().get_sectioned_instance_bounds(id)
+                    .map(|b| b[3].max(0.3_f32))
+                    .unwrap_or(0.3_f32);
+                let hov  = self.hovered_axis;
                 let mode = self.gizmo_mode;
                 renderer.debug_batch(|dbg| {
                     dbg.sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
@@ -700,6 +830,19 @@ fn draw_box_wire(renderer: &mut DebugBatch<'_>, center: Vec3, half: f32, color: 
 /// * `local_axes` — normalized columns 0-2 of the object's world transform.
 ///   These match the directions the gizmo handles point in so that all drawing,
 ///   hit-testing, and drag math automatically follows the object's orientation.
+fn sectioned_gizmo_info(id: SectionedInstanceId, scene: &Scene) -> Option<(Vec3, f32, [Vec3; 3])> {
+    let transform = scene.get_sectioned_instance_transform(id)?;
+    let bounds    = scene.get_sectioned_instance_bounds(id)?;
+    let center    = transform.col(3).truncate();
+    let size      = (bounds[3].max(0.3) * 1.8).max(0.8);
+    let local_axes = [
+        transform.col(0).truncate().normalize_or_zero(),
+        transform.col(1).truncate().normalize_or_zero(),
+        transform.col(2).truncate().normalize_or_zero(),
+    ];
+    Some((center, size, local_axes))
+}
+
 fn object_gizmo_info(id: ObjectId, scene: &Scene) -> Option<(Vec3, f32, [Vec3; 3])> {
     let transform = scene.get_object_transform(id).ok()?;
     let bounds    = scene.get_object_bounds(id).ok()?;

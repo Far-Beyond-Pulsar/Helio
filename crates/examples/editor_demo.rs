@@ -352,7 +352,7 @@ impl ApplicationHandler for App {
                 LoadConfig::default()
                     .with_uv_flip(false)
                     .with_merge_meshes(true)
-                    .with_import_scale(glam::Vec3::splat(1.0 / 20.0)),
+                    .with_import_scale(glam::Vec3::splat(1.0 / 200.0)),
             ) {
                 Ok(scene) => {
                     match upload_sectioned_scene(&mut renderer, &scene) {

@@ -13,7 +13,7 @@ mod scene_converter;
 mod texture_loader;
 
 use helio::MeshId;
-use helio::{LightId, MaterialId, MultiMeshId, ObjectId, Renderer, SectionedMeshUpload, SectionedObjectId, TextureId};
+use helio::{LightId, MaterialId, MultiMeshId, ObjectId, Renderer, SectionedMeshUpload, TextureId};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;

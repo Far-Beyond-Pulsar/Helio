@@ -24,7 +24,7 @@ mod vg;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use picking::{PickHit, ScenePicker};
 pub use groups::{GroupId, GroupMask};
-pub use handles::{LightId, MaterialId, MeshId, MultiMeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
+pub use handles::{LightId, MaterialId, MeshId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 pub use helio_pass_billboard::BillboardInstance;
 pub use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
 pub use material::{
@@ -40,7 +40,6 @@ pub use renderer::{
 pub use scene::{
     Camera, ObjectDescriptor, PickableObject, Result as SceneResult, Scene, SceneError,
     SceneActor, SceneActorId, SceneActorTrait,
-    SectionedObjectId,
     WaterHitboxActor, WaterHitboxDescriptor,
     WaterVolumeActor, WaterVolumeDescriptor,
 };

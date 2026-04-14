@@ -1,4 +1,4 @@
-use crate::handles::{LightId, MeshId, ObjectId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
+use crate::handles::{LightId, MeshId, ObjectId, SectionedInstanceId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
@@ -14,6 +14,8 @@ pub enum SceneActorId {
     VirtualMesh(VirtualMeshId),
     VirtualObject(VirtualObjectId),
     Object(ObjectId),
+    /// A complete placed sectioned mesh instance (all sections as one unit).
+    SectionedObject(SectionedInstanceId),
     WaterVolume(WaterVolumeId),
     WaterHitbox(WaterHitboxId),
 }
@@ -53,6 +55,14 @@ impl SceneActorId {
 
     pub fn as_object(self) -> Option<ObjectId> {
         if let SceneActorId::Object(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_sectioned_object(self) -> Option<SectionedInstanceId> {
+        if let SceneActorId::SectionedObject(id) = self {
             Some(id)
         } else {
             None

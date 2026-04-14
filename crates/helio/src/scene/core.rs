@@ -14,8 +14,9 @@ use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
-use crate::handles::{LightId, MaterialId, MultiMeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
+use crate::handles::{LightId, MaterialId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 use crate::mesh::{MeshPool, MultiMeshRecord};
+use crate::scene::multi_mesh::SectionedInstanceRecord;
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
 
@@ -149,7 +150,16 @@ pub struct Scene {
     // ── Multi-material (sectioned) meshes ─────────────────────────────────────
     /// Sectioned mesh assets: one record per `insert_sectioned_mesh` call.
     /// Each record stores N `MeshId`s (one per section) all sharing the same vertex buffer.
-    pub(in crate::scene) multi_meshes: SparsePool<MultiMeshRecord, MultiMeshId>,}
+    pub(in crate::scene) multi_meshes: SparsePool<MultiMeshRecord, MultiMeshId>,
+
+    /// Placed sectioned mesh instances.  Each entry owns N `ObjectId`s (one per section)
+    /// and back-references the `MultiMeshId` asset it was created from.
+    pub(in crate::scene) sectioned_instances: SparsePool<SectionedInstanceRecord, SectionedInstanceId>,
+
+    /// Reverse lookup: given any section's `ObjectId`, find the owning `SectionedInstanceId`.
+    /// Populated by `insert_sectioned_object` and cleaned up by `remove_sectioned_object`.
+    pub(in crate::scene) section_to_instance: HashMap<ObjectId, SectionedInstanceId>,
+}
 
 impl Scene {
     /// Create a new empty scene.
@@ -257,6 +267,8 @@ impl Scene {
             water_hitboxes_dirty: false,
             water_hitboxes_dirty_range: None,
             multi_meshes: SparsePool::new(),
+            sectioned_instances: SparsePool::new(),
+            section_to_instance: HashMap::new(),
         }
     }
 

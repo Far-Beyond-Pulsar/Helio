@@ -456,8 +456,15 @@ impl ScenePicker {
             // Normal transform: transpose of inverse of the upper-left 3×3.
             let normal_mat = Mat3::from_mat4(inv).transpose();
 
+            // If this object is a section of a sectioned instance, report the
+            // instance handle so the editor selects the whole unit at once.
+            let actor_id = scene
+                .section_instance_for_object(obj.id)
+                .map(SceneActorId::SectionedObject)
+                .unwrap_or(SceneActorId::Object(obj.id));
+
             self.instances.push(PickInstance {
-                actor_id: SceneActorId::Object(obj.id),
+                actor_id,
                 mesh_key: key,
                 transform: obj.transform,
                 inv_transform: inv,

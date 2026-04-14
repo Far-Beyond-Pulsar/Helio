@@ -83,7 +83,6 @@ mod types;
 mod virtual_geometry;
 mod water;
 
-pub use multi_mesh::SectionedObjectId;
 pub use actor::{
     SceneActor, SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
     WaterVolumeDescriptor, WaterVolumeActor,
