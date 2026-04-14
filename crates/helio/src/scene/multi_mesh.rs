@@ -260,16 +260,18 @@ impl super::Scene {
         let mut materials: Vec<MaterialId> = Vec::with_capacity(section_objects.len());
         let mut bounds = [0.0f32; 4];
         let mut transform = Mat4::IDENTITY;
+        let mut movability = None;
         for (i, &obj_id) in section_objects.iter().enumerate() {
             let desc = self.get_object_descriptor(obj_id)?;
             materials.push(desc.material);
             if i == 0 {
-                bounds    = desc.bounds;
-                transform = desc.transform;
+                bounds     = desc.bounds;
+                transform  = desc.transform;
+                movability = desc.movability;
             }
         }
 
-        self.insert_sectioned_object(multi_mesh, &materials, transform, bounds, None)
+        self.insert_sectioned_object(multi_mesh, &materials, transform, bounds, movability)
     }
 }
 
