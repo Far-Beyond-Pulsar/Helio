@@ -9,6 +9,24 @@ use crate::material_converter::{convert_material, ConvertedMaterial, ConvertedTe
 use crate::texture_loader::{load_texture_upload, TextureSemantic};
 use crate::{camera_converter, light_converter, mesh_converter, CameraData, Result};
 
+/// Build a 1×1 opaque-white fallback texture for a missing image.
+fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
+    let srgb = semantic.is_srgb();
+    // White for colour/emissive channels, (128,128,255,255) for normals, 255 everywhere else.
+    let pixel: [u8; 4] = match semantic {
+        TextureSemantic::Normal => [128, 128, 255, 255],
+        _ => [255, 255, 255, 255],
+    };
+    helio::TextureUpload::rgba8(
+        format!("fallback-{}", semantic.suffix()),
+        1,
+        1,
+        srgb,
+        pixel.to_vec(),
+        helio::TextureSamplerDesc::default(),
+    )
+}
+
 /// Converted scene data ready for GPU upload.
 pub struct ConvertedScene {
     pub name: String,
@@ -50,8 +68,23 @@ pub fn convert_scene(
                 let converted_index = if let Some(&index) = texture_cache.get(&key) {
                     index
                 } else {
-                    let upload =
-                        load_texture_upload(scene, texture_ref.texture_index, semantic, base_dir)?;
+                    let upload = match load_texture_upload(
+                        scene,
+                        texture_ref.texture_index,
+                        semantic,
+                        base_dir,
+                    ) {
+                        Ok(u) => u,
+                        Err(e) => {
+                            log::warn!(
+                                "Texture {} ({:?}) not found, using fallback: {}",
+                                texture_ref.texture_index,
+                                semantic,
+                                e
+                            );
+                            fallback_texture(semantic)
+                        }
+                    };
                     let index = textures.len();
                     textures.push(upload);
                     texture_cache.insert(key, index);
