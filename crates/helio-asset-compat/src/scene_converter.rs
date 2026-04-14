@@ -152,6 +152,10 @@ pub struct ConvertedMesh {
     pub vertices: Vec<PackedVertex>,
     pub indices: Vec<u32>,
     pub material_index: Option<usize>,
+    /// World-space transform accumulated from the scene node hierarchy.
+    /// Identity when the source format has no scene graph (or the mesh is
+    /// not attached to any node).
+    pub node_transform: glam::Mat4,
 }
 
 pub fn convert_scene(
@@ -169,55 +173,62 @@ pub fn convert_scene(
 
     let mut textures = Vec::new();
     let mut texture_cache = HashMap::<(usize, TextureSemantic), usize>::new();
-    let materials: Result<Vec<ConvertedMaterial>> = scene
-        .materials
-        .iter()
-        .map(|material| {
-            convert_material(material, |texture_ref, semantic| {
-                let key = (texture_ref.texture_index, semantic);
-                let converted_index = if let Some(&index) = texture_cache.get(&key) {
-                    index
-                } else {
-                    let upload = match load_texture_upload(
-                        scene,
-                        texture_ref.texture_index,
-                        semantic,
-                        base_dir,
-                    ) {
-                        Ok(u) => u,
-                        Err(e) => {
-                            log::warn!(
-                                "Texture {} ({:?}) not found, using fallback: {}",
-                                texture_ref.texture_index,
-                                semantic,
-                                e
-                            );
-                            fallback_texture(semantic)
-                        }
-                    };
-                    let index = textures.len();
-                    textures.push(upload);
-                    texture_cache.insert(key, index);
-                    index
+    // Track which uploaded texture indices came from a fallback (missing file).
+    let mut fallback_texture_indices = std::collections::HashSet::<usize>::new();
+    // Track which material indices used at least one fallback texture.
+    let mut used_fallback_for_mat = vec![false; scene.materials.len()];
+    let mut materials: Vec<ConvertedMaterial> = Vec::with_capacity(scene.materials.len());
+    for (mat_idx, material) in scene.materials.iter().enumerate() {
+        let mat = convert_material(material, |texture_ref, semantic| {
+            let key = (texture_ref.texture_index, semantic);
+            let converted_index = if let Some(&index) = texture_cache.get(&key) {
+                // A cache hit on a previously-failed texture still counts as a fallback.
+                if fallback_texture_indices.contains(&index) {
+                    used_fallback_for_mat[mat_idx] = true;
+                }
+                index
+            } else {
+                let upload = match load_texture_upload(
+                    scene,
+                    texture_ref.texture_index,
+                    semantic,
+                    base_dir,
+                ) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        log::warn!(
+                            "Texture {} ({:?}) not found, using fallback: {}",
+                            texture_ref.texture_index,
+                            semantic,
+                            e
+                        );
+                        used_fallback_for_mat[mat_idx] = true;
+                        fallback_texture_indices.insert(textures.len());
+                        fallback_texture(semantic)
+                    }
                 };
+                let index = textures.len();
+                textures.push(upload);
+                texture_cache.insert(key, index);
+                index
+            };
 
-                Ok(ConvertedTextureRef {
-                    texture_index: converted_index,
-                    ..texture_ref
-                })
+            Ok(ConvertedTextureRef {
+                texture_index: converted_index,
+                ..texture_ref
             })
-        })
-        .collect();
-    let mut materials = materials?;
+        })?;
+        materials.push(mat);
+    }
 
-    // Inject a checkerboard normal map for any material whose normal slot was
-    // absent in the source file (e.g. FBX with no normal_texture reference).
-    // Without this the fallback_texture(Normal) path is never triggered for
-    // such materials and the groove depth is invisible.
+    // Inject the checkerboard normal map ONLY for materials that actually used
+    // a fallback texture (i.e. their source textures were missing).  Materials
+    // whose textures loaded successfully keep their own normals — or no normal
+    // at all — rather than getting the debug grid baked on top.
     let fallback_normal_index = textures.len();
     let mut normal_fallback_pushed = false;
-    for mat in &mut materials {
-        if mat.textures.normal.is_none() {
+    for (idx, mat) in materials.iter_mut().enumerate() {
+        if mat.textures.normal.is_none() && used_fallback_for_mat[idx] {
             if !normal_fallback_pushed {
                 textures.push(fallback_texture(TextureSemantic::Normal));
                 normal_fallback_pushed = true;
@@ -231,6 +242,36 @@ pub fn convert_scene(
         }
     }
 
+    // Walk the scene node DAG to compute per-mesh world-space transforms.
+    // A mesh may be referenced by multiple nodes (instancing); we collect all
+    // transforms so each instance becomes its own ConvertedMesh entry.
+    let mut mesh_world_transforms: HashMap<usize, Vec<glam::Mat4>> = HashMap::new();
+    {
+        // Iterative DFS: (node_id, parent_world_mat)
+        let mut stack: Vec<(solid_rs::scene::NodeId, glam::Mat4)> = scene
+            .roots
+            .iter()
+            .map(|&id| (id, glam::Mat4::IDENTITY))
+            .collect();
+        while let Some((node_id, parent_world)) = stack.pop() {
+            let Some(node) = scene.node(node_id) else { continue };
+            // solid_rs may link a different glam version than the workspace.
+            // Convert via the column array (same memory layout across versions).
+            let node_mat = node.transform.to_matrix();
+            let node_mat_ws = glam::Mat4::from_cols_array(&node_mat.to_cols_array());
+            let world = parent_world * node_mat_ws;
+            if let Some(mesh_idx) = node.mesh {
+                mesh_world_transforms
+                    .entry(mesh_idx)
+                    .or_default()
+                    .push(world);
+            }
+            for &child_id in &node.children {
+                stack.push((child_id, world));
+            }
+        }
+    }
+
     let mut meshes = Vec::new();
     for (mesh_idx, mesh) in scene.meshes.iter().enumerate() {
         if mesh.primitives.is_empty() {
@@ -238,27 +279,47 @@ pub fn convert_scene(
             continue;
         }
 
-        for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
-            let (vertices, indices) = mesh_converter::convert_primitive(mesh, primitive, config)?;
+        // Get the list of world transforms for this mesh (one per node instance).
+        // Fall back to identity when the mesh is not attached to any node.
+        let world_transforms = mesh_world_transforms
+            .get(&mesh_idx)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[glam::Mat4::IDENTITY]);
 
-            let mesh_name = if mesh.name.is_empty() {
-                if mesh.primitives.len() > 1 {
-                    format!("Mesh_{}_{}", mesh_idx, prim_idx)
+        if world_transforms.len() > 1 {
+            log::debug!(
+                "Mesh '{}' is instanced {} times via scene nodes",
+                mesh.name,
+                world_transforms.len()
+            );
+        } else if !world_transforms[0].abs_diff_eq(glam::Mat4::IDENTITY, 1e-6) {
+            log::debug!("Mesh '{}' has non-identity node transform", mesh.name);
+        }
+
+        for &node_transform in world_transforms {
+            for (prim_idx, primitive) in mesh.primitives.iter().enumerate() {
+                let (vertices, indices) = mesh_converter::convert_primitive(mesh, primitive, config)?;
+
+                let mesh_name = if mesh.name.is_empty() {
+                    if mesh.primitives.len() > 1 {
+                        format!("Mesh_{}_{}", mesh_idx, prim_idx)
+                    } else {
+                        format!("Mesh_{}", mesh_idx)
+                    }
+                } else if mesh.primitives.len() > 1 {
+                    format!("{}_{}", mesh.name, prim_idx)
                 } else {
-                    format!("Mesh_{}", mesh_idx)
-                }
-            } else if mesh.primitives.len() > 1 {
-                format!("{}_{}", mesh.name, prim_idx)
-            } else {
-                mesh.name.clone()
-            };
+                    mesh.name.clone()
+                };
 
-            meshes.push(ConvertedMesh {
-                name: mesh_name,
-                vertices,
-                indices,
-                material_index: primitive.material_index,
-            });
+                meshes.push(ConvertedMesh {
+                    name: mesh_name,
+                    vertices,
+                    indices,
+                    material_index: primitive.material_index,
+                    node_transform,
+                });
+            }
         }
     }
 

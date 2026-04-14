@@ -361,25 +361,41 @@ impl ApplicationHandler for App {
                             vec![]
                         }
                     };
+                    // Compute a single global AABB in world space by transforming
+                    // each mesh's local vertices through its node_transform.
+                    // This keeps all sub-parts assembled correctly as a unit.
+                    let mut global_min = glam::Vec3::splat(f32::INFINITY);
+                    let mut global_max = glam::Vec3::splat(f32::NEG_INFINITY);
+                    for mesh in &scene.meshes {
+                        for v in &mesh.vertices {
+                            let p = mesh.node_transform.transform_point3(glam::Vec3::from_array(v.position));
+                            global_min = global_min.min(p);
+                            global_max = global_max.max(p);
+                        }
+                    }
+                    let global_center = (global_min + global_max) * 0.5;
+                    let placement_offset = CRATES_TARGET - global_center;
+                    let placement = glam::Mat4::from_translation(placement_offset);
+                    eprintln!("[editor_demo] scene world-center={global_center:.2?}, placement_offset={placement_offset:.2?}");
+
                     for (i, mesh) in scene.meshes.into_iter().enumerate() {
-                        // Compute AABB so we can see where the raw verts sit.
+                        // World-space AABB for the bounding radius.
                         let mut bb_min = glam::Vec3::splat(f32::INFINITY);
                         let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
                         for v in &mesh.vertices {
-                            let p = glam::Vec3::from_array(v.position);
+                            let p = mesh.node_transform.transform_point3(glam::Vec3::from_array(v.position));
                             bb_min = bb_min.min(p);
                             bb_max = bb_max.max(p);
                         }
-                        let center = (bb_min + bb_max) * 0.5;
                         let radius = ((bb_max - bb_min) * 0.5).length().max(0.5);
                         eprintln!(
-                            "[editor_demo] mesh[{i}]: verts={}, bb_min={bb_min:.2?}, bb_max={bb_max:.2?}, center={center:.2?}, r={radius:.2}",
+                            "[editor_demo] mesh[{i}]: verts={}, world_bb_min={bb_min:.2?}, world_bb_max={bb_max:.2?}, r={radius:.2}",
                             mesh.vertices.len()
                         );
 
-                        // Translate the mesh center to the target position.
-                        let offset = CRATES_TARGET - center;
-                        let transform = glam::Mat4::from_translation(offset);
+                        // Compose placement with the per-mesh node transform so
+                        // each sub-object sits in its correct relative position.
+                        let transform = placement * mesh.node_transform;
 
                         let upload = helio::MeshUpload {
                             vertices: mesh.vertices,
