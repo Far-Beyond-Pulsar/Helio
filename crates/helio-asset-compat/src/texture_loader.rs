@@ -73,6 +73,7 @@ fn image_path_candidates(path: &str, base_dir: &Path) -> Vec<PathBuf> {
     let candidate = PathBuf::from(path);
     let mut base_candidates = Vec::new();
 
+    // 1. Try the path exactly as embedded in the file.
     if candidate.is_absolute() {
         push_unique_path(&mut base_candidates, candidate.clone());
     } else {
@@ -80,23 +81,69 @@ fn image_path_candidates(path: &str, base_dir: &Path) -> Vec<PathBuf> {
     }
 
     if let Some(file_name) = candidate.file_name() {
+        // 2. FBX `.fbm` sidecar folder: <model_name>.fbm/<texture_file>
+        //    Try the parent folder name joined under base_dir.
         if let Some(parent_name) = candidate.parent().and_then(Path::file_name) {
             push_unique_path(
                 &mut base_candidates,
                 base_dir.join(parent_name).join(file_name),
             );
         }
-        push_unique_path(
-            &mut base_candidates,
-            base_dir.join("textures").join(file_name),
-        );
+
+        // 3. Common sub-folder names used by DCC tools and asset packs.
+        for subfolder in &["textures", "Textures", "tex", "Tex", "maps", "Maps", "material", "Material"] {
+            push_unique_path(&mut base_candidates, base_dir.join(subfolder).join(file_name));
+        }
+
+        // 4. Flat next to the FBX.
         push_unique_path(&mut base_candidates, base_dir.join(file_name));
+
+        // 5. Walk up to 3 parent directories and repeat the search in each.
+        //    Handles cases where the texture lives beside the FBX in a parent dir.
+        let mut ancestor = base_dir.to_path_buf();
+        for _ in 0..3 {
+            if !ancestor.pop() { break; }
+            push_unique_path(&mut base_candidates, ancestor.join(file_name));
+            for subfolder in &["textures", "Textures", "tex", "maps"] {
+                push_unique_path(&mut base_candidates, ancestor.join(subfolder).join(file_name));
+            }
+        }
+
+        // 6. Case-insensitive stem match inside base_dir.
+        //    Useful on case-sensitive Linux filesystems when the FBX was created
+        //    on Windows (e.g. `Mat_Diffuse.PNG` embedded but file is `mat_diffuse.png`).
+        if let Some(stem) = candidate.file_stem().and_then(|s| s.to_str()) {
+            let stem_lower = stem.to_ascii_lowercase();
+            // Scan base_dir itself.
+            for search_dir in [base_dir, &base_dir.join("textures"), &base_dir.join("tex")] {
+                if let Ok(entries) = fs::read_dir(search_dir) {
+                    for entry in entries.flatten() {
+                        let entry_path = entry.path();
+                        if !entry_path.is_file() { continue; }
+                        let Some(entry_stem) = entry_path.file_stem().and_then(|s| s.to_str()) else { continue };
+                        if entry_stem.to_ascii_lowercase() != stem_lower { continue; }
+                        let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) else { continue };
+                        let ext_l = ext.to_ascii_lowercase();
+                        if matches!(ext_l.as_str(), "png" | "jpg" | "jpeg" | "tga" | "bmp" | "webp" | "tiff" | "tif") {
+                            push_unique_path(&mut base_candidates, entry_path);
+                        }
+                    }
+                }
+            }
+        }
     }
 
+    // Expand every base candidate with extension variants (jpg↔jpeg↔png etc.)
+    // and also add common formats the FBX may not have listed explicitly.
     let mut candidates = Vec::new();
     for base_candidate in base_candidates {
         for variant in extension_variants(&base_candidate) {
             push_unique_path(&mut candidates, variant);
+        }
+        // Also try TGA / BMP / WebP / TIFF for each candidate stem — FBX
+        // often embeds a .tga path but the artist converted to PNG later.
+        for extra_ext in &["tga", "bmp", "webp", "tiff", "tif"] {
+            push_unique_path(&mut candidates, base_candidate.with_extension(extra_ext));
         }
     }
 
