@@ -9,20 +9,60 @@ use crate::material_converter::{convert_material, ConvertedMaterial, ConvertedTe
 use crate::texture_loader::{load_texture_upload, TextureSemantic};
 use crate::{camera_converter, light_converter, mesh_converter, CameraData, Result};
 
-/// Build a 1×1 opaque-white fallback texture for a missing image.
+/// Build a noisy checkerboard fallback texture for a missing image
 fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
+    const SIZE: u32 = 64;
+    const TILE: u32 = 8; // checker tile size in pixels
     let srgb = semantic.is_srgb();
-    // White for colour/emissive channels, (128,128,255,255) for normals, 255 everywhere else.
-    let pixel: [u8; 4] = match semantic {
-        TextureSemantic::Normal => [128, 128, 255, 255],
-        _ => [255, 255, 255, 255],
+
+    // For non-colour channels produce a flat neutral value so shading isn't broken.
+    match semantic {
+        TextureSemantic::Normal => {
+            // Flat upward-pointing normal map — 1×1 is fine.
+            return helio::TextureUpload::rgba8(
+                "fallback-normal".into(),
+                1, 1, false,
+                vec![128, 128, 255, 255],
+                helio::TextureSamplerDesc::default(),
+            );
+        }
+        TextureSemantic::MetallicRoughness | TextureSemantic::Occlusion
+        | TextureSemantic::SpecularWeight => {
+            // Fully rough, non-metallic, full occlusion.
+            return helio::TextureUpload::rgba8(
+                format!("fallback-{}", semantic.suffix()),
+                1, 1, false,
+                vec![255, 255, 255, 255],
+                helio::TextureSamplerDesc::default(),
+            );
+        }
+        _ => {}
+    }
+
+    // Tiny deterministic LCG — no external dep needed.
+    let mut rng: u32 = 0x9e37_79b9;
+    let mut rand_u8 = move || -> u8 {
+        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+        (rng >> 24) as u8
     };
+
+    let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let checker = ((x / TILE) ^ (y / TILE)) & 1 == 0;
+            // Dark tile: ~45, Light tile: ~190  (matches UE4 look)
+            let base: u8 = if checker { 45 } else { 190 };
+            // ±18 noise on top, clamped to [0, 255]
+            let noise = (rand_u8() & 0x24) as i16 - 18; // range roughly −18..+18
+            let v = (base as i16 + noise).clamp(0, 255) as u8;
+            data.extend_from_slice(&[v, v, v, 255]);
+        }
+    }
+
     helio::TextureUpload::rgba8(
         format!("fallback-{}", semantic.suffix()),
-        1,
-        1,
-        srgb,
-        pixel.to_vec(),
+        SIZE, SIZE, srgb,
+        data,
         helio::TextureSamplerDesc::default(),
     )
 }
