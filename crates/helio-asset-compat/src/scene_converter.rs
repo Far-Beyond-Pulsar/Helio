@@ -20,7 +20,7 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
         TextureSemantic::Normal => {
             // Flat upward-pointing normal map — 1×1 is fine.
             return helio::TextureUpload::rgba8(
-                "fallback-normal".into(),
+                "fallback-normal",
                 1, 1, false,
                 vec![128, 128, 255, 255],
                 helio::TextureSamplerDesc::default(),
