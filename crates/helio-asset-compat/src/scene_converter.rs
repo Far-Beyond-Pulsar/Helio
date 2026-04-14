@@ -9,26 +9,19 @@ use crate::material_converter::{convert_material, ConvertedMaterial, ConvertedTe
 use crate::texture_loader::{load_texture_upload, TextureSemantic};
 use crate::{camera_converter, light_converter, mesh_converter, CameraData, Result};
 
-/// Build a noisy checkerboard fallback texture for a missing image
+/// Build a high-res checkerboard fallback matching Unreal Engine's style:
+///   • 512×512, 8×8 grid of 64px tiles, 1px hair-thin grout
+///   • 4px chamfered bevel at tile edges — normal map encodes the actual depth
+///   • Light tiles ~195 (metallic silver), ±3 noise
+///   • Dark tiles ~55 (graphite), ±15 fine grain noise
+///   • Normal semantic gets a full 512×512 normal map matching the tile geometry
 fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
-    const SIZE: u32 = 64;
-    const TILE: u32 = 8; // checker tile size in pixels
     let srgb = semantic.is_srgb();
 
-    // For non-colour channels produce a flat neutral value so shading isn't broken.
+    // Flat neutral for channels that don't need a visual pattern.
     match semantic {
-        TextureSemantic::Normal => {
-            // Flat upward-pointing normal map — 1×1 is fine.
-            return helio::TextureUpload::rgba8(
-                "fallback-normal",
-                1, 1, false,
-                vec![128, 128, 255, 255],
-                helio::TextureSamplerDesc::default(),
-            );
-        }
         TextureSemantic::MetallicRoughness | TextureSemantic::Occlusion
         | TextureSemantic::SpecularWeight => {
-            // Fully rough, non-metallic, full occlusion.
             return helio::TextureUpload::rgba8(
                 format!("fallback-{}", semantic.suffix()),
                 1, 1, false,
@@ -39,23 +32,77 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
         _ => {}
     }
 
-    // Tiny deterministic LCG — no external dep needed.
-    let mut rng: u32 = 0x9e37_79b9;
-    let mut rand_u8 = move || -> u8 {
-        rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
-        (rng >> 24) as u8
+    const SIZE: u32 = 512;
+    const TILE: u32 = 64;  // 8×8 grid
+    const GROUT: u32 = 1;  // 1px hairline grout
+    const BEVEL: u32 = 4;  // chamfer width (pixels), used for normal map tilt
+
+    let is_normal = semantic == TextureSemantic::Normal;
+
+    // Deterministic position-keyed hash (no sequential state).
+    let hash = |x: u32, y: u32| -> u8 {
+        let mut h = x.wrapping_mul(2246822519_u32).wrapping_add(y.wrapping_mul(3266489917_u32));
+        h ^= h >> 13;
+        h = h.wrapping_mul(1274126177_u32);
+        h ^= h >> 16;
+        (h & 0xFF) as u8
     };
 
     let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for y in 0..SIZE {
         for x in 0..SIZE {
-            let checker = ((x / TILE) ^ (y / TILE)) & 1 == 0;
-            // Dark tile: ~45, Light tile: ~190  (matches UE4 look)
-            let base: u8 = if checker { 45 } else { 190 };
-            // ±18 noise on top, clamped to [0, 255]
-            let noise = (rand_u8() & 0x24) as i16 - 18; // range roughly −18..+18
-            let v = (base as i16 + noise).clamp(0, 255) as u8;
-            data.extend_from_slice(&[v, v, v, 255]);
+            let tx = x % TILE;
+            let ty = y % TILE;
+            let checker = ((x / TILE) + (y / TILE)) % 2 == 0;
+
+            let edge_x = tx.min(TILE - 1 - tx);
+            let edge_y = ty.min(TILE - 1 - ty);
+            let edge = edge_x.min(edge_y);
+
+            if is_normal {
+                // ── Normal map ────────────────────────────────────────────────
+                // Grout is the recessed groove; bevel region tilts the normal
+                // outward (toward tile center) creating a chamfered raised-tile look.
+                let pixel: [u8; 4] = if edge < GROUT {
+                    // Grout groove — shallow downward tilt.
+                    [128, 128, 200, 255]
+                } else if edge < GROUT + BEVEL {
+                    let t = (edge - GROUT) as f32 / BEVEL as f32; // 0=grout edge, 1=flat
+                    let tilt = (1.0_f32 - t) * 0.65;
+                    // Tilt toward the closer axis edge.
+                    let (nx, ny) = if edge_x <= edge_y {
+                        let sign = if tx < TILE / 2 { 1.0_f32 } else { -1.0 };
+                        (sign * tilt, 0.0_f32)
+                    } else {
+                        let sign = if ty < TILE / 2 { 1.0_f32 } else { -1.0 };
+                        (0.0_f32, sign * tilt)
+                    };
+                    let nz = (1.0 - nx * nx - ny * ny).max(0.001).sqrt();
+                    [
+                        (128.0 + nx * 127.0) as u8,
+                        (128.0 + ny * 127.0) as u8,
+                        (nz * 255.0).clamp(0.0, 255.0) as u8,
+                        255,
+                    ]
+                } else {
+                    [128, 128, 255, 255] // flat tile centre
+                };
+                data.extend_from_slice(&pixel);
+            } else {
+                // ── Base colour / emissive / specular colour ──────────────────
+                let v: u8 = if edge < GROUT {
+                    10 // very thin dark hairline grout
+                } else if checker {
+                    // Light tile — metallic silver, near-clean.
+                    let n = (hash(x, y) & 0x07) as i16 - 3;
+                    (195_i16 + n).clamp(0, 255) as u8
+                } else {
+                    // Dark tile — graphite with fine grain noise.
+                    let n = (hash(x ^ 0xA5A5, y ^ 0x5A5A) & 0x1F) as i16 - 15;
+                    (55_i16 + n).clamp(0, 255) as u8
+                };
+                data.extend_from_slice(&[v, v, v, 255]);
+            }
         }
     }
 
