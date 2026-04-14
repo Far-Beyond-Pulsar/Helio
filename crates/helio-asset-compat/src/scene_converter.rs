@@ -145,6 +145,30 @@ pub struct ConvertedScene {
     pub materials: Vec<ConvertedMaterial>,
     pub lights: Vec<helio::GpuLight>,
     pub cameras: Vec<CameraData>,
+    /// Populated instead of `meshes` when [`crate::LoadConfig::merge_meshes`] is true.
+    /// One section per unique material; all sections share one vertex buffer.
+    pub sectioned_mesh: Option<ConvertedSectionedMesh>,
+}
+
+/// One material section of a sectioned (multi-material) merged mesh.
+pub struct ConvertedMeshSection {
+    /// Triangle indices into the shared vertex buffer.
+    pub indices: Vec<u32>,
+    /// Index into [`ConvertedScene::materials`], or `None` if the section has no material.
+    pub material_index: Option<usize>,
+}
+
+/// A multi-material merged mesh (produced when [`crate::LoadConfig::merge_meshes`] is true).
+///
+/// Mirrors Unreal Engine's Static Mesh sections: all sections share one vertex buffer.
+/// Use [`helio::Scene::insert_sectioned_mesh`] + [`helio::Scene::insert_sectioned_object`]
+/// to submit this to the GPU.
+pub struct ConvertedSectionedMesh {
+    pub name: String,
+    /// Shared vertex array — all sections index into this.
+    pub vertices: Vec<PackedVertex>,
+    /// Per-material sections (one per unique `material_index` group).
+    pub sections: Vec<ConvertedMeshSection>,
 }
 
 pub struct ConvertedMesh {
@@ -357,10 +381,8 @@ pub fn convert_scene(
 
             let base = group_verts[bucket].len() as u32;
             let xform = sub.node_transform;
-            // Normal matrix: inverse-transpose of upper-3×3 handles non-uniform scale.
             let normal_mat = glam::Mat3::from_mat4(xform.inverse().transpose());
             let tangent_mat = glam::Mat3::from_mat4(xform);
-            // If the transform flips handedness (det < 0) the bitangent sign flips too.
             let handedness_sign = if xform.determinant() < 0.0 { -1.0_f32 } else { 1.0 };
 
             for v in &sub.vertices {
@@ -386,22 +408,51 @@ pub fn convert_scene(
             }
         }
 
+        // Build the ConvertedSectionedMesh: one shared vertex buffer (the union
+        // of all per-bucket vertices, re-indexed so all sections' indices are
+        // absolute into the shared array) plus one ConvertedMeshSection per bucket.
         let scene_name = scene.name.clone();
-        meshes = material_order
-            .into_iter()
-            .enumerate()
-            .map(|(i, mat_idx)| ConvertedMesh {
-                name: if group_verts.len() == 1 {
-                    scene_name.clone()
-                } else {
-                    format!("{}_mat{}", scene_name, i)
-                },
-                vertices: std::mem::take(&mut group_verts[i]),
-                indices: std::mem::take(&mut group_indices[i]),
+        let mut shared_vertices: Vec<PackedVertex> = Vec::new();
+        let mut sections: Vec<ConvertedMeshSection> = Vec::new();
+
+        for (i, mat_idx) in material_order.into_iter().enumerate() {
+            let base = shared_vertices.len() as u32;
+            // Adjust indices to be absolute into the shared vertex array.
+            let abs_indices: Vec<u32> =
+                group_indices[i].iter().map(|&idx| base + idx).collect();
+            shared_vertices.extend_from_slice(&group_verts[i]);
+            sections.push(ConvertedMeshSection {
+                indices: abs_indices,
                 material_index: mat_idx,
-                node_transform: glam::Mat4::IDENTITY,
-            })
-            .collect();
+            });
+        }
+
+        let sectioned = ConvertedSectionedMesh {
+            name: scene_name,
+            vertices: shared_vertices,
+            sections,
+        };
+
+        let lights = scene
+            .lights
+            .iter()
+            .filter_map(light_converter::convert_light)
+            .collect::<Vec<_>>();
+        let cameras = scene
+            .cameras
+            .iter()
+            .map(camera_converter::extract_camera_data)
+            .collect::<Vec<_>>();
+
+        return Ok(ConvertedScene {
+            name: scene.name.clone(),
+            meshes: vec![],
+            textures,
+            materials,
+            lights,
+            cameras,
+            sectioned_mesh: Some(sectioned),
+        });
     }
 
     let lights = scene
@@ -422,6 +473,7 @@ pub fn convert_scene(
         materials,
         lights,
         cameras,
+        sectioned_mesh: None,
     })
 }
 

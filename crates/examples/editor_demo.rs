@@ -32,7 +32,7 @@ use helio::{
     Camera, EditorState, GizmoMode, Movability, Renderer, RendererConfig,
     SceneActor, ScenePicker, required_wgpu_features, required_wgpu_limits,
 };
-use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
+use helio_asset_compat::{load_scene_bytes_with_config, upload_sectioned_scene, LoadConfig};
 use v3_demo_common::{
     box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
     sphere_mesh,
@@ -355,86 +355,43 @@ impl ApplicationHandler for App {
                     .with_import_scale(glam::Vec3::splat(1.0 / 20.0)),
             ) {
                 Ok(scene) => {
-                    eprintln!("[editor_demo] Crates.fbx Ok — {} meshes", scene.meshes.len());
-                    let mat_ids = match upload_scene_materials(&mut renderer, &scene) {
-                        Ok(ids) => {
-                            eprintln!("[editor_demo] upload_scene_materials ok: {} materials", ids.len());
-                            ids
+                    match upload_sectioned_scene(&mut renderer, &scene) {
+                        Ok((multi_mesh_id, section_mat_ids)) => {
+                            let sm = scene.sectioned_mesh.as_ref().unwrap();
+                            // Node transforms are already baked into the shared vertex buffer,
+                            // so the mesh lives at IDENTITY in its own space.  Compute a
+                            // local-space AABB and then translate it to CRATES_TARGET.
+                            let mut bb_min = glam::Vec3::splat(f32::INFINITY);
+                            let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
+                            for v in &sm.vertices {
+                                let p = glam::Vec3::from(v.position);
+                                bb_min = bb_min.min(p);
+                                bb_max = bb_max.max(p);
+                            }
+                            let local_center = (bb_min + bb_max) * 0.5;
+                            let radius = ((bb_max - bb_min) * 0.5).length().max(0.5);
+                            let placement =
+                                glam::Mat4::from_translation(CRATES_TARGET - local_center);
+                            let world_center = placement.transform_point3(local_center);
+                            eprintln!(
+                                "[editor_demo] sectioned mesh: {} sections, {} verts, r={radius:.2}, world_center={world_center:.2?}",
+                                sm.sections.len(),
+                                sm.vertices.len()
+                            );
+                            match renderer.scene_mut().insert_sectioned_object(
+                                multi_mesh_id,
+                                &section_mat_ids,
+                                placement,
+                                [world_center.x, world_center.y, world_center.z, radius],
+                                Some(Movability::Movable),
+                            ) {
+                                Ok(_) => eprintln!("[editor_demo] sectioned mesh inserted ok"),
+                                Err(e) => {
+                                    eprintln!("[editor_demo] sectioned mesh INSERT FAILED: {e:?}")
+                                }
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("[editor_demo] upload_scene_materials ERR: {e} — using fallback");
-                            vec![]
-                        }
-                    };
-                    // Compute a single global AABB in world space by transforming
-                    // each mesh's local vertices through its node_transform.
-                    // This keeps all sub-parts assembled correctly as a unit.
-                    let mut global_min = glam::Vec3::splat(f32::INFINITY);
-                    let mut global_max = glam::Vec3::splat(f32::NEG_INFINITY);
-                    for mesh in &scene.meshes {
-                        for v in &mesh.vertices {
-                            let p = mesh.node_transform.transform_point3(glam::Vec3::from_array(v.position));
-                            global_min = global_min.min(p);
-                            global_max = global_max.max(p);
-                        }
-                    }
-                    let global_center = (global_min + global_max) * 0.5;
-                    let placement_offset = CRATES_TARGET - global_center;
-                    let placement = glam::Mat4::from_translation(placement_offset);
-                    eprintln!("[editor_demo] scene world-center={global_center:.2?}, placement_offset={placement_offset:.2?}");
-
-                    for (i, mesh) in scene.meshes.into_iter().enumerate() {
-                        // World-space AABB for the bounding radius.
-                        let mut bb_min = glam::Vec3::splat(f32::INFINITY);
-                        let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
-                        for v in &mesh.vertices {
-                            let p = mesh.node_transform.transform_point3(glam::Vec3::from_array(v.position));
-                            bb_min = bb_min.min(p);
-                            bb_max = bb_max.max(p);
-                        }
-                        let radius = ((bb_max - bb_min) * 0.5).length().max(0.5);
-                        eprintln!(
-                            "[editor_demo] mesh[{i}]: verts={}, world_bb_min={bb_min:.2?}, world_bb_max={bb_max:.2?}, r={radius:.2}",
-                            mesh.vertices.len()
-                        );
-
-                        // Compose placement with the per-mesh node transform so
-                        // each sub-object sits in its correct relative position.
-                        let transform = placement * mesh.node_transform;
-
-                        let upload = helio::MeshUpload {
-                            vertices: mesh.vertices,
-                            indices: mesh.indices,
-                        };
-                        let mesh_id = renderer
-                            .scene_mut()
-                            .insert_actor(SceneActor::mesh(upload.clone()))
-                            .as_mesh()
-                            .unwrap();
-                        picker.register_mesh(mesh_id, &upload);
-                        let material = mesh
-                            .material_index
-                            .and_then(|idx| mat_ids.get(idx).copied())
-                            .unwrap_or_else(|| {
-                                renderer.scene_mut().insert_material(make_material(
-                                    [0.7, 0.65, 0.55, 1.0],
-                                    0.6,
-                                    0.0,
-                                    [0.0; 3],
-                                    0.0,
-                                ))
-                            });
-                        match insert_object_with_movability(
-                            &mut renderer,
-                            mesh_id,
-                            material,
-                            transform,
-                            radius,
-                            Some(Movability::Movable),
-                        ) {
-                            Ok(_) => eprintln!("[editor_demo] mesh[{i}] inserted ok"),
-                            Err(e) => eprintln!("[editor_demo] mesh[{i}] INSERT FAILED: {e:?}"),
-                        }
+                        Err(e) => eprintln!("[editor_demo] upload_sectioned_scene ERR: {e}"),
                     }
                 }
                 Err(e) => eprintln!("[editor_demo] Failed to load Crates.fbx: {e}"),

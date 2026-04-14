@@ -14,8 +14,8 @@ use wgpu::util::DeviceExt;
 
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
-use crate::handles::{LightId, MaterialId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
-use crate::mesh::MeshPool;
+use crate::handles::{LightId, MaterialId, MultiMeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
+use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
 
@@ -146,7 +146,10 @@ pub struct Scene {
 
     /// Dirty range of water hitboxes that need GPU upload.
     pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
-}
+    // ── Multi-material (sectioned) meshes ─────────────────────────────────────
+    /// Sectioned mesh assets: one record per `insert_sectioned_mesh` call.
+    /// Each record stores N `MeshId`s (one per section) all sharing the same vertex buffer.
+    pub(in crate::scene) multi_meshes: SparsePool<MultiMeshRecord, MultiMeshId>,}
 
 impl Scene {
     /// Create a new empty scene.
@@ -253,6 +256,7 @@ impl Scene {
             water_hitboxes: DenseArena::new(),
             water_hitboxes_dirty: false,
             water_hitboxes_dirty_range: None,
+            multi_meshes: SparsePool::new(),
         }
     }
 

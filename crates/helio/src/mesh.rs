@@ -50,6 +50,28 @@ pub struct MeshUpload {
     pub indices: Vec<u32>,
 }
 
+/// Upload descriptor for a multi-material (sectioned) mesh.
+///
+/// All sections share one vertex buffer. Each element of `sections` is an independent
+/// index list referencing `vertices`, rendered with its own material per draw call.
+/// This mirrors Unreal Engine's Static Mesh section model: one VB/IB, N draw calls.
+#[derive(Debug, Clone)]
+pub struct SectionedMeshUpload {
+    /// The full shared vertex array. All sections index into this.
+    pub vertices: Vec<PackedVertex>,
+    /// Per-section index lists. `sections[i]` is drawn with the i-th material.
+    pub sections: Vec<Vec<u32>>,
+}
+
+/// Internal record for a stored multi-material mesh.
+/// Sections share the same vertex buffer region but have distinct index ranges.
+pub(crate) struct MultiMeshRecord {
+    /// One `MeshId` per section (all share the same vertex range in the pool).
+    pub section_mesh_ids: Vec<crate::handles::MeshId>,
+    /// Number of live [`SectionedObjectId`] instances placed from this mesh.
+    pub ref_count: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MeshSlice {
     pub first_vertex: u32,
@@ -108,6 +130,40 @@ impl MeshPool {
             ref_count: 0,
         });
         id
+    }
+
+    /// Upload a sectioned mesh: vertices are pushed ONCE into the shared vertex buffer;
+    /// each section's index list gets its own contiguous range in the index buffer.
+    /// Returns one `MeshId` per section — all share the same `first_vertex`.
+    ///
+    /// This is the GPU-native implementation of Unreal's Static Mesh sections.
+    pub fn insert_sectioned(&mut self, upload: SectionedMeshUpload) -> MultiMeshRecord {
+        let vertex_range = self.vertices.extend_from_slice(&upload.vertices);
+        let first_vertex = vertex_range.start as u32;
+        let vertex_count = (vertex_range.end - vertex_range.start) as u32;
+
+        let section_mesh_ids = upload
+            .sections
+            .iter()
+            .map(|sec_indices| {
+                let index_range = self.indices.extend_from_slice(sec_indices);
+                let (id, _, _) = self.meshes.insert(MeshRecord {
+                    slice: MeshSlice {
+                        first_vertex,
+                        vertex_count,
+                        first_index: index_range.start as u32,
+                        index_count: (index_range.end - index_range.start) as u32,
+                    },
+                    ref_count: 0,
+                });
+                id
+            })
+            .collect();
+
+        MultiMeshRecord {
+            section_mesh_ids,
+            ref_count: 0,
+        }
     }
 
     pub fn get(&self, id: MeshId) -> Option<&MeshRecord> {

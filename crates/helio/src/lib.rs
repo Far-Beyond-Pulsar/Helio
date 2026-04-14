@@ -24,14 +24,14 @@ mod vg;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use picking::{PickHit, ScenePicker};
 pub use groups::{GroupId, GroupMask};
-pub use handles::{LightId, MaterialId, MeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
+pub use handles::{LightId, MaterialId, MeshId, MultiMeshId, ObjectId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 pub use helio_pass_billboard::BillboardInstance;
 pub use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
     TextureUpload, MAX_TEXTURES,
 };
-pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex};
+pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUpload};
 pub use quark_commands::{HelioAction, HelioCommandBridge, register_helio_commands};
 pub use renderer::{
     build_simple_graph, build_hlfs_graph, build_default_graph_external, required_wgpu_features, required_wgpu_limits, GiConfig, Renderer,
@@ -40,6 +40,7 @@ pub use renderer::{
 pub use scene::{
     Camera, ObjectDescriptor, PickableObject, Result as SceneResult, Scene, SceneError,
     SceneActor, SceneActorId, SceneActorTrait,
+    SectionedObjectId,
     WaterHitboxActor, WaterHitboxDescriptor,
     WaterVolumeActor, WaterVolumeDescriptor,
 };

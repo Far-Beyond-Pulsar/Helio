@@ -13,7 +13,7 @@ mod scene_converter;
 mod texture_loader;
 
 use helio::MeshId;
-use helio::{LightId, MaterialId, ObjectId, Renderer, TextureId};
+use helio::{LightId, MaterialId, MultiMeshId, ObjectId, Renderer, SectionedMeshUpload, SectionedObjectId, TextureId};
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
@@ -24,7 +24,9 @@ pub use material_converter::{
     convert_material, ConvertedMaterial, ConvertedMaterialTextures, ConvertedTextureRef,
 };
 pub use mesh_converter::{convert_primitive, convert_vertex};
-pub use scene_converter::{convert_scene, ConvertedMesh, ConvertedScene};
+pub use scene_converter::{
+    convert_scene, ConvertedMesh, ConvertedMeshSection, ConvertedScene, ConvertedSectionedMesh,
+};
 
 use std::path::Path;
 
@@ -287,6 +289,85 @@ pub fn upload_scene_materials(
                 .map_err(|err: helio::SceneError| AssetError::InvalidData(err.to_string()))
         })
         .collect()
+}
+
+/// Upload the materials/textures and sectioned mesh from a [`ConvertedScene`] that
+/// was loaded with [`LoadConfig::merge_meshes`] = true.
+///
+/// Returns the [`MultiMeshId`] asset handle and the list of [`MaterialId`]s (one per
+/// section, in the same order as [`ConvertedSectionedMesh::sections`]).
+///
+/// Panics if `scene.sectioned_mesh` is `None` (i.e. the scene was not loaded with
+/// `merge_meshes = true`).
+pub fn upload_sectioned_scene(
+    renderer: &mut Renderer,
+    scene: &ConvertedScene,
+) -> Result<(MultiMeshId, Vec<MaterialId>)> {
+    let sm = scene
+        .sectioned_mesh
+        .as_ref()
+        .expect("upload_sectioned_scene called on a scene without sectioned_mesh; use merge_meshes=true");
+
+    // Upload textures and materials (same as upload_scene_materials).
+    let texture_ids: Result<Vec<TextureId>> = scene
+        .textures
+        .iter()
+        .cloned()
+        .map(|t| {
+            renderer
+                .scene_mut()
+                .insert_texture(t)
+                .map_err(|e: helio::SceneError| AssetError::InvalidData(e.to_string()))
+        })
+        .collect();
+    let texture_ids = texture_ids?;
+
+    let all_material_ids: Result<Vec<MaterialId>> = scene
+        .materials
+        .iter()
+        .map(|mat| {
+            let asset = scene_converter::material_asset_from_converted(mat, &texture_ids);
+            renderer
+                .scene_mut()
+                .insert_material_asset(asset)
+                .map_err(|e: helio::SceneError| AssetError::InvalidData(e.to_string()))
+        })
+        .collect();
+    let all_material_ids = all_material_ids?;
+
+    // Build the SectionedMeshUpload: shared vertices + per-section index lists.
+    let upload = SectionedMeshUpload {
+        vertices: sm.vertices.clone(),
+        sections: sm.sections.iter().map(|s| s.indices.clone()).collect(),
+    };
+    let multi_mesh_id = renderer.scene_mut().insert_sectioned_mesh(upload);
+
+    // Resolve per-section material IDs (fall back to a unit material when None).
+    let section_material_ids: Vec<MaterialId> = sm
+        .sections
+        .iter()
+        .map(|sec| {
+            sec.material_index
+                .and_then(|idx| all_material_ids.get(idx).copied())
+                .unwrap_or_else(|| {
+                    renderer.scene_mut().insert_material(helio::GpuMaterial {
+                        base_color: [0.7, 0.65, 0.55, 1.0],
+                        emissive: [0.0, 0.0, 0.0, 0.0],
+                        roughness_metallic: [0.6, 0.0, 1.5, 0.0],
+                        tex_base_color: helio::GpuMaterial::NO_TEXTURE,
+                        tex_normal: helio::GpuMaterial::NO_TEXTURE,
+                        tex_roughness: helio::GpuMaterial::NO_TEXTURE,
+                        tex_emissive: helio::GpuMaterial::NO_TEXTURE,
+                        tex_occlusion: helio::GpuMaterial::NO_TEXTURE,
+                        workflow: 0,
+                        flags: 0,
+                        _pad: 0,
+                    })
+                })
+        })
+        .collect();
+
+    Ok((multi_mesh_id, section_material_ids))
 }
 
 /// Result type for asset loading operations

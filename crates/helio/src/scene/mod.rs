@@ -76,12 +76,14 @@ mod errors;
 mod groups;
 mod helpers;
 mod hitbox;
+mod multi_mesh;
 mod objects;
 mod resources;
 mod types;
 mod virtual_geometry;
 mod water;
 
+pub use multi_mesh::SectionedObjectId;
 pub use actor::{
     SceneActor, SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
     WaterVolumeDescriptor, WaterVolumeActor,
