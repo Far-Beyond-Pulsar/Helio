@@ -32,6 +32,7 @@ use helio::{
     Camera, EditorState, GizmoMode, Movability, Renderer, RendererConfig,
     SceneActor, ScenePicker, required_wgpu_features, required_wgpu_limits,
 };
+use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use v3_demo_common::{
     box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
     sphere_mesh,
@@ -47,6 +48,8 @@ use winit::{
 
 use std::collections::HashSet;
 use std::sync::Arc;
+
+const CRATES_FBX: &[u8] = include_bytes!("../../models/source/container with textures.fbx");
 
 fn main() {
     env_logger::init();
@@ -304,6 +307,118 @@ impl ApplicationHandler for App {
             Some(Movability::Movable),
         )
         .expect("sphere");
+
+        // ── Load Crates.fbx ───────────────────────────────────────────────────
+        const CRATES_TARGET: glam::Vec3 = glam::Vec3::new(3.5, 0.0, -2.0);
+
+        // Debug sphere — bright orange marker so we can confirm the target
+        // location is actually in view.  Remove once placement is verified.
+        {
+            let dbg_upload = sphere_mesh(CRATES_TARGET.to_array(), 0.35);
+            let dbg_mesh = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::mesh(dbg_upload.clone()))
+                .as_mesh()
+                .unwrap();
+            picker.register_mesh(dbg_mesh, &dbg_upload);
+            let mat_dbg = renderer.scene_mut().insert_material(make_material(
+                [1.0, 0.4, 0.05, 1.0], // bright orange
+                0.3,
+                0.0,
+                [0.8, 0.3, 0.0], // emissive so it's visible even without lighting
+                0.6,
+            ));
+            insert_object_with_movability(
+                &mut renderer,
+                dbg_mesh,
+                mat_dbg,
+                glam::Mat4::IDENTITY,
+                0.5,
+                Some(Movability::Movable),
+            )
+            .ok();
+        }
+
+        {
+            let crates_base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("models/source");
+            match load_scene_bytes_with_config(
+                CRATES_FBX,
+                "fbx",
+                Some(crates_base.as_path()),
+                LoadConfig::default().with_uv_flip(false),
+            ) {
+                Ok(scene) => {
+                    eprintln!("[editor_demo] Crates.fbx Ok — {} meshes", scene.meshes.len());
+                    let mat_ids = match upload_scene_materials(&mut renderer, &scene) {
+                        Ok(ids) => {
+                            eprintln!("[editor_demo] upload_scene_materials ok: {} materials", ids.len());
+                            ids
+                        }
+                        Err(e) => {
+                            eprintln!("[editor_demo] upload_scene_materials ERR: {e} — using fallback");
+                            vec![]
+                        }
+                    };
+                    for (i, mesh) in scene.meshes.into_iter().enumerate() {
+                        // Compute AABB so we can see where the raw verts sit.
+                        let mut bb_min = glam::Vec3::splat(f32::INFINITY);
+                        let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
+                        for v in &mesh.vertices {
+                            let p = glam::Vec3::from_array(v.position);
+                            bb_min = bb_min.min(p);
+                            bb_max = bb_max.max(p);
+                        }
+                        let center = (bb_min + bb_max) * 0.5;
+                        let radius = ((bb_max - bb_min) * 0.5).length().max(0.5);
+                        eprintln!(
+                            "[editor_demo] mesh[{i}]: verts={}, bb_min={bb_min:.2?}, bb_max={bb_max:.2?}, center={center:.2?}, r={radius:.2}",
+                            mesh.vertices.len()
+                        );
+
+                        // Translate the mesh center to the target position.
+                        let offset = CRATES_TARGET - center;
+                        let transform = glam::Mat4::from_translation(offset);
+
+                        let upload = helio::MeshUpload {
+                            vertices: mesh.vertices,
+                            indices: mesh.indices,
+                        };
+                        let mesh_id = renderer
+                            .scene_mut()
+                            .insert_actor(SceneActor::mesh(upload.clone()))
+                            .as_mesh()
+                            .unwrap();
+                        picker.register_mesh(mesh_id, &upload);
+                        let material = mesh
+                            .material_index
+                            .and_then(|idx| mat_ids.get(idx).copied())
+                            .unwrap_or_else(|| {
+                                renderer.scene_mut().insert_material(make_material(
+                                    [0.7, 0.65, 0.55, 1.0],
+                                    0.6,
+                                    0.0,
+                                    [0.0; 3],
+                                    0.0,
+                                ))
+                            });
+                        match insert_object_with_movability(
+                            &mut renderer,
+                            mesh_id,
+                            material,
+                            transform,
+                            radius,
+                            Some(Movability::Movable),
+                        ) {
+                            Ok(_) => eprintln!("[editor_demo] mesh[{i}] inserted ok"),
+                            Err(e) => eprintln!("[editor_demo] mesh[{i}] INSERT FAILED: {e:?}"),
+                        }
+                    }
+                }
+                Err(e) => eprintln!("[editor_demo] Failed to load Crates.fbx: {e}"),
+            }
+        }
 
         // Sync the picker with all just-inserted objects.
         picker.rebuild_instances(renderer.scene());
