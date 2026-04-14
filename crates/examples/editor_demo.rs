@@ -385,7 +385,28 @@ impl ApplicationHandler for App {
                                 [world_center.x, world_center.y, world_center.z, radius],
                                 Some(Movability::Movable),
                             ) {
-                                Ok(_) => eprintln!("[editor_demo] sectioned mesh inserted ok"),
+                                Ok(_) => {
+                                    eprintln!("[editor_demo] sectioned mesh inserted ok");
+                                    // Register each section's geometry with the picker so that
+                                    // ray-cast hits land on the mesh instead of passing through it.
+                                    if let Some(section_ids) = renderer
+                                        .scene()
+                                        .sectioned_section_mesh_ids(multi_mesh_id)
+                                    {
+                                        let section_ids: Vec<_> = section_ids.to_vec();
+                                        for (section_mesh_id, sec) in
+                                            section_ids.iter().zip(sm.sections.iter())
+                                        {
+                                            picker.register_mesh(
+                                                *section_mesh_id,
+                                                &helio::MeshUpload {
+                                                    vertices: sm.vertices.clone(),
+                                                    indices: sec.indices.clone(),
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
                                 Err(e) => {
                                     eprintln!("[editor_demo] sectioned mesh INSERT FAILED: {e:?}")
                                 }

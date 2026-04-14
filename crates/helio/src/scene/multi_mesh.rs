@@ -16,7 +16,7 @@
 use glam::Mat4;
 
 use crate::groups::GroupMask;
-use crate::handles::{MaterialId, MultiMeshId, ObjectId};
+use crate::handles::{MaterialId, MeshId, MultiMeshId, ObjectId};
 use crate::mesh::SectionedMeshUpload;
 use crate::scene::types::ObjectDescriptor;
 
@@ -41,6 +41,19 @@ pub struct SectionedObjectId {
 // ─── Scene methods ────────────────────────────────────────────────────────────
 
 impl super::Scene {
+    /// Return the per-section [`MeshId`]s for a previously uploaded sectioned mesh.
+    ///
+    /// Needed when registering the mesh geometry with [`crate::ScenePicker`] so
+    /// that each section participates in BVH ray-picking.  The returned slice is
+    /// in the same order as the `sections` array passed to [`insert_sectioned_mesh`].
+    ///
+    /// Returns `None` if the handle is stale or has already been removed.
+    pub fn sectioned_section_mesh_ids(&self, id: MultiMeshId) -> Option<&[MeshId]> {
+        self.multi_meshes
+            .get(id)
+            .map(|r| r.section_mesh_ids.as_slice())
+    }
+
     /// Upload a multi-material mesh to the GPU.
     ///
     /// Vertices are pushed **once** into the shared vertex buffer.
