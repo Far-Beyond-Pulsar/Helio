@@ -586,6 +586,13 @@ impl ApplicationHandler for App {
                                 state.grid_enabled = !state.grid_enabled;
                                 state.renderer.set_editor_mode(state.grid_enabled);
                             }
+                            // Spawn a powerful blue point light at the camera position.
+                            KeyCode::KeyL if !state.right_mouse_held => {
+                                let pos = state.cam_pos.to_array();
+                                state.renderer.scene_mut().insert_actor(
+                                    SceneActor::light(point_light(pos, [0.2, 0.5, 1.0], 500.0, 150.0))
+                                );
+                            }
                             _ => {}
                         }
                     }

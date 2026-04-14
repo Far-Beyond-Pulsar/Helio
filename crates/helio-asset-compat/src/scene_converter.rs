@@ -33,7 +33,7 @@ fn fallback_texture(semantic: TextureSemantic) -> helio::TextureUpload {
     }
 
     const SIZE: u32 = 1024;
-    const TILE: u32 = 128; // 8×8 grid of 128px tiles
+    const TILE: u32 = 256; // 8×8 grid of 128px tiles
     const GROUT: u32 = 1;  // 1px hairline groove (each boundary pixel)
     const CURVE: u32 = 5;  // pixels over which tile curves down into groove
 
