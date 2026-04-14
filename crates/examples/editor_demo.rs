@@ -85,6 +85,8 @@ struct AppState {
     mouse_delta: (f32, f32),
     /// Last known cursor position in logical pixels (only valid when cursor is free).
     cursor_pos: (f32, f32),
+    /// Fly-mode movement speed in units/second. Scroll wheel adjusts this.
+    cam_speed: f32,
 
     // ── Editor ───────────────────────────────────────────────────────────────
     editor: EditorState,
@@ -479,6 +481,7 @@ impl ApplicationHandler for App {
             right_mouse_held: false,
             mouse_delta: (0.0, 0.0),
             cursor_pos: (640.0, 360.0),
+            cam_speed: 6.0,
             editor: EditorState::new(),
             picker,
             grid_enabled: true,
@@ -650,6 +653,18 @@ impl ApplicationHandler for App {
                 state.editor.end_drag();
             }
 
+            WindowEvent::MouseWheel { delta, .. } => {
+                if let Some(state) = self.state.as_mut() {
+                    let lines = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
+                    };
+                    // Each scroll notch multiplies/divides speed by ~1.15.
+                    state.cam_speed = (state.cam_speed * 1.15_f32.powf(lines))
+                        .clamp(0.5, 500.0);
+                }
+            }
+
             WindowEvent::RedrawRequested => {
                 let now = std::time::Instant::now();
                 let dt = (now - state.last_frame).as_secs_f32();
@@ -707,7 +722,6 @@ impl AppState {
 
     fn update_camera(&mut self, dt: f32) {
         const LOOK: f32 = 0.0025;
-        const MOVE: f32 = 6.0;
 
         // Only rotate and move when the right mouse button is held.
         if self.right_mouse_held {
@@ -729,7 +743,7 @@ impl AppState {
             if self.keys.contains(&KeyCode::Space)     { vel += glam::Vec3::Y; }
             if self.keys.contains(&KeyCode::ShiftLeft) { vel -= glam::Vec3::Y; }
             if vel.length_squared() > 0.0 {
-                self.cam_pos += vel.normalize() * MOVE * dt;
+                self.cam_pos += vel.normalize() * self.cam_speed * dt;
             }
         }
         self.mouse_delta = (0.0, 0.0);
