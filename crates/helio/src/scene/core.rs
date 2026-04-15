@@ -491,37 +491,80 @@ impl Scene {
             }
         }
         
-        // Assign sequential shadow atlas base layers to each shadow-casting light.
-        // Convention: shadow_index == u32::MAX  → no shadow.
-        // Always 6 slots per light (matches FACES_PER_LIGHT in shadow_matrices.wgsl):
-        //   Point:       6 cube-face matrices
-        //   Directional: 4 CSM cascades + 2 identity padding slots
-        //   Spot:        1 perspective matrix + 5 unused (zeroed) slots
-        // Cap at 42 shadow casters (42 × 6 = 252 ≤ 256 atlas layers).
+        // Assign shadow atlas slots to the highest-importance shadow-casting lights.
+        //
+        // Problem with sequential assignment: the first N lights inserted always win the
+        // 42-caster budget, regardless of how far away or how dim they are. A bright
+        // close light inserted after slot 42 is full gets no shadow.
+        //
+        // Solution — two-phase importance selection:
+        //   Phase 1: Score every shadow-requesting light by camera-relative importance:
+        //              intensity × (range / max(dist, range))²
+        //            Directional lights always score ∞ (global, never culled).
+        //            Sort descending → top 42 are the frame's active casters.
+        //   Phase 2: Re-sort the WINNERS by their GPU buffer index (stable secondary key).
+        //            Same lights that were in budget last frame keep the same atlas slots,
+        //            preventing slot churn from minor score fluctuations. Only new entrants
+        //            and exits cause slot reassignment (and thus dirty-gen bumps).
+        //
+        // This mirrors how Unreal's shadow manager prioritises casters by projected
+        // screen-space contribution, gracefully dropping far/dim lights when over budget.
         {
             const MAX_SHADOW_CASTERS: usize = 42;
             const FACES_PER_LIGHT: u32 = 6;
             let light_count = self.gpu_scene.lights.len();
-            let mut next_layer: u32 = 0;
-            let mut shadow_caster_count = 0usize;
+            let [cx, cy, cz] = self.gpu_scene.camera.position();
+
+            // Phase 1: score and select the top MAX_SHADOW_CASTERS.
+            let mut scored: Vec<(f32, usize)> = Vec::with_capacity(light_count);
             for i in 0..light_count {
                 let light = self.gpu_scene.lights.0.as_slice()[i];
                 if light.shadow_index == u32::MAX {
-                    // Explicitly disabled — leave as-is.
-                    continue;
+                    continue; // user explicitly disabled shadows on this light
                 }
-                if shadow_caster_count >= MAX_SHADOW_CASTERS {
-                    // Over cap: disable shadow for this light.
+                let score = if light.light_type == 0 {
+                    // Directional: infinite range, always highest priority.
+                    f32::MAX
+                } else {
+                    let dx = light.position_range[0] - cx;
+                    let dy = light.position_range[1] - cy;
+                    let dz = light.position_range[2] - cz;
+                    let dist_sq = dx * dx + dy * dy + dz * dz;
+                    let range = light.position_range[3].max(0.001);
+                    let range_sq = range * range;
+                    // intensity × (range / max(dist, range))²
+                    // = intensity when inside range, falls off quadratically outside.
+                    light.color_intensity[3] * (range_sq / dist_sq.max(range_sq))
+                };
+                scored.push((score, i));
+            }
+
+            // Sort descending by importance to determine which lights win the budget.
+            scored.sort_unstable_by(|a, b| {
+                b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let winner_count = scored.len().min(MAX_SHADOW_CASTERS);
+
+            // Phase 2: re-sort winners by their buffer index (stable secondary key).
+            // Lights that stay in budget from frame to frame retain the same atlas slot,
+            // keeping per-caster dirty gens stable and avoiding spurious re-renders.
+            scored[..winner_count].sort_unstable_by_key(|&(_, i)| i);
+
+            // Assign atlas slots to winners; disable everything else.
+            let mut next_layer: u32 = 0;
+            for (rank, &(_, i)) in scored.iter().enumerate() {
+                let light = self.gpu_scene.lights.0.as_slice()[i];
+                if rank < MAX_SHADOW_CASTERS {
+                    let mut assigned = light;
+                    assigned.shadow_index = next_layer;
+                    self.gpu_scene.lights.update(i, assigned);
+                    next_layer += FACES_PER_LIGHT;
+                } else {
                     let mut disabled = light;
                     disabled.shadow_index = u32::MAX;
                     self.gpu_scene.lights.update(i, disabled);
-                    continue;
                 }
-                let mut assigned = light;
-                assigned.shadow_index = next_layer;
-                self.gpu_scene.lights.update(i, assigned);
-                next_layer += FACES_PER_LIGHT;
-                shadow_caster_count += 1;
             }
             let needed = (next_layer as usize).max(1);
             if self.gpu_scene.shadow_matrices.len() != needed {
