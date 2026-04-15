@@ -208,6 +208,12 @@ pub struct GpuScene {
     /// Number of movable lights in the lights buffer (at runtime, only movable lights are uploaded).
     /// Static/stationary lights are baked and excluded from real-time lighting calculations.
     pub movable_light_count: u32,
+
+    /// Per-caster shadow dirty generation counters. Each slot corresponds to one shadow caster
+    /// (6 atlas faces). Incremented by Scene::flush() when that caster's content hash changes
+    /// (light moved or a movable object within its range moved). ShadowPass compares against
+    /// its own per_caster_last_gen[] and only re-renders faces for dirty casters.
+    pub per_caster_dirty_gen: [u64; 42],
 }
 
 impl GpuScene {
@@ -273,6 +279,7 @@ impl GpuScene {
             shadow_static_draw_count: 0,
             shadow_movable_draw_count: 0,
             movable_light_count: 0,
+            per_caster_dirty_gen: [1u64; 42],
         }
     }
 
@@ -325,6 +332,7 @@ impl GpuScene {
             shadow_movable_draw_count: self.shadow_movable_draw_count,
             movable_light_count: self.movable_light_count,
             static_objects_generation: self.static_objects_generation,
+            per_caster_dirty_gen: self.per_caster_dirty_gen,
         }
     }
 

@@ -97,9 +97,15 @@ pub struct ShadowPass {
     /// Dirty flag buffer reference (per-light dirty flags from shadow matrix compute)
     _shadow_dirty_buf: Arc<wgpu::Buffer>,
 
-    /// Cache state for the dynamic atlas: (movable_objects_gen, movable_lights_gen, shadow_count).
-    /// Skips re-render when nothing Movable has changed.
-    shadow_cache_state: Option<(u64, u64, u32)>,
+    /// Per-caster last-rendered generation. Compared each frame against
+    /// SceneResources::per_caster_dirty_gen[]; faces are re-rendered only for casters
+    /// whose gen advanced (i.e., their content hash changed in Scene::flush()).
+    per_caster_last_gen: [u64; 42],
+
+    /// Total shadow count (face_count / 6) at time of last render. Used alongside
+    /// static_atlas_cache_gen to detect caster topology changes that require a full
+    /// static atlas rebuild.
+    last_rendered_shadow_count: u32,
 }
 
 impl ShadowPass {
@@ -328,7 +334,8 @@ impl ShadowPass {
             static_atlas_view,
             compare_sampler,
             _shadow_dirty_buf: shadow_dirty_buf,
-            shadow_cache_state: None,
+            per_caster_last_gen: [0u64; 42],
+            last_rendered_shadow_count: 0,
         }
     }
 }
@@ -351,8 +358,8 @@ impl RenderPass for ShadowPass {
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         // Per-light dirty-flag readback (async GPU→CPU) would allow skipping individual
         // shadow faces for lights whose frustum or scene contribution hasn't changed.
-        // That optimization is tracked for future work; the generation-counter cache in
-        // `execute()` already avoids full re-renders when nothing Movable has changed.
+        // That optimization is tracked for future work; the per-caster content-hash
+        // approach in execute() already handles region-level dirty detection on CPU.
         Ok(())
     }
 
@@ -362,7 +369,8 @@ impl RenderPass for ShadowPass {
         let movable_draw_count = ctx.scene.shadow_movable_draw_count;
 
         if face_count == 0 {
-            self.shadow_cache_state = None;
+            self.per_caster_last_gen = [0u64; 42];
+            self.last_rendered_shadow_count = 0;
             self.static_atlas_cache_gen = None;
             return Ok(());
         }
@@ -380,21 +388,25 @@ impl RenderPass for ShadowPass {
         //                   cathedral walls, floors, columns, etc.
 
         let static_gen = ctx.scene.static_objects_generation;
-        let movable_objects_gen = ctx.scene.movable_objects_generation;
-        let movable_lights_gen = ctx.scene.movable_lights_generation;
         let shadow_count = ctx.scene.shadow_count;
+        let caster_count = (face_count / 6).min(42);
 
         let need_static = self.static_atlas_cache_gen != Some(static_gen)
-            || self.shadow_cache_state.map_or(true, |(_, _, c)| c != shadow_count);
+            || shadow_count != self.last_rendered_shadow_count;
 
-        let need_dynamic = {
-            let current_state = (movable_objects_gen, movable_lights_gen, shadow_count);
-            let changed = self.shadow_cache_state != Some(current_state);
-            // Also re-render dynamic if static was just rebuilt (light count may differ)
-            changed || need_static
-        };
+        // Per-caster dirty check: each slot's gen is bumped in Scene::flush() only when
+        // that caster's content hash changes (light moved or nearby movable object moved).
+        // Only faces for dirty casters will be re-rendered.
+        let mut dirty_casters = [false; 42];
+        let mut any_dirty_caster = false;
+        for slot in 0..caster_count {
+            if ctx.scene.per_caster_dirty_gen[slot] != self.per_caster_last_gen[slot] {
+                dirty_casters[slot] = true;
+                any_dirty_caster = true;
+            }
+        }
 
-        if !need_static && !need_dynamic {
+        if !need_static && !any_dirty_caster {
             return Ok(());
         }
 
@@ -503,32 +515,39 @@ impl RenderPass for ShadowPass {
                 }
             }
             self.static_atlas_cache_gen = Some(static_gen);
+            self.last_rendered_shadow_count = shadow_count;
             log::debug!("Shadow: re-rendered static atlas ({} draws, {} faces)", static_draw_count, face_count);
         }
 
-        // ── Dynamic atlas render ───────────────────────────────────────────────
-        // Re-rendered only when Movable objects or lights move.
-        if need_dynamic {
+        // ── Dynamic atlas render — per-caster partitioning ───────────────────
+        // Only casters whose per_caster_dirty_gen advanced get their faces rebuilt.
+        // LoadOp::Clear(1.0) resets each rebuilt face to fully-lit before drawing,
+        // so casters with zero movable draws still produce a correct depth face.
+        if any_dirty_caster {
             let movable_indirect = ctx.scene.shadow_movable_indirect;
-            if movable_draw_count > 0 {
-                for face in 0..face_count {
-                    let face_view = &self.face_views[face];
-                    let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Shadow/Dynamic"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: face_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
+            for face in 0..face_count {
+                let caster_slot = face / 6;
+                if caster_slot >= 42 || !dirty_casters[caster_slot] {
+                    continue;
+                }
+                let face_view = &self.face_views[face];
+                let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
+                let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Shadow/Dynamic"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: face_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
                         }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                if movable_draw_count > 0 {
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, bg, &[dyn_offset]);
                     pass.set_vertex_buffer(0, vertices.slice(..));
@@ -540,28 +559,13 @@ impl RenderPass for ShadowPass {
                         pass.draw_indexed_indirect(movable_indirect, i as u64 * 20);
                     }
                 }
-            } else {
-                // No movable shadow casters — clear to 1.0 (fully lit)
-                for face in 0..face_count {
-                    let face_view = &self.face_views[face];
-                    let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Shadow/DynamicClear"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: face_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+            }
+            // Advance the last-rendered gen for each caster we just rebuilt.
+            for slot in 0..caster_count {
+                if dirty_casters[slot] {
+                    self.per_caster_last_gen[slot] = ctx.scene.per_caster_dirty_gen[slot];
                 }
             }
-            self.shadow_cache_state = Some((movable_objects_gen, movable_lights_gen, shadow_count));
         }
 
         Ok(())

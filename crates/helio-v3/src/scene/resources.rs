@@ -148,5 +148,9 @@ pub struct SceneResources<'a> {
     pub static_objects_generation: u64,
     /// Number of movable lights in the lights buffer (static/stationary excluded from runtime).
     pub movable_light_count: u32,
+    /// Per-caster dirty generation counters (one per shadow caster slot, 42 max).
+    /// Copied from GpuScene::per_caster_dirty_gen each frame. ShadowPass compares against
+    /// its own last-rendered gen to decide which caster faces need re-rendering.
+    pub per_caster_dirty_gen: [u64; 42],
 }
 

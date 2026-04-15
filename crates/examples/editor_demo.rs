@@ -378,7 +378,7 @@ impl ApplicationHandler for App {
                                 sm.sections.len(),
                                 sm.vertices.len()
                             );
-                            let duplicates = 15;
+                            let duplicates = 60;
                             let grid_cols = 5;
                             let grid_rows = 3;
                             let spacing = 4.75;
