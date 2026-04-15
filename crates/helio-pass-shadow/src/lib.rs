@@ -459,12 +459,20 @@ impl RenderPass for ShadowPass {
         let pipeline = &self.pipeline;
 
         // ── Static atlas render ────────────────────────────────────────────────
-        // Only re-rendered when Static/Stationary topology changes.
-        // For a typical scene this renders ONCE at load time, never again.
-        if need_static {
+        // Re-rendered when:
+        //   • Static/Stationary topology changes (need_static = true) — full rebuild of all faces.
+        //   • A specific caster is dirty (light moved) — per-caster faces only.
+        //     When a light moves its shadow matrices change, so the depth values baked into
+        //     the static atlas become stale and must be re-rendered with the new matrices.
+        if need_static || any_dirty_caster {
             let static_indirect = ctx.scene.shadow_static_indirect;
             if static_draw_count > 0 {
                 for face in 0..face_count {
+                    let caster_slot = face / 6;
+                    // Skip faces that are neither globally dirty nor per-caster dirty.
+                    if !need_static && (caster_slot >= 42 || !dirty_casters[caster_slot]) {
+                        continue;
+                    }
                     let face_view = &self.static_face_views[face];
                     let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
                     let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -493,8 +501,9 @@ impl RenderPass for ShadowPass {
                         pass.draw_indexed_indirect(static_indirect, i as u64 * 20);
                     }
                 }
-            } else {
-                // No static shadow casters — clear the atlas to 1.0 (fully lit / no shadow)
+            } else if need_static {
+                // No static shadow casters — clear the atlas to 1.0 (fully lit / no shadow).
+                // Only needed on a global topology change; per-caster dirty has nothing to clear.
                 for face in 0..face_count {
                     let face_view = &self.static_face_views[face];
                     let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -514,9 +523,11 @@ impl RenderPass for ShadowPass {
                     });
                 }
             }
-            self.static_atlas_cache_gen = Some(static_gen);
-            self.last_rendered_shadow_count = shadow_count;
-            log::debug!("Shadow: re-rendered static atlas ({} draws, {} faces)", static_draw_count, face_count);
+            if need_static {
+                self.static_atlas_cache_gen = Some(static_gen);
+                self.last_rendered_shadow_count = shadow_count;
+                log::debug!("Shadow: re-rendered static atlas ({} draws, {} faces)", static_draw_count, face_count);
+            }
         }
 
         // ── Dynamic atlas render — per-caster partitioning ───────────────────

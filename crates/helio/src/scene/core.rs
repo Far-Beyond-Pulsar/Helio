@@ -498,8 +498,8 @@ impl Scene {
         // close light inserted after slot 42 is full gets no shadow.
         //
         // Solution — two-phase importance selection:
-        //   Phase 1: Score every shadow-requesting light by camera-relative importance:
-        //              intensity × (range / max(dist, range))²
+        //   Phase 1: Score every shadow-requesting light by VIEW-INDEPENDENT importance:
+        //              intensity × range²
         //            Directional lights always score ∞ (global, never culled).
         //            Sort descending → top 42 are the frame's active casters.
         //   Phase 2: Re-sort the WINNERS by their GPU buffer index (stable secondary key).
@@ -507,13 +507,14 @@ impl Scene {
         //            preventing slot churn from minor score fluctuations. Only new entrants
         //            and exits cause slot reassignment (and thus dirty-gen bumps).
         //
-        // This mirrors how Unreal's shadow manager prioritises casters by projected
-        // screen-space contribution, gracefully dropping far/dim lights when over budget.
+        // IMPORTANT: Camera distance is intentionally NOT used in scoring. Using camera
+        // distance causes the budget to reshuffle every frame the camera moves, which
+        // triggers shadow atlas re-renders (expensive with many draw calls). The budget
+        // should only change when lights are added/removed or their properties change.
         {
             const MAX_SHADOW_CASTERS: usize = 42;
             const FACES_PER_LIGHT: u32 = 6;
             let light_count = self.gpu_scene.lights.len();
-            let [cx, cy, cz] = self.gpu_scene.camera.position();
 
             // Phase 1: score and select the top MAX_SHADOW_CASTERS.
             let mut scored: Vec<(f32, usize)> = Vec::with_capacity(light_count);
@@ -526,15 +527,10 @@ impl Scene {
                     // Directional: infinite range, always highest priority.
                     f32::MAX
                 } else {
-                    let dx = light.position_range[0] - cx;
-                    let dy = light.position_range[1] - cy;
-                    let dz = light.position_range[2] - cz;
-                    let dist_sq = dx * dx + dy * dy + dz * dz;
                     let range = light.position_range[3].max(0.001);
-                    let range_sq = range * range;
-                    // intensity × (range / max(dist, range))²
-                    // = intensity when inside range, falls off quadratically outside.
-                    light.color_intensity[3] * (range_sq / dist_sq.max(range_sq))
+                    // intensity × range² — view-independent, stable across camera moves.
+                    // Larger/brighter lights win the budget regardless of camera position.
+                    light.color_intensity[3] * (range * range)
                 };
                 scored.push((score, i));
             }
@@ -595,9 +591,19 @@ impl Scene {
                 if slot >= 42 {
                     continue;
                 }
-                new_hashes[slot] = fnv1a_f32s(&light.position_range)
+                let base_hash = fnv1a_f32s(&light.position_range)
                     ^ fnv1a_f32s(&light.direction_outer)
                     ^ (light.light_type as u64).wrapping_mul(2654435761);
+                // Directional lights use CSM cascades, which are derived from the camera
+                // frustum. When the camera moves, the cascade matrices change and the
+                // shadow atlas must be re-rendered. Include the camera position in the
+                // hash so any camera movement bumps the dirty gen for directional casters.
+                new_hashes[slot] = if light.light_type == 0 {
+                    let cam_pos = self.gpu_scene.camera.position();
+                    base_hash ^ fnv1a_f32s(&cam_pos)
+                } else {
+                    base_hash
+                };
             }
 
             // Pass 2: fold movable object bounds into each caster they intersect.
