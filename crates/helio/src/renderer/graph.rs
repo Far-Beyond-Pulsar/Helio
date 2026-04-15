@@ -8,6 +8,7 @@ use helio_pass_light_cull::LightCullPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_gbuffer::GBufferPass;
 use helio_pass_shadow::ShadowPass;
+use helio_pass_shadow_dirty::ShadowDirtyPass;
 use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky_lut::SkyLutPass;
@@ -95,7 +96,12 @@ fn build_default_graph_internal(
         &shadow_hashes_buf,
     )));
 
-    graph.add_pass(Box::new(ShadowPass::new(device, Arc::clone(&shadow_dirty_buf))));
+    let shadow_dirty_pass = ShadowDirtyPass::new(device);
+    let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
+    let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
+    graph.add_pass(Box::new(shadow_dirty_pass));
+
+    graph.add_pass(Box::new(ShadowPass::new(device, face_dirty_buf, face_geom_count_buf)));
 
     let has_sky = scene.sky_context().has_sky;
     if has_sky {
@@ -249,7 +255,12 @@ pub fn build_hlfs_graph(
         &shadow_hashes_buf,
     )));
 
-    graph.add_pass(Box::new(ShadowPass::new(device, Arc::clone(&shadow_dirty_buf))));
+    let shadow_dirty_pass = ShadowDirtyPass::new(device);
+    let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
+    let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
+    graph.add_pass(Box::new(shadow_dirty_pass));
+
+    graph.add_pass(Box::new(ShadowPass::new(device, face_dirty_buf, face_geom_count_buf)));
 
     let has_sky = scene.sky_context().has_sky;
     if has_sky {

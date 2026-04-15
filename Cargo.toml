@@ -16,6 +16,7 @@ members = [
     "crates/helio-pass-occlusion-cull",
     "crates/helio-pass-light-cull",
     "crates/helio-pass-shadow-matrix",
+    "crates/helio-pass-shadow-dirty",
     "crates/helio-pass-shadow",
     "crates/helio-pass-gbuffer",
     "crates/helio-pass-ssao",

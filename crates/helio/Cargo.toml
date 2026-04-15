@@ -24,6 +24,7 @@ helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-pass-hlfs = { path = "../helio-pass-hlfs" }
 helio-pass-shadow = { path = "../helio-pass-shadow" }
+helio-pass-shadow-dirty = { path = "../helio-pass-shadow-dirty" }
 helio-pass-shadow-matrix = { path = "../helio-pass-shadow-matrix" }
 helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
 helio-pass-sky = { path = "../helio-pass-sky" }

@@ -102,12 +102,6 @@ pub struct Scene {
     /// Used by shadow caching to detect when Movable lights move.
     pub(in crate::scene) movable_lights_generation: u64,
 
-    /// Per-caster content hash from the previous flush(). Compared against the newly-computed
-    /// hash each frame to detect which shadow caster regions have changed. When a caster's hash
-    /// differs, gpu_scene.per_caster_dirty_gen[slot] is incremented so ShadowPass re-renders
-    /// only that caster's 6 atlas faces — not the entire atlas.
-    pub(in crate::scene) per_caster_last_hash: [u64; 42],
-
     /// Per-frame custom trait-based scene actors.
     pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
 
@@ -289,7 +283,6 @@ impl Scene {
             multi_meshes: SparsePool::new(),
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),
-            per_caster_last_hash: [u64::MAX; 42],
         }
     }
 
@@ -606,64 +599,10 @@ impl Scene {
                 };
             }
 
-            // Pass 2: fold movable object bounds into each caster they intersect.
-            //
-            // IMPORTANT: instance.bounds[0..3] (world-space center) is only set at
-            // insert time and is NOT updated by update_object_transform(). We therefore:
-            //   - Hash the model matrix (always current, changed by every transform update).
-            //   - Extract the world-space position from the model's translation column
-            //     (column 3 = W axis) for the sphere-sphere overlap test.
-            //   - Keep instance.bounds[3] (radius) which is stable unless the caller
-            //     explicitly calls update_object_bounds().
-            let n_objects = self.objects.dense_len();
-            for oi in 0..n_objects {
-                let Some(obj) = self.objects.get_dense(oi) else {
-                    continue;
-                };
-                if !obj.movability.can_move() {
-                    continue;
-                }
-                // Translation column of the model matrix is always the current world position.
-                let model = Mat4::from_cols_array(&obj.instance.model);
-                let w = model.w_axis;
-                let bx = w.x;
-                let by = w.y;
-                let bz = w.z;
-                let br = obj.instance.bounds[3]; // radius unchanged by transform updates
-                // Full model matrix hash: any movement/rotation/scale changes the hash.
-                let obj_hash = fnv1a_f32s(&obj.instance.model);
-                for i in 0..light_count {
-                    let light = self.gpu_scene.lights.0.as_slice()[i];
-                    if light.shadow_index == u32::MAX {
-                        continue;
-                    }
-                    let slot = (light.shadow_index / 6) as usize;
-                    if slot >= 42 {
-                        continue;
-                    }
-                    if light.light_type == 0 {
-                        // Directional: always overlaps all movable objects.
-                        new_hashes[slot] ^= obj_hash;
-                    } else {
-                        let dx = light.position_range[0] - bx;
-                        let dy = light.position_range[1] - by;
-                        let dz = light.position_range[2] - bz;
-                        let dist_sq = dx * dx + dy * dy + dz * dz;
-                        let combined_r = light.position_range[3] + br;
-                        if dist_sq <= combined_r * combined_r {
-                            new_hashes[slot] ^= obj_hash;
-                        }
-                    }
-                }
-            }
-
-            // Bump dirty gen for any caster whose content hash changed.
+            // Write light-geometry hash to per_caster_dirty_gen.
+            // ShadowPass detects light movement each frame by comparing this value.
             for slot in 0..42usize {
-                if new_hashes[slot] != self.per_caster_last_hash[slot] {
-                    self.gpu_scene.per_caster_dirty_gen[slot] =
-                        self.gpu_scene.per_caster_dirty_gen[slot].wrapping_add(1);
-                    self.per_caster_last_hash[slot] = new_hashes[slot];
-                }
+                self.gpu_scene.per_caster_dirty_gen[slot] = new_hashes[slot];
             }
         }
 

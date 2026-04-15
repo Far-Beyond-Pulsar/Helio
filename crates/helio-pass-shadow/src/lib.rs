@@ -7,12 +7,16 @@
 //! * **Depth-only pipeline** — no colour outputs, no fragment shader.
 //! * **Front-face culled** — eliminates self-shadowing acne on lit surfaces,
 //!   exactly matching the UE4/Unity convention.
-//! * **GPU-driven** — one `multi_draw_indexed_indirect` per face; zero per-draw
-//!   CPU work regardless of scene complexity.
-//! * **O(1) CPU per frame** — face loop bounded by `MAX_SHADOW_FACES` (compile-time
-//!   constant); the loop body issues only constant-time wgpu calls.
-//! * **Zero per-frame allocations** — all GPU and CPU resources are pre-allocated
-//!   in `new()` and never resized or recreated during rendering.
+//! * **GPU-driven dynamic atlas** — per-face dirty detection via `ShadowDirtyPass`;
+//!   `multi_draw_indexed_indirect_count` suppresses draws on clean faces without
+//!   CPU readback.  A companion depth-clear pipeline issues a GPU clear triangle
+//!   before geometry draws so `LoadOp::Load` can be used on every face, preserving
+//!   the cached atlas on clean faces.
+//! * **Per-face granularity** — a moving object on the +X side of a point light
+//!   does NOT trigger re-rendering of -X, ±Y, ±Z cube faces.
+//! * **O(1) CPU per frame** — face loop bounded by `MAX_SHADOW_FACES`; the only
+//!   CPU work per face is issuing wgpu commands (constant time).
+//! * **Zero per-frame allocations** — all GPU and CPU resources pre-allocated.
 //!
 //! # Shadow Atlas
 //!
@@ -23,21 +27,24 @@
 //! | Array layers | `MAX_SHADOW_FACES` (256)                      |
 //! | VRAM         | ~256 MB at 1024 px (constant, pre-allocated)  |
 //!
-//! # Bind Group 0
+//! # Dynamic Atlas — GPU-driven dirty detection
 //!
-//! | Binding | Type                           | Contents                              |
-//! |---------|--------------------------------|---------------------------------------|
-//! | 0       | Storage (read-only), VERTEX    | Light-space matrices (one per face)   |
-//! | 1       | Storage (read-only), VERTEX    | Per-instance world transforms         |
-//! | 2       | Uniform (dynamic offset), VERTEX | Face index — selects the matrix     |
+//! Object movement is detected on GPU by `ShadowDirtyPass`, which writes two buffers:
 //!
-//! The bind group is rebuilt **only** when the underlying `GrowableBuffer` backing
-//! `shadow_matrices` or `instances` is reallocated (buffer pointer change).  In
-//! steady-state this never happens, making bind group management O(1) amortised.
+//! | Buffer           | Contents                                               |
+//! |------------------|--------------------------------------------------------|
+//! | `face_dirty_buf` | `array<u32, 256>` — 0 clean, 1 dirty per face          |
+//! | `face_geom_count_buf` | `array<u32, 256>` — 0 or movable_draw_count per face |
 //!
-//! The per-face face-index uniform is written **once** at construction time and
-//! addressed via a `dynamic_offset` of `face × FACE_BUF_STRIDE` bytes.  There is
-//! no per-frame CPU write to this buffer.
+//! For each face:
+//!   1. `multi_draw_indirect_count` with `face_dirty_buf[face]` as count (0 or 1)
+//!      drives a full-screen depth-clear triangle (clears only dirty faces).
+//!   2. `multi_draw_indexed_indirect_count` with `face_geom_count_buf[face]` as count
+//!      (0 or movable_draw_count) drives shadow geometry draws.
+//!   Both use `LoadOp::Load`, so clean faces preserve their cached shadow data.
+//!
+//! Light movement is still detected CPU-side via `per_caster_dirty_gen` (O(N_lights),
+//! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
@@ -59,62 +66,79 @@ const FACE_BUF_STRIDE: u64 = 256;
 // ── Pass struct ───────────────────────────────────────────────────────────────
 
 pub struct ShadowPass {
+    /// Shadow geometry pipeline (depth-only, front-face culled, depth-bias = 2.0).
     pipeline: wgpu::RenderPipeline,
+
+    /// Depth-clear pipeline — renders a full-screen triangle at z=1.0 with
+    /// `DepthCompare::Always` to GPU-clear individual atlas faces before geometry.
+    depth_clear_pipeline: wgpu::RenderPipeline,
 
     #[allow(dead_code)]
     bgl_0: wgpu::BindGroupLayout,
 
+    /// 256 pre-populated non-indexed draw commands for the depth-clear triangle.
+    /// All entries: `{ vertex_count: 3, instance_count: 1, first_vertex: 0, first_instance: 0 }`.
+    /// `multi_draw_indirect_count` uses `face_dirty_buf[face]` (0 or 1) as the GPU count.
+    clear_indirect_buf: wgpu::Buffer,
+
     /// Per-face face-index values, written once at construction and never touched again.
-    /// Layout: `face_idx_buf[face * FACE_BUF_STRIDE]` = `u32(face)` followed by 252 zero bytes.
     face_idx_buf: wgpu::Buffer,
 
     // ── Dynamic shadow atlas (Movable objects only) ───────────────────────────
-    /// Per-face render-target views into the dynamic atlas (movable objects).
     face_views: Box<[wgpu::TextureView]>,
-    /// The dynamic atlas texture (owned).
     pub atlas_tex: wgpu::Texture,
-    /// `D2Array` view — consumed by the deferred lighting pass.
     pub atlas_view: wgpu::TextureView,
-    /// Bind group 0 (shared by both static and dynamic passes — both use `instances`).
     bg_0: Option<wgpu::BindGroup>,
-    /// Detects GrowableBuffer reallocations; rebuilt on pointer change only.
     bg_0_key: Option<(usize, usize)>,
 
     // ── Static shadow atlas (Static/Stationary objects only) ─────────────────
-    /// Per-face render-target views into the static atlas.
     static_face_views: Box<[wgpu::TextureView]>,
-    /// The static atlas texture (owned, cached indefinitely until static topology changes).
     pub static_atlas_tex: wgpu::Texture,
-    /// `D2Array` view of the static atlas — consumed by deferred lighting.
     pub static_atlas_view: wgpu::TextureView,
-    /// Last `static_objects_generation` we rendered the static atlas for.
-    /// `None` = never rendered yet → must render on first frame.
+    /// Last `static_objects_generation` rendered.  `None` = never rendered.
     static_atlas_cache_gen: Option<u64>,
 
-    /// PCF comparison sampler (`LessEqual`) — consumed by the deferred lighting pass.
     pub compare_sampler: wgpu::Sampler,
 
-    /// Dirty flag buffer reference (per-light dirty flags from shadow matrix compute)
-    _shadow_dirty_buf: Arc<wgpu::Buffer>,
+    // ── GPU dirty buffers (shared with ShadowDirtyPass) ───────────────────────
+    /// `array<u32, 256>` — 0 = clean, 1 = dirty (written by ShadowDirtyPass).
+    /// Used as indirect draw count for the depth-clear triangle (0 = no clear, 1 = clear).
+    face_dirty_buf: Arc<wgpu::Buffer>,
+    /// `array<u32, 256>` — 0 = clean, movable_draw_count = dirty (written by ShadowDirtyPass).
+    /// Used as indirect draw count for movable geometry (`multi_draw_indexed_indirect_count`).
+    face_geom_count_buf: Arc<wgpu::Buffer>,
 
-    /// Per-caster last-rendered generation. Compared each frame against
-    /// SceneResources::per_caster_dirty_gen[]; faces are re-rendered only for casters
-    /// whose gen advanced (i.e., their content hash changed in Scene::flush()).
+    // ── Per-caster CPU dirty tracking (light movement only) ──────────────────
+    /// Per-caster last-rendered generation, compared against `per_caster_dirty_gen`.
+    /// Only updated when a light moves (object movement is now detected GPU-side).
     per_caster_last_gen: [u64; 42],
 
-    /// Total shadow count (face_count / 6) at time of last render. Used alongside
-    /// static_atlas_cache_gen to detect caster topology changes that require a full
-    /// static atlas rebuild.
+    /// Total shadow count at last render.  Detects caster topology changes.
     last_rendered_shadow_count: u32,
+
+    /// `movable_objects_generation` at last render.  O(1) CPU check to gate the GPU path.
+    last_movable_objects_gen: u64,
 }
 
 impl ShadowPass {
     /// Allocate all GPU resources.  Called once; zero allocations after this.
-    pub fn new(device: &wgpu::Device, shadow_dirty_buf: Arc<wgpu::Buffer>) -> Self {
+    ///
+    /// `face_dirty_buf` and `face_geom_count_buf` are shared with `ShadowDirtyPass`
+    /// which writes them each frame; they arrive via `Arc`.
+    pub fn new(
+        device: &wgpu::Device,
+        face_dirty_buf: Arc<wgpu::Buffer>,
+        face_geom_count_buf: Arc<wgpu::Buffer>,
+    ) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shadow.wgsl").into()),
+        });
+
+        let clear_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shadow/DepthClear"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/depth_clear.wgsl").into()),
         });
 
         // ── Bind Group Layout 0 ───────────────────────────────────────────────
@@ -217,7 +241,69 @@ impl ShadowPass {
             cache: None,
         });
 
-        // ── Face-index buffer (written once, immutable after unmap) ────────────
+        // ── Depth-clear pipeline ───────────────────────────────────────────────
+        // GPU-clear individual shadow atlas faces: renders a full-screen triangle
+        // at depth=1.0 (far plane) using DepthCompare::Always to overwrite existing
+        // depth values.  No vertex buffer, no fragment shader, no depth bias.
+        let depth_clear_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Shadow/DepthClear PL"),
+                bind_group_layouts: &[],
+                immediate_size: 0,
+            });
+
+        let depth_clear_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Shadow/DepthClear Pipeline"),
+                layout: Some(&depth_clear_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &clear_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: None,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: wgpu::TextureFormat::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Always),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        // ── Clear indirect buffer ──────────────────────────────────────────────
+        // 256 non-indexed draw commands, each drawing 3 vertices (the clear triangle).
+        // Layout per command (16 bytes): { vertex_count: 3, instance_count: 1,
+        //                                  first_vertex: 0, first_instance: 0 }
+        // `multi_draw_indirect_count` uses `face_dirty_buf[face]` as the GPU draw count
+        // (0 no clear, 1 clear), with indirect_offset = face * 16.
+        let clear_indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow/ClearIndirect"),
+            size: MAX_SHADOW_FACES as u64 * 16,
+            usage: wgpu::BufferUsages::INDIRECT,
+            mapped_at_creation: true,
+        });
+        {
+            let mut map = clear_indirect_buf.slice(..).get_mapped_range_mut();
+            for i in 0..MAX_SHADOW_FACES {
+                let off = i * 16;
+                // vertex_count = 3
+                map[off..off + 4].copy_from_slice(&3u32.to_ne_bytes());
+                // instance_count = 1
+                map[off + 4..off + 8].copy_from_slice(&1u32.to_ne_bytes());
+                // first_vertex = 0, first_instance = 0 (already zero from wgpu init)
+            }
+        }
+        clear_indirect_buf.unmap();
         // One u32 per face at FACE_BUF_STRIDE byte intervals.
         // The CPU never touches this buffer after construction.
         let face_idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -321,11 +407,13 @@ impl ShadowPass {
 
         Self {
             pipeline,
+            depth_clear_pipeline,
             bgl_0,
             bg_0: None,
             bg_0_key: None,
             static_atlas_cache_gen: None,
             face_idx_buf,
+            clear_indirect_buf,
             face_views,
             atlas_tex,
             atlas_view,
@@ -333,9 +421,11 @@ impl ShadowPass {
             static_atlas_tex,
             static_atlas_view,
             compare_sampler,
-            _shadow_dirty_buf: shadow_dirty_buf,
+            face_dirty_buf,
+            face_geom_count_buf,
             per_caster_last_gen: [0u64; 42],
             last_rendered_shadow_count: 0,
+            last_movable_objects_gen: u64::MAX,
         }
     }
 }
@@ -356,10 +446,6 @@ impl RenderPass for ShadowPass {
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
-        // Per-light dirty-flag readback (async GPU→CPU) would allow skipping individual
-        // shadow faces for lights whose frustum or scene contribution hasn't changed.
-        // That optimization is tracked for future work; the per-caster content-hash
-        // approach in execute() already handles region-level dirty detection on CPU.
         Ok(())
     }
 
@@ -372,20 +458,9 @@ impl RenderPass for ShadowPass {
             self.per_caster_last_gen = [0u64; 42];
             self.last_rendered_shadow_count = 0;
             self.static_atlas_cache_gen = None;
+            self.last_movable_objects_gen = u64::MAX;
             return Ok(());
         }
-
-        // ── Decide which atlas(es) need re-rendering ──────────────────────────
-        //
-        // Unreal-style static/dynamic shadow split:
-        //
-        //   Static atlas  — rendered ONCE when Static/Stationary objects change.
-        //                   Cached indefinitely while static topology is stable.
-        //
-        //   Dynamic atlas — rendered only when Movable objects move or lights move.
-        //                   For a scene where only the ball moves, 90%+ of shadow
-        //                   render cost is eliminated by not re-rendering the
-        //                   cathedral walls, floors, columns, etc.
 
         let static_gen = ctx.scene.static_objects_generation;
         let shadow_count = ctx.scene.shadow_count;
@@ -394,9 +469,8 @@ impl RenderPass for ShadowPass {
         let need_static = self.static_atlas_cache_gen != Some(static_gen)
             || shadow_count != self.last_rendered_shadow_count;
 
-        // Per-caster dirty check: each slot's gen is bumped in Scene::flush() only when
-        // that caster's content hash changes (light moved or nearby movable object moved).
-        // Only faces for dirty casters will be re-rendered.
+        // Per-caster dirty check for LIGHT movement only.
+        // Object-movement dirtiness is handled GPU-side via face_geom_count_buf.
         let mut dirty_casters = [false; 42];
         let mut any_dirty_caster = false;
         for slot in 0..caster_count {
@@ -406,7 +480,11 @@ impl RenderPass for ShadowPass {
             }
         }
 
-        if !need_static && !any_dirty_caster {
+        // O(1) CPU gate: did any movable object move this frame?
+        let objects_moved =
+            ctx.scene.movable_objects_generation != self.last_movable_objects_gen;
+
+        if !need_static && !any_dirty_caster && !objects_moved {
             return Ok(());
         }
 
@@ -417,17 +495,10 @@ impl RenderPass for ShadowPass {
         let vertices = main_scene.mesh_buffers.vertices;
         let indices = main_scene.mesh_buffers.indices;
 
-        // ── Bind group helpers ─────────────────────────────────────────────────
-        // Each bind group uses: [shadow_matrices, <partition instances>, face_idx_buf].
-        // Rebuilt only on GrowableBuffer pointer change (O(1) amortised).
-        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
-
-        // ── Single shared bind group ───────────────────────────────────────────
-        // Both static and dynamic passes use the main `instances` buffer at binding 1.
-        // Transforms are always up-to-date here because update_object_transform writes
-        // directly into this buffer. Rebuilt only on GrowableBuffer reallocation.
-        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
-        let inst_ptr = ctx.scene.instances as *const _ as usize;
+        // ── Shared bind group (shadow_matrices + instances + face_idx) ──────────
+        // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
+        let sm_ptr   = ctx.scene.shadow_matrices as *const _ as usize;
+        let inst_ptr = ctx.scene.instances       as *const _ as usize;
         let key = (sm_ptr, inst_ptr);
         if self.bg_0_key != Some(key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -459,17 +530,11 @@ impl RenderPass for ShadowPass {
         let pipeline = &self.pipeline;
 
         // ── Static atlas render ────────────────────────────────────────────────
-        // Re-rendered when:
-        //   • Static/Stationary topology changes (need_static = true) — full rebuild of all faces.
-        //   • A specific caster is dirty (light moved) — per-caster faces only.
-        //     When a light moves its shadow matrices change, so the depth values baked into
-        //     the static atlas become stale and must be re-rendered with the new matrices.
         if need_static || any_dirty_caster {
             let static_indirect = ctx.scene.shadow_static_indirect;
             if static_draw_count > 0 {
                 for face in 0..face_count {
                     let caster_slot = face / 6;
-                    // Skip faces that are neither globally dirty nor per-caster dirty.
                     if !need_static && (caster_slot >= 42 || !dirty_casters[caster_slot]) {
                         continue;
                     }
@@ -502,8 +567,6 @@ impl RenderPass for ShadowPass {
                     }
                 }
             } else if need_static {
-                // No static shadow casters — clear the atlas to 1.0 (fully lit / no shadow).
-                // Only needed on a global topology change; per-caster dirty has nothing to clear.
                 for face in 0..face_count {
                     let face_view = &self.static_face_views[face];
                     let _pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -530,53 +593,128 @@ impl RenderPass for ShadowPass {
             }
         }
 
-        // ── Dynamic atlas render — per-caster partitioning ───────────────────
-        // Only casters whose per_caster_dirty_gen advanced get their faces rebuilt.
-        // LoadOp::Clear(1.0) resets each rebuilt face to fully-lit before drawing,
-        // so casters with zero movable draws still produce a correct depth face.
-        if any_dirty_caster {
+        // ── Dynamic atlas render — GPU-driven per-face dirty ──────────────────
+        //
+        // Two dirty sources with different handling:
+        //
+        //   Light movement (any_dirty_caster = true):
+        //     Full clear + all movable draws, CPU-driven.  Light movement is rare
+        //     (typically < 5 lights) so this path is O(6) render passes per light.
+        //
+        //   Object movement (objects_moved = true):
+        //     LoadOp::Load (preserve cached atlas) + GPU-clear triangle (only for dirty
+        //     faces) + GPU-driven geometry draws.  ShadowDirtyPass has written
+        //     face_dirty_buf[face] ∈ {0,1} and face_geom_count_buf[face] ∈ {0, N}
+        //     so multi_draw_{indirect,indexed_indirect}_count suppresses all work on
+        //     clean faces.  The loop runs for all active faces but clean faces produce
+        //     a near-zero-cost render pass (LoadOp::Load with 0 GPU draws).
+        if any_dirty_caster || objects_moved {
             let movable_indirect = ctx.scene.shadow_movable_indirect;
+
             for face in 0..face_count {
-                let caster_slot = face / 6;
-                if caster_slot >= 42 || !dirty_casters[caster_slot] {
-                    continue;
-                }
-                let face_view = &self.face_views[face];
-                let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-                let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Shadow/Dynamic"),
-                    color_attachments: &[],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: face_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(1.0),
-                            store: wgpu::StoreOp::Store,
+                let caster_slot  = face / 6;
+                let light_dirty  = caster_slot < 42 && dirty_casters[caster_slot];
+                let face_view    = &self.face_views[face];
+                let dyn_offset   = (face as u64 * FACE_BUF_STRIDE) as u32;
+
+                if light_dirty {
+                    // ── Light moved: full clear + all movable draws ────────────
+                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow/Dynamic/LightDirty"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: face_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
                         }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-                if movable_draw_count > 0 {
-                    pass.set_pipeline(pipeline);
-                    pass.set_bind_group(0, bg, &[dyn_offset]);
-                    pass.set_vertex_buffer(0, vertices.slice(..));
-                    pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    pass.multi_draw_indexed_indirect(movable_indirect, 0, movable_draw_count);
-                    #[cfg(target_arch = "wasm32")]
-                    for i in 0..movable_draw_count {
-                        pass.draw_indexed_indirect(movable_indirect, i as u64 * 20);
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    if movable_draw_count > 0 {
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, bg, &[dyn_offset]);
+                        pass.set_vertex_buffer(0, vertices.slice(..));
+                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        pass.multi_draw_indexed_indirect(
+                            movable_indirect,
+                            0,
+                            movable_draw_count,
+                        );
+                        #[cfg(target_arch = "wasm32")]
+                        for i in 0..movable_draw_count {
+                            pass.draw_indexed_indirect(movable_indirect, i as u64 * 20);
+                        }
+                    }
+                } else if objects_moved {
+                    // ── Objects moved: GPU-driven clear + geometry ─────────────
+                    // LoadOp::Load preserves cached shadow data for clean faces.
+                    // The GPU-clear triangle (driven by face_dirty_buf count) clears
+                    // only faces that ShadowDirtyPass marked dirty.
+                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("Shadow/Dynamic/ObjectDirty"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: face_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+
+                    if movable_draw_count > 0 {
+                        // 1. Depth-clear triangle (GPU count 0 or 1 from face_dirty_buf).
+                        pass.set_pipeline(&self.depth_clear_pipeline);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        pass.multi_draw_indirect_count(
+                            &self.clear_indirect_buf,
+                            face as u64 * 16,
+                            &self.face_dirty_buf,
+                            face as u64 * 4,
+                            1,
+                        );
+
+                        // 2. Shadow geometry (GPU count 0 or movable_draw_count from face_geom_count_buf).
+                        pass.set_pipeline(pipeline);
+                        pass.set_bind_group(0, bg, &[dyn_offset]);
+                        pass.set_vertex_buffer(0, vertices.slice(..));
+                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        #[cfg(not(target_arch = "wasm32"))]
+                        pass.multi_draw_indexed_indirect_count(
+                            movable_indirect,
+                            0,
+                            &self.face_geom_count_buf,
+                            face as u64 * 4,
+                            movable_draw_count,
+                        );
+
+                        // WASM fallback: no multi_draw_indirect_count support → always draw.
+                        // This loses per-face granularity on WASM but maintains correctness.
+                        #[cfg(target_arch = "wasm32")]
+                        for i in 0..movable_draw_count {
+                            pass.draw_indexed_indirect(movable_indirect, i as u64 * 20);
+                        }
                     }
                 }
             }
-            // Advance the last-rendered gen for each caster we just rebuilt.
+
+            // Update per-caster gen tracking (light movement only).
             for slot in 0..caster_count {
                 if dirty_casters[slot] {
                     self.per_caster_last_gen[slot] = ctx.scene.per_caster_dirty_gen[slot];
                 }
             }
+
+            self.last_movable_objects_gen = ctx.scene.movable_objects_generation;
         }
 
         Ok(())

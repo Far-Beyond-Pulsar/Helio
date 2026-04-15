@@ -2692,6 +2692,7 @@ dependencies = [
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
  "helio-pass-shadow",
+ "helio-pass-shadow-dirty",
  "helio-pass-shadow-matrix",
  "helio-pass-simple-cube",
  "helio-pass-sky",
@@ -2914,6 +2915,15 @@ dependencies = [
  "helio-v3",
  "libhelio",
  "log",
+ "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-pass-shadow-dirty"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
  "wgpu 28.0.0",
 ]
 
