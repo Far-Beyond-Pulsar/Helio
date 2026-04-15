@@ -378,37 +378,59 @@ impl ApplicationHandler for App {
                                 sm.sections.len(),
                                 sm.vertices.len()
                             );
-                            match renderer.scene_mut().insert_sectioned_object(
-                                multi_mesh_id,
-                                &section_mat_ids,
-                                placement,
-                                [world_center.x, world_center.y, world_center.z, radius],
-                                Some(Movability::Movable),
-                            ) {
-                                Ok(_) => {
-                                    eprintln!("[editor_demo] sectioned mesh inserted ok");
-                                    // Register each section's geometry with the picker so that
-                                    // ray-cast hits land on the mesh instead of passing through it.
-                                    if let Some(section_ids) = renderer
-                                        .scene()
-                                        .sectioned_section_mesh_ids(multi_mesh_id)
-                                    {
-                                        let section_ids: Vec<_> = section_ids.to_vec();
-                                        for (section_mesh_id, sec) in
-                                            section_ids.iter().zip(sm.sections.iter())
-                                        {
-                                            picker.register_mesh(
-                                                *section_mesh_id,
-                                                &helio::MeshUpload {
-                                                    vertices: sm.vertices.clone(),
-                                                    indices: sec.indices.clone(),
-                                                },
-                                            );
-                                        }
+                            let duplicates = 15;
+                            let grid_cols = 5;
+                            let grid_rows = 3;
+                            let spacing = 4.75;
+                            for dup_index in 0..duplicates {
+                                let col = dup_index % grid_cols;
+                                let row = dup_index / grid_cols;
+                                let placement = glam::Mat4::from_translation(
+                                    CRATES_TARGET
+                                        + glam::Vec3::new(
+                                            (col as f32 - (grid_cols as f32 - 1.0) * 0.5) * spacing,
+                                            0.0,
+                                            (row as f32 - (grid_rows as f32 - 1.0) * 0.5) * spacing,
+                                        )
+                                        - local_center,
+                                );
+                                let world_center = placement.transform_point3(local_center);
+                                match renderer.scene_mut().insert_sectioned_object(
+                                    multi_mesh_id,
+                                    &section_mat_ids,
+                                    placement,
+                                    [world_center.x, world_center.y, world_center.z, radius],
+                                    Some(Movability::Movable),
+                                ) {
+                                    Ok(_) => {
+                                        eprintln!(
+                                            "[editor_demo] sectioned mesh inserted ok ({dup_index}/{duplicates})"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[editor_demo] sectioned mesh INSERT FAILED: {e:?}"
+                                        )
                                     }
                                 }
-                                Err(e) => {
-                                    eprintln!("[editor_demo] sectioned mesh INSERT FAILED: {e:?}")
+                            }
+
+                            // Register each section's geometry with the picker so that
+                            // ray-cast hits land on the mesh instead of passing through it.
+                            if let Some(section_ids) =
+                                renderer.scene().sectioned_section_mesh_ids(multi_mesh_id)
+                            {
+                                let section_ids: Vec<_> = section_ids.to_vec();
+                                for (section_mesh_id, sec) in
+                                    section_ids.iter().zip(sm.sections.iter())
+                                {
+                                    picker.register_mesh(
+                                        *section_mesh_id,
+                                        &helio::MeshUpload {
+                                            vertices: sm.vertices.clone(),
+                                            indices: sec.indices.clone(),
+                                        },
+                                    );
                                 }
                             }
                         }
@@ -447,6 +469,29 @@ impl ApplicationHandler for App {
                 6.0,
                 8.0,
             )));
+
+        // Add 500 scattered point lights for an extreme rendering stress test.
+        for i in 0..100 {
+            let row = i / 25;
+            let col = i % 25;
+            let x = -46.0 + col as f32 * 4.0 + if row % 2 == 0 { 0.0 } else { 2.0 };
+            let z = -36.0 + row as f32 * 4.0;
+            let y = 1.0 + (i % 5) as f32 * 0.75;
+            let hue = ((i * 37) % 100) as f32 / 100.0;
+            let color = [
+                0.35 + 0.65 * ((2.0 * std::f32::consts::PI * hue).cos() * 0.5 + 0.5),
+                0.35 + 0.65 * ((2.0 * std::f32::consts::PI * hue + 2.1).cos() * 0.5 + 0.5),
+                0.35 + 0.65 * ((2.0 * std::f32::consts::PI * hue + 4.2).cos() * 0.5 + 0.5),
+            ];
+            let intensity = 8.0 + (i % 7) as f32 * 0.35;
+            let range = 8.0 + (i % 4) as f32 * 1.75;
+            renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+                [x, y, z],
+                color,
+                intensity,
+                range,
+            )));
+        }
 
         self.state = Some(AppState {
             window,
