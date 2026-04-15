@@ -11,7 +11,9 @@ const lightCountEl = document.getElementById('lightCount');
 const bbCountEl = document.getElementById('bbCount');
 const drawCallsEl = document.getElementById('drawCalls');
 const totalVertsEl = document.getElementById('totalVerts');
+const drawnVertsEl = document.getElementById('drawnVerts');
 const totalTrisEl = document.getElementById('totalTris');
+const drawnTrisEl = document.getElementById('drawnTris');
 const uniqueMeshesEl = document.getElementById('uniqueMeshes');
 
 // Format large integers with K/M suffix for readability.
@@ -151,8 +153,10 @@ function render(snapshot) {
   if (drawCallsEl) drawCallsEl.textContent = snapshot.draw_calls.total;
 
   const ms = snapshot.mesh_stats || {};
-  if (totalVertsEl)   totalVertsEl.textContent   = fmtCount(ms.total_vertices  || 0);
-  if (totalTrisEl)    totalTrisEl.textContent    = fmtCount(ms.total_triangles || 0);
+  if (totalVertsEl)   totalVertsEl.textContent   = fmtCount(ms.total_vertices   || 0);
+  if (drawnVertsEl)   drawnVertsEl.textContent   = fmtCount(ms.drawn_vertices   || 0);
+  if (totalTrisEl)    totalTrisEl.textContent    = fmtCount(ms.total_triangles  || 0);
+  if (drawnTrisEl)    drawnTrisEl.textContent    = fmtCount(ms.drawn_triangles  || 0);
   if (uniqueMeshesEl) uniqueMeshesEl.textContent = ms.unique_meshes ?? '—';
 
   // Update timings table (in modal)

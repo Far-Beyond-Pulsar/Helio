@@ -1432,10 +1432,13 @@ impl Renderer {
                 },
                 mesh_stats: {
                     let (verts, tris, meshes) = self.scene.mesh_stats();
+                    let (drawn_verts, drawn_tris) = self.scene.drawn_mesh_stats();
                     helio_live_portal::MeshStats {
                         total_vertices: verts,
                         total_triangles: tris,
                         unique_meshes: meshes,
+                        drawn_vertices: drawn_verts,
+                        drawn_triangles: drawn_tris,
                     }
                 },
                 stage_timings,

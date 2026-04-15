@@ -172,15 +172,19 @@ pub struct DrawCallMetrics {
     pub transparent: usize,
 }
 
-/// Total mesh geometry in the scene's shared GPU buffers.
+/// Total mesh geometry statistics for the scene.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct MeshStats {
-    /// Total vertices across all meshes in the shared vertex mega-buffer.
+    /// Unique vertices stored in the shared GPU vertex mega-buffer.
     pub total_vertices: usize,
-    /// Total triangles (index_count / 3).
+    /// Unique triangles stored in the shared GPU index buffer (index_count / 3).
     pub total_triangles: usize,
     /// Number of unique live mesh records.
     pub unique_meshes: usize,
+    /// Total vertices drawn, summed across all live object instances.
+    pub drawn_vertices: usize,
+    /// Total triangles drawn, summed across all live object instances.
+    pub drawn_triangles: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

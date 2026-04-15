@@ -89,11 +89,30 @@ impl super::super::Scene {
 
     /// Aggregate mesh statistics for the scene: total vertices, total triangles,
     /// and the number of unique mesh records currently live in the pool.
+    /// These reflect the GPU buffer occupancy (unique geometry, not instanced totals).
     pub fn mesh_stats(&self) -> (usize, usize, usize) {
         let verts = self.mesh_pool.total_vertex_count();
         let tris  = self.mesh_pool.total_index_count() / 3;
         let meshes = self.mesh_pool.unique_mesh_count();
         (verts, tris, meshes)
+    }
+
+    /// Counts drawn geometry by summing index/vertex counts across all live object
+    /// instances. Returns `(drawn_vertices, drawn_triangles)`.
+    ///
+    /// Unlike `mesh_stats()`, this accounts for instancing: a mesh referenced by
+    /// 1,000 objects contributes 1,000× its vertex/triangle count to the totals.
+    pub fn drawn_mesh_stats(&self) -> (usize, usize) {
+        let mut drawn_verts: usize = 0;
+        let mut drawn_tris: usize = 0;
+        for i in 0..self.objects.dense_len() {
+            let Some(obj) = self.objects.get_dense(i) else { continue };
+            drawn_tris += (obj.draw.index_count / 3) as usize;
+            if let Some(rec) = self.mesh_pool.get(obj.mesh) {
+                drawn_verts += rec.slice.vertex_count as usize;
+            }
+        }
+        (drawn_verts, drawn_tris)
     }
 }
 
