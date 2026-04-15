@@ -185,6 +185,22 @@ impl MeshPool {
         }
     }
 
+    /// Total vertices in the shared vertex mega-buffer.
+    pub fn total_vertex_count(&self) -> usize {
+        self.vertices.len()
+    }
+
+    /// Total indices in the shared index mega-buffer.
+    /// Triangles = `total_index_count() / 3`.
+    pub fn total_index_count(&self) -> usize {
+        self.indices.len()
+    }
+
+    /// Number of unique mesh records currently live (sections each count as one).
+    pub fn unique_mesh_count(&self) -> usize {
+        self.meshes.live_len()
+    }
+
     pub fn flush(&mut self, queue: &wgpu::Queue) {
         self.vertices.flush(queue);
         self.indices.flush(queue);

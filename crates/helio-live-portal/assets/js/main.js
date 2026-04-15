@@ -10,6 +10,16 @@ const objCountEl = document.getElementById('objCount');
 const lightCountEl = document.getElementById('lightCount');
 const bbCountEl = document.getElementById('bbCount');
 const drawCallsEl = document.getElementById('drawCalls');
+const totalVertsEl = document.getElementById('totalVerts');
+const totalTrisEl = document.getElementById('totalTris');
+const uniqueMeshesEl = document.getElementById('uniqueMeshes');
+
+// Format large integers with K/M suffix for readability.
+function fmtCount(n) {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000)     return (n / 1_000).toFixed(1) + 'K';
+  return String(n);
+}
 
 let lastSnapshot = null;
 let cyInstance = null;
@@ -139,6 +149,11 @@ function render(snapshot) {
   if (lightCountEl) lightCountEl.textContent = snapshot.light_count;
   if (bbCountEl) bbCountEl.textContent = snapshot.billboard_count;
   if (drawCallsEl) drawCallsEl.textContent = snapshot.draw_calls.total;
+
+  const ms = snapshot.mesh_stats || {};
+  if (totalVertsEl)   totalVertsEl.textContent   = fmtCount(ms.total_vertices  || 0);
+  if (totalTrisEl)    totalTrisEl.textContent    = fmtCount(ms.total_triangles || 0);
+  if (uniqueMeshesEl) uniqueMeshesEl.textContent = ms.unique_meshes ?? '—';
 
   // Update timings table (in modal)
   const totalGpu = snapshot.total_gpu_ms || 0;

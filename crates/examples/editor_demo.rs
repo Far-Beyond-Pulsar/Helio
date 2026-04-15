@@ -1,40 +1,38 @@
-//! Editor Demo — Helio v3
+//! Shipyard Demo — Helio v3
 //!
-//! Demonstrates the editor API: object selection via BVH ray-picking and
-//! transform gizmo overlay (translate / rotate / scale).
+//! A waterfront shipyard scene featuring stacks of shipping containers,
+//! loading cranes, dock infrastructure, and area lighting.
+//!
+//! The shipping container mesh is loaded from `container with textures.fbx`
+//! and instanced ~300 times across the yard in stacked bays.
 //!
 //! # Controls
 //!
-//! | Input           | Action                                        |
-//! |-----------------|-----------------------------------------------|
-//! | **Right-click hold** | Capture cursor for free-fly camera       |
-//! | **Right-click release** | Release cursor for object picking      |
-//! | WASD            | Fly forward / left / back / right (hold RMB)  |
-//! | Space / L-Shift | Fly up / down (hold RMB)                      |
-//! | **Left-click**  | Pick object under cursor (cursor free)        |
-//! | G               | Switch to **Translate** gizmo (cursor free)   |
-//! | R               | Switch to **Rotate** gizmo (cursor free)      |
-//! | S               | Switch to **Scale** gizmo (cursor free)       |
-//! | Ctrl+D          | **Duplicate** selected object                 |
-//! | Delete          | **Delete** selected object                    |
-//! | Tab             | Toggle editor grid                            |
-//! | **F11**         | Toggle fullscreen                             |
-//! | **Alt+Enter**   | Toggle fullscreen                             |
-//! | Escape          | Deselect → exit                               |
-//!
-//! Picking uses a two-phase BVH ray caster (broad-phase AABB + per-mesh
-//! Möller-Trumbore triangle intersection) — no sphere approximations.
-
+//! | Input                  | Action                                      |
+//! |------------------------|---------------------------------------------|
+//! | **Right-click hold**   | Capture cursor for free-fly camera          |
+//! | **Right-click release**| Release cursor for object picking           |
+//! | WASD                   | Fly forward / left / back / right (RMB)     |
+//! | Space / L-Shift        | Fly up / down (hold RMB)                    |
+//! | **Left-click**         | Pick object under cursor (cursor free)      |
+//! | G                      | Switch to **Translate** gizmo               |
+//! | R                      | Switch to **Rotate** gizmo                  |
+//! | S                      | Switch to **Scale** gizmo                   |
+//! | Ctrl+D                 | **Duplicate** selected object               |
+//! | Delete                 | **Delete** selected object                  |
+//! | Tab                    | Toggle editor grid                          |
+//! | **F11** / **Alt+Enter**| Toggle fullscreen                           |
+//! | Escape                 | Deselect → exit                             |
 
 mod v3_demo_common;
 
 use helio::{
-    Camera, EditorState, GizmoMode, Movability, Renderer, RendererConfig,
+    Camera, EditorState, GizmoMode, Renderer, RendererConfig,
     SceneActor, ScenePicker, required_wgpu_features, required_wgpu_limits,
 };
 use helio_asset_compat::{load_scene_bytes_with_config, upload_sectioned_scene, LoadConfig};
 use v3_demo_common::{
-    box_mesh, cube_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
+    box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light,
     sphere_mesh,
 };
 
@@ -74,27 +72,20 @@ struct AppState {
     renderer: Renderer,
     last_frame: std::time::Instant,
 
-    // ── Camera ────────────────────────────────────────────────────────────────
+    // ── Camera ────────────────────────────────────────────────────────────
     cam_pos: glam::Vec3,
     cam_yaw: f32,
     cam_pitch: f32,
     keys: HashSet<KeyCode>,
-    /// True while the right mouse button is held — cursor is grabbed and camera
-    /// is in fly mode.  Released to allow free-cursor object picking.
     right_mouse_held: bool,
     mouse_delta: (f32, f32),
-    /// Last known cursor position in logical pixels (only valid when cursor is free).
     cursor_pos: (f32, f32),
-    /// Fly-mode movement speed in units/second. Scroll wheel adjusts this.
     cam_speed: f32,
 
-    // ── Editor ───────────────────────────────────────────────────────────────
+    // ── Editor ────────────────────────────────────────────────────────────
     editor: EditorState,
-    /// BVH-accelerated ray picker; rebuilt once after scene construction.
     picker: ScenePicker,
-    /// Whether the grid overlay is visible.
     grid_enabled: bool,
-    /// True while the window is in borderless-fullscreen mode.
     is_fullscreen: bool,
 }
 
@@ -104,12 +95,12 @@ impl ApplicationHandler for App {
             return;
         }
 
-        // ── Window & wgpu setup ───────────────────────────────────────────────
+        // ── Window & wgpu setup ───────────────────────────────────────────
         let window = Arc::new(
             event_loop
                 .create_window(
                     Window::default_attributes()
-                        .with_title("Helio — Editor Demo  (G=Translate  R=Rotate  S=Scale)")
+                        .with_title("Helio — Shipyard Demo")
                         .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32)),
                 )
                 .expect("window"),
@@ -164,187 +155,213 @@ impl ApplicationHandler for App {
             },
         );
 
-        // ── Renderer ──────────────────────────────────────────────────────────
+        // ── Renderer ──────────────────────────────────────────────────────
         let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
             RendererConfig::new(sz.width, sz.height, format),
         );
         renderer.set_editor_mode(true);
-        renderer.set_clear_color([0.08, 0.09, 0.12, 1.0]);
-        renderer.set_ambient([0.12, 0.14, 0.18], 0.25);
+        // Night sky — deep navy
+        renderer.set_clear_color([0.03, 0.05, 0.10, 1.0]);
+        // Moonlight ambient — bright enough to read the container colours
+        renderer.set_ambient([0.18, 0.22, 0.32], 0.35);
 
-        // ── Scene geometry ────────────────────────────────────────────────────
-        // ScenePicker is built alongside the scene so mesh BVHs are registered
-        // with the same upload data consumed by the renderer.
+        // ── Scene construction ────────────────────────────────────────────
         let mut picker = ScenePicker::new();
 
-        // Materials
-        let mat_floor = renderer
-            .scene_mut()
-            .insert_material(make_material([0.55, 0.55, 0.55, 1.0], 0.8, 0.0, [0.0; 3], 0.0));
-        let mat_red = renderer
-            .scene_mut()
-            .insert_material(make_material([0.9, 0.15, 0.15, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
-        let mat_green = renderer
-            .scene_mut()
-            .insert_material(make_material([0.15, 0.85, 0.25, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
-        let mat_blue = renderer
-            .scene_mut()
-            .insert_material(make_material([0.15, 0.35, 0.95, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
-        let mat_gold = renderer
-            .scene_mut()
-            .insert_material(make_material([1.0, 0.76, 0.1, 1.0], 0.3, 0.8, [0.0; 3], 0.0));
-        let mat_sphere = renderer
-            .scene_mut()
-            .insert_material(make_material([0.8, 0.5, 0.9, 1.0], 0.35, 0.15, [0.0; 3], 0.0));
+        // ── Materials ─────────────────────────────────────────────────────
+        // Dock concrete
+        let mat_dock = renderer.scene_mut().insert_material(
+            make_material([0.42, 0.40, 0.38, 1.0], 0.95, 0.0, [0.0; 3], 0.0));
+        // Road apron
+        let mat_road = renderer.scene_mut().insert_material(
+            make_material([0.22, 0.22, 0.22, 1.0], 0.95, 0.0, [0.0; 3], 0.0));
+        // Safety stripe yellow
+        let mat_stripe = renderer.scene_mut().insert_material(
+            make_material([0.92, 0.75, 0.05, 1.0], 0.7, 0.0, [0.0; 3], 0.0));
+        // Crane steel
+        let mat_steel = renderer.scene_mut().insert_material(
+            make_material([0.25, 0.26, 0.28, 1.0], 0.15, 0.6, [0.0; 3], 0.0));
+        // Crane safety orange
+        let mat_orange = renderer.scene_mut().insert_material(
+            make_material([0.85, 0.35, 0.05, 1.0], 0.3, 0.4, [0.0; 3], 0.0));
+        // Warning beacon emissive red
+        let mat_warning = renderer.scene_mut().insert_material(
+            make_material([1.0, 0.1, 0.05, 1.0], 0.4, 0.0, [1.0, 0.05, 0.0], 1.5));
+        // Harbour water
+        let mat_water = renderer.scene_mut().insert_material(
+            make_material([0.04, 0.12, 0.20, 1.0], 0.05, 0.95, [0.0; 3], 0.0));
+        // Bollard dark iron
+        let mat_bollard = renderer.scene_mut().insert_material(
+            make_material([0.18, 0.14, 0.10, 1.0], 0.85, 0.0, [0.0; 3], 0.0));
+        // Mast pole lamp housing
+        let mat_lamp = renderer.scene_mut().insert_material(
+            make_material([0.90, 0.85, 0.50, 1.0], 0.3, 0.0, [0.6, 0.55, 0.1], 0.8));
 
-        // Meshes — clone each upload so we can register it with the picker
-        // (the scene takes ownership of the original, picker keeps the clone).
-        let floor_upload = plane_mesh([0.0; 3], 8.0);
-        let floor_mesh = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(floor_upload.clone()))
-            .as_mesh()
-            .unwrap();
-        picker.register_mesh(floor_mesh, &floor_upload);
-
-        let box_a_upload = box_mesh([0.0; 3], [0.55, 0.55, 0.55]);
-        let box_a = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_a_upload.clone()))
-            .as_mesh()
-            .unwrap();
-        picker.register_mesh(box_a, &box_a_upload);
-
-        let box_b_upload = box_mesh([0.0; 3], [0.4, 0.75, 0.4]);
-        let box_b = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_b_upload.clone()))
-            .as_mesh()
-            .unwrap();
-        picker.register_mesh(box_b, &box_b_upload);
-
-        let box_c_upload = box_mesh([0.0; 3], [0.6, 0.35, 0.6]);
-        let box_c = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(box_c_upload.clone()))
-            .as_mesh()
-            .unwrap();
-        picker.register_mesh(box_c, &box_c_upload);
-
-        let cube_gold_upload = cube_mesh([0.0; 3], 0.45);
-        let cube_gold = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(cube_gold_upload.clone()))
-            .as_mesh()
-            .unwrap();
-        picker.register_mesh(cube_gold, &cube_gold_upload);
-
-        let sphere_a_upload = sphere_mesh([0.0; 3], 0.65);
-        let sphere_a = renderer
-            .scene_mut()
-            .insert_actor(SceneActor::mesh(sphere_a_upload.clone()))
-            .as_mesh()
-            .unwrap();
-        picker.register_mesh(sphere_a, &sphere_a_upload);
-
-        // Floor (Static — not selectable for transform, but still visible)
-        let _ = insert_object_with_movability(
-            &mut renderer,
-            floor_mesh,
-            mat_floor,
-            glam::Mat4::IDENTITY,
-            8.5,
-            None, // Static
-        );
-
-        // Pickable / movable objects
+        // ── Ground — large dock apron ──────────────────────────────────────
+        let dock_upload = plane_mesh([0.0, 0.0, 0.0], 100.0);
+        let dock_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(dock_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(dock_mesh, &dock_upload);
         insert_object_with_movability(
-            &mut renderer,
-            box_a,
-            mat_red,
-            glam::Mat4::from_translation(glam::Vec3::new(-2.5, 0.55, 0.5)),
-            1.0,
-            Some(Movability::Movable),
-        )
-        .expect("red box");
+            &mut renderer, dock_mesh, mat_dock,
+            glam::Mat4::IDENTITY, 120.0, None,
+        ).ok();
 
+        // ── Harbour water ──────────────────────────────────────────────────
+        let water_upload = plane_mesh([0.0, -0.15, 0.0], 80.0);
+        let water_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(water_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(water_mesh, &water_upload);
         insert_object_with_movability(
-            &mut renderer,
-            box_b,
-            mat_green,
-            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.75, -1.0)),
-            1.0,
-            Some(Movability::Movable),
-        )
-        .expect("green box");
+            &mut renderer, water_mesh, mat_water,
+            glam::Mat4::from_translation(glam::Vec3::new(115.0, 0.0, 0.0)),
+            90.0, None,
+        ).ok();
 
+        // ── Quay wall ─────────────────────────────────────────────────────
+        let quay_upload = box_mesh([0.0, 0.0, 0.0], [95.0, 3.5, 1.2]);
+        let quay_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(quay_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(quay_mesh, &quay_upload);
         insert_object_with_movability(
-            &mut renderer,
-            box_c,
-            mat_blue,
-            glam::Mat4::from_translation(glam::Vec3::new(2.5, 0.35, 0.5)),
-            0.85,
-            Some(Movability::Movable),
-        )
-        .expect("blue box");
+            &mut renderer, quay_mesh, mat_dock,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, -1.75, -51.0)),
+            50.0, None,
+        ).ok();
 
+        // ── Road apron strip ───────────────────────────────────────────────
+        let road_upload = box_mesh([0.0, 0.0, 0.0], [95.0, 0.05, 6.0]);
+        let road_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(road_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(road_mesh, &road_upload);
         insert_object_with_movability(
-            &mut renderer,
-            cube_gold,
-            mat_gold,
-            glam::Mat4::from_rotation_y(0.6) * glam::Mat4::from_translation(glam::Vec3::new(0.5, 0.45, 2.5)),
-            0.75,
-            Some(Movability::Movable),
-        )
-        .expect("gold cube");
+            &mut renderer, road_mesh, mat_road,
+            glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.01, -44.0)),
+            52.0, None,
+        ).ok();
 
-        insert_object_with_movability(
-            &mut renderer,
-            sphere_a,
-            mat_sphere,
-            glam::Mat4::from_translation(glam::Vec3::new(-1.0, 0.65, -2.5)),
-            0.85,
-            Some(Movability::Movable),
-        )
-        .expect("sphere");
-
-        // ── Load Crates.fbx ───────────────────────────────────────────────────
-        const CRATES_TARGET: glam::Vec3 = glam::Vec3::new(3.5, 0.0, -2.0);
-
-        // Debug sphere — bright orange marker so we can confirm the target
-        // location is actually in view.  Remove once placement is verified.
-        {
-            let dbg_upload = sphere_mesh(CRATES_TARGET.to_array(), 0.35);
-            let dbg_mesh = renderer
-                .scene_mut()
-                .insert_actor(SceneActor::mesh(dbg_upload.clone()))
-                .as_mesh()
-                .unwrap();
-            picker.register_mesh(dbg_mesh, &dbg_upload);
-            let mat_dbg = renderer.scene_mut().insert_material(make_material(
-                [1.0, 0.4, 0.05, 1.0], // bright orange
-                0.3,
-                0.0,
-                [0.8, 0.3, 0.0], // emissive so it's visible even without lighting
-                0.6,
-            ));
+        // Yellow safety stripes (two parallel lines)
+        let stripe_upload = box_mesh([0.0, 0.0, 0.0], [95.0, 0.06, 0.4]);
+        let stripe_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(stripe_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(stripe_mesh, &stripe_upload);
+        for sz_off in [-1.5_f32, 1.5_f32] {
             insert_object_with_movability(
-                &mut renderer,
-                dbg_mesh,
-                mat_dbg,
-                glam::Mat4::IDENTITY,
-                0.5,
-                Some(Movability::Movable),
-            )
-            .ok();
+                &mut renderer, stripe_mesh, mat_stripe,
+                glam::Mat4::from_translation(glam::Vec3::new(0.0, 0.02, -44.0 + sz_off)),
+                52.0, None,
+            ).ok();
         }
 
+        // ── Bollards along the quay edge ───────────────────────────────────
+        let bollard_upload = box_mesh([0.0, 0.0, 0.0], [0.28, 0.6, 0.28]);
+        let bollard_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(bollard_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(bollard_mesh, &bollard_upload);
+        for bi in 0..18i32 {
+            let bx = -85.0 + bi as f32 * 10.0;
+            insert_object_with_movability(
+                &mut renderer, bollard_mesh, mat_bollard,
+                glam::Mat4::from_translation(glam::Vec3::new(bx, 0.6, -43.5)),
+                0.8, None,
+            ).ok();
+        }
+
+        // ── Portal cranes — two units at each end of the yard ─────────────
+        for crane_i in 0i32..2 {
+            let cx = -50.0 + crane_i as f32 * 100.0;
+            let cz = -38.0_f32;
+
+            // Leg pair
+            let leg_upload = box_mesh([0.0; 3], [1.0, 18.0, 1.0]);
+            let leg_mesh = renderer.scene_mut()
+                .insert_actor(SceneActor::mesh(leg_upload.clone())).as_mesh().unwrap();
+            picker.register_mesh(leg_mesh, &leg_upload);
+            for leg_dx in [-5.0_f32, 5.0_f32] {
+                insert_object_with_movability(
+                    &mut renderer, leg_mesh, mat_steel,
+                    glam::Mat4::from_translation(glam::Vec3::new(cx + leg_dx, 9.0, cz)),
+                    10.0, None,
+                ).ok();
+            }
+            // Cross-beam
+            let beam_upload = box_mesh([0.0; 3], [13.0, 1.0, 1.0]);
+            let beam_mesh = renderer.scene_mut()
+                .insert_actor(SceneActor::mesh(beam_upload.clone())).as_mesh().unwrap();
+            picker.register_mesh(beam_mesh, &beam_upload);
+            insert_object_with_movability(
+                &mut renderer, beam_mesh, mat_orange,
+                glam::Mat4::from_translation(glam::Vec3::new(cx, 18.0, cz)),
+                8.0, None,
+            ).ok();
+            // Boom extending over the water side
+            let boom_sign = if crane_i == 0 { -1.0_f32 } else { 1.0_f32 };
+            let boom_upload = box_mesh([0.0; 3], [18.0, 0.8, 0.8]);
+            let boom_mesh = renderer.scene_mut()
+                .insert_actor(SceneActor::mesh(boom_upload.clone())).as_mesh().unwrap();
+            picker.register_mesh(boom_mesh, &boom_upload);
+            insert_object_with_movability(
+                &mut renderer, boom_mesh, mat_steel,
+                glam::Mat4::from_translation(glam::Vec3::new(cx + boom_sign * 10.0, 17.5, cz)),
+                12.0, None,
+            ).ok();
+            // Warning beacon on boom tip
+            let beacon_upload = sphere_mesh([0.0; 3], 0.45);
+            let beacon_mesh = renderer.scene_mut()
+                .insert_actor(SceneActor::mesh(beacon_upload.clone())).as_mesh().unwrap();
+            picker.register_mesh(beacon_mesh, &beacon_upload);
+            insert_object_with_movability(
+                &mut renderer, beacon_mesh, mat_warning,
+                glam::Mat4::from_translation(glam::Vec3::new(cx + boom_sign * 27.5, 17.5, cz)),
+                0.6, None,
+            ).ok();
+            // Operator cab
+            let cab_upload = box_mesh([0.0; 3], [3.5, 2.5, 3.0]);
+            let cab_mesh = renderer.scene_mut()
+                .insert_actor(SceneActor::mesh(cab_upload.clone())).as_mesh().unwrap();
+            picker.register_mesh(cab_mesh, &cab_upload);
+            insert_object_with_movability(
+                &mut renderer, cab_mesh, mat_orange,
+                glam::Mat4::from_translation(glam::Vec3::new(cx, 17.0, cz - 0.5)),
+                3.0, None,
+            ).ok();
+        }
+
+        // ── Lamp mast posts ────────────────────────────────────────────────
+        // 7×3 grid of sodium masts spanning the expanded yard
+        let mast_xs: &[f32] = &[-84.0, -56.0, -28.0, 0.0, 28.0, 56.0, 84.0];
+        let mast_zs: &[f32] = &[-32.0, 4.0, 38.0];
+        let mast_upload = box_mesh([0.0; 3], [0.35, 12.0, 0.35]);
+        let mast_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(mast_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(mast_mesh, &mast_upload);
+        let lamp_upload = box_mesh([0.0; 3], [1.2, 0.4, 1.2]);
+        let lamp_mesh = renderer.scene_mut()
+            .insert_actor(SceneActor::mesh(lamp_upload.clone())).as_mesh().unwrap();
+        picker.register_mesh(lamp_mesh, &lamp_upload);
+        for &mz in mast_zs {
+            for &mx in mast_xs {
+                insert_object_with_movability(
+                    &mut renderer, mast_mesh, mat_steel,
+                    glam::Mat4::from_translation(glam::Vec3::new(mx, 6.0, mz)),
+                    7.0, None,
+                ).ok();
+                insert_object_with_movability(
+                    &mut renderer, lamp_mesh, mat_lamp,
+                    glam::Mat4::from_translation(glam::Vec3::new(mx, 12.4, mz)),
+                    1.0, None,
+                ).ok();
+            }
+        }
+
+        // ── Shipping containers — ~900 stacked in shipyard bays ───────────
         {
             let crates_base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
                 .join("models/source");
+
             match load_scene_bytes_with_config(
                 CRATES_FBX,
                 "fbx",
@@ -358,9 +375,8 @@ impl ApplicationHandler for App {
                     match upload_sectioned_scene(&mut renderer, &scene) {
                         Ok((multi_mesh_id, section_mat_ids)) => {
                             let sm = scene.sectioned_mesh.as_ref().unwrap();
-                            // Node transforms are already baked into the shared vertex buffer,
-                            // so the mesh lives at IDENTITY in its own space.  Compute a
-                            // local-space AABB and then translate it to CRATES_TARGET.
+
+                            // Measure local-space AABB to derive step sizes
                             let mut bb_min = glam::Vec3::splat(f32::INFINITY);
                             let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
                             for v in &sm.vertices {
@@ -369,54 +385,82 @@ impl ApplicationHandler for App {
                                 bb_max = bb_max.max(p);
                             }
                             let local_center = (bb_min + bb_max) * 0.5;
-                            let radius = ((bb_max - bb_min) * 0.5).length().max(0.5);
-                            let placement =
-                                glam::Mat4::from_translation(CRATES_TARGET - local_center);
-                            let world_center = placement.transform_point3(local_center);
+                            let local_size   = bb_max - bb_min;
+                            let radius = (local_size * 0.5).length().max(0.5);
+
                             eprintln!(
-                                "[editor_demo] sectioned mesh: {} sections, {} verts, r={radius:.2}, world_center={world_center:.2?}",
-                                sm.sections.len(),
-                                sm.vertices.len()
+                                "[shipyard] container: {} sections {} verts  \
+                                 size={:.2?} center={:.2?} r={radius:.2}",
+                                sm.sections.len(), sm.vertices.len(), local_size, local_center
                             );
-                            let duplicates = 60;
-                            let grid_cols = 5;
-                            let grid_rows = 3;
-                            let spacing = 4.75;
-                            for dup_index in 0..duplicates {
-                                let col = dup_index % grid_cols;
-                                let row = dup_index / grid_cols;
-                                let placement = glam::Mat4::from_translation(
-                                    CRATES_TARGET
-                                        + glam::Vec3::new(
-                                            (col as f32 - (grid_cols as f32 - 1.0) * 0.5) * spacing,
-                                            0.0,
-                                            (row as f32 - (grid_rows as f32 - 1.0) * 0.5) * spacing,
-                                        )
-                                        - local_center,
-                                );
-                                let world_center = placement.transform_point3(local_center);
-                                match renderer.scene_mut().insert_sectioned_object(
-                                    multi_mesh_id,
-                                    &section_mat_ids,
-                                    placement,
-                                    [world_center.x, world_center.y, world_center.z, radius],
-                                    Some(Movability::Movable),
-                                ) {
-                                    Ok(_) => {
-                                        eprintln!(
-                                            "[editor_demo] sectioned mesh inserted ok ({dup_index}/{duplicates})"
-                                        );
-                                    }
-                                    Err(e) => {
-                                        eprintln!(
-                                            "[editor_demo] sectioned mesh INSERT FAILED: {e:?}"
-                                        )
+
+                            // Step sizes: tiny gap so edges don't z-fight
+                            let step_x = local_size.x + 0.04;
+                            let step_z = local_size.z + 0.06;
+                            let step_y = local_size.y;
+
+                            // ── Bay layout ────────────────────────────────────
+                            // Total across all bays: ~900 containers.
+                            // oz is the Z origin of the *nearest* row in each bay.
+                            struct Bay { ox: f32, oz: f32, cols: u32, rows: u32, layers: u32 }
+                            let bays: &[Bay] = &[
+                                // Bay A — left main block (14×7×6 = 588)
+                                Bay { ox: -95.0, oz: -26.0, cols: 14, rows: 7, layers: 6 },
+                                // Bay B — right main block (12×6×5 = 360)
+                                Bay { ox:  18.0, oz: -26.0, cols: 12, rows: 6, layers: 5 },
+                                // Bay C — rear overflow (10×5×3 = 150) — shorter stacks
+                                Bay { ox: -60.0, oz:  36.0, cols: 10, rows: 5, layers: 3 },
+                                // Bay D — dock-side loose row (18×3×2 = 108)
+                                //         freshly offloaded, only 2 high
+                                Bay { ox: -95.0, oz: -38.0, cols: 18, rows: 3, layers: 2 },
+                            ];
+
+                            let mut count = 0u32;
+                            for bay in bays {
+                                for layer in 0..bay.layers {
+                                    for row in 0..bay.rows {
+                                        for col in 0..bay.cols {
+                                            // World-space centre of this container slot
+                                            let wx = bay.ox + col as f32 * step_x;
+                                            // Bottom of layer 0 sits exactly on y = 0
+                                            let wy = layer as f32 * step_y + local_size.y * 0.5;
+                                            let wz = bay.oz + row as f32 * step_z;
+
+                                            // Alternate 180° every other column for variety.
+                                            // Rotation must happen around the mesh centre so
+                                            // we use: T(world) * R * T(-local_center)
+                                            let rot = if (col + layer) % 2 == 1 {
+                                                glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                                            } else {
+                                                glam::Mat4::IDENTITY
+                                            };
+                                            let placement =
+                                                glam::Mat4::from_translation(
+                                                    glam::Vec3::new(wx, wy, wz),
+                                                ) * rot
+                                                * glam::Mat4::from_translation(-local_center);
+                                            // World centre is always exactly (wx, wy, wz)
+                                            // regardless of rotation
+
+                                            match renderer.scene_mut().insert_sectioned_object(
+                                                multi_mesh_id,
+                                                &section_mat_ids,
+                                                placement,
+                                                [wx, wy, wz, radius],
+                                                None, // Static — containers never move
+                                            ) {
+                                                Ok(_) => count += 1,
+                                                Err(e) => eprintln!(
+                                                    "[shipyard] insert failed: {e:?}"
+                                                ),
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            eprintln!("[shipyard] {count} containers inserted");
 
-                            // Register each section's geometry with the picker so that
-                            // ray-cast hits land on the mesh instead of passing through it.
+                            // Register sections with the picker once
                             if let Some(section_ids) =
                                 renderer.scene().sectioned_section_mesh_ids(multi_mesh_id)
                             {
@@ -434,64 +478,69 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        Err(e) => eprintln!("[editor_demo] upload_sectioned_scene ERR: {e}"),
+                        Err(e) => eprintln!("[shipyard] upload_sectioned_scene ERR: {e}"),
                     }
                 }
-                Err(e) => eprintln!("[editor_demo] Failed to load Crates.fbx: {e}"),
+                Err(e) => eprintln!("[shipyard] Failed to load container FBX: {e}"),
             }
         }
 
-        // Sync the picker with all just-inserted objects.
         picker.rebuild_instances(renderer.scene());
 
-        // ── Lights ────────────────────────────────────────────────────────────
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(point_light(
-                [0.0, 4.5, 2.0],
-                [1.0, 0.85, 0.7],
-                14.0,
-                12.0,
-            )));
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(point_light(
-                [-4.0, 3.0, -3.0],
-                [0.4, 0.55, 1.0],
-                8.0,
-                9.0,
-            )));
-        renderer
-            .scene_mut()
-            .insert_actor(SceneActor::light(point_light(
-                [4.0, 2.5, -2.0],
-                [1.0, 0.4, 0.3],
-                6.0,
-                8.0,
-            )));
+        // ── Lights ────────────────────────────────────────────────────────
+        // Sodium mast floodlights — warm amber, high mounted, wide range
+        for &mz in mast_zs {
+            for &mx in mast_xs {
+                renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+                    [mx, 14.0, mz],
+                    [1.0, 0.80, 0.40],
+                    280.0,
+                    52.0,
+                )));
+            }
+        }
 
-        // Add 500 scattered point lights for an extreme rendering stress test.
-        for i in 0..100 {
-            let row = i / 25;
-            let col = i % 25;
-            let x = -46.0 + col as f32 * 4.0 + if row % 2 == 0 { 0.0 } else { 2.0 };
-            let z = -36.0 + row as f32 * 4.0;
-            let y = 1.0 + (i % 5) as f32 * 0.75;
-            let hue = ((i * 37) % 100) as f32 / 100.0;
-            let color = [
-                0.35 + 0.65 * ((2.0 * std::f32::consts::PI * hue).cos() * 0.5 + 0.5),
-                0.35 + 0.65 * ((2.0 * std::f32::consts::PI * hue + 2.1).cos() * 0.5 + 0.5),
-                0.35 + 0.65 * ((2.0 * std::f32::consts::PI * hue + 4.2).cos() * 0.5 + 0.5),
-            ];
-            let intensity = 8.0 + (i % 7) as f32 * 0.35;
-            let range = 8.0 + (i % 4) as f32 * 1.75;
+        // Crane work lights — cool white, tight cone, very bright
+        renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+            [-90.0, 20.0, -38.0], [0.90, 0.96, 1.0], 400.0, 35.0,
+        )));
+        renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+            [ 90.0, 20.0, -38.0], [0.90, 0.96, 1.0], 400.0, 35.0,
+        )));
+
+        // Boom tip warning lights (red, matching emissive beacons)
+        renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+            [-117.5, 17.5, -38.0], [1.0, 0.05, 0.02], 50.0, 7.0,
+        )));
+        renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+            [ 117.5, 17.5, -38.0], [1.0, 0.05, 0.02], 50.0, 7.0,
+        )));
+
+        // Ground-level fill lights between stack rows — sodium spill colour
+        // These light up the lower sides of containers the masts can't reach.
+        let fill_pts: &[(f32, f32, f32)] = &[
+            // Bay A alleys
+            (-80.0, 3.5, -12.0), (-52.0, 3.5, -12.0), (-24.0, 3.5, -12.0),
+            // Bay B alleys
+            ( 30.0, 3.5, -12.0), ( 58.0, 3.5, -12.0),
+            // Row between bay A and bay D (dock-side alley)
+            (-80.0, 3.5, -33.0), (-52.0, 3.5, -33.0), (-24.0, 3.5, -33.0),
+            // Bay C alleys (rear)
+            (-50.0, 3.5,  48.0), (-22.0, 3.5,  48.0),
+        ];
+        for &(fx, fy, fz) in fill_pts {
             renderer.scene_mut().insert_actor(SceneActor::light(point_light(
-                [x, y, z],
-                color,
-                intensity,
-                range,
+                [fx, fy, fz], [1.0, 0.76, 0.38], 90.0, 28.0,
             )));
         }
+
+        // Harbour water sheen — deep teal reflections off the harbour side
+        renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+            [120.0, 2.0, -20.0], [0.20, 0.55, 0.85], 60.0, 60.0,
+        )));
+        renderer.scene_mut().insert_actor(SceneActor::light(point_light(
+            [130.0, 2.0,  10.0], [0.15, 0.45, 0.75], 50.0, 55.0,
+        )));
 
         self.state = Some(AppState {
             window,
@@ -500,14 +549,15 @@ impl ApplicationHandler for App {
             surface_format: format,
             renderer,
             last_frame: std::time::Instant::now(),
-            cam_pos: glam::Vec3::new(0.0, 4.0, 9.5),
+            // Start back and high for a wide overview of the full expanded yard
+            cam_pos: glam::Vec3::new(0.0, 55.0, 150.0),
             cam_yaw: 0.0,
-            cam_pitch: -0.35,
+            cam_pitch: -0.38,
             keys: HashSet::new(),
             right_mouse_held: false,
             mouse_delta: (0.0, 0.0),
             cursor_pos: (640.0, 360.0),
-            cam_speed: 6.0,
+            cam_speed: 18.0,
             editor: EditorState::new(),
             picker,
             grid_enabled: true,
@@ -545,7 +595,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_pos = (position.x as f32, position.y as f32);
-                // Update hover highlight and, if dragging, apply drag.
                 if !state.right_mouse_held {
                     let (ray_o, ray_d) = state.build_ray();
                     state.editor.update_hover(ray_o, ray_d, state.renderer.scene());
@@ -568,7 +617,6 @@ impl ApplicationHandler for App {
                     ElementState::Pressed => {
                         state.keys.insert(code);
                         match code {
-                            // ── Fullscreen toggle ────────────────────────────
                             KeyCode::F11 => state.toggle_fullscreen(),
                             KeyCode::Enter | KeyCode::NumpadEnter
                                 if state.keys.contains(&KeyCode::AltLeft)
@@ -576,7 +624,6 @@ impl ApplicationHandler for App {
                             {
                                 state.toggle_fullscreen();
                             }
-                            // ─────────────────────────────────────────────────
                             KeyCode::Escape => {
                                 if state.editor.selected().is_some() {
                                     state.editor.deselect();
@@ -589,8 +636,6 @@ impl ApplicationHandler for App {
                                     state.picker.rebuild_instances(state.renderer.scene());
                                 }
                             }
-                            // Gizmo keys only fire when the cursor is free
-                            // (not flying the camera) to avoid clashes with WASD.
                             KeyCode::KeyG if !state.right_mouse_held => {
                                 state.editor.set_gizmo_mode(GizmoMode::Translate)
                             }
@@ -603,8 +648,11 @@ impl ApplicationHandler for App {
                             KeyCode::KeyD
                                 if !state.right_mouse_held
                                 && (state.keys.contains(&KeyCode::ControlLeft)
-                                    || state.keys.contains(&KeyCode::ControlRight)) => {
-                                if let Some(_new_id) = state.editor.duplicate_selected(&mut state.renderer) {
+                                    || state.keys.contains(&KeyCode::ControlRight)) =>
+                            {
+                                if let Some(_new_id) =
+                                    state.editor.duplicate_selected(&mut state.renderer)
+                                {
                                     state.picker.rebuild_instances(state.renderer.scene());
                                 }
                             }
@@ -612,11 +660,12 @@ impl ApplicationHandler for App {
                                 state.grid_enabled = !state.grid_enabled;
                                 state.renderer.set_editor_mode(state.grid_enabled);
                             }
-                            // Spawn a powerful blue point light at the camera position.
                             KeyCode::KeyL if !state.right_mouse_held => {
                                 let pos = state.cam_pos.to_array();
                                 state.renderer.scene_mut().insert_actor(
-                                    SceneActor::light(point_light(pos, [0.2, 0.5, 1.0], 500.0, 150.0))
+                                    SceneActor::light(point_light(
+                                        pos, [0.2, 0.5, 1.0], 500.0, 150.0,
+                                    )),
                                 );
                             }
                             _ => {}
@@ -628,7 +677,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // Right-click PRESS → grab cursor and enter fly mode.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Right,
@@ -644,7 +692,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // Right-click RELEASE → restore cursor for object picking.
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Right,
@@ -655,7 +702,6 @@ impl ApplicationHandler for App {
                 state.right_mouse_held = false;
             }
 
-            // Left-click → try to drag a gizmo handle, else pick an object.
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -663,12 +709,11 @@ impl ApplicationHandler for App {
             } => {
                 if !state.right_mouse_held {
                     let (ray_o, ray_d) = state.build_ray();
-
-                    // Gizmo drag has priority over scene picking.
                     if !state.editor.try_start_drag(ray_o, ray_d, state.renderer.scene()) {
-                        // BVH ray cast — exact triangle intersection.
                         state.picker.rebuild_instances(state.renderer.scene());
-                        if let Some(hit) = state.picker.cast_ray(state.renderer.scene(), ray_o, ray_d) {
+                        if let Some(hit) =
+                            state.picker.cast_ray(state.renderer.scene(), ray_o, ray_d)
+                        {
                             state.editor.select(hit.actor_id);
                         } else {
                             state.editor.deselect();
@@ -677,7 +722,6 @@ impl ApplicationHandler for App {
                 }
             }
 
-            // Left-click RELEASE → finish any active gizmo drag.
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,
@@ -692,7 +736,6 @@ impl ApplicationHandler for App {
                         MouseScrollDelta::LineDelta(_, y) => y,
                         MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
                     };
-                    // Each scroll notch multiplies/divides speed by ~1.15.
                     state.cam_speed = (state.cam_speed * 1.15_f32.powf(lines))
                         .clamp(0.5, 500.0);
                 }
@@ -738,7 +781,6 @@ impl ApplicationHandler for App {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl AppState {
-    /// Compute a world-space ray from the current cursor position.
     fn build_ray(&self) -> (glam::Vec3, glam::Vec3) {
         let sz     = self.window.inner_size();
         let width  = sz.width as f32;
@@ -747,7 +789,7 @@ impl AppState {
         let (sp, cp) = self.cam_pitch.sin_cos();
         let fwd    = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let aspect = width / height.max(1.0);
-        let proj   = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 500.0);
+        let proj   = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 800.0);
         let view   = glam::Mat4::look_at_rh(self.cam_pos, self.cam_pos + fwd, glam::Vec3::Y);
         let vp_inv = (proj * view).inverse();
         EditorState::ray_from_screen(self.cursor_pos.0, self.cursor_pos.1, width, height, vp_inv)
@@ -756,7 +798,6 @@ impl AppState {
     fn update_camera(&mut self, dt: f32) {
         const LOOK: f32 = 0.0025;
 
-        // Only rotate and move when the right mouse button is held.
         if self.right_mouse_held {
             self.cam_yaw += self.mouse_delta.0 * LOOK;
             self.cam_pitch -= self.mouse_delta.1 * LOOK;
@@ -765,7 +806,7 @@ impl AppState {
                 .clamp(-std::f32::consts::FRAC_PI_2 * 0.99, std::f32::consts::FRAC_PI_2 * 0.99);
 
             let (sy, cy) = self.cam_yaw.sin_cos();
-            let fwd = glam::Vec3::new(sy, 0.0, -cy);
+            let fwd   = glam::Vec3::new(sy, 0.0, -cy);
             let right = glam::Vec3::new(cy, 0.0, sy);
 
             let mut vel = glam::Vec3::ZERO;
@@ -782,40 +823,22 @@ impl AppState {
         self.mouse_delta = (0.0, 0.0);
     }
 
-    /// Toggle between borderless fullscreen and true DXGI exclusive fullscreen.
-    ///
-    /// On Windows, entering fullscreen:
-    ///   1. Moves the window to borderless fullscreen (no mode change = no flicker).
-    ///   2. Calls `SetFullscreenState(TRUE)` on the DXGI swap chain, which
-    ///      transitions the display into true hardware-exclusive mode and
-    ///      completely bypasses DWM composition.
-    ///
-    /// On exit, `SetFullscreenState(FALSE)` is called first (DXGI requirement)
-    /// before the window returns to windowed mode.
     fn toggle_fullscreen(&mut self) {
         use winit::window::Fullscreen;
         if self.is_fullscreen {
-            // DXGI requires SetFullscreenState(FALSE) before we give the window
-            // back to the desktop compositor.
             #[cfg(target_os = "windows")]
             unsafe { self.renderer.exit_exclusive_fullscreen(&self.surface); }
             self.window.set_fullscreen(None);
             self.is_fullscreen = false;
         } else {
-            // First: move to borderless fullscreen so the window covers the full
-            // monitor. DXGI's SetFullscreenState works best when the client area
-            // already matches the display resolution.
             let monitor = self.window.current_monitor();
             self.window.set_fullscreen(Some(Fullscreen::Borderless(monitor)));
-            // Second: enter hardware-exclusive mode via DXGI.
             #[cfg(target_os = "windows")]
             {
                 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
                 if let Ok(handle) = self.window.window_handle() {
                     if let RawWindowHandle::Win32(h) = handle.as_raw() {
                         let hwnd = h.hwnd.get() as *mut std::ffi::c_void;
-                        // SAFETY: hwnd is valid for the lifetime of this window;
-                        // surface is configured and associated with this hwnd.
                         unsafe {
                             self.renderer.request_exclusive_fullscreen(&self.surface, hwnd);
                         }
@@ -841,14 +864,12 @@ impl AppState {
             std::f32::consts::FRAC_PI_4,
             aspect,
             0.1,
-            500.0,
+            800.0,
         );
 
-        // ── Gizmo overlay (uses debug draw, cleared each frame) ───────────────
         self.renderer.debug_clear();
         self.editor.draw_gizmos(&mut self.renderer);
 
-        // Draw a small crosshair at the screen centre when cursor is free (pick aid).
         if !self.right_mouse_held {
             let hit_point = self.cam_pos + fwd * 0.1;
             let r = 0.004;
@@ -864,7 +885,6 @@ impl AppState {
             );
         }
 
-        // ── Present ───────────────────────────────────────────────────────────
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(e) => { log::warn!("surface: {:?}", e); return; }

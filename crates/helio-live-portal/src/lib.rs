@@ -172,6 +172,17 @@ pub struct DrawCallMetrics {
     pub transparent: usize,
 }
 
+/// Total mesh geometry in the scene's shared GPU buffers.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MeshStats {
+    /// Total vertices across all meshes in the shared vertex mega-buffer.
+    pub total_vertices: usize,
+    /// Total triangles (index_count / 3).
+    pub total_triangles: usize,
+    /// Number of unique live mesh records.
+    pub unique_meshes: usize,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PortalFrameSnapshot {
     pub frame: u64,
@@ -198,6 +209,10 @@ pub struct PortalFrameSnapshot {
     pub billboard_count: usize,
 
     pub draw_calls: DrawCallMetrics,
+
+    /// Total mesh geometry in the scene's shared GPU buffers.
+    #[serde(default)]
+    pub mesh_stats: MeshStats,
 
     /// CPU timing tree built from `profile_scope!` macros — always populated.
     pub stage_timings: Vec<PortalStageTiming>,

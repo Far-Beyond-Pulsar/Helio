@@ -86,5 +86,14 @@ impl super::super::Scene {
     pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
         self.mesh_pool.buffers()
     }
+
+    /// Aggregate mesh statistics for the scene: total vertices, total triangles,
+    /// and the number of unique mesh records currently live in the pool.
+    pub fn mesh_stats(&self) -> (usize, usize, usize) {
+        let verts = self.mesh_pool.total_vertex_count();
+        let tris  = self.mesh_pool.total_index_count() / 3;
+        let meshes = self.mesh_pool.unique_mesh_count();
+        (verts, tris, meshes)
+    }
 }
 

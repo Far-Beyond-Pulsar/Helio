@@ -1430,6 +1430,14 @@ impl Renderer {
                     opaque: self.scene.gpu_scene().resources().draw_count as usize,
                     transparent: 0,
                 },
+                mesh_stats: {
+                    let (verts, tris, meshes) = self.scene.mesh_stats();
+                    helio_live_portal::MeshStats {
+                        total_vertices: verts,
+                        total_triangles: tris,
+                        unique_meshes: meshes,
+                    }
+                },
                 stage_timings,
             };
 
