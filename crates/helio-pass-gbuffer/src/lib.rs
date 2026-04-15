@@ -297,8 +297,8 @@ impl GBufferPass {
                 // Use `LessEqual` for early-Z culling while being robust to precision issues.
                 // This maintains early-Z benefits (GPU can discard fragments before shading)
                 // while avoiding re-shading due to minor floating-point differences.
-                // `depth_write_enabled: false` avoids redundant bandwidth.
-                depth_write_enabled: Some(false),
+                // GBuffer owns the depth write (DepthPrepass no longer runs).
+                depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
@@ -587,7 +587,7 @@ impl RenderPass for GBufferPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: ctx.depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load, // depth prepass already wrote depth
+                    load: wgpu::LoadOp::Clear(1.0), // GBuffer owns depth; clear to far
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
