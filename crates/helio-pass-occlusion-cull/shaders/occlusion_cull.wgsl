@@ -136,7 +136,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if ndc_center.x < -1.0 - ndc_radius || ndc_center.x > 1.0 + ndc_radius ||
        ndc_center.y < -1.0 - ndc_radius || ndc_center.y > 1.0 + ndc_radius ||
        ndc_center.z < 0.0 - ndc_radius || ndc_center.z > 1.0 + ndc_radius {
-        indirect[idx * 5u + 1u] = 1u;
+        indirect[idx * 5u + 1u] = 0u; // outside frustum → cull
         return;
     }
 

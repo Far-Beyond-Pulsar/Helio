@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use helio_pass_billboard::BillboardPass;
 use helio_pass_deferred_light::DeferredLightPass;
-use helio_pass_depth_prepass::DepthPrepassPass;
 use helio_pass_hiz::HiZBuildPass;
+use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_gbuffer::GBufferPass;
@@ -122,9 +122,8 @@ fn build_default_graph_internal(
         true,
     )));
 
+    graph.add_pass(Box::new(IndirectDispatchPass::new(device)));
     graph.add_pass(Box::new(OcclusionCullPass::new(device, hiz_view, hiz_sampler)));
-
-    graph.add_pass(Box::new(DepthPrepassPass::new(device, wgpu::TextureFormat::Depth32Float)));
 
     let perf_overlay_shared = PerfOverlayShared::new(device, config.internal_width(), config.internal_height());
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
@@ -277,9 +276,8 @@ pub fn build_hlfs_graph(
         true,
     )));
 
+    graph.add_pass(Box::new(IndirectDispatchPass::new(device)));
     graph.add_pass(Box::new(OcclusionCullPass::new(device, hiz_view, hiz_sampler)));
-
-    graph.add_pass(Box::new(DepthPrepassPass::new(device, wgpu::TextureFormat::Depth32Float)));
 
     let perf_overlay_shared = PerfOverlayShared::new(device, config.internal_width(), config.internal_height());
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));

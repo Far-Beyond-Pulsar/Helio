@@ -15,7 +15,9 @@ struct Camera {
 struct CullUniforms {
     frustum_planes: array<vec4<f32>, 6>,
     draw_count: u32,
-    _pad: vec3<u32>,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 struct GpuInstance {
@@ -26,7 +28,7 @@ struct GpuInstance {
     normal_0:    vec4<f32>,
     normal_1:    vec4<f32>,
     normal_2:    vec4<f32>,
-    bounds:      vec4<f32>,  // xyz = center, w = radius
+    bounds:      vec4<f32>,  // xyz = world-space center, w = world-space radius
     mesh_id:     u32,
     material_id: u32,
     flags:       u32,
@@ -74,15 +76,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // If the representative passes, all instances in the batch are drawn.
     let inst = instances[dc.first_instance];
 
-    // Transform bounding sphere center to world space via model matrix
-    let model = mat4x4<f32>(inst.model_0, inst.model_1, inst.model_2, inst.model_3);
-    let world_center = (model * vec4<f32>(inst.bounds.xyz, 1.0)).xyz;
-
-    // Scale radius by max scale component
-    let sx = length(inst.model_0.xyz);
-    let sy = length(inst.model_1.xyz);
-    let sz = length(inst.model_2.xyz);
-    let world_radius = inst.bounds.w * max(sx, max(sy, sz));
+    // bounds.xyz is the world-space bounding sphere center (pre-computed by CPU).
+    // bounds.w is the world-space radius.  Do NOT apply the model matrix here —
+    // that would double-transform an already-world-space value.
+    let world_center = inst.bounds.xyz;
+    let world_radius = inst.bounds.w;
 
     let visible = sphere_in_frustum(world_center, world_radius);
 

@@ -2687,6 +2687,7 @@ dependencies = [
  "helio-pass-gbuffer",
  "helio-pass-hiz",
  "helio-pass-hlfs",
+ "helio-pass-indirect-dispatch",
  "helio-pass-light-cull",
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",

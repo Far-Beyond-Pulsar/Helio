@@ -17,6 +17,7 @@ helio-pass-light-cull = { path = "../helio-pass-light-cull" }
 helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-pass-deferred-light = { path = "../helio-pass-deferred-light" }
 helio-pass-depth-prepass = { path = "../helio-pass-depth-prepass" }
+helio-pass-indirect-dispatch = { path = "../helio-pass-indirect-dispatch" }
 helio-pass-hiz = { path = "../helio-pass-hiz" }
 helio-pass-occlusion-cull = { path = "../helio-pass-occlusion-cull" }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
