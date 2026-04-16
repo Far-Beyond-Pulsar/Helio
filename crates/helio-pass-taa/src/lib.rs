@@ -1,6 +1,7 @@
 //! Temporal Anti-Aliasing (TAA) pass.
 //!
-//! Blends the current frame with a history buffer using velocity-based reprojection
+//! Blends the current frame with a history buffer using camera-matrix reprojection
+//! (depth + inv_view_proj + prev_view_proj — no velocity buffer required)
 //! and YCoCg variance-clipped neighbourhood clamping.
 //!
 //! ## O(1) guarantee
@@ -19,8 +20,9 @@
 //! output is GPU-copied into history so the next frame sees the updated accumulation.
 //!
 //! ## Lazy bind group
-//! The TAA bind group is rebuilt lazily when `frame.pre_aa` or `ctx.depth`
-//! pointer changes (i.e. on resize). No views are required at construction time.
+//! The TAA bind group is rebuilt lazily when `frame.pre_aa`, `ctx.depth`,
+//! or `ctx.scene.camera` pointer changes (i.e. on resize). No views are required
+//! at construction time.
 
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
@@ -44,14 +46,20 @@ const HALTON_JITTER: [[f32; 2]; 16] = [
     [0.031250, 0.592593],
 ];
 
+/// History and output textures always use 16-bit float so:
+/// - HDR specular values (> 1.0) are not clipped.
+/// - Confidence counters (11, 21, 31 …) are not clamped to 1.0.
+///
+/// Using 8-bit surface format here would silently lock the blend rate at
+/// DEFAULT_HISTORY_BLEND_RATE forever, defeating adaptive temporal smoothing.
+const HISTORY_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TaaUniform {
-    feedback_min: f32,   // unused — kept for struct-layout compatibility
-    feedback_max: f32,   // unused — kept for struct-layout compatibility
     jitter: [f32; 2],
-    reset: u32,          // 1 on the very first frame so RESET path runs
-    _pad: u32,           // pad to match WGSL struct alignment (vec2 → align-8 → 24 bytes)
+    reset: u32, // 1 on the very first frame so RESET path runs
+    _pad: u32,
 }
 
 /// Post-TAA sharpening blit.
@@ -61,6 +69,11 @@ struct TaaUniform {
 /// artefacts over multiple frames; keeping history unsharpened preserves temporal
 /// stability while the sharpened output recovers fine mesh / material detail lost
 /// by the temporal low-pass filter.
+///
+/// The TAA resolve stores Reinhard-tonemapped (soft LDR) colors in Rgba16Float
+/// history.  The blit reads those values, applies the sharpen, and writes them
+/// directly to the display surface — no reverse-tonemap step is needed because
+/// soft-tonemapped colors are already in an appropriate range for 8-bit output.
 ///
 /// Algorithm: contrast-adaptive unsharp mask (5-tap cross kernel).
 ///   blur        = (N + S + E + W) / 4
@@ -117,8 +130,8 @@ pub struct TaaPass {
     blit_bgl: wgpu::BindGroupLayout,
     /// Lazy TAA bind group (pre_aa + history + velocity_fallback + depth + samplers + uniform).
     bind_group: Option<wgpu::BindGroup>,
-    /// (pre_aa_ptr, depth_ptr)
-    bind_group_key: Option<(usize, usize)>,
+    /// Cache key: (pre_aa_ptr, depth_ptr, camera_ptr) — rebuilt on any pointer change.
+    bind_group_key: Option<(usize, usize, usize)>,
     /// Static blit bind group: output_view + linear_sampler.
     blit_bind_group: wgpu::BindGroup,
     taa_uniform_buf: wgpu::Buffer,
@@ -128,13 +141,9 @@ pub struct TaaPass {
     pub output_view: wgpu::TextureView,
     linear_sampler: wgpu::Sampler,
     point_sampler: wgpu::Sampler,
-    velocity_fallback_texture: wgpu::Texture,
-    velocity_fallback_view: wgpu::TextureView,
     /// Set to true on construction; cleared after the first prepare() so the
     /// shader's RESET path runs exactly once to prime the history texture.
     first_frame: bool,
-    /// Format of output / history textures (needed to recreate them on resize).
-    output_format: wgpu::TextureFormat,
 }
 
 impl TaaPass {
@@ -186,16 +195,16 @@ impl TaaPass {
             ..Default::default()
         });
 
-        // history and output textures are always at OUTPUT (display) resolution so
-        // temporal accumulation is gathered at full quality even when rendering at
-        // a lower internal resolution.
+        // history and output textures always use HISTORY_FORMAT (Rgba16Float).
+        // Using surface_format (e.g. Bgra8Unorm) here would silently clip confidence
+        // counters to 1.0 and HDR specular to [0,1], breaking temporal accumulation.
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format,
+            format: HISTORY_FORMAT,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
             view_formats: &[],
         };
@@ -205,36 +214,41 @@ impl TaaPass {
         let output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         let output_view = output_texture.create_view(&Default::default());
 
-        let velocity_fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("TAA Velocity Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-        let velocity_fallback_view = velocity_fallback_texture.create_view(&Default::default());
-
         // ── TAA BGL ────────────────────────────────────────────────────────────
+        // Binding layout mirrors taa.wgsl:
+        //   0 current_frame    (texture_2d<f32>, filterable)
+        //   1 history_frame    (texture_2d<f32>, filterable)  [Rgba16Float]
+        //   2 depth_tex        (texture_depth_2d)
+        //   3 linear_sampler   (filtering)
+        //   4 point_sampler    (non-filtering)
+        //   5 camera           (uniform buffer, matches GpuCameraUniforms layout)
+        //   6 taa              (uniform buffer, TaaUniform)
         let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("TAA BGL"),
             entries: &[
                 tex_entry(0, wgpu::TextureSampleType::Float { filterable: true }),
                 tex_entry(1, wgpu::TextureSampleType::Float { filterable: true }),
-                tex_entry(2, wgpu::TextureSampleType::Float { filterable: false }),
-                tex_entry(3, wgpu::TextureSampleType::Depth),
+                tex_entry(2, wgpu::TextureSampleType::Depth),
                 wgpu::BindGroupLayoutEntry {
-                    binding: 4,
+                    binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
-                    binding: 5,
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
                     count: None,
                 },
                 wgpu::BindGroupLayoutEntry {
@@ -299,7 +313,7 @@ impl TaaPass {
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: HISTORY_FORMAT,
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -358,10 +372,7 @@ impl TaaPass {
             output_view,
             linear_sampler,
             point_sampler,
-            velocity_fallback_texture,
-            velocity_fallback_view,
             first_frame: true,
-            output_format: format,
         }
     }
 }
@@ -383,14 +394,13 @@ impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let fmt = self.output_format;
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: fmt,
+            format: HISTORY_FORMAT,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
             view_formats: &[],
         };
@@ -429,8 +439,6 @@ impl RenderPass for TaaPass {
         // Consume the first_frame flag so RESET runs on exactly one frame.
         let reset = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
         let uniforms = TaaUniform {
-            feedback_min: 0.88,  // unused but kept for layout
-            feedback_max: 0.97,  // unused but kept for layout
             jitter: [raw[0] - 0.5, raw[1] - 0.5],
             reset,
             _pad: 0,
@@ -446,7 +454,11 @@ impl RenderPass for TaaPass {
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )
         })?;
-        let key = (pre_aa_view as *const _ as usize, ctx.depth as *const _ as usize);
+        let key = (
+            pre_aa_view as *const _ as usize,
+            ctx.depth as *const _ as usize,
+            ctx.scene.camera as *const _ as usize,
+        );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TAA BG"),
@@ -454,10 +466,10 @@ impl RenderPass for TaaPass {
                 entries: &[
                     wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.history_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.velocity_fallback_view) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ctx.depth) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(ctx.depth) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
+                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
+                    wgpu::BindGroupEntry { binding: 5, resource: ctx.scene.camera.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 6, resource: self.taa_uniform_buf.as_entire_binding() },
                 ],
             }));
