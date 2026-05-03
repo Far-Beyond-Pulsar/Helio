@@ -175,6 +175,11 @@ fn fnv1a_f32s(vals: &[f32]) -> u64 {
     h
 }
 
+#[inline]
+fn quantize_f32s<const N: usize>(vals: [f32; N], quantum: f32) -> [f32; N] {
+    vals.map(|value| (value / quantum).round() * quantum)
+}
+
 impl Scene {
     /// Create a new empty scene.
     ///
@@ -587,13 +592,25 @@ impl Scene {
                 let base_hash = fnv1a_f32s(&light.position_range)
                     ^ fnv1a_f32s(&light.direction_outer)
                     ^ (light.light_type as u64).wrapping_mul(2654435761);
-                // Directional lights use CSM cascades, which are derived from the camera
-                // frustum. When the camera moves, the cascade matrices change and the
-                // shadow atlas must be re-rendered. Include the camera position in the
-                // hash so any camera movement bumps the dirty gen for directional casters.
+                // Directional CSM depends on the camera frustum, but the GPU matrix pass
+                // already texel-snaps cascade placement. Mirror that coarseness here so
+                // sub-texel camera motion does not thrash the cached shadow atlas.
                 new_hashes[slot] = if light.light_type == 0 {
-                    let cam_pos = self.gpu_scene.camera.position();
-                    base_hash ^ fnv1a_f32s(&cam_pos)
+                    const DIRECTIONAL_CAMERA_SNAP_METERS: f32 = 0.25;
+                    const DIRECTIONAL_FORWARD_SNAP: f32 = 1.0 / 1024.0;
+
+                    let snapped_cam_pos = quantize_f32s(
+                        self.gpu_scene.camera.position(),
+                        DIRECTIONAL_CAMERA_SNAP_METERS,
+                    );
+                    let snapped_cam_forward = quantize_f32s(
+                        self.gpu_scene.camera.forward(),
+                        DIRECTIONAL_FORWARD_SNAP,
+                    );
+
+                    base_hash
+                        ^ fnv1a_f32s(&snapped_cam_pos)
+                        ^ fnv1a_f32s(&snapped_cam_forward)
                 } else {
                     base_hash
                 };
