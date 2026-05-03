@@ -118,6 +118,11 @@ pub struct ShadowPass {
 
     /// `movable_objects_generation` at last render.  O(1) CPU check to gate the GPU path.
     last_movable_objects_gen: u64,
+
+    /// True when the device supports MULTI_DRAW_INDIRECT_COUNT (Vulkan 1.2+, DX12 tier2).
+    /// False on macOS Metal, WASM, and older Vulkan/DX12.  When false the ObjectDirty path
+    /// falls back to a full LoadOp::Clear + multi_draw_indexed_indirect (no per-face GPU culling).
+    supports_multi_draw_count: bool,
 }
 
 impl ShadowPass {
@@ -426,6 +431,9 @@ impl ShadowPass {
             per_caster_last_gen: [0u64; 42],
             last_rendered_shadow_count: 0,
             last_movable_objects_gen: u64::MAX,
+            supports_multi_draw_count: device
+                .features()
+                .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
         }
     }
 }
@@ -652,56 +660,81 @@ impl RenderPass for ShadowPass {
                     }
                 } else if objects_moved {
                     // ── Objects moved: GPU-driven clear + geometry ─────────────
-                    // LoadOp::Load preserves cached shadow data for clean faces.
-                    // The GPU-clear triangle (driven by face_dirty_buf count) clears
-                    // only faces that ShadowDirtyPass marked dirty.
-                    let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Shadow/Dynamic/ObjectDirty"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: face_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
+                    // When MULTI_DRAW_INDIRECT_COUNT is available (Vulkan 1.2+, DX12):
+                    //   LoadOp::Load preserves cached shadow data for clean faces.
+                    //   The GPU-clear triangle (driven by face_dirty_buf count) clears
+                    //   only faces that ShadowDirtyPass marked dirty.
+                    // When the feature is unavailable (macOS Metal, older hardware):
+                    //   Fall back to a full clear + draw all movable geometry,
+                    //   equivalent to the LightDirty path but without per-face culling.
+                    if self.supports_multi_draw_count {
+                        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Shadow/Dynamic/ObjectDirty"),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                view: face_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
                             }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
 
-                    if movable_draw_count > 0 {
-                        // 1. Depth-clear triangle (GPU count 0 or 1 from face_dirty_buf).
-                        pass.set_pipeline(&self.depth_clear_pipeline);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        pass.multi_draw_indirect_count(
-                            &self.clear_indirect_buf,
-                            face as u64 * 16,
-                            &self.face_dirty_buf,
-                            face as u64 * 4,
-                            1,
-                        );
+                        if movable_draw_count > 0 {
+                            // 1. Depth-clear triangle (GPU count 0 or 1 from face_dirty_buf).
+                            pass.set_pipeline(&self.depth_clear_pipeline);
+                            pass.multi_draw_indirect_count(
+                                &self.clear_indirect_buf,
+                                face as u64 * 16,
+                                &self.face_dirty_buf,
+                                face as u64 * 4,
+                                1,
+                            );
 
-                        // 2. Shadow geometry (GPU count 0 or movable_draw_count from face_geom_count_buf).
-                        pass.set_pipeline(pipeline);
-                        pass.set_bind_group(0, bg, &[dyn_offset]);
-                        pass.set_vertex_buffer(0, vertices.slice(..));
-                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
-                        #[cfg(not(target_arch = "wasm32"))]
-                        pass.multi_draw_indexed_indirect_count(
-                            movable_indirect,
-                            0,
-                            &self.face_geom_count_buf,
-                            face as u64 * 4,
-                            movable_draw_count,
-                        );
-
-                        // WASM fallback: no multi_draw_indirect_count support → always draw.
-                        // This loses per-face granularity on WASM but maintains correctness.
-                        #[cfg(target_arch = "wasm32")]
-                        for i in 0..movable_draw_count {
-                            pass.draw_indexed_indirect(movable_indirect, i as u64 * 20);
+                            // 2. Shadow geometry (GPU count 0 or movable_draw_count from face_geom_count_buf).
+                            pass.set_pipeline(pipeline);
+                            pass.set_bind_group(0, bg, &[dyn_offset]);
+                            pass.set_vertex_buffer(0, vertices.slice(..));
+                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.multi_draw_indexed_indirect_count(
+                                movable_indirect,
+                                0,
+                                &self.face_geom_count_buf,
+                                face as u64 * 4,
+                                movable_draw_count,
+                            );
+                        }
+                    } else {
+                        // Fallback: full clear + draw all movable geometry (no per-face GPU culling).
+                        let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("Shadow/Dynamic/ObjectDirty/Fallback"),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                                view: face_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(1.0),
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            }),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        if movable_draw_count > 0 {
+                            pass.set_pipeline(pipeline);
+                            pass.set_bind_group(0, bg, &[dyn_offset]);
+                            pass.set_vertex_buffer(0, vertices.slice(..));
+                            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                            pass.multi_draw_indexed_indirect(
+                                movable_indirect,
+                                0,
+                                movable_draw_count,
+                            );
                         }
                     }
                 }
