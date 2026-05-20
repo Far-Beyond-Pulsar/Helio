@@ -250,7 +250,32 @@ impl super::super::Scene {
             .materials
             .remove(id)
             .ok_or_else(|| invalid("material"))?;
+        // Collect texture IDs before mutating so we can cascade-remove after.
+        let tex_ids: Vec<_> = [
+            removed.textures.base_color,
+            removed.textures.normal,
+            removed.textures.roughness_metallic,
+            removed.textures.emissive,
+            removed.textures.occlusion,
+            removed.textures.specular_color,
+            removed.textures.specular_weight,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|r| r.texture)
+        .collect();
+
         self.bump_texture_refs(&removed.textures, -1)?;
+
+        // Cascade: free any textures whose ref count just hit zero.
+        for tex_id in tex_ids {
+            if self.textures.get(tex_id).map_or(false, |r| r.ref_count == 0) {
+                self.textures.remove(tex_id);
+                self.texture_binding_version =
+                    self.texture_binding_version.wrapping_add(1);
+            }
+        }
+
         let updated_material = self.gpu_scene.materials.update(slot, tombstone_material());
         let updated_textures = self
             .material_textures

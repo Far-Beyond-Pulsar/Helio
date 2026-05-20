@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{
-    Camera, GpuLight, GpuMaterial, GroupMask, LightType, ObjectDescriptor,
+    Camera, GpuLight, GpuMaterial, GroupMask, LightId, LightType,
+    MaterialId, MeshId, ObjectDescriptor, ObjectId,
     Renderer, RendererConfig, SceneActor,
 };
 use helio_asset_compat::{load_scene_file_with_config, upload_scene, LoadConfig};
@@ -352,4 +353,262 @@ async fn readback_rgba(
 
 fn align_up(n: u32, align: u32) -> u32 {
     (n + align - 1) & !(align - 1)
+}
+
+/// Returns (key, fill, rim) directional light travel vectors derived from the
+/// camera's own axes so the rig always illuminates the visible faces regardless
+/// of ViewDirection.
+fn camera_light_rig(camera: &Camera, target: Vec3) -> (Vec3, Vec3, Vec3) {
+    let forward = (target - camera.position).normalize();
+    let right   = forward.cross(Vec3::Y).normalize();
+    let up      = right.cross(forward).normalize();
+
+    // Key: slightly right + elevated, in the forward hemisphere
+    let key_dir  = (forward + right * 0.45 + up * 0.55).normalize();
+    // Fill: mirrored left, lower elevation
+    let fill_dir = (forward - right * 0.55 + up * 0.20).normalize();
+    // Rim: from behind, adds depth separation
+    let rim_dir  = (-forward + up * 0.30).normalize();
+
+    (key_dir, fill_dir, rim_dir)
+}
+
+// ── SnapshotBatch ─────────────────────────────────────────────────────────────
+
+/// Handles inserted for a single model render, removed before the next one.
+/// `remove_material` now cascades into `remove_texture` automatically (helio
+/// decrements texture ref counts and frees any that hit zero), so we only need
+/// to track the four primary resource types.
+#[derive(Default)]
+struct SceneSlot {
+    objects:   Vec<ObjectId>,
+    meshes:    Vec<MeshId>,
+    materials: Vec<MaterialId>,
+    lights:    Vec<LightId>,
+}
+
+impl SceneSlot {
+    fn clear(&mut self, renderer: &mut Renderer) {
+        // Order matters: objects before meshes/materials (ref counts), lights last.
+        for id in self.objects.drain(..)   { let _ = renderer.scene_mut().remove_object(id); }
+        for id in self.meshes.drain(..)    { let _ = renderer.scene_mut().remove_mesh(id); }
+        for id in self.materials.drain(..) { let _ = renderer.scene_mut().remove_material(id); }
+        for id in self.lights.drain(..)    { let _ = renderer.scene_mut().remove_light(id); }
+        // Textures are freed automatically by the remove_material cascade.
+    }
+}
+
+/// A persistent batch renderer — GPU and Helio are initialised once, then
+/// [`render`](SnapshotBatch::render) can be called for thousands of models.
+///
+/// The scene is fully cleared between models using Helio's remove APIs, so
+/// there is no memory growth across models.
+///
+/// # Example
+/// ```no_run
+/// use helio_snapshot::{SnapshotBatch, SnapshotConfig};
+///
+/// let mut batch = SnapshotBatch::new(SnapshotConfig::default()).unwrap();
+/// for path in &["a.fbx", "b.fbx", "c.fbx"] {
+///     let img = batch.render(path).unwrap();
+///     img.save(format!("{path}.png")).unwrap();
+/// }
+/// ```
+pub struct SnapshotBatch {
+    device:         Arc<wgpu::Device>,
+    queue:          Arc<wgpu::Queue>,
+    renderer:       Renderer,
+    target_texture: wgpu::Texture,
+    target_view:    wgpu::TextureView,
+    config:         SnapshotConfig,
+}
+
+impl SnapshotBatch {
+    /// Initialise GPU and Helio once.  All subsequent [`render`](Self::render)
+    /// calls share this device/queue/renderer.
+    pub fn new(config: SnapshotConfig) -> Result<Self, SnapshotError> {
+        pollster::block_on(Self::new_async(config))
+    }
+
+    async fn new_async(config: SnapshotConfig) -> Result<Self, SnapshotError> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::PRIMARY,
+            ..Default::default()
+        });
+
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            })
+            .await
+            .map_err(|_| SnapshotError::NoAdapter)?;
+
+        let (device, queue): (wgpu::Device, wgpu::Queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("helio-snapshot-batch"),
+                required_features: helio::required_wgpu_features(adapter.features()),
+                required_limits: helio::required_wgpu_limits(adapter.limits()),
+                ..Default::default()
+            })
+            .await?;
+
+        let device = Arc::new(device);
+        let queue  = Arc::new(queue);
+
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+        let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("batch-snapshot-target"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let renderer_cfg = RendererConfig::new(config.width, config.height, FORMAT)
+            .with_render_scale(1.0);
+
+        let renderer = Renderer::new_with_external_device(
+            device.clone(),
+            queue.clone(),
+            renderer_cfg,
+        );
+
+        Ok(Self { device, queue, renderer, target_texture, target_view, config })
+    }
+
+    /// Render `model_path` and return an RGBA image.
+    ///
+    /// The scene is wiped after each call, so this can be called in a tight
+    /// loop without any GPU memory growth.
+    pub fn render<P: AsRef<Path>>(
+        &mut self,
+        model_path: P,
+    ) -> Result<image::RgbaImage, SnapshotError> {
+        pollster::block_on(self.render_async(model_path))
+    }
+
+    async fn render_async<P: AsRef<Path>>(
+        &mut self,
+        model_path: P,
+    ) -> Result<image::RgbaImage, SnapshotError> {
+        // ── Load model ────────────────────────────────────────────────────────
+        let load_cfg = LoadConfig::default()
+            .with_uv_flip(self.config.flip_uv_y)
+            .with_merge_meshes(false);
+
+        let scene = load_scene_file_with_config(model_path, load_cfg)?;
+
+        // ── AABB + camera ─────────────────────────────────────────────────────
+        let (aabb_min, aabb_max) = compute_aabb(&scene)?;
+        let center = (aabb_min + aabb_max) * 0.5;
+        let radius = ((aabb_max - aabb_min) * 0.5).length().max(0.01);
+        let camera = build_camera(center, radius, &self.config);
+
+        let mut slot = SceneSlot::default();
+
+        // Upload textures, materials, and meshes via helio-asset-compat.
+        // Textures are freed automatically when materials are removed (helio
+        // cascades remove_material → remove any textures whose ref count hits 0).
+        let uploaded = upload_scene(&mut self.renderer, &scene)
+            .map_err(|e| SnapshotError::Render(e.to_string()))?;
+
+        slot.meshes.extend_from_slice(&uploaded.mesh_ids);
+        slot.materials.extend_from_slice(&uploaded.material_ids);
+
+        // Fallback material for meshes with no assignment.
+        let fallback_mat = self.renderer.scene_mut().insert_material(GpuMaterial {
+            base_color: [0.7, 0.65, 0.55, 1.0],
+            emissive: [0.0; 4],
+            roughness_metallic: [0.6, 0.0, 1.5, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal:     GpuMaterial::NO_TEXTURE,
+            tex_roughness:  GpuMaterial::NO_TEXTURE,
+            tex_emissive:   GpuMaterial::NO_TEXTURE,
+            tex_occlusion:  GpuMaterial::NO_TEXTURE,
+            workflow: 0, flags: 0, _pad: 0,
+        });
+        slot.materials.push(fallback_mat);
+
+        for (i, mesh) in scene.meshes.iter().enumerate() {
+            let mesh_id = match uploaded.mesh_ids.get(i) {
+                Some(&id) => id,
+                None => continue,
+            };
+            let material_id = uploaded.mesh_material(mesh).unwrap_or(fallback_mat);
+            let transform    = mesh.node_transform;
+            let world_center = transform.transform_point3(Vec3::ZERO);
+
+            if let Some(obj_id) = self.renderer
+                .scene_mut()
+                .insert_actor(SceneActor::object(ObjectDescriptor {
+                    mesh: mesh_id,
+                    material: material_id,
+                    transform,
+                    bounds: [world_center.x, world_center.y, world_center.z, radius],
+                    flags: 3,
+                    groups: GroupMask::NONE,
+                    movability: None,
+                }))
+                .as_object()
+            {
+                slot.objects.push(obj_id);
+            }
+        }
+
+        // ── Camera-relative three-point light rig ─────────────────────────────
+        let (key_dir, fill_dir, rim_dir) = camera_light_rig(&camera, center);
+
+        let push_light = |renderer: &mut Renderer, dir: Vec3, color: [f32; 3], intensity: f32, shadow: u32| -> Option<LightId> {
+            renderer.scene_mut()
+                .insert_actor(SceneActor::light(GpuLight {
+                    position_range:  [0.0, 0.0, 0.0, f32::MAX],
+                    direction_outer: [dir.x, dir.y, dir.z, 0.0],
+                    color_intensity: [color[0], color[1], color[2], intensity],
+                    shadow_index:    shadow,
+                    light_type:      LightType::Directional as u32,
+                    inner_angle:     0.0,
+                    _pad:            0,
+                }))
+                .as_light()
+        };
+
+        if let Some(id) = push_light(&mut self.renderer, key_dir,  [1.00, 0.97, 0.92], 3.5, 0)          { slot.lights.push(id); }
+        if let Some(id) = push_light(&mut self.renderer, fill_dir, [0.55, 0.65, 0.85], 1.2, u32::MAX)   { slot.lights.push(id); }
+        if let Some(id) = push_light(&mut self.renderer, rim_dir,  [0.90, 0.95, 1.00], 0.8, u32::MAX)   { slot.lights.push(id); }
+
+        self.renderer.scene_mut().flush();
+
+        // ── Render ────────────────────────────────────────────────────────────
+        self.renderer
+            .render(&camera, &self.target_view)
+            .map_err(|e| SnapshotError::Render(e.to_string()))?;
+
+        self.device.poll(wgpu::PollType::wait_indefinitely());
+
+        // ── Read pixels ───────────────────────────────────────────────────────
+        let img = readback_rgba(
+            &self.device,
+            &self.queue,
+            &self.target_texture,
+            self.config.width,
+            self.config.height,
+        ).await?;
+
+        // ── Clear scene for next model ────────────────────────────────────────
+        slot.clear(&mut self.renderer);
+        self.renderer.scene_mut().flush();
+
+        Ok(img)
+    }
 }

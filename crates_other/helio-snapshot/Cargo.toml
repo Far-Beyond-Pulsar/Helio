@@ -23,3 +23,7 @@ env_logger         = "0.11"
 [[example]]
 name = "snapshot_test_fbx"
 path = "examples/snapshot_test_fbx.rs"
+
+[[example]]
+name = "batch_benchmark"
+path = "examples/batch_benchmark.rs"

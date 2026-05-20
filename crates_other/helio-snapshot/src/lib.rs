@@ -21,4 +21,4 @@
 
 mod renderer;
 
-pub use renderer::{render_snapshot, SnapshotConfig, SnapshotError, ViewDirection};
+pub use renderer::{render_snapshot, SnapshotBatch, SnapshotConfig, SnapshotError, ViewDirection};
