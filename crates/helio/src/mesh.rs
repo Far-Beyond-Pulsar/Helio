@@ -110,10 +110,106 @@ pub struct MeshBuffers<'a> {
     pub indices: &'a wgpu::Buffer,
 }
 
-/// Shared vertex + index storage for one class of mesh geometry (static or dynamic).
+// ── Free-list range allocator ─────────────────────────────────────────────────
+
+/// First-fit range allocator with coalescing and tail-trimming.
+///
+/// Tracks free `(start, len)` ranges inside a logically contiguous buffer.
+/// On each `free()` call adjacent ranges are merged (O(free_ranges) but
+/// typically very small).  When the newly-freed range butts up against the
+/// end of the buffer, the tail is trimmed so callers can `truncate()` the
+/// physical buffer back to the new high-water mark, actually returning memory.
+#[derive(Default)]
+struct FreeListAllocator {
+    /// Sorted by start offset, coalesced, no overlaps.
+    free: Vec<(usize, usize)>,
+}
+
+impl FreeListAllocator {
+    /// Try to satisfy an allocation of `count` elements using the free list.
+    ///
+    /// Uses first-fit: picks the first range that is large enough.  Splits
+    /// oversized ranges, leaving the remainder on the list.
+    ///
+    /// Returns `Some(start)` on success or `None` when the caller must append.
+    fn alloc(&mut self, count: usize) -> Option<usize> {
+        if count == 0 {
+            return Some(0);
+        }
+        let idx = self.free.iter().position(|&(_, len)| len >= count)?;
+        let (start, len) = self.free[idx];
+        if len == count {
+            self.free.remove(idx);
+        } else {
+            self.free[idx] = (start + count, len - count);
+        }
+        Some(start)
+    }
+
+    /// Mark `[start, start + count)` as free.
+    ///
+    /// Adjacent ranges are coalesced.  If the resulting free range extends to
+    /// `buf_len` (the current logical end of the buffer), the tail is trimmed:
+    /// the free entry is removed and the new logical buffer end is returned so
+    /// the caller can `truncate()` the physical buffer.
+    ///
+    /// Returns `Some(new_buf_len)` when a tail-trim occurred, `None` otherwise.
+    fn free(&mut self, start: usize, count: usize, buf_len: usize) -> Option<usize> {
+        if count == 0 {
+            return None;
+        }
+
+        // Insert in sorted order.
+        let pos = self.free.partition_point(|&(s, _)| s < start);
+        self.free.insert(pos, (start, count));
+
+        // Coalesce with successor.
+        if pos + 1 < self.free.len() {
+            let (s, l) = self.free[pos];
+            let (ns, nl) = self.free[pos + 1];
+            if s + l == ns {
+                self.free[pos] = (s, l + nl);
+                self.free.remove(pos + 1);
+            }
+        }
+        // Coalesce with predecessor.
+        if pos > 0 {
+            let prev = pos - 1;
+            let (ps, pl) = self.free[prev];
+            let (s, l) = self.free[pos.min(self.free.len() - 1)];
+            if ps + pl == s {
+                self.free[prev] = (ps, pl + l);
+                // The coalesced entry is now at `prev`.
+                if prev + 1 < self.free.len() {
+                    self.free.remove(prev + 1);
+                }
+            }
+        }
+
+        // Tail-trim: if the last free range reaches the buffer end, remove it
+        // and report a new (smaller) logical end so the caller can truncate.
+        if let Some(&(tail_start, tail_len)) = self.free.last() {
+            if tail_start + tail_len == buf_len {
+                self.free.pop();
+                return Some(tail_start);
+            }
+        }
+
+        None
+    }
+
+    fn clear(&mut self) {
+        self.free.clear();
+    }
+}
+
+// ── Sub-pool (vertex + index + their allocators) ──────────────────────────────
+
 struct MeshSubPool {
     vertices: GrowableBuffer<PackedVertex>,
     indices: GrowableBuffer<u32>,
+    vertex_alloc: FreeListAllocator,
+    index_alloc: FreeListAllocator,
 }
 
 impl MeshSubPool {
@@ -145,6 +241,56 @@ impl MeshSubPool {
                 wgpu::BufferUsages::INDEX,
                 i_label,
             ),
+            vertex_alloc: FreeListAllocator::default(),
+            index_alloc: FreeListAllocator::default(),
+        }
+    }
+
+    /// Allocate space for `vcount` vertices and `icount` indices.
+    ///
+    /// Tries free ranges first; falls back to appending.  Returns the
+    /// `(first_vertex, first_index)` slot start.
+    fn alloc_and_write(
+        &mut self,
+        vertices: &[PackedVertex],
+        indices: &[u32],
+    ) -> (usize, usize) {
+        let vcount = vertices.len();
+        let icount = indices.len();
+
+        let vstart = if let Some(s) = self.vertex_alloc.alloc(vcount) {
+            self.vertices.update_range(s, vertices);
+            s
+        } else {
+            self.vertices.extend_from_slice(vertices).start
+        };
+
+        let istart = if let Some(s) = self.index_alloc.alloc(icount) {
+            self.indices.update_range(s, indices);
+            s
+        } else {
+            self.indices.extend_from_slice(indices).start
+        };
+
+        (vstart, istart)
+    }
+
+    /// Return the vertex and index ranges of `slice` to the free list.
+    ///
+    /// Performs tail-trimming: if the freed range reaches the current logical
+    /// end of the buffer, the buffer is truncated immediately, actually
+    /// releasing CPU and (on next flush) GPU memory.
+    fn free_slice(&mut self, slice: &MeshSlice) {
+        let vstart = slice.first_vertex as usize;
+        let vcount = slice.vertex_count as usize;
+        let istart = slice.first_index as usize;
+        let icount = slice.index_count as usize;
+
+        if let Some(new_vlen) = self.vertex_alloc.free(vstart, vcount, self.vertices.live_len()) {
+            self.vertices.truncate(new_vlen);
+        }
+        if let Some(new_ilen) = self.index_alloc.free(istart, icount, self.indices.live_len()) {
+            self.indices.truncate(new_ilen);
         }
     }
 
@@ -161,10 +307,10 @@ impl MeshSubPool {
     }
 }
 
+// ── Public MeshPool ───────────────────────────────────────────────────────────
+
 pub struct MeshPool {
-    /// Upload-once geometry (terrain, buildings, props).
     static_sub: MeshSubPool,
-    /// Per-frame-updatable geometry (skinned, morphed, procedural).
     dynamic_sub: MeshSubPool,
     meshes: SparsePool<MeshRecord, MeshId>,
 }
@@ -178,21 +324,10 @@ impl MeshPool {
         }
     }
 
-    /// Insert static (upload-once) mesh geometry. The geometry cannot be changed later.
-    ///
-    /// Use for terrain, buildings, props — any geometry that never deforms.
-    /// Objects that *move* but keep their shape (rigid bodies) should still use
-    /// `insert()` here; only the per-object transform changes via
-    /// [`update_object_transform`](crate::Scene::update_object_transform).
     pub fn insert(&mut self, mesh: MeshUpload) -> MeshId {
         self.insert_with_kind(mesh, MeshKind::Static)
     }
 
-    /// Insert dynamic mesh geometry that can be updated every frame.
-    ///
-    /// Use for skinned characters, morphed geometry, or any mesh whose vertex
-    /// positions/normals change at runtime. After inserting, call
-    /// [`update_dynamic_vertices`](Self::update_dynamic_vertices) each frame.
     pub fn insert_dynamic(&mut self, mesh: MeshUpload) -> MeshId {
         self.insert_with_kind(mesh, MeshKind::Dynamic)
     }
@@ -202,44 +337,49 @@ impl MeshPool {
             MeshKind::Static => &mut self.static_sub,
             MeshKind::Dynamic => &mut self.dynamic_sub,
         };
-        let vertex_range = sub.vertices.extend_from_slice(&mesh.vertices);
-        let index_range = sub.indices.extend_from_slice(&mesh.indices);
+
+        let (first_vertex, first_index) = sub.alloc_and_write(&mesh.vertices, &mesh.indices);
+
         let slice = MeshSlice {
-            first_vertex: vertex_range.start as u32,
-            vertex_count: (vertex_range.end - vertex_range.start) as u32,
-            first_index: index_range.start as u32,
-            index_count: (index_range.end - index_range.start) as u32,
+            first_vertex: first_vertex as u32,
+            vertex_count: mesh.vertices.len() as u32,
+            first_index: first_index as u32,
+            index_count: mesh.indices.len() as u32,
         };
-        let (id, _, _) = self.meshes.insert(MeshRecord {
-            slice,
-            ref_count: 0,
-            kind,
-        });
+
+        let (id, _, _) = self.meshes.insert(MeshRecord { slice, ref_count: 0, kind });
         id
     }
 
-    /// Upload a sectioned mesh: vertices are pushed ONCE into the shared vertex buffer;
-    /// each section's index list gets its own contiguous range in the index buffer.
-    /// Returns one `MeshId` per section — all share the same `first_vertex`.
-    ///
-    /// This is the GPU-native implementation of Unreal's Static Mesh sections.
     pub fn insert_sectioned(&mut self, upload: SectionedMeshUpload) -> MultiMeshRecord {
         let sub = &mut self.static_sub;
-        let vertex_range = sub.vertices.extend_from_slice(&upload.vertices);
-        let first_vertex = vertex_range.start as u32;
-        let vertex_count = (vertex_range.end - vertex_range.start) as u32;
+
+        // Vertices are shared across all sections — allocate once.
+        let first_vertex = if let Some(s) = sub.vertex_alloc.alloc(upload.vertices.len()) {
+            sub.vertices.update_range(s, &upload.vertices);
+            s
+        } else {
+            sub.vertices.extend_from_slice(&upload.vertices).start
+        };
+        let vertex_count = upload.vertices.len() as u32;
 
         let section_mesh_ids = upload
             .sections
             .iter()
             .map(|sec_indices| {
-                let index_range = sub.indices.extend_from_slice(sec_indices);
+                let first_index = if let Some(s) = sub.index_alloc.alloc(sec_indices.len()) {
+                    sub.indices.update_range(s, sec_indices);
+                    s
+                } else {
+                    sub.indices.extend_from_slice(sec_indices).start
+                };
+
                 let (id, _, _) = self.meshes.insert(MeshRecord {
                     slice: MeshSlice {
-                        first_vertex,
+                        first_vertex: first_vertex as u32,
                         vertex_count,
-                        first_index: index_range.start as u32,
-                        index_count: (index_range.end - index_range.start) as u32,
+                        first_index: first_index as u32,
+                        index_count: sec_indices.len() as u32,
                     },
                     ref_count: 0,
                     kind: MeshKind::Static,
@@ -248,19 +388,9 @@ impl MeshPool {
             })
             .collect();
 
-        MultiMeshRecord {
-            section_mesh_ids,
-            ref_count: 0,
-        }
+        MultiMeshRecord { section_mesh_ids, ref_count: 0 }
     }
 
-    /// Replace the vertex data of a **dynamic** mesh in-place.
-    ///
-    /// The new slice must have the same length as the original upload.
-    /// Returns an error string if `id` is invalid, is a static mesh, or the
-    /// vertex count doesn't match.
-    ///
-    /// On the next [`flush`](Self::flush), only the dirty byte range is re-uploaded.
     pub fn update_dynamic_vertices(
         &mut self,
         id: MeshId,
@@ -288,8 +418,17 @@ impl MeshPool {
         self.meshes.get_mut_with_slot(id).map(|(_, record)| record)
     }
 
+    /// Remove a mesh and immediately free its vertex/index ranges back into the
+    /// allocator.  If the freed ranges are at the tail of their buffer, the
+    /// buffer is truncated on the spot — no separate "compact" call needed.
     pub fn remove(&mut self, id: MeshId) -> Option<MeshRecord> {
-        self.meshes.remove(id).map(|(_, record)| record)
+        let (_, record) = self.meshes.remove(id)?;
+        let sub = match record.kind {
+            MeshKind::Static => &mut self.static_sub,
+            MeshKind::Dynamic => &mut self.dynamic_sub,
+        };
+        sub.free_slice(&record.slice);
+        Some(record)
     }
 
     pub fn buffers(&self) -> MeshBuffers<'_> {
@@ -300,17 +439,14 @@ impl MeshPool {
         self.dynamic_sub.buffers()
     }
 
-    /// Total vertices in the static vertex mega-buffer.
     pub fn total_vertex_count(&self) -> usize {
-        self.static_sub.vertices.len()
+        self.static_sub.vertices.live_len()
     }
 
-    /// Total indices in the static index mega-buffer.
     pub fn total_index_count(&self) -> usize {
-        self.static_sub.indices.len()
+        self.static_sub.indices.live_len()
     }
 
-    /// Number of unique mesh records currently live (sections each count as one).
     pub fn unique_mesh_count(&self) -> usize {
         self.meshes.live_len()
     }
@@ -320,9 +456,6 @@ impl MeshPool {
         self.dynamic_sub.flush(queue);
     }
 
-    /// Extracts a mesh's vertex and index data from the pool.
-    ///
-    /// Returns None if the mesh ID is invalid. Used internally for baking.
     pub(crate) fn extract_mesh_data(&self, id: MeshId) -> Option<MeshUpload> {
         let record = self.meshes.get(id)?;
         let slice = &record.slice;
@@ -342,4 +475,3 @@ impl MeshPool {
         Some(MeshUpload { vertices, indices })
     }
 }
-

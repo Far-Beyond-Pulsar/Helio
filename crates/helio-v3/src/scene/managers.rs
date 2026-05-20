@@ -159,6 +159,46 @@ impl<T: bytemuck::Pod> GrowableBuffer<T> {
         Some(removed)
     }
 
+    /// Shrink the CPU mirror to `new_len` elements, clamping the dirty range.
+    ///
+    /// The GPU buffer is not immediately reallocated (it is oversized); it will
+    /// be compacted the next time `flush()` triggers a 2× reallocation.  Draw
+    /// calls that reference ranges beyond `new_len` must already have been
+    /// removed before calling this, or they will read garbage.
+    pub fn truncate(&mut self, new_len: usize) {
+        if new_len >= self.data.len() {
+            return;
+        }
+        self.data.truncate(new_len);
+        if let Some((start, end)) = &mut self.dirty_range {
+            if *start >= new_len {
+                self.dirty_range = None;
+            } else {
+                *end = (*end).min(new_len);
+            }
+        }
+    }
+
+    /// Reset the CPU-side data to empty without resizing the GPU buffer.
+    ///
+    /// The GPU buffer retains stale bytes beyond offset 0 until new data is
+    /// pushed and flushed, but since no draw call references those ranges after
+    /// the reset, this is safe. The next push/extend marks `dirty_range = [0, n)`
+    /// and flush() re-uploads the new data starting at byte 0.
+    ///
+    /// Use this when an entire logical pool (mesh vertex buffer, material buffer,
+    /// etc.) is known to be empty so its address space can be reused from the
+    /// beginning rather than growing indefinitely.
+    pub fn reset(&mut self) {
+        self.data.clear();
+        self.dirty_range = None;
+    }
+
+    /// Returns the number of live elements in the CPU-side mirror.
+    pub fn live_len(&self) -> usize {
+        self.data.len()
+    }
+
     /// Flushes dirty data to GPU. O(1) if clean.
     pub fn flush(&mut self, queue: &wgpu::Queue) {
         let Some((start, end)) = self.dirty_range else {

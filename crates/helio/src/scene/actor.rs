@@ -113,14 +113,17 @@ pub trait SceneActorTrait {
 /// A mesh actor (upload + optional resource handle).
 #[derive(Debug, Clone)]
 pub struct MeshActor {
-    pub upload: MeshUpload,
+    /// Consumed exactly once in `on_attach`; `None` thereafter.
+    /// Structurally `None` after attachment so the actor never holds
+    /// vertex/index data longer than it takes to hand it to the mesh pool.
+    pub upload: Option<MeshUpload>,
     pub mesh_id: Option<MeshId>,
 }
 
 impl MeshActor {
     pub fn new(upload: MeshUpload) -> Self {
         Self {
-            upload,
+            upload: Some(upload),
             mesh_id: None,
         }
     }
@@ -133,7 +136,9 @@ impl MeshActor {
 impl SceneActorTrait for MeshActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.mesh_id.is_none() {
-            self.mesh_id = Some(scene.insert_mesh(self.upload.clone()));
+            if let Some(upload) = self.upload.take() {
+                self.mesh_id = Some(scene.insert_mesh(upload));
+            }
         }
     }
 

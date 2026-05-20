@@ -109,12 +109,15 @@ impl super::super::Scene {
         self.bump_texture_refs(&material.textures, 1)?;
 
         let gpu_textures = gpu_material_textures(&material.textures);
-        let (id, slot, is_new) = self.materials.insert(MaterialRecord {
+        let (id, slot, _is_new) = self.materials.insert(MaterialRecord {
             gpu: material.gpu,
             textures: material.textures,
             ref_count: 0,
         });
-        if is_new {
+        // Use the GrowableBuffer length as the source of truth for push-vs-update.
+        // After a pool reset the GPU buffer is empty (len=0) even though the SparsePool
+        // may be handing back a reused slot — we must push, not update into a void.
+        if slot >= self.gpu_scene.materials.live_len() {
             let pushed = self.gpu_scene.materials.push(material.gpu);
             debug_assert_eq!(pushed, slot);
             let pushed = self.material_textures.push(gpu_textures);
@@ -281,6 +284,17 @@ impl super::super::Scene {
             .material_textures
             .update(slot, tombstone_material_textures());
         debug_assert!(updated_material && updated_textures);
+
+        // When the pool is completely empty reset both GPU buffers so their
+        // address space is reused from offset 0 rather than growing indefinitely
+        // with tombstone entries.  Slots are recycled by the SparsePool freelist
+        // so new insertions will call update() rather than push(), but if the
+        // pool has fully drained we can compact back to zero length.
+        if self.materials.live_len() == 0 {
+            self.gpu_scene.materials.reset();
+            self.material_textures.reset();
+        }
+
         Ok(())
     }
 

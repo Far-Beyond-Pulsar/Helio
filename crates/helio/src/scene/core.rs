@@ -307,6 +307,37 @@ impl Scene {
         self.lights.iter_with_handles().map(|(id, record)| (id, &record.gpu))
     }
 
+    /// Remove every object, light, mesh, material, and texture from the scene.
+    ///
+    /// This is the efficient path for batch renderers that swap the entire scene
+    /// between frames. Objects are removed first, which cascades through the full
+    /// reference-count chain:
+    ///   `remove_object` → `remove_mesh` + `remove_material` → `remove_texture`
+    /// so no manual ID tracking is required by the caller.
+    ///
+    /// Calls `flush()` before returning so GPU buffers are synchronised.
+    pub fn clear(&mut self) {
+        // Collect all handles before mutating — iterators are invalidated by removal.
+        let object_ids: Vec<_> = self.objects.iter_with_handles().map(|(id, _)| id).collect();
+        let light_ids:  Vec<_> = self.lights.iter_with_handles().map(|(id, _)| id).collect();
+
+        // Objects first: the cascade frees meshes, materials, and textures.
+        for id in object_ids {
+            let _ = self.remove_object(id);
+        }
+
+        for id in light_ids {
+            let _ = self.remove_light(id);
+        }
+
+        // Drop all boxed actors.  Each actor holds any state it accumulated
+        // during its lifetime (e.g. the MeshActor's Option<MeshUpload> is
+        // already None after on_attach, but other actor types may hold data).
+        self.custom_actors.clear();
+
+        self.flush();
+    }
+
     /// Get the GPU light data for a single light by its handle.
     pub fn get_light(&self, id: LightId) -> Option<GpuLight> {
         self.lights.get_with_index(id).map(|(_, record)| record.gpu)

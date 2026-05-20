@@ -84,32 +84,40 @@ impl super::super::Scene {
             .map(|(_, r)| !r.movability.can_move())
             .unwrap_or(false);
 
+        // Capture handles before any mutation so we can cascade after.
+        let (mesh_id, material_id) = {
+            let record = self.objects.get_with_index(id)
+                .map(|(_, r)| (r.mesh, r.material))
+                .ok_or_else(|| invalid("object"))?;
+            record
+        };
+
         if self.objects_layout_optimized {
             // Optimization active - invalidate and mark for rebuild
             self.objects_layout_optimized = false;
             self.objects_dirty = true;
 
             // Still remove from CPU-side arena
-            let DenseRemove { removed, .. } =
+            let DenseRemove { .. } =
                 self.objects.remove(id).ok_or_else(|| invalid("object"))?;
 
             // Decrement ref counts
             if let Some(material) = self
                 .materials
-                .get_mut_with_slot(removed.material)
+                .get_mut_with_slot(material_id)
                 .map(|(_, m)| m)
             {
                 material.ref_count = material.ref_count.saturating_sub(1);
             }
-            if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
+            if let Some(mesh) = self.mesh_pool.get_mut(mesh_id) {
                 mesh.ref_count = mesh.ref_count.saturating_sub(1);
             }
         } else {
             // Persistent mode - swap_remove from GPU buffers
             let DenseRemove {
-                removed,
                 dense_index,
                 moved,
+                ..
             } = self.objects.remove(id).ok_or_else(|| invalid("object"))?;
 
             // Swap-remove from GPU buffers (O(1) operations)
@@ -145,12 +153,12 @@ impl super::super::Scene {
             // Decrement ref counts
             if let Some(material) = self
                 .materials
-                .get_mut_with_slot(removed.material)
+                .get_mut_with_slot(material_id)
                 .map(|(_, m)| m)
             {
                 material.ref_count = material.ref_count.saturating_sub(1);
             }
-            if let Some(mesh) = self.mesh_pool.get_mut(removed.mesh) {
+            if let Some(mesh) = self.mesh_pool.get_mut(mesh_id) {
                 mesh.ref_count = mesh.ref_count.saturating_sub(1);
             }
 
@@ -162,6 +170,16 @@ impl super::super::Scene {
                 self.movable_objects_generation += 1;
                 self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
             }
+        }
+
+        // Cascade: auto-free mesh and material when their ref counts hit zero.
+        // remove_material already cascades into remove_texture, so a single call
+        // here is sufficient to free the full chain.
+        if self.mesh_pool.get(mesh_id).map_or(false, |r| r.ref_count == 0) {
+            let _ = self.remove_mesh(mesh_id);
+        }
+        if self.materials.get(material_id).map_or(false, |r| r.ref_count == 0) {
+            let _ = self.remove_material(material_id);
         }
 
         // After removal: mark static atlas dirty if a static object was removed

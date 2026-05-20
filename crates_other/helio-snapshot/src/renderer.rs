@@ -3,9 +3,8 @@ use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{
-    Camera, GpuLight, GpuMaterial, GroupMask, LightId, LightType,
-    MaterialId, MeshId, ObjectDescriptor, ObjectId,
-    Renderer, RendererConfig, SceneActor,
+    Camera, GpuLight, GpuMaterial, GroupMask, LightType,
+    ObjectDescriptor, Renderer, RendererConfig, SceneActor,
 };
 use helio_asset_compat::{load_scene_file_with_config, upload_scene, LoadConfig};
 use thiserror::Error;
@@ -375,29 +374,6 @@ fn camera_light_rig(camera: &Camera, target: Vec3) -> (Vec3, Vec3, Vec3) {
 
 // ── SnapshotBatch ─────────────────────────────────────────────────────────────
 
-/// Handles inserted for a single model render, removed before the next one.
-/// `remove_material` now cascades into `remove_texture` automatically (helio
-/// decrements texture ref counts and frees any that hit zero), so we only need
-/// to track the four primary resource types.
-#[derive(Default)]
-struct SceneSlot {
-    objects:   Vec<ObjectId>,
-    meshes:    Vec<MeshId>,
-    materials: Vec<MaterialId>,
-    lights:    Vec<LightId>,
-}
-
-impl SceneSlot {
-    fn clear(&mut self, renderer: &mut Renderer) {
-        // Order matters: objects before meshes/materials (ref counts), lights last.
-        for id in self.objects.drain(..)   { let _ = renderer.scene_mut().remove_object(id); }
-        for id in self.meshes.drain(..)    { let _ = renderer.scene_mut().remove_mesh(id); }
-        for id in self.materials.drain(..) { let _ = renderer.scene_mut().remove_material(id); }
-        for id in self.lights.drain(..)    { let _ = renderer.scene_mut().remove_light(id); }
-        // Textures are freed automatically by the remove_material cascade.
-    }
-}
-
 /// A persistent batch renderer — GPU and Helio are initialised once, then
 /// [`render`](SnapshotBatch::render) can be called for thousands of models.
 ///
@@ -502,31 +478,21 @@ impl SnapshotBatch {
         &mut self,
         model_path: P,
     ) -> Result<image::RgbaImage, SnapshotError> {
-        // ── Load model ────────────────────────────────────────────────────────
+        // ── Load + upload ─────────────────────────────────────────────────────
         let load_cfg = LoadConfig::default()
             .with_uv_flip(self.config.flip_uv_y)
             .with_merge_meshes(false);
 
         let scene = load_scene_file_with_config(model_path, load_cfg)?;
 
-        // ── AABB + camera ─────────────────────────────────────────────────────
         let (aabb_min, aabb_max) = compute_aabb(&scene)?;
         let center = (aabb_min + aabb_max) * 0.5;
         let radius = ((aabb_max - aabb_min) * 0.5).length().max(0.01);
         let camera = build_camera(center, radius, &self.config);
 
-        let mut slot = SceneSlot::default();
-
-        // Upload textures, materials, and meshes via helio-asset-compat.
-        // Textures are freed automatically when materials are removed (helio
-        // cascades remove_material → remove any textures whose ref count hits 0).
         let uploaded = upload_scene(&mut self.renderer, &scene)
             .map_err(|e| SnapshotError::Render(e.to_string()))?;
 
-        slot.meshes.extend_from_slice(&uploaded.mesh_ids);
-        slot.materials.extend_from_slice(&uploaded.material_ids);
-
-        // Fallback material for meshes with no assignment.
         let fallback_mat = self.renderer.scene_mut().insert_material(GpuMaterial {
             base_color: [0.7, 0.65, 0.55, 1.0],
             emissive: [0.0; 4],
@@ -538,54 +504,41 @@ impl SnapshotBatch {
             tex_occlusion:  GpuMaterial::NO_TEXTURE,
             workflow: 0, flags: 0, _pad: 0,
         });
-        slot.materials.push(fallback_mat);
 
         for (i, mesh) in scene.meshes.iter().enumerate() {
-            let mesh_id = match uploaded.mesh_ids.get(i) {
-                Some(&id) => id,
-                None => continue,
-            };
-            let material_id = uploaded.mesh_material(mesh).unwrap_or(fallback_mat);
+            let Some(&mesh_id) = uploaded.mesh_ids.get(i) else { continue };
+            let material_id  = uploaded.mesh_material(mesh).unwrap_or(fallback_mat);
             let transform    = mesh.node_transform;
             let world_center = transform.transform_point3(Vec3::ZERO);
 
-            if let Some(obj_id) = self.renderer
-                .scene_mut()
-                .insert_actor(SceneActor::object(ObjectDescriptor {
-                    mesh: mesh_id,
-                    material: material_id,
-                    transform,
-                    bounds: [world_center.x, world_center.y, world_center.z, radius],
-                    flags: 3,
-                    groups: GroupMask::NONE,
-                    movability: None,
-                }))
-                .as_object()
-            {
-                slot.objects.push(obj_id);
-            }
+            self.renderer.scene_mut().insert_actor(SceneActor::object(ObjectDescriptor {
+                mesh: mesh_id,
+                material: material_id,
+                transform,
+                bounds: [world_center.x, world_center.y, world_center.z, radius],
+                flags: 3,
+                groups: GroupMask::NONE,
+                movability: None,
+            }));
         }
 
         // ── Camera-relative three-point light rig ─────────────────────────────
         let (key_dir, fill_dir, rim_dir) = camera_light_rig(&camera, center);
-
-        let push_light = |renderer: &mut Renderer, dir: Vec3, color: [f32; 3], intensity: f32, shadow: u32| -> Option<LightId> {
-            renderer.scene_mut()
-                .insert_actor(SceneActor::light(GpuLight {
-                    position_range:  [0.0, 0.0, 0.0, f32::MAX],
-                    direction_outer: [dir.x, dir.y, dir.z, 0.0],
-                    color_intensity: [color[0], color[1], color[2], intensity],
-                    shadow_index:    shadow,
-                    light_type:      LightType::Directional as u32,
-                    inner_angle:     0.0,
-                    _pad:            0,
-                }))
-                .as_light()
-        };
-
-        if let Some(id) = push_light(&mut self.renderer, key_dir,  [1.00, 0.97, 0.92], 3.5, 0)          { slot.lights.push(id); }
-        if let Some(id) = push_light(&mut self.renderer, fill_dir, [0.55, 0.65, 0.85], 1.2, u32::MAX)   { slot.lights.push(id); }
-        if let Some(id) = push_light(&mut self.renderer, rim_dir,  [0.90, 0.95, 1.00], 0.8, u32::MAX)   { slot.lights.push(id); }
+        for (dir, color, intensity, shadow) in [
+            (key_dir,  [1.00_f32, 0.97, 0.92], 3.5_f32, 0_u32),
+            (fill_dir, [0.55, 0.65, 0.85],     1.2,     u32::MAX),
+            (rim_dir,  [0.90, 0.95, 1.00],     0.8,     u32::MAX),
+        ] {
+            self.renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
+                position_range:  [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [dir.x, dir.y, dir.z, 0.0],
+                color_intensity: [color[0], color[1], color[2], intensity],
+                shadow_index:    shadow,
+                light_type:      LightType::Directional as u32,
+                inner_angle:     0.0,
+                _pad:            0,
+            }));
+        }
 
         self.renderer.scene_mut().flush();
 
@@ -596,7 +549,7 @@ impl SnapshotBatch {
 
         self.device.poll(wgpu::PollType::wait_indefinitely());
 
-        // ── Read pixels ───────────────────────────────────────────────────────
+        // ── Readback ──────────────────────────────────────────────────────────
         let img = readback_rgba(
             &self.device,
             &self.queue,
@@ -605,9 +558,9 @@ impl SnapshotBatch {
             self.config.height,
         ).await?;
 
-        // ── Clear scene for next model ────────────────────────────────────────
-        slot.clear(&mut self.renderer);
-        self.renderer.scene_mut().flush();
+        // Scene::clear() — no ID tracking needed; Helio's cascade handles
+        // objects → meshes → materials → textures → lights automatically.
+        self.renderer.scene_mut().clear();
 
         Ok(img)
     }
