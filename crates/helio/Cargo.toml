@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 arrayvec = "0.7"
 bytemuck = { version = "1.14", features = ["derive"] }
-glam = { version = "0.29", features = ["bytemuck"] }
+glam.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
 helio-v3 = { path = "../helio-v3", default-features = false }
 helio-pass-billboard = { path = "../helio-pass-billboard" }
