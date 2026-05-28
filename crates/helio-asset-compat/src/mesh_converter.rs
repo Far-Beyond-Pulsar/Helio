@@ -111,54 +111,33 @@ pub fn convert_primitive(
             }
         }
 
-        println!(
-            "━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
+        log::debug!(
+            "Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
             mesh.name, min_u, max_u, min_v, max_v
         );
 
-        // Warn if UVs are outside normal range
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
-            println!("⚠️  Mesh '{}' has UVs OUTSIDE [0,1] range!", mesh.name);
+            log::warn!("Mesh '{}' has UVs outside [0,1] range", mesh.name);
         }
     }
 
-    // Convert all vertices
     let vertices: Vec<PackedVertex> = mesh
         .vertices
         .iter()
         .map(|v| convert_vertex(v, config.flip_uv_y))
         .collect();
 
-    // Use only this primitive's indices
     let indices = primitive.indices.clone();
 
-    // DEBUG: Check if indices are in valid range
     let max_index = indices.iter().max().copied().unwrap_or(0);
     let vertices_len = vertices.len();
     if max_index >= vertices_len as u32 {
-        println!(
-            "⚠️  CRITICAL: Mesh '{}' has indices OUT OF BOUNDS! max_index={}, vertices={}",
-            mesh.name, max_index, vertices_len
-        );
-        println!(
-            "    First 10 indices: {:?}",
+        log::error!(
+            "Mesh '{}': index out of bounds — max_index={}, vertices={}; first 10: {:?}",
+            mesh.name, max_index, vertices_len,
             &indices[0..indices.len().min(10)]
         );
-    } else {
-        println!(
-            "✓ Indices valid: max={}, vertices={}",
-            max_index, vertices_len
-        );
     }
-
-    println!(
-        "✓ Converted primitive '{}': {} verts, {} indices, material {:?}, UV flip: {}",
-        mesh.name,
-        vertices.len(),
-        indices.len(),
-        primitive.material_index,
-        config.flip_uv_y
-    );
 
     Ok((vertices, indices))
 }
@@ -192,14 +171,13 @@ pub fn convert_mesh(mesh: &Mesh) -> Result<(Vec<PackedVertex>, Vec<u32>)> {
             }
         }
 
-        println!(
-            "━━━ Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}] ━━━",
+        log::debug!(
+            "Mesh '{}' UV range: U=[{:.3}, {:.3}], V=[{:.3}, {:.3}]",
             mesh.name, min_u, max_u, min_v, max_v
         );
 
-        // Warn if UVs are outside normal range
         if min_u < -0.1 || max_u > 1.1 || min_v < -0.1 || max_v > 1.1 {
-            println!("⚠️  Mesh '{}' has UVs OUTSIDE [0,1] range!", mesh.name);
+            log::warn!("Mesh '{}' has UVs outside [0,1] range", mesh.name);
         }
     }
 
