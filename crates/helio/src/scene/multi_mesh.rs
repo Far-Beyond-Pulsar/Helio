@@ -146,6 +146,7 @@ impl super::Scene {
                 flags: 0b11, // casts + receives shadows
                 groups: GroupMask::NONE,
                 movability,
+                user_tag: 0,
             })?;
             section_objects.push(obj_id);
         }

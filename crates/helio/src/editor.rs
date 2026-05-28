@@ -566,7 +566,7 @@ impl EditorState {
         let mut best_t  = f32::MAX;
         let mut best_id: Option<SceneActorId> = None;
 
-        for (id, _transform, bounds) in scene.iter_objects_for_editor() {
+        for (id, _transform, bounds, _tag) in scene.iter_objects_for_editor() {
             let center = Vec3::new(bounds[0], bounds[1], bounds[2]);
             let radius = bounds[3];
             if let Some(t) = ray_sphere_intersect(ray_origin, ray_dir, center, radius) {

@@ -101,6 +101,7 @@ pub fn insert_object_with_movability(
         flags: 0,
         groups: helio::GroupMask::NONE,
         movability,
+        user_tag: 0,
     }));
 
     object_actor_id

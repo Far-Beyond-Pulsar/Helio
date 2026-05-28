@@ -118,6 +118,7 @@ pub(super) fn object_gpu_data(
         material: desc.material,
         groups: desc.groups,
         movability: desc.movability.unwrap_or_default(),
+        user_tag: desc.user_tag,
         instance: GpuInstanceData {
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),

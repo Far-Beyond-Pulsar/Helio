@@ -155,6 +155,8 @@ pub struct LightActor {
     pub light: GpuLight,
     pub light_id: Option<LightId>,
     pub movability: Option<libhelio::Movability>,
+    /// Application-defined tag — see [`crate::ObjectDescriptor::user_tag`].
+    pub user_tag: u64,
 }
 
 impl LightActor {
@@ -163,6 +165,7 @@ impl LightActor {
             light,
             light_id: None,
             movability: None,
+            user_tag: 0,
         }
     }
 
@@ -171,6 +174,16 @@ impl LightActor {
             light,
             light_id: None,
             movability,
+            user_tag: 0,
+        }
+    }
+
+    pub fn new_with_tag(light: GpuLight, user_tag: u64) -> Self {
+        Self {
+            light,
+            light_id: None,
+            movability: None,
+            user_tag,
         }
     }
 
@@ -182,7 +195,11 @@ impl LightActor {
 impl SceneActorTrait for LightActor {
     fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
         if self.light_id.is_none() {
-            self.light_id = Some(scene.insert_light_with_movability(self.light, self.movability));
+            self.light_id = Some(scene.insert_light_with_movability(
+                self.light,
+                self.movability,
+                self.user_tag,
+            ));
         }
     }
 
@@ -673,6 +690,10 @@ impl SceneActor {
 
     pub fn light(light: GpuLight) -> Self {
         SceneActor::Light(LightActor::new(light))
+    }
+
+    pub fn light_with_tag(light: GpuLight, user_tag: u64) -> Self {
+        SceneActor::Light(LightActor::new_with_tag(light, user_tag))
     }
 
     pub fn light_with_movability(light: GpuLight, movability: Option<libhelio::Movability>) -> Self {

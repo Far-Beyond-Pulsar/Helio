@@ -302,9 +302,11 @@ impl Scene {
         &self.gpu_scene
     }
 
-    /// Iterate over all live lights, yielding the handle and GPU light data.
-    pub fn iter_lights(&self) -> impl Iterator<Item = (LightId, &GpuLight)> + '_ {
-        self.lights.iter_with_handles().map(|(id, record)| (id, &record.gpu))
+    /// Iterate over all live lights, yielding the handle, GPU light data, and user tag.
+    pub fn iter_lights(&self) -> impl Iterator<Item = (LightId, &GpuLight, u64)> + '_ {
+        self.lights
+            .iter_with_handles()
+            .map(|(id, record)| (id, &record.gpu, record.user_tag))
     }
 
     /// Remove every object, light, mesh, material, and texture from the scene.

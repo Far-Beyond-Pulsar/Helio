@@ -70,6 +70,16 @@ pub struct ObjectDescriptor {
     /// Movability mode. Defaults to Static when None.
     /// Set to Some(Movability::Movable) for objects that will update their transforms at runtime.
     pub movability: Option<libhelio::Movability>,
+
+    /// Application-defined tag stored alongside the object on the CPU side.
+    ///
+    /// Helio does not interpret this value. Engines use it to associate a scene
+    /// object with an external identifier (e.g. a hashed scene-database ID)
+    /// so that [`crate::ScenePicker`] hits can be resolved back to the owning
+    /// entity without maintaining a separate reverse-lookup map.
+    ///
+    /// Defaults to `0` (no tag).
+    pub user_tag: u64,
 }
 
 /// A scene object exposed for CPU-side picking queries.
@@ -86,6 +96,9 @@ pub struct PickableObject {
 
     /// Current world-space model matrix (updated by `update_object_transform`).
     pub transform: Mat4,
+
+    /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
+    pub user_tag: u64,
 }
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -116,6 +129,8 @@ pub(crate) struct LightRecord {
     pub gpu: GpuLight,
     /// Mobility mode (Static, Stationary, Movable).
     pub movability: libhelio::Movability,
+    /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
+    pub user_tag: u64,
 }
 
 /// Internal record for a scene object.
@@ -135,6 +150,9 @@ pub(crate) struct ObjectRecord {
 
     /// Movability mode (Static, Stationary, Movable).
     pub movability: libhelio::Movability,
+
+    /// Application-defined tag — see [`ObjectDescriptor::user_tag`].
+    pub user_tag: u64,
 
     /// GPU instance data (model matrix, normal matrix, bounds, mesh/material indices).
     pub instance: GpuInstanceData,

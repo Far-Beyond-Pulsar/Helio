@@ -349,6 +349,11 @@ pub struct PickHit {
     /// World-space surface normal at the hit point (unit length, pointing
     /// toward the ray origin, i.e. front-face convention).
     pub normal: Vec3,
+
+    /// Application-defined tag from the hit actor — see
+    /// [`crate::ObjectDescriptor::user_tag`].  Zero if the actor was inserted
+    /// without a tag.
+    pub user_tag: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -368,6 +373,8 @@ struct PickInstance {
     /// World-space tight AABB derived from `transform + bvh.local_{min,max}`.
     world_min: Vec3,
     world_max: Vec3,
+    /// Application-defined tag from [`crate::ObjectDescriptor::user_tag`].
+    user_tag: u64,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -471,6 +478,7 @@ impl ScenePicker {
                 normal_mat,
                 world_min,
                 world_max,
+                user_tag: obj.user_tag,
             });
         }
     }
@@ -564,12 +572,13 @@ impl ScenePicker {
                         t: world_t,
                         position: world_hit,
                         normal: world_normal,
+                        user_tag: inst.user_tag,
                     });
                 }
             }
         }
 
-        for (light_id, light_record) in scene.iter_lights() {
+        for (light_id, light_record, light_tag) in scene.iter_lights() {
             if light_record.light_type != libhelio::LightType::Point as u32
                 && light_record.light_type != libhelio::LightType::Spot as u32
             {
@@ -602,6 +611,7 @@ impl ScenePicker {
                 t,
                 position: world_hit,
                 normal: world_normal,
+                user_tag: light_tag,
             });
         }
 

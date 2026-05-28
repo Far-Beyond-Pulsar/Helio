@@ -201,6 +201,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             flags: 3, // casts + receives shadow
             groups: GroupMask::NONE,
             movability: None,
+            user_tag: 0,
         }));
     }
 
@@ -519,6 +520,7 @@ impl SnapshotBatch {
                 flags: 3,
                 groups: GroupMask::NONE,
                 movability: None,
+                user_tag: 0,
             }));
         }
 

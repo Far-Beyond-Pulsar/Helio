@@ -48,14 +48,15 @@ impl super::super::Scene {
     /// });
     /// ```
     pub(in crate::scene) fn insert_light(&mut self, light: GpuLight) -> LightId {
-        self.insert_light_with_movability(light, None)
+        self.insert_light_with_movability(light, None, 0)
     }
 
-    /// Insert a light into the scene with explicit movability.
+    /// Insert a light into the scene with explicit movability and user tag.
     pub(in crate::scene) fn insert_light_with_movability(
         &mut self,
         light: GpuLight,
         movability: Option<libhelio::Movability>,
+        user_tag: u64,
     ) -> LightId {
         // Default lights to Movable (most common case for real-time lighting).
         // Static lights are opt-in for baking scenarios.
@@ -63,6 +64,7 @@ impl super::super::Scene {
         let (id, dense_index) = self.lights.insert(LightRecord {
             gpu: light,
             movability,
+            user_tag,
         });
         let pushed = self.gpu_scene.lights.push(light);
         debug_assert_eq!(pushed, dense_index);

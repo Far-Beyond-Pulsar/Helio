@@ -340,12 +340,14 @@ impl super::super::Scene {
     /// ray-sphere picking.
     ///
     /// This iterator is O(N) in the number of live objects; do not call it per-vertex.
+    /// Iterate over all live objects for editor use, yielding handle, transform,
+    /// bounds, and user tag.
     pub fn iter_objects_for_editor(
         &self,
-    ) -> impl Iterator<Item = (ObjectId, Mat4, [f32; 4])> + '_ {
+    ) -> impl Iterator<Item = (ObjectId, Mat4, [f32; 4], u64)> + '_ {
         self.objects.iter_with_handles().map(|(id, rec)| {
             let transform = Mat4::from_cols_array(&rec.instance.model);
-            (id, transform, rec.instance.bounds)
+            (id, transform, rec.instance.bounds, rec.user_tag)
         })
     }
 
@@ -367,6 +369,7 @@ impl super::super::Scene {
             flags:       record.instance.flags,
             groups:      GroupMask(record.groups.0),
             movability:  Some(record.movability),
+            user_tag:    record.user_tag,
         })
     }
 
@@ -380,6 +383,7 @@ impl super::super::Scene {
             id,
             mesh_id: rec.mesh,
             transform: Mat4::from_cols_array(&rec.instance.model),
+            user_tag: rec.user_tag,
         })
     }
 }
