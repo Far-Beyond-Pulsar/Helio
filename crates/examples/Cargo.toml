@@ -135,6 +135,10 @@ path = "terra_forge_demo.rs"
 name = "editor_demo"
 path = "editor_demo.rs"
 
+[[bin]]
+name = "editor_demo_mini"
+path = "editor_demo_mini.rs"
+
 
 
 [dependencies]
