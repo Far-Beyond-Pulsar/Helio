@@ -1,5 +1,5 @@
-// Tests for helio-pass-taa: TaaUniform size, Halton properties, history ping-pong,
-// feedback clamp. All tests are pure Rust — no GPU device required.
+// Tests for helio-pass-taa: TaaUniform size, R1/R2 jitter properties,
+// history ping-pong, feedback clamp. All tests are pure Rust — no GPU device required.
 
 use std::mem;
 
@@ -8,43 +8,29 @@ use std::mem;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TaaUniform {
-    feedback_min: f32,
-    feedback_max: f32,
     jitter: [f32; 2],
+    upscale_factor: f32,
+    reset: u32,
+    time_delta: f32,
+    _pad: f32,
 }
 
-/// Exact Halton(2,3) sequence from the source (16 entries, values in (0,1)).
-const HALTON_JITTER: [[f32; 2]; 16] = [
-    [0.500000, 0.333333],
-    [0.250000, 0.666667],
-    [0.750000, 0.111111],
-    [0.125000, 0.444444],
-    [0.625000, 0.777778],
-    [0.375000, 0.222222],
-    [0.875000, 0.555556],
-    [0.062500, 0.888889],
-    [0.562500, 0.037037],
-    [0.312500, 0.370370],
-    [0.812500, 0.703704],
-    [0.187500, 0.148148],
-    [0.687500, 0.481481],
-    [0.437500, 0.814815],
-    [0.937500, 0.259259],
-    [0.031250, 0.592593],
-];
+/// Replicates the `r1_r2_jitter()` function from `lib.rs`.
+fn r1_r2_jitter(frame: u64) -> [f32; 2] {
+    const INV_R1: f64 = 0.7548776662466927;
+    const INV_R2: f64 = 0.5698402905980539;
+    const PHASE: f64 = 0.5;
+    let fx = frame as f64 * INV_R1 + PHASE;
+    let fy = frame as f64 * INV_R2 + PHASE;
+    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
+}
 
 // ── TaaUniform size tests ─────────────────────────────────────────────────────
 
 #[test]
-fn taa_uniform_size_is_16() {
-    assert_eq!(mem::size_of::<TaaUniform>(), 16,
-        "feedback_min(4) + feedback_max(4) + jitter[2](8) = 16");
-}
-
-#[test]
-fn taa_uniform_feedback_plus_jitter_layout() {
-    // 2 × f32 + [f32;2] = 2×4 + 8 = 16
-    assert_eq!(2 * 4 + 8, 16usize);
+fn taa_uniform_size_is_24() {
+    assert_eq!(mem::size_of::<TaaUniform>(), 24,
+        "jitter(8) + upscale_factor(4) + reset(4) + time_delta(4) + _pad(4) = 24");
 }
 
 #[test]
@@ -53,151 +39,110 @@ fn taa_uniform_alignment_is_4() {
 }
 
 #[test]
-fn taa_uniform_size_divisible_by_16() {
-    // Matches WebGPU uniform alignment requirements
-    assert_eq!(mem::size_of::<TaaUniform>() % 16, 0);
+fn taa_uniform_size_aligned_to_8() {
+    // WGSL vec2 align 8 → struct size must be multiple of 8.
+    assert_eq!(mem::size_of::<TaaUniform>() % 8, 0);
 }
 
-// ── Feedback clamp tests ──────────────────────────────────────────────────────
+// ── R1/R2 jitter range tests ─────────────────────────────────────────────────
 
 #[test]
-fn feedback_min_less_than_feedback_max() {
-    let u = TaaUniform { feedback_min: 0.88, feedback_max: 0.97, jitter: [0.0; 2] };
-    assert!(u.feedback_min < u.feedback_max);
-}
-
-#[test]
-fn feedback_min_in_0_1() {
-    let u = TaaUniform { feedback_min: 0.88, feedback_max: 0.97, jitter: [0.0; 2] };
-    assert!(u.feedback_min >= 0.0 && u.feedback_min <= 1.0);
-}
-
-#[test]
-fn feedback_max_in_0_1() {
-    let u = TaaUniform { feedback_min: 0.88, feedback_max: 0.97, jitter: [0.0; 2] };
-    assert!(u.feedback_max >= 0.0 && u.feedback_max <= 1.0);
-}
-
-#[test]
-fn feedback_blend_produces_temporal_average() {
-    let feedback = 0.9f32;
-    let current = 1.0f32;
-    let history = 0.0f32;
-    let blended = current * (1.0 - feedback) + history * feedback;
-    assert!((blended - 0.1f32).abs() < 1e-6f32);
-}
-
-#[test]
-fn feedback_one_gives_full_history() {
-    let current = 0.8f32;
-    let history = 0.2f32;
-    let blended = current * 0.0 + history * 1.0;
-    assert!((blended - history).abs() < 1e-6f32);
-}
-
-#[test]
-fn feedback_zero_gives_full_current() {
-    let current = 0.8f32;
-    let history = 0.2f32;
-    let blended = current * 1.0 + history * 0.0;
-    assert!((blended - current).abs() < 1e-6f32);
-}
-
-// ── Halton sequence count tests ───────────────────────────────────────────────
-
-#[test]
-fn halton_has_16_entries() {
-    assert_eq!(HALTON_JITTER.len(), 16);
-}
-
-#[test]
-fn halton_all_x_values_in_open_0_1() {
-    for (i, entry) in HALTON_JITTER.iter().enumerate() {
-        assert!(entry[0] > 0.0f32 && entry[0] < 1.0f32,
-            "entry[{i}].x = {} not in (0,1)", entry[0]);
+fn r1_r2_jitter_x_in_half_range() {
+    for frame in 0..256u64 {
+        let [jx, _] = r1_r2_jitter(frame);
+        assert!(jx >= -0.5 && jx < 0.5, "frame {frame}: jx = {jx}");
     }
 }
 
 #[test]
-fn halton_all_y_values_in_open_0_1() {
-    for (i, entry) in HALTON_JITTER.iter().enumerate() {
-        assert!(entry[1] > 0.0f32 && entry[1] < 1.0f32,
-            "entry[{i}].y = {} not in (0,1)", entry[1]);
+fn r1_r2_jitter_y_in_half_range() {
+    for frame in 0..256u64 {
+        let [_, jy] = r1_r2_jitter(frame);
+        assert!(jy >= -0.5 && jy < 0.5, "frame {frame}: jy = {jy}");
     }
 }
 
 #[test]
-fn halton_no_x_duplicates() {
-    let xs: Vec<u32> = HALTON_JITTER.iter()
-        .map(|e| (e[0] * 1_000_000.0) as u32)
-        .collect();
-    let set: std::collections::HashSet<_> = xs.iter().cloned().collect();
-    assert_eq!(set.len(), 16, "Duplicate x values: {:?}", xs);
+fn r1_r2_covers_both_signs_x() {
+    let mut neg = 0u32;
+    let mut pos = 0u32;
+    for frame in 0..256u64 {
+        let [jx, _] = r1_r2_jitter(frame);
+        if jx < 0.0 { neg += 1; } else { pos += 1; }
+    }
+    assert!(neg > 0 && pos > 0, "neg={neg} pos={pos}");
 }
 
 #[test]
-fn halton_no_y_duplicates() {
-    let ys: Vec<u32> = HALTON_JITTER.iter()
-        .map(|e| (e[1] * 1_000_000.0) as u32)
-        .collect();
-    let set: std::collections::HashSet<_> = ys.iter().cloned().collect();
-    assert_eq!(set.len(), 16, "Duplicate y values: {:?}", ys);
+fn r1_r2_covers_both_signs_y() {
+    let mut neg = 0u32;
+    let mut pos = 0u32;
+    for frame in 0..256u64 {
+        let [_, jy] = r1_r2_jitter(frame);
+        if jy < 0.0 { neg += 1; } else { pos += 1; }
+    }
+    assert!(neg > 0 && pos > 0, "neg={neg} pos={pos}");
 }
 
 #[test]
-fn halton_first_entry_x_is_0_5() {
-    assert!((HALTON_JITTER[0][0] - 0.5f32).abs() < 1e-5f32);
+fn r1_r2_mean_near_zero() {
+    let n = 256usize;
+    let mean_x: f32 = (0..n).map(|f| r1_r2_jitter(f as u64)[0]).sum::<f32>() / n as f32;
+    let mean_y: f32 = (0..n).map(|f| r1_r2_jitter(f as u64)[1]).sum::<f32>() / n as f32;
+    assert!(mean_x.abs() < 0.05, "mean_x = {mean_x}");
+    assert!(mean_y.abs() < 0.05, "mean_y = {mean_y}");
+}
+
+// ── R1/R2 unique values (no repeats within window) ────────────────────────────
+
+#[test]
+fn r1_r2_no_duplicates_in_256_frames() {
+    let mut set = std::collections::HashSet::new();
+    for frame in 0..256u64 {
+        let [jx, jy] = r1_r2_jitter(frame);
+        let key = ((jx * 1_000_000.0) as i32, (jy * 1_000_000.0) as i32);
+        assert!(set.insert(key), "duplicate at frame {frame}: ({jx}, {jy})");
+    }
+    assert_eq!(set.len(), 256);
+}
+
+// ── R1/R2 is deterministic ────────────────────────────────────────────────────
+
+#[test]
+fn r1_r2_deterministic() {
+    for frame in 0..64u64 {
+        assert_eq!(r1_r2_jitter(frame), r1_r2_jitter(frame));
+    }
+}
+
+// ── Upscale factor sanity ─────────────────────────────────────────────────────
+
+#[test]
+fn upscale_factor_computed_correctly() {
+    let internal = 960u32;
+    let output = 1920u32;
+    let factor = output as f32 / internal as f32;
+    assert!((factor - 2.0).abs() < 1e-5);
 }
 
 #[test]
-fn halton_first_entry_y_is_one_third() {
-    assert!((HALTON_JITTER[0][1] - 1.0f32 / 3.0f32).abs() < 1e-4f32);
-}
-
-#[test]
-fn halton_second_entry_x_is_0_25() {
-    assert!((HALTON_JITTER[1][0] - 0.25f32).abs() < 1e-5f32);
-}
-
-#[test]
-fn halton_third_entry_x_is_0_75() {
-    assert!((HALTON_JITTER[2][0] - 0.75f32).abs() < 1e-5f32);
+fn upscale_factor_at_least_one() {
+    for internal in [1920, 960, 640, 480] {
+        let output = 1920u32;
+        let factor = (output as f32 / internal as f32).max(1.0);
+        assert!(factor >= 1.0, "internal={internal} factor={factor}");
+    }
 }
 
 // ── History ping-pong tests ───────────────────────────────────────────────────
 
 #[test]
-fn frame_modulo_16_cycles_through_all_jitter_entries() {
-    let mut seen = std::collections::HashSet::new();
-    for frame in 0u32..16 {
-        seen.insert(frame % 16);
+fn frame_num_advances_monotonically() {
+    let values: Vec<[f32; 2]> = (0..64).map(|f| r1_r2_jitter(f)).collect();
+    // All 64 entries must be distinct (non-repeating)
+    let mut set = std::collections::HashSet::new();
+    for v in &values {
+        let key = ((v[0] * 1_000_000.0) as i32, (v[1] * 1_000_000.0) as i32);
+        assert!(set.insert(key), "non-unique jitter {v:?}");
     }
-    assert_eq!(seen.len(), 16);
-}
-
-#[test]
-fn frame_modulo_wraps_at_16() {
-    assert_eq!(16u32 % 16, 0);
-    assert_eq!(17u32 % 16, 1);
-    assert_eq!(31u32 % 16, 15);
-    assert_eq!(32u32 % 16, 0);
-}
-
-#[test]
-fn jitter_centered_after_offset_by_half() {
-    // Jitter is offset by -0.5 at upload time; result should be in (-0.5, 0.5)
-    for entry in &HALTON_JITTER {
-        let jx = entry[0] - 0.5;
-        let jy = entry[1] - 0.5;
-        assert!(jx > -0.5f32 && jx < 0.5f32, "jx = {jx}");
-        assert!(jy > -0.5f32 && jy < 0.5f32, "jy = {jy}");
-    }
-}
-
-#[test]
-fn jitter_mean_near_zero_after_centering() {
-    let mean_x: f32 = HALTON_JITTER.iter().map(|e| e[0] - 0.5).sum::<f32>() / 16.0;
-    let mean_y: f32 = HALTON_JITTER.iter().map(|e| e[1] - 0.5).sum::<f32>() / 16.0;
-    assert!(mean_x.abs() < 0.05f32, "mean_x = {mean_x}");
-    assert!(mean_y.abs() < 0.05f32, "mean_y = {mean_y}");
 }

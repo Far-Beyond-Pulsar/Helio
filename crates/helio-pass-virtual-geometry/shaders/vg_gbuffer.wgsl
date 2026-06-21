@@ -113,7 +113,9 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 }
 
 @vertex
-fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
+fn vs_main(v: Vertex, @builtin(instance_index) packed_slot: u32) -> VertexOutput {
+    // LOD level is packed in upper 8 bits by the cull shader.
+    let slot = packed_slot & 0x00FFFFFFu;
     let inst      = instance_data[slot];
     let world_pos = inst.transform * vec4<f32>(v.position, 1.0);
 
@@ -234,11 +236,21 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     return out;
 }
 
-// ── VG triangle debug (mode 20): solid colour per triangle ───────────────────
-// Uses material_id as a color seed (primitive_index is not available in
-// WebGPU browser environments).
+// ── Deterministic per-triangle hash for debug colouring ─────────────────────
+// Uses world-space face centroid to generate a stable per-triangle seed.
+fn tri_hash(world_pos: vec3<f32>) -> u32 {
+    let centroid = floor(world_pos * 1000.0);
+    var h = u32(centroid.x) * 73856093u ^ u32(centroid.y) * 19349663u ^ u32(centroid.z) * 83492791u;
+    h ^= h >> 13u;
+    h *= 2654435769u;
+    h ^= h >> 16u;
+    return h;
+}
+
+// ── VG triangle debug (mode 20): unlit solid colour per meshlet + per-tri variation
 @fragment
 fn fs_debug(input: VertexOutput) -> GBufferOutput {
+    // Meshlet-level base colour from material_id hash.
     var h = (input.material_id * 2747636419u);
     h ^= h >> 16u;
     h *= 2654435769u;
@@ -259,11 +271,74 @@ fn fs_debug(input: VertexOutput) -> GBufferOutput {
     pal[10] = vec3<f32>(0.00, 0.65, 0.65);
     pal[11] = vec3<f32>(1.00, 0.70, 0.10);
 
+    // Per-triangle variation: slight brightness shift so individual triangles are visible.
+    let face_centroid = input.world_position;
+    let t_hash = tri_hash(face_centroid);
+    let brightness = 0.7 + 0.3 * f32(t_hash % 256u) / 255.0;
+    let base_color = pal[idx] * brightness;
+
+    // Unlit: write colour directly, flat face normal, no material/lighting.
     let face_n = normalize(cross(dpdx(input.world_position), dpdy(input.world_position)));
     var out: GBufferOutput;
-    out.albedo   = vec4<f32>(pal[idx], 1.0);
+    out.albedo   = vec4<f32>(base_color, 1.0);
     out.normal   = vec4<f32>(face_n, 0.0);
-    out.orm      = vec4<f32>(1.0, 0.9, 0.0, 0.0);
-    out.emissive = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    out.emissive = vec4<f32>(base_color, 0.0);
+    return out;
+}
+
+// ── VG LOD heatmap debug (mode 21) ─────────────────────────────────────────
+// Nanite-style: per-triangle colours tinted by LOD level.
+// Green (LOD0/full detail) → Red (LOD7/coarsest), with per-tri variation
+// so individual triangles remain visible within each LOD band.
+
+struct LodVertexOutput {
+    @invariant @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_position: vec3<f32>,
+    @location(1) lod_level:      f32,
+}
+
+@vertex
+fn vs_debug_lod(v: Vertex, @builtin(instance_index) packed_slot: u32) -> LodVertexOutput {
+    let slot      = packed_slot & 0x00FFFFFFu;
+    let lod_level = packed_slot >> 24u;
+    let inst      = instance_data[slot];
+    let world_pos = inst.transform * vec4<f32>(v.position, 1.0);
+
+    var out: LodVertexOutput;
+    out.clip_position  = camera.view_proj * world_pos;
+    out.world_position = world_pos.xyz;
+    out.lod_level      = f32(lod_level);
+    return out;
+}
+
+@fragment
+fn fs_debug_lod(input: LodVertexOutput) -> GBufferOutput {
+    // 8-stop colour ramp: LOD0=green → LOD7=red
+    var pal: array<vec3<f32>, 8>;
+    pal[0] = vec3<f32>(0.10, 0.95, 0.10); // LOD 0 — bright green
+    pal[1] = vec3<f32>(0.50, 0.95, 0.10); // LOD 1 — yellow-green
+    pal[2] = vec3<f32>(0.85, 0.90, 0.10); // LOD 2 — yellow
+    pal[3] = vec3<f32>(1.00, 0.70, 0.10); // LOD 3 — amber
+    pal[4] = vec3<f32>(1.00, 0.45, 0.05); // LOD 4 — orange
+    pal[5] = vec3<f32>(1.00, 0.25, 0.05); // LOD 5 — red-orange
+    pal[6] = vec3<f32>(0.90, 0.10, 0.05); // LOD 6 — red
+    pal[7] = vec3<f32>(0.60, 0.05, 0.30); // LOD 7 — dark magenta
+
+    let idx = min(u32(input.lod_level + 0.5), 7u);
+    let lod_color = pal[idx];
+
+    // Per-triangle brightness variation so individual tris are visible.
+    let t_hash = tri_hash(input.world_position);
+    let brightness = 0.7 + 0.3 * f32(t_hash % 256u) / 255.0;
+    let final_color = lod_color * brightness;
+
+    // Unlit: emit colour directly, no material/lighting.
+    let face_n = normalize(cross(dpdx(input.world_position), dpdy(input.world_position)));
+    var out: GBufferOutput;
+    out.albedo   = vec4<f32>(final_color, 1.0);
+    out.normal   = vec4<f32>(face_n, 0.0);
+    out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
+    out.emissive = vec4<f32>(final_color, 0.0);
     return out;
 }

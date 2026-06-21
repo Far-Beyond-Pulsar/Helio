@@ -273,13 +273,17 @@ impl RenderPass for SmaaPass {
         "SMAA"
     }
 
+    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[helio_v3::ResourceSlot::PreAa]
+    }
+
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // O(1): exactly 3 fullscreen draws regardless of scene size.
 
         // ── Lazy bind group rebuild ───────────────────────────────────────────
         // Edge and neighbor bind groups reference the pre_aa view from frame resources.
         // They are rebuilt whenever that view's pointer changes (e.g. after resize).
-        let pre_aa = ctx.resources.pre_aa.ok_or_else(|| {
+        let pre_aa = ctx.resources.pre_aa.read("SMAA").ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "SmaaPass requires frame.pre_aa (published by the geometry pass)".to_string(),
             )

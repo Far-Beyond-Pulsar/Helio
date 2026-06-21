@@ -23,7 +23,7 @@ pub enum MeshKind {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+#[derive(Debug, Clone, Copy, Default, Pod, Zeroable)]
 pub struct PackedVertex {
     pub position: [f32; 3],
     pub bitangent_sign: f32,

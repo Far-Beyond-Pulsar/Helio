@@ -4,7 +4,7 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 
 const KERNEL_SIZE: usize = 64;
 const NOISE_DIM: u32 = 4;
@@ -401,6 +401,10 @@ impl RenderPass for SsaoPass {
         "SSAO"
     }
 
+    fn writes(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::Ssao]
+    }
+
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.resize(device, width, height);
     }
@@ -408,9 +412,9 @@ impl RenderPass for SsaoPass {
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // Use baked AO if available — avoids runtime screen-space computation entirely.
         if let Some(ref baked) = self.baked_ao_override {
-            frame.ssao = Some(baked.as_ref());
+            frame.ssao.write(baked.as_ref(), "SSAO");
         } else {
-            frame.ssao = Some(&self.ssao_view);
+            frame.ssao.write(&self.ssao_view, "SSAO");
         }
     }
 

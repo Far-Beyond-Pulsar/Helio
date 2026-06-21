@@ -1213,7 +1213,7 @@ impl RenderPass for PerfOverlayPass {
             return Ok(());
         }
 
-        if let (Some(gbuffer), Some(tile_light_counts)) = (ctx.resources.gbuffer, ctx.resources.tile_light_counts) {
+        if let (Some(gbuffer), Some(tile_light_counts)) = (ctx.resources.gbuffer.get(), ctx.resources.tile_light_counts.get()) {
             let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
             let tile_light_counts_ptr = tile_light_counts as *const _ as usize;
             let key = (gbuffer_orm_ptr, tile_light_counts_ptr);
@@ -1258,7 +1258,7 @@ impl RenderPass for PerfOverlayPass {
             pass.dispatch_workgroups(num_tiles.div_ceil(256), 1, 1);
         }
 
-        if let (Some(_pre_aa), Some(gbuffer)) = (ctx.resources.pre_aa, ctx.resources.gbuffer) {
+        if let (Some(_pre_aa), Some(gbuffer)) = (ctx.resources.pre_aa.get(), ctx.resources.gbuffer.get()) {
             let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
             let key = gbuffer_orm_ptr;
 
@@ -1366,7 +1366,7 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         }
 
         // Get the color render target (pre-AA buffer)
-        let color_texture = if let Some(pre_aa) = ctx.resources.pre_aa {
+        let color_texture = if let Some(pre_aa) = ctx.resources.pre_aa.get() {
             pre_aa
         } else {
             // If no pre_aa, use the main target (though this is less ideal)
@@ -1552,7 +1552,7 @@ impl RenderPass for PerfOverlayCostAnalyzerPass {
 
         // Get GBuffer and tile light counts
         if let (Some(gbuffer), Some(tile_light_counts)) = 
-            (ctx.resources.gbuffer, ctx.resources.tile_light_counts) 
+            (ctx.resources.gbuffer.get(), ctx.resources.tile_light_counts.get()) 
         {
             // Create bind group for cost computation
             let cost_compute_bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {

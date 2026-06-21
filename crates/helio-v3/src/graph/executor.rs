@@ -260,9 +260,9 @@ impl RenderGraph {
         // Pre-register the three built-in transient routes so existing graphs
         // that rely on these names continue to work without any changes.
         let mut resource_routes: Vec<(&'static str, TransientRoute)> = Vec::new();
-        resource_routes.push(("pre_aa",  Box::new(|view, fr| fr.pre_aa  = Some(view))));
-        resource_routes.push(("sky_lut", Box::new(|view, fr| fr.sky_lut = Some(view))));
-        resource_routes.push(("ssao",    Box::new(|view, fr| fr.ssao    = Some(view))));
+        resource_routes.push(("pre_aa",  Box::new(|view, fr| fr.pre_aa.write(view, "TransientTexture"))));
+        resource_routes.push(("sky_lut", Box::new(|view, fr| fr.sky_lut.write(view, "TransientTexture"))));
+        resource_routes.push(("ssao",    Box::new(|view, fr| fr.ssao.write(view, "TransientTexture"))));
 
         Self {
             passes: Vec::new(),
@@ -476,6 +476,62 @@ impl RenderGraph {
             .filter_map(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Collects all debug view descriptors from every pass in the graph.
+    pub fn collect_debug_views(&self) -> Vec<crate::DebugViewDescriptor> {
+        self.passes
+            .iter()
+            .flat_map(|p| p.debug_views().iter().copied())
+            .collect()
+    }
+
+    /// Validates that all pass resource dependencies are satisfied.
+    /// Called once after all passes are added to the graph.
+    /// Panics at startup with a clear message on invalid orderings.
+    pub fn validate_dependencies(&self) -> std::result::Result<(), String> {
+        use std::collections::HashSet;
+        let mut available: HashSet<super::ResourceSlot> = HashSet::new();
+
+        // Resources provided by the Renderer from the start
+        available.insert(super::ResourceSlot::MainScene);
+        available.insert(super::ResourceSlot::Vg);
+        available.insert(super::ResourceSlot::Billboards);
+        available.insert(super::ResourceSlot::DepthTexture);
+
+        for (i, pass) in self.passes.iter().enumerate() {
+            let name = pass.name();
+            for &slot in pass.reads() {
+                if !available.contains(&slot) {
+                    return Err(format!(
+                        "RenderGraph validation failed: pass '{}' (index {}) reads {:?} \
+                         but no prior pass writes it. Available: {:?}",
+                        name, i, slot, available
+                    ));
+                }
+            }
+            for &slot in pass.writes() {
+                available.insert(slot);
+            }
+        }
+        Ok(())
+    }
+
+    /// Prints a DOT-format dependency graph to stderr for visualization.
+    pub fn dump_dependency_graph(&self) {
+        eprintln!("digraph RenderGraph {{");
+        for (i, pass) in self.passes.iter().enumerate() {
+            eprintln!("  {} [label=\"{}\"];", i, pass.name());
+            for &slot in pass.reads() {
+                for j in (0..i).rev() {
+                    if self.passes[j].writes().contains(&slot) {
+                        eprintln!("  {} -> {} [label=\"{:?}\"];", j, i, slot);
+                        break;
+                    }
+                }
+            }
+        }
+        eprintln!("}}");
+    }
+
     /// Returns a reference to the profiler for reading timing data.
     ///
     /// Use this to access CPU and GPU profiling results after calling `execute()`.
@@ -595,6 +651,9 @@ impl RenderGraph {
         // Routes are stable across passes, so there is no reason to re-apply them inside
         // the per-pass loop (previously O(passes × routes), now O(routes)).
         let mut visible_frame_resources = *frame_resources;
+        // Reset debug tracking so stale writes from last frame don't carry over.
+        // Renderer-provided fields are re-marked below.
+        visible_frame_resources.reset_tracking("Renderer");
         for (name, route) in &self.resource_routes {
             if let Some(tex) = self.transient_textures.get(name) {
                 route(&tex.view, &mut visible_frame_resources);

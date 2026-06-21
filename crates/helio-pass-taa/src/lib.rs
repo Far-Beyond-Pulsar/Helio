@@ -1,7 +1,8 @@
-//! Temporal Anti-Aliasing (TAA) pass.
+//! Temporal Anti-Aliasing (TAA) pass — TSR-style temporal accumulation.
 //!
-//! Blends the current frame with a history buffer using velocity-based reprojection
-//! and YCoCg variance-clipped neighbourhood clamping.
+//! Blends the current frame with a history buffer using YCoCg weighted
+//! neighbourhood clamping, variance-driven adaptive blending, depth-based
+//! reprojection, and a low-discrepancy R1/R2 (plastic ratio) jitter sequence.
 //!
 //! ## O(1) guarantee
 //! `execute()` records exactly one fullscreen `draw(0..3, 0..1)` for the TAA
@@ -10,8 +11,9 @@
 //! All three are constant-time GPU operations.
 //!
 //! ## Jitter
-//! A Halton(2, 3) sequence of 16 entries is indexed by `frame_num % 16`.
-//! The jitter offset is uploaded to the GPU uniform every frame in `prepare()`.
+//! A non-repeating low-discrepancy sequence based on the plastic ratio (R1, R2)
+//! indexed by `frame_num`.  Unlike Halton(2,3) which repeats every 16 frames,
+//! the R1/R2 sequence never repeats, eliminating temporal periodic artefacts.
 //!
 //! ## History ping-pong
 //! The pass owns two textures: `output_texture` (render target each frame) and
@@ -25,33 +27,32 @@
 use bytemuck::{Pod, Zeroable};
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-const HALTON_JITTER: [[f32; 2]; 16] = [
-    [0.500000, 0.333333],
-    [0.250000, 0.666667],
-    [0.750000, 0.111111],
-    [0.125000, 0.444444],
-    [0.625000, 0.777778],
-    [0.375000, 0.222222],
-    [0.875000, 0.555556],
-    [0.062500, 0.888889],
-    [0.562500, 0.037037],
-    [0.312500, 0.370370],
-    [0.812500, 0.703704],
-    [0.187500, 0.148148],
-    [0.687500, 0.481481],
-    [0.437500, 0.814815],
-    [0.937500, 0.259259],
-    [0.031250, 0.592593],
-];
+/// R1/R2 low-discrepancy jitter offset for a given frame index.
+///
+/// Based on the plastic ratio (2D generalisation of the golden ratio):
+///   R1 ≈ 1.324717957, R2 = R1² ≈ 1.754877666
+/// Returns offset in [-0.5, 0.5) — the sub-pixel jitter for the frame.
+/// A phase offset is added to avoid exactly -0.5 at frame 0 (which would
+/// cause off-by-one sampling with NEAREST filtering).
+fn r1_r2_jitter(frame: u64) -> [f32; 2] {
+    // Pre-computed plastic ratio constants
+    const INV_R1: f64 = 0.7548776662466927; // 1 / R1
+    const INV_R2: f64 = 0.5698402905980539; // 1 / R2
+    // Phase offset to avoid exact -0.5 at frame 0
+    const PHASE: f64 = 0.5;
+    let fx = frame as f64 * INV_R1 + PHASE;
+    let fy = frame as f64 * INV_R2 + PHASE;
+    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TaaUniform {
-    feedback_min: f32,   // unused — kept for struct-layout compatibility
-    feedback_max: f32,   // unused — kept for struct-layout compatibility
-    jitter: [f32; 2],
+    jitter: [f32; 2],    // R1/R2 jitter offset in [-0.5, 0.5]
+    upscale_factor: f32, // output_width / internal_width (≥ 1.0)
     reset: u32,          // 1 on the very first frame so RESET path runs
-    _pad: u32,           // pad to match WGSL struct alignment (vec2 → align-8 → 24 bytes)
+    time_delta: f32,     // seconds since last frame
+    _pad: f32,
 }
 
 /// Post-TAA sharpening blit.
@@ -131,6 +132,9 @@ pub struct TaaPass {
     /// Set to true on construction; cleared after the first prepare() so the
     /// shader's RESET path runs exactly once to prime the history texture.
     first_frame: bool,
+    /// Internal (geometry) render resolution — used to compute the upscale factor.
+    internal_width: u32,
+    internal_height: u32,
     /// Full (output / display) resolution — the textures and copy always run at
     /// this size regardless of the internal (pre-AA) render scale.
     output_width: u32,
@@ -147,8 +151,8 @@ impl TaaPass {
     ///   and output textures, and the final blit, all run at this size.
     pub fn new(
         device: &wgpu::Device,
-        _internal_width: u32,
-        _internal_height: u32,
+        internal_width: u32,
+        internal_height: u32,
         output_width: u32,
         output_height: u32,
         format: wgpu::TextureFormat,
@@ -361,6 +365,8 @@ impl TaaPass {
             linear_sampler,
             point_sampler,
             first_frame: true,
+            internal_width,
+            internal_height,
             output_width,
             output_height,
         }
@@ -383,9 +389,15 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
+    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[helio_v3::ResourceSlot::PreAa]
+    }
+
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.output_width = width;
         self.output_height = height;
+        // Internal resolution stays at the last create-time value.
+        // The render graph re-creates the pass if the internal resolution changes.
         // History/output always use Rgba16Float regardless of the swapchain format.
         let fmt = wgpu::TextureFormat::Rgba16Float;
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
@@ -428,16 +440,18 @@ impl RenderPass for TaaPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let jitter_idx = (ctx.frame_num % 16) as usize;
-        let raw = HALTON_JITTER[jitter_idx];
-        // Consume the first_frame flag so RESET runs on exactly one frame.
+        let jitter = r1_r2_jitter(ctx.frame_num);
         let reset = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
+        let upscale_factor = (self.output_width as f32 / self.internal_width as f32)
+            .max(1.0)
+            .min(16.0);
+        let time_delta = ctx.delta_time.max(0.0);
         let uniforms = TaaUniform {
-            feedback_min: 0.88,  // unused but kept for layout
-            feedback_max: 0.97,  // unused but kept for layout
-            jitter: [raw[0] - 0.5, raw[1] - 0.5],
+            jitter,
+            upscale_factor,
             reset,
-            _pad: 0,
+            time_delta,
+            _pad: 0.0,
         };
         ctx.queue.write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
@@ -445,7 +459,7 @@ impl RenderPass for TaaPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ────────────────────────────────────────────────
-        let pre_aa_view = ctx.resources.pre_aa.ok_or_else(|| {
+        let pre_aa_view = ctx.resources.pre_aa.read("TAA").ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )

@@ -36,6 +36,14 @@ name = "indoor_cathedral"
 path = "indoor_cathedral.rs"
 
 [[bin]]
+name = "indoor_cathedral_fxaa"
+path = "indoor_cathedral_fxaa.rs"
+
+[[bin]]
+name = "indoor_cathedral_fxaa_hlfs"
+path = "indoor_cathedral_fxaa_hlfs.rs"
+
+[[bin]]
 name = "indoor_cathedral_hlfs"
 path = "indoor_cathedral_hlfs.rs"
 

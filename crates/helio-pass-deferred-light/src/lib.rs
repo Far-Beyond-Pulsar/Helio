@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -524,18 +524,41 @@ impl RenderPass for DeferredLightPass {
         "DeferredLight"
     }
 
+    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[
+            helio_v3::ResourceSlot::GBuffer,
+            helio_v3::ResourceSlot::GBufferLightmapUv,
+            helio_v3::ResourceSlot::Depth,
+            helio_v3::ResourceSlot::ShadowAtlas,
+            helio_v3::ResourceSlot::StaticShadowAtlas,
+            helio_v3::ResourceSlot::ShadowSampler,
+            helio_v3::ResourceSlot::Ssao,
+            helio_v3::ResourceSlot::SkyLut,
+            helio_v3::ResourceSlot::TileLightLists,
+            helio_v3::ResourceSlot::TileLightCounts,
+            helio_v3::ResourceSlot::MainScene,
+            helio_v3::ResourceSlot::WaterCaustics,
+            helio_v3::ResourceSlot::WaterVolumes,
+        ]
+    }
+
+    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[helio_v3::ResourceSlot::PreAa]
+    }
+
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.resize(device, width, height);
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         if frame.pre_aa.is_none() {
-            frame.pre_aa = Some(&self.pre_aa_view);
+            frame.pre_aa.write(&self.pre_aa_view, "DeferredLight");
         }
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let main_scene = ctx.frame_resources.main_scene.as_ref();
+        let main_scene_opt = ctx.frame_resources.main_scene.get();
+        let main_scene = main_scene_opt.as_ref();
         let (ambient_color, ambient_intensity) = if let Some(main_scene) = main_scene {
             (main_scene.ambient_color, main_scene.ambient_intensity)
         } else {
@@ -570,7 +593,8 @@ impl RenderPass for DeferredLightPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let gbuffer = ctx.resources.gbuffer.as_ref().ok_or_else(|| {
+        let gbuffer_opt = ctx.resources.gbuffer.read("DeferredLight");
+        let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "DeferredLight requires published gbuffer resources".to_string(),
             )
@@ -578,10 +602,10 @@ impl RenderPass for DeferredLightPass {
 
         // Screen-space AO: use baked AO (via frame.ssao, which SsaoPass publishes as override
         // when a baked AO texture is present) or fall back to the 1×1 white texture.
-        let ao_view = ctx.resources.ssao.unwrap_or(&self.fallback_ao_view);
+        let ao_view = ctx.resources.ssao.get().unwrap_or(&self.fallback_ao_view);
         
         // Lightmap UVs from GBuffer
-        let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.unwrap_or(&self.fallback_lightmap_uv_view);
+        let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
 
         let gbuffer_key = (
             gbuffer.albedo as *const _ as usize,
@@ -617,18 +641,18 @@ impl RenderPass for DeferredLightPass {
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
-        let shadow_view = ctx.resources.shadow_atlas.unwrap_or(&self.fallback_shadow_view);
-        let static_shadow_view = ctx.resources.static_shadow_atlas.unwrap_or(&self.fallback_static_shadow_view);
+        let shadow_view = ctx.resources.shadow_atlas.get().unwrap_or(&self.fallback_shadow_view);
+        let static_shadow_view = ctx.resources.static_shadow_atlas.get().unwrap_or(&self.fallback_static_shadow_view);
         let shadow_sampler = ctx
             .resources
             .shadow_sampler
-            .unwrap_or(&self.fallback_shadow_sampler);
+            .get().unwrap_or(&self.fallback_shadow_sampler);
         let rc_view = &self.fallback_rc_view;
         let env_view = &self.fallback_env_view;
         
         // Baked lightmap atlas from bake inject pass
-        let lightmap_view = ctx.resources.baked_lightmap.unwrap_or(&self.fallback_lightmap_view);
-        let lightmap_sampler = ctx.resources.baked_lightmap_sampler.unwrap_or(&self.fallback_lightmap_sampler);
+        let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
+        let lightmap_sampler = ctx.resources.baked_lightmap_sampler.get().unwrap_or(&self.fallback_lightmap_sampler);
         
         let scene_key = (
             ctx.scene.lights as *const _ as usize,
@@ -671,7 +695,7 @@ impl RenderPass for DeferredLightPass {
                         resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
                     },
                     // Water caustics texture (binding 8)
-                    texture_view_entry(8, ctx.resources.water_caustics.unwrap_or(&self.fallback_caustics_view)),
+                    texture_view_entry(8, ctx.resources.water_caustics.get().unwrap_or(&self.fallback_caustics_view)),
                     // Caustics sampler (binding 9)
                     wgpu::BindGroupEntry {
                         binding: 9,
@@ -680,7 +704,7 @@ impl RenderPass for DeferredLightPass {
                     // Water volumes buffer (binding 10)
                     wgpu::BindGroupEntry {
                         binding: 10,
-                        resource: ctx.resources.water_volumes.unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
+                        resource: ctx.resources.water_volumes.get().unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
                     },
                     // Static shadow atlas (binding 11) — cached, only changes with Static topology
                     texture_view_entry(11, static_shadow_view),
@@ -697,8 +721,8 @@ impl RenderPass for DeferredLightPass {
         }
 
         // ── Bind group 3: tile light culling results ──────────────────────────
-        let tile_lists   = ctx.resources.tile_light_lists.unwrap_or(&self.fallback_tile_lists);
-        let tile_counts  = ctx.resources.tile_light_counts.unwrap_or(&self.fallback_tile_counts);
+        let tile_lists   = ctx.resources.tile_light_lists.get().unwrap_or(&self.fallback_tile_lists);
+        let tile_counts  = ctx.resources.tile_light_counts.get().unwrap_or(&self.fallback_tile_counts);
         let tile_key = (tile_lists as *const _ as usize, tile_counts as *const _ as usize);
         if self.bind_group_3_key != Some(tile_key) {
             self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -718,7 +742,7 @@ impl RenderPass for DeferredLightPass {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         };
 
-        let pre_aa_view = ctx.resources.pre_aa.unwrap_or(&self.pre_aa_view);
+        let pre_aa_view = ctx.resources.pre_aa.get().unwrap_or(&self.pre_aa_view);
         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
             view: pre_aa_view,
             resolve_target: None,
@@ -744,6 +768,32 @@ impl RenderPass for DeferredLightPass {
         pass.set_bind_group(3, self.bind_group_3.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
         Ok(())
+    }
+
+    fn debug_views(&self) -> &'static [DebugViewDescriptor] {
+        static VIEWS: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "Albedo Only",
+                debug_mode: 4,
+                description: "G-buffer albedo without lighting",
+            },
+            DebugViewDescriptor {
+                name: "World Normals",
+                debug_mode: 5,
+                description: "World-space normals remapped to RGB",
+            },
+            DebugViewDescriptor {
+                name: "Shadow Heatmap",
+                debug_mode: 10,
+                description: "Shadow factor: white=lit, black=shadowed",
+            },
+            DebugViewDescriptor {
+                name: "Light Depth",
+                debug_mode: 11,
+                description: "Light-space depth projection",
+            },
+        ];
+        VIEWS
     }
 }
 

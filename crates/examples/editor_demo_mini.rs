@@ -28,9 +28,9 @@ mod v3_demo_common;
 
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, EditorState, GizmoMode, Renderer,
-    RendererConfig, SceneActor, ScenePicker,
+    RendererConfig, SceneActor, ScenePicker, VirtualMeshUpload, VirtualObjectDescriptor,
 };
-use helio_asset_compat::{load_scene_bytes_with_config, upload_sectioned_scene, LoadConfig};
+use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use v3_demo_common::{
     box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh,
 };
@@ -86,6 +86,8 @@ struct AppState {
     picker: ScenePicker,
     grid_enabled: bool,
     is_fullscreen: bool,
+    /// Index into the debug views list (0 = off).
+    debug_view_index: usize,
 }
 
 impl ApplicationHandler for App {
@@ -490,7 +492,10 @@ impl ApplicationHandler for App {
             }
         }
 
-        // ── Shipping containers — 10 total in a small shipyard stack ─────
+        // ── Shipping containers — 10 total, using Virtual Geometry ─────
+        // Load with merge_meshes so sections share one vertex buffer (correct
+        // spatial relationships). Upload the FBX textures+materials, then
+        // create one VG mesh per section so each keeps its own material.
         {
             let crates_base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
@@ -506,124 +511,109 @@ impl ApplicationHandler for App {
                     .with_import_scale(glam::Vec3::splat(1.0 / 200.0)),
             ) {
                 Ok(scene) => {
-                    match upload_sectioned_scene(&mut renderer, &scene) {
-                        Ok((multi_mesh_id, section_mat_ids)) => {
-                            let sm = scene.sectioned_mesh.as_ref().unwrap();
+                    // Upload textures and materials from the FBX.
+                    let fallback_mat = renderer.scene_mut().insert_material(make_material(
+                        [0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0,
+                    ));
+                    let mat_ids = upload_scene_materials(&mut renderer, &scene)
+                        .unwrap_or_default();
 
-                            // Measure local-space AABB to derive step sizes
-                            let mut bb_min = glam::Vec3::splat(f32::INFINITY);
-                            let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
-                            for v in &sm.vertices {
-                                let p = glam::Vec3::from(v.position);
-                                bb_min = bb_min.min(p);
-                                bb_max = bb_max.max(p);
-                            }
-                            let local_center = (bb_min + bb_max) * 0.5;
-                            let local_size = bb_max - bb_min;
-                            let radius = (local_size * 0.5).length().max(0.5);
+                    if let Some(sm) = &scene.sectioned_mesh {
+                        // One VG mesh per section — each section has its own
+                        // material but shares the vertex buffer.
+                        let mut vg_entries: Vec<(helio::VirtualMeshId, u32)> = Vec::new();
+                        for sec in &sm.sections {
+                            if sec.indices.is_empty() { continue; }
 
-                            eprintln!(
-                                "[shipyard] container: {} sections {} verts  \
-                                 size={:.2?} center={:.2?} r={radius:.2}",
-                                sm.sections.len(),
-                                sm.vertices.len(),
-                                local_size,
-                                local_center
-                            );
+                            let vm_id = renderer
+                                .scene_mut()
+                                .insert_actor(SceneActor::virtual_mesh(VirtualMeshUpload {
+                                    vertices: sm.vertices.clone(),
+                                    indices: sec.indices.clone(),
+                                }))
+                                .as_virtual_mesh()
+                                .unwrap();
 
-                            // Step sizes: tiny gap so edges don't z-fight
-                            let step_x = local_size.x + 0.04;
-                            let step_z = local_size.z + 0.06;
-                            let step_y = local_size.y;
+                            let mat_slot = sec.material_index
+                                .and_then(|idx| mat_ids.get(idx))
+                                .copied()
+                                .unwrap_or(fallback_mat)
+                                .slot();
+                            vg_entries.push((vm_id, mat_slot));
+                        }
 
-                            // ── Bay layout ────────────────────────────────────
-                            // Total across all bays: 10 containers.
-                            // oz is the Z origin of the *nearest* row in each bay.
-                            struct Bay {
-                                ox: f32,
-                                oz: f32,
-                                cols: u32,
-                                rows: u32,
-                                layers: u32,
-                            }
-                            let bays: &[Bay] = &[
-                                // One compact stack near the dock (5×1×2 = 10)
-                                Bay {
-                                    ox: -95.0,
-                                    oz: -26.0,
-                                    cols: 5,
-                                    rows: 1,
-                                    layers: 2,
-                                },
-                            ];
-                            const MAX_CONTAINERS: u32 = 10;
+                        // Measure AABB for placement.
+                        let mut bb_min = glam::Vec3::splat(f32::INFINITY);
+                        let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
+                        for v in &sm.vertices {
+                            let p = glam::Vec3::from(v.position);
+                            bb_min = bb_min.min(p);
+                            bb_max = bb_max.max(p);
+                        }
+                        let local_center = (bb_min + bb_max) * 0.5;
+                        let local_size = bb_max - bb_min;
+                        let radius = (local_size * 0.5).length().max(0.5);
 
-                            let mut count = 0u32;
-                            'bays: for bay in bays {
-                                for layer in 0..bay.layers {
-                                    for row in 0..bay.rows {
-                                        for col in 0..bay.cols {
-                                            if count >= MAX_CONTAINERS {
-                                                break 'bays;
-                                            }
-                                            // World-space centre of this container slot
-                                            let wx = bay.ox + col as f32 * step_x;
-                                            // Bottom of layer 0 sits exactly on y = 0
-                                            let wy = layer as f32 * step_y + local_size.y * 0.5;
-                                            let wz = bay.oz + row as f32 * step_z;
+                        eprintln!(
+                            "[shipyard] VG container: {} sections {} verts  \
+                             size={:.2?} center={:.2?} r={radius:.2}",
+                            vg_entries.len(), sm.vertices.len(),
+                            local_size, local_center
+                        );
 
-                                            // Alternate 180° every other column for variety.
-                                            // Rotation must happen around the mesh centre so
-                                            // we use: T(world) * R * T(-local_center)
-                                            let rot = if (col + layer) % 2 == 1 {
-                                                glam::Mat4::from_rotation_y(std::f32::consts::PI)
-                                            } else {
-                                                glam::Mat4::IDENTITY
-                                            };
-                                            let placement = glam::Mat4::from_translation(
-                                                glam::Vec3::new(wx, wy, wz),
-                                            ) * rot
-                                                * glam::Mat4::from_translation(-local_center);
-                                            // World centre is always exactly (wx, wy, wz)
-                                            // regardless of rotation
+                        let step_x = local_size.x + 0.04;
+                        let step_z = local_size.z + 0.06;
+                        let step_y = local_size.y;
 
-                                            match renderer.scene_mut().insert_sectioned_object(
-                                                multi_mesh_id,
-                                                &section_mat_ids,
-                                                placement,
-                                                [wx, wy, wz, radius],
-                                                Some(helio::Movability::Static),
-                                            ) {
-                                                Ok(_) => count += 1,
-                                                Err(e) => {
-                                                    eprintln!("[shipyard] insert failed: {e:?}")
-                                                }
-                                            }
+                        struct Bay { ox: f32, oz: f32, cols: u32, rows: u32, layers: u32 }
+                        let bays: &[Bay] = &[Bay {
+                            ox: -95.0, oz: -26.0, cols: 5, rows: 1, layers: 2,
+                        }];
+                        const MAX_CONTAINERS: u32 = 10;
+
+                        let mut count = 0u32;
+                        'bays: for bay in bays {
+                            for layer in 0..bay.layers {
+                                for row in 0..bay.rows {
+                                    for col in 0..bay.cols {
+                                        if count >= MAX_CONTAINERS { break 'bays; }
+                                        let wx = bay.ox + col as f32 * step_x;
+                                        let wy = layer as f32 * step_y + local_size.y * 0.5;
+                                        let wz = bay.oz + row as f32 * step_z;
+                                        let rot = if (col + layer) % 2 == 1 {
+                                            glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                                        } else {
+                                            glam::Mat4::IDENTITY
+                                        };
+                                        let placement = glam::Mat4::from_translation(
+                                            glam::Vec3::new(wx, wy, wz),
+                                        ) * rot * glam::Mat4::from_translation(-local_center);
+
+                                        for &(vm_id, mat_slot) in &vg_entries {
+                                            let _ = renderer.scene_mut().insert_actor(
+                                                SceneActor::virtual_object(
+                                                    VirtualObjectDescriptor {
+                                                        virtual_mesh: vm_id,
+                                                        material_id: mat_slot,
+                                                        transform: placement,
+                                                        bounds: [wx, wy, wz, radius],
+                                                        flags: 0,
+                                                        groups: helio::GroupMask::NONE,
+                                                        movability: Some(
+                                                            helio::Movability::Static,
+                                                        ),
+                                                    },
+                                                ),
+                                            );
                                         }
+                                        count += 1;
                                     }
                                 }
                             }
-                            eprintln!("[shipyard] {count} containers inserted");
-
-                            // Register sections with the picker once
-                            if let Some(section_ids) =
-                                renderer.scene().sectioned_section_mesh_ids(multi_mesh_id)
-                            {
-                                let section_ids: Vec<_> = section_ids.to_vec();
-                                for (section_mesh_id, sec) in
-                                    section_ids.iter().zip(sm.sections.iter())
-                                {
-                                    picker.register_mesh(
-                                        *section_mesh_id,
-                                        &helio::MeshUpload {
-                                            vertices: sm.vertices.clone(),
-                                            indices: sec.indices.clone(),
-                                        },
-                                    );
-                                }
-                            }
                         }
-                        Err(e) => eprintln!("[shipyard] upload_sectioned_scene ERR: {e}"),
+                        eprintln!("[shipyard] {count} VG containers inserted ({} VG meshes per instance)", vg_entries.len());
+                    } else {
+                        eprintln!("[shipyard] No sectioned mesh in FBX");
                     }
                 }
                 Err(e) => eprintln!("[shipyard] Failed to load container FBX: {e}"),
@@ -750,6 +740,7 @@ impl ApplicationHandler for App {
             picker,
             grid_enabled: true,
             is_fullscreen: false,
+            debug_view_index: 0,
         });
     }
 
@@ -845,6 +836,42 @@ impl ApplicationHandler for App {
                         KeyCode::Tab => {
                             state.grid_enabled = !state.grid_enabled;
                             state.renderer.set_editor_mode(state.grid_enabled);
+                        }
+                        KeyCode::F3 => {
+                            let views = state.renderer.available_debug_views();
+                            if views.is_empty() {
+                                eprintln!("[debug] No debug views available");
+                            } else {
+                                state.debug_view_index = (state.debug_view_index + 1) % (views.len() + 1);
+                                if state.debug_view_index == 0 {
+                                    state.renderer.set_debug_mode(0);
+                                    eprintln!("[debug] Debug view: OFF");
+                                } else {
+                                    let view = &views[state.debug_view_index - 1];
+                                    state.renderer.set_debug_mode(view.debug_mode);
+                                    eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
+                                }
+                            }
+                        }
+                        KeyCode::F4 => {
+                            let views = state.renderer.available_debug_views();
+                            if views.is_empty() {
+                                eprintln!("[debug] No debug views available");
+                            } else {
+                                if state.debug_view_index == 0 {
+                                    state.debug_view_index = views.len();
+                                } else {
+                                    state.debug_view_index -= 1;
+                                }
+                                if state.debug_view_index == 0 {
+                                    state.renderer.set_debug_mode(0);
+                                    eprintln!("[debug] Debug view: OFF");
+                                } else {
+                                    let view = &views[state.debug_view_index - 1];
+                                    state.renderer.set_debug_mode(view.debug_mode);
+                                    eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
+                                }
+                            }
                         }
                         KeyCode::KeyL if !state.right_mouse_held => {
                             let pos = state.cam_pos.to_array();

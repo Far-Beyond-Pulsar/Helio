@@ -46,7 +46,7 @@
 //! Light movement is still detected CPU-side via `per_caster_dirty_gen` (O(N_lights),
 //! negligible).  Light-dirty faces use `LoadOp::Clear` + full movable geometry draws.
 
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 use std::sync::Arc;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -445,12 +445,20 @@ impl RenderPass for ShadowPass {
         "Shadow"
     }
 
+    fn reads(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::MainScene]
+    }
+
+    fn writes(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::ShadowAtlas, ResourceSlot::ShadowSampler, ResourceSlot::StaticShadowAtlas]
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // The dynamic atlas contains movable-object shadows.
-        frame.shadow_atlas = Some(&self.atlas_view);
-        frame.shadow_sampler = Some(&self.compare_sampler);
+        frame.shadow_atlas.write(&self.atlas_view, "Shadow");
+        frame.shadow_sampler.write(&self.compare_sampler, "Shadow");
         // The static atlas contains static-object shadows (cached between frames).
-        frame.static_shadow_atlas = Some(&self.static_atlas_view);
+        frame.static_shadow_atlas.write(&self.static_atlas_view, "Shadow");
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
@@ -496,7 +504,7 @@ impl RenderPass for ShadowPass {
             return Ok(());
         }
 
-        let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
+        let main_scene = ctx.resources.main_scene.read("Shadow").ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("ShadowPass requires main_scene".into())
         })?;
 

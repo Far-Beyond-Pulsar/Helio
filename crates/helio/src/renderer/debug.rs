@@ -213,7 +213,7 @@ impl RenderPass for DebugDrawPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let target_view = if self.editor_mode {
-            ctx.resources.pre_aa.unwrap_or(ctx.target)
+            ctx.resources.pre_aa.get().unwrap_or(ctx.target)
         } else {
             ctx.target
         };

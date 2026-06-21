@@ -1,19 +1,27 @@
-// TAA (Temporal Anti-Aliasing) shader
+// TAA (Temporal Anti-Aliasing) — TSR-style temporal resolve
+//
+// Algorithm based on the shadertoy TSR demo:
+//   - Weighted 3×3 YCoCg neighbourhood min/max clamp (Playdead-style)
+//   - Variance-driven adaptive blend rate
+//   - Sub-pixel offset weight for jitter-aware accumulation
+//   - Low-discrepancy R1/R2 (plastic ratio) jitter sequence
+//   - Catmull-Rom history sampling
+//   - Depth-based reprojection for motion vectors
 //
 // References:
+//   https://www.shadertoy.com/view/ (TSR demo)
 //   https://www.elopezr.com/temporal-aa-and-the-quest-for-the-holy-trail
-//   http://behindthepixels.io/assets/files/TemporalAA.pdf
-//   Playdead clip_towards_aabb_center: https://github.com/playdeadgames/temporal (MIT)
-//   Bevy TAA: https://github.com/bevyengine/bevy (MIT/Apache-2.0)
+//   https://github.com/playdeadgames/temporal (MIT)
 
-// How much of the current frame to blend in.
-// Lower = more temporal smoothing, more ghosting risk on fast motion.
-const DEFAULT_HISTORY_BLEND_RATE: f32 = 0.1;   // used when history is uncertain
-const MIN_HISTORY_BLEND_RATE:     f32 = 0.015; // used when history is very confident
+const MIN_HISTORY_BLEND_RATE: f32 = 0.015;
+const C_POS_INFTY: f32 = 1.0e32;
+const C_NEG_INFTY: f32 = -1.0e32;
+const C_MIN_STD: f32 = 1.0 / 16.0;
+const C_MIN_VAR: f32 = C_MIN_STD * C_MIN_STD;
 
 @group(0) @binding(0) var current_frame: texture_2d<f32>;
 @group(0) @binding(1) var history_frame: texture_2d<f32>;
-// binding 2: GpuCameraUniforms (inv_view_proj + prev_view_proj for depth reprojection)
+
 struct CameraUniforms {
     view:           mat4x4<f32>,
     proj:           mat4x4<f32>,
@@ -30,13 +38,12 @@ struct CameraUniforms {
 @group(0) @binding(5) var point_sampler: sampler;
 
 struct TaaUniform {
-    feedback_min:  f32,          // unused — kept for layout compat
-    feedback_max:  f32,          // unused — kept for layout compat
-    jitter_offset: vec2<f32>,    // Halton-0.5 offset for this frame
-    reset:         u32,          // 1 on the very first frame
-    _pad:          u32,
+    jitter_offset: vec2<f32>,
+    upscale_factor: f32,
+    reset: u32,
+    time_delta: f32,
+    _pad: f32,
 }
-
 @group(0) @binding(6) var<uniform> taa: TaaUniform;
 
 struct VertexOutput {
@@ -54,6 +61,8 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
+// ── YCoCg colour-space helpers ────────────────────────────────────────────────
+
 fn rgb_to_ycocg(rgb: vec3<f32>) -> vec3<f32> {
     let y = dot(rgb, vec3<f32>(0.25, 0.5, 0.25));
     let co = dot(rgb, vec3<f32>(0.5, 0.0, -0.5));
@@ -62,115 +71,137 @@ fn rgb_to_ycocg(rgb: vec3<f32>) -> vec3<f32> {
 }
 
 fn ycocg_to_rgb(ycocg: vec3<f32>) -> vec3<f32> {
-    let y = ycocg.x;
-    let co = ycocg.y;
-    let cg = ycocg.z;
     return vec3<f32>(
-        y + co - cg,
-        y + cg,
-        y - co - cg
+        ycocg.x + ycocg.y - ycocg.z,
+        ycocg.x + ycocg.z,
+        ycocg.x - ycocg.y - ycocg.z,
     );
 }
+
+// ── Catmull-Rom texture sampling ──────────────────────────────────────────────
 
 fn sample_catmull_rom(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec3<f32> {
     let dimensions = vec2<f32>(textureDimensions(tex));
     let sample_pos = uv * dimensions;
     let tex_pos = floor(sample_pos - 0.5) + 0.5;
     let f = sample_pos - tex_pos;
-    
+
     let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
     let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
     let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
     let w3 = f * f * (-0.5 + 0.5 * f);
-    
+
     let w12 = w1 + w2;
     let offset12 = w2 / w12;
-    
+
     let texel_size = 1.0 / dimensions;
     let uv0 = (tex_pos - 1.0) * texel_size;
     let uv12 = (tex_pos + offset12) * texel_size;
     let uv3 = (tex_pos + 2.0) * texel_size;
-    
-    // Use textureSampleLevel (explicit LOD=0) so this function may be called from
-    // non-uniform control flow (history_uv depends on velocity which is non-uniform).
+
     var result = vec3<f32>(0.0);
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv0.y), 0.0).rgb * w0.x * w0.y;
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv0.y), 0.0).rgb * w12.x * w0.y;
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv0.y), 0.0).rgb * w3.x * w0.y;
-    
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv12.y), 0.0).rgb * w0.x * w12.y;
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv12.y), 0.0).rgb * w12.x * w12.y;
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv12.y), 0.0).rgb * w3.x * w12.y;
-    
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv3.y), 0.0).rgb * w0.x * w3.y;
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv3.y), 0.0).rgb * w12.x * w3.y;
-    result = result + textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv3.y), 0.0).rgb * w3.x * w3.y;
-    
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv0.y), 0.0).rgb * w0.x * w0.y;
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv0.y), 0.0).rgb * w12.x * w0.y;
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv0.y), 0.0).rgb * w3.x * w0.y;
+
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv12.y), 0.0).rgb * w0.x * w12.y;
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv12.y), 0.0).rgb * w12.x * w12.y;
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv12.y), 0.0).rgb * w3.x * w12.y;
+
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv0.x, uv3.y), 0.0).rgb * w0.x * w3.y;
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv12.x, uv3.y), 0.0).rgb * w12.x * w3.y;
+    result += textureSampleLevel(tex, samp, vec2<f32>(uv3.x, uv3.y), 0.0).rgb * w3.x * w3.y;
+
     return max(result, vec3<f32>(0.0));
 }
 
-// Clip history_color towards the AABB centre rather than clamping to the AABB surface.
-// From Playdead's temporal reprojection (MIT licence):
-//   https://github.com/playdeadgames/temporal
-// This preserves more valid history than plain clamp while still preventing ghosting.
-fn clip_towards_aabb_center(
-    history_color: vec3<f32>,
-    current_color: vec3<f32>,
-    aabb_min: vec3<f32>,
-    aabb_max: vec3<f32>,
-) -> vec3<f32> {
-    let p_clip = 0.5 * (aabb_max + aabb_min);
-    let e_clip = 0.5 * (aabb_max - aabb_min) + 1e-7;
-    let v_clip = history_color - p_clip;
-    let v_unit = v_clip / e_clip;
-    let a_unit = abs(v_unit);
-    let ma_unit = max(a_unit.x, max(a_unit.y, a_unit.z));
-    if ma_unit > 1.0 {
-        return p_clip + (v_clip / ma_unit);
-    }
-    return history_color;
+// ── YCoCg neighbourhood statistics ───────────────────────────────────────────
+
+struct ColorRange {
+    min: vec3<f32>,
+    max: vec3<f32>,
+    avg: vec3<f32>,
+    dev: vec3<f32>,
 }
 
-// Reversible tonemapper — keeps HDR values from dominating temporal accumulation.
-// (Reinhard per-channel max; GPU Open optimised version.)
-fn rcp(x: f32) -> f32 { return 1.0 / x; }
+// Statistics are computed in tonemapped YCoCg space so they match the space
+// used during blending. Including alpha would corrupt the stats because the
+// history texture stores a large confidence value (1/blend_rate) in alpha.
+fn sample_range(tex: texture_2d<f32>, uv: vec2<f32>, step: vec2<f32>) -> ColorRange {
+    var min_color = vec3<f32>(C_POS_INFTY);
+    var max_color = vec3<f32>(C_NEG_INFTY);
+    var total_weight = 0.0;
+    var l1 = vec3<f32>(0.0);
+    var l2 = vec3<f32>(0.0);
+
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let s = textureSampleLevel(tex, point_sampler, uv + vec2<f32>(f32(x), f32(y)) * step, 0.0);
+            let q = rgb_to_ycocg(tonemap(s.rgb));
+
+            min_color = min(min_color, q);
+            max_color = max(max_color, q);
+
+            let w = 2.0 / f32(1 + abs(x) + abs(y));
+            total_weight += w;
+            l1 += w * q;
+            l2 += w * q * q;
+        }
+    }
+
+    l1 /= total_weight;
+    l2 /= total_weight;
+
+    var result: ColorRange;
+    result.min = min_color;
+    result.max = max_color;
+    result.avg = l1;
+    result.dev = sqrt(C_MIN_VAR + l2 - l1 * l1);
+    return result;
+}
+
+fn clamp_to_range(color: vec3<f32>, range: ColorRange) -> vec3<f32> {
+    let ycocg = rgb_to_ycocg(color);
+    let clamped = clamp(ycocg, range.min, range.max);
+    return ycocg_to_rgb(clamped);
+}
+
+fn variance_range_to_range(lhs: ColorRange, rhs: ColorRange) -> f32 {
+    let inv_std = 1.0 / ((1.0 / lhs.dev) + (1.0 / rhs.dev));
+    let diff = lhs.avg - rhs.avg;
+    let variance = (C_MIN_VAR + diff * diff) / (inv_std * inv_std);
+    return length(variance / 4.0);
+}
+
+// ── Reversible tonemapper (Reinhard) ─────────────────────────────────────────
+
 fn max3(v: vec3<f32>) -> f32 { return max(v.r, max(v.g, v.b)); }
-fn tonemap(c: vec3<f32>)         -> vec3<f32> { return c * rcp(max3(c) + 1.0); }
-fn reverse_tonemap(c: vec3<f32>) -> vec3<f32> { return c * rcp(1.0 - max3(c)); }
+fn tonemap(c: vec3<f32>) -> vec3<f32> { return c * (1.0 / (max3(c) + 1.0)); }
+fn reverse_tonemap(c: vec3<f32>) -> vec3<f32> { return c * (1.0 / (1.0 - max3(c) + 1.0e-8)); }
+
+// ── Main resolve ──────────────────────────────────────────────────────────────
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let in_dims  = vec2<f32>(textureDimensions(current_frame));
     let in_texel = 1.0 / in_dims;
+    let out_dims = vec2<f32>(textureDimensions(history_frame));
+    let out_texel = 1.0 / out_dims;
 
     // ── Jitter correction ───────────────────────────────────────────────────
-    // The projection was shifted by NDC (raw-0.5)*2/W, which equals UV (raw-0.5)/W.
-    // Output pixel in.uv represents the UNJITTERED world-point at in.uv.
-    // Because jitter shifts all geometry by +jitter_uv, the world-point at in.uv
-    // landed at in.uv + jitter_uv in the rendered current_frame.
-    // So we add jitter_uv when reading current_frame, and do NOT subtract it from
-    // history_uv (since history already stores accumulated unjittered results).
     let jitter_uv = taa.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
     let cur_uv    = in.uv + jitter_uv;
 
     // ── Current frame sample ────────────────────────────────────────────────
     let original_color = textureSample(current_frame, point_sampler, cur_uv);
-    let current_color  = tonemap(original_color.rgb);
 
     // ── RESET (first frame) ─────────────────────────────────────────────────
-    // Write current directly and prime history with high confidence so
-    // accumulation starts at MIN_HISTORY_BLEND_RATE from frame 2 onwards.
     if taa.reset != 0u {
         return vec4<f32>(original_color.rgb, 1.0 / MIN_HISTORY_BLEND_RATE);
     }
 
-    // ── Depth-based reprojection ────────────────────────────────────────────
-    // Reconstruct this pixel’s world-space position from the depth buffer, then
-    // reproject with the previous frame’s view-projection to find where the same
-    // world point landed last frame.  Handles all camera movement over static
-    // geometry without a dedicated velocity buffer.
+    // ── Depth-based reprojection → history UV ───────────────────────────────
     let depth_val  = textureSample(depth_tex, point_sampler, in.uv);
-    // UV (0,0)=top-left → NDC: x ∈ [-1,+1], y ∈ [+1,-1]
     let ndc_xy     = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     let clip       = vec4<f32>(ndc_xy, depth_val, 1.0);
     let world_h    = camera.inv_view_proj * clip;
@@ -183,57 +214,51 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         return vec4<f32>(original_color.rgb, 1.0);
     }
 
-    // ── History ─────────────────────────────────────────────────────────────
-    // Read confidence from history alpha (point sampler — no filtering needed).
-    let raw_confidence = textureSampleLevel(history_frame, point_sampler, history_uv, 0.0).a;
+    // ── History sample ──────────────────────────────────────────────────────
+    let history_rgb = sample_catmull_rom(history_frame, linear_sampler, history_uv);
 
-    // Catmull-Rom reduces blur compared to bilinear.
-    // History was written as original (non-tonemapped) colors; tonemap before blending.
-    let history_color = tonemap(sample_catmull_rom(history_frame, linear_sampler, history_uv));
+    // ── Tonemap for stable accumulation ─────────────────────────────────────
+    let current_color = tonemap(original_color.rgb);
+    let history_color = tonemap(history_rgb);
 
-    // ── 3×3 neighbourhood AABB in YCoCg ────────────────────────────────────
-    // Sample around the jitter-corrected UV so the box bounds the correct world-point.
-    var m1 = vec3<f32>(0.0);
-    var m2 = vec3<f32>(0.0);
-    for (var x = -1; x <= 1; x = x + 1) {
-        for (var y = -1; y <= 1; y = y + 1) {
-            // textureSampleLevel: control flow is non-uniform here (history_uv depends on
-            // velocity which is a textureSample return value).
-            let s = rgb_to_ycocg(tonemap(
-                textureSampleLevel(current_frame, point_sampler,
-                    cur_uv + vec2<f32>(f32(x), f32(y)) * in_texel, 0.0).rgb));
-            m1 += s;
-            m2 += s * s;
-        }
-    }
-    let mean    = m1 / 9.0;
-    let std_dev = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+    // ── Weighted 3×3 YCoCg neighbourhood analysis ──────────────────────────
+    let next_range = sample_range(current_frame, cur_uv, in_texel);
+    let prev_range = sample_range(history_frame, history_uv, out_texel);
 
-    // Clip history towards AABB centre (Playdead method).
-    let clipped_history = ycocg_to_rgb(clip_towards_aabb_center(
-        rgb_to_ycocg(history_color),
-        rgb_to_ycocg(current_color),
-        mean - std_dev,
-        mean + std_dev,
-    ));
+    // Clamp history to current frame's YCoCg [min, max]  → prevents ghosting
+    let clamped = clamp_to_range(history_color, next_range);
 
-    // ── Confidence-based blend rate ─────────────────────────────────────────
-    // Confidence accumulates each frame when history is stable.
-    // If the AABB clipping moved the history sample significantly, the world
-    // content at this pixel changed (disocclusion or fast object motion) —
-    // reset to 1 so we fall back to the DEFAULT blend rate for those pixels.
-    let clip_error = length(rgb_to_ycocg(clipped_history) - rgb_to_ycocg(history_color));
-    var new_confidence: f32;
-    if clip_error > 0.05 {
-        new_confidence = 1.0;
-    } else {
-        new_confidence = raw_confidence + 1.0;
-    }
-    let blend_rate = clamp(1.0 / new_confidence, MIN_HISTORY_BLEND_RATE, DEFAULT_HISTORY_BLEND_RATE);
+    // Blend history toward current based on distance to the clamped value.
+    // If history is inside current's AABB, ratio → 0 (keep history).
+    // If history is outside current's AABB, ratio → 1 (favour current).
+    let prev_dist = distance(history_color, clamped);
+    let next_dist = distance(current_color, clamped);
+    let blend_toward_current = prev_dist / (next_dist + prev_dist + 1.0e-6);
+    var blended = mix(history_color, current_color, blend_toward_current);
 
-    // ── Blend and output ────────────────────────────────────────────────────
-    // Result is kept in original (non-tonemapped) space for history storage.
-    // Alpha carries the confidence counter for next frame.
-    let result = reverse_tonemap(mix(clipped_history, current_color, blend_rate));
-    return vec4<f32>(result, new_confidence);
+    // ── Sub-pixel jitter offset weight ──────────────────────────────────────
+    // Pixels sampled near the sub-pixel centre are more reliable.
+    let jitter_len_sq = dot(taa.jitter_offset, taa.jitter_offset);
+    let offset_w = exp(-4.0 * (1.0 - blend_toward_current) * jitter_len_sq);
+    let w = offset_w * taa.upscale_factor * taa.upscale_factor;
+
+    // ── Variance-driven blend rate ──────────────────────────────────────────
+    // When current and history neighbourhoods have similar statistics, var is
+    // small → rc is small → history is preserved (temporal stability).
+    // When they differ (disocclusion, fast motion), var is large → rc is large
+    // → current frame dominates (no ghosting).
+    let variance = variance_range_to_range(next_range, prev_range);
+    let rc = 1.0 - exp(-16.0 * max(taa.time_delta, 1.0 / 60.0) * variance * w);
+    let blend_rate = clamp(rc, MIN_HISTORY_BLEND_RATE, 1.0);
+
+    // ── Final blend & output ────────────────────────────────────────────────
+    let result_rgb = mix(blended, current_color, blend_rate);
+    let result = reverse_tonemap(result_rgb);
+
+    // Alpha encodes effective blend confidence (inverse of blend_rate).
+    // Higher confidence = slower accumulation = more temporal stability.
+    // External passes can read this for debug visualisation.
+    let confidence = 1.0 / blend_rate;
+
+    return vec4<f32>(result, confidence);
 }

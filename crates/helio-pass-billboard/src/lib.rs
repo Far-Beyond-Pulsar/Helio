@@ -443,9 +443,17 @@ impl RenderPass for BillboardPass {
         "Billboard"
     }
 
+    fn reads(&self) -> &'static [helio_v3::graph::ResourceSlot] {
+        &[
+            helio_v3::graph::ResourceSlot::PreAa,
+            helio_v3::graph::ResourceSlot::FullResDepth,
+            helio_v3::graph::ResourceSlot::Billboards,
+        ]
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Upload billboard instances from the high-level renderer's frame data.
-        if let Some(data) = ctx.frame_resources.billboards {
+        if let Some(data) = ctx.frame_resources.billboards.get() {
             if data.generation != self.uploaded_generation {
                 let max_bytes = MAX_BILLBOARDS as usize * std::mem::size_of::<BillboardInstance>();
                 let upload_bytes = data.instances.len().min(max_bytes);
@@ -475,7 +483,7 @@ impl RenderPass for BillboardPass {
         }
 
         let target_view = if self.occluded_by_geometry {
-            ctx.resources.pre_aa.unwrap_or(ctx.target)
+            ctx.resources.pre_aa.get().unwrap_or(ctx.target)
         } else {
             ctx.target
         };
@@ -496,7 +504,7 @@ impl RenderPass for BillboardPass {
 
         let (depth_view, depth_load_op) = if self.occluded_by_geometry {
             (ctx.depth, wgpu::LoadOp::Load)
-        } else if let Some(frd) = ctx.resources.full_res_depth {
+        } else if let Some(frd) = ctx.resources.full_res_depth.get() {
             (frd, wgpu::LoadOp::Load)
         } else {
             (ctx.depth, wgpu::LoadOp::Load)

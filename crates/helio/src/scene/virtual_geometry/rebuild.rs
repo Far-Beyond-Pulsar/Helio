@@ -126,8 +126,8 @@ impl super::super::Scene {
         }
 
         self.vg_buffer_version = self.vg_buffer_version.wrapping_add(1);
-        log::debug!(
-            "rebuild_vg_buffers: {} VG objects → {} meshlets",
+        eprintln!(
+            "[vg] rebuild_vg_buffers: {} VG objects → {} meshlets",
             instance_count,
             self.vg_cpu_meshlets.len()
         );

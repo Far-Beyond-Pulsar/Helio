@@ -45,6 +45,7 @@ quark = { workspace = true, package = "quark" }
 helio-live-portal = { path = "../helio-live-portal", optional = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
+meshopt = "0.6.2"
 
 [features]
 default = ["profiling"]
