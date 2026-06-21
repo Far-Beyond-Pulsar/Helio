@@ -31,13 +31,17 @@ use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 ///
 /// Based on the plastic ratio (2D generalisation of the golden ratio):
 ///   R1 ≈ 1.324717957, R2 = R1² ≈ 1.754877666
-/// Returns offset in [-0.5, 0.5] — the sub-pixel jitter for the frame.
+/// Returns offset in [-0.5, 0.5) — the sub-pixel jitter for the frame.
+/// A phase offset is added to avoid exactly -0.5 at frame 0 (which would
+/// cause off-by-one sampling with NEAREST filtering).
 fn r1_r2_jitter(frame: u64) -> [f32; 2] {
     // Pre-computed plastic ratio constants
     const INV_R1: f64 = 0.7548776662466927; // 1 / R1
     const INV_R2: f64 = 0.5698402905980539; // 1 / R2
-    let fx = frame as f64 * INV_R1;
-    let fy = frame as f64 * INV_R2;
+    // Phase offset to avoid exact -0.5 at frame 0
+    const PHASE: f64 = 0.5;
+    let fx = frame as f64 * INV_R1 + PHASE;
+    let fy = frame as f64 * INV_R2 + PHASE;
     [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
 }
 

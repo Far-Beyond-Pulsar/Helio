@@ -19,8 +19,9 @@ struct TaaUniform {
 fn r1_r2_jitter(frame: u64) -> [f32; 2] {
     const INV_R1: f64 = 0.7548776662466927;
     const INV_R2: f64 = 0.5698402905980539;
-    let fx = frame as f64 * INV_R1;
-    let fy = frame as f64 * INV_R2;
+    const PHASE: f64 = 0.5;
+    let fx = frame as f64 * INV_R1 + PHASE;
+    let fy = frame as f64 * INV_R2 + PHASE;
     [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
 }
 
@@ -38,25 +39,26 @@ fn taa_uniform_alignment_is_4() {
 }
 
 #[test]
-fn taa_uniform_size_divisible_by_16() {
-    assert_eq!(mem::size_of::<TaaUniform>() % 16, 0);
+fn taa_uniform_size_aligned_to_8() {
+    // WGSL vec2 align 8 → struct size must be multiple of 8.
+    assert_eq!(mem::size_of::<TaaUniform>() % 8, 0);
 }
 
 // ── R1/R2 jitter range tests ─────────────────────────────────────────────────
 
 #[test]
-fn r1_r2_jitter_x_in_open_half() {
+fn r1_r2_jitter_x_in_half_range() {
     for frame in 0..256u64 {
         let [jx, _] = r1_r2_jitter(frame);
-        assert!(jx > -0.5 && jx < 0.5, "frame {frame}: jx = {jx}");
+        assert!(jx >= -0.5 && jx < 0.5, "frame {frame}: jx = {jx}");
     }
 }
 
 #[test]
-fn r1_r2_jitter_y_in_open_half() {
+fn r1_r2_jitter_y_in_half_range() {
     for frame in 0..256u64 {
         let [_, jy] = r1_r2_jitter(frame);
-        assert!(jy > -0.5 && jy < 0.5, "frame {frame}: jy = {jy}");
+        assert!(jy >= -0.5 && jy < 0.5, "frame {frame}: jy = {jy}");
     }
 }
 

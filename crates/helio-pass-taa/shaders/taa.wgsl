@@ -118,24 +118,26 @@ fn sample_catmull_rom(tex: texture_2d<f32>, samp: sampler, uv: vec2<f32>) -> vec
 // ── YCoCg neighbourhood statistics ───────────────────────────────────────────
 
 struct ColorRange {
-    min: vec4<f32>,
-    max: vec4<f32>,
-    avg: vec4<f32>,
-    std: vec4<f32>,
+    min: vec3<f32>,
+    max: vec3<f32>,
+    avg: vec3<f32>,
+    dev: vec3<f32>,
 }
 
+// Statistics are computed in tonemapped YCoCg space so they match the space
+// used during blending. Including alpha would corrupt the stats because the
+// history texture stores a large confidence value (1/blend_rate) in alpha.
 fn sample_range(tex: texture_2d<f32>, uv: vec2<f32>, step: vec2<f32>) -> ColorRange {
-    var min_color = vec4<f32>(C_POS_INFTY);
-    var max_color = vec4<f32>(C_NEG_INFTY);
+    var min_color = vec3<f32>(C_POS_INFTY);
+    var max_color = vec3<f32>(C_NEG_INFTY);
     var total_weight = 0.0;
-    var l1 = vec4<f32>(0.0);
-    var l2 = vec4<f32>(0.0);
+    var l1 = vec3<f32>(0.0);
+    var l2 = vec3<f32>(0.0);
 
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let s = textureSampleLevel(tex, point_sampler, uv + vec2<f32>(f32(x), f32(y)) * step, 0.0);
-            let ycocg = rgb_to_ycocg(s.rgb);
-            let q = vec4<f32>(ycocg, s.a);
+            let q = rgb_to_ycocg(tonemap(s.rgb));
 
             min_color = min(min_color, q);
             max_color = max(max_color, q);
@@ -154,18 +156,18 @@ fn sample_range(tex: texture_2d<f32>, uv: vec2<f32>, step: vec2<f32>) -> ColorRa
     result.min = min_color;
     result.max = max_color;
     result.avg = l1;
-    result.std = sqrt(C_MIN_VAR + l2 - l1 * l1);
+    result.dev = sqrt(C_MIN_VAR + l2 - l1 * l1);
     return result;
 }
 
 fn clamp_to_range(color: vec3<f32>, range: ColorRange) -> vec3<f32> {
     let ycocg = rgb_to_ycocg(color);
-    let clamped = clamp(vec4<f32>(ycocg, 0.0), range.min, range.max);
-    return ycocg_to_rgb(clamped.rgb);
+    let clamped = clamp(ycocg, range.min, range.max);
+    return ycocg_to_rgb(clamped);
 }
 
 fn variance_range_to_range(lhs: ColorRange, rhs: ColorRange) -> f32 {
-    let inv_std = 1.0 / ((1.0 / lhs.std) + (1.0 / rhs.std));
+    let inv_std = 1.0 / ((1.0 / lhs.dev) + (1.0 / rhs.dev));
     let diff = lhs.avg - rhs.avg;
     let variance = (C_MIN_VAR + diff * diff) / (inv_std * inv_std);
     return length(variance / 4.0);
@@ -245,8 +247,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // small → rc is small → history is preserved (temporal stability).
     // When they differ (disocclusion, fast motion), var is large → rc is large
     // → current frame dominates (no ghosting).
-    let var = variance_range_to_range(next_range, prev_range);
-    let rc = 1.0 - exp(-16.0 * max(taa.time_delta, 1.0 / 60.0) * var * w);
+    let variance = variance_range_to_range(next_range, prev_range);
+    let rc = 1.0 - exp(-16.0 * max(taa.time_delta, 1.0 / 60.0) * variance * w);
     let blend_rate = clamp(rc, MIN_HISTORY_BLEND_RATE, 1.0);
 
     // ── Final blend & output ────────────────────────────────────────────────
