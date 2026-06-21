@@ -530,6 +530,15 @@ fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> v
     return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
+fn env_brdf_approx(NdotV: f32, roughness: f32) -> vec2<f32> {
+    let a    = roughness * roughness;
+    let a2   = a * a;
+    let ndv  = NdotV;
+    let bias = 1.0 - a2 * 0.5 / (a2 * 0.5 + 0.33) * ndv;
+    let scale = 1.0 - bias;
+    return vec2<f32>(scale, bias);
+}
+
 // Evaluate one direct light with the full Cook-Torrance BRDF.
 // `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
 fn pbr_direct_light(
@@ -554,9 +563,9 @@ fn pbr_direct_light(
         let dist     = length(to_light);
         if dist > light.position_range.w { return vec3<f32>(0.0); }
         L = to_light / dist;
-        let ratio   = dist / light.position_range.w;
-        let falloff = max(0.0, 1.0 - ratio * ratio);
-        var atten   = falloff * falloff;
+        var atten = 1.0 / (dist * dist + 0.0001);
+        let normalized_dist = dist / light.position_range.w;
+        atten *= max(0.0, 1.0 - normalized_dist * normalized_dist * normalized_dist * normalized_dist);
         if light.light_type == 2u {  // Spot light
             let cos_a = dot(-L, light.direction_outer.xyz);
             atten    *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
@@ -835,8 +844,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let R            = reflect(-V, N);
     let env_lod      = roughness * 8.0;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
     let env_sample   = textureSampleLevel(env_cube, env_sampler, R, env_lod).rgb;
-    let spec_scale   = 1.0 - roughness * roughness;
-    let spec_ind     = F_ibl * env_sample * spec_scale;
+    let env_brdf    = env_brdf_approx(NdV, roughness);
+    let spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
 
     // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
     // Hemisphere ambient is shadow-INDEPENDENT.  Shadow maps only affect direct

@@ -54,6 +54,36 @@ const ENABLE_SHADOWS: bool = true;
 const MAX_SHADOW_LIGHTS: u32 = 42u;
 const ATLAS_SIZE: f32 = 1024.0;
 const NORMAL_OFFSET_SCALE: f32 = 0.01;
+const PI: f32 = 3.14159265359;
+
+fn pow5(x: f32) -> f32 {
+    let x2 = x * x;
+    return x2 * x2 * x;
+}
+
+fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
+    let a    = roughness * roughness;
+    let a2   = a * a;
+    let NdH  = max(dot(N, H), 0.0);
+    let denom = NdH * NdH * (a2 - 1.0) + 1.0;
+    return a2 / (PI * denom * denom + 0.0001);
+}
+
+fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 {
+    let r = roughness + 1.0;
+    let k = (r * r) / 8.0;
+    return NdotV / (NdotV * (1.0 - k) + k + 0.0001);
+}
+
+fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f32 {
+    let NdV = max(dot(N, V), 0.0);
+    let NdL = max(dot(N, L), 0.0);
+    return geometry_schlick_ggx(NdV, roughness) * geometry_schlick_ggx(NdL, roughness);
+}
+
+fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
+    return F0 + (1.0 - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
+}
 
 struct LightMatrix {
     mat: mat4x4<f32>,
@@ -296,35 +326,41 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
     }
 }
 
-fn evaluate_light(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-    let light_color = light.color_intensity.xyz;
-    let intensity = light.color_intensity.w;
-    if (light.light_type == 0u) {
-        // Directional light
-        let dir = normalize(light.direction_outer.xyz);
-        let ndotl = max(dot(normal, dir), 0.0);
-        return light_color * intensity * ndotl;
+fn evaluate_light(light: GpuLight, world_pos: vec3<f32>, N: vec3<f32>, V: vec3<f32>, F0: vec3<f32>, albedo: vec3<f32>, roughness: f32, metallic: f32, sf: f32) -> vec3<f32> {
+    var L: vec3<f32>;
+    var radiance: vec3<f32>;
+
+    if light.light_type == 0u {
+        L = normalize(-light.direction_outer.xyz);
+        radiance = light.color_intensity.xyz * light.color_intensity.w;
     } else {
-        let delta = light.position_range.xyz - world_pos;
-        let dist = max(length(delta), 0.001);
-        let dir = normalize(delta);
-        let ndotl = max(dot(normal, dir), 0.0);
-        let range = max(light.position_range.w, 1.0);
-        let attenuation = max(0.0, 1.0 - dist / range) / (dist * dist * 0.2 + 1.0);
-
-        if (light.light_type == 2u) {
-            // Spot attack
-            let spot_dir = normalize(light.direction_outer.xyz);
-            let cos_angle = dot(spot_dir, -dir);
-            let outer = light.direction_outer.w;
-            let inner = light.inner_angle;
-            let spot = smoothstep(outer, inner, cos_angle);
-            return light_color * intensity * ndotl * attenuation * spot;
+        let to_light = light.position_range.xyz - world_pos;
+        let dist = length(to_light);
+        if dist > light.position_range.w { return vec3<f32>(0.0); }
+        L = to_light / dist;
+        var atten = 1.0 / (dist * dist + 0.0001);
+        let normalized_dist = dist / light.position_range.w;
+        atten *= max(0.0, 1.0 - normalized_dist * normalized_dist * normalized_dist * normalized_dist);
+        if light.light_type == 2u {
+            let cos_a = dot(-L, light.direction_outer.xyz);
+            atten *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
         }
-
-        // point/other
-        return light_color * intensity * ndotl * attenuation;
+        radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
     }
+
+    let NdL = max(dot(N, L), 0.0);
+    if NdL == 0.0 { return vec3<f32>(0.0); }
+
+    if all(radiance < vec3<f32>(0.002)) { return vec3<f32>(0.0); }
+
+    let H = normalize(V + L);
+    let D = distribution_ggx(N, H, roughness);
+    let G = geometry_smith(N, V, L, roughness);
+    let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    let kD = (1.0 - F) * (1.0 - metallic);
+    let specular = D * G * F / (4.0 * max(dot(N, V), 0.0) * NdL + 0.0001);
+
+    return (kD * albedo / PI + specular) * radiance * NdL * sf;
 }
 
 // Group 1: GBuffer inputs
@@ -388,33 +424,26 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     let roughness = clamp(orm.g, 0.02, 1.0);
     let metallic = orm.b;
-    let base_albedo = albedo * (1.0 - metallic);
-
     // Reconstruct accurate world position from depth and camera inverse view-proj.
     let screen_size = vec2<f32>(textureDimensions(gbuf_albedo));
     let uv_01 = in.clip_pos.xy / screen_size;
     let ndc_xy = vec2<f32>(uv_01.x * 2.0 - 1.0, 1.0 - uv_01.y * 2.0);
     let world_h = camera.view_proj_inv * vec4<f32>(ndc_xy, depth, 1.0);
     let world_pos = world_h.xyz / world_h.w;
+    let V = normalize(camera.position_near.xyz - world_pos);
+    let F0 = mix(vec3<f32>(0.04), albedo, metallic);
 
     // Direct per-light accumulation (actual scene lights)
     var direct_lighting = vec3<f32>(0.0);
     let max_lights = min(globals.light_count, 64u);
     for (var i: u32 = 0u; i < max_lights; i = i + 1u) {
         let vis = shadow_factor(i, world_pos, normal, in.clip_pos.xy, globals.frame);
-        direct_lighting = direct_lighting + evaluate_light(lights[i], world_pos, normal) * vis;
+        direct_lighting = direct_lighting + evaluate_light(lights[i], world_pos, normal, V, F0, albedo, roughness, metallic, vis);
     }
 
     let ambient = vec3<f32>(0.03);
-    let specular_strength = 0.04;
-    var specular = vec3<f32>(0.0);
-    if (length(direct_lighting) > 0.0) {
-        let phong = pow(max(dot(normal, normalize(direct_lighting)), 0.0), (1.0 / max(roughness, 0.001)) * 64.0);
-        specular = vec3<f32>(specular_strength) * phong;
-    }
-
-    let base = base_albedo * (direct_lighting + ambient);
-    let final_color = base + specular + indirect + emissive;
+    let base = albedo * (1.0 - metallic) * (direct_lighting + ambient);
+    let final_color = base + indirect + emissive;
 
     return vec4<f32>(final_color, 1.0);
 }
