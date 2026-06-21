@@ -49,8 +49,9 @@ pub use scene::{
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 pub use helio_v3::{
-    DrawIndexedIndirectArgs, Error, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
-    GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
+    DebugViewDescriptor, DrawIndexedIndirectArgs, Error, GpuCameraUniforms, GpuDrawCall,
+    GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass,
+    Result,
 };
 pub use libhelio::{LightType, Movability, ShadowQuality, VolumetricClouds, SkyActor};
 #[cfg(feature = "bake")]

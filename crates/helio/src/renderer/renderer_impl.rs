@@ -9,6 +9,7 @@ use arrayvec::ArrayVec;
 use helio_pass_debug::{DebugVertex};
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
+use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_v3::{RenderGraph, RenderPass, Result as HelioResult};
 use helio_pass_debug::DebugCameraUniform;
 const MAX_TEXTURES: usize = crate::material::MAX_TEXTURES;
@@ -537,7 +538,14 @@ impl Renderer {
             if let Some(pass) = self.graph.find_pass_mut::<DeferredLightPass>() {
                 pass.set_debug_mode(mode);
             }
+            if let Some(pass) = self.graph.find_pass_mut::<VirtualGeometryPass>() {
+                pass.debug_mode = mode;
+            }
         }
+    }
+
+    pub fn available_debug_views(&self) -> Vec<helio_v3::DebugViewDescriptor> {
+        self.graph.collect_debug_views()
     }
 
     pub fn set_perf_overlay_mode(&mut self, mode: PerfOverlayMode) {

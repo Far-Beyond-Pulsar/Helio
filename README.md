@@ -179,8 +179,38 @@ renderer.set_render_size(width, height);
 renderer.set_clear_color([0.05, 0.05, 0.08, 1.0]);
 renderer.set_ambient([0.12, 0.14, 0.18], 0.25);
 renderer.set_editor_mode(true);    // enables grid + billboarded light icons
-renderer.set_debug_mode(0);        // 0=off  10=shadow heatmap  11=light depth
+renderer.set_debug_mode(0);        // 0=off, or use available_debug_views()
 ```
+
+### Debug Views
+
+Render passes register named debug visualisations via the `DebugViewDescriptor`
+trait method. The renderer aggregates them so editors/tools can discover and
+cycle through available modes at runtime:
+
+```rust
+for view in renderer.available_debug_views() {
+    println!("{}: {}", view.name, view.description);
+}
+renderer.set_debug_mode(view.debug_mode);
+```
+
+In `editor_demo_mini`, press **F3** / **F4** to cycle debug views.
+
+| Mode | Pass | Name | Description |
+|------|------|------|-------------|
+| 0 | — | Off | Normal rendering |
+| 1 | GBuffer | UV Visualisation | Show UV coordinates as R=U, G=V |
+| 2 | GBuffer | Raw Texture | Raw texture sample without material multiply |
+| 3 | GBuffer | Geometry Normals | Geometry normals only (skip normal mapping) |
+| 4 | DeferredLight | Albedo Only | G-buffer albedo without lighting |
+| 5 | DeferredLight | World Normals | World-space normals remapped to RGB |
+| 10 | DeferredLight | Shadow Heatmap | Shadow factor: white=lit, black=shadowed |
+| 11 | DeferredLight | Light Depth | Light-space depth projection |
+| 20 | VirtualGeometry | VG Mesh Triangles | Per-meshlet solid colour |
+| 21 | VirtualGeometry | VG LOD Heatmap | Colour by LOD level: green=LOD0 → red=LOD7 |
+
+Custom passes can register their own views by implementing `debug_views()` on `RenderPass`.
 
 ### Meshes
 

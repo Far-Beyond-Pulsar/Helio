@@ -26,7 +26,7 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::num::NonZeroU32;
 
 /// Bindless texture array size per shader stage.
@@ -616,6 +616,27 @@ impl RenderPass for GBufferPass {
             pass.draw_indexed_indirect(indirect, i as u64 * 20);
         }
         Ok(())
+    }
+
+    fn debug_views(&self) -> &'static [DebugViewDescriptor] {
+        static VIEWS: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "UV Visualisation",
+                debug_mode: 1,
+                description: "Show UV coordinates as R=U, G=V",
+            },
+            DebugViewDescriptor {
+                name: "Raw Texture",
+                debug_mode: 2,
+                description: "Raw texture sample without material multiply",
+            },
+            DebugViewDescriptor {
+                name: "Geometry Normals",
+                debug_mode: 3,
+                description: "Geometry normals only (skip normal mapping)",
+            },
+        ];
+        VIEWS
     }
 }
 

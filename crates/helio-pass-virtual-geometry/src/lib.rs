@@ -16,7 +16,7 @@
 use std::num::NonZeroU32;
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 /// Bindless texture array size per shader stage.
 /// Capped at 16 on wasm32 (WebGPU baseline); 256 on native.
@@ -96,11 +96,11 @@ impl LodQuality {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
     meshlet_count: u32,
-    // Nanite-style screen-space LOD thresholds (0..1 fraction of screen height).
-    // screen_radius = (obj_radius * cot(fov/2)) / dist — FOV/scale/resolution-invariant.
-    lod_s0: f32, // LOD 0→1 when screen_radius drops below this (e.g. 0.05 = 5 % of screen)
-    lod_s1: f32, // LOD 1→2 when screen_radius drops below this (e.g. 0.01 = 1 % of screen)
+    _pad0: u32,
+    _pad1: u32,
     _pad2: u32,
+    lod_thresholds: [f32; 7],
+    _pad3: f32,
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -118,6 +118,9 @@ pub struct VirtualGeometryPass {
     /// Separate pipeline using `fs_debug` (requires SHADER_PRIMITIVE_INDEX).
     /// Only bound when debug_mode == 20; normal pipeline has zero primitive_index overhead.
     debug_draw_pipeline: Option<wgpu::RenderPipeline>,
+    /// LOD heatmap pipeline: uses `vs_debug_lod` + `fs_debug_lod` to colour by LOD level.
+    /// Bound when debug_mode == 21.
+    lod_debug_pipeline: wgpu::RenderPipeline,
     draw_bgl_0: wgpu::BindGroupLayout,
     draw_bgl_1: wgpu::BindGroupLayout,
     draw_bg_0: Option<wgpu::BindGroup>,
@@ -518,7 +521,7 @@ impl VirtualGeometryPass {
                         targets: gbuffer_targets,
                     }),
                     primitive: draw_primitive,
-                    depth_stencil: draw_depth,
+                    depth_stencil: draw_depth.clone(),
                     multisample: wgpu::MultisampleState::default(),
                     multiview_mask: None,
                     cache: None,
@@ -528,6 +531,31 @@ impl VirtualGeometryPass {
             None
         };
 
+        // LOD heatmap debug pipeline: uses vs_debug_lod + fs_debug_lod which
+        // colour geometry by LOD level (green=LOD0 → red=LOD7).
+        let lod_debug_pipeline =
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("VG LOD Debug Pipeline"),
+                layout: Some(&draw_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &draw_shader,
+                    entry_point: Some("vs_debug_lod"),
+                    compilation_options: Default::default(),
+                    buffers: vg_vertex_buffers,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &draw_shader,
+                    entry_point: Some("fs_debug_lod"),
+                    compilation_options: Default::default(),
+                    targets: gbuffer_targets,
+                }),
+                primitive: draw_primitive,
+                depth_stencil: draw_depth,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
         Self {
             cull_pipeline,
             cull_bgl,
@@ -535,6 +563,7 @@ impl VirtualGeometryPass {
             cull_buf,
             draw_pipeline,
             debug_draw_pipeline,
+            lod_debug_pipeline,
             draw_bgl_0,
             draw_bgl_1,
             draw_bg_0,
@@ -692,12 +721,14 @@ impl RenderPass for VirtualGeometryPass {
         }
 
         // ── Upload cull uniforms ──────────────────────────────────────────────
-        let (lod_s0, lod_s1) = self.lod_quality.thresholds();
+        let lod_thresholds = self.lod_quality.thresholds();
         let cull_uni = CullUniforms {
             meshlet_count: self.last_meshlet_count,
-            lod_s0,
-            lod_s1,
+            _pad0: 0,
+            _pad1: 0,
             _pad2: 0,
+            lod_thresholds,
+            _pad3: 0.0,
         };
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
@@ -896,12 +927,12 @@ impl RenderPass for VirtualGeometryPass {
                 multiview_mask: None,
             });
 
-            let active_pipeline = if self.debug_mode == 20 {
-                self.debug_draw_pipeline
+            let active_pipeline = match self.debug_mode {
+                20 => self.debug_draw_pipeline
                     .as_ref()
-                    .unwrap_or(&self.draw_pipeline)
-            } else {
-                &self.draw_pipeline
+                    .unwrap_or(&self.draw_pipeline),
+                21 => &self.lod_debug_pipeline,
+                _ => &self.draw_pipeline,
             };
             rpass.set_pipeline(active_pipeline);
             rpass.set_bind_group(0, draw_bg0, &[]);
@@ -934,6 +965,22 @@ impl RenderPass for VirtualGeometryPass {
         }
 
         Ok(())
+    }
+
+    fn debug_views(&self) -> &'static [DebugViewDescriptor] {
+        static VIEWS: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "VG Mesh Triangles",
+                debug_mode: 20,
+                description: "Per-meshlet solid colour — visualises meshlet boundaries",
+            },
+            DebugViewDescriptor {
+                name: "VG LOD Heatmap",
+                debug_mode: 21,
+                description: "Colour by LOD level: green=LOD0 through red=LOD7",
+            },
+        ];
+        VIEWS
     }
 }
 

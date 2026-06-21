@@ -476,6 +476,14 @@ impl RenderGraph {
             .filter_map(|p| p.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Collects all debug view descriptors from every pass in the graph.
+    pub fn collect_debug_views(&self) -> Vec<crate::DebugViewDescriptor> {
+        self.passes
+            .iter()
+            .flat_map(|p| p.debug_views().iter().copied())
+            .collect()
+    }
+
     /// Returns a reference to the profiler for reading timing data.
     ///
     /// Use this to access CPU and GPU profiling results after calling `execute()`.

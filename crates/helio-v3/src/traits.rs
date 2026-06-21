@@ -99,6 +99,17 @@ impl<T> MaybeSync for T {}
 
 use crate::{PassContext, PrepareContext, Result};
 
+/// Describes a debug visualisation mode that a render pass provides.
+///
+/// Passes return a static slice of these from [`RenderPass::debug_views`] so
+/// the renderer can enumerate all available debug modes at runtime.
+#[derive(Debug, Clone, Copy)]
+pub struct DebugViewDescriptor {
+    pub name: &'static str,
+    pub debug_mode: u32,
+    pub description: &'static str,
+}
+
 /// Supertrait that provides safe `Any`-based downcasting for render passes.
 ///
 /// Blanket-implemented for every `T: 'static`, so no concrete pass needs to
@@ -381,5 +392,10 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// The default is a no-op, so passes that don't need resize handling can ignore it.
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
+    /// Returns the debug visualisation modes this pass provides.
+    ///
+    /// The renderer aggregates these from all passes to build a discoverable
+    /// list of debug views that can be cycled at runtime.
+    fn debug_views(&self) -> &'static [DebugViewDescriptor] { &[] }
 }
 

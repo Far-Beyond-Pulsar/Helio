@@ -68,7 +68,7 @@ impl super::super::Scene {
     /// }
     /// ```
     pub(in crate::scene) fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
-        // Generate three LOD levels (full, medium, coarse) via vertex clustering.
+        // Generate up to 8 LOD levels via QEM edge-collapse simplification.
         let lod_meshes = generate_lod_meshes(&upload.vertices, &upload.indices);
 
         let mut all_meshlets: Vec<libhelio::GpuMeshletEntry> = Vec::new();

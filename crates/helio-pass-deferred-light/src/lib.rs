@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -744,6 +744,32 @@ impl RenderPass for DeferredLightPass {
         pass.set_bind_group(3, self.bind_group_3.as_ref().unwrap(), &[]);
         pass.draw(0..3, 0..1);
         Ok(())
+    }
+
+    fn debug_views(&self) -> &'static [DebugViewDescriptor] {
+        static VIEWS: &[DebugViewDescriptor] = &[
+            DebugViewDescriptor {
+                name: "Albedo Only",
+                debug_mode: 4,
+                description: "G-buffer albedo without lighting",
+            },
+            DebugViewDescriptor {
+                name: "World Normals",
+                debug_mode: 5,
+                description: "World-space normals remapped to RGB",
+            },
+            DebugViewDescriptor {
+                name: "Shadow Heatmap",
+                debug_mode: 10,
+                description: "Shadow factor: white=lit, black=shadowed",
+            },
+            DebugViewDescriptor {
+                name: "Light Depth",
+                debug_mode: 11,
+                description: "Light-space depth projection",
+            },
+        ];
+        VIEWS
     }
 }
 
