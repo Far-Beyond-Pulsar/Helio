@@ -1,8 +1,9 @@
 //! CPU-side virtual geometry: meshlet decomposition for GPU-driven rendering.
 //!
 //! Uses [meshopt](https://crates.io/crates/meshopt) (meshoptimizer FFI) for
-//! simplification, meshlet building, and bounds computation — the same library
-//! used by Unreal Engine 5's Nanite pipeline.
+//! the full optimization pipeline: indexing, vertex cache optimization,
+//! overdraw optimization, vertex fetch optimization, simplification, and
+//! meshlet building with bounds computation.
 
 use std::mem;
 
@@ -20,10 +21,6 @@ pub struct VirtualMeshId(pub(crate) u32);
 // ─── Upload / descriptor types ──────────────────────────────────────────────
 
 /// High-resolution mesh for virtual geometry upload.
-///
-/// The scene splits this into meshlets automatically when you call
-/// `Scene::insert_virtual_mesh()`.  Keep the CPU-side data alive only until
-/// after `Scene::flush()` returns.
 #[derive(Debug, Clone)]
 pub struct VirtualMeshUpload {
     pub vertices: Vec<PackedVertex>,
@@ -36,12 +33,9 @@ pub struct VirtualObjectDescriptor {
     pub virtual_mesh: VirtualMeshId,
     pub material_id: u32,
     pub transform: glam::Mat4,
-    /// World-space bounding sphere `[cx, cy, cz, radius]`.
     pub bounds: [f32; 4],
     pub flags: u32,
-    /// Group membership bitmask.  Use `GroupMask::NONE` for ungrouped objects.
     pub groups: crate::groups::GroupMask,
-    /// Movability mode. Defaults to Static when None.
     pub movability: Option<libhelio::Movability>,
 }
 
@@ -53,31 +47,58 @@ impl DecodePosition for PackedVertex {
     }
 }
 
-// ─── LOD generation via meshopt simplify ──────────────────────────────────
+// ─── Full meshopt optimization pipeline ───────────────────────────────────
 
-/// Generate exactly 8 LOD levels using meshoptimizer's edge-collapse simplifier.
+/// Run the full meshopt optimization pipeline on a mesh:
+/// 1. Weld duplicate vertices by position
+/// 2. Vertex cache optimization (reorder tris for GPU transform cache)
+/// 3. Overdraw optimization (reorder tris to reduce pixel overdraw)
+/// 4. Vertex fetch optimization (reorder verts for memory locality)
+fn optimize_mesh(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVertex>, Vec<u32>) {
+    if vertices.is_empty() || indices.is_empty() {
+        return (vertices.to_vec(), indices.to_vec());
+    }
+
+    // Step 1: Weld vertices that share the same position.
+    let (welded_verts, welded_indices) = weld_by_position(vertices, indices);
+
+    // Step 2: Vertex cache optimization.
+    let vcache_indices = meshopt::optimize_vertex_cache(&welded_indices, welded_verts.len());
+
+    // Step 3: Overdraw optimization (threshold 1.05 = allow up to 5% worse cache ratio).
+    let mut overdraw_indices = vcache_indices;
+    meshopt::optimize_overdraw_in_place_decoder(&mut overdraw_indices, &welded_verts, 1.05);
+
+    // Step 4: Vertex fetch optimization (reorder verts for locality).
+    let remap = meshopt::optimize_vertex_fetch_remap(&overdraw_indices, welded_verts.len());
+    let fetch_indices = meshopt::remap_index_buffer(Some(&overdraw_indices), welded_verts.len(), &remap);
+    let fetch_verts = meshopt::remap_vertex_buffer(&welded_verts, welded_verts.len(), &remap);
+
+    (fetch_verts, fetch_indices)
+}
+
+// ─── LOD generation ───────────────────────────────────────────────────────
+
+/// Generate exactly 8 LOD levels using meshoptimizer's simplifier.
 ///
-/// LOD 0 is the original mesh. Each successive level targets ~50% of the
-/// previous level's triangle count. If simplification bottoms out, the last
-/// level is duplicated to fill remaining slots so every LOD 0–7 has meshlets.
+/// LOD 0 is the fully optimized original mesh. Each successive level targets
+/// ~50% of the previous level's triangle count. The full meshopt pipeline
+/// (cache, overdraw, fetch optimization) is applied to every level.
 pub fn generate_lod_meshes(
     vertices: &[PackedVertex],
     indices: &[u32],
 ) -> Vec<(Vec<PackedVertex>, Vec<u32>)> {
-    let base_tri_count = indices.len() / 3;
-    let mut levels: Vec<(Vec<PackedVertex>, Vec<u32>)> = Vec::with_capacity(8);
-    levels.push((vertices.to_vec(), indices.to_vec()));
+    // Optimize the base mesh first.
+    let (opt_verts, opt_indices) = optimize_mesh(vertices, indices);
+    let base_tri_count = opt_indices.len() / 3;
 
-    // Weld vertices by position so meshopt can find shared edges to collapse.
-    // Many importers (FBX especially) produce unwelded meshes where every
-    // triangle has 3 unique vertices even when positions overlap.
-    let (welded_verts, welded_indices) = weld_by_position(vertices, indices);
-    let welded_tri_count = welded_indices.len() / 3;
+    let mut levels: Vec<(Vec<PackedVertex>, Vec<u32>)> = Vec::with_capacity(8);
+    levels.push((opt_verts.clone(), opt_indices.clone()));
 
     eprintln!(
-        "[vg] weld: {} verts → {} verts, {} tris → {} tris",
-        vertices.len(), welded_verts.len(),
-        base_tri_count, welded_tri_count,
+        "[vg] base: {} verts, {} tris (from {} verts, {} tris)",
+        opt_verts.len(), base_tri_count,
+        vertices.len(), indices.len() / 3,
     );
 
     let lod_params: [(f32, f32); 7] = [
@@ -90,11 +111,12 @@ pub fn generate_lod_meshes(
         (0.008, 2.0),
     ];
     for &(ratio, max_error) in &lod_params {
-        let target_indices = (((welded_tri_count as f32 * ratio) as usize).max(1)) * 3;
+        let target_indices = (((base_tri_count as f32 * ratio) as usize).max(1)) * 3;
 
+        // Simplify from the optimized base mesh for globally optimal results.
         let simplified_indices = meshopt::simplify_decoder(
-            &welded_indices,
-            &welded_verts,
+            &opt_indices,
+            &opt_verts,
             target_indices,
             max_error,
             meshopt::SimplifyOptions::None,
@@ -105,17 +127,23 @@ pub fn generate_lod_meshes(
             let last = levels.last().unwrap().clone();
             levels.push(last);
         } else {
+            // Compact, then run cache+overdraw+fetch optimization on the LOD.
             let (compact_verts, compact_indices) =
-                compact_mesh(&welded_verts, &simplified_indices);
+                compact_mesh(&opt_verts, &simplified_indices);
+            let mut opt_idx = meshopt::optimize_vertex_cache(&compact_indices, compact_verts.len());
+            meshopt::optimize_overdraw_in_place_decoder(&mut opt_idx, &compact_verts, 1.05);
+            let remap = meshopt::optimize_vertex_fetch_remap(&opt_idx, compact_verts.len());
+            let final_indices = meshopt::remap_index_buffer(Some(&opt_idx), compact_verts.len(), &remap);
+            let final_verts = meshopt::remap_vertex_buffer(&compact_verts, compact_verts.len(), &remap);
+
             eprintln!(
-                "[vg] LOD {}: {}/{} tris (target {}, error {})",
+                "[vg] LOD {}: {}/{} tris (target {})",
                 levels.len(),
-                compact_indices.len() / 3,
-                welded_tri_count,
+                final_indices.len() / 3,
+                base_tri_count,
                 target_indices / 3,
-                max_error,
             );
-            levels.push((compact_verts, compact_indices));
+            levels.push((final_verts, final_indices));
         }
     }
 
@@ -127,12 +155,12 @@ pub fn generate_lod_meshes(
     levels
 }
 
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
 /// Weld vertices that share the same position, merging duplicates.
-/// Keeps the first vertex's attributes (normal, UV, etc.) for each unique position.
 fn weld_by_position(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVertex>, Vec<u32>) {
     use std::collections::HashMap;
 
-    // Quantize positions to avoid floating-point mismatch (snap to ~1μm).
     fn pos_key(p: &[f32; 3]) -> (i64, i64, i64) {
         (
             (p[0] as f64 * 1_000_000.0).round() as i64,
@@ -186,11 +214,10 @@ fn compact_mesh(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVertex
 
 // ─── Meshlet building via meshopt ─────────────────────────────────────────
 
-/// Build meshlets using meshoptimizer AND return the reordered index buffer.
+/// Build meshlets using meshoptimizer and return the reordered index buffer.
 ///
-/// This is the preferred entry point: it returns both the meshlet descriptors
-/// and the flat index buffer that those descriptors reference, ready for upload
-/// to the mega-buffer.
+/// Returns `(meshlet_entries, flat_index_buffer)` — the flat indices are the
+/// meshlet-grouped index data ready for upload to the mega-buffer.
 pub fn meshletize_with_indices(
     vertices: &[PackedVertex],
     indices: &[u32],
@@ -225,10 +252,8 @@ pub fn meshletize_with_indices(
 
     for i in 0..meshlets.len() {
         let m = meshlets.get(i);
-
         let first_index_offset = flat_indices.len() as u32;
 
-        // Expand meshlet local tri indices → global vertex indices.
         let mut meshlet_global_indices: Vec<u32> = Vec::with_capacity(m.triangles.len());
         for &local_tri_idx in m.triangles {
             let vertex_slot = m.vertices[local_tri_idx as usize];
@@ -257,4 +282,3 @@ pub fn meshletize_with_indices(
 
     (entries, flat_indices)
 }
-
