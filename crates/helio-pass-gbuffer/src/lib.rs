@@ -436,16 +436,80 @@ impl RenderPass for GBufferPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // O(1): single multi_draw_indexed_indirect — no CPU loop over draw calls.
         let draw_count = ctx.scene.draw_count;
-        if draw_count == 0 {
+        let main_scene = ctx.resources.main_scene;
+
+        // Always clear the GBuffer + depth so downstream passes (VG, deferred
+        // lighting) see a clean slate even when there are no regular draw calls.
+        {
+            let _clear_pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("GBuffer Clear"),
+                color_attachments: &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.albedo_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.normal_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.orm_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.emissive_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &self.lightmap_uv_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                ],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: ctx.depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // Drop _clear_pass immediately — the clear happens on begin_render_pass.
+        }
+
+        if draw_count == 0 || main_scene.is_none() {
             return Ok(());
         }
-        let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
-            helio_v3::Error::InvalidPassConfig(
-                "GBuffer requires main_scene mesh buffers".to_string(),
-            )
-        })?;
+        let main_scene = main_scene.unwrap();
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
@@ -540,14 +604,14 @@ impl RenderPass for GBufferPass {
         let indirect = ctx.scene.indirect;
 
         let mut pass = ctx.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("GBuffer"),
+            label: Some("GBuffer Draw"),
             color_attachments: &[
                 Some(wgpu::RenderPassColorAttachment {
                     view: &self.albedo_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 }),
@@ -556,7 +620,7 @@ impl RenderPass for GBufferPass {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 }),
@@ -565,7 +629,7 @@ impl RenderPass for GBufferPass {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 }),
@@ -574,7 +638,7 @@ impl RenderPass for GBufferPass {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 }),
@@ -583,7 +647,7 @@ impl RenderPass for GBufferPass {
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 }),
@@ -591,7 +655,7 @@ impl RenderPass for GBufferPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: ctx.depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0), // GBuffer owns depth; clear to far
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
