@@ -15,7 +15,7 @@
 //! A future OIT (Order-Independent Transparency) implementation would eliminate this sort.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -223,6 +223,10 @@ impl RenderPass for TransparentPass {
         "Transparent"
     }
 
+    fn reads(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::MainScene, ResourceSlot::Depth]
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
@@ -244,7 +248,8 @@ impl RenderPass for TransparentPass {
         if draw_count == 0 {
             return Ok(());
         }
-        let main_scene = ctx.resources.main_scene.as_ref().ok_or_else(|| {
+        let main_scene = ctx.resources.main_scene.read("Transparent");
+        let main_scene = main_scene.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "TransparentPass requires main_scene mesh buffers".to_string(),
             )

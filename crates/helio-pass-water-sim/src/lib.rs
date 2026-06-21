@@ -1348,14 +1348,31 @@ impl RenderPass for WaterSimPass {
         // resize_internal() with the correct internal dimensions.
     }
 
+    fn reads(&self) -> &'static [helio_v3::graph::ResourceSlot] {
+        &[
+            helio_v3::graph::ResourceSlot::GBuffer,
+            helio_v3::graph::ResourceSlot::Depth,
+            helio_v3::graph::ResourceSlot::PreAa,
+            helio_v3::graph::ResourceSlot::DepthTexture,
+        ]
+    }
+    fn writes(&self) -> &'static [helio_v3::graph::ResourceSlot] {
+        &[
+            helio_v3::graph::ResourceSlot::WaterSimTexture,
+            helio_v3::graph::ResourceSlot::WaterSimSampler,
+            helio_v3::graph::ResourceSlot::WaterCaustics,
+            helio_v3::graph::ResourceSlot::PreAa,
+        ]
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         let view = if self.front { &self.view_a } else { &self.view_b };
-        frame.water_sim_texture = Some(view);
-        frame.water_sim_sampler = Some(&self.output_sampler);
-        frame.water_caustics = Some(&self.caustics_view);
+        frame.water_sim_texture.write(view, "WaterSim");
+        frame.water_sim_sampler.write(&self.output_sampler, "WaterSim");
+        frame.water_caustics.write(&self.caustics_view, "WaterSim");
         // Overwrite pre_aa with the water-composited intermediary so TAA
         // accumulates the water surface without any changes to the TAA pass.
-        frame.pre_aa = Some(&self.water_output_view);
+        frame.pre_aa.write(&self.water_output_view, "WaterSim");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -1397,7 +1414,7 @@ impl RenderPass for WaterSimPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ---- 1. Hitbox displacement ------------------------------------------
         if ctx.resources.water_hitbox_count > 0 {
-            if let Some(hitboxes_buf) = ctx.resources.water_hitboxes {
+            if let Some(hitboxes_buf) = ctx.resources.water_hitboxes.get() {
                 // SAFETY: view_a and view_b are separate, non-overlapping wgpu
                 // TextureView allocations. We render FROM src INTO dst — never
                 // the same texture for both roles simultaneously.
@@ -1589,7 +1606,7 @@ impl RenderPass for WaterSimPass {
 
         // ---- 5. Caustics projection ------------------------------------------
         if ctx.resources.water_volume_count > 0 {
-            if let Some(vols_buf) = ctx.resources.water_volumes {
+            if let Some(vols_buf) = ctx.resources.water_volumes.get() {
                 let sim_view = if self.front { &self.view_a } else { &self.view_b };
 
                 let vols_key = vols_buf as *const wgpu::Buffer as usize;
@@ -1642,7 +1659,7 @@ impl RenderPass for WaterSimPass {
         // NOTE: use self.caustics_view directly — it was filled in stage 5 this
         // same frame. ctx.resources.water_caustics is None during execute() because
         // publish() hasn't run yet, so we must NOT guard on it here.
-        let scene_view: &wgpu::TextureView = ctx.resources.pre_aa
+        let scene_view: &wgpu::TextureView = ctx.resources.pre_aa.get()
             .unwrap_or(&self.pre_aa_fallback_view);
         let blit_key = scene_view as *const _ as usize;
         if self.blit_bg_key != Some(blit_key) {
@@ -1682,7 +1699,7 @@ impl RenderPass for WaterSimPass {
 
         // ---- 7. Water surface render → water_output --------------------------
         if ctx.resources.water_volume_count > 0 {
-            if let Some(vols_buf) = ctx.resources.water_volumes {
+            if let Some(vols_buf) = ctx.resources.water_volumes.get() {
                 let sim_view = if self.front { &self.view_a } else { &self.view_b };
 
                 // Per-frame viewport uniform: (w, h, 1/w, 1/h)
@@ -1695,7 +1712,7 @@ impl RenderPass for WaterSimPass {
 
                 // Copy depth texture for SSR sampling
                 // This allows us to sample from the copy while using the original as a depth attachment
-                let src_depth_tex = ctx.resources.depth_texture.ok_or_else(|| {
+                let src_depth_tex = ctx.resources.depth_texture.get().ok_or_else(|| {
                     helio_v3::Error::InvalidPassConfig(
                         "Water SSR requires depth_texture in FrameResources".to_string(),
                     )
@@ -1711,7 +1728,7 @@ impl RenderPass for WaterSimPass {
                 );
 
                 // Get GBuffer normal texture (fallback to 1×1 black if not available)
-                let gbuffer_normal_view = ctx.resources.gbuffer
+                let gbuffer_normal_view = ctx.resources.gbuffer.get()
                     .map(|gb| gb.normal)
                     .unwrap_or(&self.gbuffer_fallback_view);
 

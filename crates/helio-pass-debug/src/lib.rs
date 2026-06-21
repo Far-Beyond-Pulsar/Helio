@@ -384,7 +384,7 @@ impl DebugPass {
         }
 
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.resources.full_res_depth {
+            let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
                 frd
             } else {
                 ctx.depth

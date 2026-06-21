@@ -36,36 +36,36 @@ impl RenderPass for BakeInjectPass {
     fn publish<'a>(&'a self, frame: &mut FrameResources<'a>) {
         // AO — replaces SSAO slot so downstream passes (DeferredLight) see baked AO
         if let Some(ref view) = self.data.ao_view {
-            frame.baked_ao = Some(view.as_ref());
+            frame.baked_ao.write(view.as_ref(), "BakeInject");
         }
         if let Some(ref sampler) = self.data.ao_sampler {
-            frame.baked_ao_sampler = Some(sampler.as_ref());
+            frame.baked_ao_sampler.write(sampler.as_ref(), "BakeInject");
         }
 
         // Lightmap atlas
         if let Some(ref view) = self.data.lightmap_view {
-            frame.baked_lightmap = Some(view.as_ref());
+            frame.baked_lightmap.write(view.as_ref(), "BakeInject");
         }
         if let Some(ref sampler) = self.data.lightmap_sampler {
-            frame.baked_lightmap_sampler = Some(sampler.as_ref());
+            frame.baked_lightmap_sampler.write(sampler.as_ref(), "BakeInject");
         }
 
         // Reflection cubemap
         if let Some(ref view) = self.data.reflection_view {
-            frame.baked_reflection = Some(view.as_ref());
+            frame.baked_reflection.write(view.as_ref(), "BakeInject");
         }
         if let Some(ref sampler) = self.data.reflection_sampler {
-            frame.baked_reflection_sampler = Some(sampler.as_ref());
+            frame.baked_reflection_sampler.write(sampler.as_ref(), "BakeInject");
         }
 
         // Irradiance SH GPU buffer
         if let Some(ref buf) = self.data.irradiance_sh_buf {
-            frame.baked_irradiance_sh = Some(buf.as_ref());
+            frame.baked_irradiance_sh.write(buf.as_ref(), "BakeInject");
         }
 
         // PVS — CPU-side bitfield for visibility queries
         if let Some(ref pvs) = self.data.pvs {
-            frame.baked_pvs = Some(libhelio::BakedPvsRef {
+            frame.baked_pvs.write(libhelio::BakedPvsRef {
                 world_min: pvs.world_min,
                 world_max: pvs.world_max,
                 grid_dims: pvs.grid_dims,
@@ -73,7 +73,7 @@ impl RenderPass for BakeInjectPass {
                 cell_count: pvs.cell_count,
                 words_per_cell: pvs.words_per_cell,
                 bits: &pvs.bits,
-            });
+            }, "BakeInject");
         }
     }
 

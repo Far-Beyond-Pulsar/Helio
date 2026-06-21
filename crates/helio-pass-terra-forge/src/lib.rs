@@ -1253,8 +1253,12 @@ impl RenderPass for TerraForgePass {
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         if frame.pre_aa.is_none() {
-            frame.pre_aa = Some(&self.pre_aa_view);
+            frame.pre_aa.write(&self.pre_aa_view, "TerraForge");
         }
+    }
+
+    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[helio_v3::ResourceSlot::PreAa]
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {

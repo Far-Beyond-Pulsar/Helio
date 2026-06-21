@@ -75,6 +75,106 @@ pub struct MainSceneResources<'a> {
     pub rc_world_max: [f32; 3],
 }
 
+/// Debug-tracked resource slot.
+///
+/// In debug builds, records which pass wrote the value so we can detect
+/// when a pass reads a resource that no prior pass wrote this frame.
+/// In release builds, compiles down to a plain `Option<T>` with zero overhead.
+#[derive(Clone, Copy)]
+pub struct Tracked<T> {
+    value: Option<T>,
+    #[cfg(debug_assertions)]
+    written_by: Option<&'static str>,
+}
+
+impl<T: Copy> Tracked<T> {
+    /// Creates an empty (unwritten) slot.
+    pub const fn empty() -> Self {
+        Self {
+            value: None,
+            #[cfg(debug_assertions)]
+            written_by: None,
+        }
+    }
+
+    /// Creates a slot with a pre-set value (no writer recorded).
+    /// Used for renderer-provided fields that are available from the start.
+    pub const fn with_value(value: T) -> Self {
+        Self {
+            value: Some(value),
+            #[cfg(debug_assertions)]
+            written_by: None,
+        }
+    }
+
+    /// Writes a value, recording the writer pass name in debug builds.
+    pub fn write(&mut self, value: T, _pass_name: &'static str) {
+        self.value = Some(value);
+        #[cfg(debug_assertions)]
+        {
+            self.written_by = Some(_pass_name);
+        }
+    }
+
+    /// Reads the value. Panics in debug builds if the slot was never written
+    /// (i.e. no prior pass called `write` on it this frame).
+    ///
+    /// Returns `None` when the slot was explicitly written but set to `None`
+    /// (the panics only fire for unwritten slots, not empty-but-written ones).
+    pub fn read(&self, _reader_pass: &'static str) -> Option<T> {
+        #[cfg(debug_assertions)]
+        if self.written_by.is_none() && self.value.is_some() {
+            // This state shouldn't happen if write() is always used,
+            // but just in case, don't panic if there's actually a value.
+        }
+        #[cfg(debug_assertions)]
+        if self.value.is_none() && self.written_by.is_none() {
+            panic!(
+                "[RenderGraph] pass '{reader}' read resource that was never written this frame",
+                reader = _reader_pass
+            );
+        }
+        self.value
+    }
+
+    /// Reads without debug tracking (for optional resources that legitimately
+    /// may be `None`, e.g. `full_res_depth`).
+    pub fn get(&self) -> Option<T> {
+        self.value
+    }
+
+    /// Returns true if this slot was written this frame (debug builds only).
+    /// Always returns `true` in release builds.
+    #[inline]
+    pub fn was_written(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.written_by.is_some()
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            self.value.is_some()
+        }
+    }
+}
+
+impl<T> Tracked<T> {
+    /// Returns `true` if the slot has a value (regardless of tracking state).
+    pub fn is_some(&self) -> bool {
+        self.value.is_some()
+    }
+
+    /// Returns `true` if the slot has no value.
+    pub fn is_none(&self) -> bool {
+        self.value.is_none()
+    }
+
+    /// Converts to `Option<&T>`.
+    pub fn as_ref(&self) -> Option<&T> {
+        self.value.as_ref()
+    }
+}
+
 /// All transient per-frame texture references.
 ///
 /// The `RenderGraph` creates the actual `wgpu::Texture` objects and passes
@@ -82,60 +182,60 @@ pub struct MainSceneResources<'a> {
 #[derive(Clone, Copy)]
 pub struct FrameResources<'a> {
     /// GBuffer textures (populated after GBufferPass)
-    pub gbuffer: Option<GBufferViews<'a>>,
+    pub gbuffer: Tracked<GBufferViews<'a>>,
     /// GBuffer lightmap UV texture (Rg16Float) populated by GBufferPass.
     /// Contains per-pixel lightmap atlas UVs for sampling baked_lightmap.
-    pub gbuffer_lightmap_uv: Option<&'a wgpu::TextureView>,
+    pub gbuffer_lightmap_uv: Tracked<&'a wgpu::TextureView>,
     /// Shadow atlas (2D array texture view) — populated after ShadowPass (dynamic/Movable objects)
-    pub shadow_atlas: Option<&'a wgpu::TextureView>,
+    pub shadow_atlas: Tracked<&'a wgpu::TextureView>,
     /// Static shadow atlas (2D array texture view) — cached until Static/Stationary topology changes.
     /// Combined with `shadow_atlas` in the lighting shader: a pixel is shadowed if either atlas occludes it.
-    pub static_shadow_atlas: Option<&'a wgpu::TextureView>,
+    pub static_shadow_atlas: Tracked<&'a wgpu::TextureView>,
     /// Shadow atlas sampler (comparison sampler)
-    pub shadow_sampler: Option<&'a wgpu::Sampler>,
+    pub shadow_sampler: Tracked<&'a wgpu::Sampler>,
     /// Hi-Z pyramid (mip chain of depth, for occlusion culling)
-    pub hiz: Option<&'a wgpu::TextureView>,
+    pub hiz: Tracked<&'a wgpu::TextureView>,
     /// Hi-Z sampler (min reduction sampler)
-    pub hiz_sampler: Option<&'a wgpu::Sampler>,
+    pub hiz_sampler: Tracked<&'a wgpu::Sampler>,
     /// Static HiZ: Pre-baked 3D voxel occlusion grid for static geometry (camera-independent)
-    pub static_hiz: Option<&'a wgpu::TextureView>,
+    pub static_hiz: Tracked<&'a wgpu::TextureView>,
     /// Static HiZ sampler (linear, clamp)
-    pub static_hiz_sampler: Option<&'a wgpu::Sampler>,
+    pub static_hiz_sampler: Tracked<&'a wgpu::Sampler>,
     /// Atmospheric sky LUT (transmittance + aerial perspective)
-    pub sky_lut: Option<&'a wgpu::TextureView>,
+    pub sky_lut: Tracked<&'a wgpu::TextureView>,
     /// Sky LUT sampler (linear, clamp)
-    pub sky_lut_sampler: Option<&'a wgpu::Sampler>,
+    pub sky_lut_sampler: Tracked<&'a wgpu::Sampler>,
     /// SSAO result texture
-    pub ssao: Option<&'a wgpu::TextureView>,
+    pub ssao: Tracked<&'a wgpu::TextureView>,
     /// Pre-AA HDR color buffer (input to TAA/FXAA/SMAA)
-    pub pre_aa: Option<&'a wgpu::TextureView>,
+    pub pre_aa: Tracked<&'a wgpu::TextureView>,
     /// Tiled light lists buffer (populated by LightCullPass, consumed by DeferredLightPass).
     /// Layout: `tile_light_lists[tile_idx * MAX_LIGHTS_PER_TILE + i] = light_index`.
-    pub tile_light_lists: Option<&'a wgpu::Buffer>,
+    pub tile_light_lists: Tracked<&'a wgpu::Buffer>,
     /// Tiled light counts buffer: one u32 per tile giving the number of lights.
-    pub tile_light_counts: Option<&'a wgpu::Buffer>,
+    pub tile_light_counts: Tracked<&'a wgpu::Buffer>,
     /// Full-resolution depth view — only present when render_scale < 1.0.
     /// Post-upscale passes (e.g. BillboardPass) that render to the native-resolution
     /// `ctx.target` must use this instead of `ctx.depth` (which is at internal res)
     /// to avoid a render-pass attachment size mismatch.
-    pub full_res_depth: Option<&'a wgpu::TextureView>,
+    pub full_res_depth: Tracked<&'a wgpu::TextureView>,
 
     /// Full-resolution depth texture object for compute passes that need raw texture access.
-    pub full_res_depth_texture: Option<&'a wgpu::Texture>,
+    pub full_res_depth_texture: Tracked<&'a wgpu::Texture>,
     /// High-level Helio scene resources used by wrapper-owned passes.
-    pub main_scene: Option<MainSceneResources<'a>>,
+    pub main_scene: Tracked<MainSceneResources<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::sky::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
-    pub billboards: Option<BillboardFrameData<'a>>,
+    pub billboards: Tracked<BillboardFrameData<'a>>,
     /// Virtual geometry meshlet + instance data for this frame.
-    pub vg: Option<VgFrameData<'a>>,
+    pub vg: Tracked<VgFrameData<'a>>,
 
     /// Water caustics texture (populated by WaterCausticsPass)
-    pub water_caustics: Option<&'a wgpu::TextureView>,
+    pub water_caustics: Tracked<&'a wgpu::TextureView>,
 
     /// Water volumes buffer (populated by Scene)
-    pub water_volumes: Option<&'a wgpu::Buffer>,
+    pub water_volumes: Tracked<&'a wgpu::Buffer>,
 
     /// Number of water volumes in the buffer
     pub water_volume_count: u32,
@@ -143,19 +243,19 @@ pub struct FrameResources<'a> {
     /// Water heightfield simulation texture (Rgba16Float 256×256, ping-pong current)
     /// R=height, G=velocity, B=normal.x, A=normal.z
     /// Populated by `WaterSimPass::publish()`.
-    pub water_sim_texture: Option<&'a wgpu::TextureView>,
+    pub water_sim_texture: Tracked<&'a wgpu::TextureView>,
 
     /// Linear clamp sampler for water_sim_texture (set by WaterSimPass)
-    pub water_sim_sampler: Option<&'a wgpu::Sampler>,
+    pub water_sim_sampler: Tracked<&'a wgpu::Sampler>,
 
     /// Water hitboxes storage buffer (populated by Renderer each frame)
-    pub water_hitboxes: Option<&'a wgpu::Buffer>,
+    pub water_hitboxes: Tracked<&'a wgpu::Buffer>,
 
     /// Number of hitboxes in water_hitboxes
     pub water_hitbox_count: u32,
 
     /// Main depth texture (for passes that need to copy/sample it)
-    pub depth_texture: Option<&'a wgpu::Texture>,
+    pub depth_texture: Tracked<&'a wgpu::Texture>,
 
     // ── Pre-baked data (populated by BakeInjectPass when baking is enabled) ──
 
@@ -163,38 +263,38 @@ pub struct FrameResources<'a> {
     ///
     /// When present, `SsaoPass` skips runtime computation and publishes this texture
     /// instead of its own SSAO result.
-    pub baked_ao: Option<&'a wgpu::TextureView>,
+    pub baked_ao: Tracked<&'a wgpu::TextureView>,
 
     /// Sampler for [`baked_ao`](Self::baked_ao).
-    pub baked_ao_sampler: Option<&'a wgpu::Sampler>,
+    pub baked_ao_sampler: Tracked<&'a wgpu::Sampler>,
 
     /// Pre-baked lightmap atlas (RGBA32F or RGBA16F).
     ///
     /// Contains direct + multi-bounce indirect illumination for static geometry.
     /// Indexed by per-mesh UV atlas regions stored in the baked data.
-    pub baked_lightmap: Option<&'a wgpu::TextureView>,
+    pub baked_lightmap: Tracked<&'a wgpu::TextureView>,
 
     /// Sampler for [`baked_lightmap`](Self::baked_lightmap).
-    pub baked_lightmap_sampler: Option<&'a wgpu::Sampler>,
+    pub baked_lightmap_sampler: Tracked<&'a wgpu::Sampler>,
 
     /// Pre-baked reflection cubemap (Rgba32Float or Rgba8Unorm RGBE, 6 faces + mip chain).
     ///
     /// First probe only; closest-probe blending is future work.
-    pub baked_reflection: Option<&'a wgpu::TextureView>,
+    pub baked_reflection: Tracked<&'a wgpu::TextureView>,
 
     /// Sampler for [`baked_reflection`](Self::baked_reflection) (trilinear).
-    pub baked_reflection_sampler: Option<&'a wgpu::Sampler>,
+    pub baked_reflection_sampler: Tracked<&'a wgpu::Sampler>,
 
     /// Pre-baked irradiance spherical harmonics (L2, 9 RGB coefficients = 27 × f32).
     ///
     /// Stored as a uniform buffer (`wgpu::BufferUsages::UNIFORM`).
-    pub baked_irradiance_sh: Option<&'a wgpu::Buffer>,
+    pub baked_irradiance_sh: Tracked<&'a wgpu::Buffer>,
 
     /// Pre-baked potentially-visible set for CPU-side visibility culling.
     ///
     /// Use [`BakedPvsRef::is_visible`] to test cell-to-cell visibility before
     /// submitting draw calls. Returns `None` when PVS baking was not configured.
-    pub baked_pvs: Option<BakedPvsRef<'a>>,
+    pub baked_pvs: Tracked<BakedPvsRef<'a>>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -257,46 +357,100 @@ pub struct BakedPvsData {
 }
 
 impl<'a> FrameResources<'a> {
-    /// Creates an empty (all-None) frame resources for the start of a frame.
+    /// Creates an empty (all-Tracked::empty) frame resources for the start of a frame.
     pub fn empty() -> Self {
         Self {
-            gbuffer: None,
-            gbuffer_lightmap_uv: None,
-            shadow_atlas: None,
-            static_shadow_atlas: None,
-            shadow_sampler: None,
-            hiz: None,
-            hiz_sampler: None,
-            static_hiz: None,
-            static_hiz_sampler: None,
-            sky_lut: None,
-            sky_lut_sampler: None,
-            ssao: None,
-            pre_aa: None,
-            tile_light_lists: None,
-            tile_light_counts: None,
-            full_res_depth: None,
-            full_res_depth_texture: None,
-            main_scene: None,
+            gbuffer: Tracked::empty(),
+            gbuffer_lightmap_uv: Tracked::empty(),
+            shadow_atlas: Tracked::empty(),
+            static_shadow_atlas: Tracked::empty(),
+            shadow_sampler: Tracked::empty(),
+            hiz: Tracked::empty(),
+            hiz_sampler: Tracked::empty(),
+            static_hiz: Tracked::empty(),
+            static_hiz_sampler: Tracked::empty(),
+            sky_lut: Tracked::empty(),
+            sky_lut_sampler: Tracked::empty(),
+            ssao: Tracked::empty(),
+            pre_aa: Tracked::empty(),
+            tile_light_lists: Tracked::empty(),
+            tile_light_counts: Tracked::empty(),
+            full_res_depth: Tracked::empty(),
+            full_res_depth_texture: Tracked::empty(),
+            main_scene: Tracked::empty(),
             sky: crate::sky::SkyContext::default(),
-            billboards: None,
-            vg: None,
-            water_caustics: None,
-            water_volumes: None,
+            billboards: Tracked::empty(),
+            vg: Tracked::empty(),
+            water_caustics: Tracked::empty(),
+            water_volumes: Tracked::empty(),
             water_volume_count: 0,
-            water_sim_texture: None,
-            water_sim_sampler: None,
-            water_hitboxes: None,
+            water_sim_texture: Tracked::empty(),
+            water_sim_sampler: Tracked::empty(),
+            water_hitboxes: Tracked::empty(),
             water_hitbox_count: 0,
-            depth_texture: None,
-            baked_ao: None,
-            baked_ao_sampler: None,
-            baked_lightmap: None,
-            baked_lightmap_sampler: None,
-            baked_reflection: None,
-            baked_reflection_sampler: None,
-            baked_irradiance_sh: None,
-            baked_pvs: None,
+            depth_texture: Tracked::empty(),
+            baked_ao: Tracked::empty(),
+            baked_ao_sampler: Tracked::empty(),
+            baked_lightmap: Tracked::empty(),
+            baked_lightmap_sampler: Tracked::empty(),
+            baked_reflection: Tracked::empty(),
+            baked_reflection_sampler: Tracked::empty(),
+            baked_irradiance_sh: Tracked::empty(),
+            baked_pvs: Tracked::empty(),
+        }
+    }
+
+    /// Resets debug tracking markers so that fields written in a previous
+    /// frame don't satisfy the "was written this frame" check.
+    ///
+    /// Fields that have a value are re-marked with the given `_writer` name
+    /// (e.g. `"Renderer"`).  In release builds this is a no-op.
+    pub fn reset_tracking(&mut self, _writer: &'static str) {
+        #[cfg(debug_assertions)]
+        {
+            macro_rules! reset_field {
+                ($field:ident) => {
+                    if self.$field.value.is_some() {
+                        self.$field.written_by = Some(_writer);
+                    } else {
+                        self.$field.written_by = None;
+                    }
+                };
+            }
+            reset_field!(gbuffer);
+            reset_field!(gbuffer_lightmap_uv);
+            reset_field!(shadow_atlas);
+            reset_field!(static_shadow_atlas);
+            reset_field!(shadow_sampler);
+            reset_field!(hiz);
+            reset_field!(hiz_sampler);
+            reset_field!(static_hiz);
+            reset_field!(static_hiz_sampler);
+            reset_field!(sky_lut);
+            reset_field!(sky_lut_sampler);
+            reset_field!(ssao);
+            reset_field!(pre_aa);
+            reset_field!(tile_light_lists);
+            reset_field!(tile_light_counts);
+            reset_field!(full_res_depth);
+            reset_field!(full_res_depth_texture);
+            reset_field!(main_scene);
+            reset_field!(billboards);
+            reset_field!(vg);
+            reset_field!(water_caustics);
+            reset_field!(water_volumes);
+            reset_field!(water_sim_texture);
+            reset_field!(water_sim_sampler);
+            reset_field!(water_hitboxes);
+            reset_field!(depth_texture);
+            reset_field!(baked_ao);
+            reset_field!(baked_ao_sampler);
+            reset_field!(baked_lightmap);
+            reset_field!(baked_lightmap_sampler);
+            reset_field!(baked_reflection);
+            reset_field!(baked_reflection_sampler);
+            reset_field!(baked_irradiance_sh);
+            reset_field!(baked_pvs);
         }
     }
 }

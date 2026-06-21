@@ -26,7 +26,7 @@
 //! buffer (slot 0) and index buffer before this pass executes.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 use std::num::NonZeroU32;
 
 /// Bindless texture array size per shader stage.
@@ -391,20 +391,20 @@ impl RenderPass for GBufferPass {
     }
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame.gbuffer = Some(libhelio::GBufferViews {
+        frame.gbuffer.write(libhelio::GBufferViews {
             albedo: &self.albedo_view,
             normal: &self.normal_view,
             orm: &self.orm_view,
             emissive: &self.emissive_view,
-        });
-        frame.gbuffer_lightmap_uv = Some(&self.lightmap_uv_view);
+        }, "GBuffer");
+        frame.gbuffer_lightmap_uv.write(&self.lightmap_uv_view, "GBuffer");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Read per-scene values from frame_resources so the GBuffer globals match
         // what the renderer configured (ambient light, GI bounds, etc.).
         let (ambient_color, ambient_intensity, rc_world_min, rc_world_max) =
-            if let Some(ref ms) = ctx.frame_resources.main_scene {
+            if let Some(ref ms) = ctx.frame_resources.main_scene.get().as_ref() {
                 (
                     [ms.ambient_color[0], ms.ambient_color[1], ms.ambient_color[2], 1.0],
                     ms.ambient_intensity,
@@ -509,7 +509,7 @@ impl RenderPass for GBufferPass {
         if draw_count == 0 || main_scene.is_none() {
             return Ok(());
         }
-        let main_scene = main_scene.unwrap();
+        let main_scene = main_scene.read("GBuffer").unwrap();
 
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
@@ -701,6 +701,14 @@ impl RenderPass for GBufferPass {
             },
         ];
         VIEWS
+    }
+
+    fn reads(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::MainScene]
+    }
+
+    fn writes(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::GBuffer, ResourceSlot::GBufferLightmapUv]
     }
 }
 

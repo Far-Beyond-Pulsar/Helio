@@ -352,8 +352,12 @@ impl RenderPass for SkyPass {
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // Make the sky background available to all passes that run after this one.
         if frame.pre_aa.is_none() {
-            frame.pre_aa = Some(&self.pre_aa_view);
+            frame.pre_aa.write(&self.pre_aa_view, "Sky");
         }
+    }
+
+    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[helio_v3::ResourceSlot::PreAa]
     }
 
 }

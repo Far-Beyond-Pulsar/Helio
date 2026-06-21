@@ -521,7 +521,11 @@ impl RenderPass for HlfsPass {
 
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // Publish output as pre_aa for downstream passes (always overwrite)
-        frame.pre_aa = Some(&self.output_view);
+        frame.pre_aa.write(&self.output_view, "HLFS");
+    }
+
+    fn writes(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[helio_v3::ResourceSlot::PreAa]
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -555,16 +559,16 @@ impl RenderPass for HlfsPass {
 
         // Shade bind group 0 (clip-stack, pre_aa, lights, shadow, camera).
         // Lazily rebuilt only when any referenced pointer changes (resize, scene realloc).
-        let pre_aa = ctx.resources.pre_aa.ok_or_else(|| {
+        let pre_aa = ctx.resources.pre_aa.get().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "HLFS requires pre_aa (sky + debug layers)".to_string(),
             )
         })?;
 
-        let shadow_view = ctx.resources.shadow_atlas.ok_or_else(|| {
+        let shadow_view = ctx.resources.shadow_atlas.get().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("HLFS requires shadow_atlas (shadow pass must run first)".to_string())
         })?;
-        let shadow_sampler = ctx.resources.shadow_sampler.ok_or_else(|| {
+        let shadow_sampler = ctx.resources.shadow_sampler.get().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig("HLFS requires shadow_sampler (shadow pass must run first)".to_string())
         })?;
 
@@ -601,7 +605,8 @@ impl RenderPass for HlfsPass {
 
         // Shade bind group 1 (GBuffer + depth).
         // Lazily rebuilt only when gbuffer or depth pointers change (resize).
-        let gbuffer = ctx.resources.gbuffer.as_ref().ok_or_else(|| {
+        let gbuffer_opt = ctx.resources.gbuffer.read("HLFS");
+        let gbuffer = gbuffer_opt.as_ref().ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "HLFS requires published gbuffer resources".to_string(),
             )

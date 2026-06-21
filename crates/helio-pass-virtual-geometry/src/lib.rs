@@ -683,7 +683,7 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let Some(vg) = ctx.frame_resources.vg else {
+        let Some(vg) = ctx.frame_resources.vg.get() else {
             return Ok(());
         };
 
@@ -733,7 +733,7 @@ impl RenderPass for VirtualGeometryPass {
         ctx.write_buffer(&self.cull_buf, 0, bytemuck::bytes_of(&cull_uni));
 
         // ── Material bind group (rebuild when texture version changes) ─────────
-        let Some(main_scene) = ctx.frame_resources.main_scene else {
+        let Some(main_scene) = ctx.frame_resources.main_scene.read("VirtualGeometry") else {
             return Ok(());
         };
         if self.draw_bg_1.is_none()
@@ -842,10 +842,10 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else {
             return Ok(());
         };
-        let Some(main_scene) = ctx.resources.main_scene else {
+        let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else {
             return Ok(());
         };
-        let Some(gbuffer) = ctx.resources.gbuffer else {
+        let Some(gbuffer) = ctx.resources.gbuffer.read("VirtualGeometry") else {
             return Ok(());
         };
 
@@ -966,6 +966,15 @@ impl RenderPass for VirtualGeometryPass {
 
         Ok(())
     }
+
+    fn reads(&self) -> &'static [helio_v3::graph::ResourceSlot] {
+        &[
+            helio_v3::graph::ResourceSlot::GBuffer,
+            helio_v3::graph::ResourceSlot::MainScene,
+            helio_v3::graph::ResourceSlot::Vg,
+        ]
+    }
+    fn writes(&self) -> &'static [helio_v3::graph::ResourceSlot] { &[] }
 
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
         static VIEWS: &[DebugViewDescriptor] = &[

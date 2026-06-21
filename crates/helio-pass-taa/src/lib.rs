@@ -389,6 +389,10 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
+    fn reads(&self) -> &'static [helio_v3::ResourceSlot] {
+        &[helio_v3::ResourceSlot::PreAa]
+    }
+
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         self.output_width = width;
         self.output_height = height;
@@ -455,7 +459,7 @@ impl RenderPass for TaaPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // ── 1. Lazy bind group ────────────────────────────────────────────────
-        let pre_aa_view = ctx.resources.pre_aa.ok_or_else(|| {
+        let pre_aa_view = ctx.resources.pre_aa.read("TAA").ok_or_else(|| {
             helio_v3::Error::InvalidPassConfig(
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )

@@ -20,7 +20,7 @@
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{FrameResources, PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 use wgpu::util::DeviceExt;
 
 const WORKGROUP_SIZE: u32 = 8;
@@ -428,6 +428,14 @@ impl RenderPass for HiZBuildPass {
         "HiZBuild"
     }
 
+    fn reads(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::Depth]
+    }
+
+    fn writes(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::HiZ, ResourceSlot::HiZSampler]
+    }
+
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
         let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
 
@@ -604,15 +612,15 @@ impl RenderPass for HiZBuildPass {
         // Expose the current frame's HiZ for any downstream pass that needs it.
         // OcclusionCullPass uses its own Arc ref so it always reads the
         // previous frame's data (temporal), not this freshly built pyramid.
-        frame.hiz = Some(&*self.hiz_view);
-        frame.hiz_sampler = Some(&*self.hiz_sampler);
+        frame.hiz.write(&*self.hiz_view, "HiZBuild");
+        frame.hiz_sampler.write(&*self.hiz_sampler, "HiZBuild");
 
         // Expose static HiZ if loaded
         if let Some(ref view) = self.static_hiz_view {
-            frame.static_hiz = Some(&**view);
+            frame.static_hiz.write(&**view, "HiZBuild");
         }
         if let Some(ref sampler) = self.static_hiz_sampler {
-            frame.static_hiz_sampler = Some(&**sampler);
+            frame.static_hiz_sampler.write(&**sampler, "HiZBuild");
         }
     }
 }

@@ -1391,21 +1391,9 @@ impl Renderer {
         #[cfg(not(feature = "bake"))]
         let baked_pvs = None;
 
-        let frame_resources = libhelio::FrameResources {
-            gbuffer: None,
-            gbuffer_lightmap_uv: None,
-            shadow_atlas: None,
-            static_shadow_atlas: None,
-            shadow_sampler: None,
-            hiz: None,
-            hiz_sampler: None,
-            static_hiz: None,
-            static_hiz_sampler: None,
-            sky_lut: None,
-            sky_lut_sampler: None,
-            ssao: None,
-            pre_aa: None,
-            main_scene: Some(libhelio::MainSceneResources {
+        let mut frame_resources = libhelio::FrameResources::empty();
+        frame_resources.main_scene.write(
+            libhelio::MainSceneResources {
                 mesh_buffers: libhelio::MeshBuffers {
                     vertices: mesh_buffers.vertices,
                     indices: mesh_buffers.indices,
@@ -1423,48 +1411,62 @@ impl Renderer {
                 ambient_intensity: self.ambient_intensity,
                 rc_world_min: rc_min,
                 rc_world_max: rc_max,
-            }),
-            tile_light_lists: None,
-            tile_light_counts: None,
-            full_res_depth: self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView),
-            full_res_depth_texture: self.full_res_depth_texture.as_ref().map(|t| t as &wgpu::Texture),
-            sky: self.scene.sky_context(),
-            billboards: if self.billboard_scratch.is_empty() {
-                None
-            } else {
-                Some(libhelio::BillboardFrameData {
+            },
+            "Renderer",
+        );
+        if !self.billboard_scratch.is_empty() {
+            frame_resources.billboards.write(
+                libhelio::BillboardFrameData {
                     instances: bytemuck::cast_slice(&self.billboard_scratch),
                     count: self.billboard_scratch.len() as u32,
                     generation: self.billboard_generation,
-                })
-            },
-            vg: self.scene.vg_frame_data(),
-            water_caustics: None,
-            water_volumes: if water_volume_count > 0 {
-                Some(&self.water_volumes_buffer)
-            } else {
-                None
-            },
-            water_volume_count,
-            water_sim_texture: None,
-            water_sim_sampler: None,
-            water_hitboxes: if water_hitbox_count > 0 {
-                Some(&self.water_hitboxes_buffer)
-            } else {
-                None
-            },
-            water_hitbox_count,
-            depth_texture: Some(&self.depth_texture),
-            // Baked data — populated after configure_bake() completes.
-            baked_ao,
-            baked_ao_sampler,
-            baked_lightmap,
-            baked_lightmap_sampler,
-            baked_reflection,
-            baked_reflection_sampler,
-            baked_irradiance_sh,
-            baked_pvs,
-        };
+                },
+                "Renderer",
+            );
+        }
+        if water_volume_count > 0 {
+            frame_resources.water_volumes.write(&self.water_volumes_buffer, "Renderer");
+        }
+        frame_resources.water_volume_count = water_volume_count;
+        if water_hitbox_count > 0 {
+            frame_resources.water_hitboxes.write(&self.water_hitboxes_buffer, "Renderer");
+        }
+        frame_resources.water_hitbox_count = water_hitbox_count;
+        frame_resources.depth_texture.write(&self.depth_texture, "Renderer");
+        if let Some(v) = self.full_res_depth_view.as_ref().map(|v| v as &wgpu::TextureView) {
+            frame_resources.full_res_depth.write(v, "Renderer");
+        }
+        if let Some(t) = self.full_res_depth_texture.as_ref().map(|t| t as &wgpu::Texture) {
+            frame_resources.full_res_depth_texture.write(t, "Renderer");
+        }
+        if let Some(vg_data) = self.scene.vg_frame_data() {
+            frame_resources.vg.write(vg_data, "Renderer");
+        }
+        frame_resources.sky = self.scene.sky_context();
+        if let Some(ao) = baked_ao {
+            frame_resources.baked_ao.write(ao, "Renderer");
+        }
+        if let Some(ao_sampler) = baked_ao_sampler {
+            frame_resources.baked_ao_sampler.write(ao_sampler, "Renderer");
+        }
+        if let Some(lightmap) = baked_lightmap {
+            frame_resources.baked_lightmap.write(lightmap, "Renderer");
+        }
+        if let Some(lightmap_sampler) = baked_lightmap_sampler {
+            frame_resources.baked_lightmap_sampler.write(lightmap_sampler, "Renderer");
+        }
+        if let Some(reflection) = baked_reflection {
+            frame_resources.baked_reflection.write(reflection, "Renderer");
+        }
+        if let Some(reflection_sampler) = baked_reflection_sampler {
+            frame_resources.baked_reflection_sampler.write(reflection_sampler, "Renderer");
+        }
+        if let Some(irradiance_sh) = baked_irradiance_sh {
+            frame_resources.baked_irradiance_sh.write(irradiance_sh, "Renderer");
+        }
+        if let Some(pvs) = baked_pvs {
+            frame_resources.baked_pvs.write(pvs, "Renderer");
+        }
 
         if self.clear_target_next_frame {
             let clear = wgpu::Color {

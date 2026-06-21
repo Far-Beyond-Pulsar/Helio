@@ -47,8 +47,10 @@
 
 mod executor;
 mod resource;
+mod resource_slot;
 
 pub use executor::RenderGraph;
+pub use resource_slot::ResourceSlot;
 pub use resource::{
     ResourceAccess, ResourceBuilder, ResourceDecl, ResourceFormat, ResourceHandle, ResourceSize,
 };

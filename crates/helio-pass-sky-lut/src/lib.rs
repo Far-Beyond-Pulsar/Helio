@@ -4,7 +4,7 @@
 //! O(1) CPU: single fullscreen draw.
 
 use bytemuck::{Pod, Zeroable};
-use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{PassContext, PrepareContext, RenderPass, ResourceSlot, Result as HelioResult};
 
 const LUT_WIDTH: u32 = 192;
 const LUT_HEIGHT: u32 = 108;
@@ -216,8 +216,12 @@ impl RenderPass for SkyLutPass {
         "SkyLUT"
     }
 
+    fn writes(&self) -> &'static [ResourceSlot] {
+        &[ResourceSlot::SkyLut]
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
-        frame.sky_lut = Some(&self.sky_lut_view);
+        frame.sky_lut.write(&self.sky_lut_view, "SkyLUT");
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
