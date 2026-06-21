@@ -30,7 +30,7 @@ use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, EditorState, GizmoMode, Renderer,
     RendererConfig, SceneActor, ScenePicker, VirtualMeshUpload, VirtualObjectDescriptor,
 };
-use helio_asset_compat::{load_scene_bytes_with_config, LoadConfig};
+use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use v3_demo_common::{
     box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh,
 };
@@ -493,8 +493,9 @@ impl ApplicationHandler for App {
         }
 
         // ── Shipping containers — 10 total, using Virtual Geometry ─────
-        // Load with merge_meshes so all sections share one vertex buffer,
-        // then feed the merged mesh into VG as a single upload.
+        // Load with merge_meshes so sections share one vertex buffer (correct
+        // spatial relationships). Upload the FBX textures+materials, then
+        // create one VG mesh per section so each keeps its own material.
         {
             let crates_base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
@@ -510,106 +511,90 @@ impl ApplicationHandler for App {
                     .with_import_scale(glam::Vec3::splat(1.0 / 200.0)),
             ) {
                 Ok(scene) => {
-                    if let Some(sm) = &scene.sectioned_mesh {
-                        // Combine all section indices into one index buffer so
-                        // the entire container is a single VG mesh with correct
-                        // spatial relationships preserved.
-                        let mut all_indices: Vec<u32> = Vec::new();
-                        for sec in &sm.sections {
-                            all_indices.extend_from_slice(&sec.indices);
-                        }
+                    // Upload textures and materials from the FBX.
+                    let fallback_mat = renderer.scene_mut().insert_material(make_material(
+                        [0.5, 0.5, 0.5, 1.0], 0.8, 0.0, [0.0; 3], 0.0,
+                    ));
+                    let mat_ids = upload_scene_materials(&mut renderer, &scene)
+                        .unwrap_or_default();
 
-                        if sm.vertices.is_empty() || all_indices.is_empty() {
-                            eprintln!("[shipyard] Merged mesh has no geometry");
-                        } else {
-                            let mat_container =
-                                renderer.scene_mut().insert_material(make_material(
-                                    [0.45, 0.35, 0.25, 1.0],
-                                    0.7,
-                                    0.0,
-                                    [0.0; 3],
-                                    0.0,
-                                ));
+                    if let Some(sm) = &scene.sectioned_mesh {
+                        // One VG mesh per section — each section has its own
+                        // material but shares the vertex buffer.
+                        let mut vg_entries: Vec<(helio::VirtualMeshId, u32)> = Vec::new();
+                        for sec in &sm.sections {
+                            if sec.indices.is_empty() { continue; }
 
                             let vm_id = renderer
                                 .scene_mut()
                                 .insert_actor(SceneActor::virtual_mesh(VirtualMeshUpload {
                                     vertices: sm.vertices.clone(),
-                                    indices: all_indices,
+                                    indices: sec.indices.clone(),
                                 }))
                                 .as_virtual_mesh()
                                 .unwrap();
 
-                            // Measure AABB for placement.
-                            let mut bb_min = glam::Vec3::splat(f32::INFINITY);
-                            let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
-                            for v in &sm.vertices {
-                                let p = glam::Vec3::from(v.position);
-                                bb_min = bb_min.min(p);
-                                bb_max = bb_max.max(p);
-                            }
-                            let local_center = (bb_min + bb_max) * 0.5;
-                            let local_size = bb_max - bb_min;
-                            let radius = (local_size * 0.5).length().max(0.5);
+                            let mat_slot = sec.material_index
+                                .and_then(|idx| mat_ids.get(idx))
+                                .copied()
+                                .unwrap_or(fallback_mat)
+                                .slot();
+                            vg_entries.push((vm_id, mat_slot));
+                        }
 
-                            eprintln!(
-                                "[shipyard] VG container: {} sections {} verts  \
-                                 size={:.2?} center={:.2?} r={radius:.2}",
-                                sm.sections.len(),
-                                sm.vertices.len(),
-                                local_size,
-                                local_center
-                            );
+                        // Measure AABB for placement.
+                        let mut bb_min = glam::Vec3::splat(f32::INFINITY);
+                        let mut bb_max = glam::Vec3::splat(f32::NEG_INFINITY);
+                        for v in &sm.vertices {
+                            let p = glam::Vec3::from(v.position);
+                            bb_min = bb_min.min(p);
+                            bb_max = bb_max.max(p);
+                        }
+                        let local_center = (bb_min + bb_max) * 0.5;
+                        let local_size = bb_max - bb_min;
+                        let radius = (local_size * 0.5).length().max(0.5);
 
-                            let step_x = local_size.x + 0.04;
-                            let step_z = local_size.z + 0.06;
-                            let step_y = local_size.y;
+                        eprintln!(
+                            "[shipyard] VG container: {} sections {} verts  \
+                             size={:.2?} center={:.2?} r={radius:.2}",
+                            vg_entries.len(), sm.vertices.len(),
+                            local_size, local_center
+                        );
 
-                            struct Bay {
-                                ox: f32,
-                                oz: f32,
-                                cols: u32,
-                                rows: u32,
-                                layers: u32,
-                            }
-                            let bays: &[Bay] = &[Bay {
-                                ox: -95.0,
-                                oz: -26.0,
-                                cols: 5,
-                                rows: 1,
-                                layers: 2,
-                            }];
-                            const MAX_CONTAINERS: u32 = 10;
+                        let step_x = local_size.x + 0.04;
+                        let step_z = local_size.z + 0.06;
+                        let step_y = local_size.y;
 
-                            let mut count = 0u32;
-                            'bays: for bay in bays {
-                                for layer in 0..bay.layers {
-                                    for row in 0..bay.rows {
-                                        for col in 0..bay.cols {
-                                            if count >= MAX_CONTAINERS {
-                                                break 'bays;
-                                            }
-                                            let wx = bay.ox + col as f32 * step_x;
-                                            let wy =
-                                                layer as f32 * step_y + local_size.y * 0.5;
-                                            let wz = bay.oz + row as f32 * step_z;
-                                            let rot = if (col + layer) % 2 == 1 {
-                                                glam::Mat4::from_rotation_y(
-                                                    std::f32::consts::PI,
-                                                )
-                                            } else {
-                                                glam::Mat4::IDENTITY
-                                            };
-                                            let placement = glam::Mat4::from_translation(
-                                                glam::Vec3::new(wx, wy, wz),
-                                            ) * rot
-                                                * glam::Mat4::from_translation(-local_center);
+                        struct Bay { ox: f32, oz: f32, cols: u32, rows: u32, layers: u32 }
+                        let bays: &[Bay] = &[Bay {
+                            ox: -95.0, oz: -26.0, cols: 5, rows: 1, layers: 2,
+                        }];
+                        const MAX_CONTAINERS: u32 = 10;
 
+                        let mut count = 0u32;
+                        'bays: for bay in bays {
+                            for layer in 0..bay.layers {
+                                for row in 0..bay.rows {
+                                    for col in 0..bay.cols {
+                                        if count >= MAX_CONTAINERS { break 'bays; }
+                                        let wx = bay.ox + col as f32 * step_x;
+                                        let wy = layer as f32 * step_y + local_size.y * 0.5;
+                                        let wz = bay.oz + row as f32 * step_z;
+                                        let rot = if (col + layer) % 2 == 1 {
+                                            glam::Mat4::from_rotation_y(std::f32::consts::PI)
+                                        } else {
+                                            glam::Mat4::IDENTITY
+                                        };
+                                        let placement = glam::Mat4::from_translation(
+                                            glam::Vec3::new(wx, wy, wz),
+                                        ) * rot * glam::Mat4::from_translation(-local_center);
+
+                                        for &(vm_id, mat_slot) in &vg_entries {
                                             let _ = renderer.scene_mut().insert_actor(
                                                 SceneActor::virtual_object(
                                                     VirtualObjectDescriptor {
                                                         virtual_mesh: vm_id,
-                                                        material_id: mat_container.slot(),
+                                                        material_id: mat_slot,
                                                         transform: placement,
                                                         bounds: [wx, wy, wz, radius],
                                                         flags: 0,
@@ -620,13 +605,13 @@ impl ApplicationHandler for App {
                                                     },
                                                 ),
                                             );
-                                            count += 1;
                                         }
+                                        count += 1;
                                     }
                                 }
                             }
-                            eprintln!("[shipyard] {count} VG containers inserted");
                         }
+                        eprintln!("[shipyard] {count} VG containers inserted ({} VG meshes per instance)", vg_entries.len());
                     } else {
                         eprintln!("[shipyard] No sectioned mesh in FBX");
                     }
