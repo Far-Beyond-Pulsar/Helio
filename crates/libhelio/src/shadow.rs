@@ -14,18 +14,17 @@ pub const CSM_SPLITS: [f32; 4] = [16.0, 80.0, 300.0, 1400.0];
 
 /// Shadow quality presets for runtime configuration.
 ///
-/// Sample counts are halved vs a non-TAA renderer because the Vogel disk is
-/// rotated per-frame via `hash22(frag_coord + frame)`.  TAA accumulates the
-/// 16-frame sequence so effective quality matches 2× the listed sample count.
+/// The Vogel disk uses a stable per-pixel hash so noise is static across
+/// frames and TAA can accumulate it effectively.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShadowQuality {
-    /// 2-sample PCF (TAA equivalent: ~4 samples), no PCSS — mobile / low-end
+    /// 8-sample PCF, no PCSS — low-end / mobile
     Low,
-    /// 4-sample PCF (TAA equivalent: ~8 samples), no PCSS — mid-tier default
+    /// 12-sample PCF, no PCSS — mid-tier default
     Medium,
-    /// 6-sample PCF + PCSS 4 blocker / 8 filter (TAA equivalent: ~12/16) — high-end PC
+    /// 12-sample PCF + PCSS 8 blocker / 16 filter — high-end PC
     High,
-    /// 8-sample PCF + PCSS 8 blocker / 16 filter (TAA equivalent: ~16/32) — cinematic
+    /// 16-sample PCF + PCSS 16 blocker / 32 filter — cinematic
     Ultra,
 }
 
@@ -103,9 +102,7 @@ impl ShadowConfig {
                 enable_pcss: 0,
                 pcss_blocker_samples: 4,
                 pcss_filter_samples: 4,
-                // 4 samples minimum: 2 is binary (0/0.5/1.0) which is too noisy
-                // even with TAA. TAA * 16 frames = effective 64 samples.
-                pcf_sample_count: 4,
+                pcf_sample_count: 8,
             },
             ShadowQuality::Medium => Self {
                 cascades: [
@@ -137,7 +134,7 @@ impl ShadowConfig {
                 enable_pcss: 0,
                 pcss_blocker_samples: 8,
                 pcss_filter_samples: 8,
-                pcf_sample_count: 4,
+                pcf_sample_count: 12,
             },
             ShadowQuality::High => Self {
                 cascades: [
@@ -167,9 +164,9 @@ impl ShadowConfig {
                     },
                 ],
                 enable_pcss: 1,
-                pcss_blocker_samples: 4,
-                pcss_filter_samples: 8,
-                pcf_sample_count: 6,
+                pcss_blocker_samples: 8,
+                pcss_filter_samples: 16,
+                pcf_sample_count: 12,
             },
             ShadowQuality::Ultra => Self {
                 cascades: [
@@ -199,9 +196,9 @@ impl ShadowConfig {
                     },
                 ],
                 enable_pcss: 1,
-                pcss_blocker_samples: 8,
-                pcss_filter_samples: 16,
-                pcf_sample_count: 8,
+                pcss_blocker_samples: 16,
+                pcss_filter_samples: 32,
+                pcf_sample_count: 16,
             },
         }
     }
