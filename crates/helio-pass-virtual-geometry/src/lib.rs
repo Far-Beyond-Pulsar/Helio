@@ -462,6 +462,11 @@ impl VirtualGeometryPass {
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rg16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
         ];
         let draw_primitive = wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -848,6 +853,9 @@ impl RenderPass for VirtualGeometryPass {
         let Some(gbuffer) = ctx.resources.gbuffer.read("VirtualGeometry") else {
             return Ok(());
         };
+        let Some(lightmap_uv) = ctx.resources.gbuffer_lightmap_uv.read("VirtualGeometry") else {
+            return Ok(());
+        };
 
         let meshlet_count = self.last_meshlet_count;
 
@@ -906,6 +914,15 @@ impl RenderPass for VirtualGeometryPass {
                     }),
                     Some(wgpu::RenderPassColorAttachment {
                         view: gbuffer.emissive,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: lightmap_uv,
                         resolve_target: None,
                         depth_slice: None,
                         ops: wgpu::Operations {

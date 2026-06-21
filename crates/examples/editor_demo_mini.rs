@@ -27,8 +27,9 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, EditorState, GizmoMode, Renderer,
-    RendererConfig, SceneActor, ScenePicker, VirtualMeshUpload, VirtualObjectDescriptor,
+    required_wgpu_features, required_wgpu_limits, build_fxaa_graph, Camera, EditorState,
+    GizmoMode, Renderer, RendererConfig, SceneActor, ScenePicker, VirtualMeshUpload,
+    VirtualObjectDescriptor,
 };
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
 use v3_demo_common::{
@@ -154,11 +155,12 @@ impl ApplicationHandler for App {
             },
         );
 
-        // ── Renderer ──────────────────────────────────────────────────────
+        // ── Renderer (FXAA pipeline: full-res, no TAA jitter/upscaling) ───
         let mut renderer = Renderer::new(
             device.clone(),
             queue.clone(),
-            RendererConfig::new(sz.width, sz.height, format),
+            RendererConfig::new(sz.width, sz.height, format)
+                .with_render_scale(1.0),
         );
         renderer.set_editor_mode(true);
         // Night sky — deep navy
@@ -719,6 +721,25 @@ impl ApplicationHandler for App {
                 50.0,
                 55.0,
             )));
+
+        // Switch to FXAA pipeline: full-res rendering, no TAA jitter/upscaling
+        let fxaa_config = RendererConfig::new(sz.width, sz.height, format)
+            .with_render_scale(1.0);
+        let fxaa_graph = build_fxaa_graph(
+            &device,
+            &queue,
+            renderer.scene(),
+            fxaa_config,
+            renderer.debug_state(),
+            renderer.debug_camera_buf(),
+        );
+        renderer.set_graph_custom(
+            fxaa_graph,
+            fxaa_config,
+            Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf| {
+                build_fxaa_graph(device, queue, scene, cfg, debug_state, debug_camera_buf)
+            }),
+        );
 
         self.state = Some(AppState {
             window,

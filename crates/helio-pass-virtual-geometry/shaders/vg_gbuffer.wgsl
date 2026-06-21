@@ -142,10 +142,11 @@ fn vs_main(v: Vertex, @builtin(instance_index) packed_slot: u32) -> VertexOutput
 }
 
 struct GBufferOutput {
-    @location(0) albedo:   vec4<f32>,
-    @location(1) normal:   vec4<f32>,
-    @location(2) orm:      vec4<f32>,
-    @location(3) emissive: vec4<f32>,
+    @location(0) albedo:    vec4<f32>,
+    @location(1) normal:    vec4<f32>,
+    @location(2) orm:       vec4<f32>,
+    @location(3) emissive:  vec4<f32>,
+    @location(4) vg_flag:   vec2<f32>,
 }
 
 const NO_TEXTURE: u32 = 0xffffffffu;
@@ -233,6 +234,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.normal  = vec4<f32>(N, specular_f0.r);
     out.orm     = vec4<f32>(ao, roughness, metallic, specular_f0.g);
     out.emissive = vec4<f32>(emissive, specular_f0.b);
+    out.vg_flag = vec2<f32>(-2.0, -2.0);
     return out;
 }
 
@@ -284,6 +286,7 @@ fn fs_debug(input: VertexOutput) -> GBufferOutput {
     out.normal   = vec4<f32>(face_n, 0.0);
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(base_color, 0.0);
+    out.vg_flag  = vec2<f32>(-2.0, -2.0);
     return out;
 }
 
@@ -340,5 +343,6 @@ fn fs_debug_lod(input: LodVertexOutput) -> GBufferOutput {
     out.normal   = vec4<f32>(face_n, 0.0);
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(final_color, 0.0);
+    out.vg_flag  = vec2<f32>(-2.0, -2.0);
     return out;
 }

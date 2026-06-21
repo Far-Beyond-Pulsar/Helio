@@ -196,7 +196,7 @@ fn point_light_face(dir: vec3<f32>) -> u32 {
 // Shifts the shadow query point along the surface normal before projecting into
 // light space, eliminating self-shadowing without any visible surface gap.
 // This is the same technique used by UE4 ("Normal Shadow Bias") and Unity HDRP.
-const NORMAL_OFFSET_SCALE: f32 = 0.05;
+const NORMAL_OFFSET_SCALE: f32 = 0.01;
 
 // High-quality PCF shadow sampling with Vogel disk pattern.
 // world_pos must already have normal-offset applied (call shadow_factor, not this directly).
@@ -220,11 +220,10 @@ fn sample_cascade_shadow(
         return 1.0;
     }
 
-    let biased_depth = ndc.z;
     let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
 
-    // Per-pixel rotation to break up banding (stable with frame counter)
-    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+    // Per-pixel rotation to break up banding (stable hash — no frame counter)
+    let theta = hash22(frag_coord) * 6.28318530718;
 
     // OPTIMIZATION: Adaptive PCF sample count based on cascade distance
     // Distant cascades are naturally blurrier and need fewer samples for good quality.
@@ -247,16 +246,17 @@ fn sample_cascade_shadow(
             shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
-            biased_depth,
+            ndc.z,
         );
         let sta_lit = textureSampleCompareLevel(
             static_shadow_atlas, shadow_sampler,
             shadow_uv + offset,
             i32(layer),
-            biased_depth,
+            ndc.z,
         );
         lit_sum += min(dyn_lit, sta_lit);
     }
+
     return lit_sum / f32(pcf_count);
 }
 
@@ -339,9 +339,10 @@ fn sample_cascade_shadow_pcss(
     }
 
     let receiver_depth = ndc.z;
-    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+    let theta = hash22(frag_coord) * 6.28318530718;
 
     // Step 1: Blocker search (average occluder depth)
+    // Uses unbiased depth so nearby occluders are correctly identified.
     let search_radius = config.pcss_light_size / ATLAS_SIZE;
     let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius,
                                        shadow_config.pcss_blocker_samples, theta);
@@ -730,6 +731,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(N * 0.5 + 0.5, 1.0);
     }
 
+    // ── VG flag: VG pass writes a (-2, -2) sentinel into gbuf_lightmap_uv ─────
+    let lightmap_uv     = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
+    let is_vg           = lightmap_uv.x < -1.5;
+    let has_lightmap    = !is_vg && lightmap_uv.x >= 0.0;  // sentinel: negative x = no lightmap
+
     // ── Reconstruct world position from depth + inv_view_proj ────────────────
     // clip_pos.xy is in viewport space (0→width, 0→height, y↓).
     // Convert to NDC: x ∈ [-1,1], y ∈ [1,-1] (wgpu NDC y+ = up, viewport y+ = down).
@@ -746,7 +752,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     if globals.debug_mode == 10u {
         var shadow_sum = 0.0;
         for (var i = 0u; i < globals.light_count; i++) {
-            shadow_sum += shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame);
+            let sf = select(shadow_factor(i, world_pos, N, in.clip_pos.xy, globals.frame), 1.0, is_vg);
+            shadow_sum += sf;
         }
         let sf = shadow_sum / max(f32(globals.light_count), 1.0);
         return vec4<f32>(sf, sf, sf, 1.0);
@@ -791,7 +798,10 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
                 let dist = length(light.position_range.xyz - world_pos);
                 if dist > light.position_range.w { continue; }
             }
-            let sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
+            // VG geometry does not render into shadow maps, so shadow_factor
+            // would incorrectly occlude VG pixels with unrelated regular geometry.
+            // Skip shadow evaluation for VG surfaces.
+            let sf = select(shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame), 1.0, is_vg);
             Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf);
         }
     }
@@ -813,8 +823,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     //
     // The UV is already clamped to the region's half-texel-inset boundary in the
     // vertex shader, so textureSample cannot bleed into adjacent atlas regions.
-    let lightmap_uv     = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
-    let has_lightmap    = lightmap_uv.x >= 0.0;  // sentinel: negative x = no lightmap
     // textureSampleLevel instead of textureSample: control flow is non-uniform (depends on
     // per-fragment world_pos via clip_pos), so WebGPU requires an explicit LOD variant.
     let lightmap_sample = textureSampleLevel(baked_lightmap, baked_lightmap_sampler, lightmap_uv, 0.0).rgb;
