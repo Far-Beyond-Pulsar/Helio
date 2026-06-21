@@ -155,7 +155,7 @@ fn sample_cascade_shadow(layer: u32, cascade_idx: u32, cascade_scale: f32, world
     }
 
     let receiver_depth = ndc.z;
-    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+    let theta = hash22(frag_coord) * 6.28318530718;
 
     // OPTIMIZATION: Adaptive PCF sample count based on cascade distance
     let base_count = shadow_config.pcf_sample_count;
@@ -189,7 +189,7 @@ fn sample_cascade_shadow_pcss(layer: u32, cascade_idx: u32, world_pos: vec3<f32>
     }
 
     let receiver_depth = ndc.z;
-    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+    let theta = hash22(frag_coord) * 6.28318530718;
 
     let search_radius = config.pcss_light_size / ATLAS_SIZE;
     let blocker = pcss_blocker_search(layer, shadow_uv, receiver_depth, search_radius, shadow_config.pcss_blocker_samples, theta);

@@ -223,8 +223,8 @@ fn sample_cascade_shadow(
     let biased_depth = ndc.z;
     let filter_radius = (2.0 / ATLAS_SIZE) * cascade_scale;
 
-    // Per-pixel rotation to break up banding (stable with frame counter)
-    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+    // Per-pixel rotation to break up banding (stable hash — no frame counter)
+    let theta = hash22(frag_coord) * 6.28318530718;
 
     // OPTIMIZATION: Adaptive PCF sample count based on cascade distance
     // Distant cascades are naturally blurrier and need fewer samples for good quality.
@@ -339,7 +339,7 @@ fn sample_cascade_shadow_pcss(
     }
 
     let receiver_depth = ndc.z;
-    let theta = hash22(frag_coord + vec2<f32>(f32(frame))) * 6.28318530718;
+    let theta = hash22(frag_coord) * 6.28318530718;
 
     // Step 1: Blocker search (average occluder depth)
     let search_radius = config.pcss_light_size / ATLAS_SIZE;
