@@ -595,13 +595,13 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_pos = (position.x as f32, position.y as f32);
-                if !state.right_mouse_held {
-                    let (ray_o, ray_d) = state.build_ray();
-                    state.editor.update_hover(ray_o, ray_d, state.renderer.scene());
-                    if state.editor.is_dragging() {
-                        state.editor.update_drag(ray_o, ray_d, state.renderer.scene_mut());
+                    if !state.right_mouse_held {
+                        let (ray_o, ray_d) = state.build_ray();
+                        state.editor.update_hover(ray_o, ray_d, &state.renderer);
+                        if state.editor.is_dragging() {
+                            state.editor.update_drag(ray_o, ray_d, &mut state.renderer);
+                        }
                     }
-                }
             }
 
             WindowEvent::KeyboardInput {
@@ -868,6 +868,7 @@ impl AppState {
         );
 
         self.renderer.debug_clear();
+        self.renderer.set_gizmo_camera(&camera, self.renderer.output_height() as f32);
         self.editor.draw_gizmos(&mut self.renderer);
 
         if !self.right_mouse_held {

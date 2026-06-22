@@ -323,9 +323,9 @@ impl HelioWasmApp for Demo {
             );
 
             // Hover highlight and drag update every frame.
-            self.editor.update_hover(ray_o, ray_d, renderer.scene());
+            self.editor.update_hover(ray_o, ray_d, renderer);
             if self.editor.is_dragging() {
-                self.editor.update_drag(ray_o, ray_d, renderer.scene_mut());
+                self.editor.update_drag(ray_o, ray_d, renderer);
             }
 
             // Left-click: try to start a gizmo drag, else BVH pick.
@@ -383,16 +383,9 @@ impl HelioWasmApp for Demo {
             }
         }
 
-        // ── Gizmo overlay ─────────────────────────────────────────────────────
-        renderer.debug_clear();
-        self.editor.draw_gizmos(renderer);
-
-        // ── Store keys for next frame ─────────────────────────────────────────
-        self.prev_keys = input.keys.clone();
-
         // ── Camera ────────────────────────────────────────────────────────────
         let aspect = self.width as f32 / self.height.max(1) as f32;
-        Camera::perspective_look_at(
+        let camera = Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + fwd,
             glam::Vec3::Y,
@@ -400,6 +393,16 @@ impl HelioWasmApp for Demo {
             aspect,
             0.1,
             500.0,
-        )
+        );
+
+        // ── Gizmo overlay ─────────────────────────────────────────────────────
+        renderer.debug_clear();
+        renderer.set_gizmo_camera(&camera, self.height as f32);
+        self.editor.draw_gizmos(renderer);
+
+        // ── Store keys for next frame ─────────────────────────────────────────
+        self.prev_keys = input.keys.clone();
+
+        camera
     }
 }
