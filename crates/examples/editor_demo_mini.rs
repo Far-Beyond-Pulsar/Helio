@@ -794,11 +794,11 @@ impl ApplicationHandler for App {
                     let (ray_o, ray_d) = state.build_ray();
                     state
                         .editor
-                        .update_hover(ray_o, ray_d, state.renderer.scene());
+                        .update_hover(ray_o, ray_d, &state.renderer);
                     if state.editor.is_dragging() {
                         state
                             .editor
-                            .update_drag(ray_o, ray_d, state.renderer.scene_mut());
+                            .update_drag(ray_o, ray_d, &mut state.renderer);
                     }
                 }
             }
@@ -1113,6 +1113,7 @@ impl AppState {
         );
 
         self.renderer.debug_clear();
+        self.renderer.set_gizmo_camera(&camera, self.renderer.output_height() as f32);
         self.editor.draw_gizmos(&mut self.renderer);
 
         if !self.right_mouse_held {
