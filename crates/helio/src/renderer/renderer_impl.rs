@@ -92,6 +92,11 @@ pub struct Renderer {
     /// Cached resolution for jitter matrix precomputation.
     jitter_cache_width: u32,
     jitter_cache_height: u32,
+    /// Camera and viewport stored by the caller via [`set_gizmo_camera`] so that
+    /// gizmo drawing and hit-testing can compute a screen-space-consistent size.
+    gizmo_camera: Option<crate::scene::Camera>,
+    gizmo_viewport_height: f32,
+
     /// Optional live portal handle for non-blocking profiling telemetry
     #[cfg(feature = "live-portal")]
     portal_handle: Option<helio_live_portal::LivePortalHandle>,
@@ -362,6 +367,8 @@ impl Renderer {
             clear_target_next_frame: true,
             owns_device: true,
             pending_resize: None,
+            gizmo_camera: None,
+            gizmo_viewport_height: 0.0,
         };
 
         // Automatically start live performance dashboard if feature is enabled
@@ -509,6 +516,8 @@ impl Renderer {
             bake_pending: None,
             #[cfg(feature = "bake")]
             baked_data: None,
+            gizmo_camera: None,
+            gizmo_viewport_height: 0.0,
             owns_device: false,
             pending_resize: None,
             clear_target_next_frame: true,
@@ -1154,6 +1163,30 @@ impl Renderer {
         self.billboard_instances.clear();
         self.billboard_instances.extend_from_slice(instances);
         self.billboard_dirty = true;
+    }
+
+    /// Store the current camera and viewport height for screen-space gizmo sizing.
+    ///
+    /// Call this **before** [`draw_gizmos`](crate::EditorState::draw_gizmos) / [`update_hover`](crate::EditorState::update_hover)
+    /// each frame so that gizmos are sized consistently regardless of camera distance.
+    /// Typically the same camera that is passed to [`render`](Self::render).
+    pub fn set_gizmo_camera(&mut self, camera: &crate::scene::Camera, viewport_height: f32) {
+        self.gizmo_camera = Some(*camera);
+        self.gizmo_viewport_height = viewport_height;
+    }
+
+    /// Returns the camera and viewport height previously set via [`set_gizmo_camera`],
+    /// or [`None`] if no camera has been set yet.
+    pub fn gizmo_camera_info(&self) -> Option<(&crate::scene::Camera, f32)> {
+        self.gizmo_camera.as_ref().map(|c| (c, self.gizmo_viewport_height))
+    }
+
+    pub fn output_width(&self) -> u32 {
+        self.output_width
+    }
+
+    pub fn output_height(&self) -> u32 {
+        self.output_height
     }
 
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {

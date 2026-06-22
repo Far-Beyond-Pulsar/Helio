@@ -32,7 +32,7 @@ use glam::{Mat3, Mat4, Vec3};
 
 use crate::handles::{ObjectId, SectionedInstanceId};
 use crate::renderer::{DebugBatch, Renderer};
-use crate::scene::{Scene, SceneActorId};
+use crate::scene::{Camera, Scene, SceneActorId};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public types
@@ -209,25 +209,36 @@ impl EditorState {
     ///
     /// Call on every `CursorMoved` event when the cursor is not grabbed.
     /// Returns `true` if the cursor is over any gizmo handle.
-    pub fn update_hover(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &Scene) -> bool {
+    ///
+    /// The gizmo hit-test size is derived from the camera info stored in the
+    /// renderer (set via [`Renderer::set_gizmo_camera`]) so that hit zones
+    /// remain a consistent screen-space size.
+    pub fn update_hover(&mut self, ray_o: Vec3, ray_d: Vec3, renderer: &Renderer) -> bool {
         if self.is_dragging() {
             return true; // keep hover alive while dragging
         }
+        let Some((gizmo_camera, viewport_height)) = renderer.gizmo_camera_info() else {
+            self.hovered_axis = None;
+            return false;
+        };
+        let scene = renderer.scene();
         match self.selected {
             Some(SceneActorId::Object(id)) => {
-                let Some((center, size, local_axes)) = object_gizmo_info(id, scene) else {
+                let Some((center, _size, local_axes)) = object_gizmo_info(id, scene) else {
                     self.hovered_axis = None;
                     return false;
                 };
-                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode, local_axes);
+                let world_size = gizmo_world_size(center, gizmo_camera, viewport_height);
+                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, world_size, self.gizmo_mode, local_axes);
                 self.hovered_axis.is_some()
             }
             Some(SceneActorId::SectionedObject(id)) => {
-                let Some((center, size, local_axes)) = sectioned_gizmo_info(id, scene) else {
+                let Some((center, _size, local_axes)) = sectioned_gizmo_info(id, scene) else {
                     self.hovered_axis = None;
                     return false;
                 };
-                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, size, self.gizmo_mode, local_axes);
+                let world_size = gizmo_world_size(center, gizmo_camera, viewport_height);
+                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, world_size, self.gizmo_mode, local_axes);
                 self.hovered_axis.is_some()
             }
             Some(SceneActorId::Light(id)) => {
@@ -240,8 +251,9 @@ impl EditorState {
                     light.position_range[1],
                     light.position_range[2],
                 );
+                let world_size = gizmo_world_size(center, gizmo_camera, viewport_height);
                 // Lights only support translate gizmo.
-                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, 0.8, GizmoMode::Translate, [Vec3::X, Vec3::Y, Vec3::Z]);
+                self.hovered_axis = hit_gizmo(ray_o, ray_d, center, world_size, GizmoMode::Translate, [Vec3::X, Vec3::Y, Vec3::Z]);
                 self.hovered_axis.is_some()
             }
             _ => {
@@ -259,6 +271,9 @@ impl EditorState {
     /// started (the caller should skip normal scene picking in that case).
     /// Returns `false` when the cursor was not over any handle.
     pub fn try_start_drag(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &Scene) -> bool {
+        // Note: try_start_drag does not need camera info because it only reads
+        // the frozen gizmo center and local axes from gizmo_info (the size is
+        // dropped). The drag math uses the captured initial_transform directly.
         let axis = match self.hovered_axis {
             Some(a) => a,
             None    => return false,
@@ -347,7 +362,10 @@ impl EditorState {
     /// Apply the gizmo drag to the selected object given the current ray.
     ///
     /// Call on every `CursorMoved` event while the left button is held.
-    pub fn update_drag(&mut self, ray_o: Vec3, ray_d: Vec3, scene: &mut Scene) {
+    ///
+    /// The scale-drag sensitivity is normalised by the screen-space gizmo size
+    /// so that scaling feels consistent at any camera distance.
+    pub fn update_drag(&mut self, ray_o: Vec3, ray_d: Vec3, renderer: &mut Renderer) {
         let DragState::Active { axis, initial_transform, gizmo_center, local_axes, axis_t_start } = self.drag else {
             return;
         };
@@ -357,12 +375,17 @@ impl EditorState {
         let axis_dir = local_axes[axis.col()];
         let center   = gizmo_center;
 
+        // Camera info for screen-space-consistent scale sensitivity.
+        let (camera, viewport_height) = match renderer.gizmo_camera_info() {
+            Some(c) => c,
+            None    => return,
+        };
+        let world_size = gizmo_world_size(center, camera, viewport_height);
+
+        let scene = renderer.scene_mut();
+
         match self.selected {
             Some(SceneActorId::Object(object_id)) => {
-                let gizmo_size = scene.get_object_bounds(object_id)
-                    .map(|b| (b[3].max(0.3) * 1.8).max(0.8))
-                    .unwrap_or(1.0);
-
                 let new_transform = match self.gizmo_mode {
                     GizmoMode::Translate => {
                         let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
@@ -380,7 +403,7 @@ impl EditorState {
                         };
                         // World-unit drag → scale fraction relative to gizmo size.
                         let delta        = t_now - axis_t_start;
-                        let sensitivity  = 1.5 / gizmo_size.max(0.01);
+                        let sensitivity  = 1.5 / world_size.max(0.01);
                         let scale_factor = (1.0 + delta * sensitivity).max(0.01_f32);
 
                         // Re-scale the column that corresponds to this axis.
@@ -426,10 +449,6 @@ impl EditorState {
                 let _ = scene.update_object_transform(object_id, new_transform);
             }
             Some(SceneActorId::SectionedObject(inst_id)) => {
-                let gizmo_size = scene.get_sectioned_instance_bounds(inst_id)
-                    .map(|b| (b[3].max(0.3) * 1.8).max(0.8))
-                    .unwrap_or(1.0);
-
                 let new_transform = match self.gizmo_mode {
                     GizmoMode::Translate => {
                         let t_now = match ray_to_axis_t(ray_o, ray_d, center, axis_dir) {
@@ -446,7 +465,7 @@ impl EditorState {
                             None    => return,
                         };
                         let delta        = t_now - axis_t_start;
-                        let sensitivity  = 1.5 / gizmo_size.max(0.01);
+                        let sensitivity  = 1.5 / world_size.max(0.01);
                         let scale_factor = (1.0 + delta * sensitivity).max(0.01_f32);
 
                         let ci      = axis.col();
@@ -588,41 +607,42 @@ impl EditorState {
     ///
     /// Call every frame after [`Renderer::debug_clear`] and before frame submission.
     /// No-op when nothing is selected.
+    ///
+    /// The gizmo is sized to a constant screen-space footprint (~80 px) using the
+    /// camera and viewport height previously set via [`Renderer::set_gizmo_camera`].
     pub fn draw_gizmos(&self, renderer: &mut Renderer) {
+        let Some((gizmo_camera, viewport_height)) = renderer.gizmo_camera_info() else { return };
         match self.selected {
             Some(SceneActorId::Object(id)) => {
-                let Some((center, gizmo_size, local_axes)) =
+                let Some((center, _gizmo_size, local_axes)) =
                     object_gizmo_info(id, renderer.scene()) else { return };
 
-                // Selection highlight: wire sphere at the transform origin (center), radius from bounds.
-                let sphere_radius = renderer.scene().get_object_bounds(id)
-                    .map(|b| b[3].max(0.3_f32))
-                    .unwrap_or(0.3_f32);
+                let world_size = gizmo_world_size(center, gizmo_camera, viewport_height);
+                let sphere_radius = world_size * 0.5;
                 let hov = self.hovered_axis;
                 let mode = self.gizmo_mode;
                 renderer.debug_batch(|dbg| {
-                    dbg.sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
+                    dbg.sphere(center.to_array(), sphere_radius, [1.0, 0.95, 0.0, 1.0], 24);
                     match mode {
-                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, gizmo_size, hov, local_axes),
-                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, gizmo_size, hov, local_axes),
-                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, gizmo_size, hov, local_axes),
+                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, world_size, hov, local_axes),
+                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, world_size, hov, local_axes),
+                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, world_size, hov, local_axes),
                     }
                 });
             }
             Some(SceneActorId::SectionedObject(id)) => {
-                let Some((center, gizmo_size, local_axes)) =
+                let Some((center, _gizmo_size, local_axes)) =
                     sectioned_gizmo_info(id, renderer.scene()) else { return };
-                let sphere_radius = renderer.scene().get_sectioned_instance_bounds(id)
-                    .map(|b| b[3].max(0.3_f32))
-                    .unwrap_or(0.3_f32);
+                let world_size = gizmo_world_size(center, gizmo_camera, viewport_height);
+                let sphere_radius = world_size * 0.5;
                 let hov  = self.hovered_axis;
                 let mode = self.gizmo_mode;
                 renderer.debug_batch(|dbg| {
-                    dbg.sphere(center.to_array(), sphere_radius * 1.08_f32, [1.0, 0.95, 0.0, 1.0], 24);
+                    dbg.sphere(center.to_array(), sphere_radius, [1.0, 0.95, 0.0, 1.0], 24);
                     match mode {
-                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, gizmo_size, hov, local_axes),
-                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, gizmo_size, hov, local_axes),
-                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, gizmo_size, hov, local_axes),
+                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, world_size, hov, local_axes),
+                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, world_size, hov, local_axes),
+                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, world_size, hov, local_axes),
                     }
                 });
             }
@@ -633,13 +653,12 @@ impl EditorState {
                     light.position_range[1],
                     light.position_range[2],
                 );
-                let gizmo_size = 0.8_f32;
+                let world_size = gizmo_world_size(center, gizmo_camera, viewport_height);
                 let local_axes = [Vec3::X, Vec3::Y, Vec3::Z];
                 let hovered_axis = self.hovered_axis;
                 renderer.debug_batch(|dbg| {
-                    // Yellow circle highlight around billboard.
-                    dbg.sphere(center.to_array(), 0.38_f32, [1.0, 0.95, 0.0, 1.0], 24);
-                    draw_translate_gizmo(dbg, center, gizmo_size, hovered_axis, local_axes);
+                    dbg.sphere(center.to_array(), world_size * 0.5, [1.0, 0.95, 0.0, 1.0], 24);
+                    draw_translate_gizmo(dbg, center, world_size, hovered_axis, local_axes);
                 });
             }
             _ => {}
@@ -818,6 +837,22 @@ fn draw_box_wire(renderer: &mut DebugBatch<'_>, center: Vec3, half: f32, color: 
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Screen-space gizmo sizing
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Desired gizmo size in screen pixels (translate shaft length, rotate ring
+/// radius, scale shaft length).
+const GIZMO_PIXELS: f32 = 80.0;
+
+/// Convert a fixed pixel size into a world-space length at `center`'s depth
+/// so that gizmos appear identical on screen regardless of camera distance.
+fn gizmo_world_size(center: Vec3, camera: &Camera, viewport_height: f32) -> f32 {
+    let distance = (center - camera.position).length().max(0.001);
+    let fy       = camera.proj.col(1)[1]; // 1.0 / tan(fov_y/2)
+    GIZMO_PIXELS * 2.0 * distance / (fy * viewport_height)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Gizmo hit-testing
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -826,37 +861,32 @@ fn draw_box_wire(renderer: &mut DebugBatch<'_>, center: Vec3, half: f32, color: 
 /// * `gizmo_center` — world-space transform origin (`col(3).xyz`), i.e. the
 ///   object's pivot point.  Deliberately *not* the bounding-sphere centroid so
 ///   the gizmo sits exactly at the object's transform origin.
-/// * `size` — uniform visual scale derived from the bounding-sphere radius.
+/// * `size` — gizmo scale (multiply by [`gizmo_world_size`] to get world units).
 /// * `local_axes` — normalized columns 0-2 of the object's world transform.
 ///   These match the directions the gizmo handles point in so that all drawing,
 ///   hit-testing, and drag math automatically follows the object's orientation.
 fn sectioned_gizmo_info(id: SectionedInstanceId, scene: &Scene) -> Option<(Vec3, f32, [Vec3; 3])> {
     let transform = scene.get_sectioned_instance_transform(id)?;
-    let bounds    = scene.get_sectioned_instance_bounds(id)?;
     let center    = transform.col(3).truncate();
-    let size      = (bounds[3].max(0.3) * 1.8).max(0.8);
     let local_axes = [
         transform.col(0).truncate().normalize_or_zero(),
         transform.col(1).truncate().normalize_or_zero(),
         transform.col(2).truncate().normalize_or_zero(),
     ];
-    Some((center, size, local_axes))
+    Some((center, 1.0, local_axes))
 }
 
 fn object_gizmo_info(id: ObjectId, scene: &Scene) -> Option<(Vec3, f32, [Vec3; 3])> {
     let transform = scene.get_object_transform(id).ok()?;
-    let bounds    = scene.get_object_bounds(id).ok()?;
     // Pivot: world-space position of the object's local origin.
     let center = transform.col(3).truncate();
-    // Size from the bounding-sphere radius (independent of orientation).
-    let size = (bounds[3].max(0.3) * 1.8).max(0.8);
     // Normalized local axes — these are the directions the gizmo arms point.
     let local_axes = [
         transform.col(0).truncate().normalize_or_zero(),
         transform.col(1).truncate().normalize_or_zero(),
         transform.col(2).truncate().normalize_or_zero(),
     ];
-    Some((center, size, local_axes))
+    Some((center, 1.0, local_axes))
 }
 
 /// Return which gizmo axis handle (if any) the cursor ray intersects.
