@@ -80,6 +80,8 @@ pub struct Renderer {
     billboard_cached_light_gen: u64,
     /// Cached editor-hidden state at last rebuild.
     billboard_cached_editor_hidden: bool,
+    /// Cached corona emitter generation at last rebuild.
+    billboard_cached_corona_gen: u64,
     /// Monotonic generation for billboard GPU uploads.
     billboard_generation: u64,
 
@@ -355,6 +357,7 @@ impl Renderer {
             billboard_cached_light_count: usize::MAX,
             billboard_cached_light_gen: u64::MAX,
             billboard_cached_editor_hidden: false,
+            billboard_cached_corona_gen: u64::MAX,
             billboard_generation: 0,
 
             corona_emitters: Vec::new(),
@@ -511,6 +514,7 @@ impl Renderer {
             billboard_cached_light_count: usize::MAX,
             billboard_cached_light_gen: u64::MAX,
             billboard_cached_editor_hidden: false,
+            billboard_cached_corona_gen: u64::MAX,
             billboard_generation: 0,
 
             corona_emitters: Vec::new(),
@@ -1328,10 +1332,12 @@ impl Renderer {
         let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
         let light_count = self.scene.gpu_scene().lights.len();
         let light_gen = self.scene.gpu_scene().movable_lights_generation;
+        let corona_gen = self.corona_emitter_generation;
         if self.billboard_dirty
             || light_count != self.billboard_cached_light_count
             || light_gen != self.billboard_cached_light_gen
             || editor_hidden != self.billboard_cached_editor_hidden
+            || corona_gen != self.billboard_cached_corona_gen
         {
             self.billboard_scratch.clear();
             self.billboard_scratch.extend_from_slice(&self.billboard_instances);
@@ -1349,12 +1355,22 @@ impl Renderer {
                         });
                     }
                 }
+                // Corona emitter billboards — cyan tint to distinguish from lights
+                for emitter in &self.corona_emitters {
+                    let [x, y, z, _] = emitter.transform[3];
+                    self.billboard_scratch.push(helio_pass_billboard::BillboardInstance {
+                        world_pos: [x, y, z, 0.0],
+                        scale_flags: [0.25, 0.25, 0.0, 0.0],
+                        color: [0.2, 0.8, 1.0, 1.0],
+                    });
+                }
             }
             self.billboard_generation = self.billboard_generation.wrapping_add(1);
             self.billboard_dirty = false;
             self.billboard_cached_light_count = light_count;
             self.billboard_cached_light_gen = light_gen;
             self.billboard_cached_editor_hidden = editor_hidden;
+            self.billboard_cached_corona_gen = corona_gen;
         }
 
         // Upload water volumes to GPU only when the descriptor has changed.

@@ -38,6 +38,7 @@ pub struct CoronaPass {
     // Pipelines
     simulate_pipeline: wgpu::ComputePipeline,
     emit_pipeline: wgpu::ComputePipeline,
+    reset_pipeline: wgpu::ComputePipeline,
     count_pipeline: wgpu::ComputePipeline,
     build_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
@@ -53,7 +54,10 @@ pub struct CoronaPass {
     particle_buf: wgpu::Buffer,
     emitter_buf: wgpu::Buffer,
     live_counter_buf: wgpu::Buffer,
-    indirect_buf: wgpu::Buffer,
+    /// Written by cs_build_indirect (STORAGE). Bound at b4 in both BGLs.
+    indirect_staging_buf: wgpu::Buffer,
+    /// Used only by draw_indirect (INDIRECT). Never bound in any bind group.
+    indirect_draw_buf: wgpu::Buffer,
 
     // Bind groups (rebuilt when emitter/camera pointers change)
     compute_bg: Option<wgpu::BindGroup>,
@@ -126,10 +130,19 @@ impl CoronaPass {
             .copy_from_slice(&0u32.to_ne_bytes());
         live_counter_buf.unmap();
 
-        let indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Corona Indirect"),
-            size: std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+        let indirect_size = std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
+        // Compute writes here; also bound as STORAGE at b4 in both BGLs.
+        let indirect_staging_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Corona Indirect Staging"),
+            size: indirect_size,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        // Receives a copy from staging each frame; only used by draw_indirect.
+        let indirect_draw_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Corona Indirect Draw"),
+            size: indirect_size,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -244,21 +257,66 @@ impl CoronaPass {
         // ── Compute pipelines ────────────────────────────────────────────────
         let simulate_pipeline = Self::make_compute_pipeline(device, &shader, &compute_pl, "cs_simulate");
         let emit_pipeline = Self::make_compute_pipeline(device, &shader, &compute_pl, "cs_emit");
+        let reset_pipeline = Self::make_compute_pipeline(device, &shader, &compute_pl, "cs_reset_counter");
         let count_pipeline = Self::make_compute_pipeline(device, &shader, &compute_pl, "cs_count_alive");
         let build_pipeline = Self::make_compute_pipeline(device, &shader, &compute_pl, "cs_build_indirect");
 
         // ── Render bind group layout ────────────────────────────────────────
-        // Only bindings actually used by vs_main / fs_main. Compute-only
-        // bindings (especially indirect_buf) must NOT appear here: binding
-        // indirect_buf as STORAGE in a render pass while draw_indirect also
-        // uses it as INDIRECT causes a wgpu exclusive-usage validation error.
+        // Mirrors the compute BGL so all shader globals are satisfied, but b4
+        // binds indirect_staging_buf (STORAGE only — no INDIRECT flag).
+        // draw_indirect uses indirect_draw_buf which is INDIRECT only and is
+        // never in any bind group, so there is no exclusive-usage conflict.
         let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Corona Render BGL"),
             entries: &[
-                // b1: particles — vs_main reads instance data
+                // b0: uniforms
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // b1: particles storage (vertex reads instance data)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // b2: emitters
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // b3: live counter
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // b4: indirect staging (STORAGE only — no INDIRECT usage conflict)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
@@ -351,12 +409,13 @@ impl CoronaPass {
         let camera_ptr = camera_buf as *const _ as usize;
         let p_ptr = &particle_buf as *const _ as usize;
         let e_ptr = &emitter_buf as *const _ as usize;
-        let compute_bg = Some(Self::build_compute_bg(device, &compute_bgl, &uniform_buf, &particle_buf, &emitter_buf, &live_counter_buf, &indirect_buf));
-        let render_bg = Some(Self::build_render_bg(device, &render_bgl, &particle_buf, camera_buf, &particle_view, &particle_sampler));
+        let compute_bg = Some(Self::build_compute_bg(device, &compute_bgl, &uniform_buf, &particle_buf, &emitter_buf, &live_counter_buf, &indirect_staging_buf));
+        let render_bg = Some(Self::build_render_bg(device, &render_bgl, &uniform_buf, &particle_buf, &emitter_buf, &live_counter_buf, &indirect_staging_buf, camera_buf, &particle_view, &particle_sampler));
 
         Self {
             simulate_pipeline,
             emit_pipeline,
+            reset_pipeline,
             count_pipeline,
             build_pipeline,
             render_pipeline,
@@ -368,7 +427,8 @@ impl CoronaPass {
             particle_buf,
             emitter_buf,
             live_counter_buf,
-            indirect_buf,
+            indirect_staging_buf,
+            indirect_draw_buf,
             compute_bg,
             compute_bg_key: Some((p_ptr, e_ptr)),
             render_bg,
@@ -427,7 +487,11 @@ impl CoronaPass {
     fn build_render_bg(
         device: &wgpu::Device,
         bgl: &wgpu::BindGroupLayout,
+        uniform: &wgpu::Buffer,
         particles: &wgpu::Buffer,
+        emitters: &wgpu::Buffer,
+        counter: &wgpu::Buffer,
+        indirect_staging: &wgpu::Buffer,
         camera: &wgpu::Buffer,
         tex_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
@@ -436,7 +500,11 @@ impl CoronaPass {
             label: Some("Corona Render BG"),
             layout: bgl,
             entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: particles.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: emitters.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 3, resource: counter.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: indirect_staging.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: camera.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(tex_view) },
                 wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::Sampler(sampler) },
@@ -528,7 +596,7 @@ impl RenderPass for CoronaPass {
             self.compute_bg = Some(Self::build_compute_bg(
                 ctx.device, &self.compute_bgl,
                 &self.uniform_buf, &self.particle_buf, &self.emitter_buf,
-                &self.live_counter_buf, &self.indirect_buf,
+                &self.live_counter_buf, &self.indirect_staging_buf,
             ));
             self.compute_bg_key = Some(comp_key);
         }
@@ -537,7 +605,8 @@ impl RenderPass for CoronaPass {
         if self.render_bg_key != Some(render_key) {
             self.render_bg = Some(Self::build_render_bg(
                 ctx.device, &self.render_bgl,
-                &self.particle_buf,
+                &self.uniform_buf, &self.particle_buf, &self.emitter_buf,
+                &self.live_counter_buf, &self.indirect_staging_buf,
                 &ctx.scene.camera, &self.particle_view, &self.particle_sampler,
             ));
             self.render_bg_key = Some(render_key);
@@ -566,7 +635,20 @@ impl RenderPass for CoronaPass {
             pass.dispatch_workgroups(self.emitter_count.max(1), 1, 1);
         }
 
-        // ── Compute pass 3: Count alive ──────────────────────────────────────
+        // ── Compute pass 3a: Reset live counter ──────────────────────────────
+        // Must be a separate dispatch so the reset is globally visible before
+        // any counting threads run (GPU dispatches within an encoder are ordered).
+        {
+            let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Corona ResetCounter"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.reset_pipeline);
+            pass.set_bind_group(0, self.compute_bg.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        // ── Compute pass 3b: Count alive ─────────────────────────────────────
         {
             let mut pass = ctx.encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("Corona Count"),
@@ -588,6 +670,16 @@ impl RenderPass for CoronaPass {
             pass.set_bind_group(0, self.compute_bg.as_ref().unwrap(), &[]);
             pass.dispatch_workgroups(1, 1, 1);
         }
+
+        // Copy the indirect args from the staging buffer (STORAGE) to the draw
+        // buffer (INDIRECT). This separates the two usages so wgpu never sees
+        // the same buffer as both STORAGE and INDIRECT in the same scope.
+        let indirect_size = std::mem::size_of::<libhelio::GpuCoronaDrawIndirect>() as u64;
+        ctx.encoder.copy_buffer_to_buffer(
+            &self.indirect_staging_buf, 0,
+            &self.indirect_draw_buf, 0,
+            indirect_size,
+        );
 
         // ── Render pass: Draw particles ──────────────────────────────────────
         let target_view = ctx.resources.pre_aa.get().unwrap_or(ctx.target);
@@ -622,7 +714,7 @@ impl RenderPass for CoronaPass {
         let mut pass = ctx.encoder.begin_render_pass(&desc);
         pass.set_pipeline(&self.render_pipeline);
         pass.set_bind_group(0, self.render_bg.as_ref().unwrap(), &[]);
-        pass.draw_indirect(&self.indirect_buf, 0);
+        pass.draw_indirect(&self.indirect_draw_buf, 0);
 
         Ok(())
     }

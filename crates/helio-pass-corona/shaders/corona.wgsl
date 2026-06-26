@@ -187,14 +187,18 @@ fn cs_emit(@builtin(workgroup_id) id: vec3<u32>) {
     emitters[eidx].spawn_cursor = em.spawn_cursor;
 }
 
+// ── Reset live counter (single thread, run as a separate dispatch before count) ─
+
+@compute @workgroup_size(1)
+fn cs_reset_counter() {
+    atomicStore(&live_counter, 0u);
+}
+
 // ── Count alive (atomic into live_counter) ──────────────────────────────────
 
 @compute @workgroup_size(256)
 fn cs_count_alive(@builtin(global_invocation_id) id: vec3<u32>) {
     let idx = id.x;
-    if idx == 0u {
-        atomicStore(&live_counter, 0u);
-    }
     if idx >= uniforms.total_particles { return; }
     if particles[idx].pos_and_alive.w > 0.5 {
         atomicAdd(&live_counter, 1u);
