@@ -205,13 +205,14 @@ fn cs_count_alive(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
-// ── Build indirect draw args (single thread, reads live_counter) ────────────
+// ── Build indirect draw args ─────────────────────────────────────────────────
+// We always draw total_particles instances; dead particles are culled in
+// vs_main by outputting a degenerate position outside the NDC cube.
 
 @compute @workgroup_size(1)
 fn cs_build_indirect() {
-    let count = atomicLoad(&live_counter);
     indirect_buf.vertex_count = 6u;
-    indirect_buf.instance_count = count;
+    indirect_buf.instance_count = uniforms.total_particles;
     indirect_buf.first_vertex = 0u;
     indirect_buf.first_instance = 0u;
 }
@@ -258,17 +259,26 @@ fn quad_uv(idx: u32) -> vec2<f32> {
 @vertex
 fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
     let p = particles[ii];
-    let corner = quad_corner(vi);
 
+    var out: VOut;
+    // Dead particles get a degenerate position outside NDC — GPU clips the
+    // whole triangle without invoking the fragment shader.
+    if p.pos_and_alive.w < 0.5 {
+        out.pos = vec4<f32>(2.0, 2.0, 2.0, 1.0);
+        out.uv = vec2<f32>(0.0);
+        out.color = vec4<f32>(0.0);
+        return out;
+    }
+
+    let corner = quad_corner(vi);
     let right = vec3<f32>(camera.view[0].x, camera.view[1].x, camera.view[2].x);
-    let up = vec3<f32>(camera.view[0].y, camera.view[1].y, camera.view[2].y);
+    let up    = vec3<f32>(camera.view[0].y, camera.view[1].y, camera.view[2].y);
     let size = max(p.size_lifetime_age.x, 0.001);
 
     let world_pos = p.pos_and_alive.xyz
         + right * corner.x * size
-        + up * corner.y * size;
+        + up    * corner.y * size;
 
-    var out: VOut;
     out.pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
     out.uv = quad_uv(vi);
     out.color = p.color;

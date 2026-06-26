@@ -12,8 +12,8 @@ use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/// Default total particles (= 512K; 64 MiB VRAM for particles alone).
-const DEFAULT_MAX_PARTICLES: u32 = 524_288;
+/// Default total particles — match CORONA_MAX_PARTICLES so the buffer never underflows.
+const DEFAULT_MAX_PARTICLES: u32 = libhelio::CORONA_MAX_PARTICLES;
 
 /// Maximum emitters we can have in the GPU buffer.
 const MAX_EMITTERS: u32 = 64;
@@ -80,6 +80,10 @@ pub struct CoronaPass {
     max_particles: u32,
     emitter_count: u32,
     surface_format: wgpu::TextureFormat,
+
+    // CPU-side emitter state: tracks spawn cursors across frames so they
+    // aren't reset to 0 each time the demo rebuilds its emitter list.
+    cpu_emitters: Vec<libhelio::GpuCoronaEmitter>,
 }
 
 impl CoronaPass {
@@ -441,6 +445,7 @@ impl CoronaPass {
             max_particles: DEFAULT_MAX_PARTICLES,
             emitter_count: 0,
             surface_format,
+            cpu_emitters: Vec::new(),
         }
     }
 
@@ -553,15 +558,49 @@ impl RenderPass for CoronaPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        // ── Upload emitter definitions if changed ────────────────────────────
+        // ── Upload emitter definitions, preserving GPU state ─────────────────
         if let Some(data) = ctx.frame_resources.corona_emitters.get() {
             if data.generation != self.uploaded_generation {
-                let max_bytes = (MAX_EMITTERS as usize * std::mem::size_of::<libhelio::GpuCoronaEmitter>())
-                    .min(data.emitters.len());
-                if max_bytes > 0 {
-                    ctx.write_buffer(&self.emitter_buf, 0, &data.emitters[..max_bytes]);
+                let em_size = std::mem::size_of::<libhelio::GpuCoronaEmitter>();
+                let count = (data.count as usize).min(MAX_EMITTERS as usize);
+                let src_bytes = &data.emitters[..count * em_size];
+                let new_emitters: &[libhelio::GpuCoronaEmitter] = bytemuck::cast_slice(src_bytes);
+
+                // Grow the CPU emitter list if new emitters were added.
+                if self.cpu_emitters.len() < count {
+                    self.cpu_emitters.resize(count, libhelio::GpuCoronaEmitter::zeroed());
                 }
-                self.emitter_count = data.count.min(MAX_EMITTERS);
+                self.cpu_emitters.truncate(count);
+
+                // Assign each emitter a non-overlapping particle range, then
+                // copy incoming params while preserving the existing spawn cursor
+                // so particles travel across frames instead of resetting.
+                let dt = ctx.delta_time;
+
+                // Build upload array: preserve cursors, assign non-overlapping offsets.
+                // cpu_emitters[i].spawn_cursor holds the cursor for NEXT frame (post-emit).
+                let mut upload = self.cpu_emitters[..count].to_vec();
+                let mut offset = 0u32;
+                for (i, src) in new_emitters.iter().enumerate() {
+                    let this_frame_cursor = self.cpu_emitters[i].spawn_cursor;
+                    let emit_count = (src.emit_params[0] * dt) as u32;
+                    let range = src.particle_count.max(1);
+
+                    upload[i] = *src;
+                    upload[i].particle_offset = offset;
+                    upload[i].spawn_cursor = this_frame_cursor;
+
+                    // Advance CPU cursor to where GPU will be after cs_emit.
+                    self.cpu_emitters[i].spawn_cursor = (this_frame_cursor + emit_count) % range;
+
+                    offset = offset.saturating_add(src.particle_count);
+                }
+
+                let upload_bytes: &[u8] = bytemuck::cast_slice(&upload);
+                let max_bytes = (MAX_EMITTERS as usize * em_size).min(upload_bytes.len());
+                ctx.write_buffer(&self.emitter_buf, 0, &upload_bytes[..max_bytes]);
+
+                self.emitter_count = count as u32;
                 self.uploaded_generation = data.generation;
                 self.max_particles = data.max_particles.clamp(1024, 4_194_304);
             }
