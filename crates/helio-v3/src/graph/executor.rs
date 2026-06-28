@@ -687,7 +687,7 @@ impl RenderGraph {
             let pass_type = if writes > 0 { "R" } else { "C" };
             let write_names: Vec<&str> = self.resources.iter()
                 .filter(|(_, rl)| rl.first_write_pass == i)
-                .map(|(n, _)| *n)
+                .map(|(n, _)| n.as_str())
                 .collect();
             eprintln!("  {:>3}. [{}] {:<30} {}  {}",
                 i, pass_type, pass.name(), fusion,
