@@ -87,6 +87,7 @@ struct AppState {
     picker: ScenePicker,
     grid_enabled: bool,
     is_fullscreen: bool,
+    debug_lighting: bool,
 }
 
 impl ApplicationHandler for App {
@@ -562,6 +563,7 @@ impl ApplicationHandler for App {
             picker,
             grid_enabled: true,
             is_fullscreen: false,
+            debug_lighting: false,
         });
     }
 
@@ -667,6 +669,11 @@ impl ApplicationHandler for App {
                                         pos, [0.2, 0.5, 1.0], 500.0, 150.0,
                                     )),
                                 );
+                            }
+                            KeyCode::F1 => {
+                                let mode = if state.debug_lighting { 0 } else { 4 };
+                                state.renderer.set_debug_mode(mode);
+                                state.debug_lighting = !state.debug_lighting;
                             }
                             _ => {}
                         }

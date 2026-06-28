@@ -52,7 +52,10 @@ impl From<wgpu::TextureFormat> for ResourceFormat {
 /// Size specification for transient resources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ResourceSize {
+    /// Match the internal render resolution (render_scale × output)
     MatchSurface,
+    /// Match the full output/display resolution
+    Output,
     Absolute { width: u32, height: u32 },
     Scaled { divisor: u32 },
 }

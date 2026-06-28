@@ -378,7 +378,7 @@ impl Renderer {
             baked_data: None,
             clear_target_next_frame: true,
             owns_device: true,
-            pending_resize: None,
+            pending_resize: Some((config.width, config.height)),
             gizmo_camera: None,
             gizmo_viewport_height: 0.0,
         };
@@ -536,7 +536,7 @@ impl Renderer {
             gizmo_camera: None,
             gizmo_viewport_height: 0.0,
             owns_device: false,
-            pending_resize: None,
+            pending_resize: Some((config.width, config.height)),
             clear_target_next_frame: true,
         }
     }

@@ -5,6 +5,35 @@ use libhelio::GBufferViews;
 use std::any::TypeId;
 use std::collections::HashMap;
 
+fn format_bpp(fmt: wgpu::TextureFormat) -> u32 {
+    use wgpu::TextureFormat::*;
+    match fmt {
+        R8Unorm | R8Snorm | R8Uint | R8Sint => 8,
+        R16Unorm | R16Snorm | R16Uint | R16Sint | R16Float | Rg8Unorm | Rg8Snorm | Rg8Uint | Rg8Sint => 16,
+        R32Uint | R32Sint | R32Float | Rg16Unorm | Rg16Snorm | Rg16Uint | Rg16Sint | Rg16Float | Rgba8Unorm | Rgba8UnormSrgb | Rgba8Snorm | Rgba8Uint | Rgba8Sint | Bgra8UnormSrgb => 32,
+        Rg32Uint | Rg32Sint | Rg32Float | Rgba16Unorm | Rgba16Snorm | Rgba16Uint | Rgba16Sint | Rgba16Float => 64,
+        Rgba32Uint | Rgba32Sint | Rgba32Float => 128,
+        Depth32Float => 32,
+        _ => 32,
+    }
+}
+
+fn format_name(fmt: wgpu::TextureFormat) -> &'static str {
+    use wgpu::TextureFormat::*;
+    match fmt {
+        Rgba16Float => "Rgba16Float",
+        Rgba8Unorm => "Rgba8Unorm",
+        Rgba8UnormSrgb => "Rgba8UnormSrgb",
+        Bgra8UnormSrgb => "Bgra8UnormSrgb",
+        R32Float => "R32Float",
+        R16Float => "R16Float",
+        R8Unorm => "R8Unorm",
+        Rg16Float => "Rg16Float",
+        Depth32Float => "Depth32Float",
+        _ => "Other",
+    }
+}
+
 /// Per-resource metadata: which pass first writes it and which pass last reads it.
 struct ResourceLifetime {
     first_write_pass: usize,
@@ -55,6 +84,8 @@ pub struct RenderGraph {
     /// so the executor can open one render pass and call `next_subpass()` between
     /// passes instead of each pass calling `ctx.begin_render_pass()`.
     subpass_chains: Vec<std::ops::Range<usize>>,
+    /// Frame counter for periodic stats reporting.
+    frame_count: u64,
 }
 
 impl RenderGraph {
@@ -76,6 +107,7 @@ impl RenderGraph {
             gpu_render_bundles: Vec::new(),
             resources_allocated: false,
             subpass_chains: Vec::new(),
+            frame_count: 0,
         }
     }
 
@@ -141,7 +173,8 @@ impl RenderGraph {
             }
 
             let (width, height) = match w.size {
-                crate::graph::ResourceSize::MatchSurface => (self.output_w, self.output_h),
+                crate::graph::ResourceSize::MatchSurface => (self.internal_w, self.internal_h),
+                crate::graph::ResourceSize::Output => (self.output_w, self.output_h),
                 crate::graph::ResourceSize::Absolute { width, height } => (width, height),
                 crate::graph::ResourceSize::Scaled { divisor } => {
                     (self.output_w / divisor.max(1), self.output_h / divisor.max(1))
@@ -263,13 +296,9 @@ impl RenderGraph {
     // ── Public API ──────────────────────────────────────────────────────
 
     pub fn set_render_size(&mut self, width: u32, height: u32) {
-        let internal_w = width;
-        let internal_h = height;
-        if self.internal_w == internal_w && self.internal_h == internal_h && self.resources_allocated {
+        if self.output_w == width && self.output_h == height && self.resources_allocated {
             return;
         }
-        self.internal_w = internal_w;
-        self.internal_h = internal_h;
         self.output_w = width;
         self.output_h = height;
 
@@ -295,9 +324,6 @@ impl RenderGraph {
         self.allocate_textures();
         self.detect_subpass_chains();
         self.resources_allocated = true;
-        for pass in &mut self.passes {
-            pass.on_resize(&self.device, width, height);
-        }
         self.rebuild_gpu_render_bundles();
     }
 
@@ -452,8 +478,8 @@ impl RenderGraph {
                         scene: scene_resources,
                         profiler: &mut self.profiler,
                         frame_num: scene.frame_count,
-                        width: scene.width,
-                        height: scene.height,
+                        width: self.internal_w,
+                        height: self.internal_h,
                         device: &scene.device,
                         resources: &visible_frame_resources,
                         owns_device: self.owns_device,
@@ -478,8 +504,8 @@ impl RenderGraph {
                     scene,
                     frame_resources: &visible_frame_resources,
                     resize: false,
-                    width: scene.width,
-                    height: scene.height,
+                    width: self.internal_w,
+                    height: self.internal_h,
                     delta_time: self.delta_time,
                 };
                 pass.prepare(&prepare_ctx)?;
@@ -515,8 +541,8 @@ impl RenderGraph {
                     scene: scene_resources,
                     profiler: &mut self.profiler,
                     frame_num: scene.frame_count,
-                    width: scene.width,
-                    height: scene.height,
+                    width: self.internal_w,
+                    height: self.internal_h,
                     device: &scene.device,
                     resources: &visible_frame_resources,
                     owns_device: self.owns_device,
@@ -541,7 +567,54 @@ impl RenderGraph {
             self.profiler.read_gpu_timestamps_deferred();
         }
 
+        self.frame_count += 1;
+        if self.frame_count % 1000 == 0 {
+            self.log_resource_stats();
+        }
+
         Ok(())
+    }
+
+    /// Log a breakdown of graph-managed inter-pass textures every 1k frames.
+    fn log_resource_stats(&self) {
+        let mut total_bytes = 0u64;
+        let mut alias_groups: HashMap<&str, Vec<&str>> = HashMap::new();
+        eprintln!("── [Graph] Inter-pass texture stats ──");
+        for (name, rl) in &self.resources {
+            let bpp = format_bpp(rl.format);
+            let bytes = rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8;
+            total_bytes += bytes;
+            let alias = rl.alias_group.as_deref().unwrap_or("-");
+            if rl.alias_group.is_some() {
+                alias_groups.entry(alias).or_default().push(name);
+            }
+            eprintln!(
+                "  {:<28} {:>4}×{:<4} layers={:<3} {:<14} {:>8} KB  alias={}",
+                name, rl.width, rl.height, rl.depth_or_array_layers,
+                format_name(rl.format), bytes / 1024, alias,
+            );
+        }
+
+        // Report alias group savings
+        for (group, members) in &alias_groups {
+            let total = members.iter().filter_map(|n| {
+                self.resources.get(*n).map(|rl| {
+                    let bpp = format_bpp(rl.format);
+                    rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8
+                })
+            }).sum::<u64>();
+            let saved = total * (members.len().saturating_sub(1) as u64);
+            eprintln!("  alias group '{}': {} members, ~{} KB saved (would be {} KB without aliasing)",
+                group, members.len(), saved / 1024, (total * members.len() as u64) / 1024);
+        }
+
+        eprintln!("  Total graph-managed VRAM: {} KB ({} MB)", total_bytes / 1024, total_bytes / (1024 * 1024));
+        eprintln!("  Subpass-fusible chains: {}", self.subpass_chains.len());
+        for chain in &self.subpass_chains {
+            let names: Vec<&str> = self.passes[chain.start..chain.end].iter().map(|p| p.name()).collect();
+            eprintln!("    potential chain: {}", names.join(" → "));
+        }
+        eprintln!("─────────────────────────────────────");
     }
 
     fn rebuild_gpu_render_bundles(&mut self) {

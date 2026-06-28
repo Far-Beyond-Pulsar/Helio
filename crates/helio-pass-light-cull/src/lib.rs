@@ -238,12 +238,16 @@ impl RenderPass for LightCullPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        // Tile grid must match the internal (render-target) resolution, not output.
+        // ctx.width/height are internal_w/h from the graph.
+        self.num_tiles_x = ctx.width.div_ceil(TILE_SIZE);
+        self.num_tiles_y = ctx.height.div_ceil(TILE_SIZE);
         let params = LightCullParams {
             num_tiles_x: self.num_tiles_x,
-            num_tiles_y: self.num_tiles_y,
-            num_lights: ctx.scene.movable_light_count, // Only process movable lights (static lights are baked)
-            screen_width: self.width,
-            screen_height: self.height,
+            num_tiles_y: ctx.height.div_ceil(TILE_SIZE),
+            num_lights: ctx.scene.movable_light_count,
+            screen_width: ctx.width,
+            screen_height: ctx.height,
             _pad0: 0,
             _pad1: 0,
             _pad2: 0,

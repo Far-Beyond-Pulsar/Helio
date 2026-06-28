@@ -199,15 +199,35 @@ impl HiZBuildPass {
         });
 
         // Mip uniforms and bind groups are built lazily from the graph-owned texture.
-        // Mip uniforms and dispatch groups (width/height-dependent only) are built
-        // in on_resize(). mip_views and mip_bind_groups need the wgpu::Texture
-        // handle which is available via ctx.resource_pool in execute().
+        // Mip uniforms and dispatch groups are built once here (width/height-dependent).
+        let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
+        let mut mip_uniforms = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
+        let mut mip_dispatch_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
+        for mip in 0..(mip_count.saturating_sub(1)) {
+            let src_w = (width >> mip).max(1);
+            let src_h = (height >> mip).max(1);
+            let dst_w = (width >> (mip + 1)).max(1);
+            let dst_h = (height >> (mip + 1)).max(1);
+            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("HiZ Mip Uniform"),
+                contents: bytemuck::bytes_of(&HiZUniforms {
+                    src_size: [src_w, src_h],
+                    dst_size: [dst_w, dst_h],
+                }),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            mip_uniforms.push(ub);
+            mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
+        }
+
+        // mip_views and mip_bind_groups need the wgpu::Texture handle which is
+        // available via ctx.resource_pool in execute().
         Self {
             mip_pipeline,
             mip_bgl,
             mip_bind_groups: Vec::new(),
-            mip_uniforms: Vec::new(),
-            mip_dispatch_groups: Vec::new(),
+            mip_uniforms,
+            mip_dispatch_groups,
             copy_pipeline,
             copy_bgl,
             copy_bind_group: None,
@@ -365,35 +385,9 @@ impl RenderPass for HiZBuildPass {
         builder.write_color_raw("hiz", wgpu::TextureFormat::R32Float, ResourceSize::MatchSurface);
     }
 
-    fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        self.width = width;
-        self.height = height;
-
-        // Rebuild uniforms and dispatch groups (width/height-dependent, no texture needed).
-        let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
-        let mut mip_uniforms = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
-        let mut mip_dispatch_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
-        for mip in 0..(mip_count.saturating_sub(1)) {
-            let src_w = (width >> mip).max(1);
-            let src_h = (height >> mip).max(1);
-            let dst_w = (width >> (mip + 1)).max(1);
-            let dst_h = (height >> (mip + 1)).max(1);
-
-            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("HiZ Mip Uniform"),
-                contents: bytemuck::bytes_of(&HiZUniforms {
-                    src_size: [src_w, src_h],
-                    dst_size: [dst_w, dst_h],
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
-            });
-            mip_uniforms.push(ub);
-            mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
-        }
-
-        self.mip_uniforms = mip_uniforms;
-        self.mip_dispatch_groups = mip_dispatch_groups;
-        // Clear views and bind groups — rebuilt lazily from graph-owned texture in execute().
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+        // Graph textures are re-allocated by the pool. Clear lazy views/bind groups
+        // so they are rebuilt from the new graph-owned texture in execute().
         self.mip_views.clear();
         self.mip_bind_groups.clear();
         self.copy_bind_group = None;
