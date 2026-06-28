@@ -337,22 +337,20 @@ impl RenderGraph {
     /// Uses a greedy forward scan to build maximal chains.
     fn detect_subpass_chains(&mut self) {
         self.subpass_chains.clear();
+        // Greedy chain builder: chain A→B if B reads() any resource that A writes().
         let mut i = 0;
-        while i < self.passes.len().saturating_sub(1) {
-            // Start a new chain — find the longest sequential run where each
-            // adjacent pair (k, k+1) shares a resource that k writes and k+1 reads.
+        while i < self.passes.len() {
             let chain_start = i;
-            while i < self.passes.len().saturating_sub(1) {
-                let can_fuse = self.resources.values().any(|rl| {
-                    rl.first_write_pass == i && rl.last_read_pass > i
-                });
+            while i + 1 < self.passes.len() {
+                let writes_i: &[&str] = self.passes[i].writes();
+                let reads_next: &[&str] = self.passes[i + 1].reads();
+                let can_fuse = writes_i.iter().any(|w| reads_next.contains(w));
                 if !can_fuse { break; }
                 i += 1;
             }
-            // A chain must have at least 2 passes.
-            let chain_end = i + 1; // inclusive: passes[chain_start ..= chain_end]
-            if chain_end > chain_start + 1 && chain_end <= self.passes.len() {
-                self.subpass_chains.push(chain_start..chain_end);
+            let chain_len = i + 1 - chain_start;
+            if chain_len >= 2 {
+                self.subpass_chains.push(chain_start..i + 1);
             }
             i += 1;
         }
@@ -662,39 +660,40 @@ impl RenderGraph {
         }
 
         // ── Full pass pipeline report ──────────────────────────────────
-        let chain_set: std::collections::HashSet<usize> = self.subpass_chains.iter()
-            .flat_map(|r| r.clone())
-            .collect();
-        eprintln!("── Pass pipeline ({} total) ──", self.passes.len());
+        // Build a set of which passes are in chains.
+        let mut pass_chain: Vec<Option<usize>> = vec![None; self.passes.len()];
+        for (ci, chain) in self.subpass_chains.iter().enumerate() {
+            for pi in chain.clone() {
+                pass_chain[pi] = Some(ci);
+            }
+        }
+        eprintln!("── Pass pipeline ({} passes, {} chains) ──",
+            self.passes.len(), self.subpass_chains.len());
         for (i, pass) in self.passes.iter().enumerate() {
-            let in_chain = chain_set.contains(&i);
-            let fusion = if in_chain {
-                self.subpass_chains.iter()
-                    .find(|r| r.contains(&i))
-                    .map(|r| {
-                        if i == r.start { "╔══ FUSED ══>" }
-                        else if i == r.end - 1 { "╚══ FUSED ══>" }
-                        else { "║ FUSED" }
-                    })
-                    .unwrap_or("")
-            } else {
-                ""
-            };
-            // Determine pass type from the resources it writes.
-            let writes = self.resources.iter()
-                .filter(|(_, rl)| rl.first_write_pass == i)
-                .count();
-            let pass_type = if writes > 0 { "R" } else { "C" };
-            let write_names: Vec<&str> = self.resources.iter()
+            let writes: Vec<&str> = self.resources.iter()
                 .filter(|(_, rl)| rl.first_write_pass == i)
                 .map(|(n, _)| n.as_str())
                 .collect();
-            eprintln!("  {:>3}. [{}] {:<30} {}  {}",
-                i, pass_type, pass.name(), fusion,
-                if write_names.is_empty() { String::new() } else { format!("→ {}", write_names.join(", ")) },
-            );
+            let r_or_c = if writes.is_empty() { 'C' } else { 'R' };
+
+            // Chain marker for this pass.
+            let marker = match pass_chain[i] {
+                Some(ci) => {
+                    let chain = &self.subpass_chains[ci];
+                    if i == chain.start { format!("[{}.{}]", ci, chain.len()) }
+                    else { format!("|.{}", chain.len()) }
+                }
+                None => "   ".to_string(),
+            };
+            let write_str = if writes.is_empty() {
+                String::new()
+            } else {
+                format!(" → {}", writes.join(", "))
+            };
+            eprintln!("  {:>2}. [{}] {:>4} {:<28}{}",
+                i, r_or_c, marker, pass.name(), write_str);
         }
-        eprintln!("  (R=render writes textures  C=compute/other)");
+        eprintln!("  (R=render  C=compute  [chain_id.pass_count] = fused chain)");
 
         eprintln!("─────────────────────────────────────");
     }
