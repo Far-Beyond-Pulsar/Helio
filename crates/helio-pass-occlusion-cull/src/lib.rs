@@ -173,6 +173,10 @@ impl RenderPass for OcclusionCullPass {
         "OcclusionCull"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        &["hiz"]
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let p = CullParams {
             screen_width:  self.screen_width,

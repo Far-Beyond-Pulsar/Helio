@@ -445,7 +445,7 @@ impl RenderPass for BillboardPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa", "full_res_depth", "billboards"]
+        &["pre_aa", "full_res_depth", "billboards", "depth", "main_scene"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

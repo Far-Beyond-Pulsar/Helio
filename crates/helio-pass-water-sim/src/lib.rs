@@ -1306,7 +1306,7 @@ impl RenderPass for WaterSimPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "depth", "pre_aa", "depth_texture"]
+        &["gbuffer", "depth", "pre_aa", "depth_texture", "water_hitbox_count", "water_hitboxes", "water_volume_count", "water_volumes", "water_caustics"]
     }
     fn writes(&self) -> &'static [&'static str] {
         &["water_sim_texture", "water_sim_sampler", "water_caustics", "pre_aa"]

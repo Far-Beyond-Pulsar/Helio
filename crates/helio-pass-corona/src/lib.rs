@@ -582,7 +582,7 @@ impl RenderPass for CoronaPass {
     fn name(&self) -> &'static str { "Corona" }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa", "full_res_depth", "corona_emitters"]
+        &["pre_aa", "full_res_depth", "corona_emitters", "depth", "main_scene"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

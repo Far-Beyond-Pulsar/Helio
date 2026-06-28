@@ -518,6 +518,10 @@ impl RenderPass for DeferredLightPass {
             "main_scene",
             "water_caustics",
             "water_volumes",
+            "pre_aa",
+            "rc_view",
+            "baked_lightmap",
+            "baked_lightmap_sampler",
         ]
     }
 

@@ -125,6 +125,10 @@ impl RenderPass for DepthPrepassPass {
         "DepthPrepass"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        &["main_scene"]
+    }
+
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
     }

@@ -390,6 +390,10 @@ impl RenderPass for SsaoPass {
         "SSAO"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa", "depth"]
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw("ssao", wgpu::TextureFormat::R8Unorm, ResourceSize::MatchSurface);
     }
