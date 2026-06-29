@@ -206,10 +206,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let depth_bias = 1.0 / 65536.0;
     if near_z > hiz_depth + depth_bias {
+        // Only count as occlusion-culled if the frustum pass left it visible
+        // (instance_count > 0). Frustum-culled draws already have instance_count=0.
+        let was_visible = indirect[idx * 5u + 1u] != 0u;
         indirect[idx * 5u + 1u] = 0u;
-        atomicAdd(&stats[4u], 1u);
-        if (inst.flags & 1u) != 0u {
-            atomicAdd(&stats[7u], 1u);
+        if was_visible {
+            atomicAdd(&stats[4u], 1u);
+            if (inst.flags & 1u) != 0u {
+                atomicAdd(&stats[7u], 1u);
+            }
         }
         return;
     }
@@ -241,10 +246,13 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let w = (clamped_uvw.z + f32(layer)) / 6.0;
             let occlusion_dist = textureSampleLevel(static_hiz_tex, static_hiz_samp, vec3<f32>(clamped_uvw.x, clamped_uvw.y, w), 0.0).r;
             if cam_dist > occlusion_dist + 0.1 {
+                let was_visible = indirect[idx * 5u + 1u] != 0u;
                 indirect[idx * 5u + 1u] = 0u;
-                atomicAdd(&stats[4u], 1u);
-                if (inst.flags & 1u) != 0u {
-                    atomicAdd(&stats[7u], 1u);
+                if was_visible {
+                    atomicAdd(&stats[4u], 1u);
+                    if (inst.flags & 1u) != 0u {
+                        atomicAdd(&stats[7u], 1u);
+                    }
                 }
             }
         }

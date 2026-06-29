@@ -1718,12 +1718,17 @@ impl Renderer {
                         let total = cs[0];
                         let frustum = cs[1];
                         let subpixel = cs[2];
-                        let occ = cs[4];
-                        let visible = total.saturating_sub(frustum + subpixel + occ);
+                        let frustum_visible = cs[3];
+                        let occ_raw = cs[4];
+                        // Cap occlusion-culled at frustum_visible (occlusion pass may
+                        // process frustum-culled draws due to timing/overlap).
+                        let occ = occ_raw.min(frustum_visible);
+                        let visible = frustum_visible - occ;
                         let sh_total = cs[5];
-                        let sh_vis = cs[6];
-                        let sh_occ = cs[7];
-                        let sh_frustum = sh_total.saturating_sub(sh_vis + sh_occ);
+                        let sh_visible = cs[6];
+                        let sh_occ_raw = cs[7];
+                        let sh_occ = sh_occ_raw.min(sh_visible);
+                        let sh_frustum = sh_total.saturating_sub(sh_visible + sh_occ);
                         state.write_text(0, l, &format!("── Culling Stats ──────────────────────")); l += 1;
                         state.write_text(0, l, &format!("  Total draws:     {:>6}", total)); l += 1;
                         let pct = |n: u32, d: u32| -> f64 { if d == 0 { 0.0 } else { n as f64 / d as f64 * 100.0 } };
@@ -1732,8 +1737,9 @@ impl Renderer {
                         state.write_text(0, l, &format!("  Occlusion culled:{:>6}  {:>5.1}%", occ, pct(occ, total))); l += 1;
                         state.write_text(0, l, &format!("  Visible:         {:>6}  {:>5.1}%", visible, pct(visible, total))); l += 1;
                         l += 1;
+                        let sh_vis_final = sh_visible.saturating_sub(sh_occ);
                         state.write_text(0, l, &format!("  Shadow casters:  {:>6}", sh_total)); l += 1;
-                        state.write_text(0, l, &format!("    Visible:       {:>6}  {:>5.1}%", sh_vis, pct(sh_vis, sh_total))); l += 1;
+                        state.write_text(0, l, &format!("    Visible:       {:>6}  {:>5.1}%", sh_vis_final, pct(sh_vis_final, sh_total))); l += 1;
                         state.write_text(0, l, &format!("    Frustum culled:{:>6}  {:>5.1}%", sh_frustum, pct(sh_frustum, sh_total))); l += 1;
                         state.write_text(0, l, &format!("    Occlusion cull:{:>6}  {:>5.1}%", sh_occ, pct(sh_occ, sh_total))); l += 1;
                     }
