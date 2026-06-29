@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use helio_pass_debug_overlay::DebugOverlayState;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_light_cull::LightCullPass;
 use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass};
@@ -18,8 +19,9 @@ pub fn build_default_graph(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, true)
+    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, true, debug_overlay)
 }
 
 /// Same as `build_default_graph` but marks the graph as operating against an
@@ -33,8 +35,9 @@ pub fn build_default_graph_external(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, false)
+    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, false, debug_overlay)
 }
 
 fn build_default_graph_internal(
@@ -45,6 +48,7 @@ fn build_default_graph_internal(
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     owns_device: bool,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
@@ -75,7 +79,7 @@ fn build_default_graph_internal(
         device, iw, ih, config.width, config.height, config.surface_format,
     )));
 
-    add_final_passes(&mut graph, device, &config, &perf, debug_state, debug_camera_buf);
+    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
     graph.init_transients(iw, ih);
     graph

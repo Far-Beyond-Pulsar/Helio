@@ -89,6 +89,7 @@ struct AppState {
     is_fullscreen: bool,
     /// Index into the debug views list (0 = off).
     debug_view_index: usize,
+    debug_overlay_enabled: bool,
 }
 
 impl ApplicationHandler for App {
@@ -732,12 +733,13 @@ impl ApplicationHandler for App {
             fxaa_config,
             renderer.debug_state(),
             renderer.debug_camera_buf(),
+            None,
         );
         renderer.set_graph_custom(
             fxaa_graph,
             fxaa_config,
             Arc::new(|device, queue, scene, cfg, debug_state, debug_camera_buf| {
-                build_fxaa_graph(device, queue, scene, cfg, debug_state, debug_camera_buf)
+                build_fxaa_graph(device, queue, scene, cfg, debug_state, debug_camera_buf, None)
             }),
         );
 
@@ -762,6 +764,7 @@ impl ApplicationHandler for App {
             grid_enabled: true,
             is_fullscreen: false,
             debug_view_index: 0,
+            debug_overlay_enabled: false,
         });
     }
 
@@ -893,6 +896,10 @@ impl ApplicationHandler for App {
                                     eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
                                 }
                             }
+                        }
+                        KeyCode::F5 => {
+                            state.debug_overlay_enabled = !state.debug_overlay_enabled;
+                            state.renderer.set_debug_overlay_enabled(state.debug_overlay_enabled);
                         }
                         KeyCode::KeyL if !state.right_mouse_held => {
                             let pos = state.cam_pos.to_array();

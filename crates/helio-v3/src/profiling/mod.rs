@@ -293,6 +293,8 @@ impl Profiler {
     ///
     /// **Warning**: This blocks the render thread and causes frame hitches.
     /// For production use, export to helio-live-portal instead via `export_pass_timings()`.
+    /// Note: The new DebugOverlayPass replaces the need for console printing.
+    #[deprecated(note = "Use the DebugOverlayPass for on-screen display instead")]
     pub fn print_frame_timings(&self) {
         if !self.enabled {
             return;

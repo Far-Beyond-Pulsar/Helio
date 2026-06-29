@@ -2691,6 +2691,7 @@ dependencies = [
  "helio-pass-billboard",
  "helio-pass-corona",
  "helio-pass-debug",
+ "helio-pass-debug-overlay",
  "helio-pass-deferred-light",
  "helio-pass-depth-prepass",
  "helio-pass-fxaa",
@@ -2797,6 +2798,16 @@ dependencies = [
 
 [[package]]
 name = "helio-pass-debug"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-v3",
+ "libhelio",
+ "wgpu 28.0.0",
+]
+
+[[package]]
+name = "helio-pass-debug-overlay"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

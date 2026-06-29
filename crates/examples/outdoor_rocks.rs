@@ -106,6 +106,8 @@ struct AppState {
     /// True when F3 VG triangle debug is active (debug_mode 20).
     vg_debug: bool,
 
+    debug_overlay_enabled: bool,
+
     // ── CPU-side profiling ───────────────────────────────────────────────
     frame_count: u64,
     prof_frame_total: f64, // ms
@@ -478,6 +480,7 @@ impl ApplicationHandler for App {
             sun_light_id,
             sun_angle,
             vg_debug: false,
+            debug_overlay_enabled: false,
             frame_count: 0,
             prof_frame_total: 0.0,
             prof_update: 0.0,
@@ -546,6 +549,21 @@ impl ApplicationHandler for App {
                 } else {
                     "Helio — Outdoor Rocks"
                 });
+            }
+
+            // F5: toggle debug overlay (F3 is VG debug)
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::F5),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } => {
+                state.debug_overlay_enabled = !state.debug_overlay_enabled;
+                state.renderer.set_debug_overlay_enabled(state.debug_overlay_enabled);
+                println!("[debug] debug overlay = {:?}", state.debug_overlay_enabled);
             }
 
             WindowEvent::KeyboardInput {

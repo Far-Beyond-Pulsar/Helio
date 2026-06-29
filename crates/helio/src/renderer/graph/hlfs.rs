@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use helio_pass_debug_overlay::DebugOverlayState;
 use helio_pass_hlfs::HlfsPass;
 use helio_pass_perf_overlay::PerfOverlayAnalyzerPass;
 use helio_pass_taa::TaaPass;
@@ -17,6 +18,7 @@ pub fn build_hlfs_graph(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
@@ -39,7 +41,7 @@ pub fn build_hlfs_graph(
         device, iw, ih, config.width, config.height, config.surface_format,
     )));
 
-    add_final_passes(&mut graph, device, &config, &perf, debug_state, debug_camera_buf);
+    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
     graph.init_transients(iw, ih);
     graph

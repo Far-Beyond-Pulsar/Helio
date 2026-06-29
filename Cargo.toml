@@ -38,6 +38,7 @@ members = [
     "crates/helio-pass-water-surface",
     "crates/helio-pass-underwater",
     "crates/helio-pass-corona",
+    "crates/helio-pass-debug-overlay",
 
     # WASM infrastructure
     "crates/helio-wasm",

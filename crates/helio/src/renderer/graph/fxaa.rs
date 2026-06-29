@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use helio_pass_debug_overlay::DebugOverlayState;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_light_cull::LightCullPass;
@@ -22,8 +23,9 @@ pub fn build_fxaa_graph(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, true)
+    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, true, debug_overlay)
 }
 
 pub fn build_fxaa_graph_external(
@@ -33,8 +35,9 @@ pub fn build_fxaa_graph_external(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, false)
+    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, false, debug_overlay)
 }
 
 fn build_fxaa_graph_internal(
@@ -45,6 +48,7 @@ fn build_fxaa_graph_internal(
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
     owns_device: bool,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
     let w = config.width;
     let h = config.height;
@@ -73,7 +77,7 @@ fn build_fxaa_graph_internal(
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
-    add_final_passes(&mut graph, device, &config, &perf, debug_state, debug_camera_buf);
+    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
     graph.init_transients(w, h);
     graph

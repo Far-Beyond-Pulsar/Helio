@@ -390,7 +390,7 @@ pub use crate::scene::managers::*;
 // Re-export core types
 pub use context::{PassContext, PrepareContext};
 pub use error::{Error, Result};
-pub use graph::RenderGraph;
+pub use graph::{DebugPassInfo, DebugResourceInfo, FrameDebugData, RenderGraph};
 pub use profiling::Profiler;
 pub use scene::{GpuScene, SceneResources};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};

@@ -26,6 +26,7 @@ pub use picking::{PickHit, ScenePicker};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{LightId, MaterialId, MeshId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId};
 pub use helio_pass_billboard::BillboardInstance;
+pub use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 pub use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,

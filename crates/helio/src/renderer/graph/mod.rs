@@ -24,6 +24,7 @@ use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_sky::SkyPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
+use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayPass, PerfOverlayShared};
 use helio_pass_water_sim::WaterSimPass;
 use helio_v3::RenderGraph;
@@ -206,14 +207,17 @@ fn add_late_passes(
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 }
 
-/// Shared final passes: perf overlay + post-geometry debug draw.
+/// Shared final passes: perf overlay, debug draw, and debug info overlay.
+/// If `debug_overlay` is `Some`, a `DebugOverlayPass` is appended at the end.
 fn add_final_passes(
     graph: &mut RenderGraph,
     device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
     config: &RendererConfig,
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) {
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
@@ -233,6 +237,17 @@ fn add_final_passes(
         false,
         false,
     )));
+
+    if let Some(shared) = debug_overlay {
+        graph.add_pass(Box::new(DebugOverlayPass::new(
+            device,
+            queue,
+            Arc::clone(shared),
+            config.surface_format,
+            config.width,
+            config.height,
+        )));
+    }
 }
 
 fn new_graph(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>, owns_device: bool) -> RenderGraph {

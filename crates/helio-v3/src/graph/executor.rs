@@ -5,6 +5,39 @@ use libhelio::GBufferViews;
 use std::any::TypeId;
 use std::collections::HashMap;
 
+/// Per-resource debug info for the debug overlay.
+#[derive(Clone)]
+pub struct DebugResourceInfo {
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub layers: u32,
+    pub format_name: String,
+    pub size_kb: u64,
+    pub alias: String,
+}
+
+/// Per-pass debug info for the debug overlay.
+#[derive(Clone)]
+pub struct DebugPassInfo {
+    pub index: usize,
+    pub name: String,
+    pub kind: String, // "C" or "R"
+    pub writes: Vec<String>,
+    pub chain_marker: String,
+}
+
+/// All debug data for a single frame.
+#[derive(Clone, Default)]
+pub struct FrameDebugData {
+    pub resources: Vec<DebugResourceInfo>,
+    pub total_vram_kb: u64,
+    pub passes: Vec<DebugPassInfo>,
+    pub subpass_chains: Vec<String>,
+    pub frame_count: u64,
+    pub delta_time: f32,
+}
+
 fn format_bpp(fmt: wgpu::TextureFormat) -> u32 {
     use wgpu::TextureFormat::*;
     match fmt {
@@ -433,6 +466,92 @@ impl RenderGraph {
         &self.profiler
     }
 
+    /// Collect a snapshot of all resource and pass data for the debug overlay.
+    pub fn collect_frame_debug_data(&self) -> FrameDebugData {
+        let mut data = FrameDebugData::default();
+        data.frame_count = self.frame_count;
+        data.delta_time = self.delta_time;
+
+        let mut total_bytes = 0u64;
+        let mut alias_groups: HashMap<&str, Vec<&str>> = HashMap::new();
+
+        for (name, rl) in &self.resources {
+            let bpp = format_bpp(rl.format);
+            let bytes = rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8;
+            total_bytes += bytes;
+            let alias = rl.alias_group.as_deref().unwrap_or("-").to_string();
+            if rl.alias_group.is_some() {
+                alias_groups.entry(rl.alias_group.as_ref().unwrap()).or_default().push(name);
+            }
+            data.resources.push(DebugResourceInfo {
+                name: name.clone(),
+                width: rl.width,
+                height: rl.height,
+                layers: rl.depth_or_array_layers,
+                format_name: format_name(rl.format).to_string(),
+                size_kb: bytes / 1024,
+                alias,
+            });
+        }
+        data.total_vram_kb = total_bytes / 1024;
+
+        // Alias group summary lines
+        for (group, members) in &alias_groups {
+            let t: u64 = members.iter().filter_map(|n| {
+                self.resources.get(*n).map(|rl| {
+                    let bpp = format_bpp(rl.format);
+                    rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8
+                })
+            }).sum();
+            let saved = t * (members.len().saturating_sub(1) as u64);
+            data.passes.push(DebugPassInfo {
+                index: 999,
+                name: format!("alias group '{}': {} members, ~{} KB saved", group, members.len(), saved / 1024),
+                kind: String::new(),
+                writes: Vec::new(),
+                chain_marker: String::new(),
+            });
+        }
+
+        // Pass pipeline
+        let mut pass_chain: Vec<Option<usize>> = vec![None; self.passes.len()];
+        for (ci, chain) in self.subpass_chains.iter().enumerate() {
+            for pi in chain.clone() {
+                pass_chain[pi] = Some(ci);
+            }
+        }
+
+        for (i, pass) in self.passes.iter().enumerate() {
+            let writes: Vec<String> = self.resources.iter()
+                .filter(|(_, rl)| rl.first_write_pass == i)
+                .map(|(n, _)| n.clone())
+                .collect();
+            let r_or_c = if writes.is_empty() { "C" } else { "R" };
+            let marker = match pass_chain[i] {
+                Some(ci) => {
+                    let chain = &self.subpass_chains[ci];
+                    if i == chain.start { format!("[{}.{}]", ci, chain.len()) }
+                    else { format!("|.{}", chain.len()) }
+                }
+                None => String::new(),
+            };
+            data.passes.push(DebugPassInfo {
+                index: i,
+                name: pass.name().to_string(),
+                kind: r_or_c.to_string(),
+                writes,
+                chain_marker: marker,
+            });
+        }
+
+        for (ci, chain) in self.subpass_chains.iter().enumerate() {
+            let names: Vec<String> = self.passes[chain.start..chain.end].iter().map(|p| p.name().to_string()).collect();
+            data.subpass_chains.push(format!("chain {}: {}", ci, names.join(" → ")));
+        }
+
+        data
+    }
+
     pub fn execute(
         &mut self,
         scene: &GpuScene,
@@ -612,90 +731,8 @@ impl RenderGraph {
         }
 
         self.frame_count += 1;
-        if self.frame_count % 1000 == 0 {
-            self.log_resource_stats();
-        }
 
         Ok(())
-    }
-
-    /// Log a breakdown of graph-managed inter-pass textures every 1k frames.
-    fn log_resource_stats(&self) {
-        let mut total_bytes = 0u64;
-        let mut alias_groups: HashMap<&str, Vec<&str>> = HashMap::new();
-        eprintln!("── [Graph] Inter-pass texture stats ──");
-        for (name, rl) in &self.resources {
-            let bpp = format_bpp(rl.format);
-            let bytes = rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8;
-            total_bytes += bytes;
-            let alias = rl.alias_group.as_deref().unwrap_or("-");
-            if rl.alias_group.is_some() {
-                alias_groups.entry(alias).or_default().push(name);
-            }
-            eprintln!(
-                "  {:<28} {:>4}×{:<4} layers={:<3} {:<14} {:>8} KB  alias={}",
-                name, rl.width, rl.height, rl.depth_or_array_layers,
-                format_name(rl.format), bytes / 1024, alias,
-            );
-        }
-
-        // Report alias group savings
-        for (group, members) in &alias_groups {
-            let total = members.iter().filter_map(|n| {
-                self.resources.get(*n).map(|rl| {
-                    let bpp = format_bpp(rl.format);
-                    rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8
-                })
-            }).sum::<u64>();
-            let saved = total * (members.len().saturating_sub(1) as u64);
-            eprintln!("  alias group '{}': {} members, ~{} KB saved (would be {} KB without aliasing)",
-                group, members.len(), saved / 1024, (total * members.len() as u64) / 1024);
-        }
-
-        eprintln!("  Total graph-managed VRAM: {} KB ({} MB)", total_bytes / 1024, total_bytes / (1024 * 1024));
-        eprintln!("  Subpass-fusible chains: {}", self.subpass_chains.len());
-        for chain in &self.subpass_chains {
-            let names: Vec<&str> = self.passes[chain.start..chain.end].iter().map(|p| p.name()).collect();
-            eprintln!("    potential chain: {}", names.join(" → "));
-        }
-
-        // ── Full pass pipeline report ──────────────────────────────────
-        // Build a set of which passes are in chains.
-        let mut pass_chain: Vec<Option<usize>> = vec![None; self.passes.len()];
-        for (ci, chain) in self.subpass_chains.iter().enumerate() {
-            for pi in chain.clone() {
-                pass_chain[pi] = Some(ci);
-            }
-        }
-        eprintln!("── Pass pipeline ({} passes, {} chains) ──",
-            self.passes.len(), self.subpass_chains.len());
-        for (i, pass) in self.passes.iter().enumerate() {
-            let writes: Vec<&str> = self.resources.iter()
-                .filter(|(_, rl)| rl.first_write_pass == i)
-                .map(|(n, _)| n.as_str())
-                .collect();
-            let r_or_c = if writes.is_empty() { 'C' } else { 'R' };
-
-            // Chain marker for this pass.
-            let marker = match pass_chain[i] {
-                Some(ci) => {
-                    let chain = &self.subpass_chains[ci];
-                    if i == chain.start { format!("[{}.{}]", ci, chain.len()) }
-                    else { format!("|.{}", chain.len()) }
-                }
-                None => "   ".to_string(),
-            };
-            let write_str = if writes.is_empty() {
-                String::new()
-            } else {
-                format!(" → {}", writes.join(", "))
-            };
-            eprintln!("  {:>2}. [{}] {:>4} {:<28}{}",
-                i, r_or_c, marker, pass.name(), write_str);
-        }
-        eprintln!("  (R=render  C=compute  [chain_id.pass_count] = fused chain)");
-
-        eprintln!("─────────────────────────────────────");
     }
 
     fn rebuild_gpu_render_bundles(&mut self) {

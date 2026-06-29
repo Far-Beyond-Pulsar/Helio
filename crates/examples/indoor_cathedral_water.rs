@@ -189,6 +189,7 @@ struct AppState {
     // Debug
     debug_mode: u32,
     perf_overlay_mode: PerfOverlayMode,
+    debug_overlay_enabled: bool,
 
     // Scene state
     chandelier_light_ids: Vec<LightId>,
@@ -735,6 +736,7 @@ impl ApplicationHandler for App {
             mouse_delta: (0.0, 0.0),
             debug_mode: 0,
             perf_overlay_mode: PerfOverlayMode::Disabled,
+            debug_overlay_enabled: false,
             chandelier_light_ids,
             candle_light_ids,
             start_time: std::time::Instant::now(),
@@ -804,6 +806,23 @@ impl ApplicationHandler for App {
                     renderer.set_perf_overlay_mode(state.perf_overlay_mode);
                 }
                 println!("[debug] perf overlay mode = {:?}", state.perf_overlay_mode);
+            }
+
+            // F3: toggle debug overlay
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        state: ElementState::Pressed,
+                        physical_key: PhysicalKey::Code(KeyCode::F3),
+                        ..
+                    },
+                ..
+            } => {
+                state.debug_overlay_enabled = !state.debug_overlay_enabled;
+                if let Ok(mut renderer) = state.renderer.lock() {
+                    renderer.set_debug_overlay_enabled(state.debug_overlay_enabled);
+                }
+                println!("[debug] debug overlay = {:?}", state.debug_overlay_enabled);
             }
 
             WindowEvent::KeyboardInput {

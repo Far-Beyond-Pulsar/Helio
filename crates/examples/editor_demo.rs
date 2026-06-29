@@ -88,6 +88,7 @@ struct AppState {
     grid_enabled: bool,
     is_fullscreen: bool,
     debug_lighting: bool,
+    debug_overlay_enabled: bool,
 }
 
 impl ApplicationHandler for App {
@@ -564,6 +565,7 @@ impl ApplicationHandler for App {
             grid_enabled: true,
             is_fullscreen: false,
             debug_lighting: false,
+            debug_overlay_enabled: false,
         });
     }
 
@@ -674,6 +676,10 @@ impl ApplicationHandler for App {
                                 let mode = if state.debug_lighting { 0 } else { 4 };
                                 state.renderer.set_debug_mode(mode);
                                 state.debug_lighting = !state.debug_lighting;
+                            }
+                            KeyCode::F2 => {
+                                state.debug_overlay_enabled = !state.debug_overlay_enabled;
+                                state.renderer.set_debug_overlay_enabled(state.debug_overlay_enabled);
                             }
                             _ => {}
                         }

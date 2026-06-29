@@ -36,6 +36,7 @@ helio-pass-transparent = { path = "../helio-pass-transparent" }
 helio-pass-debug = { path = "../helio-pass-debug" }
 helio-pass-water-sim = { path = "../helio-pass-water-sim" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
+helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-corona = { path = "../helio-pass-corona" }
 libhelio = { workspace = true }
 log = { workspace = true }

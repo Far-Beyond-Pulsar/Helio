@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use arrayvec::ArrayVec;
 use helio_pass_debug::{DebugVertex};
+use helio_pass_debug_overlay::DebugOverlayState;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_perf_overlay::{PerfOverlayMode, PerfOverlayPass};
 use helio_pass_virtual_geometry::VirtualGeometryPass;
@@ -70,6 +71,7 @@ pub struct Renderer {
     custom_graph_builder: Option<CustomGraphBuilder>,
     custom_graph_config: Option<RendererConfig>,
     debug_state: Arc<Mutex<DebugDrawState>>,
+    debug_overlay_shared: Arc<Mutex<DebugOverlayState>>,
     billboard_instances: Vec<helio_pass_billboard::BillboardInstance>,
     billboard_scratch: Vec<helio_pass_billboard::BillboardInstance>,
     /// True when billboard_instances was updated since the last rebuild.
@@ -93,6 +95,11 @@ pub struct Renderer {
     water_hitboxes_buffer: wgpu::Buffer,
     /// Instant of the previous `render()` call, used to compute real `delta_time`.
     last_render_time: Instant,
+    /// Frame delta time in seconds (for debug overlay display).
+    delta_time: f32,
+    /// Frame time history for the timing graph (ring buffer).
+    frame_times: Vec<f32>,
+    frame_times_cursor: usize,
     /// Precomputed TAA jitter translation matrices (16-sample Halton sequence).
     /// Cached per resolution to avoid per-frame matrix construction overhead.
     jitter_matrices: [glam::Mat4; 16],
@@ -288,7 +295,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer);
+        let debug_overlay_shared = DebugOverlayState::new();
+        let mut graph = build_default_graph(
+            &device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer,
+            Some(&debug_overlay_shared),
+        );
 
         let (depth_texture, depth_view) = create_depth_resources(
             &device,
@@ -351,6 +362,7 @@ impl Renderer {
             custom_graph_config: None,
             perf_overlay_mode: config.perf_overlay_mode,
             debug_state,
+            debug_overlay_shared,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
             billboard_dirty: true,
@@ -366,6 +378,9 @@ impl Renderer {
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
+            delta_time: 0.0,
+            frame_times: vec![0.0; 200],
+            frame_times_cursor: 0,
             jitter_matrices,
             jitter_cache_width: internal_w,
             jitter_cache_height: internal_h,
@@ -444,13 +459,15 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let graph = super::graph::build_default_graph_external(
+        let debug_overlay_shared = DebugOverlayState::new();
+        let mut graph = super::graph::build_default_graph_external(
             &device,
             &queue,
             &scene,
             config,
             debug_state.clone(),
             &debug_camera_buffer,
+            Some(&debug_overlay_shared),
         );
 
         let (depth_texture, depth_view) =
@@ -508,6 +525,7 @@ impl Renderer {
             custom_graph_config: None,
             perf_overlay_mode: config.perf_overlay_mode,
             debug_state,
+            debug_overlay_shared,
             billboard_instances: Vec::new(),
             billboard_scratch: Vec::new(),
             billboard_dirty: true,
@@ -523,6 +541,9 @@ impl Renderer {
             water_volumes_buffer,
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
+            delta_time: 0.0,
+            frame_times: vec![0.0; 200],
+            frame_times_cursor: 0,
             jitter_matrices,
             jitter_cache_width: internal_w,
             jitter_cache_height: internal_h,
@@ -580,6 +601,12 @@ impl Renderer {
             if let Some(pass) = self.graph.find_pass_mut::<PerfOverlayPass>() {
                 pass.set_mode(mode);
             }
+        }
+    }
+
+    pub fn set_debug_overlay_enabled(&mut self, enabled: bool) {
+        if let Ok(mut state) = self.debug_overlay_shared.lock() {
+            state.enabled = enabled;
         }
     }
 
@@ -1006,6 +1033,7 @@ impl Renderer {
                         config,
                         self.debug_state.clone(),
                         &self.debug_camera_buffer,
+                        Some(&self.debug_overlay_shared),
                     )
                 } else {
                     super::graph::build_default_graph_external(
@@ -1015,6 +1043,7 @@ impl Renderer {
                         config,
                         self.debug_state.clone(),
                         &self.debug_camera_buffer,
+                        Some(&self.debug_overlay_shared),
                     )
                 };
                 log::trace!("apply_resize_now: graph rebuild {}ms", graph_start.elapsed().as_secs_f64() * 1000.0);
@@ -1127,6 +1156,7 @@ impl Renderer {
                 config,
                 self.debug_state.clone(),
                 &self.debug_camera_buffer,
+                Some(&self.debug_overlay_shared),
             )
         } else {
             super::graph::build_default_graph_external(
@@ -1136,6 +1166,7 @@ impl Renderer {
                 config,
                 self.debug_state.clone(),
                 &self.debug_camera_buffer,
+                Some(&self.debug_overlay_shared),
             )
         };
         self.graph_kind = GraphKind::Default;
@@ -1292,6 +1323,9 @@ impl Renderer {
         let now = Instant::now();
         let dt = now.duration_since(self.last_render_time).as_secs_f32().min(0.1);
         self.last_render_time = now;
+        self.delta_time = dt;
+        self.frame_times[self.frame_times_cursor] = dt;
+        self.frame_times_cursor = (self.frame_times_cursor + 1) % self.frame_times.len();
         self.graph.set_delta_time(dt);
 
         // OPTIMIZATION: Use precomputed jitter matrices (avoid per-frame Mat4 construction).
@@ -1587,6 +1621,239 @@ impl Renderer {
             }
             self.queue.submit(std::iter::once(clear_encoder.finish()));
             self.clear_target_next_frame = false;
+        }
+
+        // Populate debug overlay data before executing passes
+        {
+            if let Ok(mut state) = self.debug_overlay_shared.lock() {
+                if state.enabled {
+                    state.clear();
+
+                    // Size grid to fill screen
+                    let cols = (self.output_width / 14).min(280);
+                    let rows = (self.output_height / 24).min(90);
+                    state.set_grid_size(cols, rows);
+                    let half = cols / 2;
+                    let sw = self.output_width as f32;
+                    let sh = self.output_height as f32;
+
+                    let debug_data = self.graph.collect_frame_debug_data();
+                    let fps = if self.delta_time > 0.0 { (1.0 / self.delta_time) as u32 } else { 0 };
+                    let frame_ms = self.delta_time * 1000.0;
+                    let (timings, total_cpu, total_gpu) = self.graph.profiler().export_timings();
+
+                    // ── LEFT SECTION: perf info ──
+                    let mut l = 0u32;
+                    state.write_text(0, l, &format!("Helio  FPS: {}  Frame: {:.1} ms  CPU: {:.1} ms  GPU: {:.1} ms",
+                        fps, frame_ms, total_cpu, total_gpu)); l += 1;
+                    l += 1;
+
+                    for pt in &timings {
+                        if l >= rows { break; }
+                        state.write_text(0, l, &format!("  {:.1}c / {:.1}g ms  {}", pt.cpu_ms, pt.gpu_ms, pt.name));
+                        l += 1;
+                    }
+                    l += 1;
+
+                    state.write_text(0, l, &format!("Graph VRAM: {} KB ({} MB)  Subpass chains: {}",
+                        debug_data.total_vram_kb, debug_data.total_vram_kb / 1024, debug_data.subpass_chains.len())); l += 1;
+                    for ch in &debug_data.subpass_chains {
+                        if l >= rows { break; }
+                        state.write_text(0, l, &format!("  {}", ch)); l += 1;
+                    }
+
+                    // ── RIGHT SECTION: column-aligned texture table (anchored to right edge) ──
+                    let mut table_rows: Vec<Vec<String>> = Vec::new();
+                    for res in &debug_data.resources {
+                        table_rows.push(vec![
+                            res.name.clone(),
+                            format!("{}x{}", res.width, res.height),
+                            res.layers.to_string(),
+                            res.format_name.clone(),
+                            format!("{}KB", res.size_kb),
+                            res.alias.clone(),
+                        ]);
+                    }
+                    let mut col_widths = vec![4u32; 6];
+                    for row in &table_rows {
+                        for (i, val) in row.iter().enumerate() {
+                            col_widths[i] = col_widths[i].max(val.chars().count() as u32);
+                        }
+                    }
+                    let header = ["name", "size", "layers", "format", "KB", "alias"];
+                    for (i, h) in header.iter().enumerate() {
+                        col_widths[i] = col_widths[i].max(h.chars().count() as u32);
+                    }
+                    let total_table_w: u32 = col_widths.iter().sum::<u32>() + (col_widths.len() as u32 - 1);
+                    let right_x = cols.saturating_sub(total_table_w);
+
+                    let mut t = 0u32;
+                    let mut x = right_x;
+                    for (i, h) in header.iter().enumerate() {
+                        state.write_text(x, t, h);
+                        x += col_widths[i] + 1;
+                    }
+                    t += 1;
+                    let mut sep = String::new();
+                    for w in &col_widths { for _ in 0..*w { sep.push('-'); } sep.push(' '); }
+                    state.write_text(right_x, t, &sep); t += 1;
+
+                    for row in &table_rows {
+                        if t >= rows { break; }
+                        let mut x = right_x;
+                        for (i, val) in row.iter().enumerate() {
+                            let w = col_widths[i] as usize;
+                            let display: String = val.chars().take(w).collect();
+                            state.write_text(x, t, &display);
+                            x += col_widths[i] + 1;
+                        }
+                        t += 1;
+                    }
+
+                    // ── Pass pipeline (right-anchored table) ──
+                    t += 1;
+                    if t < rows {
+                        let mut pass_rows: Vec<Vec<String>> = Vec::new();
+                        for pi in &debug_data.passes {
+                            if pi.index == 999 { continue; }
+                            let ws = if pi.writes.is_empty() { String::new() } else { pi.writes.join(", ") };
+                            pass_rows.push(vec![
+                                pi.index.to_string(),
+                                pi.kind.clone(),
+                                pi.chain_marker.clone(),
+                                pi.name.clone(),
+                                ws,
+                            ]);
+                        }
+                        let mut pw = vec![2u32, 1, 6, 12, 0];
+                        for row in &pass_rows {
+                            for (i, val) in row.iter().enumerate() {
+                                pw[i] = pw[i].max(val.chars().count() as u32);
+                            }
+                        }
+                        for (i, h) in ["#", "", "chain", "pass", "writes"].iter().enumerate() {
+                            pw[i] = pw[i].max(h.chars().count() as u32);
+                        }
+                        let pass_total: u32 = pw.iter().sum::<u32>() + (pw.len() as u32 - 1);
+                        let pass_x = cols.saturating_sub(pass_total);
+
+                        state.write_text(pass_x, t, "Pass pipeline:"); t += 1;
+                        let mut px = pass_x;
+                        for (i, h) in ["#", "", "chain", "pass", "writes"].iter().enumerate() {
+                            state.write_text(px, t, h);
+                            px += pw[i] + 1;
+                        }
+                        t += 1;
+
+                        for row in &pass_rows {
+                            if t >= rows { break; }
+                            let mut px = pass_x;
+                            for (i, val) in row.iter().enumerate() {
+                                let display: String = val.chars().take(pw[i] as usize).collect();
+                                state.write_text(px, t, &display);
+                                px += pw[i] + 1;
+                            }
+                            t += 1;
+                        }
+                    }
+
+                    // ── LOWER CHARTS: FPS graph (left) + VRAM pie (right) ──
+                    let chart_y = sh - 150.0;
+                    let graph_w = 220.0;
+                    let graph_h = 110.0;
+                    let graph_x = 10.0;
+                    let pie_r = 80.0;
+                    let pie_cx = sw - pie_r - 60.0;
+                    let pie_cy = chart_y + graph_h * 0.5;
+
+                    // ── FPS GRAPH ──
+                    let num_samples = self.frame_times.len();
+                    let bar_w = graph_w / num_samples as f32;
+                    let max_dt = 0.05;
+
+                    for (ms, y_frac, label) in [(0.050, 0.0, "50ms"), (0.033, 0.34, "33ms"), (0.016, 0.66, "16ms")] {
+                        let dy = chart_y + graph_h * (1.0 - y_frac);
+                        state.add_bar(graph_x, dy, graph_w, 1.0, 0.5, 0.5, 0.5, 0.5);
+                        let lcol = ((graph_x + graph_w + 4.0) / 8.0) as u32;
+                        let lrow = ((dy - 5.0) / 12.0) as u32;
+                        if lcol < state.small_cols() && lrow < state.small_rows() {
+                            state.write_small(lcol, lrow, label);
+                        }
+                    }
+
+                    for (i, &ft) in self.frame_times.iter().enumerate() {
+                        let bar_h = (ft / max_dt * graph_h).min(graph_h);
+                        let bx = graph_x + i as f32 * bar_w;
+                        let by = chart_y + graph_h - bar_h;
+                        let color = if ft < 0.016 { (0.3, 0.8, 0.3, 0.8) }
+                                     else if ft < 0.033 { (0.9, 0.9, 0.2, 0.8) }
+                                     else { (0.9, 0.3, 0.3, 0.8) };
+                        state.add_bar(bx, by, bar_w.max(2.0), bar_h.max(1.0), color.0, color.1, color.2, color.3);
+                    }
+
+                    // ── VRAM PIE CHART ──
+                    if debug_data.total_vram_kb > 0 {
+                        let vram_total = debug_data.total_vram_kb as f32;
+                        let mut angle = 0.0f32;
+                        let pie_colors = [
+                            (0.3, 0.6, 1.0, 0.9), (0.3, 1.0, 0.6, 0.9),
+                            (1.0, 0.6, 0.3, 0.9), (1.0, 0.3, 0.6, 0.9),
+                            (0.6, 0.3, 1.0, 0.9), (0.6, 1.0, 0.3, 0.9),
+                        ];
+
+                        for (i, res) in debug_data.resources.iter().enumerate() {
+                            let frac = res.size_kb as f32 / vram_total;
+                            let end = angle + frac * std::f32::consts::TAU;
+                            let ci = pie_colors[i % pie_colors.len()];
+                            state.add_pie_slice(pie_cx, pie_cy, pie_r, end, ci.0, ci.1, ci.2, ci.3);
+
+                            let mid = angle + frac * std::f32::consts::PI;
+                            let edge_x = pie_cx + mid.cos() * pie_r;
+                            let edge_y = pie_cy + mid.sin() * pie_r;
+                            let pct = (frac * 100.0) as u32;
+                            let label = format!("{} {}%", res.name, pct);
+                            let lw = label.chars().count() as u32;
+
+                            // Dynamic gap: right-aligned text (extends toward pie from tip) needs gap >= label width
+                            let prefer_left = mid.cos() >= 0.0;
+                            let min_gap = if !prefer_left { (lw as f32 + 2.0) * 8.0 } else { 20.0 };
+                            let gap = min_gap.max(20.0).min(200.0);
+                            let lx = pie_cx + mid.cos() * (pie_r + gap);
+                            let ly = pie_cy + mid.sin() * (pie_r + gap);
+                            state.add_line(edge_x, edge_y, lx, ly, 1.0, 1.0, 1.0, 0.7);
+
+                            let sm_cols = state.small_cols();
+                            let sm_rows = state.small_rows();
+                            let lrow = ((ly - 4.0) / 12.0) as u32;
+
+                            // Auto-anchor: prefer outward from pie center, fallback to opposite if off-screen
+                            let tip_col = lx / 8.0;
+                            let left_col = tip_col + 1.0;
+                            let right_col = tip_col - lw as f32 - 1.0;
+                            let left_ok = left_col + lw as f32 <= sm_cols as f32;
+                            let right_ok = right_col >= 0.0;
+
+                            let lcol = if prefer_left && left_ok {
+                                left_col as u32
+                            } else if !prefer_left && right_ok {
+                                right_col as u32
+                            } else if left_ok {
+                                left_col as u32
+                            } else if right_ok {
+                                right_col as u32
+                            } else {
+                                0u32
+                            };
+                            if lrow < sm_rows {
+                                let max_w = sm_cols.saturating_sub(lcol);
+                                let truncated: String = label.chars().take(max_w as usize).collect();
+                                state.write_small(lcol, lrow, &truncated);
+                            }
+                            angle = end;
+                        }
+                    }
+                }
+            }
         }
 
         self.graph.execute_with_frame_resources(
