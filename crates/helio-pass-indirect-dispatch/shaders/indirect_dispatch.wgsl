@@ -66,13 +66,15 @@ struct DrawIndexedIndirect {
 @group(0) @binding(5) var<storage, read_write> indirect:  array<DrawIndexedIndirect>;
 @group(0) @binding(6) var<storage, read_write> stats:   array<atomic<u32>>;
 
-// Stats layout:
+// Stats layout (shared with OcclusionCullPass):
 // 0: total_draws
 // 1: frustum_culled
 // 2: subpixel_culled
 // 3: frustum_visible
-// 4: shadow_total
-// 5: shadow_frustum_visible
+// 4: occlusion_culled     ← written by occlusion pass only
+// 5: shadow_total
+// 6: shadow_frustum_visible
+// 7: shadow_occlusion_culled ← written by occlusion pass only
 
 fn sphere_in_frustum(center: vec3<f32>, radius: f32) -> bool {
     for (var i = 0u; i < 6u; i++) {
@@ -136,7 +138,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let is_shadow_caster = (inst.flags & 1u) != 0u;
     if is_shadow_caster {
-        atomicAdd(&stats[4u], 1u);
+        atomicAdd(&stats[5u], 1u);
     }
 
     if should_draw {
@@ -149,7 +151,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         );
         atomicAdd(&stats[3u], 1u);
         if is_shadow_caster {
-            atomicAdd(&stats[5u], 1u);
+            atomicAdd(&stats[6u], 1u);
         }
     } else if !visible {
         indirect[idx] = DrawIndexedIndirect(
