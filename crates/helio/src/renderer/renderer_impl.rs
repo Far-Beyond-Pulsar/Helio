@@ -97,6 +97,8 @@ pub struct Renderer {
     last_render_time: Instant,
     /// Frame delta time in seconds (for debug overlay display).
     delta_time: f32,
+    /// Time spent in graph execution (milliseconds, previous frame).
+    graph_time_ms: f32,
     /// Frame time history for the timing graph (ring buffer).
     frame_times: Vec<f32>,
     frame_times_cursor: usize,
@@ -379,6 +381,7 @@ impl Renderer {
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
+            graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
             jitter_matrices,
@@ -542,6 +545,7 @@ impl Renderer {
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
+            graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
             jitter_matrices,
@@ -1640,17 +1644,22 @@ impl Renderer {
                     let debug_data = self.graph.collect_frame_debug_data();
                     let fps = if self.delta_time > 0.0 { (1.0 / self.delta_time) as u32 } else { 0 };
                     let frame_ms = self.delta_time * 1000.0;
-                    let (timings, total_cpu, total_gpu) = self.graph.profiler().export_timings();
 
                     // ── LEFT SECTION: perf info ──
                     let mut l = 0u32;
-                    state.write_text(0, l, &format!("Helio  FPS: {}  Frame: {:.1} ms  CPU: {:.1} ms  GPU: {:.1} ms",
-                        fps, frame_ms, total_cpu, total_gpu)); l += 1;
+                    let other_ms = (frame_ms - self.graph_time_ms).max(0.0);
+                    let (timings, total_cpu, total_gpu) = self.graph.profiler().export_timings();
+                    state.write_text(0, l, &format!("Helio  FPS: {}  Frame: {:.1} ms  Graph: {:.2} ms  Other: {:.2} ms",
+                        fps, frame_ms, self.graph_time_ms, other_ms)); l += 1;
                     l += 1;
 
-                    for pt in &timings {
-                        if l >= rows { break; }
-                        state.write_text(0, l, &format!("  {:.1}c / {:.1}g ms  {}", pt.cpu_ms, pt.gpu_ms, pt.name));
+                    if !timings.is_empty() {
+                        state.write_text(0, l, &format!("  CPU-prepare: {:.2} ms  GPU-compute: {:.2} ms", total_cpu, total_gpu)); l += 1;
+                        for pt in &timings {
+                            if l >= rows { break; }
+                            state.write_text(0, l, &format!("  {:.3}c/{:.3}g ms  {}", pt.cpu_ms, pt.gpu_ms, pt.name));
+                            l += 1;
+                        }
                         l += 1;
                     }
                     l += 1;
@@ -1856,12 +1865,14 @@ impl Renderer {
             }
         }
 
+        let _graph_start = Instant::now();
         self.graph.execute_with_frame_resources(
             self.scene.gpu_scene(),
             target,
             &self.depth_view,
             &frame_resources,
         )?;
+        self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
 
         // Send profiling data to live portal (non-blocking)
         #[cfg(feature = "live-portal")]
