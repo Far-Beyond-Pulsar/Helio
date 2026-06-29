@@ -60,9 +60,9 @@ struct DrawIndexedIndirect {
 
 struct CullUniforms {
     meshlet_count: u32,
-    _pad0:  u32,
-    _pad1:  u32,
-    _pad2:  u32,
+    screen_width:  u32,
+    screen_height: u32,
+    hiz_mip_count: u32,
     // 7 screen-radius LOD thresholds: s[i] = transition LOD i → i+1.
     // 8 LOD levels total (0–7), matching UE5's traditional mesh LOD system.
     lod_s0: f32,
@@ -83,6 +83,9 @@ struct CullUniforms {
 /// Atomic counter: cull shader increments once per visible meshlet.
 /// CPU passes this buffer to multi_draw_indexed_indirect_count as the count arg.
 @group(0) @binding(5) var<storage, read_write> draw_count: atomic<u32>;
+
+@group(0) @binding(6) var hiz_tex:  texture_2d<f32>;
+@group(0) @binding(7) var hiz_samp: sampler;
 
 // ─── LOD selection ───────────────────────────────────────────────────────────
 
@@ -154,9 +157,50 @@ fn cs_cull(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
+    // ── Hi-Z occlusion cull ──────────────────────────────────────────────────
+    let cull_clip = camera.view_proj * vec4<f32>(center_ws, 1.0);
+    if cull_clip.w > 0.0 {
+        let cull_ndc = cull_clip.xyz / cull_clip.w;
+        let cull_uv_x = cull_ndc.x * 0.5 + 0.5;
+        let cull_uv_y = cull_ndc.y * -0.5 + 0.5;
+        let cull_uv = vec2<f32>(cull_uv_x, cull_uv_y);
+
+        let ndc_r = max(
+            abs(world_radius * camera.proj[0][0] / cull_clip.w),
+            abs(world_radius * camera.proj[1][1] / cull_clip.w),
+        );
+
+        if cull_uv.x + ndc_r > -1.0 && cull_uv.x - ndc_r < 1.0 &&
+           cull_uv.y + ndc_r > -1.0 && cull_uv.y - ndc_r < 1.0 {
+            let cam_pos = camera.position_near.xyz;
+            let to_meshlet = center_ws - cam_pos;
+            let dist_sq = dot(to_meshlet, to_meshlet);
+            var near_z = 0.0;
+            if dist_sq > world_radius * world_radius {
+                let dir = to_meshlet * (1.0 / sqrt(dist_sq));
+                let near_ws = center_ws - dir * world_radius;
+                let near_clip = camera.view_proj * vec4<f32>(near_ws, 1.0);
+                near_z = clamp(near_clip.z / near_clip.w, 0.0, 1.0);
+            }
+
+            let half_h = f32(cull_uni.screen_height) * 0.5;
+            let r_px = abs(world_radius / cull_clip.w * camera.proj[1][1] * half_h);
+            let diameter = max(r_px * 2.0, 1.0);
+            let mip = clamp(u32(ceil(log2(diameter))), 0u, cull_uni.hiz_mip_count - 1u);
+
+            let sample_uv = clamp(cull_uv, vec2<f32>(0.0), vec2<f32>(1.0));
+            let hiz_depth = textureSampleLevel(hiz_tex, hiz_samp, sample_uv, f32(mip)).r;
+
+            let depth_bias = 1.0 / 65536.0;
+            if near_z > hiz_depth + depth_bias {
+                return;
+            }
+        }
+    }
+
     // ── LOD selection — Nanite-style projected screen coverage ─────────────
     let cluster_dist = max(length(cam_to_center), 0.001);
-    let obj_radius   = max(inst.bounds.w, 0.001);
+    let obj_radius   = max(world_radius, 0.001);
     let focal_len    = camera.proj[1][1];
     let screen_size  = (obj_radius * focal_len) / cluster_dist;
     let lod_level    = u32(m.lod_error + 0.5);

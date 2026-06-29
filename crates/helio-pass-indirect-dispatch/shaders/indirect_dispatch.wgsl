@@ -84,9 +84,22 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let visible = sphere_in_frustum(world_center, world_radius);
 
+    // Sub-pixel culling: skip objects projecting to < 1 pixel.
+    var should_draw = visible;
+    if visible {
+        let clip_pos = camera.view_proj * vec4<f32>(world_center, 1.0);
+        if clip_pos.w > 0.0 {
+            // r_ndc ~ world_radius * cot(fov/2) / clip_w
+            let r_ndc = abs(world_radius * camera.proj[1][1] / clip_pos.w);
+            if r_ndc < 0.001 {
+                should_draw = false;
+            }
+        }
+    }
+
     indirect[idx] = DrawIndexedIndirect(
         dc.index_count,
-        select(0u, dc.instance_count, visible),  // cull entire batch or keep all N instances
+        select(0u, dc.instance_count, should_draw),
         dc.first_index,
         dc.vertex_offset,
         dc.first_instance,

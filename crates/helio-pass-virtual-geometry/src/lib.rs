@@ -97,9 +97,9 @@ impl LodQuality {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct CullUniforms {
     meshlet_count: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
+    screen_width:  u32,
+    screen_height: u32,
+    hiz_mip_count: u32,
     lod_thresholds: [f32; 7],
     _pad3: f32,
 }
@@ -110,8 +110,10 @@ pub struct VirtualGeometryPass {
     // ── Compute (cull) ────────────────────────────────────────────────────────
     cull_pipeline: wgpu::ComputePipeline,
     cull_bgl: wgpu::BindGroupLayout,
-    /// Rebuilt whenever owned buffers are reallocated (set to None then).
+    /// Rebuilt whenever owned buffers or Hi-Z resources change.
     cull_bind_group: Option<wgpu::BindGroup>,
+    /// (hiz_view_ptr, hiz_sampler_ptr) for lazy rebuild detection.
+    cull_bind_group_hiz_key: Option<(usize, usize)>,
     cull_buf: wgpu::Buffer, // CullUniforms
 
     // ── Render (VG GBuffer) ───────────────────────────────────────────────────
@@ -295,40 +297,28 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                // 6: Hi-Z texture
+                wgpu::BindGroupLayoutEntry {
+                    binding:    6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type:    wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled:   false,
+                    },
+                    count: None,
+                },
+                // 7: Hi-Z sampler
+                wgpu::BindGroupLayoutEntry {
+                    binding:    7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                    count: None,
+                },
             ],
         });
 
-        // Initial cull bind group (built with starting empty buffers; rebuilt if they grow).
-        let cull_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("VG Cull BG"),
-            layout: &cull_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: cull_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: meshlet_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: instance_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: indirect_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: draw_count_buf.as_entire_binding(),
-                },
-            ],
-        }));
+        // No initial cull bind group — created lazily in execute() with Hi-Z resources.
 
         // ── Cull pipeline ─────────────────────────────────────────────────────
         let cull_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -565,7 +555,8 @@ impl VirtualGeometryPass {
         Self {
             cull_pipeline,
             cull_bgl,
-            cull_bind_group,
+            cull_bind_group: None,
+            cull_bind_group_hiz_key: None,
             cull_buf,
             draw_pipeline,
             debug_draw_pipeline,
@@ -630,38 +621,10 @@ impl VirtualGeometryPass {
         })
     }
 
-    /// Rebuild cull + draw_bg_0 bind groups after buffer reallocation.
+    /// Rebuild draw_bg_0 after buffer reallocation; cull bind group is rebuilt
+    /// lazily in execute() with Hi-Z resources.
     fn rebuild_owned_bind_groups(&mut self, device: &wgpu::Device, camera_buf: &wgpu::Buffer) {
-        self.cull_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("VG Cull BG"),
-            layout: &self.cull_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: camera_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.cull_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.meshlet_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.instance_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: self.indirect_buf.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: self.draw_count_buf.as_entire_binding(),
-                },
-            ],
-        }));
+        self.cull_bind_group = None;
         self.draw_bg_0 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("VG Draw BG0"),
             layout: &self.draw_bgl_0,
@@ -728,11 +691,13 @@ impl RenderPass for VirtualGeometryPass {
 
         // ── Upload cull uniforms ──────────────────────────────────────────────
         let lod_thresholds = self.lod_quality.thresholds();
+        let max_dim = ctx.width.max(ctx.height);
+        let hiz_mip_count = (u32::BITS - max_dim.leading_zeros()).max(1);
         let cull_uni = CullUniforms {
             meshlet_count: self.last_meshlet_count,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            screen_width:  ctx.width,
+            screen_height: ctx.height,
+            hiz_mip_count,
             lod_thresholds,
             _pad3: 0.0,
         };
@@ -911,6 +876,54 @@ impl RenderPass for VirtualGeometryPass {
             return Ok(());
         }
 
+        // Lazy cull bind group rebuild: tracks owned buffers + Hi-Z resources.
+        let hiz_view = ctx.resources.hiz.as_ref()
+            .expect("VirtualGeometry: 'hiz' view not routed by graph");
+        let hiz_sampler = ctx.resources.hiz_sampler.as_ref()
+            .expect("VirtualGeometry: 'hiz_sampler' not available");
+        let hiz_key = (hiz_view as *const _ as usize, hiz_sampler as *const _ as usize);
+        if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key != Some(hiz_key) {
+            self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("VG Cull BG"),
+                layout: &self.cull_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.cull_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.meshlet_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: self.instance_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: self.indirect_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: self.draw_count_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: wgpu::BindingResource::TextureView(hiz_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: wgpu::BindingResource::Sampler(hiz_sampler),
+                    },
+                ],
+            }));
+            self.cull_bind_group_hiz_key = Some(hiz_key);
+        }
+
         let Some(cull_bg) = self.cull_bind_group.as_ref() else {
             return Ok(());
         };
@@ -991,13 +1004,14 @@ impl RenderPass for VirtualGeometryPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["gbuffer", "main_scene", "vg"]
+        &["gbuffer", "main_scene", "vg", "hiz"]
     }
     fn writes(&self) -> &'static [&'static str] { &[] }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("gbuffer");
         builder.read("vg");
+        builder.read("hiz");
     }
 
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {

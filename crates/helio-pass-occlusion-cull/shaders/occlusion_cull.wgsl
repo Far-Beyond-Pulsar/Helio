@@ -166,8 +166,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let sample_uv = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
-
     // ── Conservative near depth ──────────────────────────────────────────────
     let near_z = sphere_near_depth(center, radius);
 
@@ -175,16 +173,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let r_px = screen_radius_px(radius, clip.w);
     let mip  = pick_mip(r_px);
 
-    // ── Occlusion test ───────────────────────────────────────────────────────
-    // Sample Hi-Z (MAX pyramid): the stored value is the MAXIMUM (farthest) depth
-    // in the footprint at this mip level.
-    let hiz_depth = textureSampleLevel(hiz_tex, hiz_samp, sample_uv, f32(mip)).r;
+    // ── Conservative 4-tap Hi-Z occlusion test ──────────────────────────────
+    // Sample Hi-Z (MAX pyramid) at 4 corners of sphere's bounding rectangle.
+    // Take the farthest of the 4 samples — most conservative.
+    let uv_half = ndc_r * 0.5;
+    let uv_00 = clamp(uv - vec2<f32>(uv_half, uv_half), vec2<f32>(0.0), vec2<f32>(1.0));
+    let uv_11 = clamp(uv + vec2<f32>(uv_half, uv_half), vec2<f32>(0.0), vec2<f32>(1.0));
 
-    // Occluded: every point of the sphere is farther than the closest known occluder.
-    // In [0,1] depth where 0=near, 1=far: occluded iff near_z > hiz_depth + bias.
-    let depth_bias = 1.0 / 65536.0; // ~1.5e-5 — prevent near-plane fighting
+    let hiz_00 = textureSampleLevel(hiz_tex, hiz_samp, uv_00, f32(mip)).r;
+    let hiz_01 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_11.x, uv_00.y), f32(mip)).r;
+    let hiz_10 = textureSampleLevel(hiz_tex, hiz_samp, vec2<f32>(uv_00.x, uv_11.y), f32(mip)).r;
+    let hiz_11 = textureSampleLevel(hiz_tex, hiz_samp, uv_11, f32(mip)).r;
+    let hiz_depth = max(max(hiz_00, hiz_01), max(hiz_10, hiz_11));
+
+    let depth_bias = 1.0 / 65536.0;
     if near_z > hiz_depth + depth_bias {
-        // Set instance_count to 0 for the entire draw call
         indirect[idx * 5u + 1u] = 0u;
     }
     // Otherwise keep the existing instance_count (set by frustum cull pass).
