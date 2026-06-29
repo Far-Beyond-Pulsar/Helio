@@ -59,6 +59,7 @@ pub struct Renderer {
     full_res_depth_view: Option<wgpu::TextureView>,
     surface_format: wgpu::TextureFormat,
     debug_camera_buffer: wgpu::Buffer,
+    cull_stats_buffer: wgpu::Buffer,
     ambient_color: [f32; 3],
     ambient_intensity: f32,
     clear_color: [f32; 4],
@@ -99,6 +100,10 @@ pub struct Renderer {
     delta_time: f32,
     /// Time spent in graph execution (milliseconds, previous frame).
     graph_time_ms: f32,
+    /// Staging buffer for GPU culling stats readback (8 u32 counters).
+    cull_stats_staging: wgpu::Buffer,
+    /// Last frame's culling statistics, updated via GPU readback.
+    cull_stats: [u32; 8],
     /// Frame time history for the timing graph (ring buffer).
     frame_times: Vec<f32>,
     frame_times_cursor: usize,
@@ -298,8 +303,15 @@ impl Renderer {
         });
 
         let debug_overlay_shared = DebugOverlayState::new();
+        let cull_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut graph = build_default_graph(
             &device, &queue, &scene, config, debug_state.clone(), &debug_camera_buffer,
+            &cull_stats_buffer,
             Some(&debug_overlay_shared),
         );
 
@@ -336,6 +348,13 @@ impl Renderer {
         let internal_w = config.internal_width();
         let internal_h = config.internal_height();
         let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
+
+        let cull_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("CullStats Staging"),
+            size: 32,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
         let mut renderer = Self {
             device,
@@ -381,6 +400,8 @@ impl Renderer {
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
+            cull_stats_staging,
+            cull_stats: [0; 8],
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
@@ -389,7 +410,6 @@ impl Renderer {
             jitter_cache_height: internal_h,
             #[cfg(feature = "live-portal")]
             portal_handle: None,
-
             #[cfg(feature = "bake")]
             bake_pending: None,
             #[cfg(feature = "bake")]
@@ -399,6 +419,7 @@ impl Renderer {
             pending_resize: Some((config.width, config.height)),
             gizmo_camera: None,
             gizmo_viewport_height: 0.0,
+            cull_stats_buffer,
         };
 
         // Automatically start live performance dashboard if feature is enabled
@@ -463,6 +484,12 @@ impl Renderer {
         });
 
         let debug_overlay_shared = DebugOverlayState::new();
+        let cull_stats_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Cull Stats Buffer"),
+            size: 32,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
         let mut graph = super::graph::build_default_graph_external(
             &device,
             &queue,
@@ -470,6 +497,7 @@ impl Renderer {
             config,
             debug_state.clone(),
             &debug_camera_buffer,
+            &cull_stats_buffer,
             Some(&debug_overlay_shared),
         );
 
@@ -500,6 +528,12 @@ impl Renderer {
         let internal_w = config.internal_width();
         let internal_h = config.internal_height();
         let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
+        let cull_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("CullStats Staging"),
+            size: 32,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
 
         Self {
             device,
@@ -545,6 +579,8 @@ impl Renderer {
             water_hitboxes_buffer,
             last_render_time: Instant::now(),
             delta_time: 0.0,
+            cull_stats_staging,
+            cull_stats: [0; 8],
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
@@ -553,7 +589,6 @@ impl Renderer {
             jitter_cache_height: internal_h,
             #[cfg(feature = "live-portal")]
             portal_handle: None,
-
             #[cfg(feature = "bake")]
             bake_pending: None,
             #[cfg(feature = "bake")]
@@ -563,6 +598,7 @@ impl Renderer {
             owns_device: false,
             pending_resize: Some((config.width, config.height)),
             clear_target_next_frame: true,
+            cull_stats_buffer,
         }
     }
 
@@ -1037,6 +1073,7 @@ impl Renderer {
                         config,
                         self.debug_state.clone(),
                         &self.debug_camera_buffer,
+                        &self.cull_stats_buffer,
                         Some(&self.debug_overlay_shared),
                     )
                 } else {
@@ -1047,6 +1084,7 @@ impl Renderer {
                         config,
                         self.debug_state.clone(),
                         &self.debug_camera_buffer,
+                        &self.cull_stats_buffer,
                         Some(&self.debug_overlay_shared),
                     )
                 };
@@ -1160,6 +1198,7 @@ impl Renderer {
                 config,
                 self.debug_state.clone(),
                 &self.debug_camera_buffer,
+                &self.cull_stats_buffer,
                 Some(&self.debug_overlay_shared),
             )
         } else {
@@ -1170,6 +1209,7 @@ impl Renderer {
                 config,
                 self.debug_state.clone(),
                 &self.debug_camera_buffer,
+                &self.cull_stats_buffer,
                 Some(&self.debug_overlay_shared),
             )
         };
@@ -1671,6 +1711,33 @@ impl Renderer {
                         state.write_text(0, l, &format!("  {}", ch)); l += 1;
                     }
 
+                    // ── CULLING STATS ──
+                    l += 1;
+                    if l < rows {
+                        let cs = self.cull_stats;
+                        let total = cs[0];
+                        let frustum = cs[1];
+                        let subpixel = cs[2];
+                        let occ = cs[4];
+                        let visible = total.saturating_sub(frustum + subpixel + occ);
+                        let sh_total = cs[5];
+                        let sh_vis = cs[6];
+                        let sh_occ = cs[7];
+                        let sh_frustum = sh_total.saturating_sub(sh_vis + sh_occ);
+                        state.write_text(0, l, &format!("── Culling Stats ──────────────────────")); l += 1;
+                        state.write_text(0, l, &format!("  Total draws:     {:>6}", total)); l += 1;
+                        let pct = |n: u32, d: u32| -> f64 { if d == 0 { 0.0 } else { n as f64 / d as f64 * 100.0 } };
+                        state.write_text(0, l, &format!("  Frustum culled:  {:>6}  {:>5.1}%", frustum, pct(frustum, total))); l += 1;
+                        state.write_text(0, l, &format!("  Sub-pixel culled:{:>6}  {:>5.1}%", subpixel, pct(subpixel, total))); l += 1;
+                        state.write_text(0, l, &format!("  Occlusion culled:{:>6}  {:>5.1}%", occ, pct(occ, total))); l += 1;
+                        state.write_text(0, l, &format!("  Visible:         {:>6}  {:>5.1}%", visible, pct(visible, total))); l += 1;
+                        l += 1;
+                        state.write_text(0, l, &format!("  Shadow casters:  {:>6}", sh_total)); l += 1;
+                        state.write_text(0, l, &format!("    Visible:       {:>6}  {:>5.1}%", sh_vis, pct(sh_vis, sh_total))); l += 1;
+                        state.write_text(0, l, &format!("    Frustum culled:{:>6}  {:>5.1}%", sh_frustum, pct(sh_frustum, sh_total))); l += 1;
+                        state.write_text(0, l, &format!("    Occlusion cull:{:>6}  {:>5.1}%", sh_occ, pct(sh_occ, sh_total))); l += 1;
+                    }
+
                     // ── RIGHT SECTION: column-aligned texture table (anchored to right edge) ──
                     let mut table_rows: Vec<Vec<String>> = Vec::new();
                     for res in &debug_data.resources {
@@ -1865,6 +1932,15 @@ impl Renderer {
             }
         }
 
+        // Clear culling stats before graph execution (zero out all 8 atomic counters).
+        {
+            let mut clear_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("CullStats Clear"),
+            });
+            clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
+            self.queue.submit(std::iter::once(clear_encoder.finish()));
+        }
+
         let _graph_start = Instant::now();
         self.graph.execute_with_frame_resources(
             self.scene.gpu_scene(),
@@ -1873,6 +1949,36 @@ impl Renderer {
             &frame_resources,
         )?;
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
+
+        // Read back culling stats: copy GPU buffer → staging, then map + read.
+        {
+            let mut read_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("CullStats Readback"),
+            });
+            read_encoder.copy_buffer_to_buffer(
+                &self.cull_stats_buffer, 0,
+                &self.cull_stats_staging, 0,
+                32,
+            );
+            self.queue.submit(std::iter::once(read_encoder.finish()));
+        }
+
+        // Poll and map the staging buffer to read the 8 counters.
+        // Skip when the renderer doesn't own the device (can't poll without stalling).
+        if self.owns_device {
+            let staging_slice = self.cull_stats_staging.slice(..);
+            staging_slice.map_async(wgpu::MapMode::Read, |_| {});
+            self.device.poll(wgpu::PollType::wait_indefinitely());
+            {
+                let mapped = staging_slice.get_mapped_range();
+                if mapped.len() >= 32 {
+                    let ptr = mapped.as_ptr() as *const u32;
+                    self.cull_stats = unsafe { std::ptr::read_unaligned(ptr.cast()) };
+                }
+                drop(mapped);
+            }
+            self.cull_stats_staging.unmap();
+        }
 
         // Send profiling data to live portal (non-blocking)
         #[cfg(feature = "live-portal")]

@@ -23,9 +23,10 @@ pub fn build_fxaa_graph(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, true, debug_overlay)
+    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
 }
 
 pub fn build_fxaa_graph_external(
@@ -35,9 +36,10 @@ pub fn build_fxaa_graph_external(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, false, debug_overlay)
+    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay)
 }
 
 fn build_fxaa_graph_internal(
@@ -47,6 +49,7 @@ fn build_fxaa_graph_internal(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
@@ -55,8 +58,8 @@ fn build_fxaa_graph_internal(
 
     let mut graph = new_graph(device, queue, owns_device);
 
-    let (perf, _cull_stats) = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, w, h,
+    let perf = add_common_early_passes(
+        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, w, h,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, w, h)));

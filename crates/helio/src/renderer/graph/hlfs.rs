@@ -18,6 +18,7 @@ pub fn build_hlfs_graph(
     config: RendererConfig,
     debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
     debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
     let iw = config.internal_width();
@@ -25,8 +26,8 @@ pub fn build_hlfs_graph(
 
     let mut graph = RenderGraph::new(device, queue);
 
-    let (perf, _cull_stats) = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, iw, ih,
+    let perf = add_common_early_passes(
+        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, iw, ih,
     );
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
