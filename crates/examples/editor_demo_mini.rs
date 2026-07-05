@@ -898,7 +898,7 @@ impl ApplicationHandler for App {
                                 }
                             }
                         }
-                        KeyCode::F5 => {
+                        KeyCode::F2 | KeyCode::F5 => {
                             state.debug_overlay_enabled = !state.debug_overlay_enabled;
                             state.renderer.set_debug_overlay_enabled(state.debug_overlay_enabled);
                         }
