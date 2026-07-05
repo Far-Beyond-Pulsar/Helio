@@ -338,19 +338,17 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         None
     }
 
-    /// Returns a render pass descriptor for replaying a prebuilt render bundle.
-    ///
-    /// This is only used for passes that return `Some` from
-    /// `build_gpu_render_bundle()`. The descriptor is created at runtime using
-    /// the current `target`, `depth`, and resource views.
+    /// Declares the render pass this pass needs, or `None` if the pass only
+    /// performs compute dispatches.  Every pass **must** implement this —
+    /// there is no default.  Compute-only passes return `None`; render passes
+    /// return `Some(descriptor)` so the executor can manage the render pass
+    /// lifecycle (subpass chaining, store-op patching, tile-memory fusion).
     fn render_pass_descriptor<'a>(
         &'a self,
-        _target: &'a wgpu::TextureView,
-        _depth: &'a wgpu::TextureView,
-        _resources: &'a libhelio::FrameResources<'a>,
-    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        None
-    }
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>>;
 
     /// Optionally prepares per-frame data before GPU execution.
     ///

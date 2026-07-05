@@ -33,6 +33,15 @@ impl RenderPass for BakeInjectPass {
         "BakeInject"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn publish<'a>(&'a self, frame: &mut FrameResources<'a>) {
         // AO — replaces SSAO slot so downstream passes (DeferredLight) see baked AO
         if let Some(ref view) = self.data.ao_view {

@@ -525,6 +525,15 @@ impl RenderPass for DebugOverlayPass {
         "DebugOverlay"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let mut shared = self.shared.lock().unwrap();
         if !shared.enabled {

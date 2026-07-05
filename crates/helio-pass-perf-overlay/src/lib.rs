@@ -1352,6 +1352,15 @@ impl RenderPass for PerfOverlayAnalyzerPass {
         "PerfOverlay Color Analyzer"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let shared = self.shared.lock().unwrap();
         let color_compare_params = ColorCompareParams {
@@ -1475,6 +1484,15 @@ impl PerfOverlayCostAnalyzerPass {
 impl RenderPass for PerfOverlayCostAnalyzerPass {
     fn name(&self) -> &'static str {
         "PerfOverlay Cost Analyzer"
+    }
+
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {

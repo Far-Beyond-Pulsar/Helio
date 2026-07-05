@@ -209,6 +209,45 @@ impl RenderPass for SimpleCubePass {
         "SimpleCube"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: 0.01,
+                        g: 0.01,
+                        b: 0.02,
+                        a: 1.0,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("SimpleCube"),
+            color_attachments,
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
     }
@@ -228,40 +267,12 @@ impl RenderPass for SimpleCubePass {
             self.bind_group_key = Some(camera_ptr);
         }
 
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("SimpleCube"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: ctx.target,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: 0.01,
-                        g: 0.01,
-                        b: 0.02,
-                        a: 1.0,
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: ctx.depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-        pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint16);
-        pass.draw_indexed(0..36, 0, 0..1);
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
+        rp.set_vertex_buffer(0, self.vertex_buf.slice(..));
+        rp.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint16);
+        rp.draw_indexed(0..36, 0, 0..1);
         Ok(())
     }
 }

@@ -168,6 +168,15 @@ impl RenderPass for RadianceCascadesPass {
         builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let light_count = ctx.scene.lights.len() as u32;
         let sky = ctx.frame_resources.sky.sky_color;

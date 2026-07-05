@@ -172,6 +172,15 @@ impl RenderPass for ShadowMatrixPass {
         "ShadowMatrix"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = ShadowMatrixUniforms {
             light_count: ctx.scene.lights.len() as u32,

@@ -414,6 +414,34 @@ impl RenderPass for SsaoPass {
         }
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        let ssao_view = resources.ssao.read("SSAO")?;
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: ssao_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
+            label: Some("SSAO"),
+            color_attachments,
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        })
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // TODO: Derive view, proj, inv_view_proj from scene camera for accurate SSAO.
         // Currently zeroed — GPU will return 1.0 (no occlusion) for sky pixels.
@@ -441,34 +469,12 @@ impl RenderPass for SsaoPass {
             return Ok(());
         }
 
-        let ssao_view = ctx.resources.ssao.read("SSAO").unwrap();
-
-        // O(1): single fullscreen draw — GPU samples GBuffer and accumulates AO.
-        let color_attachment = wgpu::RenderPassColorAttachment {
-            view: ssao_view,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
-                store: wgpu::StoreOp::Store,
-            },
-        };
-        let color_attachments = [Some(color_attachment)];
-        let desc = wgpu::RenderPassDescriptor {
-            label: Some("SSAO"),
-            color_attachments: &color_attachments,
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        };
-
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, &self.bind_group_0, &[]);
-        pass.set_bind_group(1, &self.bind_group_1, &[]);
-        pass.set_bind_group(2, &self.bind_group_2, &[]);
-        pass.draw(0..3, 0..1);
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        rp.set_pipeline(&self.pipeline);
+        rp.set_bind_group(0, &self.bind_group_0, &[]);
+        rp.set_bind_group(1, &self.bind_group_1, &[]);
+        rp.set_bind_group(2, &self.bind_group_2, &[]);
+        rp.draw(0..3, 0..1);
         Ok(())
     }
 }

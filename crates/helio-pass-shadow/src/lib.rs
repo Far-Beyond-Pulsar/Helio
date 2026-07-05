@@ -405,6 +405,15 @@ impl ShadowPass {
 // ── RenderPass impl ───────────────────────────────────────────────────────────
 
 impl RenderPass for ShadowPass {
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         let sz = ResourceSize::Absolute { width: self.atlas_size, height: self.atlas_size };
         builder.write_color_raw("shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);

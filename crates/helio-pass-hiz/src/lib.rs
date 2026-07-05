@@ -401,6 +401,15 @@ impl RenderPass for HiZBuildPass {
         self.first_frame = true;
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         // Static HiZ mip uniforms are initialized once in `new()` and do not
         // need to be re-uploaded every frame unless the pass is recreated.

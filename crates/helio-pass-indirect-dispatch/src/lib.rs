@@ -166,6 +166,15 @@ impl RenderPass for IndirectDispatchPass {
         "IndirectDispatch"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let draw_count = ctx.scene.draw_calls.len() as u32;
         self.draw_count = draw_count;

@@ -243,6 +243,15 @@ impl RenderPass for LightCullPass {
         frame.tile_light_counts.write(&self.tile_light_counts, "LightCull");
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // Tile grid must match the internal (render-target) resolution, not output.
         // ctx.width/height are internal_w/h from the graph.

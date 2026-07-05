@@ -390,6 +390,15 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 impl RenderPass for TaaPass {
     fn name(&self) -> &'static str { "TAA" }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn reads(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }

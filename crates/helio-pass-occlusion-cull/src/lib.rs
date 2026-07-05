@@ -285,6 +285,15 @@ impl RenderPass for OcclusionCullPass {
         &["hiz", "static_hiz", "static_hiz_sampler"]
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let static_hiz_available = ctx.frame_resources.static_hiz.is_some();
         let p = CullParams {

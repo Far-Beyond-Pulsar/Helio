@@ -118,6 +118,15 @@ impl RenderPass for DebugDrawPass {
         "DebugDraw"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        self.pass.render_pass_descriptor(target, depth, resources)
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let state_arc = Arc::clone(&self.state);
         let state = state_arc.lock().unwrap();

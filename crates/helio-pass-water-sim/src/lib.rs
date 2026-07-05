@@ -1292,6 +1292,15 @@ impl RenderPass for WaterSimPass {
         "WaterSim"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
         // WaterSimPass operates at INTERNAL (render-scaled) resolution, so it must
         // not be resized from the graph's set_render_size() call (which uses the full

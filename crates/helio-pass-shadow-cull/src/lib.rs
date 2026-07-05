@@ -234,6 +234,15 @@ impl RenderPass for ShadowCullPass {
         "ShadowCull"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = CullUniforms {
             instance_count:    ctx.scene.shadow_movable_draw_count,

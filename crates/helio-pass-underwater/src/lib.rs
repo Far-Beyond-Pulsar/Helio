@@ -7,6 +7,16 @@ impl RenderPass for UnderwaterPass {
     fn name(&self) -> &'static str {
         "Underwater(stub)"
     }
+
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn execute(&mut self, _ctx: &mut PassContext) -> HelioResult<()> {
         Ok(())
     }

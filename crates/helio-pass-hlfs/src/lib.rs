@@ -520,6 +520,15 @@ impl RenderPass for HlfsPass {
         "HLFS"
     }
 
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        _target: &'a wgpu::TextureView,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        None
+    }
+
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // Publish output as pre_aa for downstream passes (always overwrite)
         frame.pre_aa.write(&self.output_view, "HLFS");

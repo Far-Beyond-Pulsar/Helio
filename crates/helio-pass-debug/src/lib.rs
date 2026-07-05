@@ -458,20 +458,17 @@ impl RenderPass for DebugPass {
         "DebugDraw"
     }
 
-    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
-        Ok(())
-    }
-
-    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if self.vertex_count == 0 && self.tri_count == 0 {
-            return Ok(());
-        }
-        self.ensure_bind_group(ctx.device);
+    fn render_pass_descriptor<'a>(
+        &'a self,
+        target: &'a wgpu::TextureView,
+        depth: &'a wgpu::TextureView,
+        resources: &'a libhelio::FrameResources<'a>,
+    ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = ctx.resources.full_res_depth.get() {
+            let depth_view = if let Some(frd) = resources.full_res_depth.get() {
                 frd
             } else {
-                ctx.depth
+                depth
             };
             Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth_view,
@@ -484,25 +481,38 @@ impl RenderPass for DebugPass {
         } else {
             None
         };
-        let color_attachments = [Some(wgpu::RenderPassColorAttachment {
-            view: ctx.target,
-            resolve_target: None,
-            depth_slice: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })];
-        let desc = wgpu::RenderPassDescriptor {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
+            Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            }),
+        ]));
+        Some(wgpu::RenderPassDescriptor {
             label: Some("DebugDraw"),
-            color_attachments: &color_attachments,
+            color_attachments,
             depth_stencil_attachment: depth_attachment,
             timestamp_writes: None,
             occlusion_query_set: None,
             multiview_mask: None,
-        };
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&desc);
-        self.draw_commands(&mut pass);
+        })
+    }
+
+    fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
+        Ok(())
+    }
+
+    fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        if self.vertex_count == 0 && self.tri_count == 0 {
+            return Ok(());
+        }
+        self.ensure_bind_group(ctx.device);
+        let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        self.draw_commands(rp);
         Ok(())
     }
 }
