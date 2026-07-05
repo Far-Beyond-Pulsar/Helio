@@ -406,17 +406,34 @@ impl RenderGraph {
     /// Detect chains of adjacent passes where each writes a resource the next
     /// reads. These could be fused into a single render pass with `next_subpass()`
     /// to keep inter-pass data in tile memory.
-    /// Uses a greedy forward scan to build maximal chains.
+    /// Uses a greedy forward scan across BOTH legacy reads()/writes() and
+    /// declare_resources() data to find every opportunity.
     fn detect_subpass_chains(&mut self) {
         self.subpass_chains.clear();
-        // Greedy chain builder: chain A→B if B reads() any resource that A writes().
+        // Build per-pass read/write sets from both legacy and declaration APIs.
+        let mut writes_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
+        let mut reads_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
+        for (i, pass) in self.passes.iter().enumerate() {
+            let mut w: Vec<&str> = pass.writes().to_vec();
+            let mut r: Vec<&str> = pass.reads().to_vec();
+            // Also scan declare_resources for reads/writes not captured above.
+            let mut builder = crate::graph::ResourceBuilder::new();
+            pass.declare_resources(&mut builder);
+            for d in builder.declarations() {
+                match d.access {
+                    crate::graph::ResourceAccess::Read => { if !r.contains(&d.name) { r.push(d.name); } }
+                    crate::graph::ResourceAccess::Write => { if !w.contains(&d.name) { w.push(d.name); } }
+                }
+            }
+            writes_set.push(w);
+            reads_set.push(r);
+        }
+
         let mut i = 0;
         while i < self.passes.len() {
             let chain_start = i;
             while i + 1 < self.passes.len() {
-                let writes_i: &[&str] = self.passes[i].writes();
-                let reads_next: &[&str] = self.passes[i + 1].reads();
-                let can_fuse = writes_i.iter().any(|w| reads_next.contains(w));
+                let can_fuse = writes_set[i].iter().any(|w| reads_set[i + 1].contains(w));
                 if !can_fuse { break; }
                 i += 1;
             }
@@ -959,27 +976,71 @@ impl RenderGraph {
             });
 
         // Pre-compute cache: chain info + store ops from descriptor.
-        self.pass_cache = self.passes.iter().enumerate().map(|(_pi, pass)| {
+        self.pass_cache = self.passes.iter().enumerate().map(|(pi, pass)| {
             let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
-            // TEMP: force all standalone (no chaining) until we fix the fusion path
-            let chain_range = 0..0;
-            let subpass_index = 0;
-            let store_ops: Vec<Option<wgpu::StoreOp>> = desc.color_attachments.iter().map(|opt| {
-                opt.as_ref().and_then(|att| {
-                    let key = att.view as *const _ as usize;
-                    let name = v2n.get(&key)?;
-                    let rl = self.resources.get(*name)?;
-                    (rl.last_read_pass < chain_range.end).then_some(wgpu::StoreOp::Discard)
-                })
-            }).collect();
+            let chain = self.subpass_chains.iter().find(|c| c.contains(&pi));
+            let chain_range = chain.cloned().unwrap_or(0..0);
+            let subpass_index = chain.map_or(0, |c| (pi - c.start) as u32);
+            // TODO: restore store-op override once composite-vs-individual tracking is
+            // resolved.  For now always None to avoid discarding gbuffer sub-attachments.
+            let store_ops: Vec<Option<wgpu::StoreOp>> = desc.color_attachments.iter().map(|_| None).collect();
             Some(CachedPass { store_ops, subpass_index, chain_range })
         }).collect();
 
-        if !self.subpass_chains.is_empty() {
-            eprintln!("[RenderGraph] {} subpass chain(s):", self.subpass_chains.len());
-            for c in &self.subpass_chains {
-                let ns: Vec<&str> = self.passes[c.start..c.end].iter().map(|p| p.name()).collect();
-                eprintln!("  chain {}: {}", c.start, ns.join(" → "));
+        // Detailed chain diagnostic.
+        {
+            // Recompute read/write sets for the diagnostic.
+            let mut w_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
+            let mut r_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
+            for (i, p) in self.passes.iter().enumerate() {
+                let mut w: Vec<&str> = p.writes().to_vec();
+                let mut r: Vec<&str> = p.reads().to_vec();
+                let mut b = crate::graph::ResourceBuilder::new();
+                p.declare_resources(&mut b);
+                for d in b.declarations() {
+                    match d.access {
+                        crate::graph::ResourceAccess::Read => { if !r.contains(&d.name) { r.push(d.name); } }
+                        crate::graph::ResourceAccess::Write => { if !w.contains(&d.name) { w.push(d.name); } }
+                    }
+                }
+                w_set.push(w);
+                r_set.push(r);
+            }
+            eprintln!("[RenderGraph] {} passes, {} chain(s):", self.passes.len(), self.subpass_chains.len());
+            for i in 0..self.passes.len() {
+                let name = self.passes[i].name();
+                let is_chain_start = self.subpass_chains.iter().any(|c| c.start == i);
+                let is_chain_mid   = self.subpass_chains.iter().any(|c| i > c.start && i < c.end);
+                let marker = if is_chain_start { " ──chain──►" } else if is_chain_mid { " │         " } else { "           " };
+                let w_str = if w_set[i].is_empty() { "–".to_string() } else { w_set[i].join(",") };
+                let r_str = if r_set[i].is_empty() { "–".to_string() } else { r_set[i].join(",") };
+                eprintln!("  {:>2}. {:<28} W: {}  R: {}", i, name, w_str, r_str);
+                if i + 1 < self.passes.len() {
+                    let can_fuse = w_set[i].iter().any(|w| r_set[i + 1].contains(w));
+                    let why = if can_fuse {
+                        let common: Vec<&str> = w_set[i].iter().filter(|w| r_set[i + 1].contains(w)).copied().collect();
+                        format!("fusable via {}", common.join(","))
+                    } else {
+                        let mut reasons = Vec::new();
+                        for w in &w_set[i] {
+                            if !r_set[i + 1].contains(w) {
+                                reasons.push(format!("{} not read by next", w));
+                            }
+                        }
+                        if reasons.is_empty() {
+                            reasons.push("no writes from this pass".to_string());
+                        }
+                        reasons.join("; ")
+                    };
+                    let is_fused = self.subpass_chains.iter().any(|c| c.contains(&i) && c.contains(&(i + 1)));
+                    if is_fused {
+                        eprintln!("  {:>2}.{:>2} CHAINED  ({})", "", "", why);
+                    } else if can_fuse {
+                        eprintln!("  {:>2}.{:>2} NOT CHAINED — both must implement render_pass_descriptor. ({})", "", "", why);
+                    }
+                    // else: no write→read dependency, no chain possible — don't print.
+                }
+                eprintln!("  {}", marker);
             }
         }
         self.locked = true;
