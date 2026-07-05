@@ -112,9 +112,10 @@ pub struct RenderGraph {
     gpu_render_bundles: Vec<Option<wgpu::RenderBundle>>,
     resources_allocated: bool,
     /// Detected subpass-fusible chains. Each entry is a contiguous range of
-    /// pass indices whose resources could share a single render pass with
-    /// `next_subpass()`. Currently used only for debug overlay visualization;
-    /// the executor still opens one render pass per migrated pass.
+    /// pass indices whose resources share a single render pass (tile-memory
+    /// optimization). The executor opens one render pass per chain instead of
+    /// one per migrated pass. Consecutive chained passes draw into the same
+    /// active render pass without closing/reopening it.
     subpass_chains: Vec<std::ops::Range<usize>>,
     /// Frame counter for periodic stats reporting.
     frame_count: u64,
@@ -588,6 +589,10 @@ impl RenderGraph {
 
         let mut visible_frame_resources = *frame_resources;
 
+        // Subpass chain tracking: keep a render pass open across consecutive
+        // migrated passes that form a write→read chain (tile-memory optimization).
+        let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
+
         for (pass_index, pass) in self.passes.iter_mut().enumerate() {
             // GPU-only prebuilt path.
             if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
@@ -665,11 +670,24 @@ impl RenderGraph {
 
             // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
             if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
-                let mut rp = unsafe {
-                    let enc = &mut *std::ptr::addr_of_mut!(encoder);
-                    enc.begin_render_pass(&desc)
-                };
-                {
+                let chain = self.subpass_chains.iter().find(|c| c.contains(&pass_index));
+                let is_chained = chain.is_some();
+
+                if is_chained {
+                    let chain = chain.unwrap();
+                    let subpass_idx = (pass_index - chain.start) as u32;
+
+                    if pass_index == chain.start {
+                        // First pass in chain: open a new render pass stored in chain_rp.
+                        let rp = unsafe {
+                            let enc = &mut *std::ptr::addr_of_mut!(encoder);
+                            enc.begin_render_pass(&desc)
+                        };
+                        chain_rp = Some(std::mem::ManuallyDrop::new(rp));
+                    }
+                    // else: continuation — chain_rp already holds the active render pass.
+
+                    // Execute against the chain's render pass.
                     let scene_resources = scene.resources();
                     let mut ctx = PassContext {
                         encoder_ptr: std::ptr::addr_of_mut!(encoder),
@@ -685,13 +703,58 @@ impl RenderGraph {
                         resources: &visible_frame_resources,
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
-                        subpass_index: 0,
-                        active_render_pass: Some(&mut rp as *mut _ as *mut _),
+                        subpass_index: subpass_idx,
+                        active_render_pass: chain_rp.as_mut().map(|rp| &mut **rp as *mut _ as *mut _),
                         active_compute_pass: None,
                     };
                     pass.execute(&mut ctx)?;
+
+                    // Close the render pass at chain end.
+                    if pass_index + 1 >= chain.end {
+                        if let Some(mut rp) = chain_rp.take() {
+                            unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                        }
+                    }
+                } else {
+                    // Standalone pass: close any active chain first.
+                    if let Some(mut rp) = chain_rp.take() {
+                        unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                    }
+
+                    // Open, execute, close — one render pass.
+                    let mut rp = unsafe {
+                        let enc = &mut *std::ptr::addr_of_mut!(encoder);
+                        enc.begin_render_pass(&desc)
+                    };
+                    {
+                        let scene_resources = scene.resources();
+                        let mut ctx = PassContext {
+                            encoder_ptr: std::ptr::addr_of_mut!(encoder),
+                            compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
+                            target,
+                            depth,
+                            scene: scene_resources,
+                            profiler: &mut self.profiler,
+                            frame_num: scene.frame_count,
+                            width: self.internal_w,
+                            height: self.internal_h,
+                            device: &scene.device,
+                            resources: &visible_frame_resources,
+                            owns_device: self.owns_device,
+                            resource_pool: &self.pool,
+                            subpass_index: 0,
+                            active_render_pass: Some(&mut rp as *mut _ as *mut _),
+                            active_compute_pass: None,
+                        };
+                        pass.execute(&mut ctx)?;
+                    }
                 }
             } else {
+                // Legacy path: close any active chain render pass first.
+                if let Some(mut rp) = chain_rp.take() {
+                    unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                }
+
                 // Legacy path: pass opens its own render/compute pass via begin_render_pass.
                 let scene_resources = scene.resources();
                 let mut ctx = PassContext {
