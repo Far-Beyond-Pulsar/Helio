@@ -88,6 +88,11 @@ struct ResourceLifetime {
     mip_level_count: u32,
     extra_usage: wgpu::TextureUsages,
     alias_group: Option<String>,
+    /// When true, this resource is only ever written and read within a single
+    /// subpass chain — the executor skips allocating a backing texture and
+    /// substitutes a 1×1 dummy view.  The attachment stays entirely in tile
+    /// memory and never touches VRAM.
+    chain_local: bool,
 }
 
 /// An action to perform on FrameResources before a pass executes.
@@ -130,6 +135,9 @@ pub struct RenderGraph {
     locked: bool,
     /// Pre-computed per-pass data (store ops, chain info) populated by `lock()`.
     pass_cache: Vec<Option<CachedPass>>,
+    /// 1×1 dummy views for chain-local resources whose backing textures were
+    /// skipped — they stay entirely in tile memory during the fused render pass.
+    dummy_views: std::collections::HashMap<String, wgpu::TextureView>,
     /// Frame counter for periodic stats reporting.
     frame_count: u64,
 }
@@ -155,6 +163,7 @@ impl RenderGraph {
             subpass_chains: Vec::new(),
             locked: false,
             pass_cache: Vec::new(),
+            dummy_views: std::collections::HashMap::new(),
             frame_count: 0,
         }
     }
@@ -252,6 +261,7 @@ impl RenderGraph {
                 mip_level_count,
                 extra_usage: w.extra_usage,
                 alias_group: None,
+                chain_local: false,
             });
         }
     }
@@ -264,8 +274,11 @@ impl RenderGraph {
             return;
         }
 
-        // Allocate all textures into the pool.
+        // Allocate textures into the pool.  Chain-local resources get a 1×1
+        // dummy (they live in tile memory during the fused render pass and
+        // never touch VRAM at full resolution).
         for (name, rl) in &self.resources {
+            let (w, h) = if rl.chain_local { (1u32, 1u32) } else { (rl.width, rl.height) };
             let usage = if rl.format == wgpu::TextureFormat::R32Float {
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING
             } else {
@@ -274,10 +287,10 @@ impl RenderGraph {
             let tex_desc = TextureDescriptor {
                 name: name.clone(),
                 format: rl.format,
-                width: rl.width,
-                height: rl.height,
-                depth_or_array_layers: rl.depth_or_array_layers,
-                mip_level_count: rl.mip_level_count,
+                width: w,
+                height: h,
+                depth_or_array_layers: if rl.chain_local { 1 } else { rl.depth_or_array_layers },
+                mip_level_count: if rl.chain_local { 1 } else { rl.mip_level_count },
                 sample_count: 1,
                 usage,
                 alias_group: rl.alias_group.clone(),
@@ -701,8 +714,9 @@ impl RenderGraph {
                 if is_chained {
                     let c = cache.unwrap();
                     if pass_index == c.chain_range.start {
-                        // First pass in chain: use the raw descriptor (same as standalone)
-                        // but keep the render pass open for subsequent passes.
+                        // First pass in chain: use the raw descriptor.
+                        // Store-op patching (Discard for chain-local resources)
+                        // is deferred — the 1×1 allocation already saves VRAM.
                         let rp = unsafe {
                             let enc = &mut *std::ptr::addr_of_mut!(encoder);
                             enc.begin_render_pass(&desc)
@@ -851,6 +865,13 @@ impl RenderGraph {
         self.pool.clear();
         self.collect_declarations();
         self.detect_subpass_chains();
+        // Mark resources whose entire lifetime falls within a single subpass
+        // chain — they get 1×1 dummies and live entirely in tile memory.
+        for (_, rl) in &mut self.resources {
+            rl.chain_local = self.subpass_chains.iter().any(|c| {
+                c.start <= rl.first_write_pass && rl.last_read_pass < c.end
+            });
+        }
         self.allocate_textures();
         self.resources_allocated = true;
         self.rebuild_gpu_render_bundles();
@@ -907,7 +928,7 @@ impl RenderGraph {
             });
 
         // Pre-compute cache: chain info + store ops from descriptor.
-        self.pass_cache = self.passes.iter().enumerate().map(|(pi, pass)| {
+        self.pass_cache = self.passes.iter().enumerate().map(|(_pi, pass)| {
             let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
             // TEMP: force all standalone (no chaining) until we fix the fusion path
             let chain_range = 0..0;
