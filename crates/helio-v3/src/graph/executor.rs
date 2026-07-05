@@ -593,6 +593,15 @@ impl RenderGraph {
         // migrated passes that form a write→read chain (tile-memory optimization).
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
 
+        // Build reverse mapping from graph-owned texture view → resource name
+        // so the executor can patch StoreOp::Store → Discard for chain-local attachments.
+        let mut view_to_name: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+        for (name, _rl) in &self.resources {
+            if let Some(view) = self.pool.get_view(name) {
+                view_to_name.insert(view as *const _ as usize, name.as_str());
+            }
+        }
+
         for (pass_index, pass) in self.passes.iter_mut().enumerate() {
             // GPU-only prebuilt path.
             if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
@@ -678,10 +687,35 @@ impl RenderGraph {
                     let subpass_idx = (pass_index - chain.start) as u32;
 
                     if pass_index == chain.start {
-                        // First pass in chain: open a new render pass stored in chain_rp.
+                        // First pass in chain: patch store ops for resources whose
+                        // last read is within this chain (tile-memory discard).
+                        let mut patched_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = Vec::new();
+                        for opt in desc.color_attachments.iter() {
+                            let mut pushed = opt.clone();
+                            if let Some(att) = &mut pushed {
+                                let key = att.view as *const _ as usize;
+                                if let Some(name) = view_to_name.get(&key) {
+                                    if let Some(rl) = self.resources.get(*name) {
+                                        if rl.last_read_pass < chain.end {
+                                            att.ops.store = wgpu::StoreOp::Discard;
+                                        }
+                                    }
+                                }
+                            }
+                            patched_atts.push(pushed);
+                        }
+                        let chain_desc = wgpu::RenderPassDescriptor {
+                            label: desc.label,
+                            color_attachments: &patched_atts,
+                            depth_stencil_attachment: desc.depth_stencil_attachment,
+                            timestamp_writes: desc.timestamp_writes,
+                            occlusion_query_set: desc.occlusion_query_set,
+                            multiview_mask: desc.multiview_mask,
+                        };
+
                         let rp = unsafe {
                             let enc = &mut *std::ptr::addr_of_mut!(encoder);
-                            enc.begin_render_pass(&desc)
+                            enc.begin_render_pass(&chain_desc)
                         };
                         chain_rp = Some(std::mem::ManuallyDrop::new(rp));
                     }
@@ -722,9 +756,35 @@ impl RenderGraph {
                     }
 
                     // Open, execute, close — one render pass.
+                    // Patch store ops: discard any resource whose last reader is
+                    // this pass, so the driver never flushes it to VRAM.
+                    let mut patched_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = Vec::new();
+                    for opt in desc.color_attachments.iter() {
+                        let mut pushed = opt.clone();
+                        if let Some(att) = &mut pushed {
+                            let key = att.view as *const _ as usize;
+                            if let Some(name) = view_to_name.get(&key) {
+                                if let Some(rl) = self.resources.get(*name) {
+                                    if rl.last_read_pass <= pass_index {
+                                        att.ops.store = wgpu::StoreOp::Discard;
+                                    }
+                                }
+                            }
+                        }
+                        patched_atts.push(pushed);
+                    }
+                    let standalone_desc = wgpu::RenderPassDescriptor {
+                        label: desc.label,
+                        color_attachments: &patched_atts,
+                        depth_stencil_attachment: desc.depth_stencil_attachment,
+                        timestamp_writes: desc.timestamp_writes,
+                        occlusion_query_set: desc.occlusion_query_set,
+                        multiview_mask: desc.multiview_mask,
+                    };
+
                     let mut rp = unsafe {
                         let enc = &mut *std::ptr::addr_of_mut!(encoder);
-                        enc.begin_render_pass(&desc)
+                        enc.begin_render_pass(&standalone_desc)
                     };
                     {
                         let scene_resources = scene.resources();
