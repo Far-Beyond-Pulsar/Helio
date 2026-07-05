@@ -122,6 +122,6 @@ fn build_fxaa_graph_internal(
         debug_overlay,
     );
 
-    graph.init_transients(w, h);
+    graph.lock(w, h);
     graph
 }

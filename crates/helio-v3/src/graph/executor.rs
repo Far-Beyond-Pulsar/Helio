@@ -887,9 +887,9 @@ impl RenderGraph {
             let n = self.pool.get_view("gbuffer_normal");
             let o = self.pool.get_view("gbuffer_orm");
             let e = self.pool.get_view("gbuffer_emissive");
-            if let (Some(a), Some(n), Some(o), Some(e)) = (a, n, o, e) {
+            if let (Some(albedo), Some(normal), Some(orm), Some(emissive)) = (a, n, o, e) {
                 canon.gbuffer.write(
-                    libhelio::GBufferViews { albedo: &a, normal: &n, orm: &o, emissive: &e },
+                    libhelio::GBufferViews { albedo, normal, orm, emissive },
                     "Graph",
                 );
             }
