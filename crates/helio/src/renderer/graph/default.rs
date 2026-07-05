@@ -84,6 +84,6 @@ fn build_default_graph_internal(
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
 
-    graph.init_transients(iw, ih);
+    graph.lock(iw, ih);
     graph
 }

@@ -67,7 +67,16 @@ fn format_name(fmt: wgpu::TextureFormat) -> &'static str {
     }
 }
 
-/// Per-resource metadata: which pass first writes it and which pass last reads it.
+/// Pre-computed per-pass data populated at graph lock time.
+struct CachedPass {
+    /// Store op override for each color attachment (None = use pass's original).
+    store_ops: Vec<Option<wgpu::StoreOp>>,
+    /// Subpass index within a chain (0 for standalone / chain start).
+    subpass_index: u32,
+    /// Range of the chain (start..end), or 0..0 for standalone.
+    chain_range: std::ops::Range<usize>,
+}
+
 struct ResourceLifetime {
     first_write_pass: usize,
     #[allow(dead_code)]
@@ -117,6 +126,10 @@ pub struct RenderGraph {
     /// one per migrated pass. Consecutive chained passes draw into the same
     /// active render pass without closing/reopening it.
     subpass_chains: Vec<std::ops::Range<usize>>,
+    /// When true, `add_pass()` panics and `lock()` has been called.
+    locked: bool,
+    /// Pre-computed per-pass data (store ops, chain info) populated by `lock()`.
+    pass_cache: Vec<Option<CachedPass>>,
     /// Frame counter for periodic stats reporting.
     frame_count: u64,
 }
@@ -140,6 +153,8 @@ impl RenderGraph {
             gpu_render_bundles: Vec::new(),
             resources_allocated: false,
             subpass_chains: Vec::new(),
+            locked: false,
+            pass_cache: Vec::new(),
             frame_count: 0,
         }
     }
@@ -340,16 +355,24 @@ impl RenderGraph {
         self.output_w = width;
         self.output_h = height;
 
-        self.pool.clear();
-        self.collect_declarations();
-        self.allocate_textures();
-        self.detect_subpass_chains();
-        self.resources_allocated = true;
-
-        for pass in &mut self.passes {
-            pass.on_resize(&self.device, width, height);
+        if self.locked {
+            // Re-lock with the new size.
+            self.locked = false;
+            self.lock(width, height);
+            for pass in &mut self.passes {
+                pass.on_resize(&self.device, width, height);
+            }
+        } else {
+            self.pool.clear();
+            self.collect_declarations();
+            self.allocate_textures();
+            self.detect_subpass_chains();
+            self.resources_allocated = true;
+            for pass in &mut self.passes {
+                pass.on_resize(&self.device, width, height);
+            }
+            self.rebuild_gpu_render_bundles();
         }
-        self.rebuild_gpu_render_bundles();
     }
 
     pub fn init_transients(&mut self, width: u32, height: u32) {
@@ -391,6 +414,7 @@ impl RenderGraph {
     }
 
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
+        assert!(!self.locked, "RenderGraph: cannot add_pass() after lock()");
         let type_id = pass.as_any().type_id();
         self.pass_index_map.entry(type_id).or_insert(self.passes.len());
         self.passes.push(pass);
@@ -593,15 +617,6 @@ impl RenderGraph {
         // migrated passes that form a write→read chain (tile-memory optimization).
         let mut chain_rp: Option<std::mem::ManuallyDrop<wgpu::RenderPass<'_>>> = None;
 
-        // Build reverse mapping from graph-owned texture view → resource name
-        // so the executor can patch StoreOp::Store → Discard for chain-local attachments.
-        let mut view_to_name: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
-        for (name, _rl) in &self.resources {
-            if let Some(view) = self.pool.get_view(name) {
-                view_to_name.insert(view as *const _ as usize, name.as_str());
-            }
-        }
-
         for (pass_index, pass) in self.passes.iter_mut().enumerate() {
             // GPU-only prebuilt path.
             if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
@@ -679,34 +694,25 @@ impl RenderGraph {
 
             // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
             if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
-                let chain = self.subpass_chains.iter().find(|c| c.contains(&pass_index));
-                let is_chained = chain.is_some();
+                let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
+                let chains_enabled = std::env::var("HELIO_DISABLE_CHAINS").is_err();
+                let is_chained = chains_enabled && cache.map_or(false, |c| !c.chain_range.is_empty());
 
                 if is_chained {
-                    let chain = chain.unwrap();
-                    let subpass_idx = (pass_index - chain.start) as u32;
-
-                    if pass_index == chain.start {
-                        // First pass in chain: patch store ops for resources whose
-                        // last read is within this chain (tile-memory discard).
-                        let mut patched_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = Vec::new();
-                        for opt in desc.color_attachments.iter() {
-                            let mut pushed = opt.clone();
-                            if let Some(att) = &mut pushed {
-                                let key = att.view as *const _ as usize;
-                                if let Some(name) = view_to_name.get(&key) {
-                                    if let Some(rl) = self.resources.get(*name) {
-                                        if rl.last_read_pass < chain.end {
-                                            att.ops.store = wgpu::StoreOp::Discard;
-                                        }
-                                    }
+                    let c = cache.unwrap();
+                    if pass_index == c.chain_range.start {
+                        // First pass in chain: apply cached store-op overrides.
+                        let chain_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
+                            desc.color_attachments.iter().enumerate().map(|(i, opt)| {
+                                let mut a = opt.clone();
+                                if let (Some(att), Some(store)) = (&mut a, c.store_ops.get(i).copied().flatten()) {
+                                    att.ops.store = store;
                                 }
-                            }
-                            patched_atts.push(pushed);
-                        }
+                                a
+                            }).collect();
                         let chain_desc = wgpu::RenderPassDescriptor {
                             label: desc.label,
-                            color_attachments: &patched_atts,
+                            color_attachments: &chain_atts,
                             depth_stencil_attachment: desc.depth_stencil_attachment,
                             timestamp_writes: desc.timestamp_writes,
                             occlusion_query_set: desc.occlusion_query_set,
@@ -719,9 +725,7 @@ impl RenderGraph {
                         };
                         chain_rp = Some(std::mem::ManuallyDrop::new(rp));
                     }
-                    // else: continuation — chain_rp already holds the active render pass.
 
-                    // Execute against the chain's render pass.
                     let scene_resources = scene.resources();
                     let mut ctx = PassContext {
                         encoder_ptr: std::ptr::addr_of_mut!(encoder),
@@ -737,45 +741,35 @@ impl RenderGraph {
                         resources: &visible_frame_resources,
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
-                        subpass_index: subpass_idx,
+                        subpass_index: c.subpass_index,
                         active_render_pass: chain_rp.as_mut().map(|rp| &mut **rp as *mut _ as *mut _),
                         active_compute_pass: None,
                     };
                     pass.execute(&mut ctx)?;
 
-                    // Close the render pass at chain end.
-                    if pass_index + 1 >= chain.end {
+                    if pass_index + 1 >= c.chain_range.end {
                         if let Some(mut rp) = chain_rp.take() {
                             unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
                         }
                     }
                 } else {
-                    // Standalone pass: close any active chain first.
+                    // Standalone (or unlocked graph): close any active chain first.
                     if let Some(mut rp) = chain_rp.take() {
                         unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
                     }
 
-                    // Open, execute, close — one render pass.
-                    // Patch store ops: discard any resource whose last reader is
-                    // this pass, so the driver never flushes it to VRAM.
-                    let mut patched_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = Vec::new();
-                    for opt in desc.color_attachments.iter() {
-                        let mut pushed = opt.clone();
-                        if let Some(att) = &mut pushed {
-                            let key = att.view as *const _ as usize;
-                            if let Some(name) = view_to_name.get(&key) {
-                                if let Some(rl) = self.resources.get(*name) {
-                                    if rl.last_read_pass <= pass_index {
-                                        att.ops.store = wgpu::StoreOp::Discard;
-                                    }
-                                }
+                    // Apply cached store-op overrides (no-ops if cache is None).
+                    let standalone_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
+                        desc.color_attachments.iter().enumerate().map(|(i, opt)| {
+                            let mut a = opt.clone();
+                            if let (Some(att), Some(store)) = (&mut a, cache.and_then(|c| c.store_ops.get(i).copied()).flatten()) {
+                                att.ops.store = store;
                             }
-                        }
-                        patched_atts.push(pushed);
-                    }
+                            a
+                        }).collect();
                     let standalone_desc = wgpu::RenderPassDescriptor {
                         label: desc.label,
-                        color_attachments: &patched_atts,
+                        color_attachments: &standalone_atts,
                         depth_stencil_attachment: desc.depth_stencil_attachment,
                         timestamp_writes: desc.timestamp_writes,
                         occlusion_query_set: desc.occlusion_query_set,
@@ -856,6 +850,131 @@ impl RenderGraph {
         self.frame_count += 1;
 
         Ok(())
+    }
+
+    /// Finalize the graph after all passes have been added.
+    ///
+    /// Pre-computes resource lifetimes, subpass chains, and per-pass descriptor
+    /// data so that `execute()` has zero HashMap lookups and zero heap allocations
+    /// for the hot path. Panics if `add_pass()` is called after this.
+    pub fn lock(&mut self, width: u32, height: u32) {
+        assert!(!self.locked, "RenderGraph::lock() called twice");
+
+        self.internal_w = width;
+        self.internal_h = height;
+        self.output_w = width;
+        self.output_h = height;
+
+        self.pool.clear();
+        self.collect_declarations();
+        // Detect chains BEFORE texture allocation so the allocator can choose
+        // to skip resources whose entire lifetime is within a single chain.
+        self.detect_subpass_chains();
+        self.allocate_textures();
+        self.resources_allocated = true;
+        self.rebuild_gpu_render_bundles();
+
+        // Build canonical FrameResources from graph-owned textures.
+        let mut canon = libhelio::FrameResources::empty();
+        for (name, _) in &self.resources {
+            if let Some(view) = self.pool.get_view(name) {
+                route_named_texture(name, view, &mut canon);
+            }
+        }
+        // Also collect GBuffer views if present.
+        if canon.gbuffer.get().is_none() {
+            let a = self.pool.get_view("gbuffer_albedo");
+            let n = self.pool.get_view("gbuffer_normal");
+            let o = self.pool.get_view("gbuffer_orm");
+            let e = self.pool.get_view("gbuffer_emissive");
+            if let (Some(a), Some(n), Some(o), Some(e)) = (a, n, o, e) {
+                canon.gbuffer.write(
+                    libhelio::GBufferViews { albedo: &a, normal: &n, orm: &o, emissive: &e },
+                    "Graph",
+                );
+            }
+        }
+
+        // Build reverse view→name map from the pool for the descriptor scan.
+        let mut v2n: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+        for (name, _) in &self.resources {
+            if let Some(view) = self.pool.get_view(name) {
+                v2n.insert(view as *const _ as usize, name.as_str());
+            }
+        }
+
+        // Create a tiny throw-away texture for the `target` parameter so we can
+        // call render_pass_descriptor() at lock time (the actual target differs
+        // every frame and is only used as the output attachment — it never
+        // appears in v2n so it gets no store-op override).
+        let dummy_target = {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Lock Dummy Target"),
+                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            tex.create_view(&wgpu::TextureViewDescriptor::default())
+        };
+        // Depth from the graph pool if available, otherwise a 1×1 stand-in.
+        let dummy_depth = self.pool.get_view("depth").cloned()
+            .unwrap_or_else(|| {
+                let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Lock Dummy Depth"),
+                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Depth32Float,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                tex.create_view(&wgpu::TextureViewDescriptor::default())
+            });
+
+        // Pre-compute per-pass cache.
+        self.pass_cache = self.passes.iter().enumerate().map(|(pi, pass)| {
+            let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
+
+            let chain = self.subpass_chains.iter().find(|c| c.contains(&pi));
+            let chain_range = chain.cloned().unwrap_or(0..0);
+            let subpass_index = chain.map_or(0, |c| (pi - c.start) as u32);
+
+            // Determine store ops for each color attachment.
+            let mut store_ops: Vec<Option<wgpu::StoreOp>> = Vec::new();
+            for opt in desc.color_attachments.iter() {
+                let op = opt.as_ref().and_then(|att| {
+                    let key = att.view as *const _ as usize;
+                    let name = v2n.get(&key)?;
+                    let rl = self.resources.get(*name)?;
+                    // If every reader is within this chain, discard.
+                    if rl.last_read_pass < chain_range.end {
+                        Some(wgpu::StoreOp::Discard)
+                    } else {
+                        None
+                    }
+                });
+                store_ops.push(op);
+            }
+
+            Some(CachedPass { store_ops, subpass_index, chain_range })
+        }).collect();
+
+        // Log detected chains.
+        if !self.subpass_chains.is_empty() {
+            let names: Vec<String> = self.subpass_chains.iter().map(|c| {
+                let ns: Vec<&str> = self.passes[c.start..c.end].iter().map(|p| p.name()).collect();
+                format!("  chain {}: {}", c.start, ns.join(" → "))
+            }).collect();
+            eprintln!("[RenderGraph] {} subpass chain(s):", self.subpass_chains.len());
+            for n in &names { eprintln!("{}", n); }
+        }
+
+        self.locked = true;
     }
 
     fn rebuild_gpu_render_bundles(&mut self) {

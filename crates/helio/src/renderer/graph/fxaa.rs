@@ -7,10 +7,12 @@ use helio_pass_light_cull::LightCullPass;
 use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass};
 use helio_v3::RenderGraph;
 
-use crate::scene::Scene;
-use crate::renderer::debug::DebugDrawState;
+use super::{
+    add_common_early_passes, add_final_passes, add_geometry_passes, add_late_passes, new_graph,
+};
 use crate::renderer::config::RendererConfig;
-use super::{add_common_early_passes, add_geometry_passes, add_late_passes, add_final_passes, new_graph};
+use crate::renderer::debug::DebugDrawState;
+use crate::scene::Scene;
 
 /// Full-resolution pipeline with FXAA instead of TAA/TSR.
 ///
@@ -26,7 +28,17 @@ pub fn build_fxaa_graph(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
+    build_fxaa_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+    )
 }
 
 pub fn build_fxaa_graph_external(
@@ -39,7 +51,17 @@ pub fn build_fxaa_graph_external(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay)
+    build_fxaa_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+    )
 }
 
 fn build_fxaa_graph_internal(
@@ -59,7 +81,15 @@ fn build_fxaa_graph_internal(
     let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, w, h,
+        &mut graph,
+        device,
+        scene,
+        &config,
+        debug_state.clone(),
+        debug_camera_buf,
+        cull_stats_buf,
+        w,
+        h,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, w, h)));
@@ -67,20 +97,30 @@ fn build_fxaa_graph_internal(
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
-    let mut deferred_light_pass = DeferredLightPass::new(
-        device, queue, camera_buf, config.surface_format,
-    );
+    let mut deferred_light_pass =
+        DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
-    graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(Arc::clone(&perf))));
+    graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(Arc::clone(
+        &perf,
+    ))));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf))));
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, w, h);
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
-    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
+    add_final_passes(
+        &mut graph,
+        device,
+        queue,
+        &config,
+        &perf,
+        debug_state,
+        debug_camera_buf,
+        debug_overlay,
+    );
 
     graph.init_transients(w, h);
     graph
