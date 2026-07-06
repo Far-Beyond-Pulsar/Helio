@@ -19,6 +19,7 @@ thiserror = { workspace = true }
 wgpu = { workspace = true, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
 pollster = { workspace = true }
 quark = { workspace = true, package = "quark" }
+helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"

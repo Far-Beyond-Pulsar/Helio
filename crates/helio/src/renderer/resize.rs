@@ -62,6 +62,7 @@ impl Renderer {
                 self.debug_state.clone(),
                 &self.debug_camera_buffer,
                 &self.cull_stats_buffer,
+                Some(&self.debug_overlay_shared),
             );
         } else {
             self.graph.set_render_size(internal_w, internal_h);

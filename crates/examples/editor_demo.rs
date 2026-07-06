@@ -175,8 +175,8 @@ impl ApplicationHandler for App {
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
         let graph = build_default_graph(&device, &queue, &scene, config, debug_state.clone(), &debug_camera_buf, &cull_stats_buf, None);
-        let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
-            build_default_graph(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, None)
+        let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay| {
+            build_default_graph(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, debug_overlay)
         });
         let mut renderer = Renderer::new(
             device.clone(), queue.clone(),
