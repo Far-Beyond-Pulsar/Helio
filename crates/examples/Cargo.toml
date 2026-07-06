@@ -154,7 +154,7 @@ path = "corona_demo.rs"
 
 
 [dependencies]
-helio = { workspace = true, features = ["live-portal", "bake"] }
+helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-sdf = { workspace = true }

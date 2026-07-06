@@ -84,27 +84,13 @@
 //! │   └── ScopeGuard::drop() (CPU end)
 //! ├── profiler.scope("GBufferPass") (CPU start)
 //! │   └── ...
-//! └── Results exported to helio-live-portal
+//! └── Results available via Profiler::export_timings()
 //! ```
 //!
-//! # Integration with helio-live-portal
+//! # Data Export
 //!
-//! Profiling results are exported to `helio-live-portal` for real-time telemetry:
-//!
-//! ```text
-//! ┌─────────────────────────────────┐
-//! │ helio-live-portal (Web UI)      │
-//! ├─────────────────────────────────┤
-//! │ ShadowPass:     1.2ms CPU       │
-//! │                 0.8ms GPU       │
-//! ├─────────────────────────────────┤
-//! │ GBufferPass:    2.5ms CPU       │
-//! │                 1.9ms GPU       │
-//! ├─────────────────────────────────┤
-//! │ DeferredLight:  3.1ms CPU       │
-//! │                 2.7ms GPU       │
-//! └─────────────────────────────────┘
-//! ```
+//! Profiling data is available via [`Profiler::export_timings()`] for integration
+//! with external telemetry or custom debug overlays.
 
 mod cpu;
 mod gpu;
@@ -292,7 +278,7 @@ impl Profiler {
     /// Print profiling results to console (blocking - use for debugging only!)
     ///
     /// **Warning**: This blocks the render thread and causes frame hitches.
-    /// For production use, export to helio-live-portal instead via `export_pass_timings()`.
+    /// For production use, use export_pass_timings() instead.
     /// Note: The new DebugOverlayPass replaces the need for console printing.
     #[deprecated(note = "Use the DebugOverlayPass for on-screen display instead")]
     pub fn print_frame_timings(&self) {
@@ -328,10 +314,10 @@ impl Profiler {
         println!("====================\n");
     }
 
-    /// Export profiling data in a format suitable for helio-live-portal.
+    /// Export profiling data for external telemetry systems.
     ///
     /// Returns (pass_timings, total_cpu_ms, total_gpu_ms) for non-blocking transmission
-    /// to the web UI. This is the recommended way to access profiling data.
+    /// to external debug overlays or telemetry backends.
     ///
     /// # Example
     ///
@@ -340,8 +326,8 @@ impl Profiler {
     /// # let graph = RenderGraph::new(&device, &queue);
     /// let (pass_timings, total_cpu_ms, total_gpu_ms) = graph.profiler().export_timings();
     ///
-    /// // Send to helio-live-portal without blocking
-    /// // portal_handle.publish(PortalFrameSnapshot { pass_timings, ... });
+    /// // Forward to custom telemetry system
+    /// // for timing in &pass_timings { ... }
     /// ```
     pub fn export_timings(&self) -> (Vec<PassTiming>, f32, f32) {
         if !self.enabled {
@@ -390,7 +376,7 @@ impl Profiler {
     }
 }
 
-/// Pass timing data for export to helio-live-portal or other telemetry systems.
+/// Pass timing data for export to external debug overlays or telemetry systems.
 #[derive(Clone, Debug)]
 pub struct PassTiming {
     pub name: String,

@@ -243,7 +243,7 @@
 //! - CPU profiling: `RenderGraph` creates scopes for each pass
 //! - GPU profiling: `begin_render_pass` injects timestamp queries
 //! - Zero instrumentation cost (compile-time feature flag `profiling`)
-//! - Results exported to `helio-live-portal` for real-time telemetry
+//! - Results available via `Profiler::export_timings()` for external telemetry
 //!
 //! ## Migration from helio-render-v2
 //!
@@ -290,7 +290,7 @@
 //! 2. **Pre-allocate buffers**: Set initial capacity for managers to avoid GPU buffer reallocations
 //! 3. **Use dirty tracking**: Managers automatically skip uploads when nothing changed
 //! 4. **Avoid per-frame allocations**: All data structures are persistent and reused
-//! 5. **Profile with `profiling` feature**: Monitor CPU/GPU timings in `helio-live-portal`
+//! 5. **Profile with `profiling` feature**: Monitor CPU/GPU timings via `Profiler::export_timings()`
 //!
 //! ## Architecture Patterns
 //!

@@ -142,8 +142,9 @@ impl ResourceBuilder {
         self
     }
 
-    /// Legacy fallback: declare a write with inferred format/size from ResourceSlot name.
-    pub fn write_legacy(&mut self, name: &'static str) {
+    /// Declare a storage-buffer resource written by this pass.
+    /// The graph tracks it for dependency ordering; the pass allocates it manually.
+    pub fn write_buffer(&mut self, name: &'static str) {
         self.declarations.push(ResourceDecl {
             name,
             format: None,

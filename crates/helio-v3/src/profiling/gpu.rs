@@ -329,7 +329,7 @@ impl GpuProfiler {
 /// GPU timestamp result.
 ///
 /// Represents the GPU time for a single pass. Results are collected from async readback
-/// and exported to `helio-live-portal`.
+/// and available for external telemetry systems.
 ///
 /// # Fields
 ///

@@ -1,7 +1,11 @@
 mod config;
 mod debug;
+mod fullscreen;
 mod graph;
+mod render;
 mod renderer_impl;
+mod resize;
+mod setup;
 
 pub use config::{required_wgpu_features, required_wgpu_limits, GiConfig, RendererConfig};
 pub use graph::{

@@ -1,6 +1,9 @@
-//! Camera types and constructors.
+//! Camera types and constructors, and scene camera update logic.
 
 use glam::{Mat4, Vec3};
+use helio_v3::GpuCameraUniforms;
+
+use crate::scene::Scene;
 
 /// Camera parameters for rendering.
 ///
@@ -119,3 +122,61 @@ impl Camera {
     }
 }
 
+impl Scene {
+    /// Update the scene's camera for the current frame.
+    ///
+    /// Computes camera uniforms and uploads them to the GPU. Also stores the
+    /// previous frame's view-projection matrix for temporal effects (TAA, motion blur).
+    ///
+    /// # Parameters
+    /// - `camera`: Camera parameters (view, projection, position, near, far, jitter)
+    ///
+    /// # Performance
+    /// - CPU cost: O(1) - matrix multiplication and uniform construction
+    /// - GPU cost: O(1) - writes to camera uniform buffer
+    ///
+    /// # Temporal Effects
+    ///
+    /// The previous frame's view-projection matrix is stored for:
+    /// - Temporal anti-aliasing (TAA) - reprojection
+    /// - Motion blur - velocity calculation
+    /// - Temporal upsampling - history sampling
+    ///
+    /// # Example
+    /// ```ignore
+    /// use helio::Camera;
+    /// use glam::{Mat4, Vec3};
+    ///
+    /// let camera = Camera::perspective_look_at(
+    ///     Vec3::new(0.0, 5.0, 10.0), // position
+    ///     Vec3::ZERO,                // look_at
+    ///     Vec3::Y,                   // up
+    ///     60.0_f32.to_radians(),     // fov_y
+    ///     16.0 / 9.0,                // aspect
+    ///     0.1,                       // near
+    ///     1000.0,                    // far
+    /// );
+    /// scene.update_camera(camera);
+    /// ```
+    pub fn update_camera(&mut self, camera: Camera) {
+        let uniforms = GpuCameraUniforms::new(
+            camera.view,
+            camera.proj,
+            camera.position,
+            camera.near,
+            camera.far,
+            self.gpu_scene.frame_count as u32,
+            camera.jitter,
+            self.prev_view_proj,
+        );
+        // Store the UNJITTERED view_proj so next frame's motion-vector
+        // reprojection (prev_view_proj) is not contaminated by this frame's jitter.
+        let inv_jitter = Mat4::from_translation(glam::Vec3::new(
+            -camera.jitter[0], -camera.jitter[1], 0.0,
+        ));
+        let unjittered_proj = inv_jitter * camera.proj;
+        self.prev_view_proj = unjittered_proj * camera.view;
+        self.gpu_scene.camera.update(uniforms);
+        self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
+    }
+}

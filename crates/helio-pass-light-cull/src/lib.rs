@@ -201,8 +201,8 @@ impl RenderPass for LightCullPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_legacy("tile_light_lists");
-        builder.write_legacy("tile_light_counts");
+        builder.write_buffer("tile_light_lists");
+        builder.write_buffer("tile_light_counts");
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {

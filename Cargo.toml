@@ -3,7 +3,6 @@ members = [
     "crates/helio-v3",
     "crates/helio",
     "crates/libhelio",
-    "crates/helio-live-portal",
     "crates/helio-asset-compat",
     "crates/examples",
 

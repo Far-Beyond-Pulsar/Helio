@@ -242,7 +242,7 @@ impl<'a> PassContext<'a> {
     /// # Profiling
     ///
     /// - GPU timestamps are written at the start and end of the pass
-    /// - Results are exported to `helio-live-portal` for real-time telemetry
+    /// - Results are available for external telemetry systems
     /// - Zero overhead when `profiling` feature is disabled
     ///
     /// # Example
@@ -293,7 +293,7 @@ impl<'a> PassContext<'a> {
     /// # Profiling
     ///
     /// - GPU timestamps are written at the start and end of the pass
-    /// - Results are exported to `helio-live-portal` for real-time telemetry
+    /// - Results are available for external telemetry systems
     /// - Zero overhead when `profiling` feature is disabled
     ///
     /// # Example
