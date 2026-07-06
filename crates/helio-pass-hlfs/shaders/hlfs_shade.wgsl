@@ -437,8 +437,20 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     var direct_lighting = vec3<f32>(0.0);
     let max_lights = min(globals.light_count, 64u);
     for (var i: u32 = 0u; i < max_lights; i = i + 1u) {
+        let light = lights[i];
+        // Point/spot lights out of range contribute nothing — evaluate_light()
+        // already returns vec3(0) for them, but only *after* shadow_factor()
+        // above it had already paid for a full PCF/PCSS shadow-atlas sample.
+        // With no tiled light culling in this pass (unlike deferred_lighting.wgsl),
+        // every one of up to 64 lights hit this on every pixel; check range first.
+        if light.light_type != 0u {
+            let dist = length(light.position_range.xyz - world_pos);
+            if dist > light.position_range.w {
+                continue;
+            }
+        }
         let vis = shadow_factor(i, world_pos, normal, in.clip_pos.xy, globals.frame);
-        direct_lighting = direct_lighting + evaluate_light(lights[i], world_pos, normal, V, F0, albedo, roughness, metallic, vis);
+        direct_lighting = direct_lighting + evaluate_light(light, world_pos, normal, V, F0, albedo, roughness, metallic, vis);
     }
 
     let ambient = vec3<f32>(0.03);
