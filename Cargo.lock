@@ -2730,7 +2730,6 @@ name = "helio-pass-deferred-light"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "helio",
  "helio-core",
  "libhelio",
  "wgpu 28.0.0",
@@ -2762,7 +2761,6 @@ name = "helio-pass-gbuffer"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "helio",
  "helio-core",
  "libhelio",
  "log",
@@ -2910,7 +2908,6 @@ name = "helio-pass-sky"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "helio",
  "helio-core",
  "libhelio",
  "wgpu 28.0.0",
@@ -2992,7 +2989,6 @@ name = "helio-pass-virtual-geometry"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "helio",
  "helio-core",
  "libhelio",
  "log",
@@ -3013,7 +3009,6 @@ name = "helio-pass-water-sim"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "helio",
  "helio-core",
  "libhelio",
  "wgpu 28.0.0",
@@ -3023,7 +3018,6 @@ dependencies = [
 name = "helio-pass-water-surface"
 version = "0.1.0"
 dependencies = [
- "helio",
  "helio-core",
  "libhelio",
  "wgpu 28.0.0",

@@ -75,23 +75,3 @@ pub(crate) struct CullUniforms {
     pub lod_thresholds: [f32; 7],
     _pad3: f32,
 }
-
-// -- IntoActor implementations -----------------------------------------
-
-use helio::{IntoActor, Scene, VirtualMeshUpload, VirtualObjectDescriptor};
-use helio_core::VirtualObjectId;
-use helio_pass_virtual_geometry::VirtualMeshId;
-
-impl IntoActor for VirtualMeshUpload {
-    type Id = VirtualMeshId;
-    fn insert(self, scene: &mut Scene) -> VirtualMeshId {
-        scene.insert_virtual_mesh(self)
-    }
-}
-
-impl IntoActor for VirtualObjectDescriptor {
-    type Id = VirtualObjectId;
-    fn insert(self, scene: &mut Scene) -> VirtualObjectId {
-        scene.insert_virtual_object(self).unwrap()
-    }
-}

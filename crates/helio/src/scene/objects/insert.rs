@@ -75,7 +75,7 @@ impl super::super::Scene {
     /// Increments the reference count for the mesh and material. They cannot be removed
     /// while this object exists. Call [`remove_object`](crate::Scene::remove_object) to
     /// decrement reference counts.
-    pub fn insert_object(&mut self, desc: ObjectDescriptor) -> Result<ObjectId> {
+    pub(in crate::scene) fn insert_object(&mut self, desc: ObjectDescriptor) -> Result<ObjectId> {
         let mesh_slice = {
             let mesh = self
                 .mesh_pool

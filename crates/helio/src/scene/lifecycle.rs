@@ -7,54 +7,60 @@
 use glam::Mat4;
 use libhelio::sky::SkyContext;
 
-use crate::scene::IntoActor;
 use crate::scene::Scene;
 use crate::scene::SceneActorTrait;
 
 impl Scene {
     /// Remove every object, light, mesh, material, and texture from the scene.
+    ///
+    /// This is the efficient path for batch renderers that swap the entire scene
+    /// between frames. Objects are removed first, which cascades through the full
+    /// reference-count chain:
+    ///   `remove_object` → `remove_mesh` + `remove_material` → `remove_texture`
+    /// so no manual ID tracking is required by the caller.
+    ///
+    /// Calls `flush()` before returning so GPU buffers are synchronised.
     pub fn clear(&mut self) {
+        // Collect all handles before mutating — iterators are invalidated by removal.
         let object_ids: Vec<_> = self.objects.iter_with_handles().map(|(id, _)| id).collect();
         let light_ids:  Vec<_> = self.lights.iter_with_handles().map(|(id, _)| id).collect();
 
+        // Objects first: the cascade frees meshes, materials, and textures.
         for id in object_ids {
             let _ = self.remove_object(id);
         }
+
         for id in light_ids {
             let _ = self.remove_light(id);
         }
 
+        // Drop all boxed actors.  Each actor holds any state it accumulated
+        // during its lifetime (e.g. the MeshActor's Option<MeshUpload> is
+        // already None after on_attach, but other actor types may hold data).
         self.custom_actors.clear();
+
         self.flush();
     }
 
-    /// Insert a value into the scene via the [`IntoActor`] trait.
+    /// Insert a custom trait-based scene actor.
     ///
-    /// Each type implementing `IntoActor` knows which scene method to call
-    /// and what handle type to return.  Implementations live in the pass
-    /// crate that renders the type.
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// let mesh_id: MeshId = scene.insert_actor(MeshUpload { vertices, indices });
-    /// ```
-    pub fn insert_actor<A: IntoActor>(&mut self, actor: A) -> A::Id {
-        actor.insert(self)
-    }
-
-    /// Register a custom actor with per-frame lifecycle callbacks.
-    pub fn register_custom_actor<A: SceneActorTrait + 'static>(&mut self, actor: A) {
+    /// This can be e.g. `SceneActor::Sky`, `MeshActor`, `LightActor`, or other custom actors.
+    pub fn insert_actor<A: SceneActorTrait + 'static>(&mut self, mut actor: A) -> crate::scene::actor::SceneActorId {
+        actor.on_attach(self);
+        let id = actor.inserted_id();
         self.custom_actors.push(Box::new(actor));
+        id
     }
 
     /// Returns effective sky context for the current frame.
     pub fn sky_context(&self) -> SkyContext {
+        // First preference: explicit sky actor.
         for actor in self.custom_actors.iter() {
             if let Some(sky) = actor.sky_context() {
                 return sky;
             }
         }
+
         SkyContext::default()
     }
 

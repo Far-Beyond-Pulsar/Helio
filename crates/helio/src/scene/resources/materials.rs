@@ -17,11 +17,11 @@ use super::super::types::MaterialRecord;
 /// Tombstone material used when a material slot is freed (preserves slot stability).
 fn tombstone_material() -> GpuMaterial {
     GpuMaterial {
-    tex_base_color: GpuMaterial::NO_TEXTURE,
-    tex_normal: GpuMaterial::NO_TEXTURE,
-    tex_roughness: GpuMaterial::NO_TEXTURE,
-    tex_emissive: GpuMaterial::NO_TEXTURE,
-    tex_occlusion: GpuMaterial::NO_TEXTURE,
+        tex_base_color: GpuMaterial::NO_TEXTURE,
+        tex_normal: GpuMaterial::NO_TEXTURE,
+        tex_roughness: GpuMaterial::NO_TEXTURE,
+        tex_emissive: GpuMaterial::NO_TEXTURE,
+        tex_occlusion: GpuMaterial::NO_TEXTURE,
         ..GpuMaterial::zeroed()
     }
 }
@@ -316,7 +316,7 @@ impl super::super::Scene {
     /// Returns an error if any texture ID is invalid.
     pub(in crate::scene) fn validate_material_textures(
         &self,
-    textures: &MaterialTextures,
+        textures: &MaterialTextures,
     ) -> Result<()> {
         let mut validation = Ok(());
         each_material_texture_ref(textures, |texture| {
@@ -335,8 +335,8 @@ impl super::super::Scene {
     /// Used when materials are inserted, updated, or removed to track texture usage.
     pub(in crate::scene) fn bump_texture_refs(
         &mut self,
-    textures: &MaterialTextures,
-    delta: i32,
+        textures: &MaterialTextures,
+        delta: i32,
     ) -> Result<()> {
         for texture in [
             textures.base_color,

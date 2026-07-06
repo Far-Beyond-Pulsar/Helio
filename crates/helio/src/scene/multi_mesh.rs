@@ -31,7 +31,7 @@ use super::errors::{invalid, Result};
 ///
 /// Stored under [`SectionedInstanceId`] in the scene's `sectioned_instances` pool.
 /// The reverse mapping `ObjectId → SectionedInstanceId` lives in `section_to_instance`.
-pub pub(crate) struct SectionedInstanceRecord {
+pub(crate) struct SectionedInstanceRecord {
     /// One draw-call `ObjectId` per material section (same order as the `materials`
     /// slice passed to [`Scene::insert_sectioned_object`]).
     pub section_objects: Vec<ObjectId>,
@@ -117,11 +117,11 @@ impl super::Scene {
     /// - `InvalidHandle` if any `MaterialId` in `materials` is invalid.
     pub fn insert_sectioned_object(
         &mut self,
-    multi_mesh: MultiMeshId,
-    materials: &[MaterialId],
-    transform: Mat4,
-    bounds: [f32; 4],
-    movability: Option<libhelio::Movability>,
+        multi_mesh: MultiMeshId,
+        materials: &[MaterialId],
+        transform: Mat4,
+        bounds: [f32; 4],
+        movability: Option<libhelio::Movability>,
     ) -> Result<SectionedInstanceId> {
         // Snapshot the section mesh IDs — avoids holding a borrow into multi_meshes
         // while we mutably call insert_object.
@@ -174,8 +174,8 @@ impl super::Scene {
     /// O(N) where N = section count (typically 2–8).
     pub fn update_sectioned_object_transform(
         &mut self,
-    id: SectionedInstanceId,
-    transform: Mat4,
+        id: SectionedInstanceId,
+        transform: Mat4,
     ) -> Result<()> {
         let section_objects = self
             .sectioned_instances

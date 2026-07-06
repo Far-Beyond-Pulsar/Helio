@@ -699,23 +699,3 @@ fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     })
 }
 
-
-// -- IntoActor implementations -----------------------------------------
-
-use helio::{IntoActor, MeshUpload, ObjectDescriptor, Scene};
-use helio_core::ObjectId;
-use helio_core::MeshId;
-
-impl IntoActor for MeshUpload {
-    type Id = MeshId;
-    fn insert(self, scene: &mut Scene) -> MeshId {
-        scene.insert_mesh(self)
-    }
-}
-
-impl IntoActor for ObjectDescriptor {
-    type Id = ObjectId;
-    fn insert(self, scene: &mut Scene) -> ObjectId {
-        scene.insert_object(self).unwrap()
-    }
-}

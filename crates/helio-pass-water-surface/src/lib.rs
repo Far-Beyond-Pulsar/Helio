@@ -21,15 +21,3 @@ impl RenderPass for WaterSurfacePass {
         Ok(())
     }
 }
-
-// -- IntoActor implementations -----------------------------------------
-
-use helio::{IntoActor, Scene, WaterVolumeDescriptor};
-use helio_core::WaterVolumeId;
-
-impl IntoActor for WaterVolumeDescriptor {
-    type Id = WaterVolumeId;
-    fn insert(self, scene: &mut Scene) -> WaterVolumeId {
-        scene.insert_water_volume(self).unwrap()
-    }
-}

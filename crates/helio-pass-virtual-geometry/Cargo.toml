@@ -7,7 +7,6 @@ description = "GPU-driven virtual geometry pass: per-meshlet frustum + backface-
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 helio-core = { workspace = true }
 libhelio = { workspace = true }

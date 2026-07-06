@@ -1102,15 +1102,3 @@ impl RenderPass for WaterSimPass {
         Ok(())
     }
 }
-
-// -- IntoActor implementations -----------------------------------------
-
-use helio::{IntoActor, Scene, WaterHitboxDescriptor};
-use helio_core::WaterHitboxId;
-
-impl IntoActor for WaterHitboxDescriptor {
-    type Id = WaterHitboxId;
-    fn insert(self, scene: &mut Scene) -> WaterHitboxId {
-        scene.insert_water_hitbox(self).unwrap()
-    }
-}

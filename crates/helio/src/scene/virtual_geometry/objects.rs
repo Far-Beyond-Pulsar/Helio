@@ -57,9 +57,9 @@ impl super::super::Scene {
     ///     groups: GroupMask::NONE,       // Always visible
     /// })?;
     /// ```
-    pub fn insert_virtual_object(
+    pub(in crate::scene) fn insert_virtual_object(
         &mut self,
-    desc: VirtualObjectDescriptor,
+        desc: VirtualObjectDescriptor,
     ) -> Result<VirtualObjectId> {
         let record = self
             .vg_meshes
@@ -125,8 +125,8 @@ impl super::super::Scene {
     /// ```
     pub fn update_virtual_object_transform(
         &mut self,
-    id: VirtualObjectId,
-    transform: Mat4,
+        id: VirtualObjectId,
+        transform: Mat4,
     ) -> Result<()> {
         let Some((_, record)) = self.vg_objects.get_mut_with_index(id) else {
             return Err(invalid("virtual_object"));

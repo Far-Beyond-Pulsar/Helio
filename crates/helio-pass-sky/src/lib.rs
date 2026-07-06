@@ -347,14 +347,3 @@ impl RenderPass for SkyPass {
 
 }
 
-
-// -- IntoActor implementations -----------------------------------------
-
-use helio::{IntoActor, Scene};
-
-impl IntoActor for helio::SkyActor {
-    type Id = ();
-    fn insert(self, scene: &mut Scene) {
-        scene.set_sky_context(self.context());
-    }
-}

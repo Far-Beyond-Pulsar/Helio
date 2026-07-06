@@ -939,15 +939,3 @@ fn black_cube_texture(
     });
     (texture, view)
 }
-
-// -- IntoActor implementations -----------------------------------------
-
-use helio::{GpuLight, IntoActor, Scene};
-use helio_core::LightId;
-
-impl IntoActor for GpuLight {
-    type Id = LightId;
-    fn insert(self, scene: &mut Scene) -> LightId {
-        scene.insert_light_with_movability(self, None, 0)
-    }
-}

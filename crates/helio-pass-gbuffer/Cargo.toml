@@ -6,7 +6,6 @@ description = "Helio render pass: helio-pass-gbuffer"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-helio = { workspace = true }
 helio-core  = { workspace = true }
 libhelio  = { workspace = true }
 wgpu      = { workspace = true }

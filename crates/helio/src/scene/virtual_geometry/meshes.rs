@@ -18,7 +18,7 @@ impl super::super::Scene {
     /// Uses meshoptimizer for LOD simplification and meshlet building. Generates
     /// 8 LOD levels and decomposes each into spatially coherent meshlets with
     /// tight bounding spheres and backface cones.
-    pub fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
+    pub(in crate::scene) fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
         // Generate 8 LOD levels via meshopt simplification.
         let lod_meshes = generate_lod_meshes(&upload.vertices, &upload.indices);
 

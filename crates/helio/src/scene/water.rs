@@ -99,8 +99,8 @@ impl Scene {
     /// ```
     pub fn update_water_volume(
         &mut self,
-    id: WaterVolumeId,
-    desc: WaterVolumeDescriptor,
+        id: WaterVolumeId,
+        desc: WaterVolumeDescriptor,
     ) -> Result<()> {
         let (index, record) = self
             .water_volumes
@@ -143,7 +143,7 @@ impl Scene {
 
     /// Get a zero-allocation view of the GPU water volume array.
     pub fn get_water_volumes_gpu_slice(&self) -> &[GpuWaterVolume] {
-    bytemuck::cast_slice(self.water_volumes.dense.as_slice())
+        bytemuck::cast_slice(self.water_volumes.dense.as_slice())
     }
 
     /// Get the number of water volumes in the scene.
@@ -245,8 +245,8 @@ impl Scene {
     /// set `new_min/max` to the object's current world-space AABB.
     pub fn update_water_hitbox(
         &mut self,
-    id: WaterHitboxId,
-    desc: WaterHitboxDescriptor,
+        id: WaterHitboxId,
+        desc: WaterHitboxDescriptor,
     ) -> Result<()> {
         let (index, record) = self
             .water_hitboxes
@@ -276,7 +276,7 @@ impl Scene {
     /// This avoids constructing a temporary `Vec` each frame when hitboxes
     /// are uploaded to the GPU from the renderer.
     pub fn get_water_hitboxes_gpu_slice(&self) -> &[GpuWaterHitbox] {
-    bytemuck::cast_slice(self.water_hitboxes.dense.as_slice())
+        bytemuck::cast_slice(self.water_hitboxes.dense.as_slice())
     }
 
     /// Returns the current dirty hitbox upload range, if any.

@@ -32,134 +32,134 @@ use super::types::{
 /// See the [module-level documentation](crate::scene) for architecture details and usage examples.
 pub struct Scene {
     /// GPU scene resources (buffers, bind groups, etc.)
-    pub gpu_scene: GpuScene,
+    pub(in crate::scene) gpu_scene: GpuScene,
 
     /// Mesh pool (shared vertex/index buffers)
-    pub mesh_pool: MeshPool,
+    pub(in crate::scene) mesh_pool: MeshPool,
 
     /// Texture pool (sparse array with reference counting)
-    pub textures: SparsePool<TextureRecord, TextureId>,
+    pub(in crate::scene) textures: SparsePool<TextureRecord, TextureId>,
 
     /// Texture binding version (increments on add/remove)
-    pub texture_binding_version: u64,
+    pub(in crate::scene) texture_binding_version: u64,
 
     /// Material texture storage buffer (GPU-side texture descriptors)
-    pub material_textures: GrowableBuffer<crate::material::GpuMaterialTextures>,
+    pub(in crate::scene) material_textures: GrowableBuffer<crate::material::GpuMaterialTextures>,
 
     /// Placeholder texture (1x1 white)
-    pub _placeholder_texture: wgpu::Texture,
+    pub(in crate::scene) _placeholder_texture: wgpu::Texture,
 
     /// Placeholder texture view
-    pub placeholder_view: wgpu::TextureView,
+    pub(in crate::scene) placeholder_view: wgpu::TextureView,
 
     /// Placeholder sampler
-    pub placeholder_sampler: wgpu::Sampler,
+    pub(in crate::scene) placeholder_sampler: wgpu::Sampler,
 
     /// Material pool (sparse array with reference counting)
-    pub materials: SparsePool<MaterialRecord, MaterialId>,
+    pub(in crate::scene) materials: SparsePool<MaterialRecord, MaterialId>,
 
     /// Light pool (dense array)
-    pub lights: DenseArena<LightRecord, LightId>,
+    pub(in crate::scene) lights: DenseArena<LightRecord, LightId>,
 
     /// Object pool (dense array)
-    pub objects: DenseArena<ObjectRecord, ObjectId>,
+    pub(in crate::scene) objects: DenseArena<ObjectRecord, ObjectId>,
 
     /// True when the objects list has changed and the GPU instance/draw_call/indirect
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
-    pub objects_dirty: bool,
+    pub(in crate::scene) objects_dirty: bool,
 
     /// True when the scene layout has been optimized (sorted by mesh+material for instancing).
     /// When false, objects use persistent slots (1 draw per object, O(1) add/remove).
     /// When true, objects are sorted for cache coherency (instanced batching).
-    pub objects_layout_optimized: bool,
+    pub(in crate::scene) objects_layout_optimized: bool,
 
     /// True when a Static or Stationary object has been added or removed since the last
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
-    pub static_objects_dirty: bool,
+    pub(in crate::scene) static_objects_dirty: bool,
 
     /// True when static/stationary geometry or lights have been added since the last bake.
     /// When this is true and a bake was previously configured, the user must explicitly
     /// call auto_bake() again to rebake the scene with the new static content.
-    pub bake_invalidated: bool,
+    pub(in crate::scene) bake_invalidated: bool,
 
     /// True when objects have been added or removed via persistent-mode delta operations.
     /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
     /// indirect buffers must be explicitly rebuilt on the next flush.
-    pub shadow_partition_dirty: bool,
+    pub(in crate::scene) shadow_partition_dirty: bool,
 
     /// Previous frame's view-projection matrix (for temporal effects)
-    pub prev_view_proj: glam::Mat4,
+    pub(in crate::scene) prev_view_proj: glam::Mat4,
 
     /// Bitmask of currently hidden groups — bit N = GroupId(N) is hidden.
     /// An object is invisible if any of its groups intersects this mask.
-    pub group_hidden: GroupMask,
+    pub(in crate::scene) group_hidden: GroupMask,
 
     /// Generation counter for movable objects - increments when any Movable object's transform changes.
     /// Used by shadow caching to detect when Movable objects move.
-    pub movable_objects_generation: u64,
+    pub(in crate::scene) movable_objects_generation: u64,
 
     /// Generation counter for movable lights - increments when any Movable light's position/direction changes.
     /// Used by shadow caching to detect when Movable lights move.
-    pub movable_lights_generation: u64,
+    pub(in crate::scene) movable_lights_generation: u64,
 
     /// Per-frame custom trait-based scene actors.
-    pub custom_actors: Vec<Box<dyn SceneActorTrait>>,
+    pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
 
     // ── Virtual geometry ──────────────────────────────────────────────────────
     /// All uploaded virtual meshes keyed by their handle.
-    pub vg_meshes: HashMap<VirtualMeshId, VirtualMeshRecord>,
+    pub(in crate::scene) vg_meshes: HashMap<VirtualMeshId, VirtualMeshRecord>,
 
     /// Next free VirtualMeshId slot counter (monotonically increasing).
-    pub vg_next_mesh_id: u32,
+    pub(in crate::scene) vg_next_mesh_id: u32,
 
     /// Dense array of virtual objects (one entry per `insert_virtual_object` call).
-    pub vg_objects: DenseArena<VirtualObjectRecord, VirtualObjectId>,
+    pub(in crate::scene) vg_objects: DenseArena<VirtualObjectRecord, VirtualObjectId>,
 
     /// Set when VG topology or transforms change; triggers `rebuild_vg_buffers()`.
-    pub vg_objects_dirty: bool,
+    pub(in crate::scene) vg_objects_dirty: bool,
 
     /// Monotonically increasing counter forwarded to `VgFrameData::buffer_version`.
     /// The VG pass re-uploads GPU buffers only when this advances.
-    pub vg_buffer_version: u64,
+    pub(in crate::scene) vg_buffer_version: u64,
 
     /// Flattened meshlet entries for the current VG layout (rebuilt when dirty).
-    pub vg_cpu_meshlets: Vec<libhelio::GpuMeshletEntry>,
+    pub(in crate::scene) vg_cpu_meshlets: Vec<libhelio::GpuMeshletEntry>,
 
     /// Instance data for all VG objects (one entry per VG object, in order).
-    pub vg_cpu_instances: Vec<helio_core::GpuInstanceData>,
+    pub(in crate::scene) vg_cpu_instances: Vec<helio_core::GpuInstanceData>,
 
     // ── Water volumes ─────────────────────────────────────────────────────────
     /// Water volumes (dense array)
-    pub water_volumes: DenseArena<WaterVolumeRecord, WaterVolumeId>,
+    pub(in crate::scene) water_volumes: DenseArena<WaterVolumeRecord, WaterVolumeId>,
 
     /// Set when water volumes are added/removed/updated
-    pub water_volumes_dirty: bool,
+    pub(in crate::scene) water_volumes_dirty: bool,
 
     /// Dirty range of water volumes that need GPU upload.
-    pub water_volumes_dirty_range: Option<(usize, usize)>,
+    pub(in crate::scene) water_volumes_dirty_range: Option<(usize, usize)>,
 
     // ── Water hitboxes ────────────────────────────────────────────────────────
     /// AABB hitboxes that displace the water heightfield simulation
-    pub water_hitboxes: DenseArena<WaterHitboxRecord, WaterHitboxId>,
+    pub(in crate::scene) water_hitboxes: DenseArena<WaterHitboxRecord, WaterHitboxId>,
 
     /// Set when hitboxes are added/removed/updated
-    pub water_hitboxes_dirty: bool,
+    pub(in crate::scene) water_hitboxes_dirty: bool,
 
     /// Dirty range of water hitboxes that need GPU upload.
-    pub water_hitboxes_dirty_range: Option<(usize, usize)>,
+    pub(in crate::scene) water_hitboxes_dirty_range: Option<(usize, usize)>,
     // ── Multi-material (sectioned) meshes ─────────────────────────────────────
     /// Sectioned mesh assets: one record per `insert_sectioned_mesh` call.
     /// Each record stores N `MeshId`s (one per section) all sharing the same vertex buffer.
-    pub multi_meshes: SparsePool<MultiMeshRecord, MultiMeshId>,
+    pub(in crate::scene) multi_meshes: SparsePool<MultiMeshRecord, MultiMeshId>,
 
     /// Placed sectioned mesh instances.  Each entry owns N `ObjectId`s (one per section)
     /// and back-references the `MultiMeshId` asset it was created from.
-    pub sectioned_instances:
+    pub(in crate::scene) sectioned_instances:
         SparsePool<SectionedInstanceRecord, SectionedInstanceId>,
 
     /// Reverse lookup: given any section's `ObjectId`, find the owning `SectionedInstanceId`.
     /// Populated by `insert_sectioned_object` and cleaned up by `remove_sectioned_object`.
-    pub section_to_instance: HashMap<ObjectId, SectionedInstanceId>,
+    pub(in crate::scene) section_to_instance: HashMap<ObjectId, SectionedInstanceId>,
 }
 
 impl Scene {
