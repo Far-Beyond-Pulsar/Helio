@@ -5,6 +5,7 @@ use bytemuck::{Pod, Zeroable};
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TonemapOperator {
+    None = 5,       // skip tonemapping entirely (default)
     Aces = 0,
     Filmic = 1,
     Reinhard = 2,
@@ -152,7 +153,7 @@ impl Default for GpuPostProcessUniforms {
             white_balance_enabled: 0,
             pad_wb: 0.0,
 
-            tonemap_operator: TonemapOperator::Aces as u32,
+            tonemap_operator: TonemapOperator::None as u32,
             tonemap_exposure: 1.0,
             tonemap_white_point: 1.0,
             pad_tm: 0.0,
@@ -390,7 +391,7 @@ impl Default for PostProcessSettings {
             white_tint: 0.0,
             white_balance_enabled: false,
 
-            tonemap_operator: TonemapOperator::Aces,
+            tonemap_operator: TonemapOperator::None,
             tonemap_exposure: 1.0,
             tonemap_white_point: 1.0,
 
@@ -435,9 +436,8 @@ impl Default for PostProcessSettings {
 
 // ── GpuPostProcessVolume ───────────────────────────────────────────────────────
 //
-// Per-volume GPU struct for future per-pixel volume evaluation.
-// For v1, CPU-side blending is used instead; this struct is defined for
-// forward-compatibility and the storage buffer layout.
+// Per-volume GPU struct read by the cs_volume_blend compute shader.
+// The `unbound` flag marks volumes that apply regardless of camera position.
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -447,7 +447,8 @@ pub struct GpuPostProcessVolume {
     pub priority: f32,
     pub blend_radius: f32,
     pub blend_weight: f32,         // 0-1, global volume opacity
-    pub pad: [f32; 3],
+    pub unbound: u32,              // 0 = bounded, 1 = applies everywhere
+    pub _pad: [f32; 2],
     pub settings: GpuPostProcessUniforms,
 }
 
@@ -486,7 +487,8 @@ impl PostProcessVolumeDescriptor {
             priority: self.priority,
             blend_radius: self.blend_radius,
             blend_weight: self.blend_weight,
-            pad: [0.0; 3],
+            unbound: self.unbound as u32,
+            _pad: [0.0; 2],
             settings: self.settings.to_gpu(),
         }
     }
@@ -671,11 +673,12 @@ fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
         white_balance_enabled: gpu.white_balance_enabled != 0,
 
         tonemap_operator: match gpu.tonemap_operator {
+            0 => TonemapOperator::Aces,
             1 => TonemapOperator::Filmic,
             2 => TonemapOperator::Reinhard,
             3 => TonemapOperator::Uncharted2,
             4 => TonemapOperator::Lottes,
-            _ => TonemapOperator::Aces,
+            _ => TonemapOperator::None,
         },
         tonemap_exposure: gpu.tonemap_exposure,
         tonemap_white_point: gpu.tonemap_white_point,

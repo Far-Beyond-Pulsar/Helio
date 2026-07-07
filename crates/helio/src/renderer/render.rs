@@ -190,14 +190,20 @@ impl Renderer {
         }
 
         {
-            let camera_pos = camera.position.to_array();
-            let volumes = if pp_count > 0 {
-                self.scene.get_post_process_volumes_gpu_slice()
-            } else {
-                &[]
-            };
-            let pp = libhelio::PostProcessBlender::blend(camera_pos, volumes, &camera.postprocess_settings);
+            // Upload camera defaults as base; GPU volume blending (in PostProcessPass)
+            // will blend toward active volumes if any are present.
+            let pp = camera.postprocess_settings.to_gpu();
             self.queue.write_buffer(&self.postprocess_buffer, 0, bytemuck::bytes_of(&pp));
+
+            // Gate bloom: conservative when volumes exist since a volume may enable it.
+            let bloom_visible = if pp_count > 0 {
+                true
+            } else {
+                pp.bloom_intensity > 0.001 && pp.bloom_enabled != 0
+            };
+            if let Some(pp_pass) = self.graph.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {
+                pp_pass.set_bloom_active(bloom_visible);
+            }
         }
 
         let mut texture_views = ArrayVec::<&wgpu::TextureView, { crate::material::MAX_TEXTURES }>::new();

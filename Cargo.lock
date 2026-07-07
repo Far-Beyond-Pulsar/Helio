@@ -2591,6 +2591,7 @@ dependencies = [
  "glam 0.33.0",
  "helio-bake",
  "helio-core",
+ "helio-pass-postprocess",
  "image",
  "libhelio",
  "log",

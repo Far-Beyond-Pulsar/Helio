@@ -30,6 +30,7 @@ helio-core = { path = "crates/helio-core" }
 helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-taa = { path = "crates/helio-pass-taa" }
+helio-pass-postprocess = { path = "crates/helio-pass-postprocess" }
 helio = { path = "crates/helio" }
 libhelio = { path = "crates/libhelio" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }

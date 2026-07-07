@@ -1,50 +1,56 @@
 // ── Helio Post-Processing Pipeline ─────────────────────────────────────────────
 //
-// Two bind groups:
-//   @group(0) — main: uniforms, samplers, hdr/depth inputs, bloom sampled, avg_lum
+// Bind groups:
+//   @group(0) — main: uniforms, samplers, hdr/depth inputs, bloom sampled, avg_lum,
+//               noise, custom params, volume data, blend output
 //   @group(1) — bloom compute: per-dispatch src (sampled) + dst (storage write)
 //
 // Entry points:
-//   cs_exposure           — compute: luminance histogram → average log-luminance
-//   cs_bloom_down_extract — compute: extract brights from HDR → bloom mip 0
-//   cs_bloom_down         — compute: 2x downsample from bloom_src → bloom_dst
-//   vs_fullscreen         — vertex: fullscreen triangle
-//   fs_uber               — fragment: tonemap + color grade + vignette + CA + grain
+//   cs_exposure              — compute: luminance histogram → avg log-luminance
+//   cs_volume_blend          — compute: blend active post-process volumes → output
+//   cs_bloom_down_extract    — compute: extract brights from HDR → bloom mip 0
+//   cs_bloom_down            — compute: 2x downsample from bloom_src → bloom_dst
+//   vs_fullscreen            — vertex: fullscreen triangle
+//   fs_uber                  — fragment: effects chain (see INJECTION_POINT markers)
 //
 // Effect order (uber pass):
+//   INJECTION_POINT_0  — user effects (pre-blend)
 //   1. Exposure scale
-//   2. Bloom composite (sum of all 5 mip levels)
-//   3. Color grading (saturation, contrast, gamma, gain, offset)
+//   2. Bloom composite
+//   3. Color grading
 //   4. White balance
 //   5. Tonemapping
+//   INJECTION_POINT_1  — user effects (post-tonemap)
 //   6. Vignette
 //   7. Chromatic aberration
 //   8. Film grain
+//   INJECTION_POINT_2  — user effects (post-grain)
+//   9. Depth of Field
+//   10. Motion blur
+//   INJECTION_POINT_3  — user effects (final)
 
 // ── Constants ───────────────────────────────────────────────────────────────────
 
 const PI: f32 = 3.14159265359;
-const WG: u32 = 256u;
-const BLOOM_MIPS: u32 = 5u;
+const WG_BLOOM: u32 = 8u;
+const WG_EXPOSURE_X: u32 = 16u;
+const WG_EXPOSURE_Y: u32 = 16u;
+const MAX_PP_VOLUMES: u32 = 256u;
 
-// ── Uniforms ───────────────────────────────────────────────────────────────────
+// ── GpuPostProcessUniforms ─────────────────────────────────────────────────────
+// Matches CPU-side layout in libhelio/src/postprocess.rs
 
 struct GpuPostProcessUniforms {
-    // Exposure (16 bytes)
     exposure_mode:          u32,
     exposure_compensation:  f32,
     exposure_min:           f32,
     exposure_max:           f32,
-
-    // Bloom (32 bytes)
     bloom_intensity:        f32,
     bloom_threshold:        f32,
     bloom_knee:             f32,
     bloom_radius:           f32,
     bloom_tint:             vec3<f32>,
     bloom_enabled:          u32,
-
-    // Color grading (48 bytes)
     color_saturation:       vec3<f32>,
     _pad4:                  f32,
     color_contrast:         vec3<f32>,
@@ -55,40 +61,28 @@ struct GpuPostProcessUniforms {
     _pad7:                  f32,
     color_offset:           vec3<f32>,
     _pad8:                  f32,
-
-    // White balance (16 bytes)
     white_temp:             f32,
     white_tint:             f32,
     white_balance_enabled:  u32,
     _pad9:                  f32,
-
-    // Tonemap (16 bytes)
     tonemap_operator:       u32,
     tonemap_exposure:       f32,
     tonemap_white_point:    f32,
     _pad10:                 f32,
-
-    // Vignette (32 bytes)
     vignette_intensity:     f32,
     vignette_smoothness:    f32,
     vignette_roundness:     f32,
     _pad_vignette:          f32,
     vignette_color:         vec3<f32>,
     vignette_enabled:       u32,
-
-    // Chromatic aberration (16 bytes)
     ca_intensity:           f32,
     ca_start_offset:        f32,
     ca_enabled:             u32,
     _pad11:                 f32,
-
-    // Film grain (16 bytes)
     grain_intensity:        f32,
     grain_response:         f32,
     grain_size:             f32,
     grain_enabled:          u32,
-
-    // Depth of Field (32 bytes)
     dof_focal_distance:     f32,
     dof_focal_region:       f32,
     dof_near_transition:    f32,
@@ -97,14 +91,10 @@ struct GpuPostProcessUniforms {
     dof_max_bokeh_size:     f32,
     dof_enabled:            u32,
     _pad12:                 f32,
-
-    // Motion blur (16 bytes)
     motion_blur_amount:     f32,
     motion_blur_max:        f32,
     motion_blur_enabled:    u32,
     _pad13:                 f32,
-
-    // Blend weights (32 bytes)
     blend_weight_bloom:        f32,
     blend_weight_dof:          f32,
     blend_weight_motion_blur:  f32,
@@ -126,7 +116,20 @@ struct CameraUniforms {
     prev_view_proj: mat4x4<f32>,
 }
 
-// ── Group 0: main bindings (shared across all entry points) ────────────────────
+// ── GpuPostProcessVolume (matches CPU-side layout) ─────────────────────────────
+
+struct GpuPostProcessVolume {
+    bounds_min:     vec4<f32>,
+    bounds_max:     vec4<f32>,
+    priority:       f32,
+    blend_radius:   f32,
+    blend_weight:   f32,
+    unbound:        u32,
+    _pad_vol:       vec2<f32>,
+    settings:       GpuPostProcessUniforms,
+}
+
+// ── Group 0: main bindings ─────────────────────────────────────────────────────
 
 @group(0) @binding(0)  var<uniform>            postprocess:  GpuPostProcessUniforms;
 @group(0) @binding(1)  var<uniform>            camera:       CameraUniforms;
@@ -134,21 +137,19 @@ struct CameraUniforms {
 @group(0) @binding(3)  var                     depth_input:  texture_depth_2d;
 @group(0) @binding(4)  var                     linear_samp:  sampler;
 @group(0) @binding(5)  var                     point_samp:   sampler;
-// Bloom mips as sampled textures (read by fs_uber to composite bloom)
 @group(0) @binding(6)  var                     bloom_0:      texture_2d<f32>;
 @group(0) @binding(7)  var                     bloom_1:      texture_2d<f32>;
 @group(0) @binding(8)  var                     bloom_2:      texture_2d<f32>;
 @group(0) @binding(9)  var                     bloom_3:      texture_2d<f32>;
 @group(0) @binding(10) var                     bloom_4:      texture_2d<f32>;
-// Auto-exposure luminance average
 @group(0) @binding(11) var<storage, read_write> avg_luminance: array<f32>;
-// Custom effect infrastructure: noise texture + params buffer
 @group(0) @binding(12) var                     noise_tex:    texture_2d<f32>;
 @group(0) @binding(13) var                     noise_samp:   sampler;
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
+@group(0) @binding(15) var<storage, read>      pp_volumes:   array<GpuPostProcessVolume>;
+@group(0) @binding(16) var<storage, read_write> blend_output: GpuPostProcessUniforms;
 
 // ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
-// Bound only during bloom compute passes. src unused by cs_bloom_down_extract.
 
 @group(1) @binding(0) var bloom_src: texture_2d<f32>;
 @group(1) @binding(1) var bloom_dst: texture_storage_2d<rgba16float, write>;
@@ -170,10 +171,154 @@ fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> VOut {
     return out;
 }
 
-// ── Luminance / Exposure ───────────────────────────────────────────────────────
+// ── Luminance ──────────────────────────────────────────────────────────────────
 
 fn luminance(c: vec3<f32>) -> f32 {
     return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// ── cs_volume_blend: GPU post-process volume blending ─────────────────────────
+// Single workgroup (1 thread) that reads all active volumes and blends them
+// with camera defaults, writing the result to blend_output.
+
+var<workgroup> vol_weights: array<f32, 256>;
+var<workgroup> vol_indices: array<u32, 256>;
+
+fn lerpf(a: f32, b: f32, t: f32) -> f32 { return a + (b - a) * t; }
+fn lerp3v(a: vec3<f32>, b: vec3<f32>, t: f32) -> vec3<f32> { return a + (b - a) * t; }
+
+fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: f32) -> GpuPostProcessUniforms {
+    var r: GpuPostProcessUniforms;
+    r.exposure_mode          = select(base.exposure_mode, vol.exposure_mode, t > 0.5);
+    r.exposure_compensation  = lerpf(base.exposure_compensation, vol.exposure_compensation, t);
+    r.exposure_min           = lerpf(base.exposure_min, vol.exposure_min, t);
+    r.exposure_max           = lerpf(base.exposure_max, vol.exposure_max, t);
+    r.bloom_intensity        = lerpf(base.bloom_intensity, vol.bloom_intensity, t);
+    r.bloom_threshold        = lerpf(base.bloom_threshold, vol.bloom_threshold, t);
+    r.bloom_knee             = lerpf(base.bloom_knee, vol.bloom_knee, t);
+    r.bloom_radius           = lerpf(base.bloom_radius, vol.bloom_radius, t);
+    r.bloom_tint             = lerp3v(base.bloom_tint, vol.bloom_tint, t);
+    r.bloom_enabled          = select(base.bloom_enabled, vol.bloom_enabled, t > 0.5);
+    r.color_saturation       = lerp3v(base.color_saturation, vol.color_saturation, t);
+    r.color_contrast         = lerp3v(base.color_contrast, vol.color_contrast, t);
+    r.color_gamma            = lerp3v(base.color_gamma, vol.color_gamma, t);
+    r.color_gain             = lerp3v(base.color_gain, vol.color_gain, t);
+    r.color_offset           = lerp3v(base.color_offset, vol.color_offset, t);
+    r.white_temp             = lerpf(base.white_temp, vol.white_temp, t);
+    r.white_tint             = lerpf(base.white_tint, vol.white_tint, t);
+    r.white_balance_enabled  = select(base.white_balance_enabled, vol.white_balance_enabled, t > 0.5);
+    r.tonemap_operator       = select(base.tonemap_operator, vol.tonemap_operator, t > 0.5);
+    r.tonemap_exposure       = lerpf(base.tonemap_exposure, vol.tonemap_exposure, t);
+    r.tonemap_white_point    = lerpf(base.tonemap_white_point, vol.tonemap_white_point, t);
+    r.vignette_intensity     = lerpf(base.vignette_intensity, vol.vignette_intensity, t);
+    r.vignette_smoothness    = lerpf(base.vignette_smoothness, vol.vignette_smoothness, t);
+    r.vignette_roundness     = lerpf(base.vignette_roundness, vol.vignette_roundness, t);
+    r.vignette_color         = lerp3v(base.vignette_color, vol.vignette_color, t);
+    r.vignette_enabled       = select(base.vignette_enabled, vol.vignette_enabled, t > 0.5);
+    r.ca_intensity           = lerpf(base.ca_intensity, vol.ca_intensity, t);
+    r.ca_start_offset        = lerpf(base.ca_start_offset, vol.ca_start_offset, t);
+    r.ca_enabled             = select(base.ca_enabled, vol.ca_enabled, t > 0.5);
+    r.grain_intensity        = lerpf(base.grain_intensity, vol.grain_intensity, t);
+    r.grain_response         = lerpf(base.grain_response, vol.grain_response, t);
+    r.grain_size             = lerpf(base.grain_size, vol.grain_size, t);
+    r.grain_enabled          = select(base.grain_enabled, vol.grain_enabled, t > 0.5);
+    r.dof_focal_distance     = lerpf(base.dof_focal_distance, vol.dof_focal_distance, t);
+    r.dof_focal_region       = lerpf(base.dof_focal_region, vol.dof_focal_region, t);
+    r.dof_near_transition    = lerpf(base.dof_near_transition, vol.dof_near_transition, t);
+    r.dof_far_transition     = lerpf(base.dof_far_transition, vol.dof_far_transition, t);
+    r.dof_scale              = lerpf(base.dof_scale, vol.dof_scale, t);
+    r.dof_max_bokeh_size     = lerpf(base.dof_max_bokeh_size, vol.dof_max_bokeh_size, t);
+    r.dof_enabled            = select(base.dof_enabled, vol.dof_enabled, t > 0.5);
+    r.motion_blur_amount     = lerpf(base.motion_blur_amount, vol.motion_blur_amount, t);
+    r.motion_blur_max        = lerpf(base.motion_blur_max, vol.motion_blur_max, t);
+    r.motion_blur_enabled    = select(base.motion_blur_enabled, vol.motion_blur_enabled, t > 0.5);
+    r.blend_weight_bloom        = lerpf(base.blend_weight_bloom, vol.blend_weight_bloom, t);
+    r.blend_weight_dof          = lerpf(base.blend_weight_dof, vol.blend_weight_dof, t);
+    r.blend_weight_motion_blur  = lerpf(base.blend_weight_motion_blur, vol.blend_weight_motion_blur, t);
+    r.blend_weight_vignette     = lerpf(base.blend_weight_vignette, vol.blend_weight_vignette, t);
+    r.blend_weight_ca           = lerpf(base.blend_weight_ca, vol.blend_weight_ca, t);
+    r.blend_weight_grain        = lerpf(base.blend_weight_grain, vol.blend_weight_grain, t);
+    r.blend_weight_exposure     = lerpf(base.blend_weight_exposure, vol.blend_weight_exposure, t);
+    // Padding fields are implicitly copied via the field-by-field assignment above.
+    // The struct is fully written by this function; uninitialized fields get default values.
+    r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
+    r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
+    r._pad12 = 0.0; r._pad13 = 0.0; r._pad14 = 0.0;
+    return r;
+}
+
+@compute @workgroup_size(1, 1, 1)
+fn cs_volume_blend(@builtin(local_invocation_index) lid: u32) {
+    let cam_pos = camera.position_near.xyz;
+    var vol_count: u32 = 0u;
+
+    // Phase 1: evaluate all active volumes, store weight + index
+    for (var i = 0u; i < MAX_PP_VOLUMES; i++) {
+        let v = pp_volumes[i];
+        if v.blend_weight <= 0.0 { continue; }
+
+        if v.unbound == 0u {
+            // Bounded volume — camera must be inside AABB
+            let inside = cam_pos.x >= v.bounds_min.x && cam_pos.x <= v.bounds_max.x
+                      && cam_pos.y >= v.bounds_min.y && cam_pos.y <= v.bounds_max.y
+                      && cam_pos.z >= v.bounds_min.z && cam_pos.z <= v.bounds_max.z;
+            if !inside { continue; }
+
+            let clamped = vec3<f32>(
+                clamp(cam_pos.x, v.bounds_min.x, v.bounds_max.x),
+                clamp(cam_pos.y, v.bounds_min.y, v.bounds_max.y),
+                clamp(cam_pos.z, v.bounds_min.z, v.bounds_max.z),
+            );
+            let dx = cam_pos.x - clamped.x;
+            let dy = cam_pos.y - clamped.y;
+            let dz = cam_pos.z - clamped.z;
+            let dist = sqrt(dx * dx + dy * dy + dz * dz);
+            let blend_dist = max(v.blend_radius, 0.001);
+            let inside_weight = 1.0 - clamp(dist / blend_dist, 0.0, 1.0);
+            if inside_weight <= 0.0 { continue; }
+
+            vol_weights[vol_count] = inside_weight * v.blend_weight;
+        } else {
+            // Unbound volume — always applies at full blend_weight
+            vol_weights[vol_count] = v.blend_weight;
+        }
+        vol_indices[vol_count] = i;
+        vol_count++;
+    }
+
+    if vol_count == 0u {
+        blend_output = postprocess;
+        return;
+    }
+
+    // Phase 2: sort active volumes by priority descending (insertion sort)
+    for (var si = 0u; si < vol_count; si++) {
+        for (var sj = si + 1u; sj < vol_count; sj++) {
+            let pri_i = pp_volumes[vol_indices[si]].priority;
+            let pri_j = pp_volumes[vol_indices[sj]].priority;
+            if (pri_j > pri_i) {
+                let tmp_w = vol_weights[si];
+                let tmp_i = vol_indices[si];
+                vol_weights[si] = vol_weights[sj];
+                vol_indices[si] = vol_indices[sj];
+                vol_weights[sj] = tmp_w;
+                vol_indices[sj] = tmp_i;
+            }
+        }
+    }
+
+    // Phase 3: hierarchical blend from camera defaults toward each volume
+    var result: GpuPostProcessUniforms = postprocess;
+    var total_weight = 1.0;
+
+    for (var vi = 0u; vi < vol_count; vi++) {
+        let w = vol_weights[vi];
+        let t = clamp(w / (total_weight + w), 0.0, 1.0);
+        result = blend_settings(result, pp_volumes[vol_indices[vi]].settings, t);
+        total_weight += w;
+    }
+
+    blend_output = result;
 }
 
 // ── cs_exposure: histogram-based auto exposure ─────────────────────────────────
@@ -223,8 +368,6 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
 }
 
 // ── cs_bloom_down_extract: extract brights from HDR → mip 0 ───────────────────
-// Reads from hdr_input (group 0), writes to bloom_dst (group 1).
-// Dispatched once for mip 0 with dimensions = hdr / 2.
 
 @compute @workgroup_size(8, 8)
 fn cs_bloom_down_extract(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -267,7 +410,6 @@ fn cs_bloom_down_extract(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 
 // ── cs_bloom_down: 2x downsample bloom_src → bloom_dst ────────────────────────
-// Dispatched for mips 1-4, each with a separate per-mip bind group for group 1.
 
 @compute @workgroup_size(8, 8)
 fn cs_bloom_down(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -338,6 +480,7 @@ fn tonemap_lottes(x: vec3<f32>) -> vec3<f32> {
 
 fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
     let op = postprocess.tonemap_operator;
+    if op == 5u { return color; } // None — skip
     var c = color * postprocess.tonemap_exposure;
     c = c / postprocess.tonemap_white_point;
     if op == 0u { return tonemap_aces(c); }
@@ -345,7 +488,7 @@ fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
     if op == 2u { return tonemap_reinhard(c); }
     if op == 3u { return tonemap_uncharted2(c); }
     if op == 4u { return tonemap_lottes(c); }
-    return tonemap_aces(c);
+    return c; // fallback: pass through
 }
 
 // ── Color grading ──────────────────────────────────────────────────────────────
@@ -404,11 +547,11 @@ fn hash(p: vec2<f32>) -> f32 {
     return fract(sin(h) * 43758.5453123);
 }
 
-fn apply_grain(color: vec3<f32>, uv: vec2<f32>, frame: f32) -> vec3<f32> {
+fn apply_grain(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     if postprocess.grain_enabled == 0u { return color; }
     let gsize = max(postprocess.grain_size, 0.01);
-    let g_uv = uv * vec2<f32>(textureDimensions(hdr_input)) / gsize;
-    let grain = hash(g_uv + frame * 0.001) * 2.0 - 1.0;
+    let g_uv = uv * dims / gsize;
+    let grain = hash(g_uv) * 2.0 - 1.0;
     let l = luminance(color);
     let amount = postprocess.grain_intensity * pow(1.0 - l, postprocess.grain_response);
     return color + grain * amount;
@@ -475,8 +618,52 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
 
     var color = textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb;
 
-    // User-defined effects
-    color = user_effects(color, uv, dims);
+    //%P0
+
+    // 1. Exposure
+    color *= exp2(postprocess.exposure_compensation);
+
+    // 2. Bloom composite
+    if postprocess.bloom_enabled != 0u && postprocess.bloom_intensity > 0.0 {
+        var bloom = vec3<f32>(0.0);
+        bloom += textureSampleLevel(bloom_0, linear_samp, uv, 0.0).rgb;
+        bloom += textureSampleLevel(bloom_1, linear_samp, uv, 0.0).rgb;
+        bloom += textureSampleLevel(bloom_2, linear_samp, uv, 0.0).rgb;
+        bloom += textureSampleLevel(bloom_3, linear_samp, uv, 0.0).rgb;
+        bloom += textureSampleLevel(bloom_4, linear_samp, uv, 0.0).rgb;
+        color += bloom;
+    }
+
+    // 3. Color grading
+    color = color_grade(color);
+
+    // 4. White balance
+    color = white_balance(color);
+
+    // 5. Tonemapping
+    color = apply_tonemap(color);
+
+    //%P1
+
+    // 6. Vignette
+    color = apply_vignette(color, uv);
+
+    // 7. Chromatic aberration
+    color = apply_ca(color, uv, dims);
+
+    // 8. Film grain
+    color = apply_grain(color, uv, dims);
+
+    //%P2
+
+    // 9. Depth of Field
+    let raw_depth = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
+    color = apply_dof(color, uv, raw_depth, dims);
+
+    // 10. Motion blur
+    color = apply_motion_blur(color, uv);
+
+    //%P3
 
     return vec4<f32>(color, 1.0);
 }

@@ -19,7 +19,7 @@ use helio::{
 };
 use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_pass_postprocess::PostProcessPass;
-use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor, TonemapOperator};
+use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor};
 use v3_demo_common::{box_mesh, make_material, point_light};
 
 // User shader snippet injected into the post-process pipeline.
@@ -604,31 +604,9 @@ impl ApplicationHandler for App {
                 priority: 100.0,
                 blend_weight: 1.0,
                 settings: PostProcessSettings {
-                    ca_intensity: 0.015,
-                    ca_start_offset: 0.1,
-                    ca_enabled: true,
-                    grain_intensity: 0.25,
-                    grain_response: 1.5,
-                    grain_size: 1.5,
-                    grain_enabled: true,
-                    vignette_intensity: 0.7,
-                    vignette_smoothness: 2.5,
-                    vignette_roundness: 0.8,
-                    vignette_color: [0.0, 0.0, 0.0],
-                    vignette_enabled: true,
-                    color_saturation: [0.6, 0.55, 0.5],
-                    color_contrast: [1.1, 1.08, 1.05],
-                    color_gamma: [0.95, 0.95, 0.95],
-                    color_gain: [0.95, 0.9, 0.85],
-                    color_offset: [0.0, 0.01, 0.0],
-                    bloom_intensity: 0.8,
-                    bloom_threshold: 0.8,
-                    bloom_knee: 0.3,
-                    bloom_enabled: true,
-                    bloom_tint: [1.0, 0.95, 0.85],
-                    tonemap_operator: TonemapOperator::Aces,
-                    tonemap_exposure: 0.85,
-                    tonemap_white_point: 1.0,
+                    // All effects are handled by the user_effects WGSL snippet.
+                    // Keep the volume at defaults so the built-in chain is a
+                    // no-op — the VHS shader owns the entire post-process look.
                     ..PostProcessSettings::default()
                 },
             },
