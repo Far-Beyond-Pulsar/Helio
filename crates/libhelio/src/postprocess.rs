@@ -67,10 +67,13 @@ pub struct GpuPostProcessUniforms {
     pub tonemap_white_point: f32,
     pub pad_tm: f32,
 
-    // ── Vignette (20 bytes → padded to 32) ──
+    // ── Vignette (32 bytes) ──
+    // _pad_vignette aligns vignette_color to a 16-byte boundary, matching
+    // WGSL's vec3<f32> alignment requirement (vec3 align = 16).
     pub vignette_intensity: f32,
     pub vignette_smoothness: f32,
     pub vignette_roundness: f32,
+    pub _pad_vignette: f32,
     pub vignette_color: [f32; 3],
     pub vignette_enabled: u32,
 
@@ -113,8 +116,8 @@ pub struct GpuPostProcessUniforms {
     pub pad_bw: f32,
 }
 
-// Total: 16 + 32 + 48 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 = 272 bytes
-// WGSL uniform buffer rule: must be multiple of 16 → 272 / 16 = 17 slots. ✓
+// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 = 304 bytes
+// WGSL uniform buffer rule: must be multiple of 16 → 304 / 16 = 19 slots. ✓
 
 // ── Defaults ───────────────────────────────────────────────────────────────────
 
@@ -157,6 +160,7 @@ impl Default for GpuPostProcessUniforms {
             vignette_intensity: 0.0,
             vignette_smoothness: 0.5,
             vignette_roundness: 0.5,
+            _pad_vignette: 0.0,
             vignette_color: [0.0, 0.0, 0.0],
             vignette_enabled: 0,
 
@@ -319,6 +323,7 @@ impl PostProcessSettings {
             vignette_intensity: self.vignette_intensity,
             vignette_smoothness: self.vignette_smoothness,
             vignette_roundness: self.vignette_roundness,
+            _pad_vignette: 0.0,
             vignette_color: self.vignette_color,
             vignette_enabled: self.vignette_enabled as u32,
 

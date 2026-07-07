@@ -1,18 +1,19 @@
 // ── Helio Post-Processing Pipeline ─────────────────────────────────────────────
 //
-// Single WGSL module with multiple entry points sharing one bind group layout.
-// Unused bindings for a given entry point are simply not accessed.
+// Two bind groups:
+//   @group(0) — main: uniforms, samplers, hdr/depth inputs, bloom sampled, avg_lum
+//   @group(1) — bloom compute: per-dispatch src (sampled) + dst (storage write)
 //
 // Entry points:
-//   cs_exposure      — compute: luminance histogram → average log-luminance
-//   cs_bloom_down    — compute: extract brights + downsample mip chain
-//   cs_bloom_up      — compute: upsample + accumulate bloom
-//   vs_fullscreen    — vertex: fullscreen triangle
-//   fs_uber          — fragment: tonemap + color grade + vignette + CA + grain
+//   cs_exposure           — compute: luminance histogram → average log-luminance
+//   cs_bloom_down_extract — compute: extract brights from HDR → bloom mip 0
+//   cs_bloom_down         — compute: 2x downsample from bloom_src → bloom_dst
+//   vs_fullscreen         — vertex: fullscreen triangle
+//   fs_uber               — fragment: tonemap + color grade + vignette + CA + grain
 //
 // Effect order (uber pass):
 //   1. Exposure scale
-//   2. Bloom composite
+//   2. Bloom composite (sum of all 5 mip levels)
 //   3. Color grading (saturation, contrast, gamma, gain, offset)
 //   4. White balance
 //   5. Tonemapping
@@ -30,7 +31,7 @@ const BLOOM_MIPS: u32 = 5u;
 
 struct GpuPostProcessUniforms {
     // Exposure (16 bytes)
-    exposure_mode:          u32,    // 0=Manual, 1=Auto
+    exposure_mode:          u32,
     exposure_compensation:  f32,
     exposure_min:           f32,
     exposure_max:           f32,
@@ -62,7 +63,7 @@ struct GpuPostProcessUniforms {
     _pad9:                  f32,
 
     // Tonemap (16 bytes)
-    tonemap_operator:       u32,    // 0=ACES, 1=Filmic, 2=Reinhard, 3=Uncharted2, 4=Lottes
+    tonemap_operator:       u32,
     tonemap_exposure:       f32,
     tonemap_white_point:    f32,
     _pad10:                 f32,
@@ -71,6 +72,7 @@ struct GpuPostProcessUniforms {
     vignette_intensity:     f32,
     vignette_smoothness:    f32,
     vignette_roundness:     f32,
+    _pad_vignette:          f32,
     vignette_color:         vec3<f32>,
     vignette_enabled:       u32,
 
@@ -124,19 +126,28 @@ struct CameraUniforms {
     prev_view_proj: mat4x4<f32>,
 }
 
-// ── Bindings ───────────────────────────────────────────────────────────────────
-// Shared across all entry points.
+// ── Group 0: main bindings (shared across all entry points) ────────────────────
 
-@group(0) @binding(0) var<uniform> postprocess:  GpuPostProcessUniforms;
-@group(0) @binding(1) var<uniform> camera:        CameraUniforms;
-@group(0) @binding(2) var             hdr_input:    texture_2d<f32>;
-@group(0) @binding(3) var             depth_input:  texture_2d<f32>;
-@group(0) @binding(4) var             linear_samp:  sampler;
-@group(0) @binding(5) var             point_samp:   sampler;
-// Bloom mip chain (storage textures for compute)
-@group(0) @binding(6) var             bloom_mips:   binding_array<texture_storage_2d<rgba16float, write>, 5>;
+@group(0) @binding(0)  var<uniform>            postprocess:  GpuPostProcessUniforms;
+@group(0) @binding(1)  var<uniform>            camera:       CameraUniforms;
+@group(0) @binding(2)  var                     hdr_input:    texture_2d<f32>;
+@group(0) @binding(3)  var                     depth_input:  texture_depth_2d;
+@group(0) @binding(4)  var                     linear_samp:  sampler;
+@group(0) @binding(5)  var                     point_samp:   sampler;
+// Bloom mips as sampled textures (read by fs_uber to composite bloom)
+@group(0) @binding(6)  var                     bloom_0:      texture_2d<f32>;
+@group(0) @binding(7)  var                     bloom_1:      texture_2d<f32>;
+@group(0) @binding(8)  var                     bloom_2:      texture_2d<f32>;
+@group(0) @binding(9)  var                     bloom_3:      texture_2d<f32>;
+@group(0) @binding(10) var                     bloom_4:      texture_2d<f32>;
 // Auto-exposure luminance average
-@group(0) @binding(7) var<storage, read_write> avg_luminance: array<f32>;
+@group(0) @binding(11) var<storage, read_write> avg_luminance: array<f32>;
+
+// ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
+// Bound only during bloom compute passes. src unused by cs_bloom_down_extract.
+
+@group(1) @binding(0) var bloom_src: texture_2d<f32>;
+@group(1) @binding(1) var bloom_dst: texture_storage_2d<rgba16float, write>;
 
 // ── Fullscreen vertex ──────────────────────────────────────────────────────────
 
@@ -162,10 +173,7 @@ fn luminance(c: vec3<f32>) -> f32 {
 }
 
 // ── cs_exposure: histogram-based auto exposure ─────────────────────────────────
-// Computes average log-luminance from the HDR input using a workgroup-reduced
-// histogram. Writes result to avg_luminance[0].
 
-// Workgroup-shared memory for histogram reduction (must be module-scope in WGSL)
 var<workgroup> wg_sum:   array<f32, 256>;
 var<workgroup> wg_count: array<u32, 256>;
 
@@ -175,7 +183,6 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
     let w = dims.x;
     let h = dims.y;
 
-    // Stride: sample every 4th pixel for performance
     let stride = 4u;
     var sum_log: f32 = 0.0;
     var count: u32 = 0u;
@@ -189,13 +196,11 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
         }
     }
 
-    // Workgroup reduction via shared memory
     let lidx = lid.y * 16u + lid.x;
     wg_sum[lidx] = sum_log;
     wg_count[lidx] = count;
     workgroupBarrier();
 
-    // Tree reduction
     var reduce_active = 128u;
     loop {
         if reduce_active == 0u { break; }
@@ -209,115 +214,79 @@ fn cs_exposure(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_inv
 
     if lidx == 0u && wg_count[0] > 0u {
         let avg_log = wg_sum[0] / f32(wg_count[0]);
-        // Store as log2(luminance) for temporal smoothing on CPU
         avg_luminance[0] = avg_log;
     }
 }
 
-// ── cs_bloom_down: downscale mip chain ─────────────────────────────────────────
-// Extracts brights from HDR input, downsamples through bloom_mips[0..BLOOM_MIPS-1].
-// Bloom_mips[0] = extracted brights at half res.
-// Bloom_mips[i] = 2x downscale of bloom_mips[i-1].
+// ── cs_bloom_down_extract: extract brights from HDR → mip 0 ───────────────────
+// Reads from hdr_input (group 0), writes to bloom_dst (group 1).
+// Dispatched once for mip 0 with dimensions = hdr / 2.
 
 @compute @workgroup_size(8, 8)
-fn cs_bloom_down(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-    let mip = gid.z;
-    if mip >= BLOOM_MIPS { return; }
-
-    let dst_dims = textureDimensions(bloom_mips[mip]);
-    let dw = dst_dims.x;
-    let dh = dst_dims.y;
+fn cs_bloom_down_extract(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_dims = textureDimensions(bloom_dst);
     let ix = i32(gid.x);
     let iy = i32(gid.y);
+    if ix >= i32(dst_dims.x) || iy >= i32(dst_dims.y) { return; }
 
-    if ix >= dw || iy >= dh { return; }
+    let hdr_dims = textureDimensions(hdr_input);
+    let hw = i32(hdr_dims.x);
+    let hh = i32(hdr_dims.y);
 
-    if mip == 0u {
-        // Mip 0: extract brights from HDR input at half resolution
-        let hdr_dims = textureDimensions(hdr_input);
-        let hw = f32(hdr_dims.x);
-        let hh = f32(hdr_dims.y);
-
-        var color = vec3<f32>(0.0);
-        // 2x2 box downsample
-        for (var dy = 0i; dy < 2; dy++) {
-            for (var dx = 0i; dx < 2; dx++) {
-                let sx = ix * 2 + dx;
-                let sy = iy * 2 + dy;
-                if sx < i32(hw) && sy < i32(hh) {
-                    color += textureLoad(hdr_input, vec2<i32>(sx, sy), 0).rgb;
-                }
+    var color = vec3<f32>(0.0);
+    for (var dy = 0i; dy < 2; dy++) {
+        for (var dx = 0i; dx < 2; dx++) {
+            let sx = ix * 2 + dx;
+            let sy = iy * 2 + dy;
+            if sx < hw && sy < hh {
+                color += textureLoad(hdr_input, vec2<i32>(sx, sy), 0).rgb;
             }
         }
-        color *= 0.25;
-
-        // Extract brights with soft knee
-        let l = luminance(color);
-        let knee = postprocess.bloom_knee;
-        let thresh = postprocess.bloom_threshold;
-        var excess: f32;
-        if l <= thresh - knee {
-            excess = 0.0;
-        } else if l >= thresh {
-            excess = l - thresh;
-        } else {
-            // Soft knee transition
-            let t = (l - (thresh - knee)) / knee;
-            excess = t * t * knee * 0.25;
-        }
-        var brights = color * (excess / max(l, 0.0001));
-        brights *= postprocess.bloom_intensity * postprocess.blend_weight_bloom;
-        textureStore(bloom_mips[0], vec2<i32>(ix, iy), vec4<f32>(brights * postprocess.bloom_tint, 0.0));
-    } else {
-        // Downscale from previous mip
-        let src = textureDimensions(bloom_mips[mip - 1u]);
-        let sw = f32(src.x);
-        let sh = f32(src.y);
-
-        var color = vec3<f32>(0.0);
-        for (var dy = 0i; dy < 2; dy++) {
-            for (var dx = 0i; dx < 2; dx++) {
-                let sx = ix * 2 + dx;
-                let sy = iy * 2 + dy;
-                if sx < i32(sw) && sy < i32(sh) {
-                    color += textureLoad(bloom_mips[mip - 1u], vec2<i32>(sx, sy)).rgb;
-                }
-            }
-        }
-        textureStore(bloom_mips[mip], vec2<i32>(ix, iy), vec4<f32>(color * 0.25, 0.0));
     }
+    color *= 0.25;
+
+    let l = luminance(color);
+    let knee = postprocess.bloom_knee;
+    let thresh = postprocess.bloom_threshold;
+    var excess: f32;
+    if l <= thresh - knee {
+        excess = 0.0;
+    } else if l >= thresh {
+        excess = l - thresh;
+    } else {
+        let t = (l - (thresh - knee)) / knee;
+        excess = t * t * knee * 0.25;
+    }
+    var brights = color * (excess / max(l, 0.0001));
+    brights *= postprocess.bloom_intensity * postprocess.blend_weight_bloom;
+    textureStore(bloom_dst, vec2<i32>(ix, iy), vec4<f32>(brights * postprocess.bloom_tint, 0.0));
 }
 
-// ── cs_bloom_up: upsample + accumulate bloom ──────────────────────────────────
-// Accumulates bloom from coarsest mip back to finest.
-// Result is written to bloom_mips[0] (which becomes the bloom composite).
+// ── cs_bloom_down: 2x downsample bloom_src → bloom_dst ────────────────────────
+// Dispatched for mips 1-4, each with a separate per-mip bind group for group 1.
 
 @compute @workgroup_size(8, 8)
-fn cs_bloom_up(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let mip = gid.z;
-    if mip >= BLOOM_MIPS - 1u { return; }
-
-    let dst_dims = textureDimensions(bloom_mips[mip]);
-    let dw = dst_dims.x;
-    let dh = dst_dims.y;
+fn cs_bloom_down(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let dst_dims = textureDimensions(bloom_dst);
     let ix = i32(gid.x);
     let iy = i32(gid.y);
+    if ix >= i32(dst_dims.x) || iy >= i32(dst_dims.y) { return; }
 
-    if ix >= dw || iy >= dh { return; }
+    let src_dims = textureDimensions(bloom_src);
+    let sw = i32(src_dims.x);
+    let sh = i32(src_dims.y);
 
-    // Bilinear upsample from coarser mip + add current mip
-    let src = textureDimensions(bloom_mips[mip + 1u]);
-    let sw = f32(src.x);
-    let sh = f32(src.y);
-
-    let u = (f32(ix) + 0.5) / f32(dw);
-    let v = (f32(iy) + 0.5) / f32(dh);
-    let up_color = textureSampleLevel(bloom_mips[mip + 1u], linear_samp, vec2<f32>(u, v));
-
-    var cur_color = textureLoad(bloom_mips[mip], vec2<i32>(ix, iy)).rgb;
-    cur_color += up_color.rgb;
-
-    textureStore(bloom_mips[mip], vec2<i32>(ix, iy), vec4<f32>(cur_color, 0.0));
+    var color = vec3<f32>(0.0);
+    for (var dy = 0i; dy < 2; dy++) {
+        for (var dx = 0i; dx < 2; dx++) {
+            let sx = ix * 2 + dx;
+            let sy = iy * 2 + dy;
+            if sx < sw && sy < sh {
+                color += textureLoad(bloom_src, vec2<i32>(sx, sy), 0).rgb;
+            }
+        }
+    }
+    textureStore(bloom_dst, vec2<i32>(ix, iy), vec4<f32>(color * 0.25, 0.0));
 }
 
 // ── Tonemapping operators ──────────────────────────────────────────────────────
@@ -328,7 +297,6 @@ fn tonemap_aces(x: vec3<f32>) -> vec3<f32> {
 }
 
 fn tonemap_filmic(x: vec3<f32>) -> vec3<f32> {
-    // Haarm-Pieter Duiker's filmic curve
     let a = vec3<f32>(0.15); let b = vec3<f32>(0.50);
     let c = vec3<f32>(0.10); let d = vec3<f32>(0.20);
     let e = vec3<f32>(0.02); let f = vec3<f32>(0.30);
@@ -380,24 +348,18 @@ fn apply_tonemap(color: vec3<f32>) -> vec3<f32> {
 
 fn color_grade(color: vec3<f32>) -> vec3<f32> {
     var c = color;
-
-    // Lift/Gamma/Gain in ASC CDL order
     c = c * postprocess.color_gain + postprocess.color_offset;
     c = pow(max(c, vec3<f32>(0.0)), postprocess.color_gamma);
     c = c * postprocess.color_contrast;
     c = c * postprocess.color_saturation;
-
     return c;
 }
 
 // ── White balance ──────────────────────────────────────────────────────────────
-// Simplified correlated colour temperature and tint correction.
 
 fn white_balance(color: vec3<f32>) -> vec3<f32> {
     if postprocess.white_balance_enabled == 0u { return color; }
-
-    // Temperature → RGB multipliers (simplified Planckian locus)
-    let temp = postprocess.white_temp * 0.0001; // normalize
+    let temp = postprocess.white_temp * 0.0001;
     let r = 1.0 / max(temp, 0.001);
     let g = 1.0;
     let b = temp;
@@ -409,7 +371,6 @@ fn white_balance(color: vec3<f32>) -> vec3<f32> {
 
 fn apply_vignette(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if postprocess.vignette_enabled == 0u { return color; }
-
     let center = uv - 0.5;
     let dist = length(center * vec2<f32>(1.0 / max(postprocess.vignette_roundness, 0.001), 1.0));
     let vignette = 1.0 - saturate(dist * postprocess.vignette_smoothness) * postprocess.vignette_intensity;
@@ -420,19 +381,15 @@ fn apply_vignette(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 
 fn apply_ca(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
     if postprocess.ca_enabled == 0u { return color; }
-
     let center = uv - 0.5;
     let dist = length(center);
     let offset = max(dist - postprocess.ca_start_offset, 0.0) * postprocess.ca_intensity;
     let dir = normalize(center);
-
     let r_uv = uv + dir * offset * (1.0 / dims);
     let b_uv = uv - dir * offset * (1.0 / dims);
-
     let r = textureSampleLevel(hdr_input, linear_samp, r_uv, 0.0).r;
     let g = color.g;
     let b = textureSampleLevel(hdr_input, linear_samp, b_uv, 0.0).b;
-
     return vec3<f32>(r, g, b);
 }
 
@@ -445,25 +402,20 @@ fn hash(p: vec2<f32>) -> f32 {
 
 fn apply_grain(color: vec3<f32>, uv: vec2<f32>, frame: f32) -> vec3<f32> {
     if postprocess.grain_enabled == 0u { return color; }
-
     let gsize = max(postprocess.grain_size, 0.01);
     let g_uv = uv * vec2<f32>(textureDimensions(hdr_input)) / gsize;
     let grain = hash(g_uv + frame * 0.001) * 2.0 - 1.0;
-
-    // Luminance-responsive grain (more in dark areas)
     let l = luminance(color);
     let amount = postprocess.grain_intensity * pow(1.0 - l, postprocess.grain_response);
     return color + grain * amount;
 }
 
 // ── Depth of Field (Gaussian approximation) ────────────────────────────────────
-// Simplified near/far DOF using a CoC-based gather and blur.
 
 fn dof_coc(depth: f32) -> f32 {
     let linear_depth = -camera.proj[3][2] / (depth * 2.0 - 1.0 + camera.proj[2][2]);
     let focal_dist = postprocess.dof_focal_distance;
     let focal_region = postprocess.dof_focal_region;
-
     let near_blur = max(focal_dist - focal_region - linear_depth, 0.0) / max(postprocess.dof_near_transition, 0.001);
     let far_blur = max(linear_depth - (focal_dist + focal_region), 0.0) / max(postprocess.dof_far_transition, 0.001);
     let coc = max(near_blur, far_blur) * postprocess.dof_scale;
@@ -472,17 +424,13 @@ fn dof_coc(depth: f32) -> f32 {
 
 fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> vec3<f32> {
     if postprocess.dof_enabled == 0u { return color; }
-
     let coc = dof_coc(depth) * postprocess.blend_weight_dof;
     if coc < 0.5 { return color; }
-
-    // Simple Gaussian blur with CoC-driven radius
     let radius = clamp(coc, 1.0, postprocess.dof_max_bokeh_size);
     let taps = 7u;
     let step = radius / f32(taps);
     var blurred = vec3<f32>(0.0);
     var total = 0.0;
-
     for (var dy = -(i32(taps) / 2); dy <= i32(taps) / 2; dy++) {
         for (var dx = -(i32(taps) / 2); dx <= i32(taps) / 2; dx++) {
             let offset = vec2<f32>(f32(dx), f32(dy)) * step * (1.0 / dims);
@@ -492,12 +440,7 @@ fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> ve
             total += w;
         }
     }
-
-    if total > 0.0 {
-        blurred /= total;
-    }
-
-    // Blend sharp and blurred by CoC (foreground = sharp, background = blurred)
+    if total > 0.0 { blurred /= total; }
     return mix(color, blurred, clamp(coc / postprocess.dof_max_bokeh_size, 0.0, 1.0));
 }
 
@@ -505,35 +448,30 @@ fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> ve
 
 fn apply_motion_blur(color: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     if postprocess.motion_blur_enabled == 0u { return color; }
-
     var blurred = color;
     let samples = 8u;
     let amount = postprocess.motion_blur_amount * postprocess.blend_weight_motion_blur;
     if amount <= 0.0 { return color; }
-
-    let velocity = vec2<f32>(amount, 0.0); // Simplified camera-based (future: per-pixel velocity from GBuffer)
+    let velocity = vec2<f32>(amount, 0.0);
     let max_len = postprocess.motion_blur_max / f32(textureDimensions(hdr_input).x);
-
     for (var i = 1u; i < samples; i++) {
         let t = f32(i) / f32(samples);
         let sample_uv = uv - velocity * t * max_len;
         blurred += textureSampleLevel(hdr_input, linear_samp, sample_uv, 0.0).rgb;
     }
-
     return blurred / f32(samples + 1u);
 }
 
 // ── fs_uber ────────────────────────────────────────────────────────────────────
-// Master post-process fragment: chains all enabled effects in order.
 
 @fragment
 fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     let dims = vec2<f32>(textureDimensions(hdr_input));
     let uv = in.uv;
 
-    // Sample HDR input
     var color = textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb;
-    let depth = textureSampleLevel(depth_input, linear_samp, uv, 0.0).r;
+    let depth_coord = vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y));
+    let depth = textureLoad(depth_input, depth_coord, 0u);
 
     // 1. Auto exposure
     if postprocess.exposure_mode == 1u {
@@ -544,49 +482,39 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
         color *= exp2(postprocess.exposure_compensation);
     }
 
-    // 2. Bloom composite (if enabled)
+    // 2. Bloom composite: sum all 5 mip levels with tent weights
     if postprocess.bloom_enabled != 0u && postprocess.blend_weight_bloom > 0.0 {
-        let bloom_uv = uv;
-        let bloom = textureSampleLevel(bloom_mips[0], linear_samp, bloom_uv, 0.0).rgb;
+        var bloom = textureSampleLevel(bloom_0, linear_samp, uv, 0.0).rgb * 0.5;
+        bloom    += textureSampleLevel(bloom_1, linear_samp, uv, 0.0).rgb * 0.3;
+        bloom    += textureSampleLevel(bloom_2, linear_samp, uv, 0.0).rgb * 0.125;
+        bloom    += textureSampleLevel(bloom_3, linear_samp, uv, 0.0).rgb * 0.05;
+        bloom    += textureSampleLevel(bloom_4, linear_samp, uv, 0.0).rgb * 0.025;
         color += bloom;
     }
 
-    // 3. Motion blur (before color grade for linear-space blur)
+    // 3. Motion blur
     color = apply_motion_blur(color, uv);
 
     // 4. Depth of Field
     color = apply_dof(color, uv, depth, dims);
 
-    // 5. Color grading (in HDR linear space)
+    // 5. Color grading
     color = color_grade(color);
 
     // 6. White balance
     color = white_balance(color);
 
-    // 7. Tonemap (HDR → LDR)
+    // 7. Tonemap
     color = apply_tonemap(color);
 
-    // 8. Vignette (post-tonemap)
+    // 8. Vignette
     color = apply_vignette(color, uv);
 
-    // 9. Chromatic aberration (post-tonemap, screen-space)
+    // 9. Chromatic aberration
     color = apply_ca(color, uv, dims);
 
-    // 10. Film grain (post-tonemap)
+    // 10. Film grain
     color = apply_grain(color, uv, f32(postprocess.blend_weight_grain * 1000.0));
 
     return vec4<f32>(color, 1.0);
-}
-
-// ── cs_bloom_clear: clear bloom mip chain ──────────────────────────────────────
-
-@compute @workgroup_size(8, 8)
-fn cs_bloom_clear(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let mip = gid.z;
-    if mip >= BLOOM_MIPS { return; }
-    let dims = textureDimensions(bloom_mips[mip]);
-    let ix = i32(gid.x);
-    let iy = i32(gid.y);
-    if ix >= dims.x || iy >= dims.y { return; }
-    textureStore(bloom_mips[mip], vec2<i32>(ix, iy), vec4<f32>(0.0));
 }
