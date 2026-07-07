@@ -13,9 +13,9 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, HelioAction,
-    HelioCommandBridge, GroupMask, LightId, MaterialId, MeshId, Movability, ObjectDescriptor,
-    Renderer, RendererConfig, Scene,
+    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, GroupMask, HelioAction,
+    HelioCommandBridge, LightId, MaterialId, MeshId, Movability, ObjectDescriptor, Renderer,
+    RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_pass_postprocess::PostProcessPass;
@@ -24,137 +24,23 @@ use v3_demo_common::{box_mesh, make_material, point_light};
 
 // User shader snippet injected into the post-process pipeline.
 // Uses noise_tex, noise_samp, and pp_custom from the core bindings.
-const VHS_SHADER_SNIPPET: &str = "
-fn hash21(p: vec2<f32>) -> f32 {
-    return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453123);
-}
-
-fn yiq2rgb(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        dot(c, vec3<f32>(1.0,  0.956,  0.621)),
-        dot(c, vec3<f32>(1.0, -0.272, -0.647)),
-        dot(c, vec3<f32>(1.0, -1.106,  1.703)),
-    );
-}
-
-fn rgb2yiq(c: vec3<f32>) -> vec3<f32> {
-    return vec3<f32>(
-        dot(c, vec3<f32>(0.299, 0.587, 0.114)),
-        dot(c, vec3<f32>(0.596, -0.274, -0.322)),
-        dot(c, vec3<f32>(0.211, -0.523, 0.312)),
-    );
-}
-
-fn blur_ring(uv: vec2<f32>, radius: f32, n: u32) -> vec3<f32> {
-    var acc = vec3<f32>(0.0);
-    let inv = 1.0 / f32(n);
-    for (var i = 0u; i < n; i++) {
-        let a = 6.2832 * f32(i) * inv;
-        acc += textureSampleLevel(hdr_input, linear_samp, uv + vec2<f32>(cos(a), sin(a)) * radius, 0.0).rgb;
-    }
-    return acc * inv;
-}
-
-fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
-    let tape_jitter  = pp_custom[0].y;
-    let jitter_freq  = pp_custom[0].z;
-    let flicker_amt  = pp_custom[0].w;
-    let noise_amt    = pp_custom[1].x;
-    let time         = pp_custom[1].y;
-
-    let px = 1.0 / dims;
-    let frame = floor(time * 60.0);
-
-    let line = uv.y * dims.y;
-
-    // ── Vertical bounce (VCR servo instability) ───────────────────────────
-    // The entire frame slowly bobs up/down from capstan servo fluctuations.
-    let v_bounce = sin(time * 1.73) * 0.5 + sin(time * 3.11) * 0.25;
-    let vu = uv + vec2<f32>(0.0, v_bounce * px.y);
-
-    // ── Rolling scanline offset error ─────────────────────────────────────
-    let roll_pos = fract(time * 0.025 + 0.3);
-    let roll_width = 0.06;
-    let roll_dist = abs(vu.y - roll_pos);
-    let roll_weight = 1.0 - smoothstep(0.0, roll_width, roll_dist);
-    let roll_shift = sin(line * 50.0 + time * 2.0) * roll_weight * 2.5;
-
-    // ── Per-scanline tape jitter ──────────────────────────────────────────
-    let jit = (sin(line * jitter_freq + time * 3.7) * 5.0
-             + sin(line * 17.0 + time * 5.3) * 2.0) * tape_jitter;
-    let ju = vu + vec2<f32>((jit + roll_shift) * px.x, 0.0);
-
-    // ── YIQ separation with per-channel blur ─────────────────────────────
-    let yuv = blur_ring(ju, 0.5 * px.x, 5u);
-    let y = rgb2yiq(yuv).x;
-
-    let i_uv = ju + vec2<f32>(0.6 * px.x, 0.0);
-    let i_base = rgb2yiq(blur_ring(i_uv, 3.0 * px.x, 9u)).y;
-
-    let q_uv = ju + vec2<f32>(1.2 * px.x, 0.0);
-    let q_base = rgb2yiq(blur_ring(q_uv, 1.5 * px.x, 9u)).z;
-
-    // ── Chroma phase drift (VHS color decoder instability) ────────────────
-    // The chroma subcarrier PLL slowly drifts, rotating the hue.
-    let phase = sin(time * 0.37) * 0.08 + sin(time * 0.73) * 0.04;
-    let cp = cos(phase);
-    let sp = sin(phase);
-    let i = i_base * cp - q_base * sp;
-    let q = i_base * sp + q_base * cp;
-
-    var result = yiq2rgb(vec3<f32>(y, i, q));
-
-    // ── Rolling glitch noise bands ────────────────────────────────────────
-    // Thin noise bars that roll vertically like tracking comb-filter errors,
-    // with smooth intensity fade instead of abrupt random pops.
-    let glitch_roll = fract(time * 0.018 + 0.5);
-    for (var g = 0u; g < 4u; g++) {
-        let gp = fract(glitch_roll + f32(g) * 0.25 + sin(time * 0.1 + f32(g)) * 0.02);
-        let gd = abs(vu.y - gp);
-        let gw = 1.0 - smoothstep(0.0, 0.025, gd);
-        if gw > 0.005 {
-            let gn = hash21(vec2<f32>(line + f32(g) * 100.0, frame));
-            result = mix(result, vec3<f32>(gn * 0.4 + 0.1), gw * 0.7);
-        }
-    }
-
-    // ── VHS lighting: crushed blacks, clipped highlights ─────────────────
-    result = pow(max(result, vec3<f32>(0.0)), vec3<f32>(1.4));
-    result = 1.0 - pow(max(1.0 - result, vec3<f32>(0.0)), vec3<f32>(1.6));
-    result = mix(result, result * result * result, 0.15);
-
-    // ── Scanlines ─────────────────────────────────────────────────────────
-    let scan = sin(uv.y * dims.y * 3.14159);
-    result *= 1.0 - 0.06 * (1.0 - scan * scan);
-
-    // ── Non-sliding hash noise ────────────────────────────────────────────
-    let px_id = floor(uv * dims);
-    let seed = frame + hash21(px_id) * 1000.0;
-    let r0 = hash21(vec2<f32>(seed, seed * 0.5));
-    let r1 = hash21(vec2<f32>(seed + 1.0, seed * 0.3 + 2.0));
-
-    let luma = dot(result, vec3<f32>(0.299, 0.587, 0.114));
-    let noise_strength = (0.015 + 0.03 * (1.0 - luma)) * noise_amt;
-    let grain = (r0 * 2.0 - 1.0) * noise_strength;
-    result += grain;
-
-    // ── Chroma noise ──────────────────────────────────────────────────────
-    let cn = (r1 * 2.0 - 1.0) * 0.03 * (1.0 - luma) * noise_amt;
-    result += vec3<f32>(cn * 0.3, -cn * 0.5, cn * 0.7);
-
-    // ── Dot crawl on sharp edges ──────────────────────────────────────────
-    let edge = length(fwidth(result));
-    let crawl = sin(uv.x * dims.x * 0.5 + time * 50.0) * edge * 0.06;
-    result += vec3<f32>(crawl * 0.4, -crawl * 0.25, crawl * 0.6);
-
-    // ── Flicker ───────────────────────────────────────────────────────────
-    let fl = hash21(vec2<f32>(frame * 0.01, 0.5));
-    result *= 1.0 - 0.025 * flicker_amt * (fl * 2.0 - 1.0);
-
-    return clamp(result, vec3<f32>(0.0), vec3<f32>(1.0));
-}
-";
-
+//
+// v2 changes vs original, aimed at "found VHS footage" realism rather than
+// a generic retro filter:
+//   1. Lens identity: barrel distortion + vignette + edge chromatic aberration
+//      (cheap camcorder wide-angle glass, not a flat digital frame)
+//   2. CCD highlight bloom/smear: bright sources streak vertically, a classic
+//      tell of consumer CCD sensors that's otherwise completely absent
+//   3. Grain now samples noise_tex with a slow scroll instead of pure hash
+//      noise -> spatially/temporally correlated grain instead of TV static
+//   4. Head-switching noise bar near the bottom of frame (real decks show
+//      this on every single frame - previously missing entirely)
+//   5. Rare, severe tracking tears layered on top of the existing smooth
+//      jitter, so damage reads as bursty/eventful instead of constant
+// Everything from the original (YIQ separation, chroma phase drift, rolling
+// scanline error, per-line jitter, crushed blacks/highlights, dot crawl,
+// flicker) is kept - it was solid and just needed a physical frame around it.
+const VHS_SHADER_SNIPPET: &str = include_str!("vhs_effects.wgsl");
 use std::io::{self, BufRead};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -173,9 +59,9 @@ use std::collections::HashSet;
 //
 // Simple grid-based generator: drunkard's walk carves corridors, rooms branch off.
 
-const CELL: f32 = 4.0;         // metres per grid cell
+const CELL: f32 = 4.0; // metres per grid cell
 const H_CELL: f32 = CELL / 2.0;
-const WALL_H: f32 = 3.2;       // wall height
+const WALL_H: f32 = 3.2; // wall height
 const GRID_W: usize = 32;
 const GRID_H: usize = 24;
 
@@ -188,7 +74,7 @@ enum Cell {
 
 struct BackroomsMap {
     grid: Vec<Vec<Cell>>,
-    lights: Vec<(f32, f32)>,   // world-space (x, z) for each light
+    lights: Vec<(f32, f32)>, // world-space (x, z) for each light
 }
 
 fn generate_map() -> BackroomsMap {
@@ -205,7 +91,9 @@ fn generate_map() -> BackroomsMap {
     let mut rng = 12345_u64;
 
     let mut rng_u32 = || -> u32 {
-        rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        rng = rng
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         (rng >> 32) as u32
     };
 
@@ -225,10 +113,12 @@ fn generate_map() -> BackroomsMap {
         // Pick a random corridor cell
         let rx = (rng_u32() as usize) % GRID_W;
         let ry = (rng_u32() as usize) % GRID_H;
-        if grid[rx][ry] != Cell::Corridor { continue; }
+        if grid[rx][ry] != Cell::Corridor {
+            continue;
+        }
 
-        let rw = 2 + (rng_u32() % 3) as usize;  // 2-4 cells wide
-        let rh = 2 + (rng_u32() % 2) as usize;  // 2-3 cells deep
+        let rw = 2 + (rng_u32() % 3) as usize; // 2-4 cells wide
+        let rh = 2 + (rng_u32() % 2) as usize; // 2-3 cells deep
         let rdir = dirs[(rng_u32() as usize) & 3];
 
         // Carve room in the chosen direction
@@ -244,7 +134,9 @@ fn generate_map() -> BackroomsMap {
                 }
             }
         }
-        if !ok { continue; }
+        if !ok {
+            continue;
+        }
 
         for dy in 0..rh {
             for dx in 0..rw {
@@ -346,12 +238,23 @@ impl App {
         Self { state: None }
     }
 
-    fn place(scene: &mut Scene, mesh: MeshId, material: MaterialId, transform: glam::Mat4, radius: f32) {
+    fn place(
+        scene: &mut Scene,
+        mesh: MeshId,
+        material: MaterialId,
+        transform: glam::Mat4,
+        radius: f32,
+    ) {
         let _ = scene.insert_actor(helio::SceneActor::object(ObjectDescriptor {
             mesh,
             material,
             transform,
-            bounds: [transform.w_axis.x, transform.w_axis.y, transform.w_axis.z, radius],
+            bounds: [
+                transform.w_axis.x,
+                transform.w_axis.y,
+                transform.w_axis.z,
+                radius,
+            ],
             flags: 0,
             groups: GroupMask::NONE,
             movability: None,
@@ -366,23 +269,47 @@ impl App {
 
         // Remove previous map resources
         if let Some(res) = &state.map_resources {
-            for &id in &res.walls { let _ = scene.remove_mesh(id); }
-            for &id in &res.floors { let _ = scene.remove_mesh(id); }
-            for &id in &res.ceilings { let _ = scene.remove_mesh(id); }
-            for &id in &res.light_ids { let _ = scene.remove_light(id); }
+            for &id in &res.walls {
+                let _ = scene.remove_mesh(id);
+            }
+            for &id in &res.floors {
+                let _ = scene.remove_mesh(id);
+            }
+            for &id in &res.ceilings {
+                let _ = scene.remove_mesh(id);
+            }
+            for &id in &res.light_ids {
+                let _ = scene.remove_light(id);
+            }
         }
 
         let wall_mat = scene.insert_material(make_material(
-            [0.82, 0.72, 0.52, 1.0], 0.6, 0.05, [0.0, 0.0, 0.0], 0.0,
+            [0.82, 0.72, 0.52, 1.0],
+            0.6,
+            0.05,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let floor_mat = scene.insert_material(make_material(
-            [0.45, 0.38, 0.28, 1.0], 0.3, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.45, 0.38, 0.28, 1.0],
+            0.3,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let ceiling_mat = scene.insert_material(make_material(
-            [0.88, 0.88, 0.85, 1.0], 0.7, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.88, 0.88, 0.85, 1.0],
+            0.7,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
         let trim_mat = scene.insert_material(make_material(
-            [0.35, 0.32, 0.28, 1.0], 0.4, 0.0, [0.0, 0.0, 0.0], 0.0,
+            [0.35, 0.32, 0.28, 1.0],
+            0.4,
+            0.0,
+            [0.0, 0.0, 0.0],
+            0.0,
         ));
 
         let mut walls = Vec::new();
@@ -392,54 +319,90 @@ impl App {
 
         for x in 0..GRID_W {
             for y in 0..GRID_H {
-                if map.grid[x][y] == Cell::Wall { continue; }
+                if map.grid[x][y] == Cell::Wall {
+                    continue;
+                }
 
                 let wx = x as f32 * CELL - GRID_W as f32 * H_CELL + H_CELL;
                 let wz = y as f32 * CELL - GRID_H as f32 * H_CELL + H_CELL;
 
                 // Floor tile
-                let f = scene.insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0], [H_CELL, 0.05, H_CELL],
-                ))).as_mesh().unwrap();
-                Self::place(scene, f, floor_mat,
-                    glam::Mat4::from_translation(glam::Vec3::new(wx, 0.0, wz)), H_CELL);
+                let f = scene
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [H_CELL, 0.05, H_CELL],
+                    )))
+                    .as_mesh()
+                    .unwrap();
+                Self::place(
+                    scene,
+                    f,
+                    floor_mat,
+                    glam::Mat4::from_translation(glam::Vec3::new(wx, 0.0, wz)),
+                    H_CELL,
+                );
                 floors.push(f);
 
                 // Ceiling tile
-                let c = scene.insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [0.0, 0.0, 0.0], [H_CELL, 0.03, H_CELL],
-                ))).as_mesh().unwrap();
-                Self::place(scene, c, ceiling_mat,
-                    glam::Mat4::from_translation(glam::Vec3::new(wx, WALL_H, wz)), H_CELL);
+                let c = scene
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [0.0, 0.0, 0.0],
+                        [H_CELL, 0.03, H_CELL],
+                    )))
+                    .as_mesh()
+                    .unwrap();
+                Self::place(
+                    scene,
+                    c,
+                    ceiling_mat,
+                    glam::Mat4::from_translation(glam::Vec3::new(wx, WALL_H, wz)),
+                    H_CELL,
+                );
                 ceilings.push(c);
 
                 // Walls on edges adjacent to Wall cells
                 let neighbors = [
-                    (0, -1, 0.0, -H_CELL, 0.0),   // south
-                    (0, 1, 0.0, H_CELL, std::f32::consts::PI), // north
+                    (0, -1, 0.0, -H_CELL, 0.0),                               // south
+                    (0, 1, 0.0, H_CELL, std::f32::consts::PI),                // north
                     (-1, 0, -H_CELL, 0.0, std::f32::consts::FRAC_PI_2 * 3.0), // west
-                    (1, 0, H_CELL, 0.0, std::f32::consts::FRAC_PI_2), // east
+                    (1, 0, H_CELL, 0.0, std::f32::consts::FRAC_PI_2),         // east
                 ];
                 for &(dx, dy, ox, oz, rot_y) in &neighbors {
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
-                    let is_wall = nx < 0 || nx >= GRID_W as i32 || ny < 0 || ny >= GRID_H as i32
+                    let is_wall = nx < 0
+                        || nx >= GRID_W as i32
+                        || ny < 0
+                        || ny >= GRID_H as i32
                         || map.grid[nx as usize][ny as usize] == Cell::Wall;
-                    if !is_wall { continue; }
+                    if !is_wall {
+                        continue;
+                    }
 
                     // Wall
-                    let w = scene.insert_actor(helio::SceneActor::mesh(box_mesh(
-                        [0.0, 0.0, 0.0], [0.1, WALL_H / 2.0, CELL / 2.0],
-                    ))).as_mesh().unwrap();
-                    let t = glam::Mat4::from_translation(glam::Vec3::new(wx + ox, WALL_H / 2.0, wz + oz))
-                        * glam::Mat4::from_rotation_y(rot_y);
+                    let w = scene
+                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                            [0.0, 0.0, 0.0],
+                            [0.1, WALL_H / 2.0, CELL / 2.0],
+                        )))
+                        .as_mesh()
+                        .unwrap();
+                    let t = glam::Mat4::from_translation(glam::Vec3::new(
+                        wx + ox,
+                        WALL_H / 2.0,
+                        wz + oz,
+                    )) * glam::Mat4::from_rotation_y(rot_y);
                     Self::place(scene, w, wall_mat, t, H_CELL);
                     walls.push(w);
 
                     // Baseboard trim
-                    let t2 = scene.insert_actor(helio::SceneActor::mesh(box_mesh(
-                        [0.0, 0.0, 0.0], [0.12, 0.05, CELL / 2.0],
-                    ))).as_mesh().unwrap();
+                    let t2 = scene
+                        .insert_actor(helio::SceneActor::mesh(box_mesh(
+                            [0.0, 0.0, 0.0],
+                            [0.12, 0.05, CELL / 2.0],
+                        )))
+                        .as_mesh()
+                        .unwrap();
                     let tt = glam::Mat4::from_translation(glam::Vec3::new(wx + ox, 0.05, wz + oz))
                         * glam::Mat4::from_rotation_y(rot_y);
                     Self::place(scene, t2, trim_mat, tt, H_CELL);
@@ -457,7 +420,9 @@ impl App {
         ];
         let mut rng = 54321_u64;
         let mut rng_u32 = || -> u32 {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (rng >> 32) as u32
         };
         for &(lx, lz) in &map.lights {
@@ -469,10 +434,13 @@ impl App {
             ));
             // Also add a dimmer fill light slightly lower
             light_ids.push(
-                scene.insert_actor(helio::SceneActor::light_with_movability(
-                    point_light([lx, WALL_H - 1.5, lz], [0.95, 0.92, 0.85], 1.2, 4.0),
-                    Some(helio::Movability::Movable),
-                )).as_light().unwrap(),
+                scene
+                    .insert_actor(helio::SceneActor::light_with_movability(
+                        point_light([lx, WALL_H - 1.5, lz], [0.95, 0.92, 0.85], 1.2, 4.0),
+                        Some(helio::Movability::Movable),
+                    ))
+                    .as_light()
+                    .unwrap(),
             );
         }
 
@@ -513,14 +481,13 @@ impl ApplicationHandler for App {
             force_fallback_adapter: false,
         }))
         .expect("adapter");
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-                label: Some("Device"),
-                required_features: required_wgpu_features(adapter.features()),
-                required_limits: required_wgpu_limits(adapter.limits()),
-                ..Default::default()
-            }))
-            .expect("device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("Device"),
+            required_features: required_wgpu_features(adapter.features()),
+            required_limits: required_wgpu_limits(adapter.limits()),
+            ..Default::default()
+        }))
+        .expect("device");
         device.on_uncaptured_error(std::sync::Arc::new(|e: wgpu::Error| {
             panic!("[GPU UNCAPTURED ERROR] {:?}", e);
         }));
@@ -595,27 +562,27 @@ impl ApplicationHandler for App {
         );
 
         // ── VHS camcorder post-process volume ─────────────────────────────────
-        renderer.scene_mut().insert_actor(helio::SceneActor::post_process_volume(
-            PostProcessVolumeDescriptor {
-                bounds_min: [-1000.0, -1000.0, -1000.0],
-                bounds_max: [1000.0, 1000.0, 1000.0],
-                blend_radius: 0.0,
-                unbound: true,
-                priority: 100.0,
-                blend_weight: 1.0,
-                settings: PostProcessSettings {
-                    // All effects are handled by the user_effects WGSL snippet.
-                    // Keep the volume at defaults so the built-in chain is a
-                    // no-op — the VHS shader owns the entire post-process look.
-                    ..PostProcessSettings::default()
+        renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::post_process_volume(
+                PostProcessVolumeDescriptor {
+                    bounds_min: [-1000.0, -1000.0, -1000.0],
+                    bounds_max: [1000.0, 1000.0, 1000.0],
+                    blend_radius: 0.0,
+                    unbound: true,
+                    priority: 100.0,
+                    blend_weight: 1.0,
+                    settings: PostProcessSettings {
+                        // All effects are handled by the user_effects WGSL snippet.
+                        // Keep the volume at defaults so the built-in chain is a
+                        // no-op — the VHS shader owns the entire post-process look.
+                        ..PostProcessSettings::default()
+                    },
                 },
-            },
-        ));
+            ));
 
         renderer.set_ambient([0.75, 0.7, 0.6], 0.04);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
-
-
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
@@ -627,12 +594,10 @@ impl ApplicationHandler for App {
                 let stdin = io::stdin();
                 for line in stdin.lock().lines() {
                     match line {
-                        Ok(cmd) if !cmd.trim().is_empty() => {
-                            match bridge.run(&cmd) {
-                                Ok(()) => println!("OK: {}", cmd),
-                                Err(e) => println!("ERR: {} -> {}", cmd, e),
-                            }
-                        }
+                        Ok(cmd) if !cmd.trim().is_empty() => match bridge.run(&cmd) {
+                            Ok(()) => println!("OK: {}", cmd),
+                            Err(e) => println!("ERR: {} -> {}", cmd, e),
+                        },
                         _ => {}
                     }
                 }
@@ -840,13 +805,17 @@ impl AppState {
         // Write VHS parameters to post-process custom params buffer
         let time = self.start_time.elapsed().as_secs_f32();
         let vhs_params: [[f32; 4]; 2] = [
-            [0.0,    // unused
-             0.12,   // tape jitter — ~0.6 px max horizontal displacement
-             8.0,    // jitter frequency
-             0.2],   // flicker intensity
-            [0.4,    // noise amount
-             time,   // animation time
-             0.0, 0.0],
+            [
+                0.0,  // unused
+                0.12, // tape jitter — ~0.6 px max horizontal displacement
+                8.0,  // jitter frequency
+                0.2,
+            ], // flicker intensity
+            [
+                0.4,  // noise amount
+                time, // animation time
+                0.0, 0.0,
+            ],
         ];
         if let Some(pass) = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {
             pass.set_custom_params(&vhs_params);
@@ -867,3 +836,4 @@ impl AppState {
         output.present();
     }
 }
+
