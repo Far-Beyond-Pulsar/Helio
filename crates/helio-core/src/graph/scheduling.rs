@@ -4,6 +4,10 @@ use super::execution::RenderGraph;
 pub(crate) struct CachedPass {
     pub(crate) store_ops: Vec<Option<wgpu::StoreOp>>,
     pub(crate) subpass_index: u32,
+    /// Total number of passes in the chain (0 if not in a chain).
+    /// Used by the executor to call `vkCmdNextSubpass` between chain members
+    /// once wgpu exposes subpass support.
+    pub(crate) subpass_count: u32,
     pub(crate) chain_range: std::ops::Range<usize>,
 }
 

@@ -102,6 +102,24 @@ impl RenderGraph {
         }
     }
 
+    /// Assign alias groups so chain-local and non-chain-local resources never
+    /// share a physical allocation.  Runs after `chain_local` is computed on
+    /// every `ResourceLifetime`, before the final `allocate_textures()` call.
+    pub(crate) fn assign_chain_aware_alias_groups(&mut self) {
+        let mut chain_group_gen: u32 = 0;
+        for rl in self.resources.values_mut() {
+            if rl.chain_local {
+                // Every chain-local resource gets its own alias group keyed
+                // on its first_write_pass.  Resources written by the same
+                // pass are never alive concurrently so they may alias.
+                let g = format!("chain_local_{}", rl.first_write_pass);
+                rl.alias_group = Some(g);
+            } else {
+                rl.alias_group = None;
+            }
+        }
+    }
+
     pub(crate) fn allocate_textures(&mut self) {
         use crate::graph::resource::TextureDescriptor;
 

@@ -164,6 +164,13 @@ use crate::{Profiler, SceneResources};
 /// }
 /// ```
 pub struct PassContext<'a> {
+    /// When `true`, the pass declared `chain_transparent()` and MUST NOT touch
+    /// the render encoder (`encoder_ptr` / `active_render_pass`).  In debug
+    /// builds, attempting to call `begin_render_pass()` or dereferencing
+    /// `active_render_pass_ptr()` will panic.
+    #[cfg(debug_assertions)]
+    pub(crate) chain_transparent: bool,
+
     /// Command encoder for non-render-pass GPU ops (buffer clears, copies).
     /// Passes do NOT call begin_render_pass on this — the executor does that.
     /// Access via `unsafe { &mut *ctx.encoder_ptr }`.
@@ -204,6 +211,11 @@ pub struct PassContext<'a> {
     /// Subpass index within a fused render-pass chain.
     pub subpass_index: u32,
 
+    /// Total number of subpasses in the current chain (0 if standalone).
+    /// Passes can use this to know whether they're part of a fusion chain
+    /// and how many other passes share their render pass.
+    pub subpass_count: u32,
+
     /// When `false`, Helio does not own the wgpu device.
     pub owns_device: bool,
 
@@ -224,8 +236,21 @@ pub struct PassContext<'a> {
 impl<'a> PassContext<'a> {
     /// Returns a raw pointer to the active render pass, if any.
     /// Cast to a reference in the pass: `let rp = unsafe { &mut *ctx.active_render_pass()? };`
+    ///
+    /// # Panics (debug builds only)
+    ///
+    /// Panics if the pass declared `chain_transparent() == true` but still
+    /// tries to access the render encoder — this would corrupt the chain's
+    /// open render pass.
     #[inline]
     pub fn active_render_pass_ptr(&self) -> Option<*mut wgpu::RenderPass<'static>> {
+        #[cfg(debug_assertions)]
+        if self.chain_transparent && self.active_render_pass.is_some() {
+            panic!(
+                "chain_transparent pass tried to access active_render_pass_ptr(); \
+                 chain_transparent passes must only use the compute encoder"
+            );
+        }
         self.active_render_pass
     }
 
@@ -289,6 +314,14 @@ impl<'a> PassContext<'a> {
         &'b mut self,
         desc: &'b wgpu::RenderPassDescriptor<'b>,
     ) -> wgpu::RenderPass<'b> {
+        #[cfg(debug_assertions)]
+        if self.chain_transparent {
+            panic!(
+                "chain_transparent pass called begin_render_pass(); \
+                 chain_transparent passes must only use the compute encoder \
+                 (ctx.begin_compute_pass / ctx.compute_encoder_ptr)"
+            );
+        }
         // TODO: GPU profiling with begin/end_gpu_pass (needs lifetime fixes)
         unsafe { (*self.encoder_ptr).begin_render_pass(desc) }
     }

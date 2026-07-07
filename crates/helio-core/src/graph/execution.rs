@@ -27,6 +27,12 @@ pub struct RenderGraph {
     resources_allocated: bool,
     pub(crate) subpass_chains: Vec<std::ops::Range<usize>>,
     chain_membership: Vec<bool>,
+    /// Previous frame's chain membership, used to detect which passes changed
+    /// so only their bundles (and everything after) need rebuilding.
+    prev_chain_membership: Vec<bool>,
+    /// Generation counter incremented whenever chain membership changes.
+    chain_generation: u64,
+    last_bundle_chain_gen: Vec<u64>,
     locked: bool,
     pass_cache: Vec<Option<CachedPass>>,
     frame_count: u64,
@@ -55,6 +61,9 @@ impl RenderGraph {
             resources_allocated: false,
             subpass_chains: Vec::new(),
             chain_membership: Vec::new(),
+            prev_chain_membership: Vec::new(),
+            chain_generation: 0,
+            last_bundle_chain_gen: Vec::new(),
             locked: false,
             pass_cache: Vec::new(),
             frame_count: 0,
@@ -353,9 +362,12 @@ impl RenderGraph {
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
                         subpass_index: 0,
+                        subpass_count: 0,
                         active_render_pass: None,
                         active_compute_pass: None,
                         components: &scene.components,
+                        #[cfg(debug_assertions)]
+                        chain_transparent: false,
                     };
                     pass.execute(&mut ctx)?;
                 }
@@ -455,9 +467,12 @@ impl RenderGraph {
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
                         subpass_index: c.subpass_index,
+                        subpass_count: c.subpass_count,
                         active_render_pass: chain_rp.as_mut().map(|rp| &mut **rp as *mut _ as *mut _),
                         active_compute_pass: None,
                         components: &scene.components,
+                        #[cfg(debug_assertions)]
+                        chain_transparent: false,
                     };
                     pass.execute(&mut ctx)?;
 
@@ -511,9 +526,12 @@ impl RenderGraph {
                             owns_device: self.owns_device,
                             resource_pool: &self.pool,
                             subpass_index: 0,
+                            subpass_count: 0,
                             active_render_pass: Some(&mut rp as *mut _ as *mut _),
                             active_compute_pass: None,
                             components: &scene.components,
+                            #[cfg(debug_assertions)]
+                            chain_transparent: false,
                         };
                         pass.execute(&mut ctx)?;
                     }
@@ -543,9 +561,12 @@ impl RenderGraph {
                     owns_device: self.owns_device,
                     resource_pool: &self.pool,
                     subpass_index: 0,
+                    subpass_count: 0,
                     active_render_pass: None,
                     active_compute_pass: None,
                     components: &scene.components,
+                    #[cfg(debug_assertions)]
+                    chain_transparent: bridged,
                 };
                 pass.execute(&mut ctx)?;
             }
@@ -579,9 +600,9 @@ impl RenderGraph {
         self.output_h = height;
         self.pool.clear();
         self.collect_declarations();
+
+        // Phase 1: first texture allocation (no alias groups).
         self.allocate_textures();
-        self.resources_allocated = true;
-        self.rebuild_gpu_render_bundles();
 
         let mut canon = libhelio::FrameResources::empty();
         for (name, _) in &self.resources {
@@ -597,12 +618,6 @@ impl RenderGraph {
                 self.pool.get_view("gbuffer_emissive"),
             ) {
                 canon.gbuffer.write(libhelio::GBufferViews { albedo: a, normal: n, orm: o, emissive: e }, "Graph");
-            }
-        }
-        let mut v2n = std::collections::HashMap::new();
-        for (name, _) in &self.resources {
-            if let Some(view) = self.pool.get_view(name) {
-                v2n.insert(view as *const _ as usize, name.as_str());
             }
         }
 
@@ -649,6 +664,10 @@ impl RenderGraph {
             .map(|p| p.as_ref().map(|(_, sig)| sig.clone()))
             .collect();
 
+        // Phase 2: detect chains and compute chain_local BEFORE final allocation.
+        // Save previous membership so incremental bundle rebuild can find
+        // the first divergent pass and rebuild from there.
+        self.prev_chain_membership = self.chain_membership.clone();
         self.detect_subpass_chains_probed(&attachments);
         self.chain_membership = vec![false; self.passes.len()];
         for chain in &self.subpass_chains {
@@ -662,14 +681,38 @@ impl RenderGraph {
             });
         }
 
+        // Phase 3: assign alias groups so chain-local and non-chain-local
+        // resources never share a physical allocation.  This prevents the
+        // situation where a chain-local resource is forced to use
+        // StoreOp::Store because its backing memory is shared with a
+        // non-chain-local resource.
+        self.assign_chain_aware_alias_groups();
+
+        // Phase 4: re-allocate textures with chain-aware alias groups.
+        self.pool.clear();
+        self.allocate_textures();
+        self.resources_allocated = true;
+
+        // Phase 5: detect chain membership changes for incremental bundle rebuild.
+        // Only advance the generation if membership actually changed.
+        let membership_dirty = self.passes.len() != self.prev_chain_membership.len()
+            || self.chain_membership.iter().zip(&self.prev_chain_membership).any(|(c, p)| c != p);
+        if membership_dirty {
+            self.chain_generation = self.chain_generation.wrapping_add(1);
+        }
+
+        // Phase 6: build pass cache and render bundles.
         self.pass_cache = probes.into_iter().enumerate().map(|(pi, probe)| {
             let (color_len, _) = probe?;
             let chain = self.subpass_chains.iter().find(|c| c.contains(&pi));
             let chain_range = chain.cloned().unwrap_or(0..0);
             let subpass_index = chain.map_or(0, |c| (pi - c.start) as u32);
+            let subpass_count = chain.map_or(0, |c| c.len() as u32);
             let store_ops: Vec<Option<wgpu::StoreOp>> = vec![None; color_len];
-            Some(CachedPass { store_ops, subpass_index, chain_range })
+            Some(CachedPass { store_ops, subpass_index, subpass_count, chain_range })
         }).collect();
+
+        self.rebuild_gpu_render_bundles_incremental();
 
         {
             let mut w_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
@@ -731,6 +774,7 @@ impl RenderGraph {
         self.locked = true;
     }
 
+    /// Rebuild all GPU render bundles from scratch.
     fn rebuild_gpu_render_bundles(&mut self) {
         self.gpu_render_bundles.clear();
         let mut base = libhelio::FrameResources::empty();
@@ -739,6 +783,60 @@ impl RenderGraph {
             self.gpu_render_bundles.push(bundle);
             pass.publish(&mut base);
         }
+        self.last_bundle_chain_gen = vec![self.chain_generation; self.passes.len()];
+    }
+
+    /// Incrementally rebuild bundles from the first pass whose chain
+    /// membership changed.  When membership is stable (chains haven't
+    /// changed) and the bundle count matches, this is a no-op —
+    /// `set_render_size()` doesn't force a rebuild.
+    fn rebuild_gpu_render_bundles_incremental(&mut self) {
+        if self.passes.is_empty() {
+            self.rebuild_gpu_render_bundles();
+            return;
+        }
+
+        // First lock: bundle vec hasn't been sized yet — full rebuild.
+        if self.gpu_render_bundles.len() != self.passes.len() {
+            self.rebuild_gpu_render_bundles();
+            return;
+        }
+
+        // Find the first pass whose chain membership diverged from the
+        // previous frame.  Only passes at or after this index need
+        // rebuilding because earlier passes' publishing is unchanged.
+        let first_dirty = self.prev_chain_membership.iter()
+            .zip(&self.chain_membership)
+            .position(|(old, new)| old != new);
+
+        // If `prev_chain_membership` and `chain_membership` have different
+        // lengths (passes added or removed) the zipped scan won't detect it,
+        // so fall back to the boundary at the shorter length.
+        let start = first_dirty.unwrap_or_else(|| {
+            self.prev_chain_membership.len().min(self.chain_membership.len())
+        });
+
+        if start == self.passes.len() {
+            return; // no change — existing bundles are valid
+        }
+
+        // Rebuild from `start` to end.  Passes before `start` keep
+        // their existing bundles.  Rebuild the cumulative base from
+        // the surviving prefix.
+        let mut base = libhelio::FrameResources::empty();
+        let (prefix, suffix) = self.passes.split_at_mut(start);
+        for pass in prefix.iter_mut() {
+            pass.publish(&mut base);
+        }
+        self.gpu_render_bundles.truncate(start);
+        for pass in suffix.iter_mut() {
+            let bundle = pass.build_gpu_render_bundle(&self.device, &base);
+            self.gpu_render_bundles.push(bundle);
+            pass.publish(&mut base);
+        }
+        self.last_bundle_chain_gen.truncate(start);
+        self.last_bundle_chain_gen
+            .resize(self.passes.len(), self.chain_generation);
     }
 }
 
