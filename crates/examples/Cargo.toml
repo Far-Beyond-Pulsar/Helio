@@ -155,6 +155,10 @@ path = "corona_demo.rs"
 name = "indoor_cathedral_pp_volumes"
 path = "indoor_cathedral_pp_volumes.rs"
 
+[[bin]]
+name = "vhs_backrooms"
+path = "vhs_backrooms.rs"
+
 
 
 [dependencies]
