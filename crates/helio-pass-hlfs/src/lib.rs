@@ -45,6 +45,7 @@ pub struct HlfsPass {
 
     // Resources
     globals_buf: wgpu::Buffer,
+    fallback_shadow_sampler: wgpu::Sampler,
 
     // Clip-stack: 4 levels of 3D textures (128^3 RGBA16F each)
     clip_stack_views: Vec<wgpu::TextureView>,
@@ -691,12 +692,24 @@ impl HlfsPass {
             ..Default::default()
         });
 
+        let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("HLFS Fallback Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
         Self {
             importance_sample_pipeline,
             radiance_inject_pipeline,
             hierarchical_propagate_pipeline,
             final_shade_pipeline,
             globals_buf,
+            fallback_shadow_sampler,
             clip_stack_views,
             clip_stack_sampler,
             sample_buffer,
@@ -816,11 +829,7 @@ impl RenderPass for HlfsPass {
                 "HLFS requires shadow_atlas (shadow pass must run first)".to_string(),
             )
         })?;
-        let shadow_sampler = ctx.resources.shadow_sampler.get().ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "HLFS requires shadow_sampler (shadow pass must run first)".to_string(),
-            )
-        })?;
+        let shadow_sampler = ctx.resources.shadow_sampler.get().unwrap_or(&self.fallback_shadow_sampler);
 
         let shade0_key = (
             pre_aa as *const _ as usize,

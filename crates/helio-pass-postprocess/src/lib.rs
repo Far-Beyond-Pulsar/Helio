@@ -622,24 +622,30 @@ impl RenderPass for PostProcessPass {
             );
         }
 
-        // 3. Test: clear target to red (no pipeline, no draw)
+        // 3. Uber render pass — uses render_bg which includes bloom sampled views.
+        //    All compute passes are complete; no storage writes are in scope here.
         {
-            unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("PostProcess Uber"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: ctx.target,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let color = [Some(wgpu::RenderPassColorAttachment {
+                view: ctx.target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })];
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("PostProcess Uber"),
+                    color_attachments: &color,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+            pass.set_pipeline(&self.uber_pipeline);
+            pass.set_bind_group(0, render_bg, &[]);
+            pass.draw(0..3, 0..1);
         }
 
         Ok(())
