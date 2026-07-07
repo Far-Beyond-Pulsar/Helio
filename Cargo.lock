@@ -2584,7 +2584,7 @@ dependencies = [
 
 [[package]]
 name = "helio"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "arrayvec",
  "bytemuck",

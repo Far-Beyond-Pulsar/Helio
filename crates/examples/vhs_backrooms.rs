@@ -67,57 +67,78 @@ fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
 
     let line = uv.y * dims.y;
 
+    // ── Vertical bounce (VCR servo instability) ───────────────────────────
+    // The entire frame slowly bobs up/down from capstan servo fluctuations.
+    let v_bounce = sin(time * 1.73) * 0.5 + sin(time * 3.11) * 0.25;
+    let vu = uv + vec2<f32>(0.0, v_bounce * px.y);
+
     // ── Rolling scanline offset error ─────────────────────────────────────
-    // VCR head tracking misalignment: a band of the image slowly rolls
-    // vertically with per-scanline horizontal displacement.
     let roll_pos = fract(time * 0.025 + 0.3);
     let roll_width = 0.06;
-    let roll_dist = abs(uv.y - roll_pos);
+    let roll_dist = abs(vu.y - roll_pos);
     let roll_weight = 1.0 - smoothstep(0.0, roll_width, roll_dist);
     let roll_shift = sin(line * 50.0 + time * 2.0) * roll_weight * 2.5;
 
     // ── Per-scanline tape jitter ──────────────────────────────────────────
     let jit = (sin(line * jitter_freq + time * 3.7) * 5.0
              + sin(line * 17.0 + time * 5.3) * 2.0) * tape_jitter;
-    let ju = uv + vec2<f32>((jit + roll_shift) * px.x, 0.0);
+    let ju = vu + vec2<f32>((jit + roll_shift) * px.x, 0.0);
 
     // ── YIQ separation with per-channel blur ─────────────────────────────
     let yuv = blur_ring(ju, 0.5 * px.x, 5u);
     let y = rgb2yiq(yuv).x;
 
     let i_uv = ju + vec2<f32>(0.6 * px.x, 0.0);
-    let i = rgb2yiq(blur_ring(i_uv, 3.0 * px.x, 9u)).y;
+    let i_base = rgb2yiq(blur_ring(i_uv, 3.0 * px.x, 9u)).y;
 
     let q_uv = ju + vec2<f32>(1.2 * px.x, 0.0);
-    let q = rgb2yiq(blur_ring(q_uv, 1.5 * px.x, 9u)).z;
+    let q_base = rgb2yiq(blur_ring(q_uv, 1.5 * px.x, 9u)).z;
+
+    // ── Chroma phase drift (VHS color decoder instability) ────────────────
+    // The chroma subcarrier PLL slowly drifts, rotating the hue.
+    let phase = sin(time * 0.37) * 0.08 + sin(time * 0.73) * 0.04;
+    let cp = cos(phase);
+    let sp = sin(phase);
+    let i = i_base * cp - q_base * sp;
+    let q = i_base * sp + q_base * cp;
 
     var result = yiq2rgb(vec3<f32>(y, i, q));
 
+    // ── Rolling glitch noise bands ────────────────────────────────────────
+    // Thin noise bars that roll vertically like tracking comb-filter errors,
+    // with smooth intensity fade instead of abrupt random pops.
+    let glitch_roll = fract(time * 0.018 + 0.5);
+    for (var g = 0u; g < 4u; g++) {
+        let gp = fract(glitch_roll + f32(g) * 0.25 + sin(time * 0.1 + f32(g)) * 0.02);
+        let gd = abs(vu.y - gp);
+        let gw = 1.0 - smoothstep(0.0, 0.025, gd);
+        if gw > 0.005 {
+            let gn = hash21(vec2<f32>(line + f32(g) * 100.0, frame));
+            result = mix(result, vec3<f32>(gn * 0.4 + 0.1), gw * 0.7);
+        }
+    }
+
     // ── VHS lighting: crushed blacks, clipped highlights ─────────────────
-    // VHS has terrible dynamic range. Lift shadows into gray, squash everything.
-    result = pow(max(result, vec3<f32>(0.0)), vec3<f32>(1.4));        // darker shadows
-    result = 1.0 - pow(max(1.0 - result, vec3<f32>(0.0)), vec3<f32>(1.6));      // squash highlights
-    result = mix(result, result * result * result, 0.15);   // contrast crush
+    result = pow(max(result, vec3<f32>(0.0)), vec3<f32>(1.4));
+    result = 1.0 - pow(max(1.0 - result, vec3<f32>(0.0)), vec3<f32>(1.6));
+    result = mix(result, result * result * result, 0.15);
 
     // ── Scanlines ─────────────────────────────────────────────────────────
-    // VHS is interlaced — alternating horizontal bands from the field structure.
-    // On a CRT these appear as dark gaps between scan lines.
     let scan = sin(uv.y * dims.y * 3.14159);
     result *= 1.0 - 0.06 * (1.0 - scan * scan);
 
-    // ── Non-sliding hash noise (changes per-frame, zero directional bias) ─
+    // ── Non-sliding hash noise ────────────────────────────────────────────
     let px_id = floor(uv * dims);
     let seed = frame + hash21(px_id) * 1000.0;
     let r0 = hash21(vec2<f32>(seed, seed * 0.5));
     let r1 = hash21(vec2<f32>(seed + 1.0, seed * 0.3 + 2.0));
 
-    // Dark areas get more noise (VHS shadow SNR is terrible)
     let luma = dot(result, vec3<f32>(0.299, 0.587, 0.114));
     let noise_strength = (0.015 + 0.03 * (1.0 - luma)) * noise_amt;
     let grain = (r0 * 2.0 - 1.0) * noise_strength;
     result += grain;
 
-    // ── Chroma noise (more in shadows, colored) ──────────────────────────
+    // ── Chroma noise ──────────────────────────────────────────────────────
     let cn = (r1 * 2.0 - 1.0) * 0.03 * (1.0 - luma) * noise_amt;
     result += vec3<f32>(cn * 0.3, -cn * 0.5, cn * 0.7);
 
