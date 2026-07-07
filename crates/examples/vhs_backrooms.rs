@@ -17,7 +17,7 @@ use helio::{
     HelioCommandBridge, GroupMask, LightId, MaterialId, MeshId, Movability, ObjectDescriptor,
     Renderer, RendererConfig, Scene,
 };
-use helio_default_graphs::build_default_graph;
+use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_pass_postprocess::PostProcessPass;
 use libhelio::{PostProcessSettings, PostProcessVolumeDescriptor, TonemapOperator};
 use v3_demo_common::{box_mesh, make_material, point_light};
@@ -443,7 +443,7 @@ impl ApplicationHandler for App {
             mapped_at_creation: false,
         });
         let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
-        let graph = build_default_graph(
+        let graph = build_default_graph_with_user_effects(
             &device,
             &queue,
             &scene,
@@ -452,6 +452,7 @@ impl ApplicationHandler for App {
             &debug_camera_buf,
             &cull_stats_buf,
             None,
+            VHS_SHADER_SNIPPET,
         );
         let mut renderer = Renderer::new(
             device.clone(),
@@ -511,10 +512,7 @@ impl ApplicationHandler for App {
         renderer.set_ambient([0.75, 0.7, 0.6], 0.04);
         renderer.set_clear_color([0.0, 0.0, 0.0, 1.0]);
 
-        // Inject VHS shader snippet into the post-process pass
-        if let Some(pass) = renderer.find_pass_mut::<helio_pass_postprocess::PostProcessPass>() {
-            pass.set_user_shader(&device, Some(VHS_SHADER_SNIPPET));
-        }
+
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();

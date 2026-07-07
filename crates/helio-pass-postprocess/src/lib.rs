@@ -83,7 +83,24 @@ impl PostProcessPass {
         height: u32,
         format: wgpu::TextureFormat,
     ) -> Self {
-        let initial_shader_src = format!("{}\n{}", BASE_SHADER_SRC, "fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> { return color; }");
+        Self::new_with_user_effects(device, queue, width, height, format, None)
+    }
+
+    /// Create with a custom `user_effects` WGSL snippet (defines the function body).
+    /// Pass `None` for the default no-op. The snippet is baked into the shader at
+    /// construction time — no runtime pipeline replacement needed.
+    pub fn new_with_user_effects(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        user_effects_fn: Option<&str>,
+    ) -> Self {
+        let default = "fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> { return color; }";
+        let fn_body = user_effects_fn.unwrap_or(default);
+        let initial_shader_src = format!("{}\n{}", BASE_SHADER_SRC, fn_body);
+        eprintln!("[PP] MERGED SHADER (last 200 chars): ...{}", &initial_shader_src[initial_shader_src.len().saturating_sub(200)..]);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
             source: wgpu::ShaderSource::Wgsl(initial_shader_src.into()),
@@ -678,10 +695,7 @@ impl RenderPass for PostProcessPass {
             self.first_frame = false;
             let initial: f32 = 0.18;
             ctx.queue.write_buffer(&self.avg_luminance_buf, 0, bytemuck::bytes_of(&initial));
-            // Re-apply user shader if one was set (graph may have been rebuilt since set_user_shader)
-            if let Some(snippet) = self.user_shader_snippet.clone() {
-                self.set_user_shader_inner(ctx.device, &snippet);
-            }
+
         }
         if !self.custom_params.is_empty() {
             ctx.queue.write_buffer(

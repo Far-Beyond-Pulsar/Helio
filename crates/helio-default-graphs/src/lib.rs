@@ -274,7 +274,21 @@ pub fn build_default_graph(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
+    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay, None)
+}
+
+pub fn build_default_graph_with_user_effects(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    scene: &Scene,
+    config: RendererConfig,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
+    cull_stats_buf: &wgpu::Buffer,
+    debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    user_effects: &'static str,
+) -> RenderGraph {
+    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay, Some(user_effects))
 }
 
 pub fn build_default_graph_external(
@@ -287,7 +301,7 @@ pub fn build_default_graph_external(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay)
+    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay, None)
 }
 
 fn build_default_graph_internal(
@@ -300,6 +314,7 @@ fn build_default_graph_internal(
     cull_stats_buf: &wgpu::Buffer,
     owns_device: bool,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
+    user_effects: Option<&'static str>,
 ) -> RenderGraph {
     let iw = config.internal_width();
     let ih = config.internal_height();
@@ -330,8 +345,8 @@ fn build_default_graph_internal(
         device, iw, ih, config.width, config.height, config.surface_format,
     )));
 
-    graph.add_pass(Box::new(PostProcessPass::new(
-        device, queue, config.width, config.height, config.surface_format,
+    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+        device, queue, config.width, config.height, config.surface_format, user_effects,
     )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
@@ -339,8 +354,9 @@ fn build_default_graph_internal(
     graph.lock(iw, ih);
 
     let overlay_owned = debug_overlay.map(Arc::clone);
+    let effect_snippet = user_effects;
     let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
-        build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
+        build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref(), effect_snippet)
     });
     graph.set_graph_data(rebuilder);
 
@@ -440,8 +456,8 @@ fn build_fxaa_graph_internal(
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
-    graph.add_pass(Box::new(PostProcessPass::new(
-        device, queue, config.width, config.height, config.surface_format,
+    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+        device, queue, config.width, config.height, config.surface_format, None,
     )));
 
     add_final_passes(
@@ -497,8 +513,8 @@ fn build_hlfs_graph_internal(
         device, iw, ih, config.width, config.height, config.surface_format,
     )));
 
-    graph.add_pass(Box::new(PostProcessPass::new(
-        device, queue, config.width, config.height, config.surface_format,
+    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+        device, queue, config.width, config.height, config.surface_format, None,
     )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
@@ -583,8 +599,8 @@ fn build_fxaa_hlfs_graph_internal(
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
-    graph.add_pass(Box::new(PostProcessPass::new(
-        device, queue, config.width, config.height, config.surface_format,
+    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+        device, queue, config.width, config.height, config.surface_format, None,
     )));
 
     add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);

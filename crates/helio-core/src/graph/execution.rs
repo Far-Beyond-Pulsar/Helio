@@ -153,6 +153,18 @@ impl RenderGraph {
         self.passes[idx].as_any().downcast_ref::<T>()
     }
 
+    /// Find the index of the first pass matching type `T`.
+    pub fn pass_index_of<T: RenderPass + 'static>(&self) -> Option<usize> {
+        self.passes.iter().position(|p| (*p).as_any().downcast_ref::<T>().is_some())
+    }
+
+    /// Replace the pass at `index` with a new one.
+    pub fn replace_pass_at(&mut self, index: usize, pass: Box<dyn RenderPass>) {
+        if index < self.passes.len() {
+            self.passes[index] = pass;
+        }
+    }
+
     pub fn iter_passes_mut<T: RenderPass + 'static>(&mut self) -> impl Iterator<Item = &mut T> {
         self.passes
             .iter_mut()

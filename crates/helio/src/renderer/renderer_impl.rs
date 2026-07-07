@@ -321,6 +321,14 @@ impl Renderer {
         self.graph.find_pass_mut::<T>()
     }
 
+    pub fn graph_pass_index<T: RenderPass + 'static>(&self) -> Option<usize> {
+        self.graph.pass_index_of::<T>()
+    }
+
+    pub fn replace_graph_pass(&mut self, index: usize, pass: Box<dyn RenderPass>) {
+        self.graph.replace_pass_at(index, pass);
+    }
+
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
     }
