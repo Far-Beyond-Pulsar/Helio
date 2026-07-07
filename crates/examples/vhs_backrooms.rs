@@ -25,44 +25,166 @@ use v3_demo_common::{box_mesh, make_material, point_light};
 // User shader snippet injected into the post-process pipeline.
 // Uses noise_tex, noise_samp, and pp_custom from the core bindings.
 const VHS_SHADER_SNIPPET: &str = "
+fn rgb_to_ycbcr(c: vec3<f32>) -> vec3<f32> {
+    let y  = dot(c, vec3<f32>(0.299, 0.587, 0.114));
+    let cb = dot(c, vec3<f32>(-0.168736, -0.331264, 0.5)) + 0.5;
+    let cr = dot(c, vec3<f32>(0.5, -0.418688, -0.081312)) + 0.5;
+    return vec3<f32>(y, cb, cr);
+}
+
+fn ycbcr_to_rgb(c: vec3<f32>) -> vec3<f32> {
+    let y = c.x;
+    let cb = c.y - 0.5;
+    let cr = c.z - 0.5;
+    let r = y + 1.402 * cr;
+    let g = y - 0.344136 * cb - 0.714136 * cr;
+    let b = y + 1.772 * cb;
+    return vec3<f32>(r, g, b);
+}
+
+fn sample_ycbcr(u: vec2<f32>) -> vec3<f32> {
+    return rgb_to_ycbcr(textureSampleLevel(hdr_input, linear_samp, u, 0.0).rgb);
+}
+
+fn vhs_noise(u: vec2<f32>, t: f32) -> vec3<f32> {
+    let n1 = textureSampleLevel(noise_tex, noise_samp, u * 1.0 + t * 0.07, 0.0).r;
+    let n2 = textureSampleLevel(noise_tex, noise_samp, u * 2.3 + t * 0.13 + 0.3, 0.0).r;
+    let n3 = textureSampleLevel(noise_tex, noise_samp, u * 5.1 + t * 0.23 + 0.7, 0.0).r;
+    return vec3<f32>(n1, n2, n3);
+}
+
 fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
-    let scanlines   = pp_custom[0].x;
-    let wobble_amt  = pp_custom[0].y;
-    let wobble_freq = pp_custom[0].z;
-    let flicker     = pp_custom[0].w;
-    let noise_amt   = pp_custom[1].x;
-    let time        = pp_custom[1].y;
+    let _scanlines   = pp_custom[0].x;
+    let tape_jitter  = pp_custom[0].y;
+    let jitter_freq  = pp_custom[0].z;
+    let flicker      = pp_custom[0].w;
+    let noise_amt    = pp_custom[1].x;
+    let time         = pp_custom[1].y;
 
-    let n = textureSampleLevel(noise_tex, noise_samp, uv + time * 0.01, 0.0);
-    var c = color;
+    let px = vec2<f32>(1.0) / dims;
 
-    // Scanlines — interlaced VHS alternating brightness
-    let scan = sin(uv.y * dims.y * PI);
-    let scan_mask = 1.0 - scanlines * 0.35 * (1.0 - abs(scan));
-    c *= scan_mask;
+    // ── 1. Per-scanline tape jitter ──────────────────────────────────────
+    // Mechanical tape stretch creates horizontal displacement per scanline.
+    // Two sine waves at different frequencies for organic feel.
+    let line = uv.y * dims.y;
+    let jitter_px = sin(line * jitter_freq + time * 3.7) * tape_jitter * 5.0
+                  + sin(line * 17.0 + time * 5.3) * tape_jitter * 2.0;
+    let ju = uv + vec2<f32>(jitter_px * px.x, 0.0);
 
-    // Flicker — slow brightness fluctuation
-    c *= 1.0 - flicker * 0.15 * n.r;
+    // ── 2. Chroma delay (NTSC) ───────────────────────────────────────────
+    // In composite video the chroma signal arrives ~1µs after luma,
+    // causing color to smear ~1-2 pixels to the right of luminance edges.
+    let chroma_delay = 1.5 * px.x;
+    let cu = ju - vec2<f32>(chroma_delay, 0.0);
 
-    // Color bleed — horizontal-only chromatic separation
-    let bleed = 0.003 * sin(uv.y * dims.y * 0.3 + time * 1.5);
-    let r = textureSampleLevel(hdr_input, linear_samp, uv + vec2<f32>(bleed, 0.0), 0.0).r;
-    let b = textureSampleLevel(hdr_input, linear_samp, uv - vec2<f32>(bleed, 0.0), 0.0).b;
-    c = vec3<f32>(mix(c.r, r, 0.4), c.g, mix(c.b, b, 0.4));
+    // ── 3. Convert to YCbCr ─────────────────────────────────────────────
+    let main = sample_ycbcr(ju);
 
-    // Tracking noise — horizontal bars of static
-    let track_uv = vec2<f32>(uv.x * 3.0, floor(uv.y * dims.y * 0.25) + time * 0.1);
-    let track_n = textureSampleLevel(noise_tex, noise_samp, track_uv, 0.0).r;
-    let track = smoothstep(0.7, 0.98, track_n) * noise_amt * 0.5;
-    c += vec3<f32>(track * 0.6, track * 0.3, track * 0.1);
+    // ── 4. Horizontal chroma blur (~40-line chroma resolution) ──────────
+    // VHS chroma bandwidth is ~0.5 MHz vs ~3 MHz for luma — 6× difference.
+    // Gaussian kernel, 7 taps, ~8 pixel radius at 720p equivalent.
+    var cb_avg = main.y * 0.25;
+    var cr_avg = main.z * 0.25;
+    var cw_sum = 0.25;
+    for (var i = 1; i <= 6; i++) {
+        let w = exp(-f32(i * i) * 0.18);
+        let o = vec2<f32>(f32(i) * 1.8 * px.x, 0.0);
+        let sl = sample_ycbcr(cu - o);
+        let sr = sample_ycbcr(cu + o);
+        cb_avg += (sl.y + sr.y) * w;
+        cr_avg += (sl.z + sr.z) * w;
+        cw_sum += w * 2.0;
+    }
+    var y_out = main.x;
+    var cb_out = cb_avg / cw_sum;
+    var cr_out = cr_avg / cw_sum;
 
-    // Tape wobble (disabled when wobble_amt = 0)
-    let wob_x = sin(uv.y * wobble_freq + time * 4.0) * wobble_amt * 0.008;
-    let wob_uv = uv + vec2<f32>(wob_x, 0.0);
-    let wob_col = textureSampleLevel(hdr_input, linear_samp, wob_uv, 0.0).rgb;
-    c = mix(c, wob_col, wobble_amt);
+    // ── 5. Horizontal luma softening (VHS ~240-line luma resolution) ────
+    // 3-tap gaussian, ~1.5 pixel radius
+    var ly_avg = y_out * 0.5;
+    var ly_w = 0.5;
+    for (var i = 1; i <= 2; i++) {
+        let w = exp(-f32(i * i) * 0.5);
+        let o = vec2<f32>(f32(i) * 1.2 * px.x, 0.0);
+        ly_avg += (sample_ycbcr(ju - o).x + sample_ycbcr(ju + o).x) * w;
+        ly_w += w * 2.0;
+    }
+    y_out = ly_avg / ly_w;
 
-    return c;
+    // ── 6. Luma noise (VHS SNR ~45 dB, worse in shadows) ────────────────
+    let n = vhs_noise(uv, time);
+    let luma_noise = (n.x + n.y - 1.0) * 0.035 * (1.0 - y_out * 0.6) * noise_amt;
+    y_out += luma_noise;
+
+    // ── 7. Chroma noise (color rainbows from dirty heads / tape wear) ───
+    cb_out += (n.z - 0.5) * 0.025 * noise_amt;
+    cr_out += (n.y - 0.5) * 0.025 * noise_amt;
+
+    // ── 8. Dropout compensation ──────────────────────────────────────────
+    // When tape dropout occurs, VCR repeats the previous scanline,
+    // creating a horizontal frozen streak.
+    let drop_seed = floor(line * 1.5) * 0.618;
+    let dn = textureSampleLevel(noise_tex, noise_samp,
+        vec2<f32>(drop_seed + time * 0.15, 0.0), 0.0).r;
+    if dn > 0.975 {
+        let prev = sample_ycbcr(ju - vec2<f32>(0.0, px.y));
+        y_out = mix(y_out, prev.x, dn * 4.0 - 3.0);
+        cb_out = mix(cb_out, prev.y, dn * 4.0 - 3.0);
+        cr_out = mix(cr_out, prev.z, dn * 4.0 - 3.0);
+    }
+
+    // ── 9. Tracking error ───────────────────────────────────────────────
+    // Slowly rolling horizontal band where the video head tracking is off,
+    // causing severe noise and sync disruption.
+    let track_pos = fract(time * 0.06);
+    let track_half = 0.12;
+    var track_dist = abs(uv.y - track_pos);
+    if track_dist > 0.5 { track_dist = 1.0 - track_dist; }
+    let track_strength = 1.0 - smoothstep(0.0, track_half, track_dist);
+    if track_strength > 0.01 {
+        let tn = vhs_noise(uv * 2.0 + time * 0.5, time);
+        y_out  = mix(y_out,  tn.x * 0.7 + 0.15,  track_strength * 0.7);
+        cb_out = mix(cb_out, tn.y * 0.4 + 0.3,   track_strength * 0.5);
+        cr_out = mix(cr_out, tn.z * 0.4 + 0.3,   track_strength * 0.5);
+    }
+
+    // ── 10. Head-switching noise ──────────────────────────────────────────
+    // ~8 scanlines at bottom of frame where VCR switches between heads.
+    // Heavy noise with visible horizontal tearing.
+    let head_dist = 1.0 - uv.y;
+    let head_strength = 1.0 - smoothstep(0.0, 6.0 * px.y, head_dist);
+    if head_strength > 0.01 {
+        let hn = textureSampleLevel(noise_tex, noise_samp,
+            vec2<f32>(uv.x * 100.0, line * 0.5 + time * 0.3), 0.0).r;
+        y_out = mix(y_out, hn * 0.5 + 0.2, head_strength);
+        cb_out = mix(cb_out, 0.5, head_strength * 0.3);
+        cr_out = mix(cr_out, 0.5, head_strength * 0.3);
+    }
+
+    // ── 11. Convert back to RGB ───────────────────────────────────────────
+    var result = ycbcr_to_rgb(vec3<f32>(y_out, cb_out, cr_out));
+
+    // ── 12. Dot crawl / rainbow edge artifacts ────────────────────────────
+    // The chroma subcarrier (3.58 MHz NTSC) beats with luma detail,
+    // producing moving rainbow patterns on sharp edges.
+    let edge = length(fwidth(result));
+    let crawl = sin(uv.x * dims.x * 0.5 + time * 50.0) * edge * 0.08;
+    result += vec3<f32>(crawl * 0.5, -crawl * 0.3, crawl);
+
+    // ── 13. VHS desaturation & color shift ────────────────────────────────
+    let gray = dot(result, vec3<f32>(0.299, 0.587, 0.114));
+    result = mix(vec3<f32>(gray), result, 0.82);
+    result += vec3<f32>(0.0, 0.01, 0.01);
+
+    // ── 14. Power-supply flicker ──────────────────────────────────────────
+    let flick = textureSampleLevel(noise_tex, noise_samp,
+        vec2<f32>(time * 0.2, 0.0), 0.0).r;
+    result *= 1.0 - 0.04 * (flick * 2.0 - 1.0);
+
+    // ── 15. Soft clip ─────────────────────────────────────────────────────
+    result = clamp(result, vec3<f32>(0.0), vec3<f32>(1.0));
+
+    return result;
 }
 ";
 
