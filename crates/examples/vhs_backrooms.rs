@@ -26,7 +26,43 @@ use v3_demo_common::{box_mesh, make_material, point_light};
 // Uses noise_tex, noise_samp, and pp_custom from the core bindings.
 const VHS_SHADER_SNIPPET: &str = "
 fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
-    return vec3<f32>(0.0, 1.0, 1.0);
+    let scanlines   = pp_custom[0].x;
+    let wobble_amt  = pp_custom[0].y;
+    let wobble_freq = pp_custom[0].z;
+    let flicker     = pp_custom[0].w;
+    let noise_amt   = pp_custom[1].x;
+    let time        = pp_custom[1].y;
+
+    let n = textureSampleLevel(noise_tex, noise_samp, uv + time * 0.01, 0.0);
+    var c = color;
+
+    // Scanlines — interlaced VHS alternating brightness
+    let scan = sin(uv.y * dims.y * PI);
+    let scan_mask = 1.0 - scanlines * 0.35 * (1.0 - abs(scan));
+    c *= scan_mask;
+
+    // Flicker — slow brightness fluctuation
+    c *= 1.0 - flicker * 0.15 * n.r;
+
+    // Color bleed — horizontal-only chromatic separation
+    let bleed = 0.003 * sin(uv.y * dims.y * 0.3 + time * 1.5);
+    let r = textureSampleLevel(hdr_input, linear_samp, uv + vec2<f32>(bleed, 0.0), 0.0).r;
+    let b = textureSampleLevel(hdr_input, linear_samp, uv - vec2<f32>(bleed, 0.0), 0.0).b;
+    c = vec3<f32>(mix(c.r, r, 0.4), c.g, mix(c.b, b, 0.4));
+
+    // Tracking noise — horizontal bars of static
+    let track_uv = vec2<f32>(uv.x * 3.0, floor(uv.y * dims.y * 0.25) + time * 0.1);
+    let track_n = textureSampleLevel(noise_tex, noise_samp, track_uv, 0.0).r;
+    let track = smoothstep(0.7, 0.98, track_n) * noise_amt * 0.5;
+    c += vec3<f32>(track * 0.6, track * 0.3, track * 0.1);
+
+    // Tape wobble (disabled when wobble_amt = 0)
+    let wob_x = sin(uv.y * wobble_freq + time * 4.0) * wobble_amt * 0.008;
+    let wob_uv = uv + vec2<f32>(wob_x, 0.0);
+    let wob_col = textureSampleLevel(hdr_input, linear_samp, wob_uv, 0.0).rgb;
+    c = mix(c, wob_col, wobble_amt);
+
+    return c;
 }
 ";
 
@@ -738,8 +774,8 @@ impl AppState {
         let time = self.start_time.elapsed().as_secs_f32();
         let vhs_params: [[f32; 4]; 2] = [
             [0.7,    // scanlines — fairly pronounced
-             0.0,    // wobble — disabled (needs intermediate RT)
-             8.0,    // wobble frequency (unused)
+             0.004,  // wobble — subtle horizontal jitter
+             8.0,    // wobble frequency
              0.2],   // flicker — subtle brightness pulse
             [0.4,    // tracking noise — moderate
              time,   // animation time
