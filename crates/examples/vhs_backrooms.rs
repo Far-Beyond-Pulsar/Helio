@@ -26,45 +26,7 @@ use v3_demo_common::{box_mesh, make_material, point_light};
 // Uses noise_tex, noise_samp, and pp_custom from the core bindings.
 const VHS_SHADER_SNIPPET: &str = "
 fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
-    var c = color;
-
-    // 1. Scanlines — horizontal dark lines
-    let sl = pp_custom[0].x;
-    if sl > 0.0 {
-        let line = abs(sin(uv.y * dims.y * 3.14159));
-        c *= 1.0 - sl * line * 0.5;
-    }
-
-    // 2. Wobble — horizontal bend (screen-space shift of processed color)
-    let wb = pp_custom[0].y;
-    if wb > 0.0 {
-        let offset = wb * sin(uv.y * pp_custom[0].z + pp_custom[1].y);
-        let wobbled_uv = vec2<f32>(uv.x + offset, uv.y);
-        // Re-sample the ALREADY PROCESSED output via a 2nd pass texture
-        // For now just shift the processed color horizontally as a cheap approximation
-        // (a proper implementation would ping-pong through an intermediate RT)
-    }
-
-    // 3. Flicker — brightness oscillation
-    let fl = pp_custom[0].w;
-    if fl > 0.0 {
-        c *= 1.0 + fl * sin(pp_custom[1].y * 7.5 + pp_custom[1].y * 0.3);
-    }
-
-    // 4. Tracking noise — horizontal bands of colored static
-    let tr = pp_custom[1].x;
-    if tr > 0.0 {
-        let n = textureSampleLevel(noise_tex, noise_samp, vec2<f32>(uv.y * 30.0, pp_custom[1].y * 0.3), 0.0).r;
-        let band = n * step(0.8, n);
-        c += vec3<f32>(0.6, 0.4, 1.0) * band * tr * 2.0;
-    }
-
-    // 5. Color bleed — shift red channel horizontally (cheap chroma offset)
-    let bleed = 0.002 * sin(pp_custom[1].y * 2.0);
-    let r = textureSampleLevel(hdr_input, linear_samp, uv + vec2<f32>(bleed, 0.0), 0.0).r;
-    c.r = mix(c.r, r, 0.5);
-
-    return c;
+    return vec3<f32>(0.0, 1.0, 1.0);
 }
 ";
 

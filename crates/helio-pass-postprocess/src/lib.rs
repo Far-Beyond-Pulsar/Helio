@@ -584,24 +584,23 @@ impl PostProcessPass {
     /// Pass `None` to restore the default no-op. Rebuilds the uber pipeline.
     pub fn set_user_shader(&mut self, device: &wgpu::Device, wgsl: Option<&str>) {
         self.user_shader_snippet = wgsl.map(|s| s.to_string());
-        let default_noop = "fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> { return color; }";
-        let effect_fn = wgsl.unwrap_or(default_noop);
+        let effect_fn = "fn user_effects(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> { return vec3<f32>(0.0, 1.0, 1.0); }";
         let source = format!("{}\n{}", BASE_SHADER_SRC, effect_fn);
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        let shader_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
         self.uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("PostProcess Uber Pipeline"),
+            label: Some("PostProcess Uber"),
             layout: Some(&self.uber_pl),
             vertex: wgpu::VertexState {
-                module: &shader,
+                module: &shader_mod,
                 entry_point: Some("vs_fullscreen"),
                 buffers: &[],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
-                module: &shader,
+                module: &shader_mod,
                 entry_point: Some("fs_uber"),
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
@@ -681,18 +680,20 @@ impl RenderPass for PostProcessPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let pre_aa_view = ctx.resources.pre_aa.read("PostProcess").ok_or_else(|| {
-            helio_core::Error::InvalidPassConfig(
-                "PostProcess requires frame.pre_aa (from DeferredLightPass)".to_string(),
-            )
-        })?;
-
-        let postprocess_buf =
-            ctx.resources.postprocess_uniforms.read("PostProcess").ok_or_else(|| {
-                helio_core::Error::InvalidPassConfig(
-                    "PostProcess requires frame.postprocess_uniforms (from Renderer)".to_string(),
-                )
-            })?;
+        let pre_aa_view = match ctx.resources.pre_aa.get() {
+            Some(v) => v,
+            None => {
+                eprintln!("[PostProcess] pre_aa not available, skipping");
+                return Ok(());
+            }
+        };
+        let postprocess_buf = match ctx.resources.postprocess_uniforms.get() {
+            Some(v) => v,
+            None => {
+                eprintln!("[PostProcess] uniforms not available, skipping");
+                return Ok(());
+            }
+        };
 
         let camera_buf = ctx.scene.camera;
 
@@ -707,11 +708,7 @@ impl RenderPass for PostProcessPass {
             self.main_bg_key = Some(bg_key);
         }
 
-        // Bloom extract BG: dst=mip0 write storage (group1 b1).
-        // b0 (bloom_src) is declared unused by cs_bloom_down_extract, but wgpu still
-        // validates that no two bindings in scope reference the same texture with
-        // conflicting usages. Use mip1's sampled view as the dummy — a different
-        // texture than mip0 — so RESOURCE and STORAGE_WRITE_ONLY never collide.
+        // Bloom extract BG
         let hdr_ptr = pre_aa_view as *const _ as usize;
         if self.bloom_extract_bg.as_ref().map(|(k, _)| *k) != Some(hdr_ptr) {
             let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -720,7 +717,6 @@ impl RenderPass for PostProcessPass {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        // Dummy — different texture from mip0 to avoid usage conflict.
                         resource: wgpu::BindingResource::TextureView(&self.bloom_sampled_views[1]),
                     },
                     wgpu::BindGroupEntry {
@@ -767,15 +763,13 @@ impl RenderPass for PostProcessPass {
             );
         }
 
-        // 2b. Bloom downsample: mip N-1 → mip N, for N in 1..BLOOM_MIPS.
-        // Separate passes ensure writes complete before the next mip reads them.
+        // 2b. Bloom downsample
         for i in 0..(BLOOM_MIPS as usize - 1) {
             let (mw, mh) = self.mip_dims(i as u32 + 1);
-            let mut cpass =
-                unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some(&format!("PostProcess Bloom Down mip{}", i + 1)),
-                    timestamp_writes: None,
-                });
+            let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(&format!("PostProcess Bloom Down mip{}", i + 1)),
+                timestamp_writes: None,
+            });
             cpass.set_pipeline(&self.bloom_down_pipeline);
             cpass.set_bind_group(0, compute_bg, &[]);
             cpass.set_bind_group(1, &self.bloom_down_bgs[i], &[]);
@@ -786,27 +780,25 @@ impl RenderPass for PostProcessPass {
             );
         }
 
-        // 3. Uber render pass — uses render_bg which includes bloom sampled views.
-        //    All compute passes are complete; no storage writes are in scope here.
+        // 3. Uber render pass
         {
-            let color = [Some(wgpu::RenderPassColorAttachment {
-                view: ctx.target,
-                resolve_target: None,
-                depth_slice: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                    store: wgpu::StoreOp::Store,
-                },
-            })];
             let mut pass =
                 unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("PostProcess Uber"),
-                    color_attachments: &color,
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
+                label: Some("PostProcess Uber"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: ctx.target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
             pass.set_pipeline(&self.uber_pipeline);
             pass.set_bind_group(0, render_bg, &[]);
             pass.draw(0..3, 0..1);

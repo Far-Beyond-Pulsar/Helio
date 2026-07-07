@@ -474,53 +474,8 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     let uv = in.uv;
 
     var color = textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb;
-    let depth_coord = vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y));
-    let depth = textureLoad(depth_input, depth_coord, 0u);
 
-    // 1. Auto exposure
-    if postprocess.exposure_mode == 1u {
-        let avg_log = avg_luminance[0];
-        let target_lum = exp2(avg_log + postprocess.exposure_compensation);
-        color *= target_lum;
-    } else {
-        color *= exp2(postprocess.exposure_compensation);
-    }
-
-    // 2. Bloom composite: sum all 5 mip levels with tent weights
-    if postprocess.bloom_enabled != 0u && postprocess.blend_weight_bloom > 0.0 {
-        var bloom = textureSampleLevel(bloom_0, linear_samp, uv, 0.0).rgb * 0.5;
-        bloom    += textureSampleLevel(bloom_1, linear_samp, uv, 0.0).rgb * 0.3;
-        bloom    += textureSampleLevel(bloom_2, linear_samp, uv, 0.0).rgb * 0.125;
-        bloom    += textureSampleLevel(bloom_3, linear_samp, uv, 0.0).rgb * 0.05;
-        bloom    += textureSampleLevel(bloom_4, linear_samp, uv, 0.0).rgb * 0.025;
-        color += bloom;
-    }
-
-    // 3. Motion blur
-    color = apply_motion_blur(color, uv);
-
-    // 4. Depth of Field
-    color = apply_dof(color, uv, depth, dims);
-
-    // 5. Color grading
-    color = color_grade(color);
-
-    // 6. White balance
-    color = white_balance(color);
-
-    // 7. Tonemap
-    color = apply_tonemap(color);
-
-    // 8. Vignette
-    color = apply_vignette(color, uv);
-
-    // 9. Chromatic aberration
-    color = apply_ca(color, uv, dims);
-
-    // 10. Film grain
-    color = apply_grain(color, uv, f32(postprocess.blend_weight_grain * 1000.0));
-
-    // 11. User-defined effects (injected via set_user_shader)
+    // User-defined effects
     color = user_effects(color, uv, dims);
 
     return vec4<f32>(color, 1.0);
