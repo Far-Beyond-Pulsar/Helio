@@ -373,11 +373,20 @@ fn read_voxel_f32(data_offset: u32, x: u32, y: u32, z: u32) -> f32 {
     return select(-1.0, 1.0, read_voxel(data_offset, x, y, z) > 0u);
 }
 
+// Clamps a central-difference sample coordinate to the brick's valid [0,7]
+// range — without this, sampling at voxel 0 or 7 underflows/overflows the u32
+// coordinate and reads garbage (wrapped-around or adjacent-brick) data.
+fn clamped_voxel(v: i32) -> u32 {
+    return u32(clamp(v, 0, 7));
+}
+
 fn compute_normal(data_offset: u32, cx: u32, cy: u32, cz: u32, vs: f32) -> vec3<f32> {
-    let eps = 1u;
-    let sx = read_voxel_f32(data_offset, cx + eps, cy, cz) - read_voxel_f32(data_offset, cx - eps, cy, cz);
-    let sy = read_voxel_f32(data_offset, cx, cy + eps, cz) - read_voxel_f32(data_offset, cx, cy - eps, cz);
-    let sz = read_voxel_f32(data_offset, cx, cy, cz + eps) - read_voxel_f32(data_offset, cx, cy, cz - eps);
+    let icx = i32(cx);
+    let icy = i32(cy);
+    let icz = i32(cz);
+    let sx = read_voxel_f32(data_offset, clamped_voxel(icx + 1), cy, cz) - read_voxel_f32(data_offset, clamped_voxel(icx - 1), cy, cz);
+    let sy = read_voxel_f32(data_offset, cx, clamped_voxel(icy + 1), cz) - read_voxel_f32(data_offset, cx, clamped_voxel(icy - 1), cz);
+    let sz = read_voxel_f32(data_offset, cx, cy, clamped_voxel(icz + 1)) - read_voxel_f32(data_offset, cx, cy, clamped_voxel(icz - 1));
     let n = vec3<f32>(sx, sy, sz);
     if length(n) < 0.001 {
         return vec3<f32>(0.0, 1.0, 0.0);
@@ -484,10 +493,13 @@ fn main(
             let world_pos = cell_world + local_pos * vs;
             let vi = vert_base + i;
             vertex_buf[brick_vert_offset + vi] = vec4<f32>(world_pos, f32(material));
-            // Compute normal via central differences on the material field
-            let nx = u32(round(local_pos.x * 8.0));
-            let ny = u32(round(local_pos.y * 8.0));
-            let nz = u32(round(local_pos.z * 8.0));
+            // Compute normal via central differences on the material field.
+            // local_pos components are in {0.0, 0.5, 1.0} (edge_vertex midpoints);
+            // round to the nearest corner voxel (0 or 1) — NOT scaled by the
+            // brick size, which would read voxels far outside this brick.
+            let nx = u32(round(local_pos.x));
+            let ny = u32(round(local_pos.y));
+            let nz = u32(round(local_pos.z));
             let n = compute_normal(data_offset, cx + nx, cy + ny, cz + nz, vs);
             normal_buf[brick_vert_offset + vi] = vec4<f32>(n, 0.0);
         }
