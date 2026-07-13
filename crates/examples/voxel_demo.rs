@@ -17,7 +17,7 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig, Scene,
-    RenderGraph, VoxelVolumeDescriptor, VoxelMode, VoxelVolumeId,
+    RenderGraph, RenderPass, VoxelVolumeDescriptor, VoxelMode, VoxelVolumeId,
 };
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_voxel_raymarch::VoxelRayMarchPass;
@@ -249,7 +249,12 @@ impl ApplicationHandler for App {
         // without one, the surface texture is never written and shows uninitialized
         // GPU memory (flickering magenta/garbage).
         let mut graph = RenderGraph::new(&device, &queue);
-        let voxel_rm_pass = VoxelRayMarchPass::new(&device, surface_format);
+        let mut voxel_rm_pass = VoxelRayMarchPass::new(&device, surface_format);
+        // VoxelRayMarchPass allocates its output textures at a placeholder 1x1 and
+        // only resizes them in on_resize(), which the engine normally calls from a
+        // window-resize event. Since RenderGraph::lock() never calls it, we have to
+        // size the pass explicitly here or it ray marches into a 1x1 texture forever.
+        voxel_rm_pass.on_resize(&device, size.width, size.height);
         graph.add_pass(Box::new(voxel_rm_pass));
         graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
             &device, &queue, size.width, size.height, surface_format, None,
@@ -270,9 +275,12 @@ impl ApplicationHandler for App {
             surface_format,
             renderer,
             last_frame: Instant::now(),
-            cam_pos: Vec3::new(0.0, 4.0, 20.0),
+            // Start well above the terrain (world y can reach ~±10 given the
+            // generator's amplitude) looking down, so the camera doesn't spawn
+            // clipped inside solid ground.
+            cam_pos: Vec3::new(0.0, 30.0, 45.0),
             yaw: 0.0,
-            pitch: -0.2,
+            pitch: -0.5,
             velocity: Vec3::ZERO,
             keys: HashSet::new(),
             cursor_grabbed: false,
