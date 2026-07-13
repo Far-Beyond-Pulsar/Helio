@@ -64,6 +64,7 @@ struct AppState {
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
+    alpha_mode: wgpu::CompositeAlphaMode,
     renderer: Renderer,
     last_frame: Instant,
     cam_pos: Vec3,
@@ -194,6 +195,7 @@ impl ApplicationHandler for App {
             .find(|f| f.is_srgb())
             .copied()
             .unwrap_or(caps.formats[0]);
+        let alpha_mode = caps.alpha_modes[0];
 
         surface.configure(
             &device,
@@ -203,7 +205,7 @@ impl ApplicationHandler for App {
                 width: size.width,
                 height: size.height,
                 present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
+                alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             },
@@ -315,6 +317,7 @@ impl ApplicationHandler for App {
             device,
             queue,
             surface_format,
+            alpha_mode,
             renderer,
             last_frame: Instant::now(),
             // Start well above the terrain (world y can reach ~±10 given the
@@ -338,6 +341,25 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+
+            WindowEvent::Resized(new_size) => {
+                if new_size.width > 0 && new_size.height > 0 {
+                    state.surface.configure(
+                        &state.device,
+                        &wgpu::SurfaceConfiguration {
+                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                            format: state.surface_format,
+                            width: new_size.width,
+                            height: new_size.height,
+                            present_mode: wgpu::PresentMode::Fifo,
+                            alpha_mode: state.alpha_mode,
+                            view_formats: vec![],
+                            desired_maximum_frame_latency: 2,
+                        },
+                    );
+                    state.renderer.set_render_size(new_size.width, new_size.height);
+                }
+            }
 
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
