@@ -80,6 +80,7 @@ struct AppState {
     cam_pitch: f32,
     keys: HashSet<KeyCode>,
     right_mouse_held: bool,
+    left_mouse_held: bool,
     mouse_delta: (f32, f32),
     cursor_pos: (f32, f32),
     cam_speed: f32,
@@ -772,6 +773,7 @@ impl ApplicationHandler for App {
             cam_pitch: -0.38,
             keys: HashSet::new(),
             right_mouse_held: false,
+            left_mouse_held: false,
             mouse_delta: (0.0, 0.0),
             cursor_pos: (640.0, 360.0),
             cam_speed: 18.0,
@@ -794,6 +796,7 @@ impl ApplicationHandler for App {
 
             WindowEvent::Focused(false) => state.reset_transient_input(),
             WindowEvent::Focused(true) => state.last_frame = std::time::Instant::now(),
+            WindowEvent::CursorLeft { .. } => state.reset_transient_input(),
 
             WindowEvent::CursorMoved { position, .. } => {
                 state.cursor_pos = (position.x as f32, position.y as f32);
@@ -802,10 +805,12 @@ impl ApplicationHandler for App {
                     state
                         .editor
                         .update_hover(ray_o, ray_d, &state.renderer);
-                    if state.editor.is_dragging() {
+                    if state.left_mouse_held && state.editor.is_dragging() {
                         state
                             .editor
                             .update_drag(ray_o, ray_d, &mut state.renderer);
+                    } else if state.editor.is_dragging() {
+                        state.editor.end_drag();
                     }
                 }
             }
@@ -926,6 +931,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
+                state.left_mouse_held = true;
                 if !state.right_mouse_held {
                     let _ = state
                         .window
@@ -974,6 +980,7 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                state.left_mouse_held = false;
                 state.editor.end_drag();
             }
 
@@ -1026,6 +1033,7 @@ impl AppState {
         self.keys.clear();
         self.mouse_delta = (0.0, 0.0);
         self.right_mouse_held = false;
+        self.left_mouse_held = false;
         self.editor.end_drag();
         let _ = self.window.set_cursor_grab(CursorGrabMode::None);
         self.window.set_cursor_visible(true);

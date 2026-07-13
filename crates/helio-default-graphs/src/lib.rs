@@ -477,6 +477,7 @@ fn build_fxaa_graph_internal(
     let rebuilder: GraphRebuilder = Arc::new(move |device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf| {
         build_fxaa_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, owns_device, overlay_owned.as_ref())
     });
+    graph.set_graph_data(rebuilder);
 
     graph
 }
