@@ -2,10 +2,18 @@
 // One workgroup (64 threads) per brick.
 // Indexed by workgroup_id.x into the dirty_bricks list.
 
-const MAX_VERTS: u32 = 256u;
-const MAX_INDICES: u32 = 768u;
-const CELLS_PER_DIM: u32 = 7u; // (8-1) cells per dimension
-const TOTAL_CELLS: u32 = 343u; // 7×7×7
+// Must match MAX_SURFACE_VERTS_PER_BRICK/MAX_SURFACE_INDICES_PER_BRICK in
+// helio_voxel_core::constants (vertex_buf/index_buf are sized from those).
+const MAX_VERTS: u32 = 2048u;
+const MAX_INDICES: u32 = 2048u;
+// Each brick's voxel data is padded to 9x9x9 (one extra voxel of +X/+Y/+Z
+// halo copied from the neighboring brick), so cells run 0..7 (8 per axis,
+// corners 0..8) instead of 0..6 — the extra cell at each brick's +face reads
+// the neighbor's first voxel via padding, which is what actually closes the
+// seam between adjacent bricks. See VOXEL_MESH_BRICK_VOXEL_WORDS.
+const CELLS_PER_DIM: u32 = 8u;
+const TOTAL_CELLS: u32 = 512u; // 8×8×8
+const PADDED_DIM: u32 = 9u;
 const WG_SIZE: u32 = 64u;
 const CELLS_PER_THREAD: u32 = (TOTAL_CELLS + WG_SIZE - 1u) / WG_SIZE;
 
@@ -362,8 +370,10 @@ fn edge_vertex(edge: u32) -> vec3<f32> {
     return edge_mid[edge];
 }
 
+// Brick data is a padded 9x9x9 block (indices 0..8 per axis) — see
+// VOXEL_MESH_BRICK_VOXEL_WORDS / CELLS_PER_DIM.
 fn read_voxel(data_offset: u32, x: u32, y: u32, z: u32) -> u32 {
-    let linear = z * 64u + y * 8u + x;
+    let linear = z * (PADDED_DIM * PADDED_DIM) + y * PADDED_DIM + x;
     let word_idx = data_offset + linear / 4u;
     let byte_in_word = linear % 4u;
     return (voxel_data[word_idx] >> (byte_in_word * 8u)) & 0xFFu;
@@ -373,11 +383,11 @@ fn read_voxel_f32(data_offset: u32, x: u32, y: u32, z: u32) -> f32 {
     return select(-1.0, 1.0, read_voxel(data_offset, x, y, z) > 0u);
 }
 
-// Clamps a central-difference sample coordinate to the brick's valid [0,7]
-// range — without this, sampling at voxel 0 or 7 underflows/overflows the u32
-// coordinate and reads garbage (wrapped-around or adjacent-brick) data.
+// Clamps a central-difference sample coordinate to the padded brick's valid
+// [0,8] range — without this, sampling at the extremes underflows/overflows
+// the u32 coordinate and reads garbage (wrapped-around or out-of-brick) data.
 fn clamped_voxel(v: i32) -> u32 {
-    return u32(clamp(v, 0, 7));
+    return u32(clamp(v, 0, i32(PADDED_DIM) - 1));
 }
 
 fn compute_normal(data_offset: u32, cx: u32, cy: u32, cz: u32, vs: f32) -> vec3<f32> {

@@ -17,9 +17,19 @@ use wgpu::util::DeviceExt;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-pub const VOXEL_MESH_MAX_BRICKS: u32 = 8192;
+// Kept modest because vertex_buf/index_buf scale with
+// max_bricks * MAX_SURFACE_VERTS_PER_BRICK — at the 2048-vert budget needed to
+// avoid truncating textured terrain (see constants.rs), the original 8192
+// would allocate hundreds of MB for buffers this example never uses more than
+// 512 bricks of.
+pub const VOXEL_MESH_MAX_BRICKS: u32 = 1024;
 pub const VOXEL_MESH_MAX_DIRTY: u32 = 4096;
-pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 128; // 512 voxels / 4 per u32
+// Each brick stores a padded 9x9x9 voxel block (729 voxels), not the raw 8x8x8
+// (512), so the extract shader's marching-cubes pass can read one extra voxel
+// of halo from the +X/+Y/+Z neighbor brick. Without it, no cell ever covers
+// the boundary between two bricks and the surface has a visible seam/gap at
+// every brick edge — see voxel_surface_extract.wgsl's CELLS_PER_DIM.
+pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 183; // ceil(9*9*9 / 4)
 
 // ── GPU types ─────────────────────────────────────────────────────────────────
 
@@ -364,8 +374,16 @@ impl VoxelMeshPass {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
+                // Marching-cubes triangle winding from TRI_TABLE isn't
+                // guaranteed to come out consistently front-facing for every
+                // one of the 256 cases against this crate's edge_vertex/
+                // local_pos convention (unlike a hand-authored mesh). Backface
+                // culling here would silently drop roughly half the surface —
+                // exactly the patchy, gap-riddled look this pass had with
+                // Face::Back culling on. Disable culling instead of chasing
+                // per-case winding correctness.
                 front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {

@@ -15,9 +15,13 @@ use std::sync::Arc;
 pub const BRICK_DIM: u32 = 8;
 pub const BRICKS_PER_AXIS: u32 = 8;
 pub const GRID_DIM: u32 = BRICKS_PER_AXIS * BRICK_DIM; // 64
-pub const BRICK_COUNT: usize = (BRICKS_PER_AXIS * BRICKS_PER_AXIS * BRICKS_PER_AXIS) as usize;
-pub const VOXELS_PER_BRICK: usize = (BRICK_DIM * BRICK_DIM * BRICK_DIM) as usize; // 512
-pub const WORDS_PER_BRICK: usize = VOXELS_PER_BRICK / 4; // 128
+// VoxelMeshPass's extract shader reads a padded 9x9x9 block per brick (one
+// extra voxel of +X/+Y/+Z halo from the neighbor brick) so marching cubes can
+// cover the boundary cell between adjacent bricks — without it every brick
+// edge has a visible seam/gap. See voxel_surface_extract.wgsl::CELLS_PER_DIM.
+pub const PADDED_DIM: u32 = BRICK_DIM + 1; // 9
+pub const PADDED_VOXELS_PER_BRICK: usize = (PADDED_DIM * PADDED_DIM * PADDED_DIM) as usize; // 729
+pub const WORDS_PER_BRICK: usize = PADDED_VOXELS_PER_BRICK.div_ceil(4); // 183
 
 // ── materials ───────────────────────────────────────────────────────────────
 
@@ -75,44 +79,6 @@ fn fbm2(x: f32, z: f32, seed: u32, octaves: u32) -> f32 {
     sum / norm
 }
 
-fn value_noise3(x: f32, y: f32, z: f32, seed: u32) -> f32 {
-    let x0 = x.floor() as i32;
-    let y0 = y.floor() as i32;
-    let z0 = z.floor() as i32;
-    let sx = smoothstep(x - x0 as f32);
-    let sy = smoothstep(y - y0 as f32);
-    let sz = smoothstep(z - z0 as f32);
-    let c000 = hash(x0, y0, z0, seed);
-    let c100 = hash(x0 + 1, y0, z0, seed);
-    let c010 = hash(x0, y0 + 1, z0, seed);
-    let c110 = hash(x0 + 1, y0 + 1, z0, seed);
-    let c001 = hash(x0, y0, z0 + 1, seed);
-    let c101 = hash(x0 + 1, y0, z0 + 1, seed);
-    let c011 = hash(x0, y0 + 1, z0 + 1, seed);
-    let c111 = hash(x0 + 1, y0 + 1, z0 + 1, seed);
-    let x00 = lerp(c000, c100, sx);
-    let x10 = lerp(c010, c110, sx);
-    let x01 = lerp(c001, c101, sx);
-    let x11 = lerp(c011, c111, sx);
-    let y0v = lerp(x00, x10, sy);
-    let y1v = lerp(x01, x11, sy);
-    lerp(y0v, y1v, sz)
-}
-
-fn fbm3(x: f32, y: f32, z: f32, seed: u32, octaves: u32) -> f32 {
-    let mut amp = 0.5;
-    let mut freq = 1.0;
-    let mut sum = 0.0;
-    let mut norm = 0.0;
-    for i in 0..octaves {
-        sum += value_noise3(x * freq, y * freq, z * freq, seed.wrapping_add(i * 71)) * amp;
-        norm += amp;
-        amp *= 0.5;
-        freq *= 2.0;
-    }
-    sum / norm
-}
-
 // ── world ────────────────────────────────────────────────────────────────────
 
 /// Dense 64^3 voxel material grid, baked into GPU bricks on demand.
@@ -162,19 +128,14 @@ impl VoxelWorld {
                         MAT_STONE
                     };
 
-                    if mat == MAT_STONE {
-                        let cave = fbm3(
-                            x as f32 * 0.12,
-                            y as f32 * 0.12,
-                            z as f32 * 0.12,
-                            seed ^ 0x9E3779B9,
-                            3,
-                        );
-                        if cave > 0.42 && depth > 5.0 {
-                            mat = MAT_AIR;
-                        } else if hash(x as i32, y as i32, z as i32, seed ^ 0x1234_5678) > 0.985 {
-                            mat = MAT_ORE;
-                        }
+                    // No cave carving here: VoxelMeshPass caps each brick at
+                    // MAX_SURFACE_VERTS_PER_BRICK/MAX_SURFACE_INDICES_PER_BRICK
+                    // (256/768) — a cave-riddled brick's internal surface area
+                    // blows well past that budget and geometry gets silently
+                    // truncated mid-brick. A plain heightfield keeps each
+                    // brick's surface to roughly one layer of cells.
+                    if mat == MAT_STONE && hash(x as i32, y as i32, z as i32, seed ^ 0x1234_5678) > 0.985 {
+                        mat = MAT_ORE;
                     }
 
                     self.materials[Self::idx(x, y, z)] = mat;
@@ -237,20 +198,27 @@ impl VoxelWorld {
         })
     }
 
+    /// Bakes a brick's padded 9x9x9 voxel block (see `PADDED_DIM`): local
+    /// indices 0..=7 are this brick's own voxels, index 8 on each axis reads
+    /// one voxel of halo from the +X/+Y/+Z neighbor brick (or air, past the
+    /// world edge) — matches voxel_surface_extract.wgsl::read_voxel exactly.
     fn bake_brick(&self, bx: u32, by: u32, bz: u32, data_out: &mut [u32; WORDS_PER_BRICK]) -> bool {
         let mut occupied = false;
-        for lz in 0..BRICK_DIM {
-            for ly in 0..BRICK_DIM {
-                for lx in 0..BRICK_DIM {
+        for lz in 0..PADDED_DIM {
+            for ly in 0..PADDED_DIM {
+                for lx in 0..PADDED_DIM {
                     let gx = bx * BRICK_DIM + lx;
                     let gy = by * BRICK_DIM + ly;
                     let gz = bz * BRICK_DIM + lz;
-                    let mat = self.materials[Self::idx(gx, gy, gz)];
+                    let mat = if gx < GRID_DIM && gy < GRID_DIM && gz < GRID_DIM {
+                        self.materials[Self::idx(gx, gy, gz)]
+                    } else {
+                        MAT_AIR
+                    };
                     if mat != MAT_AIR {
                         occupied = true;
                     }
-                    // Matches voxel_raymarch.wgsl::read_voxel: linear = z*64 + y*8 + x.
-                    let linear = (lz * BRICK_DIM * BRICK_DIM + ly * BRICK_DIM + lx) as usize;
+                    let linear = (lz * PADDED_DIM * PADDED_DIM + ly * PADDED_DIM + lx) as usize;
                     let word = linear / 4;
                     let byte_in_word = linear % 4;
                     data_out[word] |= (mat as u32) << (byte_in_word * 8);
