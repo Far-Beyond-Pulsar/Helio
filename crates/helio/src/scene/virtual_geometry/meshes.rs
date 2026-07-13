@@ -5,7 +5,8 @@
 use crate::handles::MeshId;
 use crate::mesh::MeshUpload;
 use crate::vg::{
-    generate_lod_meshes, meshletize_with_indices, VirtualMeshId, VirtualMeshUpload,
+    generate_lod_meshes, meshletize_with_indices, GeneratedLodMesh, VirtualMeshId,
+    VirtualMeshUpload,
 };
 
 use super::super::errors::{invalid, Result, SceneError};
@@ -25,7 +26,12 @@ impl super::super::Scene {
         let mut all_meshlets: Vec<libhelio::GpuMeshletEntry> = Vec::new();
         let mut mesh_ids: Vec<MeshId> = Vec::new();
 
-        for (lod_level, (lod_verts, lod_indices)) in lod_meshes.into_iter().enumerate() {
+        for (lod_level, lod_mesh) in lod_meshes.into_iter().enumerate() {
+            let GeneratedLodMesh {
+                vertices: lod_verts,
+                indices: lod_indices,
+                error: _,
+            } = lod_mesh;
             // Build meshlets with meshoptimizer — this produces a reordered
             // index buffer that groups spatially coherent triangles.
             let (mut meshlets, meshlet_indices) =
@@ -107,4 +113,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

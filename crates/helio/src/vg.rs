@@ -12,6 +12,14 @@ use meshopt::DecodePosition;
 
 use crate::mesh::PackedVertex;
 
+#[derive(Debug, Clone)]
+pub(crate) struct GeneratedLodMesh {
+    pub vertices: Vec<PackedVertex>,
+    pub indices: Vec<u32>,
+    /// Conservative accumulated object-space simplification error.
+    pub error: f32,
+}
+
 // ─── Handle types ───────────────────────────────────────────────────────────
 
 /// Opaque handle to a virtual mesh uploaded to the scene.
@@ -50,7 +58,7 @@ impl DecodePosition for PackedVertex {
 // ─── Full meshopt optimization pipeline ───────────────────────────────────
 
 /// Run the full meshopt optimization pipeline on a mesh:
-/// 1. Weld duplicate vertices by position
+/// 1. Weld byte-identical vertices while preserving attribute seams
 /// 2. Vertex cache optimization (reorder tris for GPU transform cache)
 /// 3. Overdraw optimization (reorder tris to reduce pixel overdraw)
 /// 4. Vertex fetch optimization (reorder verts for memory locality)
@@ -59,8 +67,9 @@ fn optimize_mesh(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVerte
         return (vertices.to_vec(), indices.to_vec());
     }
 
-    // Step 1: Weld vertices that share the same position.
-    let (welded_verts, welded_indices) = weld_by_position(vertices, indices);
+    // Step 1: Weld only byte-identical vertices. Position-only welding corrupts
+    // hard normals, tangents, lightmap UVs, and texture seams.
+    let (welded_verts, welded_indices) = weld_exact_vertices(vertices, indices);
 
     // Step 2: Vertex cache optimization.
     let vcache_indices = meshopt::optimize_vertex_cache(&welded_indices, welded_verts.len());
@@ -84,66 +93,92 @@ fn optimize_mesh(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVerte
 /// LOD 0 is the fully optimized original mesh. Each successive level targets
 /// ~50% of the previous level's triangle count. The full meshopt pipeline
 /// (cache, overdraw, fetch optimization) is applied to every level.
-pub fn generate_lod_meshes(
+pub(crate) fn generate_lod_meshes(
     vertices: &[PackedVertex],
     indices: &[u32],
-) -> Vec<(Vec<PackedVertex>, Vec<u32>)> {
+) -> Vec<GeneratedLodMesh> {
+    if vertices.is_empty()
+        || indices.is_empty()
+        || indices.len() % 3 != 0
+        || indices
+            .iter()
+            .any(|&index| index as usize >= vertices.len())
+    {
+        return Vec::new();
+    }
+
     // Optimize the base mesh first.
     let (opt_verts, opt_indices) = optimize_mesh(vertices, indices);
     let base_tri_count = opt_indices.len() / 3;
 
-    let mut levels: Vec<(Vec<PackedVertex>, Vec<u32>)> = Vec::with_capacity(8);
-    levels.push((opt_verts.clone(), opt_indices.clone()));
+    let mut levels = Vec::with_capacity(8);
+    levels.push(GeneratedLodMesh {
+        vertices: opt_verts,
+        indices: opt_indices,
+        error: 0.0,
+    });
 
     eprintln!(
         "[vg] base: {} verts, {} tris (from {} verts, {} tris)",
-        opt_verts.len(), base_tri_count,
-        vertices.len(), indices.len() / 3,
+        levels[0].vertices.len(),
+        base_tri_count,
+        vertices.len(),
+        indices.len() / 3,
     );
 
-    let lod_params: [(f32, f32); 7] = [
-        (0.50,  0.05),
-        (0.25,  0.1),
-        (0.125, 0.2),
-        (0.06,  0.4),
-        (0.03,  0.7),
-        (0.015, 1.0),
-        (0.008, 2.0),
-    ];
-    for &(ratio, max_error) in &lod_params {
+    let lod_ratios = [0.50, 0.25, 0.125, 0.06, 0.03, 0.015, 0.008];
+    for &ratio in &lod_ratios {
         let target_indices = (((base_tri_count as f32 * ratio) as usize).max(1)) * 3;
+        let previous = levels.last().expect("base LOD exists");
 
-        // Simplify from the optimized base mesh for globally optimal results.
-        let simplified_indices = meshopt::simplify_decoder(
-            &opt_indices,
-            &opt_verts,
+        if previous.indices.len() <= target_indices {
+            levels.push(previous.clone());
+            continue;
+        }
+
+        let attributes = simplification_attributes(&previous.vertices);
+        let locks = vec![false; previous.vertices.len()];
+        let mut relative_error = 0.0;
+
+        // Build a progressive chain. Meshoptimizer recommends accumulating the
+        // measured error when each level starts from the previous one.
+        let simplified_indices = meshopt::simplify_with_attributes_and_locks_decoder(
+            &previous.indices,
+            &previous.vertices,
+            &attributes,
+            &[10.0, 10.0, 10.0, 10.0, 0.5, 0.5, 0.5, 0.25, 0.25, 0.25, 1.0],
+            11 * std::mem::size_of::<f32>(),
+            &locks,
             target_indices,
-            max_error,
+            f32::MAX,
             meshopt::SimplifyOptions::None,
-            None,
+            Some(&mut relative_error),
         );
 
         if simplified_indices.is_empty() {
-            let last = levels.last().unwrap().clone();
-            levels.push(last);
+            levels.push(previous.clone());
         } else {
-            // Compact, then run cache+overdraw+fetch optimization on the LOD.
+            let absolute_error = previous.error
+                + relative_error * meshopt::simplify_scale_decoder(&previous.vertices);
+
+            // Compact, then run the full cache/overdraw/fetch pipeline on the LOD.
             let (compact_verts, compact_indices) =
-                compact_mesh(&opt_verts, &simplified_indices);
-            let mut opt_idx = meshopt::optimize_vertex_cache(&compact_indices, compact_verts.len());
-            meshopt::optimize_overdraw_in_place_decoder(&mut opt_idx, &compact_verts, 1.05);
-            let remap = meshopt::optimize_vertex_fetch_remap(&opt_idx, compact_verts.len());
-            let final_indices = meshopt::remap_index_buffer(Some(&opt_idx), compact_verts.len(), &remap);
-            let final_verts = meshopt::remap_vertex_buffer(&compact_verts, compact_verts.len(), &remap);
+                compact_mesh(&previous.vertices, &simplified_indices);
+            let (final_verts, final_indices) = optimize_mesh(&compact_verts, &compact_indices);
 
             eprintln!(
-                "[vg] LOD {}: {}/{} tris (target {})",
+                "[vg] LOD {}: {}/{} tris (target {}, error {:.6})",
                 levels.len(),
                 final_indices.len() / 3,
                 base_tri_count,
                 target_indices / 3,
+                absolute_error,
             );
-            levels.push((final_verts, final_indices));
+            levels.push(GeneratedLodMesh {
+                vertices: final_verts,
+                indices: final_indices,
+                error: absolute_error,
+            });
         }
     }
 
@@ -157,25 +192,35 @@ pub fn generate_lod_meshes(
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-/// Weld vertices that share the same position, merging duplicates.
-fn weld_by_position(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVertex>, Vec<u32>) {
+/// Weld byte-identical vertices without crossing any attribute discontinuity.
+fn weld_exact_vertices(
+    vertices: &[PackedVertex],
+    indices: &[u32],
+) -> (Vec<PackedVertex>, Vec<u32>) {
     use std::collections::HashMap;
 
-    fn pos_key(p: &[f32; 3]) -> (i64, i64, i64) {
-        (
-            (p[0] as f64 * 1_000_000.0).round() as i64,
-            (p[1] as f64 * 1_000_000.0).round() as i64,
-            (p[2] as f64 * 1_000_000.0).round() as i64,
-        )
+    fn vertex_key(v: &PackedVertex) -> [u32; 10] {
+        [
+            v.position[0].to_bits(),
+            v.position[1].to_bits(),
+            v.position[2].to_bits(),
+            v.bitangent_sign.to_bits(),
+            v.tex_coords0[0].to_bits(),
+            v.tex_coords0[1].to_bits(),
+            v.tex_coords1[0].to_bits(),
+            v.tex_coords1[1].to_bits(),
+            v.normal,
+            v.tangent,
+        ]
     }
 
-    let mut pos_to_new: HashMap<(i64, i64, i64), u32> = HashMap::new();
+    let mut vertex_to_new: HashMap<[u32; 10], u32> = HashMap::new();
     let mut remap = vec![0u32; vertices.len()];
     let mut welded_verts: Vec<PackedVertex> = Vec::new();
 
     for (old_idx, v) in vertices.iter().enumerate() {
-        let key = pos_key(&v.position);
-        let new_idx = *pos_to_new.entry(key).or_insert_with(|| {
+        let key = vertex_key(v);
+        let new_idx = *vertex_to_new.entry(key).or_insert_with(|| {
             let idx = welded_verts.len() as u32;
             welded_verts.push(*v);
             idx
@@ -183,11 +228,36 @@ fn weld_by_position(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVe
         remap[old_idx] = new_idx;
     }
 
-    let welded_indices: Vec<u32> = indices.iter().map(|&i| {
-        if (i as usize) < remap.len() { remap[i as usize] } else { 0 }
-    }).collect();
+    let welded_indices = indices.iter().map(|&i| remap[i as usize]).collect();
 
     (welded_verts, welded_indices)
+}
+
+fn simplification_attributes(vertices: &[PackedVertex]) -> Vec<f32> {
+    fn unpack_snorm3(packed: u32) -> [f32; 3] {
+        let component = |shift| ((packed >> shift) as u8 as i8) as f32 / 127.0;
+        [component(0), component(8), component(16)]
+    }
+
+    let mut attributes = Vec::with_capacity(vertices.len() * 11);
+    for vertex in vertices {
+        let normal = unpack_snorm3(vertex.normal);
+        let tangent = unpack_snorm3(vertex.tangent);
+        attributes.extend_from_slice(&[
+            vertex.tex_coords0[0],
+            vertex.tex_coords0[1],
+            vertex.tex_coords1[0],
+            vertex.tex_coords1[1],
+            normal[0],
+            normal[1],
+            normal[2],
+            tangent[0],
+            tangent[1],
+            tangent[2],
+            vertex.bitangent_sign,
+        ]);
+    }
+    attributes
 }
 
 /// Remove unreferenced vertices and remap indices.
@@ -225,7 +295,13 @@ pub fn meshletize_with_indices(
     mesh_first_vertex: u32,
 ) -> (Vec<GpuMeshletEntry>, Vec<u32>) {
     let tri_count = indices.len() / 3;
-    if tri_count == 0 || vertices.is_empty() {
+    if tri_count == 0
+        || vertices.is_empty()
+        || indices.len() % 3 != 0
+        || indices
+            .iter()
+            .any(|&index| index as usize >= vertices.len())
+    {
         return (Vec::new(), Vec::new());
     }
 
@@ -281,4 +357,108 @@ pub fn meshletize_with_indices(
     }
 
     (entries, flat_indices)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn vertex(position: [f32; 3], uv: [f32; 2], normal: [f32; 3]) -> PackedVertex {
+        PackedVertex::from_components(position, normal, uv, [1.0, 0.0, 0.0], 1.0)
+    }
+
+    #[test]
+    fn exact_weld_preserves_uv_and_normal_seams() {
+        let a = vertex([0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 1.0, 0.0]);
+        let exact_duplicate = a;
+        let uv_seam = vertex([0.0, 0.0, 0.0], [1.0, 0.0], [0.0, 1.0, 0.0]);
+        let hard_normal = vertex([0.0, 0.0, 0.0], [0.0, 0.0], [1.0, 0.0, 0.0]);
+
+        let (welded, remapped) =
+            weld_exact_vertices(&[a, exact_duplicate, uv_seam, hard_normal], &[0, 1, 2, 3]);
+
+        assert_eq!(welded.len(), 3);
+        assert_eq!(remapped[0], remapped[1]);
+        assert_ne!(remapped[0], remapped[2]);
+        assert_ne!(remapped[0], remapped[3]);
+    }
+
+    #[test]
+    fn malformed_indices_are_rejected_before_meshoptimizer() {
+        let vertices = vec![
+            vertex([0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0, 1.0]),
+            vertex([1.0, 0.0, 0.0], [1.0, 0.0], [0.0, 0.0, 1.0]),
+            vertex([0.0, 1.0, 0.0], [0.0, 1.0], [0.0, 0.0, 1.0]),
+        ];
+
+        assert!(generate_lod_meshes(&vertices, &[0, 1]).is_empty());
+        assert!(generate_lod_meshes(&vertices, &[0, 1, 3]).is_empty());
+        assert!(meshletize_with_indices(&vertices, &[0, 1], 0, 0)
+            .0
+            .is_empty());
+        assert!(meshletize_with_indices(&vertices, &[0, 1, 3], 0, 0)
+            .0
+            .is_empty());
+    }
+
+    #[test]
+    fn meshlet_indices_and_bounds_cover_the_source_geometry() {
+        let vertices = vec![
+            vertex([0.0, 0.0, 0.0], [0.0, 0.0], [0.0, 0.0, 1.0]),
+            vertex([1.0, 0.0, 0.0], [1.0, 0.0], [0.0, 0.0, 1.0]),
+            vertex([1.0, 1.0, 0.0], [1.0, 1.0], [0.0, 0.0, 1.0]),
+            vertex([0.0, 1.0, 0.0], [0.0, 1.0], [0.0, 0.0, 1.0]),
+        ];
+        let source = vec![0, 1, 2, 0, 2, 3];
+        let (meshlets, flattened) = meshletize_with_indices(&vertices, &source, 0, 0);
+
+        assert_eq!(flattened.len(), source.len());
+        let mut flattened_sorted = flattened.clone();
+        let mut source_sorted = source.clone();
+        flattened_sorted.sort_unstable();
+        source_sorted.sort_unstable();
+        assert_eq!(flattened_sorted, source_sorted);
+
+        for meshlet in &meshlets {
+            let first = meshlet.first_index as usize;
+            let end = first + meshlet.index_count as usize;
+            for &index in &flattened[first..end] {
+                let p = glam::Vec3::from_array(vertices[index as usize].position);
+                let center = glam::Vec3::from_array(meshlet.center);
+                assert!(p.distance(center) <= meshlet.radius + 1e-5);
+            }
+        }
+    }
+
+    #[test]
+    fn generated_lod_errors_are_finite_and_monotonic() {
+        let side = 12usize;
+        let mut vertices = Vec::with_capacity(side * side);
+        for y in 0..side {
+            for x in 0..side {
+                vertices.push(vertex(
+                    [x as f32, y as f32, ((x * y) % 5) as f32 * 0.05],
+                    [x as f32 / side as f32, y as f32 / side as f32],
+                    [0.0, 0.0, 1.0],
+                ));
+            }
+        }
+        let mut indices = Vec::new();
+        for y in 0..side - 1 {
+            for x in 0..side - 1 {
+                let i = (y * side + x) as u32;
+                indices.extend_from_slice(&[i, i + 1, i + side as u32 + 1]);
+                indices.extend_from_slice(&[i, i + side as u32 + 1, i + side as u32]);
+            }
+        }
+
+        let lods = generate_lod_meshes(&vertices, &indices);
+        assert_eq!(lods.len(), 8);
+        assert_eq!(lods[0].error, 0.0);
+        for pair in lods.windows(2) {
+            assert!(pair[1].error.is_finite());
+            assert!(pair[1].error >= pair[0].error);
+            assert!(pair[1].indices.len() <= pair[0].indices.len());
+        }
+    }
 }
