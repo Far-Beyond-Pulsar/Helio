@@ -83,9 +83,12 @@ fn trace_volume(ro: vec3<f32>, rd: vec3<f32>, vol: GpuVoxelVolume) -> HitResult 
 
     t_entry = max(t_entry, 0.0);
 
-    // Starting position in local space
+    // Starting position in local space. Grid index 0 corresponds to local
+    // position `bmin` (= -half), so the `half` offset must be added back
+    // before dividing by voxel size — otherwise grid coords come out centered
+    // on the origin instead of the volume's corner.
     var pos = ro + rd * t_entry;
-    var grid = vec3<i32>(floor(pos / vs));
+    var grid = vec3<i32>(floor((pos + half) / vs));
 
     // Clamp to volume bounds
     let max_grid = vec3<i32>(vol.dimensions) - 1;
@@ -94,7 +97,7 @@ fn trace_volume(ro: vec3<f32>, rd: vec3<f32>, vol: GpuVoxelVolume) -> HitResult 
     // DDA setup
     let step = vec3<i32>(sign(rd));
     let t_delta = vec3<f32>(vs / abs(rd));
-    let next_border = (vec3<f32>(grid) + vec3<f32>(select(vec3<i32>(1), vec3<i32>(0), step < vec3(0)))) * vs;
+    let next_border = (vec3<f32>(grid) + vec3<f32>(select(vec3<i32>(1), vec3<i32>(0), step < vec3(0)))) * vs - half;
     var t_max = (next_border - ro) / rd;
 
     var t_hit = t_entry;
@@ -116,7 +119,7 @@ fn trace_volume(ro: vec3<f32>, rd: vec3<f32>, vol: GpuVoxelVolume) -> HitResult 
 
         if brick_idx >= 0 {
             let meta_word = brick_pool[u32(brick_idx) * 2u];
-            let data_offset = meta_word & 0xFFFFFFFu;
+            let data_offset = meta_word & 0xFFFFFFu;
             let occupancy = (meta_word >> 24u) & 0xFFu;
 
             if occupancy > 0u && data_offset < 0xFFFFFFFEu {
