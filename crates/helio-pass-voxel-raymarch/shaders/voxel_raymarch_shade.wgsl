@@ -24,6 +24,10 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VertexOut {
 
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-    let col = textureLoad(color_tex, vec2<i32>(in.uv * vec2<f32>(textureDimensions(color_tex))), 0);
+    // The fullscreen-triangle uv has v=0 at the bottom of the screen (NDC
+    // convention), but the compute pass wrote texel row 0 as the top of the
+    // screen — flip v here or the image comes out upside down.
+    let texel_uv = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
+    let col = textureLoad(color_tex, vec2<i32>(texel_uv * vec2<f32>(textureDimensions(color_tex))), 0);
     return col;
 }
