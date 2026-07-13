@@ -77,6 +77,15 @@ impl super::super::Scene {
                 .expect("virtual geometry exceeds the u32 work-item address space"),
             max_draw_count: self.vg_max_draw_count,
             buffer_version: self.vg_buffer_version,
+            instance_version: self.vg_instance_version,
+            instance_dirty_start: self
+                .vg_published_instance_dirty_range
+                .map_or(0, |(start, _)| u32::try_from(start).expect("VG dirty start exceeds u32")),
+            instance_dirty_count: self
+                .vg_published_instance_dirty_range
+                .map_or(0, |(start, end)| {
+                    u32::try_from(end - start).expect("VG dirty count exceeds u32")
+                }),
         })
     }
 
@@ -92,6 +101,8 @@ impl super::super::Scene {
         self.vg_cpu_objects.clear();
         self.vg_cpu_instances.clear();
         self.vg_cpu_work_items.clear();
+        self.vg_instance_dirty_range = None;
+        self.vg_published_instance_dirty_range = None;
         self.vg_max_draw_count = 0;
         self.vg_cpu_objects.reserve(dense_object_count);
         self.vg_cpu_instances.reserve(dense_object_count);

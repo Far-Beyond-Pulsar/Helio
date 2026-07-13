@@ -482,10 +482,11 @@ impl<'a> FrameResources<'a> {
     }
 }
 
-/// Per-frame virtual geometry data: immutable mesh, object, and instance slices.
+/// Per-frame virtual geometry data: immutable mesh/object slices and dirty-tracked instances.
 ///
 /// The `VirtualGeometryPass` uploads these slices to its owned GPU buffers on the
-/// first frame and whenever `buffer_version` advances (topology or transform change).
+/// first frame and whenever `buffer_version` advances. Transform-only changes
+/// advance `instance_version` and upload only `instance_dirty_start..+count`.
 #[derive(Clone, Copy)]
 pub struct VgFrameData<'a> {
     /// Raw bytes of a `GpuMeshletEntry` array.
@@ -504,8 +505,13 @@ pub struct VgFrameData<'a> {
     pub work_item_count: u32,
     /// Exact worst-case number of indirect draws after selecting one LOD per object.
     pub max_draw_count: u32,
-    /// Version counter incremented each time meshlet or instance data changes.
-    /// The pass re-uploads GPU buffers only when this advances.
+    /// Version counter incremented when meshlet, object, or work-item topology changes.
     pub buffer_version: u64,
+    /// Version counter incremented when a transform-only dirty range is published.
+    pub instance_version: u64,
+    /// First dirty instance in the current transform-only publication.
+    pub instance_dirty_start: u32,
+    /// Number of dirty instances; zero when `buffer_version` owns the update.
+    pub instance_dirty_count: u32,
 }
 

@@ -35,6 +35,7 @@ pub struct VirtualGeometryPass {
     pub(crate) object_buf: wgpu::Buffer,
     pub(crate) instance_buf: wgpu::Buffer,
     pub(crate) instance_cull_buf: wgpu::Buffer,
+    pub(crate) instance_cull_scratch: Vec<InstanceCullData>,
     pub(crate) work_item_buf: wgpu::Buffer,
     pub(crate) indirect_buf: wgpu::Buffer,
     pub(crate) draw_metadata_buf: wgpu::Buffer,
@@ -43,6 +44,7 @@ pub struct VirtualGeometryPass {
     pub debug_mode: u32,
     pub lod_quality: LodQuality,
     pub(crate) last_version: u64,
+    pub(crate) last_instance_version: u64,
     pub(crate) last_meshlet_count: u32,
     pub(crate) last_object_count: u32,
     pub(crate) last_work_item_count: u32,
@@ -441,6 +443,7 @@ impl VirtualGeometryPass {
             object_buf,
             instance_buf,
             instance_cull_buf,
+            instance_cull_scratch: Vec::with_capacity(INITIAL_INSTANCES as usize),
             work_item_buf,
             indirect_buf,
             draw_metadata_buf,
@@ -449,6 +452,7 @@ impl VirtualGeometryPass {
             debug_mode: 0,
             lod_quality: LodQuality::default(),
             last_version: u64::MAX,
+            last_instance_version: u64::MAX,
             last_meshlet_count: 0,
             last_object_count: 0,
             last_work_item_count: 0,
@@ -611,17 +615,56 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.work_item_buf, 0, vg.work_items);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
-            let cull_data: Vec<InstanceCullData> = instances
-                .iter()
-                .map(InstanceCullData::from_instance)
-                .collect();
-            ctx.write_buffer(&self.instance_cull_buf, 0, bytemuck::cast_slice(&cull_data));
+            self.instance_cull_scratch.clear();
+            self.instance_cull_scratch.extend(
+                instances.iter().map(InstanceCullData::from_instance),
+            );
+            ctx.write_buffer(
+                &self.instance_cull_buf,
+                0,
+                bytemuck::cast_slice(&self.instance_cull_scratch),
+            );
 
             self.last_version = vg.buffer_version;
+            self.last_instance_version = vg.instance_version;
             self.last_meshlet_count = vg.meshlet_count;
             self.last_object_count = vg.object_count;
             self.last_work_item_count = vg.work_item_count;
             self.last_max_draw_count = vg.max_draw_count;
+        } else if vg.instance_version != self.last_instance_version {
+            let start = vg.instance_dirty_start as usize;
+            let count = vg.instance_dirty_count as usize;
+            let end = start
+                .checked_add(count)
+                .expect("virtual geometry dirty instance range overflow");
+            let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
+            assert!(
+                count > 0 && end <= instances.len(),
+                "virtual geometry published an invalid dirty instance range"
+            );
+
+            let instance_offset = start as u64
+                * std::mem::size_of::<GpuInstanceData>() as u64;
+            ctx.write_buffer(
+                &self.instance_buf,
+                instance_offset,
+                bytemuck::cast_slice(&instances[start..end]),
+            );
+
+            self.instance_cull_scratch.clear();
+            self.instance_cull_scratch.extend(
+                instances[start..end]
+                    .iter()
+                    .map(InstanceCullData::from_instance),
+            );
+            let cull_offset = start as u64
+                * std::mem::size_of::<InstanceCullData>() as u64;
+            ctx.write_buffer(
+                &self.instance_cull_buf,
+                cull_offset,
+                bytemuck::cast_slice(&self.instance_cull_scratch),
+            );
+            self.last_instance_version = vg.instance_version;
         }
 
         if self.last_object_count == 0

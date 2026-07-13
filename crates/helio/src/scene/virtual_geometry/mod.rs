@@ -12,7 +12,8 @@
 //! virtual geometry is **fully GPU-driven**:
 //! - Meshlets are stored in a flat GPU buffer
 //! - Instances reference ranges in the meshlet buffer
-//! - GPU compute shader performs per-meshlet culling and LOD selection
+//! - GPU stage one performs conservative object culling and selects one LOD per object
+//! - GPU stage two culls the selected LOD through fixed 64-meshlet work spans
 //! - No CPU readback or per-frame iteration
 //!
 //! # Module Organization

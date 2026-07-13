@@ -254,10 +254,14 @@ impl Scene {
             self.rebuild_shadow_partition_buffers();
             self.shadow_partition_dirty = false;
         }
-        // Rebuild virtual geometry CPU buffers when VG topology or transforms changed.
+        // Topology changes rebuild all mirrors. Transform-only changes publish
+        // one bounded instance range without touching descriptors or work spans.
         if self.vg_objects_dirty {
             self.rebuild_vg_buffers();
             self.vg_objects_dirty = false;
+        } else if let Some(range) = self.vg_instance_dirty_range.take() {
+            self.vg_published_instance_dirty_range = Some(range);
+            self.vg_instance_version = self.vg_instance_version.wrapping_add(1);
         }
 
         // ── Voxel volume flush ───────────────────────────────────────────────
