@@ -525,8 +525,10 @@ impl VirtualGeometryPass {
 
     fn make_draw_count_buf(device: &wgpu::Device) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("VG Draw Count"),
-            size: 4,
+            label: Some("VG Draw And Overflow Counters"),
+            // draw_count at byte 0 remains directly consumable by
+            // multi_draw_indexed_indirect_count; overflow_count is at byte 4.
+            size: 8,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::INDIRECT
                 | wgpu::BufferUsages::COPY_DST,

@@ -107,7 +107,9 @@ struct CullUniforms {
 @group(0) @binding(4) var<storage, read> instances: array<InstanceData>;
 @group(0) @binding(5) var<storage, read_write> indirect: array<DrawIndexedIndirect>;
 @group(0) @binding(6) var<storage, read_write> draw_metadata: array<VgDrawMetadata>;
-@group(0) @binding(7) var<storage, read_write> draw_count: atomic<u32>;
+// Counter 0 is the attempted visible-draw count consumed by indirect-count
+// rendering. Counter 1 records attempts rejected by the bounded output arrays.
+@group(0) @binding(7) var<storage, read_write> draw_counters: array<atomic<u32>>;
 @group(0) @binding(8) var hiz_tex: texture_2d<f32>;
 @group(0) @binding(9) var hiz_samp: sampler;
 @group(0) @binding(10) var<storage, read> instance_cull: array<InstanceCullData>;
@@ -242,7 +244,7 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
     command.instance_count = 1u;
     command.first_index = m.first_index;
     command.base_vertex = m.vertex_offset;
-    let slot = atomicAdd(&draw_count, 1u);
+    let slot = atomicAdd(&draw_counters[0], 1u);
     let capacity = min(
         cull_uni.draw_capacity,
         min(arrayLength(&indirect), arrayLength(&draw_metadata)),
@@ -256,6 +258,8 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
             lod_level,
             0u,
         );
+    } else {
+        atomicAdd(&draw_counters[1], 1u);
     }
 }
 

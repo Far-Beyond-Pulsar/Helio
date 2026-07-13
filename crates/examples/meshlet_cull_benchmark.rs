@@ -63,7 +63,8 @@ struct CaseBuffers {
     object_dispatch_height: u32,
     work_dispatch_width: u32,
     work_dispatch_height: u32,
-    expected_draws: u32,
+    expected_attempts: u32,
+    expected_overflow: u32,
 }
 
 fn main() {
@@ -172,6 +173,7 @@ async fn run() {
             &cull_bind_group_layout,
             case,
             &limits,
+            TOTAL_MESHLETS,
         );
 
         for _ in 0..warmup {
@@ -201,10 +203,15 @@ async fn run() {
             ));
         }
 
-        let published = read_draw_count(&device, &queue, &buffers);
+        let counters = read_draw_counters(&device, &queue, &buffers);
         assert_eq!(
-            published, buffers.expected_draws,
-            "{} did not publish every visible meshlet",
+            counters[0], buffers.expected_attempts,
+            "{} did not attempt every visible meshlet",
+            case.name
+        );
+        assert_eq!(
+            counters[1], buffers.expected_overflow,
+            "{} reported an unexpected capacity overflow",
             case.name
         );
         timings_ms.sort_by(f64::total_cmp);
@@ -221,6 +228,33 @@ async fn run() {
             meshlets_per_second,
         );
     }
+
+    let overflow_probe = create_case_buffers(
+        &device,
+        &queue,
+        &select_bind_group_layout,
+        &cull_bind_group_layout,
+        Case {
+            name: "overflow_probe",
+            object_count: 4096,
+            meshlets_per_object: TOTAL_MESHLETS / 4096,
+        },
+        &limits,
+        TOTAL_MESHLETS - 17,
+    );
+    let _ = dispatch_and_time(
+        &device,
+        &queue,
+        &select_pipeline,
+        &cull_pipeline,
+        &overflow_probe,
+        &query_set,
+        &query_resolve,
+        &query_readback,
+    );
+    let counters = read_draw_counters(&device, &queue, &overflow_probe);
+    assert_eq!(counters, [TOTAL_MESHLETS, 17]);
+    eprintln!("overflow_probe,attempted={},rejected={}", counters[0], counters[1]);
 }
 
 fn case_fits_limits(case: Case, limits: &wgpu::Limits) -> bool {
@@ -251,6 +285,7 @@ fn create_case_buffers(
     cull_layout: &wgpu::BindGroupLayout,
     case: Case,
     limits: &wgpu::Limits,
+    draw_capacity: u32,
 ) -> CaseBuffers {
     let identity = Mat4::IDENTITY.to_cols_array();
     let camera = GpuCameraUniforms::new(
@@ -336,7 +371,7 @@ fn create_case_buffers(
         screen_width: 1920,
         screen_height: 1080,
         hiz_mip_count: 1,
-        draw_capacity: TOTAL_MESHLETS,
+        draw_capacity,
         lod_error_threshold_px: 2.0,
         object_dispatch_width,
         work_item_count,
@@ -355,10 +390,10 @@ fn create_case_buffers(
     let work_item_buffer = init_buffer(device, "Benchmark Work Items", bytemuck::cast_slice(&work_items), wgpu::BufferUsages::STORAGE);
     let indirect_buffer = output_buffer(device, "Benchmark Indirect", u64::from(TOTAL_MESHLETS) * 20);
     let metadata_buffer = output_buffer(device, "Benchmark Draw Metadata", u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64);
-    let draw_count = output_buffer(device, "Benchmark Draw Count", 4);
+    let draw_count = output_buffer(device, "Benchmark Draw And Overflow Counters", 8);
     let draw_count_readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Benchmark Draw Count Readback"),
-        size: 4,
+        size: 8,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -432,7 +467,8 @@ fn create_case_buffers(
         object_dispatch_height,
         work_dispatch_width,
         work_dispatch_height,
-        expected_draws: TOTAL_MESHLETS,
+        expected_attempts: TOTAL_MESHLETS,
+        expected_overflow: TOTAL_MESHLETS.saturating_sub(draw_capacity),
     }
 }
 
@@ -486,13 +522,18 @@ fn dispatch_and_time(
     ticks[1].saturating_sub(ticks[0]) as f64 * f64::from(queue.get_timestamp_period()) / 1_000_000.0
 }
 
-fn read_draw_count(device: &wgpu::Device, queue: &wgpu::Queue, buffers: &CaseBuffers) -> u32 {
+fn read_draw_counters(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffers: &CaseBuffers,
+) -> [u32; 2] {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("VG Cull Count Readback Encoder"),
     });
-    encoder.copy_buffer_to_buffer(&buffers.draw_count, 0, &buffers.draw_count_readback, 0, 4);
+    encoder.copy_buffer_to_buffer(&buffers.draw_count, 0, &buffers.draw_count_readback, 0, 8);
     queue.submit([encoder.finish()]);
-    read_mapped::<u32>(device, &buffers.draw_count_readback, 1)[0]
+    let values = read_mapped::<u32>(device, &buffers.draw_count_readback, 2);
+    [values[0], values[1]]
 }
 
 fn read_mapped<T: Pod + Copy>(device: &wgpu::Device, buffer: &wgpu::Buffer, count: usize) -> Vec<T> {
