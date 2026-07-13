@@ -26,7 +26,6 @@ outdoor_volcano     = []
 space_station       = []
 light_benchmark     = []
 rc_benchmark        = []
-sdf_demo            = []
 load_fbx            = []
 load_fbx_embedded   = []
 ship_flight         = []
@@ -39,7 +38,6 @@ editor_demo         = []
 helio-wasm          = { path = "../helio-wasm" }
 helio               = { workspace = true }
 helio-asset-compat  = { workspace = true }
-helio-pass-sdf      = { workspace = true }
 wgpu                = { workspace = true }
 glam                = { workspace = true, features = ["bytemuck"] }
 log                 = { workspace = true }

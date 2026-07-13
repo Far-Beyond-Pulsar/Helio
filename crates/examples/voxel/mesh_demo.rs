@@ -17,8 +17,8 @@ use std::time::Instant;
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, GpuLight, LightType, Renderer,
-    RendererConfig, Scene, SceneActor, RenderGraph, VoxelVolumeDescriptor, VoxelMode,
-    VoxelVolumeId,
+    RendererConfig, Scene, SceneActor, RenderGraph, VoxelTerrain, VoxelVolumeDescriptor, VoxelMode,
+    VoxelVolumeId, VOXEL_TERRAIN_GRID_DIM,
 };
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
@@ -32,9 +32,6 @@ use winit::{
     window::{CursorGrabMode, Window, WindowId},
 };
 
-mod voxel_world;
-use voxel_world::{VoxelWorld, GRID_DIM};
-
 // ── constants ─────────────────────────────────────────────────────────────────
 
 const LOOK_SENS: f32 = 0.002;
@@ -43,7 +40,7 @@ const DRAG: f32 = 6.0;
 // The GPU-side voxel volume is always a dense 64^3 grid (fixed by the engine's
 // BRICK_SIZE constant); `VOXEL_SIZE` just scales that grid into world units.
 const VOXEL_SIZE: f32 = 0.75;
-const ROOT_EXTENT: f32 = (GRID_DIM as f32) * VOXEL_SIZE;
+const ROOT_EXTENT: f32 = (VOXEL_TERRAIN_GRID_DIM as f32) * VOXEL_SIZE;
 
 // ── app ───────────────────────────────────────────────────────────────────────
 
@@ -69,7 +66,7 @@ struct AppState {
     mouse_delta: (f32, f32),
     current_material: u8,
     vol_id: VoxelVolumeId,
-    world: VoxelWorld,
+    world: VoxelTerrain,
     world_seed: u32,
 }
 
@@ -113,10 +110,9 @@ impl AppState {
     }
 
     /// Converts a world-space position into the voxel volume's grid coordinates.
-    /// The volume is centered on the world origin, spanning `[-GRID_DIM/2, GRID_DIM/2)`
-    /// voxels scaled by `VOXEL_SIZE` (see `voxel_world` module docs for why).
+    /// The volume is centered on the world origin, with voxels scaled by `VOXEL_SIZE`.
     fn world_to_grid(pos: Vec3) -> [f32; 3] {
-        let half = GRID_DIM as f32 / 2.0;
+        let half = VOXEL_TERRAIN_GRID_DIM as f32 / 2.0;
         [
             pos.x / VOXEL_SIZE + half,
             pos.y / VOXEL_SIZE + half,
@@ -130,7 +126,7 @@ impl AppState {
         cam_pos: Vec3,
         yaw: f32,
         pitch: f32,
-        world: &mut VoxelWorld,
+        world: &mut VoxelTerrain,
         queue: &Arc<wgpu::Queue>,
         mesh_pass: &mut VoxelMeshPass,
     ) {
@@ -273,7 +269,7 @@ impl ApplicationHandler for App {
         // Procedurally generate the world on the CPU; baked into VoxelMeshPass's
         // buffers and mark_dirty()'d below, once the pass exists.
         let world_seed = 1;
-        let mut world = VoxelWorld::empty();
+        let mut world = VoxelTerrain::empty();
         world.generate(world_seed);
 
         // Build a custom graph: VoxelMeshPass (real triangles, writes "pre_aa")

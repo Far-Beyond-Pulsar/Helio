@@ -1,6 +1,4 @@
-//! CPU-side procedural voxel world + brick baker, shared by `voxel_demo`
-//! (mesh-rendered, via `VoxelMeshPass`) and `voxel_demo_raymarch`
-//! (per-frame raymarched, via `VoxelRayMarchPass`).
+//! CPU-side voxel terrain component and brick baker.
 //!
 //! Both passes read a dense per-volume brick grid, but from different GPU
 //! buffers with different layouts:
@@ -12,22 +10,19 @@
 //! - `VoxelRayMarchPass` reads the *shared* `GpuScene::voxel_brick_pool`/
 //!   `voxel_data_pool` directly (`upload_*_raymarch`), storing each brick as
 //!   the raw **8x8x8** the DDA marcher indexes every frame — nothing in the
-//!   engine bakes edits into that pool on its own (the edit ring/CPU octree
-//!   exist but no compute pass consumes them), so this module owns that data
-//!   on the CPU and uploads it directly via `queue.write_buffer`.
+//!   engine bakes edits into that pool on its own, so this component owns that
+//!   data on the CPU and uploads it directly via `queue.write_buffer`.
 //!
 //! The grid is always a dense 64^3 voxel volume (8 bricks per axis of 8
 //! voxels each — fixed GPU-side by the engine's `BRICK_SIZE` constant).
 
-use std::sync::Arc;
-
 pub const BRICK_DIM: u32 = 8;
 pub const BRICKS_PER_AXIS: u32 = 8;
-pub const GRID_DIM: u32 = BRICKS_PER_AXIS * BRICK_DIM; // 64
-// VoxelMeshPass's extract shader reads a padded 9x9x9 block per brick (one
-// extra voxel of +X/+Y/+Z halo from the neighbor brick) so marching cubes can
-// cover the boundary cell between adjacent bricks — without it every brick
-// edge has a visible seam/gap. See voxel_surface_extract.wgsl::CELLS_PER_DIM.
+pub const VOXEL_TERRAIN_GRID_DIM: u32 = BRICKS_PER_AXIS * BRICK_DIM; // 64
+                                                                     // VoxelMeshPass's extract shader reads a padded 9x9x9 block per brick (one
+                                                                     // extra voxel of +X/+Y/+Z halo from the neighbor brick) so marching cubes can
+                                                                     // cover the boundary cell between adjacent bricks — without it every brick
+                                                                     // edge has a visible seam/gap. See voxel_surface_extract.wgsl::CELLS_PER_DIM.
 pub const PADDED_DIM: u32 = BRICK_DIM + 1; // 9
 pub const PADDED_VOXELS_PER_BRICK: usize = (PADDED_DIM * PADDED_DIM * PADDED_DIM) as usize; // 729
 pub const WORDS_PER_BRICK: usize = PADDED_VOXELS_PER_BRICK.div_ceil(4); // 183
@@ -96,37 +91,47 @@ fn fbm2(x: f32, z: f32, seed: u32, octaves: u32) -> f32 {
 // ── world ────────────────────────────────────────────────────────────────────
 
 /// Dense 64^3 voxel material grid, baked into GPU bricks on demand.
-pub struct VoxelWorld {
+pub struct VoxelTerrain {
     materials: Vec<u8>,
 }
 
-impl VoxelWorld {
+impl VoxelTerrain {
     pub fn empty() -> Self {
         Self {
-            materials: vec![MAT_AIR; (GRID_DIM * GRID_DIM * GRID_DIM) as usize],
+            materials: vec![
+                MAT_AIR;
+                (VOXEL_TERRAIN_GRID_DIM * VOXEL_TERRAIN_GRID_DIM * VOXEL_TERRAIN_GRID_DIM)
+                    as usize
+            ],
         }
     }
 
     fn idx(x: u32, y: u32, z: u32) -> usize {
-        (x + y * GRID_DIM + z * GRID_DIM * GRID_DIM) as usize
+        (x + y * VOXEL_TERRAIN_GRID_DIM + z * VOXEL_TERRAIN_GRID_DIM * VOXEL_TERRAIN_GRID_DIM)
+            as usize
     }
 
     fn in_bounds(x: i32, y: i32, z: i32) -> bool {
-        x >= 0 && y >= 0 && z >= 0 && (x as u32) < GRID_DIM && (y as u32) < GRID_DIM && (z as u32) < GRID_DIM
+        x >= 0
+            && y >= 0
+            && z >= 0
+            && (x as u32) < VOXEL_TERRAIN_GRID_DIM
+            && (y as u32) < VOXEL_TERRAIN_GRID_DIM
+            && (z as u32) < VOXEL_TERRAIN_GRID_DIM
     }
 
     /// Fills the grid with procedurally generated hills, dirt/stone layers, caves and ore.
     pub fn generate(&mut self, seed: u32) {
-        let base_height = GRID_DIM as f32 * 0.45;
-        let amplitude = GRID_DIM as f32 * 0.22;
+        let base_height = VOXEL_TERRAIN_GRID_DIM as f32 * 0.45;
+        let amplitude = VOXEL_TERRAIN_GRID_DIM as f32 * 0.22;
         let freq = 1.0 / 18.0;
 
-        for x in 0..GRID_DIM {
-            for z in 0..GRID_DIM {
+        for x in 0..VOXEL_TERRAIN_GRID_DIM {
+            for z in 0..VOXEL_TERRAIN_GRID_DIM {
                 let h = fbm2(x as f32 * freq, z as f32 * freq, seed, 4);
                 let terrain_height = base_height + h * amplitude;
 
-                for y in 0..GRID_DIM {
+                for y in 0..VOXEL_TERRAIN_GRID_DIM {
                     let yf = y as f32;
                     if yf > terrain_height {
                         self.materials[Self::idx(x, y, z)] = MAT_AIR;
@@ -148,7 +153,9 @@ impl VoxelWorld {
                     // blows well past that budget and geometry gets silently
                     // truncated mid-brick. A plain heightfield keeps each
                     // brick's surface to roughly one layer of cells.
-                    if mat == MAT_STONE && hash(x as i32, y as i32, z as i32, seed ^ 0x1234_5678) > 0.985 {
+                    if mat == MAT_STONE
+                        && hash(x as i32, y as i32, z as i32, seed ^ 0x1234_5678) > 0.985
+                    {
                         mat = MAT_ORE;
                     }
 
@@ -160,7 +167,13 @@ impl VoxelWorld {
 
     /// Applies a sphere edit (add fills with `material`, subtract clears to air) in
     /// voxel-grid coordinates. Returns the touched region's brick range for partial rebaking.
-    pub fn paint_sphere(&mut self, center: [f32; 3], radius: f32, material: u8, add: bool) -> Option<BrickRange> {
+    pub fn paint_sphere(
+        &mut self,
+        center: [f32; 3],
+        radius: f32,
+        material: u8,
+        add: bool,
+    ) -> Option<BrickRange> {
         let r = radius.ceil() as i32;
         let cx = center[0].floor() as i32;
         let cy = center[1].floor() as i32;
@@ -168,7 +181,7 @@ impl VoxelWorld {
         let r2 = radius * radius;
 
         let mut touched = false;
-        let mut min = [GRID_DIM as i32; 3];
+        let mut min = [VOXEL_TERRAIN_GRID_DIM as i32; 3];
         let mut max = [-1i32; 3];
 
         for dz in -r..=r {
@@ -224,7 +237,10 @@ impl VoxelWorld {
                     let gx = bx * BRICK_DIM + lx;
                     let gy = by * BRICK_DIM + ly;
                     let gz = bz * BRICK_DIM + lz;
-                    let mat = if gx < GRID_DIM && gy < GRID_DIM && gz < GRID_DIM {
+                    let mat = if gx < VOXEL_TERRAIN_GRID_DIM
+                        && gy < VOXEL_TERRAIN_GRID_DIM
+                        && gz < VOXEL_TERRAIN_GRID_DIM
+                    {
                         self.materials[Self::idx(gx, gy, gz)]
                     } else {
                         MAT_AIR
@@ -246,7 +262,7 @@ impl VoxelWorld {
     /// `VoxelMeshPass::mark_dirty` needs so its extract shader can place
     /// generated vertices in world space (see `voxel_surface_extract.wgsl`).
     fn brick_origin(bx: u32, by: u32, bz: u32, voxel_size: f32) -> [f32; 3] {
-        let half = GRID_DIM as f32 / 2.0;
+        let half = VOXEL_TERRAIN_GRID_DIM as f32 / 2.0;
         let gx = (bx * BRICK_DIM) as f32 - half;
         let gy = (by * BRICK_DIM) as f32 - half;
         let gz = (bz * BRICK_DIM) as f32 - half;
@@ -260,7 +276,7 @@ impl VoxelWorld {
     /// to zero triangles too, not just a newly-filled one).
     pub fn upload_range_mesh(
         &self,
-        queue: &Arc<wgpu::Queue>,
+        queue: &wgpu::Queue,
         brick_meta_buf: &wgpu::Buffer,
         voxel_data_buf: &wgpu::Buffer,
         voxel_size: f32,
@@ -270,7 +286,8 @@ impl VoxelWorld {
         for bz in range.min[2]..=range.max[2] {
             for by in range.min[1]..=range.max[1] {
                 for bx in range.min[0]..=range.max[0] {
-                    let brick_idx = bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
+                    let brick_idx =
+                        bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
                     let mut brick_words = [0u32; WORDS_PER_BRICK];
                     let occupied = self.bake_brick(bx, by, bz, &mut brick_words);
 
@@ -301,7 +318,7 @@ impl VoxelWorld {
     /// Bakes and uploads every brick in the volume. See `upload_range_mesh`.
     pub fn upload_all_mesh(
         &self,
-        queue: &Arc<wgpu::Queue>,
+        queue: &wgpu::Queue,
         brick_meta_buf: &wgpu::Buffer,
         voxel_data_buf: &wgpu::Buffer,
         voxel_size: f32,
@@ -313,14 +330,24 @@ impl VoxelWorld {
             voxel_size,
             BrickRange {
                 min: [0, 0, 0],
-                max: [BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1],
+                max: [
+                    BRICKS_PER_AXIS - 1,
+                    BRICKS_PER_AXIS - 1,
+                    BRICKS_PER_AXIS - 1,
+                ],
             },
         )
     }
 
     /// Bakes a brick's raw (unpadded) 8x8x8 voxel block for VoxelRayMarchPass.
     /// Matches voxel_raymarch.wgsl::read_voxel's `linear = z*64 + y*8 + x`.
-    fn bake_brick_raymarch(&self, bx: u32, by: u32, bz: u32, data_out: &mut [u32; RAYMARCH_WORDS_PER_BRICK]) -> bool {
+    fn bake_brick_raymarch(
+        &self,
+        bx: u32,
+        by: u32,
+        bz: u32,
+        data_out: &mut [u32; RAYMARCH_WORDS_PER_BRICK],
+    ) -> bool {
         let mut occupied = false;
         for lz in 0..BRICK_DIM {
             for ly in 0..BRICK_DIM {
@@ -346,16 +373,27 @@ impl VoxelWorld {
     /// scene's shared `voxel_brick_pool`/`voxel_data_pool` (VoxelRayMarchPass).
     /// GpuBrickMeta here is a single packed word: occupancy in the top byte,
     /// data_offset in the low 24 bits — see voxel_raymarch.wgsl's meta mask.
-    pub fn upload_range_raymarch(&self, queue: &Arc<wgpu::Queue>, brick_pool: &wgpu::Buffer, data_pool: &wgpu::Buffer, range: BrickRange) {
+    pub fn upload_range_raymarch(
+        &self,
+        queue: &wgpu::Queue,
+        brick_pool: &wgpu::Buffer,
+        data_pool: &wgpu::Buffer,
+        range: BrickRange,
+    ) {
         for bz in range.min[2]..=range.max[2] {
             for by in range.min[1]..=range.max[1] {
                 for bx in range.min[0]..=range.max[0] {
-                    let brick_idx = bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
+                    let brick_idx =
+                        bz * BRICKS_PER_AXIS * BRICKS_PER_AXIS + by * BRICKS_PER_AXIS + bx;
                     let mut brick_words = [0u32; RAYMARCH_WORDS_PER_BRICK];
                     let occupied = self.bake_brick_raymarch(bx, by, bz, &mut brick_words);
 
                     let data_offset = brick_idx * RAYMARCH_WORDS_PER_BRICK as u32;
-                    let meta_word = if occupied { (1u32 << 24) | data_offset } else { 0 };
+                    let meta_word = if occupied {
+                        (1u32 << 24) | data_offset
+                    } else {
+                        0
+                    };
 
                     queue.write_buffer(
                         brick_pool,
@@ -373,14 +411,23 @@ impl VoxelWorld {
     }
 
     /// Uploads a full bake to the shared GPU voxel pools. See `upload_range_raymarch`.
-    pub fn upload_all_raymarch(&self, queue: &Arc<wgpu::Queue>, brick_pool: &wgpu::Buffer, data_pool: &wgpu::Buffer) {
+    pub fn upload_all_raymarch(
+        &self,
+        queue: &wgpu::Queue,
+        brick_pool: &wgpu::Buffer,
+        data_pool: &wgpu::Buffer,
+    ) {
         self.upload_range_raymarch(
             queue,
             brick_pool,
             data_pool,
             BrickRange {
                 min: [0, 0, 0],
-                max: [BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1, BRICKS_PER_AXIS - 1],
+                max: [
+                    BRICKS_PER_AXIS - 1,
+                    BRICKS_PER_AXIS - 1,
+                    BRICKS_PER_AXIS - 1,
+                ],
             },
         )
     }
@@ -390,4 +437,31 @@ impl VoxelWorld {
 pub struct BrickRange {
     min: [u32; 3],
     max: [u32; 3],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_terrain_contains_air_and_solid_voxels() {
+        let mut terrain = VoxelTerrain::empty();
+        terrain.generate(1);
+
+        assert!(terrain.materials.contains(&MAT_AIR));
+        assert!(terrain.materials.iter().any(|&material| material != MAT_AIR));
+    }
+
+    #[test]
+    fn sphere_edits_update_the_dense_material_grid() {
+        let mut terrain = VoxelTerrain::empty();
+        let center = [32.0, 32.0, 32.0];
+        let center_index = VoxelTerrain::idx(32, 32, 32);
+
+        assert!(terrain.paint_sphere(center, 2.0, MAT_ORE, true).is_some());
+        assert_eq!(terrain.materials[center_index], MAT_ORE);
+
+        assert!(terrain.paint_sphere(center, 2.0, MAT_ORE, false).is_some());
+        assert_eq!(terrain.materials[center_index], MAT_AIR);
+    }
 }

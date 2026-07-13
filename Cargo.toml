@@ -21,7 +21,6 @@ solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070
 solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
 solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
-helio-pass-sdf = { path = "crates/helio-pass-sdf" }
 thiserror = "2.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }

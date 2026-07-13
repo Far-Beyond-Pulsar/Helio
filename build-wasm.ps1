@@ -47,7 +47,6 @@ $all_examples = @(
     "space_station",
     "light_benchmark",
     "rc_benchmark",
-    "sdf_demo",
     "load_fbx",
     "load_fbx_embedded",
     "ship_flight",

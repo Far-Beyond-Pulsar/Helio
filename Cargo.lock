@@ -2103,9 +2103,7 @@ dependencies = [
  "helio-pass-fxaa",
  "helio-pass-perf-overlay",
  "helio-pass-postprocess",
- "helio-pass-sdf",
  "helio-pass-taa",
- "helio-pass-terra-forge",
  "helio-pass-voxel-mesh",
  "helio-pass-voxel-raymarch",
  "helio-voxel-core",
@@ -2859,18 +2857,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-pass-sdf"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.0",
- "helio-core",
- "libhelio",
- "log",
- "wgpu 28.0.0",
-]
-
-[[package]]
 name = "helio-pass-shadow"
 version = "0.1.0"
 dependencies = [
@@ -2969,18 +2955,6 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
- "wgpu 28.0.0",
-]
-
-[[package]]
-name = "helio-pass-terra-forge"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.0",
- "helio-core",
- "libhelio",
- "log",
  "wgpu 28.0.0",
 ]
 
@@ -3106,7 +3080,6 @@ dependencies = [
  "glam 0.33.0",
  "helio",
  "helio-asset-compat",
- "helio-pass-sdf",
  "helio-wasm",
  "log",
  "wasm-bindgen",

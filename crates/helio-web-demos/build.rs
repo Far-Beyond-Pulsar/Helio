@@ -37,7 +37,6 @@ const DEMOS: &[Demo] = &[
     Demo { name: "space_station",       title: "Space Station",              description: "Orbiting station with solar arrays and navigation lights.",       controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "light_benchmark",     title: "Light Benchmark",            description: "128 animated point lights — deferred lighting stress test.",      controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "rc_benchmark",        title: "Radiance Cascades",          description: "Cornell box global illumination benchmark.",                      controls: "+/- — intensity &nbsp;·&nbsp; WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
-    Demo { name: "sdf_demo",            title: "SDF Demo",                   description: "Signed-distance field clipmap with live sphere edits.",           controls: "F — free fly / orbit &nbsp;·&nbsp; WASD — move &nbsp;·&nbsp; Mouse — look/orbit" },
     Demo { name: "load_fbx",            title: "Load FBX",                   description: "FBX asset loading (placeholder scene on WASM).",                  controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "load_fbx_embedded",   title: "Load FBX (Embedded)",        description: "FBX loaded from bytes embedded at compile time.",                 controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "ship_flight",         title: "Ship Flight",                description: "6-DoF spaceship through an asteroid field.",                      controls: "WASD — thrust &nbsp;·&nbsp; Q/E — roll &nbsp;·&nbsp; Space/Shift — lift &nbsp;·&nbsp; Mouse — aim" },
@@ -241,4 +240,3 @@ fn main() {
         }
     }
 }
-

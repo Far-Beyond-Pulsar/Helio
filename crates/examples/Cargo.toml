@@ -100,10 +100,6 @@ name = "rc_benchmark"
 path = "rc_benchmark.rs"
 
 [[bin]]
-name = "sdf_demo"
-path = "sdf_demo.rs"
-
-[[bin]]
 name = "load_fbx"
 path = "load_fbx.rs"
 
@@ -134,10 +130,6 @@ path = "indoor_cathedral_water.rs"
 [[bin]]
 name = "oil_rig_night"
 path = "oil_rig_night.rs"
-
-[[bin]]
-name = "terra_forge_demo"
-path = "terra_forge_demo.rs"
 
 [[bin]]
 name = "editor_demo"
@@ -172,8 +164,6 @@ path = "voxel/raymarch_demo.rs"
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
 helio-asset-compat = { workspace = true }
-helio-pass-sdf = { workspace = true }
-helio-pass-terra-forge = { path = "../helio-pass-terra-forge" }
 helio-pass-taa = { workspace = true }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-corona = { workspace = true }

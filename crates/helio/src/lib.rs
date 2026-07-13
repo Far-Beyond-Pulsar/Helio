@@ -19,6 +19,7 @@ mod picking;
 mod quark_commands;
 mod renderer;
 mod scene;
+mod terrain;
 mod vg;
 
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
@@ -44,6 +45,7 @@ pub use scene::{
     WaterHitboxActor, WaterHitboxDescriptor,
     WaterVolumeActor, WaterVolumeDescriptor,
 };
+pub use terrain::{VoxelTerrain, VOXEL_TERRAIN_GRID_DIM};
 pub use vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
 
 #[cfg(feature = "bake")]

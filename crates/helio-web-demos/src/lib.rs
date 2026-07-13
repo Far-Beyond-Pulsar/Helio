@@ -44,7 +44,6 @@ pub mod html {
     pub const LIGHT_BENCHMARK: &str =
         include_str!(concat!(env!("OUT_DIR"), "/light_benchmark.html"));
     pub const RC_BENCHMARK: &str = include_str!(concat!(env!("OUT_DIR"), "/rc_benchmark.html"));
-    pub const SDF_DEMO: &str = include_str!(concat!(env!("OUT_DIR"), "/sdf_demo.html"));
     pub const LOAD_FBX: &str = include_str!(concat!(env!("OUT_DIR"), "/load_fbx.html"));
     pub const LOAD_FBX_EMBEDDED: &str =
         include_str!(concat!(env!("OUT_DIR"), "/load_fbx_embedded.html"));
@@ -72,7 +71,6 @@ pub mod html {
             "space_station" => Some(SPACE_STATION),
             "light_benchmark" => Some(LIGHT_BENCHMARK),
             "rc_benchmark" => Some(RC_BENCHMARK),
-            "sdf_demo" => Some(SDF_DEMO),
             "load_fbx" => Some(LOAD_FBX),
             "load_fbx_embedded" => Some(LOAD_FBX_EMBEDDED),
             "ship_flight" => Some(SHIP_FLIGHT),
@@ -141,10 +139,6 @@ mod light_benchmark;
 #[cfg(feature = "rc_benchmark")]
 #[path = "../examples-wasm/rc_benchmark.rs"]
 mod rc_benchmark;
-
-#[cfg(feature = "sdf_demo")]
-#[path = "../examples-wasm/sdf_demo.rs"]
-mod sdf_demo;
 
 #[cfg(feature = "load_fbx")]
 #[path = "../examples-wasm/load_fbx.rs"]
@@ -244,11 +238,6 @@ pub fn start() {
     #[cfg(feature = "rc_benchmark")]
     {
         helio_wasm::launch::<rc_benchmark::Demo>();
-        return;
-    }
-    #[cfg(feature = "sdf_demo")]
-    {
-        helio_wasm::launch::<sdf_demo::Demo>();
         return;
     }
     #[cfg(feature = "load_fbx")]
@@ -357,11 +346,6 @@ pub fn main() {
         helio_wasm::launch::<rc_benchmark::Demo>();
         return;
     }
-    #[cfg(feature = "sdf_demo")]
-    {
-        helio_wasm::launch::<sdf_demo::Demo>();
-        return;
-    }
     #[cfg(feature = "load_fbx")]
     {
         helio_wasm::launch::<load_fbx::Demo>();
@@ -395,4 +379,3 @@ pub fn main() {
 
     eprintln!("helio-web-demos: no feature selected. Pass --features <demo_name>.");
 }
-

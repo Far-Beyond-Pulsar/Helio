@@ -106,6 +106,7 @@ renderer.render(&camera, &surface_view)?;
 - Handle-based API — `MeshId`, `MaterialId`, `LightId`, `ObjectId`, etc.
 - Group system — 64-bit bitmask per object; per-group hide/show/transform
 - Sectioned meshes — single VB + N index ranges (Unreal-style multi-material)
+- Reusable voxel terrain component shared by mesh and ray-march rendering
 - GPU-native scene with dirty-tracked uploads
 
 ### Pass system
@@ -160,7 +161,8 @@ Press **F2** to toggle the debug overlay — shows FPS, frame timing, and option
 | `editor_demo` | Interactive scene editor — pick, translate, scale |
 | `editor_demo_mini` | Compact editor with FXAA |
 | `light_benchmark` | 150 simultaneous point lights |
-| `sdf_demo` | Live-editable SDF clipmap ray march |
+| `voxel_demo` | Editable voxel terrain rendered as GPU-generated meshlets |
+| `voxel_demo_raymarch` | The same terrain rendered with per-pixel DDA ray marching |
 | `simple_graph` | Minimal single-pass example |
 
 ```sh
