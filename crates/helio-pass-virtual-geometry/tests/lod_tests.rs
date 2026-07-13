@@ -84,6 +84,13 @@ fn higher_quality_has_lower_s6() {
     assert!(high[6] > ultra[6]);
 }
 
+#[test]
+fn higher_quality_has_stricter_projected_error() {
+    assert!(LodQuality::Low.max_error_pixels() > LodQuality::Medium.max_error_pixels());
+    assert!(LodQuality::Medium.max_error_pixels() > LodQuality::High.max_error_pixels());
+    assert!(LodQuality::High.max_error_pixels() > LodQuality::Ultra.max_error_pixels());
+}
+
 // ── All thresholds positive and below 1.0 ────────────────────────────────────
 
 #[test]

@@ -12,6 +12,13 @@ use super::super::errors::{invalid, Result};
 use super::super::helpers::normal_matrix;
 use super::super::types::VirtualObjectRecord;
 
+fn include_dirty_instance(range: &mut Option<(usize, usize)>, index: usize) {
+    *range = Some(match *range {
+        Some((start, end)) => (start.min(index), end.max(index + 1)),
+        None => (index, index + 1),
+    });
+}
+
 impl super::super::Scene {
     /// Place an instance of a virtual mesh into the scene.
     ///
@@ -65,13 +72,18 @@ impl super::super::Scene {
             .vg_meshes
             .get_mut(&desc.virtual_mesh)
             .ok_or_else(|| invalid("virtual_mesh"))?;
+        let mesh_id = record
+            .mesh_ids
+            .first()
+            .copied()
+            .ok_or_else(|| invalid("virtual_mesh_geometry"))?;
         record.ref_count += 1;
 
         let instance = GpuInstanceData {
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),
             bounds: desc.bounds,
-            mesh_id: record.mesh_ids[0].slot(),
+            mesh_id: mesh_id.slot(),
             material_id: desc.material_id,
             flags: desc.flags,
             lightmap_index: 0xFFFFFFFF,  // Virtual geometry doesn't use lightmaps
@@ -89,7 +101,7 @@ impl super::super::Scene {
     /// Update the world transform of a virtual object.
     ///
     /// Modifies the object's model matrix and recomputes the normal matrix.
-    /// The change is reflected in the next VG buffer rebuild (on next `flush()`).
+    /// The change is reflected by a bounded instance-buffer upload on next `flush()`.
     ///
     /// # Parameters
     /// - `id`: Virtual object handle
@@ -102,15 +114,14 @@ impl super::super::Scene {
     /// `Ok(())` if the transform was successfully updated.
     ///
     /// # Performance
-    /// - CPU cost: O(1) - updates CPU-side record, marks VG dirty
-    /// - GPU cost: Deferred to next `flush()` when VG buffers are rebuilt
+    /// - CPU cost: O(1) - updates the record and expands one dirty range
+    /// - GPU cost: Uploads only the contiguous dirty instance range on next `flush()`
     /// - Memory: No allocations
     ///
     /// # Deferred Updates
     ///
-    /// Unlike regular objects (which support O(1) in-place GPU updates), virtual
-    /// geometry transforms are always applied via full buffer rebuild. This is
-    /// acceptable because VG is designed for static or infrequently-updated geometry.
+    /// Meshlet descriptors, object LOD ranges, and work spans remain immutable.
+    /// Insertions/removals still rebuild topology, but transform-only changes do not.
     ///
     /// # Example
     /// ```ignore
@@ -128,7 +139,7 @@ impl super::super::Scene {
         id: VirtualObjectId,
         transform: Mat4,
     ) -> Result<()> {
-        let Some((_, record)) = self.vg_objects.get_mut_with_index(id) else {
+        let Some((dense_index, record)) = self.vg_objects.get_mut_with_index(id) else {
             return Err(invalid("virtual_object"));
         };
         // Enforce movability: Static objects cannot have transforms updated
@@ -141,13 +152,23 @@ impl super::super::Scene {
         }
         record.instance.model = transform.to_cols_array();
         record.instance.normal_mat = normal_matrix(transform);
+        let updated_instance = record.instance;
 
         // Increment generation counter for movable objects (for shadow cache invalidation)
         self.movable_objects_generation += 1;
         self.gpu_scene.movable_objects_generation = self.movable_objects_generation;
 
-        // Mark dirty so vg_frame_data() picks up the new transform.
-        self.vg_objects_dirty = true;
+        // Topology rebuilds republish every instance. Otherwise keep the CPU
+        // mirror in place and publish only the affected range on the next flush.
+        if !self.vg_objects_dirty {
+            if let Some(instance) = self.vg_cpu_instances.get_mut(dense_index) {
+                *instance = updated_instance;
+                include_dirty_instance(&mut self.vg_instance_dirty_range, dense_index);
+            } else {
+                // A missing mirror means topology has not been published yet.
+                self.vg_objects_dirty = true;
+            }
+        }
         Ok(())
     }
 
@@ -191,6 +212,119 @@ impl super::super::Scene {
         }
         self.vg_objects_dirty = true;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use glam::{Mat4, Vec3};
+    use libhelio::Movability;
+
+    use crate::{
+        groups::GroupMask,
+        mesh::PackedVertex,
+        vg::{VirtualMeshUpload, VirtualObjectDescriptor},
+        Scene,
+    };
+
+    use super::include_dirty_instance;
+
+    fn create_test_scene() -> Scene {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..Default::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter: false,
+        }))
+        .expect("no adapter found");
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::empty(),
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                ..Default::default()
+            },
+        ))
+        .expect("failed to create device");
+        Scene::new(Arc::new(device), Arc::new(queue))
+    }
+
+    #[test]
+    fn transform_dirty_range_is_end_exclusive_and_coalesced() {
+        let mut range = None;
+        include_dirty_instance(&mut range, 7);
+        assert_eq!(range, Some((7, 8)));
+        include_dirty_instance(&mut range, 3);
+        include_dirty_instance(&mut range, 11);
+        include_dirty_instance(&mut range, 5);
+        assert_eq!(range, Some((3, 12)));
+    }
+
+    #[test]
+    fn transform_only_flush_keeps_topology_version_and_publishes_one_instance() {
+        let mut scene = create_test_scene();
+        let vertices = vec![
+            PackedVertex::from_components(
+                [0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                1.0,
+            ),
+            PackedVertex::from_components(
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                1.0,
+            ),
+            PackedVertex::from_components(
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 0.0, 0.0],
+                1.0,
+            ),
+        ];
+        let mesh = scene.insert_virtual_mesh(VirtualMeshUpload {
+            vertices,
+            indices: vec![0, 1, 2],
+        });
+        let object = scene
+            .insert_virtual_object(VirtualObjectDescriptor {
+                virtual_mesh: mesh,
+                material_id: 0,
+                transform: Mat4::IDENTITY,
+                bounds: [0.5, 0.0, 0.5, 1.0],
+                flags: 0,
+                groups: GroupMask::NONE,
+                movability: Some(Movability::Movable),
+            })
+            .expect("insert virtual object");
+        scene.flush();
+
+        let topology_version = scene.vg_buffer_version;
+        let instance_version = scene.vg_instance_version;
+        let moved = Mat4::from_translation(Vec3::new(4.0, 5.0, 6.0));
+        scene
+            .update_virtual_object_transform(object, moved)
+            .expect("update virtual object transform");
+
+        assert!(!scene.vg_objects_dirty);
+        assert_eq!(scene.vg_instance_dirty_range, Some((0, 1)));
+        scene.flush();
+
+        assert_eq!(scene.vg_buffer_version, topology_version);
+        assert_eq!(scene.vg_instance_version, instance_version + 1);
+        assert_eq!(scene.vg_published_instance_dirty_range, Some((0, 1)));
+        assert_eq!(scene.vg_cpu_instances[0].model, moved.to_cols_array());
+        let frame = scene.vg_frame_data().expect("VG frame data");
+        assert_eq!(frame.instance_dirty_start, 0);
+        assert_eq!(frame.instance_dirty_count, 1);
     }
 }
 

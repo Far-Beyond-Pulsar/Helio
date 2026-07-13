@@ -2,21 +2,27 @@
 // meshlet visibility, screen coverage, LOD transitions, backface cone culling.
 // Uses the actual public LodQuality API + locally mirrored private types.
 
-use std::mem;
 use helio_pass_virtual_geometry::LodQuality;
+use std::mem;
 
 // ── Mirror private types ──────────────────────────────────────────────────────
 
-/// Mirrors private CullUniforms (48 bytes: 16 header + 32 thresholds).
+/// Mirrors private CullUniforms (48 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CullUniforms {
-    meshlet_count: u32,
+    object_count: u32,
+    screen_width: u32,
+    screen_height: u32,
+    hiz_mip_count: u32,
+    draw_capacity: u32,
+    lod_error_threshold_px: f32,
+    object_dispatch_width: u32,
+    work_item_count: u32,
+    work_dispatch_width: u32,
     _pad0: u32,
     _pad1: u32,
     _pad2: u32,
-    lod_thresholds: [f32; 7],
-    _pad3: f32,
 }
 
 /// Mirrors private VgGlobals (96 bytes).
@@ -39,7 +45,34 @@ struct VgGlobals {
 
 const WORKGROUP_SIZE: u32 = 64;
 const INITIAL_MESHLETS: u64 = 1024;
+const INITIAL_OBJECTS: u64 = 256;
 const INITIAL_INSTANCES: u64 = 256;
+
+#[test]
+fn cull_shader_parses_and_validates() {
+    let source = include_str!("../shaders/vg_cull.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source).expect("VG cull shader must parse");
+    let mut validator = wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .expect("VG cull shader must validate");
+}
+
+#[test]
+fn gbuffer_shader_parses_and_validates() {
+    let source = include_str!("../shaders/vg_gbuffer.wgsl");
+    let module = wgpu::naga::front::wgsl::parse_str(source).expect("VG draw shader must parse");
+    let mut validator = wgpu::naga::valid::Validator::new(
+        wgpu::naga::valid::ValidationFlags::all(),
+        wgpu::naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .expect("VG draw shader must validate");
+}
 
 // ── CullUniforms layout tests ─────────────────────────────────────────────────
 
@@ -73,6 +106,11 @@ fn initial_meshlets_is_1024() {
 }
 
 #[test]
+fn initial_objects_is_256() {
+    assert_eq!(INITIAL_OBJECTS, 256u64);
+}
+
+#[test]
 fn initial_instances_is_256() {
     assert_eq!(INITIAL_INSTANCES, 256u64);
 }
@@ -85,13 +123,19 @@ fn workgroup_size_is_64() {
 }
 
 #[test]
-fn dispatch_groups_ceil_division() {
-    fn ceil_div(n: u32, d: u32) -> u32 { (n + d - 1) / d }
-    assert_eq!(ceil_div(64, 64), 1);
-    assert_eq!(ceil_div(65, 64), 2);
-    assert_eq!(ceil_div(128, 64), 2);
-    assert_eq!(ceil_div(1024, 64), 16);
-    assert_eq!(ceil_div(0, 64), 0);
+fn dispatch_uses_parallel_object_lanes_and_meshlet_spans() {
+    fn grid(workgroup_count: u32, limit: u32) -> (u32, u32) {
+        if workgroup_count == 0 {
+            return (0, 0);
+        }
+        let width = workgroup_count.min(limit);
+        (width, workgroup_count.div_ceil(width))
+    }
+
+    assert_eq!(grid(1_u32.div_ceil(WORKGROUP_SIZE), 65_535), (1, 1));
+    assert_eq!(grid(65_536_u32.div_ceil(WORKGROUP_SIZE), 65_535), (1024, 1));
+    assert_eq!(grid(65_536, 65_535), (65_535, 2));
+    assert_eq!(grid(0, 65_535), (0, 0));
 }
 
 // ── Meshlet visibility / LOD threshold tests ────────────────────────────────
@@ -142,7 +186,12 @@ fn screen_radius_close_object_above_ultra_s0() {
 
 #[test]
 fn all_quality_levels_have_positive_thresholds() {
-    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
+    for q in [
+        LodQuality::Low,
+        LodQuality::Medium,
+        LodQuality::High,
+        LodQuality::Ultra,
+    ] {
         let t = q.thresholds();
         for &v in &t {
             assert!(v > 0.0, "{:?} threshold {v}", q);
@@ -152,21 +201,63 @@ fn all_quality_levels_have_positive_thresholds() {
 
 // ── Backface cone culling tests ───────────────────────────────────────────────
 
-fn is_backfacing_cone(view_dir: [f32; 3], cone_axis: [f32; 3], cos_half_angle: f32) -> bool {
-    let dot = view_dir[0] * cone_axis[0]
-        + view_dir[1] * cone_axis[1]
-        + view_dir[2] * cone_axis[2];
-    dot + cos_half_angle <= 0.0
+fn meshopt_perspective_cone_reject(
+    camera: [f32; 3],
+    cone_apex: [f32; 3],
+    cone_axis: [f32; 3],
+    cone_cutoff: f32,
+) -> bool {
+    let to_apex = [
+        cone_apex[0] - camera[0],
+        cone_apex[1] - camera[1],
+        cone_apex[2] - camera[2],
+    ];
+    let length =
+        (to_apex[0] * to_apex[0] + to_apex[1] * to_apex[1] + to_apex[2] * to_apex[2]).sqrt();
+    if length <= 1.0e-6 {
+        return false;
+    }
+    let dot = (to_apex[0] * cone_axis[0] + to_apex[1] * cone_axis[1] + to_apex[2] * cone_axis[2])
+        / length;
+    dot >= cone_cutoff
 }
 
 #[test]
 fn cone_culling_backfacing_when_view_behind_cone() {
-    assert!(is_backfacing_cone([0.0, 0.0, -1.0], [0.0, 0.0, 1.0], 0.5));
+    assert!(meshopt_perspective_cone_reject(
+        [0.0, 0.0, -10.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        0.5,
+    ));
 }
 
 #[test]
 fn cone_culling_visible_when_view_in_front_of_cone() {
-    assert!(!is_backfacing_cone([0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.5));
+    assert!(!meshopt_perspective_cone_reject(
+        [0.0, 0.0, 10.0],
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        0.5,
+    ));
+}
+
+#[test]
+fn cone_culling_is_disabled_at_the_apex_singularity() {
+    assert!(!meshopt_perspective_cone_reject(
+        [1.0, 2.0, 3.0],
+        [1.0, 2.0, 3.0],
+        [0.0, 0.0, 1.0],
+        0.5,
+    ));
+}
+
+#[test]
+fn conservative_hiz_uses_the_farthest_corner() {
+    let samples = [0.2_f32, 0.3, 0.9, 0.4];
+    let farthest = samples.into_iter().fold(0.0_f32, f32::max);
+    assert_eq!(farthest, 0.9);
+    assert!(!(0.8 > farthest), "a visible corner must prevent occlusion");
 }
 
 // ── Frustum culling stub tests ────────────────────────────────────────────────

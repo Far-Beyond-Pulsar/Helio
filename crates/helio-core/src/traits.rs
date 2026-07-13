@@ -422,6 +422,13 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// The default is a no-op, so passes that don't need resize handling can ignore it.
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
+    /// Updates the renderer-wide debug visualisation mode.
+    ///
+    /// Passes that expose [`debug_views`](Self::debug_views) must override this
+    /// hook and update the state consumed by their next `prepare`/`execute`.
+    /// The default keeps passes without debug visualisations source-compatible.
+    fn set_debug_mode(&mut self, _mode: u32) {}
+
     /// Returns the debug visualisation modes this pass provides.
     ///
     /// The renderer aggregates these from all passes to build a discoverable

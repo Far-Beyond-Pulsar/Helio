@@ -15,17 +15,36 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     #[cfg(not(target_arch = "wasm32"))]
     let required =
         wgpu::Features::TEXTURE_BINDING_ARRAY |
-        wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
+        wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING |
+        wgpu::Features::INDIRECT_FIRST_INSTANCE;
     #[cfg(target_arch = "wasm32")]
-    let required = wgpu::Features::empty();
+    let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let optional =
-        wgpu::Features::INDIRECT_FIRST_INSTANCE | // non-zero firstInstance in indirect draws (WebGPU: indirect-first-instance)
         wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
-        wgpu::Features::SHADER_PRIMITIVE_INDEX | // @builtin(primitive_index) in fs
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE;
     required | (adapter_features & optional)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::required_wgpu_features;
+
+    #[test]
+    fn indirect_first_instance_is_required_even_when_adapter_does_not_report_it() {
+        assert!(
+            required_wgpu_features(wgpu::Features::empty())
+                .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+        );
+    }
+
+    #[test]
+    fn unsupported_optional_features_are_not_requested() {
+        let requested = required_wgpu_features(wgpu::Features::empty());
+        assert!(!requested.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT));
+        assert!(!requested.contains(wgpu::Features::TIMESTAMP_QUERY));
+    }
 }
 
 pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {

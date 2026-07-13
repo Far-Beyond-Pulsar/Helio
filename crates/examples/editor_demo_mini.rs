@@ -33,6 +33,7 @@ use helio::{
 };
 use helio_default_graphs::{build_default_graph, build_fxaa_graph};
 use helio_asset_compat::{load_scene_bytes_with_config, upload_scene_materials, LoadConfig};
+use helio_pass_virtual_geometry::{VirtualGeometryDebugStats, VirtualGeometryPass};
 use v3_demo_common::{
     box_mesh, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh,
 };
@@ -92,7 +93,10 @@ struct AppState {
     is_fullscreen: bool,
     /// Index into the debug views list (0 = off).
     debug_view_index: usize,
+    active_debug_mode: u32,
     debug_overlay_enabled: bool,
+    debug_overlay: Arc<std::sync::Mutex<helio_pass_debug_overlay::DebugOverlayState>>,
+    lod_debug_stats: Arc<std::sync::Mutex<VirtualGeometryDebugStats>>,
 }
 
 impl ApplicationHandler for App {
@@ -515,6 +519,35 @@ impl ApplicationHandler for App {
             }
         }
 
+        // ── Radar dome — dense single-material VG LOD validation asset ──
+        // The container is intentionally split by material and many sections
+        // are too small to have eight distinct simplification levels. This
+        // dense dome gives the debug heatmap a truthful deep LOD chain.
+        {
+            let radius = 6.0;
+            let position = glam::Vec3::new(-55.0, 8.0, -42.0);
+            let upload = sphere_mesh([0.0; 3], radius);
+            let virtual_mesh = renderer
+                .scene_mut()
+                .insert_actor(SceneActor::virtual_mesh(VirtualMeshUpload {
+                    vertices: upload.vertices,
+                    indices: upload.indices,
+                }))
+                .as_virtual_mesh()
+                .unwrap();
+            let _ = renderer.scene_mut().insert_actor(SceneActor::virtual_object(
+                VirtualObjectDescriptor {
+                    virtual_mesh,
+                    material_id: mat_steel.slot(),
+                    transform: glam::Mat4::from_translation(position),
+                    bounds: [position.x, position.y, position.z, radius],
+                    flags: 0,
+                    groups: helio::GroupMask::NONE,
+                    movability: Some(helio::Movability::Static),
+                },
+            ));
+        }
+
         // ── Shipping containers — 10 total, using Virtual Geometry ─────
         // Load with merge_meshes so sections share one vertex buffer (correct
         // spatial relationships). Upload the FBX textures+materials, then
@@ -747,6 +780,9 @@ impl ApplicationHandler for App {
         let fxaa_config = RendererConfig::new(sz.width, sz.height, format)
             .with_render_scale(1.0);
         let debug_overlay = helio_pass_debug_overlay::DebugOverlayState::new();
+        let lod_debug_stats = Arc::new(std::sync::Mutex::new(
+            VirtualGeometryDebugStats::default(),
+        ));
         let fxaa_graph = build_fxaa_graph(
             &device,
             &queue,
@@ -782,7 +818,10 @@ impl ApplicationHandler for App {
             grid_enabled: true,
             is_fullscreen: false,
             debug_view_index: 0,
+            active_debug_mode: 0,
             debug_overlay_enabled: false,
+            debug_overlay,
+            lod_debug_stats,
         });
     }
 
@@ -877,11 +916,11 @@ impl ApplicationHandler for App {
                             } else {
                                 state.debug_view_index = (state.debug_view_index + 1) % (views.len() + 1);
                                 if state.debug_view_index == 0 {
-                                    state.renderer.set_debug_mode(0);
+                                    state.apply_debug_mode(0);
                                     eprintln!("[debug] Debug view: OFF");
                                 } else {
                                     let view = &views[state.debug_view_index - 1];
-                                    state.renderer.set_debug_mode(view.debug_mode);
+                                    state.apply_debug_mode(view.debug_mode);
                                     eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
                                 }
                             }
@@ -897,11 +936,11 @@ impl ApplicationHandler for App {
                                     state.debug_view_index -= 1;
                                 }
                                 if state.debug_view_index == 0 {
-                                    state.renderer.set_debug_mode(0);
+                                    state.apply_debug_mode(0);
                                     eprintln!("[debug] Debug view: OFF");
                                 } else {
                                     let view = &views[state.debug_view_index - 1];
-                                    state.renderer.set_debug_mode(view.debug_mode);
+                                    state.apply_debug_mode(view.debug_mode);
                                     eprintln!("[debug] Debug view: {} — {}", view.name, view.description);
                                 }
                             }
@@ -909,7 +948,7 @@ impl ApplicationHandler for App {
                         KeyCode::F2 | KeyCode::F5 => {
                             state.debug_overlay_enabled = !state.debug_overlay_enabled;
                             if let Some(pass) = state.renderer.find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>() {
-                                pass.set_enabled(state.debug_overlay_enabled);
+                                pass.set_enabled(state.debug_overlay_enabled || state.active_debug_mode == 21);
                             }
                         }
                         KeyCode::KeyL if !state.right_mouse_held => {
@@ -1029,6 +1068,71 @@ impl ApplicationHandler for App {
 // ─────────────────────────────────────────────────────────────────────────────
 
 impl AppState {
+    fn apply_debug_mode(&mut self, mode: u32) {
+        const LOD_COLORS: [[f32; 3]; 8] = [
+            [0.10, 0.95, 0.10],
+            [0.50, 0.95, 0.10],
+            [0.85, 0.90, 0.10],
+            [1.00, 0.70, 0.10],
+            [1.00, 0.45, 0.05],
+            [1.00, 0.25, 0.05],
+            [0.90, 0.10, 0.05],
+            [0.60, 0.05, 0.30],
+        ];
+
+        self.active_debug_mode = mode;
+        self.renderer.set_debug_mode(mode);
+
+        let show_lod_legend = mode == 21;
+        {
+            let mut overlay = self.debug_overlay.lock().unwrap();
+            let shared_stats = Arc::clone(&self.lod_debug_stats);
+            overlay.populate = show_lod_legend.then(move || {
+                Box::new(move |overlay: &mut helio_pass_debug_overlay::DebugOverlayState| {
+                    let stats = *shared_stats.lock().unwrap();
+                    overlay.write_text(0, 2, "VG LOD HEATMAP");
+                    if let Some((first, last)) = stats.selected_lod_range() {
+                        overlay.write_text(
+                            0,
+                            3,
+                            &format!(
+                                "GPU objects: {}  selected: LOD{}..LOD{}  asset max: LOD{}",
+                                stats.visible_objects(), first, last, stats.max_available_lod,
+                            ),
+                        );
+                        overlay.write_text(
+                            0,
+                            4,
+                            &format!(
+                                "Meshlets: {} visible  {} rejected",
+                                stats.visible_meshlets, stats.rejected_meshlets,
+                            ),
+                        );
+                    } else {
+                        overlay.write_text(0, 3, "GPU LOD sample pending / no VG objects visible");
+                    }
+                    for (lod, color) in LOD_COLORS.iter().enumerate() {
+                        let x = 8.0 + lod as f32 * 68.0;
+                        overlay.add_bar(x, 128.0, 20.0, 14.0, color[0], color[1], color[2], 1.0);
+                        overlay.write_small(
+                            (x / 8.0) as u32 + 3,
+                            11,
+                            &format!("L{lod}:{}", stats.lod_object_counts[lod]),
+                        );
+                    }
+                    overlay.write_text(0, 6, "LOD0 = full detail; asset max can be below LOD7");
+                }) as Box<dyn Fn(&mut helio_pass_debug_overlay::DebugOverlayState) + Send + Sync>
+            });
+        }
+
+        if let Some(pass) = self
+            .renderer
+            .find_pass_mut::<helio_pass_debug_overlay::DebugOverlayPass>()
+        {
+            pass.set_enabled(self.debug_overlay_enabled || show_lod_legend);
+        }
+    }
+
     fn reset_transient_input(&mut self) {
         self.keys.clear();
         self.mouse_delta = (0.0, 0.0);
@@ -1167,6 +1271,12 @@ impl AppState {
             0.1,
             800.0,
         );
+
+        if self.active_debug_mode == 21 {
+            if let Some(pass) = self.renderer.find_pass::<VirtualGeometryPass>() {
+                *self.lod_debug_stats.lock().unwrap() = pass.debug_stats();
+            }
+        }
 
         self.renderer.debug_clear();
         self.renderer.set_gizmo_camera(&camera, self.renderer.output_height() as f32);

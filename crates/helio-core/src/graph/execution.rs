@@ -178,6 +178,13 @@ impl RenderGraph {
             .collect()
     }
 
+    /// Propagate a renderer-wide debug mode change to every pass.
+    pub fn set_debug_mode(&mut self, mode: u32) {
+        for pass in &mut self.passes {
+            pass.set_debug_mode(mode);
+        }
+    }
+
     pub fn validate_dependencies(&self) -> std::result::Result<(), String> {
         use std::collections::HashSet;
         let mut available: HashSet<&str> = HashSet::new();

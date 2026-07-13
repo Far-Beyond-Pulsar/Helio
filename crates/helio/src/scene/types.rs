@@ -204,13 +204,29 @@ pub(crate) struct TextureRecord {
 /// Stores mesh handles for each LOD level and precomputed meshlet descriptors.
 #[derive(Debug, Clone)]
 pub(crate) struct VirtualMeshRecord {
-    /// Mesh pool handles for each LOD level: index 0 = full detail, 1 = medium, 2 = coarse.
+    /// Mesh pool handles for each uploaded LOD level.
     pub mesh_ids: Vec<MeshId>,
 
     /// Precomputed meshlet descriptors for all LODs combined.
-    ///
-    /// `lod_error` field encodes the LOD level: 0.0 = full, 1.0 = medium, 2.0 = coarse.
     pub meshlets: Vec<GpuMeshletEntry>,
+
+    /// Conservative mesh-local sphere used for object culling and LOD distance.
+    pub local_bounds: [f32; 4],
+
+    /// Number of valid LOD ranges.
+    pub lod_count: u32,
+
+    /// Measured accumulated object-space simplification errors.
+    pub lod_errors: [f32; libhelio::VG_LOD_LEVELS],
+
+    /// Per-LOD offsets into `meshlets`, before the shared frame-buffer base is applied.
+    pub lod_first_meshlets: [u32; libhelio::VG_LOD_LEVELS],
+
+    /// Per-LOD meshlet counts.
+    pub lod_meshlet_counts: [u32; libhelio::VG_LOD_LEVELS],
+
+    /// Largest per-LOD meshlet count.
+    pub max_meshlet_count: u32,
 
     /// Number of virtual objects currently using this mesh.
     pub ref_count: u32,
@@ -264,4 +280,3 @@ pub(crate) struct PostProcessVolumeRecord {
     /// GPU post-process volume descriptor with bounds, priority, and settings.
     pub gpu: GpuPostProcessVolume,
 }
-

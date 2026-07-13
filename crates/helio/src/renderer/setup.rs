@@ -62,15 +62,14 @@ impl Renderer {
     ) -> Self {
         scene.set_render_size(width, height);
 
-        #[cfg(target_arch = "wasm32")]
-        if !device.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE) {
-            log::error!(
-                "helio: INDIRECT_FIRST_INSTANCE (WebGPU indirect-first-instance) is not \
-                 available on this device. Only the first object in every scene will render. \
-                 Please use a browser that supports the indirect-first-instance WebGPU feature \
-                 (Chrome 113+, Firefox 122+, Safari 17+)."
-            );
-        }
+        assert!(
+            device
+                .features()
+                .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
+            "Helio requires INDIRECT_FIRST_INSTANCE because GPU-driven object and meshlet \
+             draws use non-zero indirect first_instance values; create the device with \
+             helio::required_wgpu_features(adapter.features())"
+        );
 
         let internal_w = config.internal_width();
         let internal_h = config.internal_height();

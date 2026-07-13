@@ -2104,6 +2104,7 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-postprocess",
  "helio-pass-taa",
+ "helio-pass-virtual-geometry",
  "helio-pass-voxel-mesh",
  "helio-pass-voxel-raymarch",
  "helio-voxel-core",

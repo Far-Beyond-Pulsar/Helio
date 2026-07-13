@@ -119,18 +119,36 @@ pub struct Scene {
     /// Dense array of virtual objects (one entry per `insert_virtual_object` call).
     pub(in crate::scene) vg_objects: DenseArena<VirtualObjectRecord, VirtualObjectId>,
 
-    /// Set when VG topology or transforms change; triggers `rebuild_vg_buffers()`.
+    /// Set when VG topology changes; triggers `rebuild_vg_buffers()`.
     pub(in crate::scene) vg_objects_dirty: bool,
 
     /// Monotonically increasing counter forwarded to `VgFrameData::buffer_version`.
     /// The VG pass re-uploads GPU buffers only when this advances.
     pub(in crate::scene) vg_buffer_version: u64,
 
-    /// Flattened meshlet entries for the current VG layout (rebuilt when dirty).
+    /// Transform-only changes accumulated until the next scene flush (end exclusive).
+    pub(in crate::scene) vg_instance_dirty_range: Option<(usize, usize)>,
+
+    /// Last transform-only range published to the render pass (end exclusive).
+    pub(in crate::scene) vg_published_instance_dirty_range: Option<(usize, usize)>,
+
+    /// Monotonic version for published transform-only changes.
+    pub(in crate::scene) vg_instance_version: u64,
+
+    /// Unique meshlet entries for virtual meshes referenced by the current VG layout.
     pub(in crate::scene) vg_cpu_meshlets: Vec<libhelio::GpuMeshletEntry>,
+
+    /// Object-level LOD ranges and bounds (one entry per VG object).
+    pub(in crate::scene) vg_cpu_objects: Vec<libhelio::GpuVgObject>,
 
     /// Instance data for all VG objects (one entry per VG object, in order).
     pub(in crate::scene) vg_cpu_instances: Vec<helio_core::GpuInstanceData>,
+
+    /// Immutable 64-meshlet expansion spans for the second GPU cull stage.
+    pub(in crate::scene) vg_cpu_work_items: Vec<libhelio::GpuVgWorkItem>,
+
+    /// Exact worst-case number of draws after choosing one LOD per object.
+    pub(in crate::scene) vg_max_draw_count: u32,
 
     // ── Water volumes ─────────────────────────────────────────────────────────
     /// Water volumes (dense array)
@@ -276,8 +294,14 @@ impl Scene {
             vg_objects: DenseArena::new(),
             vg_objects_dirty: false,
             vg_buffer_version: 0,
+            vg_instance_dirty_range: None,
+            vg_published_instance_dirty_range: None,
+            vg_instance_version: 0,
             vg_cpu_meshlets: Vec::new(),
+            vg_cpu_objects: Vec::new(),
             vg_cpu_instances: Vec::new(),
+            vg_cpu_work_items: Vec::new(),
+            vg_max_draw_count: 0,
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,
             water_volumes_dirty_range: None,

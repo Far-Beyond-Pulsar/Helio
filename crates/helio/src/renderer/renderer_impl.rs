@@ -270,6 +270,7 @@ impl Renderer {
 
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
+        self.graph.set_debug_mode(mode);
     }
 
     pub fn available_debug_views(&self) -> Vec<helio_core::DebugViewDescriptor> {

@@ -770,6 +770,10 @@ impl RenderPass for DeferredLightPass {
         Ok(())
     }
 
+    fn set_debug_mode(&mut self, mode: u32) {
+        self.debug_mode = mode;
+    }
+
     fn debug_views(&self) -> &'static [DebugViewDescriptor] {
         static VIEWS: &[DebugViewDescriptor] = &[
             DebugViewDescriptor {

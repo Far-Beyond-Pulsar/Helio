@@ -140,6 +140,10 @@ name = "editor_demo_mini"
 path = "editor_demo_mini.rs"
 
 [[bin]]
+name = "meshlet_cull_benchmark"
+path = "meshlet_cull_benchmark.rs"
+
+[[bin]]
 name = "corona_demo"
 path = "corona_demo.rs"
 
@@ -172,6 +176,7 @@ helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../helio-pass-postprocess" }
 helio-pass-voxel-raymarch = { path = "../helio-pass-voxel-raymarch" }
 helio-pass-voxel-mesh = { path = "../helio-pass-voxel-mesh" }
+helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-voxel-core = { path = "../helio-voxel-core" }
 helio-default-graphs = { path = "../helio-default-graphs" }
 rapier3d = "0.24"
