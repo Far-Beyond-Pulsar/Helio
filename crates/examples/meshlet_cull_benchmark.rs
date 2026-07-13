@@ -1,8 +1,9 @@
 //! Headless virtual-geometry culling benchmark.
 //!
 //! Holds total visible meshlet work constant while changing how that work is
-//! distributed across objects. This exposes occupancy problems in the current
-//! one-workgroup-per-object publication path.
+//! distributed across objects. It also measures pre-rasterization indirect-draw
+//! amplification against one conventional indexed draw and reports the explicit
+//! scheduling/publication memory reserved by both approaches.
 //!
 //! Run with:
 //! `cargo run --release -p examples --bin meshlet_cull_benchmark`
@@ -17,9 +18,22 @@ use std::sync::mpsc;
 use wgpu::util::DeviceExt;
 
 const CULL_SHADER: &str = include_str!("../helio-pass-virtual-geometry/shaders/vg_cull.wgsl");
+const DRAW_BENCH_SHADER: &str = r#"
+@vertex
+fn vs_main(@builtin(vertex_index) vertex_index: u32) -> @builtin(position) vec4<f32> {
+    let x = 2.0 + f32(vertex_index) * 0.001;
+    return vec4<f32>(x, 2.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs_main() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.0);
+}
+"#;
 const TOTAL_MESHLETS: u32 = 1_048_576;
 const DEFAULT_WARMUP: u32 = 5;
 const DEFAULT_SAMPLES: u32 = 20;
+const DEFAULT_RENDER_SAMPLES: u32 = 3;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -57,6 +71,7 @@ struct Case {
 struct CaseBuffers {
     select_bind_group: wgpu::BindGroup,
     cull_bind_group: wgpu::BindGroup,
+    indirect: wgpu::Buffer,
     draw_count: wgpu::Buffer,
     draw_count_readback: wgpu::Buffer,
     object_dispatch_width: u32,
@@ -87,17 +102,19 @@ async fn run() {
         .await
         .expect("no GPU adapter available");
 
-    let timestamp_features =
-        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    let benchmark_features = wgpu::Features::TIMESTAMP_QUERY
+        | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
+        | wgpu::Features::INDIRECT_FIRST_INSTANCE
+        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT;
     assert!(
-        adapter.features().contains(timestamp_features),
-        "meshlet benchmark requires encoder timestamp queries"
+        adapter.features().contains(benchmark_features),
+        "meshlet benchmark requires timestamp, indirect-first-instance, and indirect-count support"
     );
     let limits = adapter.limits();
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("Meshlet Cull Benchmark Device"),
-            required_features: timestamp_features,
+            required_features: benchmark_features,
             required_limits: limits.clone(),
             ..Default::default()
         })
@@ -110,6 +127,7 @@ async fn run() {
     let info = adapter.get_info();
     let warmup = env_u32("HELIO_BENCH_WARMUP", DEFAULT_WARMUP);
     let samples = env_u32("HELIO_BENCH_SAMPLES", DEFAULT_SAMPLES).max(1);
+    let render_samples = env_u32("HELIO_BENCH_RENDER_SAMPLES", DEFAULT_RENDER_SAMPLES).max(1);
     println!("adapter,{},backend,{:?}", info.name, info.backend);
     println!("warmup,{warmup},samples,{samples},total_meshlets,{TOTAL_MESHLETS}");
     println!("case,objects,meshlets_per_object,median_ms,p95_ms,meshlets_per_second");
@@ -134,6 +152,64 @@ async fn run() {
         compilation_options: Default::default(),
         cache: None,
     });
+    let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("Meshlet Draw Benchmark Shader"),
+        source: wgpu::ShaderSource::Wgsl(DRAW_BENCH_SHADER.into()),
+    });
+    let draw_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Meshlet Draw Benchmark Layout"),
+        bind_group_layouts: &[],
+        immediate_size: 0,
+    });
+    let draw_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("Meshlet Draw Benchmark Pipeline"),
+        layout: Some(&draw_layout),
+        vertex: wgpu::VertexState {
+            module: &draw_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &draw_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let draw_target = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Meshlet Draw Benchmark Target"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let draw_target_view = draw_target.create_view(&wgpu::TextureViewDescriptor::default());
+    let draw_index_buffer = init_buffer(
+        &device,
+        "Meshlet Draw Benchmark Indices",
+        bytemuck::cast_slice(&[0_u32, 1, 2]),
+        wgpu::BufferUsages::INDEX,
+    );
     let select_bind_group_layout = select_pipeline.get_bind_group_layout(0);
     let cull_bind_group_layout = cull_pipeline.get_bind_group_layout(0);
     let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -161,7 +237,7 @@ async fn run() {
         Case { name: "many_small", object_count: 65_536, meshlets_per_object: TOTAL_MESHLETS / 65_536 },
     ];
 
-    for case in cases {
+    for &case in &cases {
         if !case_fits_limits(case, &limits) {
             println!("{},SKIPPED,storage_binding_limit", case.name);
             continue;
@@ -229,6 +305,40 @@ async fn run() {
         );
     }
 
+    // These rows isolate scheduling/publication overhead. Each shape shares one
+    // unique mesh, while publication reserves the exact worst-case visible draw
+    // capacity, so this is not a complete scene-memory comparison.
+    println!("memory_probe,case,meshlet_descriptors_bytes,object_metadata_bytes,instance_and_cull_bytes,work_span_bytes,publication_bytes,vg_total_bytes,conventional_object_draw_bytes");
+    for &case in &cases {
+        let meshlet_descriptors = u64::from(case.meshlets_per_object)
+            * std::mem::size_of::<GpuMeshletEntry>() as u64;
+        let object_metadata = u64::from(case.object_count)
+            * std::mem::size_of::<GpuVgObject>() as u64;
+        let instance_and_cull = u64::from(case.object_count)
+            * (std::mem::size_of::<GpuInstanceData>()
+                + std::mem::size_of::<InstanceCullData>()) as u64;
+        let work_spans = u64::from(case.object_count)
+            * u64::from(
+                case.meshlets_per_object
+                    .div_ceil(VG_CULL_MESHLETS_PER_WORK_ITEM),
+            )
+            * std::mem::size_of::<GpuVgWorkItem>() as u64;
+        let publication = u64::from(TOTAL_MESHLETS)
+            * (20 + std::mem::size_of::<GpuVgDraw>() as u64)
+            + 8;
+        let vg_total = meshlet_descriptors
+            + object_metadata
+            + instance_and_cull
+            + work_spans
+            + publication;
+        let conventional = u64::from(case.object_count)
+            * (std::mem::size_of::<GpuInstanceData>() as u64 + 20);
+        println!(
+            "memory_probe,{},{meshlet_descriptors},{object_metadata},{instance_and_cull},{work_spans},{publication},{vg_total},{conventional}",
+            case.name,
+        );
+    }
+
     let overflow_probe = create_case_buffers(
         &device,
         &queue,
@@ -255,6 +365,72 @@ async fn run() {
     let counters = read_draw_counters(&device, &queue, &overflow_probe);
     assert_eq!(counters, [TOTAL_MESHLETS, 17]);
     eprintln!("overflow_probe,attempted={},rejected={}", counters[0], counters[1]);
+
+    let render_probe = create_case_buffers(
+        &device,
+        &queue,
+        &select_bind_group_layout,
+        &cull_bind_group_layout,
+        Case {
+            name: "render_probe",
+            object_count: 4096,
+            meshlets_per_object: TOTAL_MESHLETS / 4096,
+        },
+        &limits,
+        TOTAL_MESHLETS,
+    );
+    let _ = dispatch_and_time(
+        &device,
+        &queue,
+        &select_pipeline,
+        &cull_pipeline,
+        &render_probe,
+        &query_set,
+        &query_resolve,
+        &query_readback,
+    );
+    // Keep rasterization offscreen and submit the same triangle invocation count.
+    // This measures front-end draw amplification, not a complete material or
+    // raster workload; the indexed path is the best-case single-draw baseline.
+    println!("render_probe,triangles,meshlet_draws,meshlet_median_ms,indexed_draws,indexed_median_ms,meshlet_overhead_ms");
+    for draw_count in [1024, 16_384, 65_536, 262_144, TOTAL_MESHLETS] {
+        let mut meshlet_draw_ms = Vec::with_capacity(render_samples as usize);
+        let mut indexed_draw_ms = Vec::with_capacity(render_samples as usize);
+        for _ in 0..render_samples {
+            meshlet_draw_ms.push(draw_and_time(
+                &device,
+                &queue,
+                &draw_pipeline,
+                &draw_target_view,
+                &draw_index_buffer,
+                Some(&render_probe),
+                draw_count,
+                &query_set,
+                &query_resolve,
+                &query_readback,
+            ));
+            indexed_draw_ms.push(draw_and_time(
+                &device,
+                &queue,
+                &draw_pipeline,
+                &draw_target_view,
+                &draw_index_buffer,
+                None,
+                draw_count,
+                &query_set,
+                &query_resolve,
+                &query_readback,
+            ));
+        }
+        meshlet_draw_ms.sort_by(f64::total_cmp);
+        indexed_draw_ms.sort_by(f64::total_cmp);
+        let meshlet_median = percentile(&meshlet_draw_ms, 0.5);
+        let indexed_median = percentile(&indexed_draw_ms, 0.5);
+        println!(
+            "render_probe,{draw_count},{draw_count},{meshlet_median:.4},1,{indexed_median:.4},{:.4}",
+            meshlet_median - indexed_median,
+        );
+    }
 }
 
 fn case_fits_limits(case: Case, limits: &wgpu::Limits) -> bool {
@@ -388,9 +564,24 @@ fn create_case_buffers(
     let instance_buffer = init_buffer(device, "Benchmark Instances", bytemuck::cast_slice(&instances), wgpu::BufferUsages::STORAGE);
     let instance_cull_buffer = init_buffer(device, "Benchmark Instance Cull", bytemuck::cast_slice(&instance_cull), wgpu::BufferUsages::STORAGE);
     let work_item_buffer = init_buffer(device, "Benchmark Work Items", bytemuck::cast_slice(&work_items), wgpu::BufferUsages::STORAGE);
-    let indirect_buffer = output_buffer(device, "Benchmark Indirect", u64::from(TOTAL_MESHLETS) * 20);
-    let metadata_buffer = output_buffer(device, "Benchmark Draw Metadata", u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64);
-    let draw_count = output_buffer(device, "Benchmark Draw And Overflow Counters", 8);
+    let indirect_buffer = output_buffer(
+        device,
+        "Benchmark Indirect",
+        u64::from(TOTAL_MESHLETS) * 20,
+        wgpu::BufferUsages::INDIRECT,
+    );
+    let metadata_buffer = output_buffer(
+        device,
+        "Benchmark Draw Metadata",
+        u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64,
+        wgpu::BufferUsages::empty(),
+    );
+    let draw_count = output_buffer(
+        device,
+        "Benchmark Draw And Overflow Counters",
+        8,
+        wgpu::BufferUsages::INDIRECT,
+    );
     let draw_count_readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Benchmark Draw Count Readback"),
         size: 8,
@@ -461,6 +652,7 @@ fn create_case_buffers(
     CaseBuffers {
         select_bind_group,
         cull_bind_group,
+        indirect: indirect_buffer,
         draw_count,
         draw_count_readback,
         object_dispatch_width,
@@ -536,6 +728,65 @@ fn read_draw_counters(
     [values[0], values[1]]
 }
 
+#[allow(clippy::too_many_arguments)]
+fn draw_and_time(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    pipeline: &wgpu::RenderPipeline,
+    target: &wgpu::TextureView,
+    index_buffer: &wgpu::Buffer,
+    meshlet_draws: Option<&CaseBuffers>,
+    draw_count: u32,
+    query_set: &wgpu::QuerySet,
+    query_resolve: &wgpu::Buffer,
+    query_readback: &wgpu::Buffer,
+) -> f64 {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Meshlet Draw Benchmark Encoder"),
+    });
+    encoder.write_timestamp(query_set, 0);
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Meshlet Draw Benchmark Pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        if let Some(buffers) = meshlet_draws {
+            pass.multi_draw_indexed_indirect_count(
+                &buffers.indirect,
+                0,
+                &buffers.draw_count,
+                0,
+                draw_count,
+            );
+        } else {
+            pass.draw_indexed(0..3, 0, 0..draw_count);
+        }
+    }
+    encoder.write_timestamp(query_set, 1);
+    encoder.resolve_query_set(query_set, 0..2, query_resolve, 0);
+    encoder.copy_buffer_to_buffer(query_resolve, 0, query_readback, 0, 16);
+    queue.submit([encoder.finish()]);
+
+    let ticks = read_mapped::<u64>(device, query_readback, 2);
+    ticks[1].saturating_sub(ticks[0]) as f64
+        * f64::from(queue.get_timestamp_period())
+        / 1_000_000.0
+}
+
 fn read_mapped<T: Pod + Copy>(device: &wgpu::Device, buffer: &wgpu::Buffer, count: usize) -> Vec<T> {
     let slice = buffer.slice(..);
     let (tx, rx) = mpsc::channel();
@@ -564,13 +815,19 @@ fn init_buffer(
     })
 }
 
-fn output_buffer(device: &wgpu::Device, label: &'static str, size: u64) -> wgpu::Buffer {
+fn output_buffer(
+    device: &wgpu::Device,
+    label: &'static str,
+    size: u64,
+    extra_usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
     device.create_buffer(&wgpu::BufferDescriptor {
         label: Some(label),
         size,
         usage: wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
-            | wgpu::BufferUsages::COPY_DST,
+            | wgpu::BufferUsages::COPY_DST
+            | extra_usage,
         mapped_at_creation: false,
     })
 }
