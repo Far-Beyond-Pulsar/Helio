@@ -16,10 +16,11 @@ use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, Renderer, RendererConfig, Scene,
-    RenderGraph, RenderPass, VoxelVolumeDescriptor, VoxelMode, VoxelVolumeId,
+    required_wgpu_features, required_wgpu_limits, Camera, GpuLight, LightType, Renderer,
+    RendererConfig, Scene, SceneActor, RenderGraph, RenderPass, VoxelVolumeDescriptor, VoxelMode,
+    VoxelVolumeId,
 };
-use helio_pass_postprocess::PostProcessPass;
+use helio_pass_fxaa::FxaaPass;
 use helio_pass_voxel_raymarch::VoxelRayMarchPass;
 use helio_voxel_core::GpuVoxelMaterial;
 use winit::{
@@ -235,6 +236,28 @@ impl ApplicationHandler for App {
         };
         let vol_id = scene.insert_voxel_volume(voxel_desc).expect("Failed to create voxel volume");
 
+        // Real scene lighting — VoxelRayMarchPass sums the scene's lights buffer
+        // directly (see voxel_raymarch.wgsl), the same infrastructure the default
+        // render graphs feed their deferred lighting pass with.
+        scene.insert_actor(SceneActor::light(GpuLight {
+            position_range: [0.0, 0.0, 0.0, f32::MAX],
+            direction_outer: [0.35, -0.8, 0.25, 0.0],
+            color_intensity: [1.0, 0.95, 0.85, 3.0],
+            shadow_index: u32::MAX,
+            light_type: LightType::Directional as u32,
+            inner_angle: 0.0,
+            _pad: 0,
+        }));
+        scene.insert_actor(SceneActor::light(GpuLight {
+            position_range: [0.0, 0.0, 0.0, f32::MAX],
+            direction_outer: [-0.4, -0.2, -0.6, 0.0],
+            color_intensity: [0.5, 0.6, 0.8, 0.6],
+            shadow_index: u32::MAX,
+            light_type: LightType::Directional as u32,
+            inner_angle: 0.0,
+            _pad: 0,
+        }));
+
         // Procedurally generate the world on the CPU and bake it straight to the
         // shared GPU voxel pools (see voxel_world.rs for why this bypasses
         // Scene::edit_voxel_volume).
@@ -248,6 +271,14 @@ impl ApplicationHandler for App {
         // terminal pass is required to blit it onto the actual swapchain target —
         // without one, the surface texture is never written and shows uninitialized
         // GPU memory (flickering magenta/garbage).
+        //
+        // We use FxaaPass rather than PostProcessPass for that terminal blit:
+        // PostProcessPass clears+rewrites the target straight from "pre_aa" on
+        // its own, so if it ran after an FxaaPass it would just discard the
+        // antialiased result (see how build_fxaa_graph_internal in
+        // helio-default-graphs composes them). FxaaPass reads "pre_aa" and
+        // writes directly to the swapchain target itself, so it can do both
+        // jobs — anti-aliasing and the terminal blit — in one pass.
         let mut graph = RenderGraph::new(&device, &queue);
         let mut voxel_rm_pass = VoxelRayMarchPass::new(&device, surface_format);
         // VoxelRayMarchPass allocates its output textures at a placeholder 1x1 and
@@ -256,9 +287,7 @@ impl ApplicationHandler for App {
         // size the pass explicitly here or it ray marches into a 1x1 texture forever.
         voxel_rm_pass.on_resize(&device, size.width, size.height);
         graph.add_pass(Box::new(voxel_rm_pass));
-        graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
-            &device, &queue, size.width, size.height, surface_format, None,
-        )));
+        graph.add_pass(Box::new(FxaaPass::new(&device, surface_format)));
         graph.lock(size.width, size.height);
 
         let renderer = Renderer::new(

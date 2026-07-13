@@ -171,6 +171,7 @@ helio-asset-compat = { workspace = true }
 helio-pass-sdf = { workspace = true }
 helio-pass-terra-forge = { path = "../helio-pass-terra-forge" }
 helio-pass-taa = { workspace = true }
+helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-corona = { workspace = true }
 helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }

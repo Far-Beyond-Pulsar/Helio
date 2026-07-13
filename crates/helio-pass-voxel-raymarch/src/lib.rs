@@ -19,6 +19,10 @@ struct RayMarchParams {
     height: f32,
     time: f32,
     volume_count: u32,
+    light_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 }
 
 // ── Pass ──────────────────────────────────────────────────────────────────────
@@ -74,6 +78,7 @@ impl VoxelRayMarchPass {
                 wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba8Unorm, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
                 wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba8Unorm, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
             ],
         });
 
@@ -199,6 +204,7 @@ impl VoxelRayMarchPass {
                 wgpu::BindGroupEntry { binding: 4, resource: ctx.scene.voxel_data_pool.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(&self.color_view) },
                 wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(&self.normal_view) },
+                wgpu::BindGroupEntry { binding: 7, resource: ctx.scene.lights.as_entire_binding() },
             ],
         });
         self.compute_bg = Some(bg);
@@ -254,6 +260,10 @@ impl RenderPass for VoxelRayMarchPass {
                 height: self.height as f32,
                 time: ctx.frame_num as f32 * 0.016,
                 volume_count: ctx.scene.voxel_volume_count,
+                light_count: ctx.scene.lights.len() as u32,
+                _pad0: 0,
+                _pad1: 0,
+                _pad2: 0,
             };
             ctx.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
             self.params_frame = ctx.frame_num;

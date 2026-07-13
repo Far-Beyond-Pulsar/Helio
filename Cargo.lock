@@ -2100,6 +2100,7 @@ dependencies = [
  "helio-default-graphs",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
+ "helio-pass-fxaa",
  "helio-pass-perf-overlay",
  "helio-pass-postprocess",
  "helio-pass-sdf",

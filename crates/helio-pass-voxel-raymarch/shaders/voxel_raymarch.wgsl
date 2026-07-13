@@ -29,6 +29,21 @@ struct RayMarchParams {
     height:         f32,
     time:           f32,
     volume_count:   u32,
+    light_count:    u32,
+    _pad0:          u32,
+    _pad1:          u32,
+    _pad2:          u32,
+}
+
+// GpuLight (64 bytes, matches libhelio::GpuLight — see deferred_lighting.wgsl).
+struct GpuLight {
+    position_range:  vec4<f32>,
+    direction_outer: vec4<f32>,
+    color_intensity: vec4<f32>,
+    shadow_index:    u32,
+    light_type:      u32,
+    inner_angle:     f32,
+    _pad:            u32,
 }
 
 struct HitResult {
@@ -43,9 +58,41 @@ struct HitResult {
 @group(0) @binding(2) var<storage, read> volumes: array<GpuVoxelVolume>;
 @group(0) @binding(3) var<storage, read> brick_pool: array<u32>;
 @group(0) @binding(4) var<storage, read> voxel_data: array<u32>;
-
 @group(0) @binding(5) var out_color: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(6) var out_normal: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(7) var<storage, read> lights: array<GpuLight>;
+
+// Simple Lambertian contribution from a scene light (no PBR/specular/shadows —
+// this pass is a lightweight forward shader, not the deferred PBR pipeline).
+fn light_contribution(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+    var l: vec3<f32>;
+    var radiance: vec3<f32>;
+
+    if light.light_type == 0u {
+        // Directional
+        l = normalize(-light.direction_outer.xyz);
+        radiance = light.color_intensity.xyz * light.color_intensity.w;
+    } else {
+        // Point / spot
+        let to_light = light.position_range.xyz - world_pos;
+        let dist = length(to_light);
+        if dist > light.position_range.w {
+            return vec3<f32>(0.0);
+        }
+        l = to_light / max(dist, 0.0001);
+        var atten = 1.0 / (dist * dist + 0.0001);
+        let normalized_dist = dist / light.position_range.w;
+        atten *= max(0.0, 1.0 - normalized_dist * normalized_dist * normalized_dist * normalized_dist);
+        if light.light_type == 2u {
+            let cos_a = dot(-l, light.direction_outer.xyz);
+            atten *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
+        }
+        radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
+    }
+
+    let n_dot_l = max(dot(normal, l), 0.0);
+    return radiance * n_dot_l;
+}
 
 fn read_voxel(data_offset: u32, x: u32, y: u32, z: u32) -> u32 {
     let linear = z * 64u + y * 8u + x;
@@ -247,11 +294,14 @@ fn main(
         let col = material_color(best_hit.material);
         let n = best_hit.normal;
 
-        // Simple directional lighting
-        let sun_dir = normalize(vec3<f32>(0.6, 1.0, 0.4));
-        let diff = max(dot(n, sun_dir), 0.0);
-        let ambient = 0.3;
-        let lit = col * (ambient + diff * 0.7);
+        // Sum the scene's real lights (directional/point/spot) instead of a
+        // hardcoded sun, so lights added to the Scene actually affect voxels.
+        let ambient = 0.2;
+        var direct = vec3<f32>(0.0);
+        for (var li = 0u; li < params.light_count; li++) {
+            direct += light_contribution(lights[li], best_hit.position, n);
+        }
+        let lit = col * (ambient + direct);
 
         textureStore(out_color, vec2<i32>(i32(px), i32(py)), vec4<f32>(lit, 1.0));
         textureStore(out_normal, vec2<i32>(i32(px), i32(py)), vec4<f32>(n * 0.5 + 0.5, best_t));
