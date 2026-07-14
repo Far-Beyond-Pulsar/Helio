@@ -57,6 +57,18 @@ impl PlanetFrameUniform {
             join_i64(self.origin_z),
         ]
     }
+
+    pub fn planet_id(self) -> PlanetId {
+        let mut bytes = [0_u8; 16];
+        for (word, output) in self.planet_id.iter().zip(bytes.chunks_exact_mut(4)) {
+            output.copy_from_slice(&word.to_le_bytes());
+        }
+        PlanetId(bytes)
+    }
+
+    pub const fn frame_number(self) -> u64 {
+        (self.frame_index[0] as u64) | ((self.frame_index[1] as u64) << 32)
+    }
 }
 
 #[repr(C, align(16))]
