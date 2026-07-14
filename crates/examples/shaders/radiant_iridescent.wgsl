@@ -1,15 +1,9 @@
-//! G-buffer write pass (GPU-driven).
-//!
-//! Rasterises scene geometry into four screen-sized textures:
-//!   target 0 – albedo   (Rgba8Unorm)
-//!   target 1 – normal   (Rgba16Float)
-//!   target 2 – orm      (Rgba8Unorm)
-//!   target 3 – emissive (Rgba16Float)
-//!
-//! Resolved F0 is packed into unused alpha channels:
-//!   normal.a   = F0.r
-//!   orm.a      = F0.g
-//!   emissive.a = F0.b
+// Radiant template: iridescent thin-film surface (class 1).
+// Demonstrates a custom surface archetype using class_params for
+// frequency and intensity control.
+//
+// Based on the default PBR template with a modified radiant_eval_surface
+// that adds thin-film interference to the specular F0.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -37,7 +31,6 @@ struct Globals {
     _pad2: u32,
 }
 
-/// GPU material (112 bytes, matches libhelio::GpuMaterial)
 struct GpuMaterial {
     base_color:         vec4<f32>,
     emissive:           vec4<f32>,
@@ -53,11 +46,6 @@ struct GpuMaterial {
     class_params:       vec4<f32>,
 }
 
-const FLAG_HAS_NORMAL_MAP: u32 = 1u << 3u;
-const FLAG_HAS_CLEAR_COAT: u32 = 1u << 4u;
-const FLAG_HAS_ANISOTROPY: u32 = 1u << 6u;
-
-/// Per-material texture metadata (224 bytes, matches helio::GpuMaterialTextures)
 struct MaterialTextureSlot {
     texture_index: u32,
     uv_channel:    u32,
@@ -75,31 +63,26 @@ struct MaterialTextureData {
     occlusion:          MaterialTextureSlot,
     specular_color:     MaterialTextureSlot,
     specular_weight:    MaterialTextureSlot,
-    params:             vec4<f32>,  // x=normal_scale, y=occlusion_strength, z=alpha_cutoff
+    params:             vec4<f32>,
 }
 
-/// Per-instance data (144 bytes). Must match `GpuInstanceData` in libhelio.
 struct GpuInstanceData {
-    transform:      mat4x4<f32>,  // offset   0  (64 bytes)
-    normal_mat_0:   vec4<f32>,    // offset  64  — row 0 of inv-transpose 3×3
-    normal_mat_1:   vec4<f32>,    // offset  80
-    normal_mat_2:   vec4<f32>,    // offset  96
-    bounds:         vec4<f32>,    // offset 112
-    mesh_id:        u32,          // offset 128
-    material_id:    u32,          // offset 132
-    flags:          u32,          // offset 136
-    lightmap_index: u32,          // offset 140 — index into lightmap_atlas_regions, 0xFFFFFFFF = no lightmap
+    transform:      mat4x4<f32>,
+    normal_mat_0:   vec4<f32>,
+    normal_mat_1:   vec4<f32>,
+    normal_mat_2:   vec4<f32>,
+    bounds:         vec4<f32>,
+    mesh_id:        u32,
+    material_id:    u32,
+    flags:          u32,
+    lightmap_index: u32,
 }
 
-/// Lightmap atlas region for a mesh (32 bytes).
-///
-/// uv_clamp_min/max are precomputed half-texel-inset bounds that prevent bilinear
-/// filtering from bleeding across neighbouring atlas region boundaries at runtime.
 struct LightmapAtlasRegion {
-    uv_offset:    vec2<f32>,  // Top-left corner in atlas [0,1] space
-    uv_scale:     vec2<f32>,  // Extent in atlas [0,1] space
-    uv_clamp_min: vec2<f32>,  // uv_offset + 0.5/atlas_size  (half-texel inner inset)
-    uv_clamp_max: vec2<f32>,  // uv_offset + uv_scale - 0.5/atlas_size
+    uv_offset:    vec2<f32>,
+    uv_scale:     vec2<f32>,
+    uv_clamp_min: vec2<f32>,
+    uv_clamp_max: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform>          camera:                 Camera;
@@ -115,10 +98,10 @@ struct LightmapAtlasRegion {
 struct Vertex {
     @location(0) position:       vec3<f32>,
     @location(1) bitangent_sign: f32,
-    @location(2) tex_coords:     vec2<f32>,  // UV0 — material/albedo channel (may tile)
+    @location(2) tex_coords:     vec2<f32>,
     @location(3) normal:         u32,
     @location(4) tangent:        u32,
-    @location(5) lightmap_uv:    vec2<f32>,  // UV1 — dedicated lightmap channel, non-overlapping [0,1]
+    @location(5) lightmap_uv:    vec2<f32>,
 }
 
 struct VertexOutput {
@@ -129,7 +112,7 @@ struct VertexOutput {
     @location(3) world_tangent:  vec3<f32>,
     @location(4) bitangent_sign: f32,
     @location(5) @interpolate(flat) material_id:    u32,
-    @location(6) lightmap_uv:    vec2<f32>,  // Lightmap atlas UV (or (0,0) if no lightmap)
+    @location(6) lightmap_uv:    vec2<f32>,
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -140,22 +123,16 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     let inst       = instance_data[slot];
     let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
-
-    // Normals transform by the inverse-transpose (stored in normal_mat).
     let normal_mat = mat3x3<f32>(
         inst.normal_mat_0.xyz,
         inst.normal_mat_1.xyz,
         inst.normal_mat_2.xyz,
     );
-
-    // Tangents are NOT normals — they transform by the regular upper-3×3 of
-    // the model matrix (no inverse-transpose).  Extract it from column vectors.
     let model_mat3 = mat3x3<f32>(
         inst.transform[0].xyz,
         inst.transform[1].xyz,
         inst.transform[2].xyz,
     );
-
     var out: VertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;
@@ -164,41 +141,18 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     out.bitangent_sign = v.bitangent_sign;
     out.tex_coords     = v.tex_coords;
     out.material_id    = inst.material_id;
-    
-    // Compute lightmap UV from atlas region.
-    //
-    // UV CHANNEL SELECTION STRATEGY
-    // ──────────────────────────────
-    // If the mesh has a dedicated lightmap UV channel (UV1, non-zero), use it.
-    // UV1 is artist-authored or tool-generated to be non-overlapping and in [0,1],
-    // exactly what offline bakers need. Nebula receives UV1 explicitly via
-    // `lightmap_uvs: Some(...)` in mesh_upload_to_bake when UV1 is non-trivial.
-    //
-    // If UV1 is all-zero (mesh has only one UV channel), fall back to UV0
-    // clamped to [0,1].  UV0 is what Nebula baked with in that case
-    // (mesh_upload_to_bake passes UV0 as lightmap_uvs when UV1 is absent).
-    // Clamping prevents tiled UV0 values (e.g. 2.3) from mapping outside
-    // the atlas region and hitting neighbouring meshes' texels (the original
-    // "random dim slivers" bug).
-    //
-    // The computed atlas UV is then half-texel-inset clamped to [uv_clamp_min,
-    // uv_clamp_max] to prevent bilinear filtering from bleeding across atlas
-    // region boundaries regardless of which UV channel was chosen.
     let lightmap_idx = inst.lightmap_index;
     if lightmap_idx != 0xFFFFFFFFu {
         let region = lightmap_atlas_regions[lightmap_idx];
-        // Use UV1 if any component is clearly non-zero; otherwise fall back to UV0.
         let use_uv1 = any(abs(v.lightmap_uv) > vec2<f32>(0.001));
         let lm_input = select(
-            clamp(v.tex_coords, vec2<f32>(0.0), vec2<f32>(1.0)),  // UV0 path: clamp to [0,1]
-            v.lightmap_uv,                                           // UV1 path: already in [0,1]
+            clamp(v.tex_coords, vec2<f32>(0.0), vec2<f32>(1.0)),
+            v.lightmap_uv,
             use_uv1,
         );
         let raw_uv = region.uv_offset + lm_input * region.uv_scale;
         out.lightmap_uv = clamp(raw_uv, region.uv_clamp_min, region.uv_clamp_max);
     } else {
-        // Sentinel: negative UV signals "no lightmap" to the deferred pass.
-        // Cannot use (0,0) because a valid atlas region can start at (0,0).
         out.lightmap_uv = vec2<f32>(-1.0, -1.0);
     }
     return out;
@@ -213,8 +167,6 @@ struct GBufferOutput {
     @location(3) emissive:    vec4<f32>,
     @location(4) lightmap_uv: vec2<f32>,
 }
-
-// ── Surface data passed to GBuffer packing ──────────────────────────────────
 
 struct SurfaceData {
     albedo:      vec4<f32>,
@@ -231,9 +183,7 @@ const NO_TEXTURE: u32 = 0xffffffffu;
 const MATERIAL_WORKFLOW_METALLIC: u32 = 0u;
 const MATERIAL_WORKFLOW_SPECULAR: u32 = 1u;
 
-/// Select UV channel and apply texture transform
 fn select_uv(slot: MaterialTextureSlot, base_uv: vec2<f32>) -> vec2<f32> {
-    // TODO: support uv_channel when we have tex_coords1
     let scaled = base_uv * slot.offset_scale.zw;
     let s = slot.rotation.x;
     let c = slot.rotation.y;
@@ -244,7 +194,6 @@ fn select_uv(slot: MaterialTextureSlot, base_uv: vec2<f32>) -> vec2<f32> {
     return rotated + slot.offset_scale.xy;
 }
 
-/// Sample texture from bindless array, or return fallback if NO_TEXTURE
 fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<f32>) -> vec4<f32> {
     if slot.texture_index == NO_TEXTURE {
         return fallback;
@@ -254,11 +203,8 @@ fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<
 }
 
 fn resolve_specular_f0(
-    material: GpuMaterial,
-    material_tex: MaterialTextureData,
-    albedo: vec3<f32>,
-    metallic: f32,
-    uv: vec2<f32>,
+    material: GpuMaterial, material_tex: MaterialTextureData,
+    albedo: vec3<f32>, metallic: f32, uv: vec2<f32>,
 ) -> vec3<f32> {
     if material.workflow == MATERIAL_WORKFLOW_SPECULAR {
         let specular_color = sample_texture(material_tex.specular_color, uv, vec4<f32>(1.0)).rgb;
@@ -267,28 +213,34 @@ fn resolve_specular_f0(
         let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
         return material.roughness_metallic.w * specular_weight * specular_color * dielectric_f0;
     }
-
-    // Metallic workflow: F0 = mix(0.04, albedo, metallic)
-    return clamp(
-        mix(vec3<f32>(0.04), albedo, metallic),
-        vec3<f32>(0.0),
-        vec3<f32>(0.999),
-    );
+    return clamp(mix(vec3<f32>(0.04), albedo, metallic), vec3<f32>(0.0), vec3<f32>(0.999));
 }
 
-// ── Default PBR material evaluation (uber-template) ──────────────────────────
+// ── Iridescent surface evaluation ────────────────────────────────────────────
+// class_params.x = thin-film frequency (higher = tighter bands)
+// class_params.y = thin-film intensity (0.0 = off, 1.0 = max)
+
+fn thin_film_color(cos_theta: f32, frequency: f32, intensity: f32) -> vec3<f32> {
+    let path_diff = 2.0 * cos_theta;
+    let phase_r = path_diff * frequency * 1.0;
+    let phase_g = path_diff * frequency * 1.1;
+    let phase_b = path_diff * frequency * 1.2;
+    return vec3<f32>(
+        sin(phase_r) * 0.5 + 0.5,
+        sin(phase_g) * 0.5 + 0.5,
+        sin(phase_b) * 0.5 + 0.5,
+    ) * intensity + (1.0 - intensity);
+}
 
 fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData, input: VertexOutput) -> SurfaceData {
     let uv = input.tex_coords;
     let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
     let albedo = material.base_color * base_sample;
     let alpha = albedo.a;
-
     let N_geom = normalize(input.world_normal);
 
-    // Warp-uniform feature branch: normal mapping (gated by flag + texture)
     var N: vec3<f32>;
-    if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
+    if material_tex.normal.texture_index != NO_TEXTURE {
         let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
         let B = cross(N_geom, T) * input.bitangent_sign;
         var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
@@ -305,16 +257,19 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     var ao: f32 = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;
     var roughness: f32 = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
     var metallic: f32 = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
-    var specular_f0: vec3<f32> = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
     var emissive: vec3<f32> = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
 
-    // class_params are material-class-specific parameters set by external tools.
-    // The default PBR template ignores them; graph overrides and custom templates
-    // can interpret them freely (e.g. clear coat strength in .x, clear coat roughness in .y).
+    // Iridescent F0: thin-film interference on dielectric base, then mixed with
+    // metallic F0 based on metallic value.
+    let V = normalize(camera.position_near.xyz - input.world_position);
+    let NdotV = max(dot(N, V), 0.0);
+    let film_freq = material.class_params.x;
+    let film_intensity = material.class_params.y;
+    let film_color = thin_film_color(NdotV, film_freq, film_intensity);
 
-    // Radiant override point: graph-generated WGSL replaces this section to
-    // override any SurfaceData field. When no graph is present the passthrough
-    // below is used (the default PBR result).
+    let base_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
+    var specular_f0: vec3<f32> = mix(base_f0 * film_color, base_f0, 0.2);
+
     // RADIANT_OVERRIDE_SURFACE
     // RADIANT_OVERRIDE_END
 
@@ -326,7 +281,6 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let material = materials[input.material_id];
     let material_tex = material_textures[input.material_id];
 
-    // DEBUG MODE 1: Show UVs as colors
     if globals.debug_mode == 1u {
         let uv = input.tex_coords;
         return GBufferOutput(
@@ -338,7 +292,6 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         );
     }
 
-    // DEBUG MODE 2: Show texture sample directly
     if globals.debug_mode == 2u {
         let base_sample = sample_texture(material_tex.base_color, input.tex_coords, vec4<f32>(1.0));
         return GBufferOutput(
@@ -350,27 +303,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
         );
     }
 
-    // DEBUG MODE 3: Geometry normals only (skip normal mapping)
-    if globals.debug_mode == 3u {
-        let uv = input.tex_coords;
-        let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
-        let albedo = material.base_color * base_sample;
-        let N_geom = normalize(input.world_normal);
-        let orm_sample = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
-        let roughness = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
-        let metallic = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
-        return GBufferOutput(
-            vec4<f32>(albedo.rgb, albedo.a),
-            vec4<f32>(N_geom, 0.0),
-            vec4<f32>(1.0, roughness, metallic, 0.0),
-            vec4<f32>(0.0),
-            vec2<f32>(0.0)
-        );
-    }
-
     let surface = radiant_eval_surface(material, material_tex, input);
-
-    // Alpha test
     if surface.alpha <= 0.001 { discard; }
     if surface.alpha < material_tex.params.z { discard; }
 

@@ -548,6 +548,11 @@ impl GBufferPass {
         );
     }
 
+    /// Access the template registry for loading new surface archetypes at runtime.
+    pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
+        &mut self.template_registry
+    }
+
     /// Get or create a render pipeline for the given key.
     /// Compiles the shader lazily on first access, injecting `graph_wgsl` when
     /// `graph_hash != 0`.
@@ -558,8 +563,16 @@ impl GBufferPass {
         graph_wgsl: &str,
     ) -> &wgpu::RenderPipeline {
         if !self.pipelines.contains_key(&key) {
-            let template = self.template_registry.get(key.template_id)
-                .expect("Unknown material template class");
+            let template = match self.template_registry.get(key.template_id) {
+                Some(t) => t,
+                None => {
+                    log::warn!(
+                        "Radiant: template class {} not found, falling back to class 0",
+                        key.template_id,
+                    );
+                    self.template_registry.get(0).expect("Default PBR template (class 0) missing")
+                }
+            };
             let module = self.shader_cache.get_or_compile(
                 device, key, template, graph_wgsl, MAX_TEXTURES, "GBuffer Shader",
             );

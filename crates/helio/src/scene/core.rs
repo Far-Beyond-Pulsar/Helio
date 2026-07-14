@@ -129,7 +129,7 @@ pub struct Scene {
 
     // ── Radiant material graph system ──────────────────────────────────────────
     /// Registry of compiled graph WGSL snippets, keyed by content hash.
-    pub(in crate::scene) radiant_graphs: RadiantGraphRegistry,
+    pub radiant_graphs: RadiantGraphRegistry,
 
     /// Transform-only changes accumulated until the next scene flush (end exclusive).
     pub(in crate::scene) vg_instance_dirty_range: Option<(usize, usize)>,
@@ -366,6 +366,16 @@ impl Scene {
         }
         let updated = self.gpu_scene.materials.update(slot, record.gpu);
         debug_assert!(updated);
+        Ok(())
+    }
+
+    /// Update only the class_params of a material (no texture revalidation).
+    pub fn update_material_class_params(&mut self, material_id: MaterialId, params: [f32; 4]) -> Result<()> {
+        let Some((slot, record)) = self.materials.get_mut_with_slot(material_id) else {
+            return Err(invalid("material"));
+        };
+        record.gpu.class_params = params;
+        self.gpu_scene.materials.update(slot, record.gpu);
         Ok(())
     }
 
