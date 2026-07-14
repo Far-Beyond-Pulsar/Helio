@@ -21,14 +21,15 @@ and `helio-voxel-core` remain unchanged regression baselines.
 - [x] Pulsar Helio-v4 integration and caller audit: [Pulsar-Native#305](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/305), [#308](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/308), and [#310](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/310)
 - [x] Pulsar deterministic sparse terrain core: [Pulsar-Native#311](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/311)
 
-## Active milestone
+## Active milestones
 
 - [ ] Helio bounded renderer-facing residency contract: [Helio#62](https://github.com/Far-Beyond-Pulsar/Helio/pull/62) ([issue #59](https://github.com/Far-Beyond-Pulsar/Helio/issues/59))
+- [ ] Helio bounded GPU residency atlas and page table: [Helio#65](https://github.com/Far-Beyond-Pulsar/Helio/pull/65) ([issue #64](https://github.com/Far-Beyond-Pulsar/Helio/issues/64))
 
 ## Implementation milestones
 
 - [ ] Pulsar terrain component/subsystem and asynchronous work queues
-- [ ] Helio bounded GPU page atlas, hash table, upload, eviction, and device-loss recovery
+- [ ] Helio bounded GPU page atlas, hash table, upload, eviction, and device-loss recovery ([Helio#65](https://github.com/Far-Beyond-Pulsar/Helio/pull/65))
 - [ ] Earth-radius camera-local coordinates and precision validation
 - [ ] View-driven page demand, streaming, and strict CPU/GPU/VRAM budgets
 - [ ] GPU Transvoxel versus manifold dual-contouring extraction bake-off
