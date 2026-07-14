@@ -29,5 +29,8 @@ fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
     // screen — flip v here or the image comes out upside down.
     let texel_uv = vec2<f32>(in.uv.x, 1.0 - in.uv.y);
     let col = textureLoad(color_tex, vec2<i32>(texel_uv * vec2<f32>(textureDimensions(color_tex))), 0);
+    if col.a == 0.0 {
+        discard;
+    }
     return col;
 }

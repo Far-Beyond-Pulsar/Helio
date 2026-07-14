@@ -306,11 +306,7 @@ fn main(
         textureStore(out_color, vec2<i32>(i32(px), i32(py)), vec4<f32>(lit, 1.0));
         textureStore(out_normal, vec2<i32>(i32(px), i32(py)), vec4<f32>(n * 0.5 + 0.5, best_t));
     } else {
-        // Sky gradient
-        let sky_top = vec3<f32>(0.35, 0.55, 0.9);
-        let sky_bot = vec3<f32>(0.65, 0.75, 0.9);
-        let sky = mix(sky_bot, sky_top, uv.y);
-        textureStore(out_color, vec2<i32>(i32(px), i32(py)), vec4<f32>(sky, 1.0));
+        textureStore(out_color, vec2<i32>(i32(px), i32(py)), vec4<f32>(0.0, 0.0, 0.0, 0.0));
         textureStore(out_normal, vec2<i32>(i32(px), i32(py)), vec4<f32>(0.0, 0.0, 0.0, 1e10));
     }
 }
