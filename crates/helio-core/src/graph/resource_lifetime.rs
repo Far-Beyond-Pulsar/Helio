@@ -30,6 +30,23 @@ impl RenderGraph {
             }
         }
         self.build_resource_lifetimes(&builders);
+        // Stash builder declarations for allocate_textures to use when routing
+        // gbuffer textures to non-first writers (e.g. VoxelMeshPass compositing
+        // over GBufferPass output).
+        self.gbuf_write_pass.clear();
+        for (pi, builder) in builders.iter().enumerate() {
+            for d in builder.declarations() {
+                if matches!(d.access, crate::graph::ResourceAccess::Write) {
+                    match d.name {
+                        "gbuffer_albedo" | "gbuffer_normal" |
+                        "gbuffer_orm" | "gbuffer_emissive" => {
+                            self.gbuf_write_pass.insert(pi);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn build_resource_lifetimes(&mut self, builders: &[ResourceBuilder]) {
@@ -160,7 +177,38 @@ impl RenderGraph {
             }
         }
 
+        // Phase 2: after every pass has its Route actions, scan for gbuffer
+        // textures.  A pass that writes gbuffer textures but is NOT the first
+        // writer (e.g. VoxelMeshPass compositing over GBufferPass output) needs
+        // a Gbuffer pre-pass action too — otherwise its render_pass_descriptor
+        // will see an empty gbuffer slot and return None.
+        //
+        // First, look up the allocated views for all four gbuffer textures, which
+        // are guaranteed to exist because at least one pass writes them.
+        let gbuf_albedo_view  = self.pool.get_view("gbuffer_albedo").cloned();
+        let gbuf_normal_view  = self.pool.get_view("gbuffer_normal").cloned();
+        let gbuf_orm_view     = self.pool.get_view("gbuffer_orm").cloned();
+        let gbuf_emissive_view = self.pool.get_view("gbuffer_emissive").cloned();
+
         for pi in 0..actions.len() {
+            let needs_gbuf = self.gbuf_write_pass.contains(&pi);
+
+            if !needs_gbuf {
+                // Maybe the previous phase already gave this pass a Gbuffer
+                // action via Route entries (first writer path).
+                let has_gbuf = actions[pi].iter().any(|a| matches!(a, PrePassAction::Gbuffer { .. }));
+                if !has_gbuf {
+                    continue;
+                }
+            }
+
+            // Already has a Gbuffer from Phase 1?  Skip.
+            if actions[pi].iter().any(|a| matches!(a, PrePassAction::Gbuffer { .. })) {
+                continue;
+            }
+
+            // Remove the individual Route entries for gbuffer textures so we
+            // can replace them with a single Gbuffer action.
             let mut albedo_idx = None;
             let mut normal_idx = None;
             let mut orm_idx = None;
@@ -195,6 +243,18 @@ impl RenderGraph {
                     normal: normal_v,
                     orm: orm_v,
                     emissive: emissive_v,
+                });
+            } else if needs_gbuf && gbuf_albedo_view.is_some() && gbuf_normal_view.is_some()
+                      && gbuf_orm_view.is_some() && gbuf_emissive_view.is_some()
+            {
+                // Fallback: pass declares gbuffer writes but didn't get Route
+                // entries (because it's not the first writer).  Route the
+                // shared views directly.
+                actions[pi].push(PrePassAction::Gbuffer {
+                    albedo: gbuf_albedo_view.clone().unwrap(),
+                    normal: gbuf_normal_view.clone().unwrap(),
+                    orm: gbuf_orm_view.clone().unwrap(),
+                    emissive: gbuf_emissive_view.clone().unwrap(),
                 });
             }
         }

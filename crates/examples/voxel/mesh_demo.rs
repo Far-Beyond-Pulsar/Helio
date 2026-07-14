@@ -272,12 +272,7 @@ impl ApplicationHandler for App {
         let mut world = VoxelTerrain::empty();
         world.generate(world_seed);
 
-        // Build a custom graph: VoxelMeshPass (real triangles, writes "pre_aa")
-        // then FxaaPass (reads "pre_aa", writes directly to the swapchain
-        // target — doing double duty as anti-aliasing and the terminal blit;
-        // PostProcessPass would instead clear+rewrite the target straight from
-        // "pre_aa" and discard FXAA's result if chained after it, see how
-        // build_fxaa_graph_internal in helio-default-graphs composes them).
+        // VoxelMeshPass writes flat-shaded color to "pre_aa", FxaaPass resolves.
         let mut graph = RenderGraph::new(&device, &queue);
         graph.add_pass(Box::new(VoxelMeshPass::new(&device, surface_format)));
         graph.add_pass(Box::new(FxaaPass::new(&device, surface_format)));

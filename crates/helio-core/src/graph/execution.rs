@@ -3,7 +3,7 @@ use crate::graph::resource::GraphTexturePool;
 use crate::{GpuScene, PassContext, PrepareContext, Profiler, RenderPass, Result};
 use libhelio::GBufferViews;
 use std::any::TypeId;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::resource_lifetime::ResourceLifetime;
 use super::scheduling::{CachedPass, PrePassAction};
@@ -39,6 +39,10 @@ pub struct RenderGraph {
     /// Opaque storage for cross-crate data (e.g. a GraphRebuilder).
     /// Set by graph builders, consumed by the Renderer on construction.
     graph_data: Option<Box<dyn std::any::Any + Send + Sync>>,
+
+    /// Pass indices that write to gbuffer textures, used by allocate_textures
+    /// to route Gbuffer pre-pass actions to non-first-writers.
+    pub(crate) gbuf_write_pass: HashSet<usize>,
 }
 
 impl RenderGraph {
@@ -68,6 +72,7 @@ impl RenderGraph {
             pass_cache: Vec::new(),
             frame_count: 0,
             graph_data: None,
+            gbuf_write_pass: HashSet::new(),
         }
     }
 

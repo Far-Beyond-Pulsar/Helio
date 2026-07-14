@@ -65,10 +65,11 @@ pub struct VoxelMeshPass {
     dirty_bricks: Vec<DirtyBrick>,
 
     normal_buf: wgpu::Buffer,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl VoxelMeshPass {
-    pub fn new(device: &wgpu::Device, _surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let max_bricks = VOXEL_MESH_MAX_BRICKS as u64;
         let max_verts = MAX_SURFACE_VERTS_PER_BRICK as u64;
         let max_indices = MAX_SURFACE_INDICES_PER_BRICK as u64;
@@ -255,22 +256,7 @@ impl VoxelMeshPass {
                 compilation_options: Default::default(),
                 targets: &[
                     Some(wgpu::ColorTargetState {
-                        format: GBUFFER_ALBEDO_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: GBUFFER_NORMAL_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: GBUFFER_ORM_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: GBUFFER_EMISSIVE_FORMAT,
+                        format: surface_format,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
@@ -311,6 +297,7 @@ impl VoxelMeshPass {
             dirty_brick_buf,
             dirty_bricks: Vec::new(),
             normal_buf,
+            surface_format,
         }
     }
 
@@ -364,17 +351,18 @@ impl RenderPass for VoxelMeshPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["gbuffer_albedo", "gbuffer_normal", "gbuffer_orm", "gbuffer_emissive"]
+        &["pre_aa"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw("gbuffer_albedo",   GBUFFER_ALBEDO_FORMAT,   ResourceSize::MatchSurface);
+        builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
         builder.write_color_raw("gbuffer_normal",   GBUFFER_NORMAL_FORMAT,   ResourceSize::MatchSurface);
         builder.write_color_raw("gbuffer_orm",      GBUFFER_ORM_FORMAT,      ResourceSize::MatchSurface);
         builder.write_color_raw("gbuffer_emissive", GBUFFER_EMISSIVE_FORMAT, ResourceSize::MatchSurface);
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
+        println!("VoxelMeshPass::prepare: dirty_bricks={}, volume_count={}", self.dirty_bricks.len(), ctx.scene.voxel_volume_count);
         if !self.dirty_bricks.is_empty() {
             let bytes = bytemuck::cast_slice(&self.dirty_bricks);
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
@@ -386,6 +374,12 @@ impl RenderPass for VoxelMeshPass {
         if ctx.scene.voxel_volume_count == 0 {
             return Ok(());
         }
+
+        println!(
+            "VoxelMeshPass::execute: voxel_volume_count={}, dirty_bricks={}",
+            ctx.scene.voxel_volume_count,
+            self.dirty_bricks.len(),
+        );
 
         let dirty_count = self.dirty_bricks.len() as u32;
 
@@ -441,32 +435,14 @@ impl RenderPass for VoxelMeshPass {
         depth: &'a wgpu::TextureView,
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let gbuffer = resources.gbuffer.read("VoxelMesh")?;
+        let pre_aa_view = resources.pre_aa.read("VoxelMesh")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
+                    view: pre_aa_view,
                     resolve_target: None,
                     depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 }), store: wgpu::StoreOp::Store },
                 }),
             ]));
         Some(wgpu::RenderPassDescriptor {

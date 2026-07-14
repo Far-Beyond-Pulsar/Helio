@@ -1,6 +1,6 @@
 // Vertex shader for voxel meshlets.
-// Uses standard vertex input (Float32x4: position.xyz + material.w).
-// The indirect draw command's base_vertex offsets into the vertex pool.
+// Reads position (+ material) from vertex buffer 0, pre-computed normal
+// from vertex buffer 1 (written by the extract compute shader).
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -17,10 +17,12 @@ struct VertexOutput {
     @builtin(position) clip_pos: vec4<f32>,
     @location(0) @interpolate(flat) material: u32,
     @location(1) world_pos: vec3<f32>,
+    @location(2) world_normal: vec3<f32>,
 }
 
 struct VertexInput {
     @location(0) data: vec4<f32>,
+    @location(1) normal: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -31,5 +33,6 @@ fn vs_main(v: VertexInput) -> VertexOutput {
     out.clip_pos = camera.view_proj * vec4(v.data.xyz, 1.0);
     out.material = u32(v.data.w);
     out.world_pos = v.data.xyz;
+    out.world_normal = normalize(v.normal.xyz);
     return out;
 }
