@@ -1,7 +1,7 @@
 use crate::biome::default_palette;
 use crate::gpu_types::*;
 use crate::terrain::ChunkSlot;
-use crate::{TerraForgePass, CHUNKS_PER_FRAME, DEFAULT_PLANET_RADIUS, HALTON_JITTER, VOXEL_SIZE};
+use crate::{TerraForgePass, CHUNKS_PER_FRAME, DEFAULT_PLANET_RADIUS, VOXEL_SIZE};
 use bytemuck::{bytes_of, cast_slice, Zeroable};
 use helio_v3::graph::{ResourceBuilder, ResourceFormat, ResourceSize};
 use helio_v3::{traits::RenderPass, PassContext, PrepareContext, Result};
@@ -635,8 +635,7 @@ impl RenderPass for TerraForgePass {
         let raw_cell = (0.0004 * surface_dist).max(0.8);
         let ff_cell_size = 2.0f32.powi(raw_cell.log2().ceil() as i32);
 
-        let jitter_idx = (ctx.frame_num % 16) as usize;
-        let raw = HALTON_JITTER[jitter_idx];
+        let jitter = libhelio::temporal_jitter(ctx.frame_num);
         let uniforms = GpuUniforms {
             width: self.ray_w_half,
             height: self.ray_h_half,
@@ -650,7 +649,7 @@ impl RenderPass for TerraForgePass {
             ff_cell_size,
             camera_offset: cam_pos,
             _pad_cam: 0.0,
-            jitter: [raw[0] - 0.5, raw[1] - 0.5],
+            jitter,
             _jitter_pad: [0.0; 2],
         };
         ctx.queue.write_buffer(&self.uniform_buf, 0, bytes_of(&uniforms));

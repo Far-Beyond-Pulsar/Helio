@@ -10,19 +10,9 @@ use crate::scene::Scene;
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
 use super::graph::{build_default_graph, build_default_graph_external, create_depth_resources};
-use super::renderer_impl::{GraphKind, Renderer, HALTON_JITTER};
+use super::renderer_impl::{GraphKind, Renderer};
 
 impl Renderer {
-    pub(crate) fn compute_jitter_matrices(width: u32, height: u32) -> [glam::Mat4; 16] {
-        let mut matrices = [glam::Mat4::IDENTITY; 16];
-        for (i, raw) in HALTON_JITTER.iter().enumerate() {
-            let jx = ((raw[0] - 0.5) * 2.0) / (width as f32);
-            let jy = ((raw[1] - 0.5) * 2.0) / (height as f32);
-            matrices[i] = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
-        }
-        matrices
-    }
-
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>, config: RendererConfig) -> Self {
         let mut scene = Scene::new(device.clone(), queue.clone());
         scene.set_render_size(config.width, config.height);
@@ -80,10 +70,6 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let internal_w = config.internal_width();
-        let internal_h = config.internal_height();
-        let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
-
         Self {
             device,
             queue,
@@ -132,9 +118,6 @@ impl Renderer {
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
-            jitter_matrices,
-            jitter_cache_width: internal_w,
-            jitter_cache_height: internal_h,
             clear_target_next_frame: true,
             owns_device: true,
             pending_resize: Some((config.width, config.height)),
@@ -205,9 +188,6 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let internal_w = config.internal_width();
-        let internal_h = config.internal_height();
-        let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
         Self {
             device,
             queue,
@@ -256,9 +236,6 @@ impl Renderer {
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
-            jitter_matrices,
-            jitter_cache_width: internal_w,
-            jitter_cache_height: internal_h,
             gizmo_camera: None,
             gizmo_viewport_height: 0.0,
             owns_device: false,

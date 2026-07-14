@@ -3,6 +3,34 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
 
+/// Return the canonical temporal-AA jitter for `frame`, in pixel units.
+///
+/// The R1/R2 low-discrepancy sequence does not repeat on a short fixed cycle.
+/// Every producer of jittered geometry or ray-marched samples must use this
+/// function; temporal resolves consume the exact resulting camera offset rather
+/// than generating another sequence independently.
+#[inline]
+pub fn temporal_jitter(frame: u64) -> [f32; 2] {
+    const INV_R1: f64 = 0.7548776662466927;
+    const INV_R2: f64 = 0.5698402905980539;
+    const PHASE: f64 = 0.5;
+
+    let fx = frame as f64 * INV_R1 + PHASE;
+    let fy = frame as f64 * INV_R2 + PHASE;
+    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
+}
+
+/// Convert the canonical pixel-space jitter to the NDC translation applied to
+/// a projection matrix for a render target of `width` x `height`.
+#[inline]
+pub fn temporal_jitter_ndc(frame: u64, width: u32, height: u32) -> [f32; 2] {
+    let [x, y] = temporal_jitter(frame);
+    [
+        x * 2.0 / width.max(1) as f32,
+        y * 2.0 / height.max(1) as f32,
+    ]
+}
+
 /// Per-frame camera uniforms uploaded to GPU every frame.
 ///
 /// Layout matches the WGSL `Camera` struct in all shaders.
@@ -52,6 +80,34 @@ impl GpuCameraUniforms {
             forward_far: [forward.x, forward.y, forward.z, far],
             jitter_frame: [jitter[0], jitter[1], frame as f32, 0.0],
             prev_view_proj: prev_view_proj.to_cols_array(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{temporal_jitter, temporal_jitter_ndc};
+
+    #[test]
+    fn temporal_jitter_is_bounded_and_non_repeating() {
+        let mut samples = std::collections::HashSet::new();
+        for frame in 0..256 {
+            let [x, y] = temporal_jitter(frame);
+            assert!((-0.5..0.5).contains(&x));
+            assert!((-0.5..0.5).contains(&y));
+            assert!(samples.insert(((x * 1_000_000.0) as i32, (y * 1_000_000.0) as i32)));
+        }
+    }
+
+    #[test]
+    fn ndc_jitter_round_trips_to_pixel_offset() {
+        for (width, height) in [(1, 1), (960, 540), (1920, 1080)] {
+            for frame in 0..64 {
+                let pixel = temporal_jitter(frame);
+                let ndc = temporal_jitter_ndc(frame, width, height);
+                assert!((ndc[0] * width as f32 * 0.5 - pixel[0]).abs() < 1.0e-6);
+                assert!((ndc[1] * height as f32 * 0.5 - pixel[1]).abs() < 1.0e-6);
+            }
         }
     }
 }

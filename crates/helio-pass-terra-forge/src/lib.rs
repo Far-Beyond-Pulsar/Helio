@@ -19,27 +19,6 @@ pub const DEFAULT_PLANET_RADIUS: f32 = 1000.0;
 /// Max chunks to generate per frame (streaming budget).
 pub(crate) const CHUNKS_PER_FRAME: usize = 8;
 
-/// Halton base-2/base-3 jitter sequence — matches TaaPass exactly so that
-/// the ray march applies the same subpixel offset TaaPass expects.
-pub(crate) const HALTON_JITTER: [[f32; 2]; 16] = [
-    [0.500000, 0.333333],
-    [0.250000, 0.666667],
-    [0.750000, 0.111111],
-    [0.125000, 0.444444],
-    [0.625000, 0.777778],
-    [0.375000, 0.222222],
-    [0.875000, 0.555556],
-    [0.062500, 0.888889],
-    [0.562500, 0.037037],
-    [0.312500, 0.370370],
-    [0.812500, 0.703704],
-    [0.187500, 0.148148],
-    [0.687500, 0.481481],
-    [0.437500, 0.814815],
-    [0.937500, 0.259259],
-    [0.031250, 0.592593],
-];
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // TerraForgePass — main voxel pass struct
 // ═══════════════════════════════════════════════════════════════════════════════

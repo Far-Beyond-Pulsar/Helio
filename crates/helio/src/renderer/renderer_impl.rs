@@ -34,25 +34,6 @@ type CustomGraphBuilder = Arc<
         + Sync,
 >;
 
-pub(crate) const HALTON_JITTER: [[f32; 2]; 16] = [
-    [0.5, 0.333333],
-    [0.25, 0.666667],
-    [0.75, 0.111111],
-    [0.125, 0.444444],
-    [0.625, 0.777778],
-    [0.375, 0.222222],
-    [0.875, 0.555556],
-    [0.0625, 0.888889],
-    [0.5625, 0.037037],
-    [0.3125, 0.37037],
-    [0.8125, 0.703704],
-    [0.1875, 0.148148],
-    [0.6875, 0.481481],
-    [0.4375, 0.814815],
-    [0.9375, 0.259259],
-    [0.03125, 0.592593],
-];
-
 pub struct Renderer {
     pub(crate) device: Arc<wgpu::Device>,
     pub(crate) queue: Arc<wgpu::Queue>,
@@ -100,9 +81,6 @@ pub struct Renderer {
     pub(crate) cull_stats: [u32; 8],
     pub(crate) frame_times: Vec<f32>,
     pub(crate) frame_times_cursor: usize,
-    pub(crate) jitter_matrices: [glam::Mat4; 16],
-    pub(crate) jitter_cache_width: u32,
-    pub(crate) jitter_cache_height: u32,
     pub(crate) gizmo_camera: Option<crate::scene::Camera>,
     pub(crate) gizmo_viewport_height: f32,
     pub(crate) owns_device: bool,

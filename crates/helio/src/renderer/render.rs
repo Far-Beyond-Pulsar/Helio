@@ -7,7 +7,7 @@ use helio_v3::Result as HelioResult;
 use crate::groups::GroupId;
 use crate::scene::Camera;
 
-use super::renderer_impl::{Renderer, HALTON_JITTER};
+use super::renderer_impl::Renderer;
 
 impl Renderer {
     /// Presents a rendered surface texture on this renderer's queue.
@@ -33,17 +33,9 @@ impl Renderer {
 
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
-        if internal_w != self.jitter_cache_width || internal_h != self.jitter_cache_height {
-            self.jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
-            self.jitter_cache_width = internal_w;
-            self.jitter_cache_height = internal_h;
-        }
-
         let frame_idx = self.scene.gpu_scene().frame_count;
-        let jitter_mat = self.jitter_matrices[(frame_idx % 16) as usize];
-        let raw = HALTON_JITTER[(frame_idx % 16) as usize];
-        let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
-        let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
+        let [jx, jy] = libhelio::temporal_jitter_ndc(frame_idx, internal_w, internal_h);
+        let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
         let jittered_m = jitter_mat * camera.proj * camera.view;
         let col = jittered_m.to_cols_array();
         let debug_camera_uniform = DebugCameraUniform {

@@ -11,9 +11,9 @@
 //! All three are constant-time GPU operations.
 //!
 //! ## Jitter
-//! A non-repeating low-discrepancy sequence based on the plastic ratio (R1, R2)
-//! indexed by `frame_num`.  Unlike Halton(2,3) which repeats every 16 frames,
-//! the R1/R2 sequence never repeats, eliminating temporal periodic artefacts.
+//! The resolve consumes the exact NDC jitter stored in `GpuCameraUniforms`.
+//! Projection, ray-marched effects, and temporal resolve therefore cannot drift
+//! onto different sequences or frame phases.
 //!
 //! ## History ping-pong
 //! The pass owns two textures: `output_texture` (render target each frame) and
@@ -28,28 +28,9 @@ use bytemuck::{Pod, Zeroable};
 use helio_v3::graph::ResourceBuilder;
 use helio_v3::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-/// R1/R2 low-discrepancy jitter offset for a given frame index.
-///
-/// Based on the plastic ratio (2D generalisation of the golden ratio):
-///   R1 ≈ 1.324717957, R2 = R1² ≈ 1.754877666
-/// Returns offset in [-0.5, 0.5) — the sub-pixel jitter for the frame.
-/// A phase offset is added to avoid exactly -0.5 at frame 0 (which would
-/// cause off-by-one sampling with NEAREST filtering).
-fn r1_r2_jitter(frame: u64) -> [f32; 2] {
-    // Pre-computed plastic ratio constants
-    const INV_R1: f64 = 0.7548776662466927; // 1 / R1
-    const INV_R2: f64 = 0.5698402905980539; // 1 / R2
-                                            // Phase offset to avoid exact -0.5 at frame 0
-    const PHASE: f64 = 0.5;
-    let fx = frame as f64 * INV_R1 + PHASE;
-    let fy = frame as f64 * INV_R2 + PHASE;
-    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
-}
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TaaUniform {
-    jitter: [f32; 2],    // R1/R2 jitter offset in [-0.5, 0.5]
     upscale_factor: f32, // output_width / internal_width (≥ 1.0)
     reset: u32,          // 1 on the very first frame so RESET path runs
     time_delta: f32,     // seconds since last frame
@@ -489,7 +470,6 @@ impl RenderPass for TaaPass {
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
-        let jitter = r1_r2_jitter(ctx.frame_num);
         let reset = if self.first_frame {
             self.first_frame = false;
             1u32
@@ -501,7 +481,6 @@ impl RenderPass for TaaPass {
             .min(16.0);
         let time_delta = ctx.delta_time.max(0.0);
         let uniforms = TaaUniform {
-            jitter,
             upscale_factor,
             reset,
             time_delta,

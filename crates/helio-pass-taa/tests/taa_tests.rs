@@ -1,6 +1,7 @@
 // Tests for helio-pass-taa: TaaUniform size, R1/R2 jitter properties,
 // history ping-pong, feedback clamp. All tests are pure Rust — no GPU device required.
 
+use libhelio::{temporal_jitter, temporal_jitter_ndc};
 use std::mem;
 
 // ── Mirror private types ──────────────────────────────────────────────────────
@@ -8,31 +9,20 @@ use std::mem;
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct TaaUniform {
-    jitter: [f32; 2],
     upscale_factor: f32,
     reset: u32,
     time_delta: f32,
     _pad: f32,
 }
 
-/// Replicates the `r1_r2_jitter()` function from `lib.rs`.
-fn r1_r2_jitter(frame: u64) -> [f32; 2] {
-    const INV_R1: f64 = 0.7548776662466927;
-    const INV_R2: f64 = 0.5698402905980539;
-    const PHASE: f64 = 0.5;
-    let fx = frame as f64 * INV_R1 + PHASE;
-    let fy = frame as f64 * INV_R2 + PHASE;
-    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
-}
-
 // ── TaaUniform size tests ─────────────────────────────────────────────────────
 
 #[test]
-fn taa_uniform_size_is_24() {
+fn taa_uniform_size_is_16() {
     assert_eq!(
         mem::size_of::<TaaUniform>(),
-        24,
-        "jitter(8) + upscale_factor(4) + reset(4) + time_delta(4) + _pad(4) = 24"
+        16,
+        "upscale_factor(4) + reset(4) + time_delta(4) + _pad(4) = 16"
     );
 }
 
@@ -42,25 +32,39 @@ fn taa_uniform_alignment_is_4() {
 }
 
 #[test]
-fn taa_uniform_size_aligned_to_8() {
-    // WGSL vec2 align 8 → struct size must be multiple of 8.
-    assert_eq!(mem::size_of::<TaaUniform>() % 8, 0);
+fn taa_uniform_size_aligned_to_16() {
+    assert_eq!(mem::size_of::<TaaUniform>() % 16, 0);
+}
+
+#[test]
+fn camera_ndc_jitter_maps_to_the_same_resolve_pixel() {
+    for (width, height) in [(960u32, 540u32), (1920, 1080)] {
+        for frame in 0..64 {
+            let pixel = temporal_jitter(frame);
+            let ndc = temporal_jitter_ndc(frame, width, height);
+
+            // Mirrors taa.wgsl: NDC spans two UV units and viewport Y is down.
+            let resolve_uv = [ndc[0] * 0.5, -ndc[1] * 0.5];
+            assert!((resolve_uv[0] * width as f32 - pixel[0]).abs() < 1.0e-6);
+            assert!((resolve_uv[1] * height as f32 + pixel[1]).abs() < 1.0e-6);
+        }
+    }
 }
 
 // ── R1/R2 jitter range tests ─────────────────────────────────────────────────
 
 #[test]
-fn r1_r2_jitter_x_in_half_range() {
+fn temporal_jitter_x_in_half_range() {
     for frame in 0..256u64 {
-        let [jx, _] = r1_r2_jitter(frame);
+        let [jx, _] = temporal_jitter(frame);
         assert!(jx >= -0.5 && jx < 0.5, "frame {frame}: jx = {jx}");
     }
 }
 
 #[test]
-fn r1_r2_jitter_y_in_half_range() {
+fn temporal_jitter_y_in_half_range() {
     for frame in 0..256u64 {
-        let [_, jy] = r1_r2_jitter(frame);
+        let [_, jy] = temporal_jitter(frame);
         assert!(jy >= -0.5 && jy < 0.5, "frame {frame}: jy = {jy}");
     }
 }
@@ -70,7 +74,7 @@ fn r1_r2_covers_both_signs_x() {
     let mut neg = 0u32;
     let mut pos = 0u32;
     for frame in 0..256u64 {
-        let [jx, _] = r1_r2_jitter(frame);
+        let [jx, _] = temporal_jitter(frame);
         if jx < 0.0 {
             neg += 1;
         } else {
@@ -85,7 +89,7 @@ fn r1_r2_covers_both_signs_y() {
     let mut neg = 0u32;
     let mut pos = 0u32;
     for frame in 0..256u64 {
-        let [_, jy] = r1_r2_jitter(frame);
+        let [_, jy] = temporal_jitter(frame);
         if jy < 0.0 {
             neg += 1;
         } else {
@@ -98,8 +102,8 @@ fn r1_r2_covers_both_signs_y() {
 #[test]
 fn r1_r2_mean_near_zero() {
     let n = 256usize;
-    let mean_x: f32 = (0..n).map(|f| r1_r2_jitter(f as u64)[0]).sum::<f32>() / n as f32;
-    let mean_y: f32 = (0..n).map(|f| r1_r2_jitter(f as u64)[1]).sum::<f32>() / n as f32;
+    let mean_x: f32 = (0..n).map(|f| temporal_jitter(f as u64)[0]).sum::<f32>() / n as f32;
+    let mean_y: f32 = (0..n).map(|f| temporal_jitter(f as u64)[1]).sum::<f32>() / n as f32;
     assert!(mean_x.abs() < 0.05, "mean_x = {mean_x}");
     assert!(mean_y.abs() < 0.05, "mean_y = {mean_y}");
 }
@@ -110,7 +114,7 @@ fn r1_r2_mean_near_zero() {
 fn r1_r2_no_duplicates_in_256_frames() {
     let mut set = std::collections::HashSet::new();
     for frame in 0..256u64 {
-        let [jx, jy] = r1_r2_jitter(frame);
+        let [jx, jy] = temporal_jitter(frame);
         let key = ((jx * 1_000_000.0) as i32, (jy * 1_000_000.0) as i32);
         assert!(set.insert(key), "duplicate at frame {frame}: ({jx}, {jy})");
     }
@@ -122,7 +126,7 @@ fn r1_r2_no_duplicates_in_256_frames() {
 #[test]
 fn r1_r2_deterministic() {
     for frame in 0..64u64 {
-        assert_eq!(r1_r2_jitter(frame), r1_r2_jitter(frame));
+        assert_eq!(temporal_jitter(frame), temporal_jitter(frame));
     }
 }
 
@@ -149,7 +153,7 @@ fn upscale_factor_at_least_one() {
 
 #[test]
 fn frame_num_advances_monotonically() {
-    let values: Vec<[f32; 2]> = (0..64).map(|f| r1_r2_jitter(f)).collect();
+    let values: Vec<[f32; 2]> = (0..64).map(|f| temporal_jitter(f)).collect();
     // All 64 entries must be distinct (non-repeating)
     let mut set = std::collections::HashSet::new();
     for v in &values {

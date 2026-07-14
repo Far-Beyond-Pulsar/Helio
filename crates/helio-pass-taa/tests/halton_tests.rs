@@ -11,22 +11,14 @@
 //
 // All tests are pure math — no GPU device required.
 
-/// Replicates the `r1_r2_jitter()` function from `lib.rs`.
-fn r1_r2_jitter(frame: u64) -> [f32; 2] {
-    const INV_R1: f64 = 0.7548776662466927;
-    const INV_R2: f64 = 0.5698402905980539;
-    const PHASE: f64 = 0.5;
-    let fx = frame as f64 * INV_R1 + PHASE;
-    let fy = frame as f64 * INV_R2 + PHASE;
-    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
-}
+use libhelio::temporal_jitter;
 
 // ── Range tests ───────────────────────────────────────────────────────────────
 
 #[test]
 fn all_x_between_minus_half_and_half() {
     for frame in 0..256u64 {
-        let [jx, _] = r1_r2_jitter(frame);
+        let [jx, _] = temporal_jitter(frame);
         assert!(
             jx >= -0.5 && jx < 0.5,
             "frame {frame}: jx = {jx} not in [-0.5, 0.5)"
@@ -37,7 +29,7 @@ fn all_x_between_minus_half_and_half() {
 #[test]
 fn all_y_between_minus_half_and_half() {
     for frame in 0..256u64 {
-        let [_, jy] = r1_r2_jitter(frame);
+        let [_, jy] = temporal_jitter(frame);
         assert!(
             jy >= -0.5 && jy < 0.5,
             "frame {frame}: jy = {jy} not in [-0.5, 0.5)"
@@ -51,7 +43,7 @@ fn all_y_between_minus_half_and_half() {
 fn first_256_values_all_unique() {
     let mut set = std::collections::HashSet::new();
     for frame in 0..256u64 {
-        let [jx, jy] = r1_r2_jitter(frame);
+        let [jx, jy] = temporal_jitter(frame);
         let key = ((jx * 1_000_000.0) as i32, (jy * 1_000_000.0) as i32);
         assert!(set.insert(key), "duplicate at frame {frame}: ({jx}, {jy})");
     }
@@ -61,13 +53,13 @@ fn first_256_values_all_unique() {
 
 #[test]
 fn x_mean_close_to_0() {
-    let mean = (0..256).map(|f| r1_r2_jitter(f)[0]).sum::<f32>() / 256.0;
+    let mean = (0..256).map(|f| temporal_jitter(f)[0]).sum::<f32>() / 256.0;
     assert!(mean.abs() < 0.05, "mean_x = {mean}");
 }
 
 #[test]
 fn y_mean_close_to_0() {
-    let mean = (0..256).map(|f| r1_r2_jitter(f)[1]).sum::<f32>() / 256.0;
+    let mean = (0..256).map(|f| temporal_jitter(f)[1]).sum::<f32>() / 256.0;
     assert!(mean.abs() < 0.05, "mean_y = {mean}");
 }
 
@@ -75,15 +67,15 @@ fn y_mean_close_to_0() {
 
 #[test]
 fn x_covers_both_halves() {
-    let below = (0..256).filter(|f| r1_r2_jitter(*f)[0] < 0.0).count();
-    let above = (0..256).filter(|f| r1_r2_jitter(*f)[0] >= 0.0).count();
+    let below = (0..256).filter(|f| temporal_jitter(*f)[0] < 0.0).count();
+    let above = (0..256).filter(|f| temporal_jitter(*f)[0] >= 0.0).count();
     assert!(below > 0 && above > 0, "below={below} above={above}");
 }
 
 #[test]
 fn y_covers_both_halves() {
-    let below = (0..256).filter(|f| r1_r2_jitter(*f)[1] < 0.0).count();
-    let above = (0..256).filter(|f| r1_r2_jitter(*f)[1] >= 0.0).count();
+    let below = (0..256).filter(|f| temporal_jitter(*f)[1] < 0.0).count();
+    let above = (0..256).filter(|f| temporal_jitter(*f)[1] >= 0.0).count();
     assert!(below > 0 && above > 0, "below={below} above={above}");
 }
 
@@ -91,8 +83,8 @@ fn y_covers_both_halves() {
 
 #[test]
 fn deterministic_sequence() {
-    let first: Vec<[f32; 2]> = (0..64).map(r1_r2_jitter).collect();
-    let second: Vec<[f32; 2]> = (0..64).map(r1_r2_jitter).collect();
+    let first: Vec<[f32; 2]> = (0..64).map(temporal_jitter).collect();
+    let second: Vec<[f32; 2]> = (0..64).map(temporal_jitter).collect();
     assert_eq!(first, second);
 }
 
@@ -100,7 +92,7 @@ fn deterministic_sequence() {
 
 #[test]
 fn sequence_variance_x_is_reasonable() {
-    let samples: Vec<f32> = (0..256).map(|f| r1_r2_jitter(f)[0]).collect();
+    let samples: Vec<f32> = (0..256).map(|f| temporal_jitter(f)[0]).collect();
     let mean = samples.iter().sum::<f32>() / 256.0;
     let var = samples.iter().map(|x| (x - mean) * (x - mean)).sum::<f32>() / 256.0;
     // Uniform distribution on [-0.5, 0.5] has variance 1/12 ≈ 0.0833
@@ -110,7 +102,7 @@ fn sequence_variance_x_is_reasonable() {
 
 #[test]
 fn sequence_variance_y_is_reasonable() {
-    let samples: Vec<f32> = (0..256).map(|f| r1_r2_jitter(f)[1]).collect();
+    let samples: Vec<f32> = (0..256).map(|f| temporal_jitter(f)[1]).collect();
     let mean = samples.iter().sum::<f32>() / 256.0;
     let var = samples.iter().map(|y| (y - mean) * (y - mean)).sum::<f32>() / 256.0;
     assert!((var - 1.0 / 12.0).abs() < 0.02, "var_y = {var}");
@@ -120,7 +112,7 @@ fn sequence_variance_y_is_reasonable() {
 
 #[test]
 fn no_repeat_at_modulo_16() {
-    let base: Vec<[f32; 2]> = (0..16).map(r1_r2_jitter).collect();
-    let next: Vec<[f32; 2]> = (16..32).map(r1_r2_jitter).collect();
+    let base: Vec<[f32; 2]> = (0..16).map(temporal_jitter).collect();
+    let next: Vec<[f32; 2]> = (16..32).map(temporal_jitter).collect();
     assert_ne!(base, next, "R1/R2 repeats at 16 — this would be wrong");
 }

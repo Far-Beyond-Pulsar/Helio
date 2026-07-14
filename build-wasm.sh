@@ -27,6 +27,22 @@ WASM_LIB_NAME="helio_web_demos"
 PROFILE="release"
 FILTER_NAME=""
 
+# Cargo-installed tools are not always on PATH (for example in IDE terminals
+# and non-login shells). Prefer PATH, then fall back to Cargo's bin directory.
+if command -v wasm-bindgen >/dev/null 2>&1; then
+    WASM_BINDGEN_BIN="$(command -v wasm-bindgen)"
+else
+    CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
+    WASM_BINDGEN_BIN="$CARGO_BIN_DIR/wasm-bindgen"
+fi
+
+if [[ ! -x "$WASM_BINDGEN_BIN" ]]; then
+    echo "wasm-bindgen CLI not found." >&2
+    echo "Install the Cargo.lock-compatible version with:" >&2
+    echo "  cargo install wasm-bindgen-cli --version 0.2.126 --locked" >&2
+    exit 1
+fi
+
 # Parse flags
 for arg in "$@"; do
     case "$arg" in
@@ -105,7 +121,7 @@ for name in "${EXAMPLES[@]}"; do
     echo "  wasm OK (~${wasm_mib} MiB)"
 
     echo "  wasm-bindgen -> $out_dir"
-    if ! wasm-bindgen "$wasm_path" --out-dir "$out_dir" --target web; then
+    if ! "$WASM_BINDGEN_BIN" "$wasm_path" --out-dir "$out_dir" --target web; then
         echo "  FAILED wasm-bindgen for $name" >&2
         FAILED+=("$name")
         continue

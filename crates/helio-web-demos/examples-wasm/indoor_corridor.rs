@@ -117,7 +117,7 @@ impl HelioWasmApp for Demo {
 
     fn update(
         &mut self,
-        _renderer: &mut Renderer,
+        renderer: &mut Renderer,
         dt: f32,
         _elapsed: f32,
         input: &InputState,
@@ -148,7 +148,7 @@ impl HelioWasmApp for Demo {
             self.cam_pos + fwd,
             Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            1280.0 / 720.0,
+            renderer.output_width() as f32 / renderer.output_height().max(1) as f32,
             0.1,
             60.0,
         )
