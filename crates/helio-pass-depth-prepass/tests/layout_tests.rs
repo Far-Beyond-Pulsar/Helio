@@ -1,7 +1,7 @@
 //! GPU pipeline layout and architecture documentation tests for the depth prepass.
 //!
-//! The depth prepass writes depth-only (no colour outputs) using a single
-//! `multi_draw_indexed_indirect` call.  These tests document the expected
+//! The depth prepass writes depth-only (no colour outputs) using GPU-generated
+//! WebGPU indirect commands. These tests document the expected
 //! pipeline configuration so regressions are caught at review time — even
 //! when no GPU is available.
 
@@ -156,4 +156,3 @@ fn draw_indirect_first_index_field_offset_is_8() {
     const FIRST_INDEX_OFFSET: usize = 2 * size_of::<u32>();
     assert_eq!(FIRST_INDEX_OFFSET, 8);
 }
-

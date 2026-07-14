@@ -7,9 +7,8 @@
 //   slot = atomicAdd(&draw_count, 1u);
 //   indirect[slot] = cmd;
 //
-// The GPU-written draw_count is passed to multi_draw_indexed_indirect_count so
-// the hardware only reads the N_visible compact commands — never stale zero-
-// instance_count entries (Nanite / DOTS style compaction).
+// WebGPU has no indirect-count draw. The CPU records a bounded indirect slot per
+// meshlet; culled slots have instance_count=0, so no readback is required.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -81,7 +80,7 @@ struct CullUniforms {
 @group(0) @binding(3) var<storage, read>       instances:  array<InstanceData>;
 @group(0) @binding(4) var<storage, read_write> indirect:   array<DrawIndexedIndirect>;
 /// Atomic counter: cull shader increments once per visible meshlet.
-/// CPU passes this buffer to multi_draw_indexed_indirect_count as the count arg.
+/// Diagnostic count of emitted commands; rendering does not read it back.
 @group(0) @binding(5) var<storage, read_write> draw_count: atomic<u32>;
 
 @group(0) @binding(6) var hiz_tex:  texture_2d<f32>;

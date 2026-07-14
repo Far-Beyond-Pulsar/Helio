@@ -54,7 +54,6 @@ use crate::*;
 ///   - [`Queue::write_buffer_with()`] allows you to write directly into temporary
 ///     storage instead of providing a slice you already prepared, which may
 ///     allow *your* code to save the allocation of a [`Vec`] or such.
-/// - You may use [`util::StagingBelt`] to manage a set of temporary buffers.
 ///   This may be more efficient than [`Queue::write_buffer_with()`] when you
 ///   have many small copies to perform, but requires more steps to use, and
 ///   tuning of the belt buffer size.

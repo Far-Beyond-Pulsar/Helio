@@ -35,51 +35,51 @@ pub struct PickResult {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 pub struct SdfPass {
-    pub(crate) scroll_pipeline:   wgpu::ComputePipeline,
+    pub(crate) scroll_pipeline: wgpu::ComputePipeline,
     pub(crate) classify_pipeline: wgpu::ComputePipeline,
-    pub(crate) eval_pipeline:     wgpu::ComputePipeline,
-    pub(crate) march_pipeline:    wgpu::RenderPipeline,
-    pub(crate) march_bgl:         wgpu::BindGroupLayout,
-    pub(crate) edit_buffer:                   wgpu::Buffer,
-    pub(crate) terrain_params_buffer:         wgpu::Buffer,
-    pub(crate) bvh_nodes_buffer:              wgpu::Buffer,
-    pub(crate) scroll_state_buffer:           wgpu::Buffer,
-    pub(crate) dirty_flags_buffer:            wgpu::Buffer,
-    pub(crate) clip_config_buffer:            wgpu::Buffer,
-    pub(crate) per_brick_hashes_buffer:       wgpu::Buffer,
-    pub(crate) per_brick_edit_lists_buffer:   wgpu::Buffer,
-    pub(crate) all_brick_indices_buffer:      wgpu::Buffer,
-    pub(crate) dirty_bricks_buffer:           wgpu::Buffer,
-    pub(crate) eval_indirect_buffer:          wgpu::Buffer,
+    pub(crate) eval_pipeline: wgpu::ComputePipeline,
+    pub(crate) march_pipeline: wgpu::RenderPipeline,
+    pub(crate) march_bgl: wgpu::BindGroupLayout,
+    pub(crate) edit_buffer: wgpu::Buffer,
+    pub(crate) terrain_params_buffer: wgpu::Buffer,
+    pub(crate) bvh_nodes_buffer: wgpu::Buffer,
+    pub(crate) scroll_state_buffer: wgpu::Buffer,
+    pub(crate) dirty_flags_buffer: wgpu::Buffer,
+    pub(crate) clip_config_buffer: wgpu::Buffer,
+    pub(crate) per_brick_hashes_buffer: wgpu::Buffer,
+    pub(crate) per_brick_edit_lists_buffer: wgpu::Buffer,
+    pub(crate) all_brick_indices_buffer: wgpu::Buffer,
+    pub(crate) dirty_bricks_buffer: wgpu::Buffer,
+    pub(crate) eval_indirect_buffer: wgpu::Buffer,
     pub(crate) eval_indirect_template_buffer: wgpu::Buffer,
-    pub(crate) atlas_buffers:                 Vec<wgpu::Buffer>,
-    pub(crate) level_params_buffers:          Vec<wgpu::Buffer>,
-    pub(crate) scroll_bg:           Option<wgpu::BindGroup>,
+    pub(crate) atlas_buffers: Vec<wgpu::Buffer>,
+    pub(crate) level_params_buffers: Vec<wgpu::Buffer>,
+    pub(crate) scroll_bg: Option<wgpu::BindGroup>,
     pub(crate) scroll_bg_camera_key: usize,
-    pub(crate) classify_bg:         wgpu::BindGroup,
-    pub(crate) eval_bgs:            Vec<wgpu::BindGroup>,
-    pub(crate) march_bg:            Option<wgpu::BindGroup>,
+    pub(crate) classify_bg: wgpu::BindGroup,
+    pub(crate) eval_bgs: Vec<wgpu::BindGroup>,
+    pub(crate) march_bg: Option<wgpu::BindGroup>,
     pub(crate) march_bg_camera_key: usize,
-    pub(crate) edit_list:        SdfEditList,
-    pub(crate) terrain_config:   Option<TerrainConfig>,
-    pub(crate) last_gen:         u64,
-    pub(crate) edit_generation:  u32,
-    pub(crate) bindings_dirty:   bool,
-    pub(crate) debug_mode:       bool,
-    pub(crate) enabled:          bool,
+    pub(crate) edit_list: SdfEditList,
+    pub(crate) terrain_config: Option<TerrainConfig>,
+    pub(crate) last_gen: u64,
+    pub(crate) edit_generation: u32,
+    pub(crate) bindings_dirty: bool,
+    pub(crate) debug_mode: bool,
+    pub(crate) enabled: bool,
     pub(crate) preserve_framebuffer: bool,
-    pub(crate) level_count:       u32,
-    pub(crate) bricks_per_level:  u32,
-    pub(crate) brick_grid_dim:    u32,
-    pub(crate) brick_size:        u32,
-    pub(crate) grid_dim:          u32,
-    pub(crate) base_voxel_size:   f32,
+    pub(crate) level_count: u32,
+    pub(crate) bricks_per_level: u32,
+    pub(crate) brick_grid_dim: u32,
+    pub(crate) brick_size: u32,
+    pub(crate) grid_dim: u32,
+    pub(crate) base_voxel_size: f32,
     pub(crate) padded_brick_voxels: u32,
-    pub(crate) volume_min:        [f32; 3],
-    pub(crate) volume_max:        [f32; 3],
-    pub(crate) surface_format:    wgpu::TextureFormat,
+    pub(crate) volume_min: [f32; 3],
+    pub(crate) volume_max: [f32; 3],
+    pub(crate) surface_format: wgpu::TextureFormat,
     pub(crate) cached_snap_origins: [[i32; 3]; 8],
-    pub(crate) gpu_passes_clean:    bool,
+    pub(crate) gpu_passes_clean: bool,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -151,8 +151,7 @@ impl SdfPass {
     ) -> Option<PickResult> {
         let edits = self.edit_list.edits();
         let terrain = self.terrain_config.as_ref();
-        let inv_transforms: Vec<glam::Mat4> =
-            edits.iter().map(|e| e.transform.inverse()).collect();
+        let inv_transforms: Vec<glam::Mat4> = edits.iter().map(|e| e.transform.inverse()).collect();
 
         let mut t = 0.0f32;
         for _ in 0..256 {
@@ -160,10 +159,16 @@ impl SdfPass {
             let d = cpu_evaluate_sdf(p, edits, &inv_transforms, terrain);
             if d.abs() < 0.02 {
                 let n = cpu_estimate_normal(p, edits, &inv_transforms, terrain);
-                return Some(PickResult { position: p, normal: n, distance: t });
+                return Some(PickResult {
+                    position: p,
+                    normal: n,
+                    distance: t,
+                });
             }
             t += d.max(0.01);
-            if t > max_dist { break; }
+            if t > max_dist {
+                break;
+            }
         }
         None
     }
@@ -173,12 +178,15 @@ impl SdfPass {
     pub(crate) fn sdf_edit_bounds(edit: &SdfEdit) -> (glam::Vec3, f32) {
         use SdfShapeType::*;
         let local_radius = match edit.shape {
-            Sphere   => edit.params.param0,
-            Cube     => glam::Vec3::new(edit.params.param0, edit.params.param1, edit.params.param2).length(),
-            Capsule  => edit.params.param0 + edit.params.param1,
-            Torus    => edit.params.param0 + edit.params.param1,
+            Sphere => edit.params.param0,
+            Cube => {
+                glam::Vec3::new(edit.params.param0, edit.params.param1, edit.params.param2).length()
+            }
+            Capsule => edit.params.param0 + edit.params.param1,
+            Torus => edit.params.param0 + edit.params.param1,
             Cylinder => (edit.params.param0 * edit.params.param0
-                         + edit.params.param1 * edit.params.param1).sqrt(),
+                + edit.params.param1 * edit.params.param1)
+                .sqrt(),
         };
         let center = edit.transform.transform_point3(glam::Vec3::ZERO);
         let col0_len = edit.transform.col(0).truncate().length();
@@ -205,7 +213,11 @@ impl SdfPass {
             voxel_sizes_hi[i] = self.voxel_size_for_level((4 + i) as u32);
         }
         let (terrain_enabled, terrain_y_min, terrain_y_max) = match terrain {
-            Some(cfg) => (1u32, cfg.height - cfg.amplitude * 3.0, cfg.height + cfg.amplitude * 2.0),
+            Some(cfg) => (
+                1u32,
+                cfg.height - cfg.amplitude * 3.0,
+                cfg.height + cfg.amplitude * 2.0,
+            ),
             None => (0u32, -1e10, 1e10),
         };
         crate::rendering::GpuClipConfig {
@@ -221,7 +233,10 @@ impl SdfPass {
             terrain_enabled,
             terrain_y_min,
             terrain_y_max,
-            _pad0: 0, _pad1: 0, _pad2: 0, _pad3: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            _pad3: 0,
             voxel_sizes_lo,
             voxel_sizes_hi,
         }
@@ -231,22 +246,24 @@ impl SdfPass {
         let vs = self.voxel_size_for_level(level);
         let max_march_dist = self.grid_dim as f32 * vs * 2.0;
         SdfGridParams {
-            volume_min:            self.volume_min,
-            _pad0:                 0.0,
-            volume_max:            self.volume_max,
-            _pad1:                 0.0,
-            grid_dim:              self.grid_dim,
+            volume_min: self.volume_min,
+            _pad0: 0.0,
+            volume_max: self.volume_max,
+            _pad1: 0.0,
+            grid_dim: self.grid_dim,
             edit_count,
-            voxel_size:            vs,
+            voxel_size: vs,
             max_march_dist,
-            brick_size:            self.brick_size,
-            brick_grid_dim:        self.brick_grid_dim,
-            level_idx:             level,
+            brick_size: self.brick_size,
+            brick_grid_dim: self.brick_grid_dim,
+            level_idx: level,
             atlas_bricks_per_axis: self.brick_grid_dim,
-            grid_origin:           [0.0; 3],
-            debug_flags:           if self.debug_mode { 1 } else { 0 },
-            bricks_per_level:      self.bricks_per_level,
-            _pad2: 0, _pad3: 0, _pad4: 0,
+            grid_origin: [0.0; 3],
+            debug_flags: if self.debug_mode { 1 } else { 0 },
+            bricks_per_level: self.bricks_per_level,
+            _pad2: 0,
+            _pad3: 0,
+            _pad4: 0,
         }
     }
 }
@@ -345,10 +362,10 @@ fn cpu_estimate_normal(
     let dy = glam::Vec3::new(0.0, eps, 0.0);
     let dz = glam::Vec3::new(0.0, 0.0, eps);
     let nx = cpu_evaluate_sdf(p + dx, edits, inv_transforms, terrain)
-           - cpu_evaluate_sdf(p - dx, edits, inv_transforms, terrain);
+        - cpu_evaluate_sdf(p - dx, edits, inv_transforms, terrain);
     let ny = cpu_evaluate_sdf(p + dy, edits, inv_transforms, terrain)
-           - cpu_evaluate_sdf(p - dy, edits, inv_transforms, terrain);
+        - cpu_evaluate_sdf(p - dy, edits, inv_transforms, terrain);
     let nz = cpu_evaluate_sdf(p + dz, edits, inv_transforms, terrain)
-           - cpu_evaluate_sdf(p - dz, edits, inv_transforms, terrain);
+        - cpu_evaluate_sdf(p - dz, edits, inv_transforms, terrain);
     glam::Vec3::new(nx, ny, nz).normalize_or_zero()
 }

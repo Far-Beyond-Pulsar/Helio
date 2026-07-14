@@ -1,9 +1,9 @@
 //! Public types and internal record structures for scene management.
 
+use bytemuck::{Pod, Zeroable};
 use glam::Mat4;
 use helio_v3::{GpuDrawCall, GpuInstanceAabb, GpuInstanceData, GpuLight, GpuMaterial};
 use libhelio::{GpuMeshletEntry, GpuWaterHitbox, GpuWaterVolume};
-use bytemuck::{Pod, Zeroable};
 
 use crate::groups::GroupMask;
 use crate::handles::{MaterialId, MeshId, ObjectId};
@@ -243,4 +243,3 @@ pub(crate) struct WaterHitboxRecord {
     /// GPU hitbox data (old bounds, new bounds, displacement params).
     pub gpu: GpuWaterHitbox,
 }
-

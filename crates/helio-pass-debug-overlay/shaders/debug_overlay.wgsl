@@ -151,6 +151,7 @@ fn fs_main(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     if sm.a > 0.0 { return sm; }
 
     discard;
+    return vec4f(0.0);
 }
 
 struct VertexOutput {

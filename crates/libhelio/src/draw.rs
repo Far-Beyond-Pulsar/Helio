@@ -1,8 +1,8 @@
 //! GPU draw call types for indirect rendering.
 //!
 //! The indirect dispatch compute shader fills an array of `wgpu::util::DrawIndexedIndirect`
-//! structs from `GpuDrawCall` templates. The CPU only submits one `multi_draw_indexed_indirect`
-//! call — O(1) regardless of scene complexity.
+//! structs from `GpuDrawCall` templates. Browser WebGPU records one indirect draw per
+//! generated command; visibility decisions and command contents remain GPU-side.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -38,7 +38,7 @@ pub struct GpuDrawCall {
 /// GPU-side indirect draw command (matches `wgpu::util::DrawIndexedIndirectArgs`).
 ///
 /// The culling compute shader writes these. The render pass reads them via
-/// `multi_draw_indexed_indirect`.
+/// `draw_indexed_indirect`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct DrawIndexedIndirectArgs {
@@ -66,4 +66,3 @@ impl DrawIndexedIndirectArgs {
         }
     }
 }
-

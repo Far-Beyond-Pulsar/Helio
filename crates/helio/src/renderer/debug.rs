@@ -86,31 +86,111 @@ impl DebugDrawPass {
         for i in -count..=count {
             let x = center_x + i as f32 * grid_step;
             let z = center_z + i as f32 * grid_step;
-            let x_color = if i.rem_euclid(5) == 0 { major_color } else { minor_color };
-            let z_color = if i.rem_euclid(5) == 0 { major_color } else { minor_color };
+            let x_color = if i.rem_euclid(5) == 0 {
+                major_color
+            } else {
+                minor_color
+            };
+            let z_color = if i.rem_euclid(5) == 0 {
+                major_color
+            } else {
+                minor_color
+            };
 
-            self.editor_grid_cache.push(DebugVertex { position: [x, 0.0, center_z - range], _pad: 0.0, color: if x.abs() < 0.01 { axis_color_x } else { x_color } });
-            self.editor_grid_cache.push(DebugVertex { position: [x, 0.0, center_z + range], _pad: 0.0, color: if x.abs() < 0.01 { axis_color_x } else { x_color } });
-            self.editor_grid_cache.push(DebugVertex { position: [center_x - range, 0.0, z], _pad: 0.0, color: if z.abs() < 0.01 { axis_color_z } else { z_color } });
-            self.editor_grid_cache.push(DebugVertex { position: [center_x + range, 0.0, z], _pad: 0.0, color: if z.abs() < 0.01 { axis_color_z } else { z_color } });
+            self.editor_grid_cache.push(DebugVertex {
+                position: [x, 0.0, center_z - range],
+                _pad: 0.0,
+                color: if x.abs() < 0.01 {
+                    axis_color_x
+                } else {
+                    x_color
+                },
+            });
+            self.editor_grid_cache.push(DebugVertex {
+                position: [x, 0.0, center_z + range],
+                _pad: 0.0,
+                color: if x.abs() < 0.01 {
+                    axis_color_x
+                } else {
+                    x_color
+                },
+            });
+            self.editor_grid_cache.push(DebugVertex {
+                position: [center_x - range, 0.0, z],
+                _pad: 0.0,
+                color: if z.abs() < 0.01 {
+                    axis_color_z
+                } else {
+                    z_color
+                },
+            });
+            self.editor_grid_cache.push(DebugVertex {
+                position: [center_x + range, 0.0, z],
+                _pad: 0.0,
+                color: if z.abs() < 0.01 {
+                    axis_color_z
+                } else {
+                    z_color
+                },
+            });
         }
 
         let origin_color = [1.0, 1.0, 0.0, 1.0];
-        self.editor_grid_cache.push(DebugVertex { position: [-3.0, 0.0, 0.0], _pad: 0.0, color: origin_color });
-        self.editor_grid_cache.push(DebugVertex { position: [3.0, 0.0, 0.0], _pad: 0.0, color: origin_color });
-        self.editor_grid_cache.push(DebugVertex { position: [0.0, 0.0, -3.0], _pad: 0.0, color: origin_color });
-        self.editor_grid_cache.push(DebugVertex { position: [0.0, 0.0, 3.0], _pad: 0.0, color: origin_color });
+        self.editor_grid_cache.push(DebugVertex {
+            position: [-3.0, 0.0, 0.0],
+            _pad: 0.0,
+            color: origin_color,
+        });
+        self.editor_grid_cache.push(DebugVertex {
+            position: [3.0, 0.0, 0.0],
+            _pad: 0.0,
+            color: origin_color,
+        });
+        self.editor_grid_cache.push(DebugVertex {
+            position: [0.0, 0.0, -3.0],
+            _pad: 0.0,
+            color: origin_color,
+        });
+        self.editor_grid_cache.push(DebugVertex {
+            position: [0.0, 0.0, 3.0],
+            _pad: 0.0,
+            color: origin_color,
+        });
     }
 
     fn update_editor_marker(&mut self, cam: glam::Vec3) {
         let camera_marker_color = [0.0, 1.0, 1.0, 1.0];
         self.editor_marker_lines = [
-            DebugVertex { position: [cam.x - 0.3, cam.y, cam.z], _pad: 0.0, color: camera_marker_color },
-            DebugVertex { position: [cam.x + 0.3, cam.y, cam.z], _pad: 0.0, color: camera_marker_color },
-            DebugVertex { position: [cam.x, cam.y - 0.3, cam.z], _pad: 0.0, color: camera_marker_color },
-            DebugVertex { position: [cam.x, cam.y + 0.3, cam.z], _pad: 0.0, color: camera_marker_color },
-            DebugVertex { position: [cam.x, cam.y, cam.z - 0.3], _pad: 0.0, color: camera_marker_color },
-            DebugVertex { position: [cam.x, cam.y, cam.z + 0.3], _pad: 0.0, color: camera_marker_color },
+            DebugVertex {
+                position: [cam.x - 0.3, cam.y, cam.z],
+                _pad: 0.0,
+                color: camera_marker_color,
+            },
+            DebugVertex {
+                position: [cam.x + 0.3, cam.y, cam.z],
+                _pad: 0.0,
+                color: camera_marker_color,
+            },
+            DebugVertex {
+                position: [cam.x, cam.y - 0.3, cam.z],
+                _pad: 0.0,
+                color: camera_marker_color,
+            },
+            DebugVertex {
+                position: [cam.x, cam.y + 0.3, cam.z],
+                _pad: 0.0,
+                color: camera_marker_color,
+            },
+            DebugVertex {
+                position: [cam.x, cam.y, cam.z - 0.3],
+                _pad: 0.0,
+                color: camera_marker_color,
+            },
+            DebugVertex {
+                position: [cam.x, cam.y, cam.z + 0.3],
+                _pad: 0.0,
+                color: camera_marker_color,
+            },
         ];
     }
 }
@@ -179,11 +259,16 @@ impl RenderPass for DebugDrawPass {
             }
 
             let cam_arr = [cam.x, cam.y, cam.z];
-            if self.editor_last_cam != Some(cam_arr) || self.cached_line_gen == u64::MAX || grid_rebuilt {
+            if self.editor_last_cam != Some(cam_arr)
+                || self.cached_line_gen == u64::MAX
+                || grid_rebuilt
+            {
                 self.update_editor_marker(cam);
 
                 if grid_rebuilt || self.cached_line_gen == u64::MAX {
-                    let mut lines = Vec::with_capacity(self.editor_grid_cache.len() + self.editor_marker_lines.len());
+                    let mut lines = Vec::with_capacity(
+                        self.editor_grid_cache.len() + self.editor_marker_lines.len(),
+                    );
                     lines.extend_from_slice(&self.editor_grid_cache);
                     lines.extend_from_slice(&self.editor_marker_lines);
                     self.pass.update_lines(ctx.queue, &lines);
@@ -193,8 +278,9 @@ impl RenderPass for DebugDrawPass {
                         self.editor_grid_cache.len(),
                         &self.editor_marker_lines,
                     );
-                    self.pass
-                        .set_line_vertex_count(self.editor_grid_cache.len() + self.editor_marker_lines.len());
+                    self.pass.set_line_vertex_count(
+                        self.editor_grid_cache.len() + self.editor_marker_lines.len(),
+                    );
                 }
 
                 self.editor_last_cam = Some(cam_arr);
@@ -238,7 +324,6 @@ impl RenderPass for DebugDrawPass {
 
         res
     }
-
 }
 
 impl Renderer {
@@ -285,27 +370,60 @@ impl Renderer {
 
     pub fn debug_line(&mut self, from: [f32; 3], to: [f32; 3], color: [f32; 4]) {
         if let Ok(mut s) = self.debug_state.lock() {
-            s.user_lines.push(DebugVertex { position: from, _pad: 0.0, color });
-            s.user_lines.push(DebugVertex { position: to, _pad: 0.0, color });
+            s.user_lines.push(DebugVertex {
+                position: from,
+                _pad: 0.0,
+                color,
+            });
+            s.user_lines.push(DebugVertex {
+                position: to,
+                _pad: 0.0,
+                color,
+            });
             s.user_lines_generation = s.user_lines_generation.wrapping_add(1);
         }
     }
 
     pub fn debug_tri(&mut self, v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], color: [f32; 4]) {
         if let Ok(mut s) = self.debug_state.lock() {
-            s.user_tris.push(DebugVertex { position: v0, _pad: 0.0, color });
-            s.user_tris.push(DebugVertex { position: v1, _pad: 0.0, color });
-            s.user_tris.push(DebugVertex { position: v2, _pad: 0.0, color });
+            s.user_tris.push(DebugVertex {
+                position: v0,
+                _pad: 0.0,
+                color,
+            });
+            s.user_tris.push(DebugVertex {
+                position: v1,
+                _pad: 0.0,
+                color,
+            });
+            s.user_tris.push(DebugVertex {
+                position: v2,
+                _pad: 0.0,
+                color,
+            });
             s.user_tris_generation = s.user_tris_generation.wrapping_add(1);
         }
     }
 
-    pub fn debug_filled_disk(&mut self, center: [f32; 3], normal: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 { return; }
+    pub fn debug_filled_disk(
+        &mut self,
+        center: [f32; 3],
+        normal: [f32; 3],
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        if segments < 3 {
+            return;
+        }
         let c = glam::Vec3::from(center);
         let n = glam::Vec3::from(normal).normalize_or_zero();
-        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
-        let tangent   = n.cross(up).normalize_or_zero();
+        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-5) {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
+        let tangent = n.cross(up).normalize_or_zero();
         let bitangent = n.cross(tangent).normalize_or_zero();
         let mut prev = c + tangent * radius;
         for i in 1..=segments {
@@ -316,13 +434,27 @@ impl Renderer {
         }
     }
 
-    pub fn debug_filled_cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 { return; }
+    pub fn debug_filled_cone(
+        &mut self,
+        apex: [f32; 3],
+        axis: [f32; 3],
+        height: f32,
+        base_radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        if segments < 3 {
+            return;
+        }
         let apex_v = glam::Vec3::from(apex);
-        let dir    = glam::Vec3::from(axis).normalize_or_zero();
-        let base   = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
-        let tangent   = dir.cross(up).normalize_or_zero();
+        let dir = glam::Vec3::from(axis).normalize_or_zero();
+        let base = apex_v + dir * height;
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
+        let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev = base + tangent * base_radius;
         for i in 1..=segments {
@@ -339,13 +471,13 @@ impl Renderer {
         let h = half;
         let corners = [
             c + glam::Vec3::new(-h, -h, -h),
-            c + glam::Vec3::new( h, -h, -h),
-            c + glam::Vec3::new( h,  h, -h),
-            c + glam::Vec3::new(-h,  h, -h),
-            c + glam::Vec3::new(-h, -h,  h),
-            c + glam::Vec3::new( h, -h,  h),
-            c + glam::Vec3::new( h,  h,  h),
-            c + glam::Vec3::new(-h,  h,  h),
+            c + glam::Vec3::new(h, -h, -h),
+            c + glam::Vec3::new(h, h, -h),
+            c + glam::Vec3::new(-h, h, -h),
+            c + glam::Vec3::new(-h, -h, h),
+            c + glam::Vec3::new(h, -h, h),
+            c + glam::Vec3::new(h, h, h),
+            c + glam::Vec3::new(-h, h, h),
         ];
         let quads: [[usize; 4]; 6] = [
             [0, 3, 2, 1],
@@ -356,13 +488,25 @@ impl Renderer {
             [3, 7, 6, 2],
         ];
         for [a, b, cc, d] in quads {
-            self.debug_tri(corners[a].to_array(), corners[b].to_array(), corners[cc].to_array(), color);
-            self.debug_tri(corners[a].to_array(), corners[cc].to_array(), corners[d].to_array(), color);
+            self.debug_tri(
+                corners[a].to_array(),
+                corners[b].to_array(),
+                corners[cc].to_array(),
+                color,
+            );
+            self.debug_tri(
+                corners[a].to_array(),
+                corners[cc].to_array(),
+                corners[d].to_array(),
+                color,
+            );
         }
     }
 
     pub fn debug_circle(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 { return; }
+        if segments < 3 {
+            return;
+        }
         let (cx, cy, cz) = (center[0], center[1], center[2]);
         let step = std::f32::consts::TAU / segments as f32;
         let mut last = (cx + radius, cy, cz);
@@ -375,7 +519,9 @@ impl Renderer {
     }
 
     pub fn debug_sphere(&mut self, center: [f32; 3], radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 4 { return; }
+        if segments < 4 {
+            return;
+        }
         for plane in 0..3 {
             let mut prev = glam::Vec3::ZERO;
             for i in 0..=segments {
@@ -393,11 +539,26 @@ impl Renderer {
         }
     }
 
-    pub fn debug_torus(&mut self, center: [f32; 3], normal: [f32; 3], major_radius: f32, minor_radius: f32, color: [f32; 4], major_segments: u32, minor_segments: u32) {
-        if major_segments < 3 || minor_segments < 3 { return; }
+    pub fn debug_torus(
+        &mut self,
+        center: [f32; 3],
+        normal: [f32; 3],
+        major_radius: f32,
+        minor_radius: f32,
+        color: [f32; 4],
+        major_segments: u32,
+        minor_segments: u32,
+    ) {
+        if major_segments < 3 || minor_segments < 3 {
+            return;
+        }
         let c = glam::Vec3::from(center);
         let n = glam::Vec3::from(normal).normalize_or_zero();
-        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-6) { glam::Vec3::X } else { glam::Vec3::Y };
+        let up = if n.abs_diff_eq(glam::Vec3::Y, 1e-6) {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
         let tangent = n.cross(up).normalize_or_zero();
         let bitangent = n.cross(tangent).normalize_or_zero();
 
@@ -411,9 +572,15 @@ impl Renderer {
             let mut pprev1 = center1 + (n * minor_radius);
             for i in 1..=minor_segments {
                 let phi = 2.0 * std::f32::consts::TAU * (i as f32) / (minor_segments as f32);
-                let offset = (n * phi.cos() + (tangent * theta0.cos() + bitangent * theta0.sin()) * phi.sin()).normalize_or_zero() * minor_radius;
+                let offset = (n * phi.cos()
+                    + (tangent * theta0.cos() + bitangent * theta0.sin()) * phi.sin())
+                .normalize_or_zero()
+                    * minor_radius;
                 let cur0 = center0 + offset;
-                let offset1 = (n * phi.cos() + (tangent * theta1.cos() + bitangent * theta1.sin()) * phi.sin()).normalize_or_zero() * minor_radius;
+                let offset1 = (n * phi.cos()
+                    + (tangent * theta1.cos() + bitangent * theta1.sin()) * phi.sin())
+                .normalize_or_zero()
+                    * minor_radius;
                 let cur1 = center1 + offset1;
 
                 self.debug_line(pprev0.to_array(), cur0.to_array(), color);
@@ -426,12 +593,26 @@ impl Renderer {
         }
     }
 
-    pub fn debug_cylinder(&mut self, base_center: [f32; 3], axis: [f32; 3], height: f32, radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 { return; }
+    pub fn debug_cylinder(
+        &mut self,
+        base_center: [f32; 3],
+        axis: [f32; 3],
+        height: f32,
+        radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        if segments < 3 {
+            return;
+        }
         let base = glam::Vec3::from(base_center);
         let dir = glam::Vec3::from(axis).normalize_or_zero();
         let top = base + dir * height;
-        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) { glam::Vec3::X } else { glam::Vec3::Y };
+        let up = if dir.abs_diff_eq(glam::Vec3::Y, 1e-5) {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
         let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev_base = base + tangent * radius;
@@ -449,12 +630,26 @@ impl Renderer {
         }
     }
 
-    pub fn debug_cone(&mut self, apex: [f32; 3], axis: [f32; 3], height: f32, base_radius: f32, color: [f32; 4], segments: u32) {
-        if segments < 3 { return; }
+    pub fn debug_cone(
+        &mut self,
+        apex: [f32; 3],
+        axis: [f32; 3],
+        height: f32,
+        base_radius: f32,
+        color: [f32; 4],
+        segments: u32,
+    ) {
+        if segments < 3 {
+            return;
+        }
         let apex_v = glam::Vec3::from(apex);
         let dir = glam::Vec3::from(axis).normalize_or_zero();
         let base = apex_v + dir * height;
-        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 { glam::Vec3::X } else { glam::Vec3::Y };
+        let up = if dir.cross(glam::Vec3::Y).length_squared() < 1e-8 {
+            glam::Vec3::X
+        } else {
+            glam::Vec3::Y
+        };
         let tangent = dir.cross(up).normalize_or_zero();
         let bitangent = dir.cross(tangent).normalize_or_zero();
         let mut prev = base + tangent * base_radius;
@@ -467,7 +662,17 @@ impl Renderer {
         }
     }
 
-    pub fn debug_frustum(&mut self, origin: [f32; 3], forward: [f32; 3], up: [f32; 3], fov_y: f32, aspect: f32, near: f32, far: f32, color: [f32; 4]) {
+    pub fn debug_frustum(
+        &mut self,
+        origin: [f32; 3],
+        forward: [f32; 3],
+        up: [f32; 3],
+        fov_y: f32,
+        aspect: f32,
+        near: f32,
+        far: f32,
+        color: [f32; 4],
+    ) {
         let o = glam::Vec3::from(origin);
         let fwd = glam::Vec3::from(forward).normalize_or_zero();
         let upv = glam::Vec3::from(up).normalize_or_zero();

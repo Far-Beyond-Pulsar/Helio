@@ -170,4 +170,3 @@ fn sphere_just_outside_multiple_planes_is_culled() {
     // Object at (0, 0, 200) with radius 50 is still outside the far plane.
     assert!(!sphere_in_frustum(&BOX_FRUSTUM, [0.0, 0.0, 200.0], 50.0));
 }
-

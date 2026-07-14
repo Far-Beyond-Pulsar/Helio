@@ -24,8 +24,6 @@ helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-pass-hlfs = { path = "../helio-pass-hlfs" }
 helio-pass-shadow = { path = "../helio-pass-shadow" }
-helio-pass-shadow-dirty = { path = "../helio-pass-shadow-dirty" }
-helio-pass-shadow-cull = { path = "../helio-pass-shadow-cull" }
 helio-pass-shadow-matrix = { path = "../helio-pass-shadow-matrix" }
 helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
 helio-pass-sky = { path = "../helio-pass-sky" }
@@ -42,23 +40,8 @@ helio-pass-corona = { path = "../helio-pass-corona" }
 libhelio = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-wgpu = { workspace = true, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
-pollster = { workspace = true }
-quark = { workspace = true, package = "quark" }
-helio-bake = { path = "../helio-bake", optional = true }
-uuid = { version = "1", features = ["v4"], optional = true }
-meshopt = "0.6.2"
-
+wgpu.workspace = true
+web-time = "1"
 [features]
 default = ["profiling"]
 profiling = ["helio-v3/profiling"]
-bake = ["helio-bake", "uuid"]
-
-[target.'cfg(target_arch = "wasm32")'.dependencies]
-web-time = "1"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-# Used for DXGI exclusive-fullscreen path (IDXGIFactory1::MakeWindowAssociation).
-# Version must match wgpu-hal's transitive dep so types are unified.
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Dxgi"] }
-

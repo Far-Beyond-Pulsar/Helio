@@ -445,7 +445,13 @@ impl RenderPass for BillboardPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa", "full_res_depth", "billboards", "depth", "main_scene"]
+        &[
+            "pre_aa",
+            "full_res_depth",
+            "billboards",
+            "depth",
+            "main_scene",
+        ]
     }
 
     fn writes(&self) -> &'static [&'static str] {
@@ -509,8 +515,8 @@ impl RenderPass for BillboardPass {
         } else {
             depth
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -518,8 +524,7 @@ impl RenderPass for BillboardPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Billboard"),
             color_attachments,

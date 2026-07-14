@@ -4,46 +4,33 @@
 
 use crate::handles::MeshId;
 use crate::mesh::MeshUpload;
-use crate::vg::{
-    generate_lod_meshes, meshletize_with_indices, VirtualMeshId, VirtualMeshUpload,
-};
+use crate::vg::{VirtualMeshId, VirtualMeshUpload};
 
 use super::super::errors::{invalid, Result, SceneError};
 use super::super::types::VirtualMeshRecord;
 
 impl super::super::Scene {
-    /// Upload a high-resolution mesh and decompose it into GPU meshlets for virtual
-    /// geometry rendering.
-    ///
-    /// Uses meshoptimizer for LOD simplification and meshlet building. Generates
-    /// 8 LOD levels and decomposes each into spatially coherent meshlets with
-    /// tight bounding spheres and backface cones.
-    pub(in crate::scene) fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
-        // Generate 8 LOD levels via meshopt simplification.
-        let lod_meshes = generate_lod_meshes(&upload.vertices, &upload.indices);
-
+    /// Upload precomputed virtual-geometry LODs and meshlets.
+    pub(in crate::scene) fn insert_virtual_mesh(
+        &mut self,
+        upload: VirtualMeshUpload,
+    ) -> VirtualMeshId {
         let mut all_meshlets: Vec<libhelio::GpuMeshletEntry> = Vec::new();
         let mut mesh_ids: Vec<MeshId> = Vec::new();
 
-        for (lod_level, (lod_verts, lod_indices)) in lod_meshes.into_iter().enumerate() {
-            // Build meshlets with meshoptimizer — this produces a reordered
-            // index buffer that groups spatially coherent triangles.
-            let (mut meshlets, meshlet_indices) =
-                meshletize_with_indices(&lod_verts, &lod_indices, 0, 0);
-
-            // Upload the vertices + meshlet-reordered indices to the mega-buffer.
+        for (lod_level, lod) in upload.lods.into_iter().enumerate() {
             let mesh_id = self.mesh_pool.insert(MeshUpload {
-                vertices: lod_verts,
-                indices: meshlet_indices,
+                vertices: lod.vertices,
+                indices: lod.indices,
             });
             let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
 
-            for m in &mut meshlets {
+            for mut m in lod.meshlets {
                 m.first_index += slice.first_index;
                 m.vertex_offset += slice.first_vertex as i32;
                 m.lod_error = lod_level as f32;
+                all_meshlets.push(m);
             }
-            all_meshlets.extend(meshlets);
             mesh_ids.push(mesh_id);
         }
 
@@ -107,4 +94,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

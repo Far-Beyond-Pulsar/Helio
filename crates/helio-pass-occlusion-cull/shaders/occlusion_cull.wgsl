@@ -31,16 +31,6 @@ struct CullParams {
     screen_height:        u32,
     draw_count:           u32,
     hiz_mip_count:        u32,
-    static_hiz_available: u32,
-    grid_resolution_x:    u32,
-    grid_resolution_y:    u32,
-    grid_resolution_z:    u32,
-    world_bounds_min_x:   f32,
-    world_bounds_min_y:   f32,
-    world_bounds_min_z:   f32,
-    world_bounds_max_x:   f32,
-    world_bounds_max_y:   f32,
-    world_bounds_max_z:   f32,
 }
 @group(0) @binding(1) var<uniform> params: CullParams;
 
@@ -74,9 +64,6 @@ struct GpuDrawCall {
 @group(0) @binding(4) var hiz_tex:  texture_2d<f32>;
 @group(0) @binding(5) var hiz_samp: sampler;
 
-@group(0) @binding(7) var static_hiz_tex:  texture_3d<f32>;
-@group(0) @binding(8) var static_hiz_samp: sampler;
-
 // Indirect draw buffer as raw u32 array.
 // DrawIndexedIndirect stride = 20 bytes = 5 × u32:
 //   [i*5 + 0] index_count
@@ -85,7 +72,7 @@ struct GpuDrawCall {
 //   [i*5 + 3] base_vertex     (i32 reinterpreted as u32 for array access)
 //   [i*5 + 4] first_instance
 @group(0) @binding(6) var<storage, read_write> indirect: array<u32>;
-@group(0) @binding(9) var<storage, read_write> stats:   array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> stats:   array<atomic<u32>>;
 
 // Stats layout (shared with IndirectDispatchPass):
 // 4: occlusion_culled  (we only write to slot 4)
@@ -219,42 +206,4 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // ── Static HiZ (pre-baked PVS) ──────────────────────────────────────────
-    // Camera-independent occlusion test using the pre-baked voxel grid.
-    // Samples the 3D texture at the sphere center, selecting the directional
-    // layer based on the camera-to-object view direction.
-    if params.static_hiz_available != 0u {
-        let cam_pos = camera.position_near.xyz;
-        let cam_to_obj = center - cam_pos;
-        let cam_dist = length(cam_to_obj);
-        if cam_dist > 0.001 {
-            let view_dir = cam_to_obj / cam_dist;
-            let abs_dir = abs(view_dir);
-            var layer: u32 = 0u;
-            if abs_dir.x >= abs_dir.y && abs_dir.x >= abs_dir.z {
-                layer = select(0u, 1u, view_dir.x < 0.0);
-            } else if abs_dir.y >= abs_dir.z {
-                layer = select(2u, 3u, view_dir.y < 0.0);
-            } else {
-                layer = select(4u, 5u, view_dir.z < 0.0);
-            }
-            let grid_min = vec3<f32>(f32(params.world_bounds_min_x), f32(params.world_bounds_min_y), f32(params.world_bounds_min_z));
-            let grid_max = vec3<f32>(f32(params.world_bounds_max_x), f32(params.world_bounds_max_y), f32(params.world_bounds_max_z));
-            let grid_size = grid_max - grid_min;
-            let uvw = (center - grid_min) / grid_size;
-            let clamped_uvw = clamp(uvw, vec3<f32>(0.0), vec3<f32>(1.0));
-            let w = (clamped_uvw.z + f32(layer)) / 6.0;
-            let occlusion_dist = textureSampleLevel(static_hiz_tex, static_hiz_samp, vec3<f32>(clamped_uvw.x, clamped_uvw.y, w), 0.0).r;
-            if cam_dist > occlusion_dist + 0.1 {
-                let was_visible = indirect[idx * 5u + 1u] != 0u;
-                indirect[idx * 5u + 1u] = 0u;
-                if was_visible {
-                    atomicAdd(&stats[4u], 1u);
-                    if (inst.flags & 1u) != 0u {
-                        atomicAdd(&stats[7u], 1u);
-                    }
-                }
-            }
-        }
-    }
 }

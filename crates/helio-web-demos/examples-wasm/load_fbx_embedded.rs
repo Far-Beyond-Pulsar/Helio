@@ -95,8 +95,12 @@ impl HelioWasmApp for Demo {
                     [0.0; 3],
                     0.0,
                 ));
-                let floor =
-                    renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([center.x, floor_y, center.z], radius * 1.55)));
+                let floor = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(plane_mesh(
+                        [center.x, floor_y, center.z],
+                        radius * 1.55,
+                    )));
                 insert_object(
                     renderer,
                     floor,
@@ -113,10 +117,12 @@ impl HelioWasmApp for Demo {
                     [0.0; 3],
                     0.0,
                 ));
-                let ped = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [center.x, floor_y + radius * 0.05, center.z],
-                    [radius * 0.62, radius * 0.05, radius * 0.62],
-                )));
+                let ped = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [center.x, floor_y + radius * 0.05, center.z],
+                        [radius * 0.62, radius * 0.05, radius * 0.62],
+                    )));
                 insert_object(renderer, ped, ped_m, glam::Mat4::IDENTITY, radius).unwrap();
 
                 let back_m = renderer.scene_mut().insert_material(make_material(
@@ -126,10 +132,12 @@ impl HelioWasmApp for Demo {
                     [0.04, 0.06, 0.12],
                     0.03,
                 ));
-                let back = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
-                    [center.x, floor_y + radius * 0.62, center.z - radius * 1.35],
-                    [radius * 1.35, radius * 0.62, radius * 0.05],
-                )));
+                let back = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        [center.x, floor_y + radius * 0.62, center.z - radius * 1.35],
+                        [radius * 1.35, radius * 0.62, radius * 0.05],
+                    )));
                 insert_object(renderer, back, back_m, glam::Mat4::IDENTITY, radius * 1.5).unwrap();
 
                 let focus = center + Vec3::new(0.0, (max.y - min.y) * 0.18, 0.0);
@@ -137,38 +145,46 @@ impl HelioWasmApp for Demo {
                 let key = focus + Vec3::new(r * 0.22, r * 0.34, r * 0.24);
                 let fill = focus + Vec3::new(-r * 0.26, r * 0.14, r * 0.28);
                 let rim = focus + Vec3::new(-r * 0.30, r * 0.22, -r * 0.32);
-                renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
-                    key.to_array(),
-                    (focus - key).normalize().to_array(),
-                    [1.0, 0.80, 0.62],
-                    18.0,
-                    r * 0.62,
-                    0.20,
-                    0.38,
-                )));
-                renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
-                    fill.to_array(),
-                    (focus - fill).normalize().to_array(),
-                    [0.52, 0.66, 1.0],
-                    6.5,
-                    r * 0.59,
-                    0.28,
-                    0.46,
-                )));
-                renderer.scene_mut().insert_actor(helio::SceneActor::light(spot_light(
-                    rim.to_array(),
-                    (focus - rim).normalize().to_array(),
-                    [0.36, 0.55, 1.0],
-                    14.0,
-                    r * 0.57,
-                    0.22,
-                    0.40,
-                )));
-                renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
-                    [0.15, -1.0, 0.1],
-                    [0.07, 0.09, 0.14],
-                    0.3,
-                )));
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(spot_light(
+                        key.to_array(),
+                        (focus - key).normalize().to_array(),
+                        [1.0, 0.80, 0.62],
+                        18.0,
+                        r * 0.62,
+                        0.20,
+                        0.38,
+                    )));
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(spot_light(
+                        fill.to_array(),
+                        (focus - fill).normalize().to_array(),
+                        [0.52, 0.66, 1.0],
+                        6.5,
+                        r * 0.59,
+                        0.28,
+                        0.46,
+                    )));
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(spot_light(
+                        rim.to_array(),
+                        (focus - rim).normalize().to_array(),
+                        [0.36, 0.55, 1.0],
+                        14.0,
+                        r * 0.57,
+                        0.22,
+                        0.40,
+                    )));
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(directional_light(
+                        [0.15, -1.0, 0.1],
+                        [0.07, 0.09, 0.14],
+                        0.3,
+                    )));
                 renderer.set_ambient([0.0, 0.0, 0.0], 0.0);
 
                 cam_pos = center + Vec3::new(r * 0.55, r * 0.28, r * 1.55);
@@ -178,7 +194,13 @@ impl HelioWasmApp for Demo {
             }
             Err(e) => {
                 log::warn!("Failed to load embedded FBX: {e:?}. Showing empty scene.");
-                renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light([0.2, -1.0, 0.4], [1.0, 0.95, 0.85], 0.01)));
+                renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::light(directional_light(
+                        [0.2, -1.0, 0.4],
+                        [1.0, 0.95, 0.85],
+                        0.01,
+                    )));
                 renderer.set_ambient([0.1, 0.12, 0.18], 0.05);
                 renderer.set_clear_color([0.02, 0.02, 0.04, 1.0]);
             }
@@ -238,6 +260,3 @@ impl HelioWasmApp for Demo {
         )
     }
 }
-
-
-

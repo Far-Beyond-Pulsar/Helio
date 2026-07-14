@@ -39,7 +39,7 @@ fn r1_r2_jitter(frame: u64) -> [f32; 2] {
     // Pre-computed plastic ratio constants
     const INV_R1: f64 = 0.7548776662466927; // 1 / R1
     const INV_R2: f64 = 0.5698402905980539; // 1 / R2
-    // Phase offset to avoid exact -0.5 at frame 0
+                                            // Phase offset to avoid exact -0.5 at frame 0
     const PHASE: f64 = 0.5;
     let fx = frame as f64 * INV_R1 + PHASE;
     let fy = frame as f64 * INV_R2 + PHASE;
@@ -198,18 +198,26 @@ impl TaaPass {
         // in the alpha channel — an 8-bit swapchain format would clamp it to [0, 1].
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: output_width,
+                height: output_height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | extra,
             view_formats: &[],
         };
 
-        let history_texture = device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        let history_texture =
+            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
         let history_view = history_texture.create_view(&Default::default());
-        let output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        let output_texture =
+            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         let output_view = output_texture.create_view(&Default::default());
 
         // ── TAA BGL ────────────────────────────────────────────────────────────
@@ -311,7 +319,10 @@ impl TaaPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -343,7 +354,10 @@ impl TaaPass {
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
-            primitive: wgpu::PrimitiveState { topology: wgpu::PrimitiveTopology::TriangleList, ..Default::default() },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
@@ -388,7 +402,9 @@ fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGr
 }
 
 impl RenderPass for TaaPass {
-    fn name(&self) -> &'static str { "TAA" }
+    fn name(&self) -> &'static str {
+        "TAA"
+    }
 
     fn render_pass_descriptor<'a>(
         &'a self,
@@ -416,18 +432,26 @@ impl RenderPass for TaaPass {
         let fmt = wgpu::TextureFormat::Rgba16Float;
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
-            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: fmt,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT | extra,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT
+                | extra,
             view_formats: &[],
         };
 
-        self.history_texture = device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
+        self.history_texture =
+            device.create_texture(&tex_desc("TAA History", wgpu::TextureUsages::COPY_DST));
         self.history_view = self.history_texture.create_view(&Default::default());
-        self.output_texture = device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
+        self.output_texture =
+            device.create_texture(&tex_desc("TAA Output", wgpu::TextureUsages::COPY_SRC));
         self.output_view = self.output_texture.create_view(&Default::default());
 
         // blit_bind_group references output_view — must be rebuilt.
@@ -455,7 +479,12 @@ impl RenderPass for TaaPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let jitter = r1_r2_jitter(ctx.frame_num);
-        let reset = if self.first_frame { self.first_frame = false; 1u32 } else { 0u32 };
+        let reset = if self.first_frame {
+            self.first_frame = false;
+            1u32
+        } else {
+            0u32
+        };
         let upscale_factor = (self.output_width as f32 / self.internal_width as f32)
             .max(1.0)
             .min(16.0);
@@ -467,7 +496,8 @@ impl RenderPass for TaaPass {
             time_delta,
             _pad: 0.0,
         };
-        ctx.queue.write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
+        ctx.queue
+            .write_buffer(&self.taa_uniform_buf, 0, bytemuck::bytes_of(&uniforms));
         Ok(())
     }
 
@@ -478,19 +508,43 @@ impl RenderPass for TaaPass {
                 "TaaPass requires frame.pre_aa (published by DeferredLightPass)".to_string(),
             )
         })?;
-        let key = (pre_aa_view as *const _ as usize, ctx.depth as *const _ as usize);
+        let key = (
+            pre_aa_view as *const _ as usize,
+            ctx.depth as *const _ as usize,
+        );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TAA BG"),
                 layout: &self.bgl,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(pre_aa_view) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&self.history_view) },
-                    wgpu::BindGroupEntry { binding: 2, resource: ctx.scene.camera.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(ctx.depth) },
-                    wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
-                    wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::Sampler(&self.point_sampler) },
-                    wgpu::BindGroupEntry { binding: 6, resource: self.taa_uniform_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&self.history_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(ctx.depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::Sampler(&self.point_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: self.taa_uniform_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -525,7 +579,11 @@ impl RenderPass for TaaPass {
         unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
             self.output_texture.as_image_copy(),
             self.history_texture.as_image_copy(),
-            wgpu::Extent3d { width: self.output_width, height: self.output_height, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: self.output_width,
+                height: self.output_height,
+                depth_or_array_layers: 1,
+            },
         );
 
         // ── 4. Blit output_view → ctx.target ─────────────────────────────────
@@ -539,14 +597,15 @@ impl RenderPass for TaaPass {
                     store: wgpu::StoreOp::Store,
                 },
             })];
-            let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TAA Blit"),
-                color_attachments: &attachments,
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("TAA Blit"),
+                    color_attachments: &attachments,
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
             pass.set_pipeline(&self.blit_pipeline);
             pass.set_bind_group(0, &self.blit_bind_group, &[]);
             pass.draw(0..3, 0..1);

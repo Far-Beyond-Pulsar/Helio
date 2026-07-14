@@ -1,6 +1,5 @@
 mod config;
 mod debug;
-mod fullscreen;
 mod graph;
 mod render;
 mod renderer_impl;
@@ -9,8 +8,7 @@ mod setup;
 
 pub use config::{required_wgpu_features, required_wgpu_limits, GiConfig, RendererConfig};
 pub use graph::{
-    build_simple_graph, build_hlfs_graph, build_default_graph_external,
-    build_fxaa_graph, build_fxaa_graph_external,
-    build_fxaa_hlfs_graph, build_fxaa_hlfs_graph_external,
+    build_default_graph_external, build_fxaa_graph, build_fxaa_graph_external,
+    build_fxaa_hlfs_graph, build_fxaa_hlfs_graph_external, build_hlfs_graph, build_simple_graph,
 };
 pub use renderer_impl::{DebugBatch, Renderer};

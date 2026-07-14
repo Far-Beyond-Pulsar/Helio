@@ -108,7 +108,9 @@ impl GpuProfiler {
         // TIMESTAMP_QUERY_INSIDE_ENCODERS.  WebGPU browsers typically support neither;
         // guard both so we never call write_timestamp on an unsupported backend.
         let has_timestamps = device.features().contains(wgpu::Features::TIMESTAMP_QUERY)
-            && device.features().contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
+            && device
+                .features()
+                .contains(wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS);
 
         let query_set = if has_timestamps {
             Some(device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -225,7 +227,8 @@ impl GpuProfiler {
 
     /// Resolve query set to buffer (call after frame submit)
     pub fn resolve_queries(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if let (Some(ref query_set), Some(ref query_buffer)) = (&self.query_set, &self.query_buffer) {
+        if let (Some(ref query_set), Some(ref query_buffer)) = (&self.query_set, &self.query_buffer)
+        {
             if self.next_index > 0 {
                 encoder.resolve_query_set(query_set, 0..self.next_index, query_buffer, 0);
             }
@@ -234,9 +237,17 @@ impl GpuProfiler {
 
     /// Copy resolved queries to CPU-readable buffer
     pub fn copy_to_resolve_buffer(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        if let (Some(ref query_buffer), Some(ref resolve_buffer)) = (&self.query_buffer, &self.resolve_buffer) {
+        if let (Some(ref query_buffer), Some(ref resolve_buffer)) =
+            (&self.query_buffer, &self.resolve_buffer)
+        {
             if self.next_index > 0 {
-                encoder.copy_buffer_to_buffer(query_buffer, 0, resolve_buffer, 0, (self.next_index as u64) * 8);
+                encoder.copy_buffer_to_buffer(
+                    query_buffer,
+                    0,
+                    resolve_buffer,
+                    0,
+                    (self.next_index as u64) * 8,
+                );
             }
         }
     }
@@ -274,11 +285,14 @@ impl GpuProfiler {
 
                     // Calculate deltas for each pass
                     for (name, start_idx, end_idx) in &self.pending_queries {
-                        if (*end_idx as usize) < timestamps.len() && (*start_idx as usize) < timestamps.len() {
+                        if (*end_idx as usize) < timestamps.len()
+                            && (*start_idx as usize) < timestamps.len()
+                        {
                             let start = timestamps[*start_idx as usize];
                             let end = timestamps[*end_idx as usize];
                             let duration_ticks = end.saturating_sub(start);
-                            let duration_ns = (duration_ticks as f32 * self.timestamp_period) as u64;
+                            let duration_ns =
+                                (duration_ticks as f32 * self.timestamp_period) as u64;
 
                             self.last_timings.push(GpuTimestamp {
                                 name: name.to_string(),

@@ -143,4 +143,3 @@ fn vertex_stride_expressed_as_u64_fits_in_u32() {
     let stride: u64 = 40;
     assert!(stride <= u32::MAX as u64);
 }
-

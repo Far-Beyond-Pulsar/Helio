@@ -209,15 +209,6 @@ fn draw_indexed_indirect_size_bytes() {
     assert_eq!(size, 20);
 }
 
-#[test]
-fn multi_draw_indirect_buffer_for_all_faces() {
-    let indirect_size: usize = 5 * std::mem::size_of::<u32>(); // 20 bytes per draw
-    // One indirect draw per face (assuming max draws = MAX_SHADOW_FACES)
-    let total = indirect_size * MAX_SHADOW_FACES;
-    // 20 × 256 = 5,120 bytes
-    assert_eq!(total, 5_120);
-}
-
 // ── Atlas texture array properties ───────────────────────────────────────────
 
 #[test]
@@ -230,7 +221,7 @@ fn atlas_texture_array_layers_equals_max_shadow_faces() {
 fn atlas_is_square() {
     // Each face in the atlas is SHADOW_RES × SHADOW_RES.
     assert_eq!(SHADOW_RES, SHADOW_RES); // trivially square
-    // More usefully: width == height
+                                        // More usefully: width == height
     let width = SHADOW_RES;
     let height = SHADOW_RES;
     assert_eq!(width, height);

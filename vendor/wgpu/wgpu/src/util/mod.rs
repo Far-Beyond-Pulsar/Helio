@@ -3,10 +3,6 @@
 //! Nothing in this module is a part of the WebGPU API specification;
 //! they are unique to the `wgpu` library.
 
-// TODO: For [`belt::StagingBelt`] to be available in `no_std` its usage of [`std::sync::mpsc`]
-// must be replaced with an appropriate alternative.
-#[cfg(std)]
-mod belt;
 mod device;
 mod encoder;
 mod init;
@@ -17,8 +13,6 @@ mod texture_blitter;
 
 use alloc::{format, string::String};
 
-#[cfg(std)]
-pub use belt::StagingBelt;
 pub use device::{BufferInitDescriptor, DeviceExt};
 pub use encoder::RenderEncoder;
 pub use init::*;

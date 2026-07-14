@@ -198,4 +198,3 @@ fn triangle_vertex_count_equals_draw_range() {
     let draw_range = 0..3_u32;
     assert_eq!(draw_range.count(), 3);
 }
-

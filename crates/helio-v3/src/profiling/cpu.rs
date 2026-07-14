@@ -29,8 +29,8 @@
 //! } // ScopeGuard drops, timing recorded
 //! ```
 
-#[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
-use std::time::Instant;
+#[cfg(feature = "profiling")]
+use web_time::Instant;
 
 /// CPU profiler with scoped timing.
 ///
@@ -118,15 +118,15 @@ impl CpuProfiler {
     ///     // ... CPU work ...
     /// } // Timing recorded when guard drops
     /// ```
-    pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
+    pub fn scope(&mut self, name: &'static str) -> ScopeGuard<'_> {
         ScopeGuard {
-            #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+            #[cfg(feature = "profiling")]
             start: Instant::now(),
-            #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+            #[cfg(feature = "profiling")]
             profiler: self,
-            #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+            #[cfg(feature = "profiling")]
             name,
-            #[cfg(not(all(not(target_arch = "wasm32"), feature = "profiling")))]
+            #[cfg(not(feature = "profiling"))]
             _phantom: std::marker::PhantomData,
         }
     }
@@ -166,14 +166,14 @@ impl Default for CpuProfiler {
 /// } // <-- Timing recorded here (automatic via Drop)
 /// ```
 pub struct ScopeGuard<'a> {
-    #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+    #[cfg(feature = "profiling")]
     start: Instant,
-    #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+    #[cfg(feature = "profiling")]
     profiler: &'a mut CpuProfiler,
-    #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+    #[cfg(feature = "profiling")]
     name: &'static str,
     // Keeps the lifetime valid when profiling fields are compiled out.
-    #[cfg(not(all(not(target_arch = "wasm32"), feature = "profiling")))]
+    #[cfg(not(feature = "profiling"))]
     _phantom: std::marker::PhantomData<&'a ()>,
 }
 
@@ -184,11 +184,10 @@ impl Drop for ScopeGuard<'_> {
     ///
     /// - **O(1)**: Calculates elapsed time and records to profiler
     fn drop(&mut self) {
-        #[cfg(all(not(target_arch = "wasm32"), feature = "profiling"))]
+        #[cfg(feature = "profiling")]
         {
             let elapsed = self.start.elapsed();
             self.profiler.timings.insert(self.name, elapsed);
         }
     }
 }
-

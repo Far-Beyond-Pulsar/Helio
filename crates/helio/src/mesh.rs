@@ -235,12 +235,7 @@ impl MeshSubPool {
                 wgpu::BufferUsages::VERTEX,
                 v_label,
             ),
-            indices: GrowableBuffer::new(
-                device,
-                i_cap,
-                wgpu::BufferUsages::INDEX,
-                i_label,
-            ),
+            indices: GrowableBuffer::new(device, i_cap, wgpu::BufferUsages::INDEX, i_label),
             vertex_alloc: FreeListAllocator::default(),
             index_alloc: FreeListAllocator::default(),
         }
@@ -250,11 +245,7 @@ impl MeshSubPool {
     ///
     /// Tries free ranges first; falls back to appending.  Returns the
     /// `(first_vertex, first_index)` slot start.
-    fn alloc_and_write(
-        &mut self,
-        vertices: &[PackedVertex],
-        indices: &[u32],
-    ) -> (usize, usize) {
+    fn alloc_and_write(&mut self, vertices: &[PackedVertex], indices: &[u32]) -> (usize, usize) {
         let vcount = vertices.len();
         let icount = indices.len();
 
@@ -286,10 +277,16 @@ impl MeshSubPool {
         let istart = slice.first_index as usize;
         let icount = slice.index_count as usize;
 
-        if let Some(new_vlen) = self.vertex_alloc.free(vstart, vcount, self.vertices.live_len()) {
+        if let Some(new_vlen) = self
+            .vertex_alloc
+            .free(vstart, vcount, self.vertices.live_len())
+        {
             self.vertices.truncate(new_vlen);
         }
-        if let Some(new_ilen) = self.index_alloc.free(istart, icount, self.indices.live_len()) {
+        if let Some(new_ilen) = self
+            .index_alloc
+            .free(istart, icount, self.indices.live_len())
+        {
             self.indices.truncate(new_ilen);
         }
     }
@@ -347,7 +344,11 @@ impl MeshPool {
             index_count: mesh.indices.len() as u32,
         };
 
-        let (id, _, _) = self.meshes.insert(MeshRecord { slice, ref_count: 0, kind });
+        let (id, _, _) = self.meshes.insert(MeshRecord {
+            slice,
+            ref_count: 0,
+            kind,
+        });
         id
     }
 
@@ -388,7 +389,10 @@ impl MeshPool {
             })
             .collect();
 
-        MultiMeshRecord { section_mesh_ids, ref_count: 0 }
+        MultiMeshRecord {
+            section_mesh_ids,
+            ref_count: 0,
+        }
     }
 
     pub fn update_dynamic_vertices(
@@ -469,7 +473,11 @@ impl MeshPool {
         let index_start = slice.first_index as usize;
         let index_end = index_start + slice.index_count as usize;
 
-        let vertices = sub.vertices.as_slice().get(vertex_start..vertex_end)?.to_vec();
+        let vertices = sub
+            .vertices
+            .as_slice()
+            .get(vertex_start..vertex_end)?
+            .to_vec();
         let indices = sub.indices.as_slice().get(index_start..index_end)?.to_vec();
 
         Some(MeshUpload { vertices, indices })

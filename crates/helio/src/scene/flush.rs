@@ -5,7 +5,7 @@
 //! with flush operations.
 
 use bytemuck::Zeroable;
-use libhelio::{GpuLight, GpuShadowMatrix};
+use libhelio::GpuShadowMatrix;
 
 use crate::scene::Scene;
 
@@ -72,34 +72,6 @@ impl Scene {
     /// renderer.render(&scene, target)?;
     /// ```
     pub fn flush(&mut self) {
-        // ── Rebuild lights buffer to only contain movable lights ─────────────
-        // Static/stationary lights are baked and should not contribute to real-time lighting.
-        // This dramatically improves performance when scenes have many baked lights.
-        {
-            let light_rec_count = self.lights.dense_len();
-            let mut movable_lights: Vec<GpuLight> = Vec::with_capacity(light_rec_count);
-
-            for i in 0..light_rec_count {
-                if let Some(record) = self.lights.get_dense(i) {
-                    if record.movability.can_move() {
-                        movable_lights.push(record.gpu);
-                    }
-                }
-            }
-
-            // Replace the lights buffer with only movable lights
-            self.gpu_scene.lights.set_data(movable_lights.clone());
-            self.gpu_scene.movable_light_count = movable_lights.len() as u32;
-
-            if movable_lights.len() < light_rec_count {
-                log::trace!(
-                    "[helio] Filtered lights for runtime: {} movable, {} static/stationary (baked)",
-                    movable_lights.len(),
-                    light_rec_count - movable_lights.len()
-                );
-            }
-        }
-
         // Assign shadow atlas slots to the highest-importance shadow-casting lights.
         //
         // Problem with sequential assignment: the first N lights inserted always win the
@@ -214,14 +186,10 @@ impl Scene {
                         self.gpu_scene.camera.position(),
                         DIRECTIONAL_CAMERA_SNAP_METERS,
                     );
-                    let snapped_cam_forward = quantize_f32s(
-                        self.gpu_scene.camera.forward(),
-                        DIRECTIONAL_FORWARD_SNAP,
-                    );
+                    let snapped_cam_forward =
+                        quantize_f32s(self.gpu_scene.camera.forward(), DIRECTIONAL_FORWARD_SNAP);
 
-                    base_hash
-                        ^ fnv1a_f32s(&snapped_cam_pos)
-                        ^ fnv1a_f32s(&snapped_cam_forward)
+                    base_hash ^ fnv1a_f32s(&snapped_cam_pos) ^ fnv1a_f32s(&snapped_cam_forward)
                 } else {
                     base_hash
                 };

@@ -12,9 +12,7 @@ bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true
 thiserror = { workspace = true }
 libhelio = { workspace = true }
-
-[dev-dependencies]
-pollster = { workspace = true }
+web-time = "1"
 
 [features]
 default = ["profiling"]

@@ -184,15 +184,14 @@ pub struct GpuScene {
     // ── Shadow partition buffers (Unreal-style static/dynamic split) ──────────
     // NOTE: Both pass kinds use `instances` (the main transforms buffer) at binding 1.
     // We only partition the INDIRECT DRAW CALL buffers so that each atlas can be
-    // rendered with a single `multi_draw_indexed_indirect` call. This means
-    // `first_instance` in each indirect entry is the object's dense_index into
+    // submitted independently through browser WebGPU. `first_instance` in each
+    // indirect entry is the object's dense_index into
     // `instances`, keeping transform data in a single place that stays in sync
     // when `update_object_transform` writes to it.
     //
     // Obsolete approach (DO NOT restore): splitting instance data into two copies
     // (shadow_static_instances / shadow_movable_instances) caused dynamic shadows to
     // freeze because the copies were never updated on `update_object_transform`.
-
     /// Indirect draw commands for Static/Stationary objects (indexes into `instances`).
     pub shadow_static_indirect: GpuIndirectBuffer,
     /// Indirect draw commands for Movable objects (indexes into `instances`).
@@ -204,10 +203,6 @@ pub struct GpuScene {
     /// Increments when the static object set changes (add/remove of Static/Stationary objects).
     /// Used by ShadowPass to know when to re-render the static shadow atlas.
     pub static_objects_generation: u64,
-    
-    /// Number of movable lights in the lights buffer (at runtime, only movable lights are uploaded).
-    /// Static/stationary lights are baked and excluded from real-time lighting calculations.
-    pub movable_light_count: u32,
 
     /// Per-caster shadow dirty generation counters. Each slot corresponds to one shadow caster
     /// (6 atlas faces). Incremented by Scene::flush() when that caster's content hash changes
@@ -278,7 +273,6 @@ impl GpuScene {
             shadow_movable_indirect,
             shadow_static_draw_count: 0,
             shadow_movable_draw_count: 0,
-            movable_light_count: 0,
             per_caster_dirty_gen: [1u64; 42],
         }
     }
@@ -330,7 +324,6 @@ impl GpuScene {
             shadow_movable_indirect: self.shadow_movable_indirect.buffer(),
             shadow_static_draw_count: self.shadow_static_draw_count,
             shadow_movable_draw_count: self.shadow_movable_draw_count,
-            movable_light_count: self.movable_light_count,
             static_objects_generation: self.static_objects_generation,
             per_caster_dirty_gen: self.per_caster_dirty_gen,
         }
@@ -398,4 +391,3 @@ impl GpuScene {
         self.shadow_movable_indirect.flush(queue);
     }
 }
-

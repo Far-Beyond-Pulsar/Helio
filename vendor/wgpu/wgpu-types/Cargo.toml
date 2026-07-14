@@ -80,9 +80,3 @@ web-sys = { workspace = true, optional = true, default-features = false, feature
     "OffscreenCanvas",
     "VideoFrame",
 ] }
-
-[dev-dependencies]
-exhaust.workspace = true
-hashbrown.workspace = true
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true

@@ -116,12 +116,10 @@ struct ShadowConfig {
 @group(1) @binding(2) var gbuf_orm:      texture_2d<f32>;       // Rgba8Unorm   AO, roughness, metallic
 @group(1) @binding(3) var gbuf_emissive: texture_2d<f32>;       // Rgba16Float  pre-multiplied emissive
 @group(1) @binding(4) var gbuf_depth:    texture_depth_2d;      // Depth32Float
-// R8Unorm screen-space AO (SSAO or pre-baked equivalent). 1.0 = fully lit, 0.0 = fully occluded.
-// Bound to a 1×1 white fallback texture when neither SSAO nor baked AO is available.
+// R8Unorm screen-space AO. 1.0 = fully lit, 0.0 = fully occluded.
+// Bound to a 1×1 white fallback texture when SSAO is unavailable.
 @group(1) @binding(5) var screen_ao:     texture_2d<f32>;
 @group(1) @binding(6) var screen_ao_samp: sampler;
-// Lightmap UVs from GBuffer (Rg16Float, contains atlas UV coordinates for lightmap lookup)
-@group(1) @binding(7) var gbuf_lightmap_uv: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -136,9 +134,6 @@ struct ShadowConfig {
 @group(2) @binding(8) var water_caustics: texture_2d<f32>;  // Caustics texture from WaterCausticsPass
 @group(2) @binding(9) var caustics_sampler: sampler;  // Sampler for caustics
 @group(2) @binding(10) var<storage, read> water_volumes: array<GpuWaterVolume>;  // Water volumes
-// Baked lightmap atlas (Rgba16Float, pre-baked indirect illumination for Static geometry)
-@group(2) @binding(12) var baked_lightmap: texture_2d<f32>;
-@group(2) @binding(13) var baked_lightmap_sampler: sampler;
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -754,10 +749,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(N * 0.5 + 0.5, 1.0);
     }
 
-    // ── VG flag: VG pass writes a (-2, -2) sentinel into gbuf_lightmap_uv ─────
-    let lightmap_uv     = textureLoad(gbuf_lightmap_uv, pix, 0).rg;
-    let is_vg           = lightmap_uv.x < -1.5;
-    let has_lightmap    = !is_vg && lightmap_uv.x >= 0.0;  // sentinel: negative x = no lightmap
+    // Virtual geometry stores -(F0.r + 1) in normal alpha; regular geometry stores F0.r.
+    let is_vg = normal_r.w < 0.0;
 
     // ── Reconstruct world position from depth + inv_view_proj ────────────────
     // clip_pos.xy is in viewport space (0→width, 0→height, y↓).
@@ -803,7 +796,8 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     }
 
     // ── PBR setup ─────────────────────────────────────────────────────────────
-    let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
+    let f0_r = select(normal_r.w, -normal_r.w - 1.0, is_vg);
+    let F0  = clamp(vec3<f32>(f0_r, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
     let V   = normalize(camera.position_near.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
@@ -845,25 +839,6 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
     let diff_ind = kD_ibl * rc_irr * albedo;
     
-    // ── Baked lightmap indirect diffuse ───────────────────────────────────────
-    // For static geometry: pre-computed multi-bounce GI from offline baking.
-    //
-    // The GBuffer vertex shader writes a sentinel of (-1, -1) into the lightmap UV
-    // channel for instances that have no lightmap (lightmap_index == 0xFFFFFFFF).
-    // We detect this sentinel here to skip the lightmap contribution entirely,
-    // rather than checking `uv > 0.01` which would incorrectly skip valid atlas
-    // regions whose top-left corner happens to be near (0, 0).
-    //
-    // The UV is already clamped to the region's half-texel-inset boundary in the
-    // vertex shader, so textureSample cannot bleed into adjacent atlas regions.
-    // textureSampleLevel instead of textureSample: control flow is non-uniform (depends on
-    // per-fragment world_pos via clip_pos), so WebGPU requires an explicit LOD variant.
-    let lightmap_sample = textureSampleLevel(baked_lightmap, baked_lightmap_sampler, lightmap_uv, 0.0).rgb;
-    // Nebula stores Σ(radiance · NdotL) — the same weighted sum pbr_direct_light accumulates
-    // into Lo.  No extra 1/π factor here: Nebula does not divide by π in the bake shader,
-    // so neither do we.  This convention matches Unreal Engine's lightmap pipeline.
-    let lightmap_indirect = lightmap_sample * albedo;
-
     // ── Indirect specular: environment cubemap ────────────────────────────────
     let R            = reflect(-V, N);
     let env_lod      = roughness * 8.0;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
@@ -888,32 +863,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // RC weight: 0 = no RC data, 1 = full RC coverage
     let rc_weight      = clamp(length(rc_irr) * 4.0, 0.0, 1.0);
 
-    // Baked lightmap weight: 1.0 for static objects with valid lightmap, 0.0 otherwise.
-    let lm_weight      = select(0.0, 1.0, has_lightmap);
-
-    // Blend between hemisphere fallback, RC-based GI, and baked lightmap:
-    // Priority: lightmap > RC > hemisphere
-    // 1. Start with hemisphere (always-on fallback)
-    // 2. Blend in RC when available (runtime dynamic GI)
-    // 3. Blend in lightmap when available (pre-baked static GI, highest quality)
-    var ambient_final = mix(hemi, diff_ind, rc_weight);
+    let ambient_final = mix(hemi, diff_ind, rc_weight);
 
     // ── Combine ───────────────────────────────────────────────────────────────
     //
-    // Unreal-style "Static light" model:
-    //   • The baked lightmap encodes TOTAL LIGHTING (direct shadow + indirect GI)
-    //     from every baked light.  For lightmapped surfaces Lo is suppressed so the
-    //     same lights are not double-counted.
-    //   • AO is NOT applied to the lightmap.  The path-traced bake already accounts
-    //     for per-texel occlusion via shadow rays; applying screen-space AO on top
-    //     would double-darken the result.
-    //   • For un-lightmapped surfaces the normal dynamic path applies AO to the
-    //     hemisphere/RC ambient term as usual.
-    let lo_final      = Lo * (1.0 - lm_weight);          // suppress Lo for baked pixels
-    let indirect_dyn  = (ambient_final + spec_ind) * ao_combined;  // AO on dynamic GI
-    let indirect_bake =  lightmap_indirect + spec_ind;              // no AO on lightmap
-    let indirect      = select(indirect_dyn, indirect_bake, has_lightmap);
-    var color         = lo_final + indirect;
+    var color = Lo + (ambient_final + spec_ind) * ao_combined;
     color        += emissive;               // emissive from G-buffer
 
     // ── Water caustics ────────────────────────────────────────────────────────

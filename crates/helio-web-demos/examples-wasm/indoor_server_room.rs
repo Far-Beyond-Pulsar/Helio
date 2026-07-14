@@ -114,9 +114,16 @@ impl HelioWasmApp for Demo {
         ));
 
         // Room shell
-        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 12.0)));
+        let floor = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(plane_mesh([0.0, 0.0, 0.0], 12.0)));
         insert_object(renderer, floor, floor_m, glam::Mat4::IDENTITY, 12.0).unwrap();
-        let ceiling = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, 3.0, 0.0], [12.0, 0.1, 12.0])));
+        let ceiling = renderer
+            .scene_mut()
+            .insert_actor(helio::SceneActor::mesh(box_mesh(
+                [0.0, 3.0, 0.0],
+                [12.0, 0.1, 12.0],
+            )));
         insert_object(renderer, ceiling, ceil_m, glam::Mat4::IDENTITY, 12.0).unwrap();
         for (pos, size, rad) in [
             ([-12.0, 1.5, 0.0], [0.1, 3.0, 12.0], 12.0_f32),
@@ -124,7 +131,9 @@ impl HelioWasmApp for Demo {
             ([0.0, 1.5, -12.0], [12.0, 3.0, 0.1], 12.0),
             ([0.0, 1.5, 12.0], [12.0, 3.0, 0.1], 12.0),
         ] {
-            let wm = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, size)));
+            let wm = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(pos, size)));
             insert_object(renderer, wm, wall_m, glam::Mat4::IDENTITY, rad).unwrap();
         }
 
@@ -142,12 +151,19 @@ impl HelioWasmApp for Demo {
             [8.0, 1.0, 8.0],
         ];
         for &pos in rack_positions {
-            let rack = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, [0.5, 2.0, 0.9])));
+            let rack = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(pos, [0.5, 2.0, 0.9])));
             insert_object(renderer, rack, rack_m, glam::Mat4::IDENTITY, 2.0).unwrap();
             // Server blades (6 per rack)
             for blade_y in 0..6 {
                 let blade_pos = [pos[0] + 0.26, pos[1] - 0.85 + blade_y as f32 * 0.3, pos[2]];
-                let blade = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(blade_pos, [0.04, 0.12, 0.85])));
+                let blade = renderer
+                    .scene_mut()
+                    .insert_actor(helio::SceneActor::mesh(box_mesh(
+                        blade_pos,
+                        [0.04, 0.12, 0.85],
+                    )));
                 insert_object(renderer, blade, blade_m, glam::Mat4::IDENTITY, 0.85).unwrap();
                 // LEDs
                 let led_x = pos[0] + 0.48;
@@ -162,15 +178,22 @@ impl HelioWasmApp for Demo {
                 {
                     let _ = k;
                     let led =
-                        renderer.scene_mut().insert_actor(helio::SceneActor::mesh(cube_mesh([led_x, blade_pos[1], pos[2] + dz], 0.018)));
+                        renderer
+                            .scene_mut()
+                            .insert_actor(helio::SceneActor::mesh(cube_mesh(
+                                [led_x, blade_pos[1], pos[2] + dz],
+                                0.018,
+                            )));
                     insert_object(renderer, led, *led_mat, glam::Mat4::IDENTITY, 0.018).unwrap();
                 }
             }
             // Cable bundles at rear
-            let cable = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(
-                [pos[0] - 0.55, pos[1] + 0.4, pos[2]],
-                [0.12, 0.4, 0.8],
-            )));
+            let cable = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(
+                    [pos[0] - 0.55, pos[1] + 0.4, pos[2]],
+                    [0.12, 0.4, 0.8],
+                )));
             insert_object(renderer, cable, cable_m, glam::Mat4::IDENTITY, 0.8).unwrap();
         }
 
@@ -178,20 +201,35 @@ impl HelioWasmApp for Demo {
         let strip_positions: &[[f32; 3]] = &[[-8.0, 2.95, 0.0], [8.0, 2.95, 0.0], [0.0, 2.95, 0.0]];
         let mut indicator_ids = Vec::new();
         for &pos in strip_positions {
-            let strip = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, [0.1, 0.05, 10.0])));
+            let strip = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::mesh(box_mesh(pos, [0.1, 0.05, 10.0])));
             insert_object(renderer, strip, strip_m, glam::Mat4::IDENTITY, 10.0).unwrap();
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(pos, [0.65, 0.75, 0.95], 80.0, 12.0))).as_light().unwrap();
+            let id = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    pos,
+                    [0.65, 0.75, 0.95],
+                    80.0,
+                    12.0,
+                )))
+                .as_light()
+                .unwrap();
             indicator_ids.push(id);
         }
 
         // Indicator accent lights per rack row
         for &pos in rack_positions.iter().step_by(2) {
-            let id = renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light(
-                [pos[0], 0.8, pos[2]],
-                [0.0, 0.9, 0.3],
-                3.0,
-                4.0,
-            ))).as_light().unwrap();
+            let id = renderer
+                .scene_mut()
+                .insert_actor(helio::SceneActor::light(point_light(
+                    [pos[0], 0.8, pos[2]],
+                    [0.0, 0.9, 0.3],
+                    3.0,
+                    4.0,
+                )))
+                .as_light()
+                .unwrap();
             indicator_ids.push(id);
         }
 
@@ -243,8 +281,9 @@ impl HelioWasmApp for Demo {
             .enumerate()
         {
             let f = 1.0 + (elapsed * 120.0 + i as f32 * 2.1).sin() * 0.005;
-            let _ =
-                renderer.scene_mut().update_light(*id, point_light(pos, [0.65, 0.75, 0.95], 80.0 * f, 12.0));
+            let _ = renderer
+                .scene_mut()
+                .update_light(*id, point_light(pos, [0.65, 0.75, 0.95], 80.0 * f, 12.0));
         }
 
         // Rack indicator lights blink
@@ -280,6 +319,3 @@ impl HelioWasmApp for Demo {
         )
     }
 }
-
-
-

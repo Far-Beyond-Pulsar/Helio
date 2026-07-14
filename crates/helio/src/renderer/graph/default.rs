@@ -7,10 +7,12 @@ use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPa
 use helio_pass_taa::TaaPass;
 use helio_v3::RenderGraph;
 
-use crate::scene::Scene;
-use crate::renderer::debug::DebugDrawState;
+use super::{
+    add_common_early_passes, add_final_passes, add_geometry_passes, add_late_passes, new_graph,
+};
 use crate::renderer::config::RendererConfig;
-use super::{add_common_early_passes, add_geometry_passes, add_late_passes, add_final_passes, new_graph};
+use crate::renderer::debug::DebugDrawState;
+use crate::scene::Scene;
 
 pub fn build_default_graph(
     device: &Arc<wgpu::Device>,
@@ -22,7 +24,17 @@ pub fn build_default_graph(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
+    build_default_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+    )
 }
 
 /// Same as `build_default_graph` but marks the graph as operating against an
@@ -39,7 +51,17 @@ pub fn build_default_graph_external(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_default_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay)
+    build_default_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+    )
 }
 
 fn build_default_graph_internal(
@@ -59,7 +81,15 @@ fn build_default_graph_internal(
     let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, iw, ih,
+        &mut graph,
+        device,
+        scene,
+        &config,
+        debug_state.clone(),
+        debug_camera_buf,
+        cull_stats_buf,
+        iw,
+        ih,
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
@@ -67,9 +97,8 @@ fn build_default_graph_internal(
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
-    let mut deferred_light_pass = DeferredLightPass::new(
-        device, queue, camera_buf, config.surface_format,
-    );
+    let mut deferred_light_pass =
+        DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
     graph.add_pass(Box::new(deferred_light_pass));
@@ -79,10 +108,24 @@ fn build_default_graph_internal(
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
 
     graph.add_pass(Box::new(TaaPass::new(
-        device, iw, ih, config.width, config.height, config.surface_format,
+        device,
+        iw,
+        ih,
+        config.width,
+        config.height,
+        config.surface_format,
     )));
 
-    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
+    add_final_passes(
+        &mut graph,
+        device,
+        queue,
+        &config,
+        &perf,
+        debug_state,
+        debug_camera_buf,
+        debug_overlay,
+    );
 
     graph.lock(iw, ih);
     graph

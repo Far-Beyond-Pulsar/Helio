@@ -1,4 +1,0 @@
-targets = "IR"
-
-[spv-in]
-adjust_coordinate_space = true

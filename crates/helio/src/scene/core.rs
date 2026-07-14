@@ -14,8 +14,8 @@ use wgpu::util::DeviceExt;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId,
-    VirtualObjectId, WaterHitboxId, WaterVolumeId,
+    LightId, MaterialId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId, VirtualObjectId,
+    WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::scene::multi_mesh::SectionedInstanceRecord;
@@ -76,11 +76,6 @@ pub struct Scene {
     /// True when a Static or Stationary object has been added or removed since the last
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
     pub(in crate::scene) static_objects_dirty: bool,
-
-    /// True when static/stationary geometry or lights have been added since the last bake.
-    /// When this is true and a bake was previously configured, the user must explicitly
-    /// call auto_bake() again to rebake the scene with the new static content.
-    pub(in crate::scene) bake_invalidated: bool,
 
     /// True when objects have been added or removed via persistent-mode delta operations.
     /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
@@ -154,7 +149,8 @@ pub struct Scene {
 
     /// Placed sectioned mesh instances.  Each entry owns N `ObjectId`s (one per section)
     /// and back-references the `MultiMeshId` asset it was created from.
-    pub(in crate::scene) sectioned_instances: SparsePool<SectionedInstanceRecord, SectionedInstanceId>,
+    pub(in crate::scene) sectioned_instances:
+        SparsePool<SectionedInstanceRecord, SectionedInstanceId>,
 
     /// Reverse lookup: given any section's `ObjectId`, find the owning `SectionedInstanceId`.
     /// Populated by `insert_sectioned_object` and cleaned up by `remove_sectioned_object`.
@@ -246,7 +242,6 @@ impl Scene {
             objects_dirty: true,             // rebuild on first flush
             objects_layout_optimized: false, // start in persistent mode
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
-            bake_invalidated: false,         // no bake configured yet
             shadow_partition_dirty: false,   // full rebuild on first flush handles this
             prev_view_proj: glam::Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,

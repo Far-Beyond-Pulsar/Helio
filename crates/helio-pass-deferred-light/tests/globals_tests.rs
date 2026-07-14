@@ -201,4 +201,3 @@ fn no_light_count_means_zero() {
     let no_lights: u32 = 0;
     assert_eq!(no_lights, 0);
 }
-

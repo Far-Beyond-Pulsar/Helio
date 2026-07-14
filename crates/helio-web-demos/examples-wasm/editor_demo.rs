@@ -35,15 +35,15 @@ use crate::common::{
 
 pub struct Demo {
     // Camera
-    cam_pos:   glam::Vec3,
-    cam_yaw:   f32,
+    cam_pos: glam::Vec3,
+    cam_yaw: f32,
     cam_pitch: f32,
-    width:     u32,
-    height:    u32,
+    width: u32,
+    height: u32,
 
     // Editor
-    editor:       EditorState,
-    picker:       ScenePicker,
+    editor: EditorState,
+    picker: ScenePicker,
     grid_enabled: bool,
 
     // One-frame "just pressed" tracking for keyboard shortcuts.
@@ -81,24 +81,48 @@ impl HelioWasmApp for Demo {
         let mut picker = ScenePicker::new();
 
         // ── Materials ─────────────────────────────────────────────────────────
-        let mat_floor = renderer
-            .scene_mut()
-            .insert_material(make_material([0.55, 0.55, 0.55, 1.0], 0.8, 0.0, [0.0; 3], 0.0));
-        let mat_red = renderer
-            .scene_mut()
-            .insert_material(make_material([0.9, 0.15, 0.15, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
-        let mat_green = renderer
-            .scene_mut()
-            .insert_material(make_material([0.15, 0.85, 0.25, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
-        let mat_blue = renderer
-            .scene_mut()
-            .insert_material(make_material([0.15, 0.35, 0.95, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
-        let mat_gold = renderer
-            .scene_mut()
-            .insert_material(make_material([1.0, 0.76, 0.1, 1.0], 0.3, 0.8, [0.0; 3], 0.0));
-        let mat_sphere = renderer
-            .scene_mut()
-            .insert_material(make_material([0.8, 0.5, 0.9, 1.0], 0.35, 0.15, [0.0; 3], 0.0));
+        let mat_floor = renderer.scene_mut().insert_material(make_material(
+            [0.55, 0.55, 0.55, 1.0],
+            0.8,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_red = renderer.scene_mut().insert_material(make_material(
+            [0.9, 0.15, 0.15, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_green = renderer.scene_mut().insert_material(make_material(
+            [0.15, 0.85, 0.25, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_blue = renderer.scene_mut().insert_material(make_material(
+            [0.15, 0.35, 0.95, 1.0],
+            0.5,
+            0.0,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_gold = renderer.scene_mut().insert_material(make_material(
+            [1.0, 0.76, 0.1, 1.0],
+            0.3,
+            0.8,
+            [0.0; 3],
+            0.0,
+        ));
+        let mat_sphere = renderer.scene_mut().insert_material(make_material(
+            [0.8, 0.5, 0.9, 1.0],
+            0.35,
+            0.15,
+            [0.0; 3],
+            0.0,
+        ));
 
         // ── Meshes (clone each upload so the picker can keep the BVH data) ──
 
@@ -243,20 +267,20 @@ impl HelioWasmApp for Demo {
             )));
 
         Demo {
-            cam_pos:      glam::Vec3::new(0.0, 4.0, 9.5),
-            cam_yaw:      0.0,
-            cam_pitch:    -0.35,
+            cam_pos: glam::Vec3::new(0.0, 4.0, 9.5),
+            cam_yaw: 0.0,
+            cam_pitch: -0.35,
             width,
             height,
-            editor:       EditorState::new(),
+            editor: EditorState::new(),
             picker,
             grid_enabled: true,
-            prev_keys:    HashSet::new(),
+            prev_keys: HashSet::new(),
         }
     }
 
     fn on_resize(&mut self, _renderer: &mut Renderer, width: u32, height: u32) {
-        self.width  = width;
+        self.width = width;
         self.height = height;
     }
 
@@ -277,27 +301,39 @@ impl HelioWasmApp for Demo {
         // ── Fly camera (cursor grabbed = right-click held) ────────────────────
 
         if input.cursor_grabbed {
-            self.cam_yaw   += input.mouse_delta.0 * LOOK;
+            self.cam_yaw += input.mouse_delta.0 * LOOK;
             self.cam_pitch -= input.mouse_delta.1 * LOOK;
-            self.cam_pitch  = self.cam_pitch.clamp(
+            self.cam_pitch = self.cam_pitch.clamp(
                 -std::f32::consts::FRAC_PI_2 * 0.99,
-                 std::f32::consts::FRAC_PI_2 * 0.99,
+                std::f32::consts::FRAC_PI_2 * 0.99,
             );
         }
 
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
-        let fwd   = glam::Vec3::new(sy * cp, sp, -cy * cp);
+        let fwd = glam::Vec3::new(sy * cp, sp, -cy * cp);
         let right = glam::Vec3::new(cy, 0.0, sy);
 
         if input.cursor_grabbed {
             let mut vel = glam::Vec3::ZERO;
-            if input.keys.contains(&KeyCode::KeyW)     { vel += fwd; }
-            if input.keys.contains(&KeyCode::KeyS)     { vel -= fwd; }
-            if input.keys.contains(&KeyCode::KeyD)     { vel += right; }
-            if input.keys.contains(&KeyCode::KeyA)     { vel -= right; }
-            if input.keys.contains(&KeyCode::Space)    { vel += glam::Vec3::Y; }
-            if input.keys.contains(&KeyCode::ShiftLeft){ vel -= glam::Vec3::Y; }
+            if input.keys.contains(&KeyCode::KeyW) {
+                vel += fwd;
+            }
+            if input.keys.contains(&KeyCode::KeyS) {
+                vel -= fwd;
+            }
+            if input.keys.contains(&KeyCode::KeyD) {
+                vel += right;
+            }
+            if input.keys.contains(&KeyCode::KeyA) {
+                vel -= right;
+            }
+            if input.keys.contains(&KeyCode::Space) {
+                vel += glam::Vec3::Y;
+            }
+            if input.keys.contains(&KeyCode::ShiftLeft) {
+                vel -= glam::Vec3::Y;
+            }
             if vel.length_squared() > 0.0 {
                 self.cam_pos += vel.normalize() * MOVE * dt;
             }
@@ -306,18 +342,14 @@ impl HelioWasmApp for Demo {
         // ── Pick / edit mode (cursor is free) ─────────────────────────────────
 
         if !input.cursor_grabbed {
-            let aspect  = self.width  as f32 / self.height.max(1) as f32;
-            let proj    = glam::Mat4::perspective_rh(
-                std::f32::consts::FRAC_PI_4, aspect, 0.1, 500.0,
-            );
-            let view    = glam::Mat4::look_at_rh(
-                self.cam_pos, self.cam_pos + fwd, glam::Vec3::Y,
-            );
-            let vp_inv  = (proj * view).inverse();
+            let aspect = self.width as f32 / self.height.max(1) as f32;
+            let proj = glam::Mat4::perspective_rh(std::f32::consts::FRAC_PI_4, aspect, 0.1, 500.0);
+            let view = glam::Mat4::look_at_rh(self.cam_pos, self.cam_pos + fwd, glam::Vec3::Y);
+            let vp_inv = (proj * view).inverse();
             let (ray_o, ray_d) = EditorState::ray_from_screen(
                 input.cursor_pos.0,
                 input.cursor_pos.1,
-                self.width  as f32,
+                self.width as f32,
                 self.height as f32,
                 vp_inv,
             );
@@ -332,9 +364,7 @@ impl HelioWasmApp for Demo {
             if input.mouse_left_just_pressed {
                 if !self.editor.try_start_drag(ray_o, ray_d, renderer.scene()) {
                     self.picker.rebuild_instances(renderer.scene());
-                    if let Some(hit) =
-                        self.picker.cast_ray(renderer.scene(), ray_o, ray_d)
-                    {
+                    if let Some(hit) = self.picker.cast_ray(renderer.scene(), ray_o, ray_d) {
                         self.editor.select(hit.actor_id);
                     } else {
                         self.editor.deselect();

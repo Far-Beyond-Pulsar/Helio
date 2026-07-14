@@ -4,7 +4,6 @@ members = [
     "crates/helio",
     "crates/libhelio",
     "crates/helio-asset-compat",
-    "crates/examples",
 
     # GPU-driven pass crates (each O(1) CPU)
     "crates/helio-pass-sky-lut",
@@ -15,8 +14,6 @@ members = [
     "crates/helio-pass-occlusion-cull",
     "crates/helio-pass-light-cull",
     "crates/helio-pass-shadow-matrix",
-    "crates/helio-pass-shadow-dirty",
-    "crates/helio-pass-shadow-cull",
     "crates/helio-pass-shadow",
     "crates/helio-pass-gbuffer",
     "crates/helio-pass-ssao",
@@ -44,23 +41,15 @@ members = [
     "crates/helio-wasm",
     "crates/helio-web-demos",
 
-    # Baking (offline AO, lightmaps, reflection probes, PVS via Nebula)
-    "crates/helio-bake",
-
-    # Offline / tooling crates (no window required)
-    "crates_other/helio-snapshot",
 ]
-exclude = ["vendor/nebula", "vendor/wgpu"]
+exclude = ["vendor/wgpu"]
 resolver = "2"
 
 [workspace.dependencies]
-wgpu = { version = "30.0.0", path = "vendor/wgpu/wgpu", default-features = false, features = ["web", "webgpu", "wgsl", "dx12", "metal", "vulkan"] }
-blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
-blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
+wgpu = { version = "30.0.0", path = "vendor/wgpu/wgpu", default-features = false, features = ["webgpu", "wgsl"] }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
-winit = "0.30.12"
-env_logger = "0.11"
+winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
 log = "0.4"
 
 # SolidRS - 3D asset loading library
@@ -69,12 +58,10 @@ solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070
 solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
 solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
 solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "c070e8ccb0324dbb0a0a5d11abd6c72f00afe291" }
-quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 helio-pass-sdf = { path = "crates/helio-pass-sdf" }
 thiserror = "2.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
-pollster = "0.4"
 helio-v3 = { path = "crates/helio-v3" }
 wasm-bindgen = "0.2"
 helio-pass-taa = { path = "crates/helio-pass-taa" }

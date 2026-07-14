@@ -58,7 +58,10 @@ impl RenderGraph {
         }
     }
 
-    pub fn new_with_external_device(device: &std::sync::Arc<wgpu::Device>, queue: &wgpu::Queue) -> Self {
+    pub fn new_with_external_device(
+        device: &std::sync::Arc<wgpu::Device>,
+        queue: &wgpu::Queue,
+    ) -> Self {
         let mut graph = Self::new(device, queue);
         graph.owns_device = false;
         graph
@@ -112,7 +115,9 @@ impl RenderGraph {
     pub fn add_pass(&mut self, pass: Box<dyn RenderPass>) {
         assert!(!self.locked, "RenderGraph: cannot add_pass() after lock()");
         let type_id = pass.as_any().type_id();
-        self.pass_index_map.entry(type_id).or_insert(self.passes.len());
+        self.pass_index_map
+            .entry(type_id)
+            .or_insert(self.passes.len());
         self.passes.push(pass);
         self.gpu_render_bundles.push(None);
     }
@@ -198,11 +203,16 @@ impl RenderGraph {
 
         for (name, rl) in &self.resources {
             let bpp = format_bpp(rl.format);
-            let bytes = rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8;
+            let bytes =
+                rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64
+                    / 8;
             total_bytes += bytes;
             let alias = rl.alias_group.as_deref().unwrap_or("-").to_string();
             if rl.alias_group.is_some() {
-                alias_groups.entry(rl.alias_group.as_ref().unwrap()).or_default().push(name);
+                alias_groups
+                    .entry(rl.alias_group.as_ref().unwrap())
+                    .or_default()
+                    .push(name);
             }
             data.resources.push(DebugResourceInfo {
                 name: name.clone(),
@@ -220,16 +230,28 @@ impl RenderGraph {
         data.total_vram_kb = total_bytes / 1024;
 
         for (group, members) in &alias_groups {
-            let t: u64 = members.iter().filter_map(|n| {
-                self.resources.get(*n).map(|rl| {
-                    let bpp = format_bpp(rl.format);
-                    rl.width as u64 * rl.height as u64 * rl.depth_or_array_layers as u64 * bpp as u64 / 8
+            let t: u64 = members
+                .iter()
+                .filter_map(|n| {
+                    self.resources.get(*n).map(|rl| {
+                        let bpp = format_bpp(rl.format);
+                        rl.width as u64
+                            * rl.height as u64
+                            * rl.depth_or_array_layers as u64
+                            * bpp as u64
+                            / 8
+                    })
                 })
-            }).sum();
+                .sum();
             let saved = t * (members.len().saturating_sub(1) as u64);
             data.passes.push(DebugPassInfo {
                 index: 999,
-                name: format!("alias group '{}': {} members, ~{} KB saved", group, members.len(), saved / 1024),
+                name: format!(
+                    "alias group '{}': {} members, ~{} KB saved",
+                    group,
+                    members.len(),
+                    saved / 1024
+                ),
                 kind: String::new(),
                 writes: Vec::new(),
                 chain_marker: String::new(),
@@ -244,7 +266,9 @@ impl RenderGraph {
         }
 
         for (i, pass) in self.passes.iter().enumerate() {
-            let writes: Vec<String> = self.resources.iter()
+            let writes: Vec<String> = self
+                .resources
+                .iter()
                 .filter(|(_, rl)| rl.first_write_pass == i)
                 .map(|(n, _)| n.clone())
                 .collect();
@@ -252,8 +276,11 @@ impl RenderGraph {
             let marker = match pass_chain[i] {
                 Some(ci) => {
                     let chain = &self.subpass_chains[ci];
-                    if i == chain.start { format!("[{}.{}]", ci, chain.len()) }
-                    else { format!("|.{}", chain.len()) }
+                    if i == chain.start {
+                        format!("[{}.{}]", ci, chain.len())
+                    } else {
+                        format!("|.{}", chain.len())
+                    }
                 }
                 None => String::new(),
             };
@@ -267,8 +294,12 @@ impl RenderGraph {
         }
 
         for (ci, chain) in self.subpass_chains.iter().enumerate() {
-            let names: Vec<String> = self.passes[chain.start..chain.end].iter().map(|p| p.name().to_string()).collect();
-            data.subpass_chains.push(format!("chain {}: {}", ci, names.join(" → ")));
+            let names: Vec<String> = self.passes[chain.start..chain.end]
+                .iter()
+                .map(|p| p.name().to_string())
+                .collect();
+            data.subpass_chains
+                .push(format!("chain {}: {}", ci, names.join(" → ")));
         }
 
         data
@@ -291,7 +322,10 @@ impl RenderGraph {
         depth: &wgpu::TextureView,
         frame_resources: &libhelio::FrameResources<'_>,
     ) -> Result<()> {
-        assert!(self.locked, "RenderGraph::execute() requires lock() to be called first");
+        assert!(
+            self.locked,
+            "RenderGraph::execute() requires lock() to be called first"
+        );
 
         self.profiler.clear_cpu_timings();
 
@@ -300,11 +334,12 @@ impl RenderGraph {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Render Graph"),
             });
-        let mut compute_encoder = scene
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Compute Graph"),
-            });
+        let mut compute_encoder =
+            scene
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Compute Graph"),
+                });
 
         let mut visible_frame_resources = *frame_resources;
 
@@ -314,9 +349,12 @@ impl RenderGraph {
         for (pass_index, pass) in self.passes.iter_mut().enumerate() {
             if let Some(bundle) = &self.gpu_render_bundles[pass_index] {
                 let pass_name = pass.name();
-                self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+                self.profiler
+                    .begin_gpu_pass(&mut compute_encoder, pass_name);
 
-                if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
+                if let Some(desc) =
+                    pass.render_pass_descriptor(target, depth, &visible_frame_resources)
+                {
                     let mut pass_encoder = encoder.begin_render_pass(&desc);
                     pass_encoder.execute_bundles(std::iter::once(bundle));
                 } else {
@@ -371,9 +409,19 @@ impl RenderGraph {
                         PrePassAction::Route { name, view } => {
                             route_named_texture(name, view, &mut visible_frame_resources);
                         }
-                        PrePassAction::Gbuffer { albedo, normal, orm, emissive } => {
+                        PrePassAction::Gbuffer {
+                            albedo,
+                            normal,
+                            orm,
+                            emissive,
+                        } => {
                             visible_frame_resources.gbuffer.write(
-                                GBufferViews { albedo, normal, orm, emissive },
+                                GBufferViews {
+                                    albedo,
+                                    normal,
+                                    orm,
+                                    emissive,
+                                },
                                 "Graph",
                             );
                         }
@@ -383,10 +431,12 @@ impl RenderGraph {
 
             // execute()
             let pass_name = pass.name();
-            self.profiler.begin_gpu_pass(&mut compute_encoder, pass_name);
+            self.profiler
+                .begin_gpu_pass(&mut compute_encoder, pass_name);
 
             // Migrated path: executor manages render pass (pass implements render_pass_descriptor).
-            if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources) {
+            if let Some(desc) = pass.render_pass_descriptor(target, depth, &visible_frame_resources)
+            {
                 let cache = self.pass_cache.get(pass_index).and_then(|c| c.as_ref());
                 let is_chained = cache.map_or(false, |c| !c.chain_range.is_empty());
 
@@ -394,18 +444,22 @@ impl RenderGraph {
                     let c = cache.unwrap();
                     if pass_index == c.chain_range.start {
                         chain_patch.clear();
-                        chain_patch.extend(desc.color_attachments.iter().enumerate().map(|(i, opt)| {
-                            let mut a = opt.clone();
-                            if let Some(store) = c.store_ops.get(i).copied().flatten() {
-                                if let Some(ref mut att) = a {
-                                    att.ops.store = store;
+                        chain_patch.extend(desc.color_attachments.iter().enumerate().map(
+                            |(i, opt)| {
+                                let mut a = opt.clone();
+                                if let Some(store) = c.store_ops.get(i).copied().flatten() {
+                                    if let Some(ref mut att) = a {
+                                        att.ops.store = store;
+                                    }
                                 }
-                            }
-                            unsafe { std::mem::transmute::<
-                                Option<wgpu::RenderPassColorAttachment<'_>>,
-                                Option<wgpu::RenderPassColorAttachment<'static>>,
-                            >(a) }
-                        }));
+                                unsafe {
+                                    std::mem::transmute::<
+                                        Option<wgpu::RenderPassColorAttachment<'_>>,
+                                        Option<wgpu::RenderPassColorAttachment<'static>>,
+                                    >(a)
+                                }
+                            },
+                        ));
                         let chain_desc = wgpu::RenderPassDescriptor {
                             label: desc.label,
                             color_attachments: &chain_patch,
@@ -437,31 +491,43 @@ impl RenderGraph {
                         owns_device: self.owns_device,
                         resource_pool: &self.pool,
                         subpass_index: c.subpass_index,
-                        active_render_pass: chain_rp.as_mut().map(|rp| &mut **rp as *mut _ as *mut _),
+                        active_render_pass: chain_rp
+                            .as_mut()
+                            .map(|rp| &mut **rp as *mut _ as *mut _),
                         active_compute_pass: None,
                     };
                     pass.execute(&mut ctx)?;
 
                     if pass_index + 1 >= c.chain_range.end {
                         if let Some(mut rp) = chain_rp.take() {
-                            unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                            unsafe {
+                                std::mem::ManuallyDrop::drop(&mut rp);
+                            }
                         }
                     }
                 } else {
                     if let Some(mut rp) = chain_rp.take() {
-                        unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                        unsafe {
+                            std::mem::ManuallyDrop::drop(&mut rp);
+                        }
                     }
 
-                    let standalone_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> =
-                        desc.color_attachments.iter().enumerate().map(|(i, opt)| {
+                    let standalone_atts: Vec<Option<wgpu::RenderPassColorAttachment<'_>>> = desc
+                        .color_attachments
+                        .iter()
+                        .enumerate()
+                        .map(|(i, opt)| {
                             let mut a = opt.clone();
-                            if let Some(store) = cache.and_then(|c| c.store_ops.get(i).copied()).flatten() {
+                            if let Some(store) =
+                                cache.and_then(|c| c.store_ops.get(i).copied()).flatten()
+                            {
                                 if let Some(ref mut att) = a {
                                     att.ops.store = store;
                                 }
                             }
                             a
-                        }).collect();
+                        })
+                        .collect();
                     let standalone_desc = wgpu::RenderPassDescriptor {
                         label: desc.label,
                         color_attachments: &standalone_atts,
@@ -499,18 +565,24 @@ impl RenderGraph {
                     }
                 }
             } else {
-                let bridged = self.chain_membership.get(pass_index).copied().unwrap_or(false)
+                let bridged = self
+                    .chain_membership
+                    .get(pass_index)
+                    .copied()
+                    .unwrap_or(false)
                     && pass.chain_transparent();
                 if !bridged {
                     if let Some(mut rp) = chain_rp.take() {
-                        unsafe { std::mem::ManuallyDrop::drop(&mut rp); }
+                        unsafe {
+                            std::mem::ManuallyDrop::drop(&mut rp);
+                        }
                     }
                 }
 
                 let scene_resources = scene.resources();
                 let mut ctx = PassContext {
                     encoder_ptr: std::ptr::addr_of_mut!(encoder),
-                        compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
+                    compute_encoder_ptr: std::ptr::addr_of_mut!(compute_encoder),
                     target,
                     depth,
                     scene: scene_resources,
@@ -535,7 +607,9 @@ impl RenderGraph {
         }
 
         self.profiler.resolve_gpu_queries(&mut compute_encoder);
-        scene.queue.submit([compute_encoder.finish(), encoder.finish()]);
+        scene
+            .queue
+            .submit([compute_encoder.finish(), encoder.finish()]);
         crate::upload::finish_frame();
 
         if self.owns_device {
@@ -575,7 +649,15 @@ impl RenderGraph {
                 self.pool.get_view("gbuffer_orm"),
                 self.pool.get_view("gbuffer_emissive"),
             ) {
-                canon.gbuffer.write(libhelio::GBufferViews { albedo: a, normal: n, orm: o, emissive: e }, "Graph");
+                canon.gbuffer.write(
+                    libhelio::GBufferViews {
+                        albedo: a,
+                        normal: n,
+                        orm: o,
+                        emissive: e,
+                    },
+                    "Graph",
+                );
             }
         }
         let mut v2n = std::collections::HashMap::new();
@@ -588,8 +670,13 @@ impl RenderGraph {
         let dummy_target = {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Lock Dummy Target"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: 1,
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8Unorm,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -597,34 +684,50 @@ impl RenderGraph {
             });
             tex.create_view(&wgpu::TextureViewDescriptor::default())
         };
-        let dummy_depth = self.pool.get_view("depth").cloned()
-            .unwrap_or_else(|| {
-                let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Lock Dummy Depth"),
-                    size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                    mip_level_count: 1, sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Depth32Float,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                });
-                tex.create_view(&wgpu::TextureViewDescriptor::default())
+        let dummy_depth = self.pool.get_view("depth").cloned().unwrap_or_else(|| {
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Lock Dummy Depth"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Depth32Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
             });
+            tex.create_view(&wgpu::TextureViewDescriptor::default())
+        });
 
-        let probes: Vec<Option<(usize, Vec<usize>)>> = self.passes.iter().map(|pass| {
-            let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
-            let color_len = desc.color_attachments.len();
-            let mut signature: Vec<usize> = desc.color_attachments.iter().map(|opt| {
-                opt.as_ref().map(|a| a.view as *const wgpu::TextureView as usize).unwrap_or(0)
-            }).collect();
-            signature.push(
-                desc.depth_stencil_attachment.as_ref()
-                    .map(|d| d.view as *const wgpu::TextureView as usize)
-                    .unwrap_or(0)
-            );
-            Some((color_len, signature))
-        }).collect();
-        let attachments: Vec<Option<Vec<usize>>> = probes.iter()
+        let probes: Vec<Option<(usize, Vec<usize>)>> = self
+            .passes
+            .iter()
+            .map(|pass| {
+                let desc = pass.render_pass_descriptor(&dummy_target, &dummy_depth, &canon)?;
+                let color_len = desc.color_attachments.len();
+                let mut signature: Vec<usize> = desc
+                    .color_attachments
+                    .iter()
+                    .map(|opt| {
+                        opt.as_ref()
+                            .map(|a| a.view as *const wgpu::TextureView as usize)
+                            .unwrap_or(0)
+                    })
+                    .collect();
+                signature.push(
+                    desc.depth_stencil_attachment
+                        .as_ref()
+                        .map(|d| d.view as *const wgpu::TextureView as usize)
+                        .unwrap_or(0),
+                );
+                Some((color_len, signature))
+            })
+            .collect();
+        let attachments: Vec<Option<Vec<usize>>> = probes
+            .iter()
             .map(|p| p.as_ref().map(|(_, sig)| sig.clone()))
             .collect();
 
@@ -636,19 +739,28 @@ impl RenderGraph {
             }
         }
         for rl in self.resources.values_mut() {
-            rl.chain_local = self.subpass_chains.iter().any(|c| {
-                c.start <= rl.first_write_pass && rl.last_read_pass < c.end
-            });
+            rl.chain_local = self
+                .subpass_chains
+                .iter()
+                .any(|c| c.start <= rl.first_write_pass && rl.last_read_pass < c.end);
         }
 
-        self.pass_cache = probes.into_iter().enumerate().map(|(pi, probe)| {
-            let (color_len, _) = probe?;
-            let chain = self.subpass_chains.iter().find(|c| c.contains(&pi));
-            let chain_range = chain.cloned().unwrap_or(0..0);
-            let subpass_index = chain.map_or(0, |c| (pi - c.start) as u32);
-            let store_ops: Vec<Option<wgpu::StoreOp>> = vec![None; color_len];
-            Some(CachedPass { store_ops, subpass_index, chain_range })
-        }).collect();
+        self.pass_cache = probes
+            .into_iter()
+            .enumerate()
+            .map(|(pi, probe)| {
+                let (color_len, _) = probe?;
+                let chain = self.subpass_chains.iter().find(|c| c.contains(&pi));
+                let chain_range = chain.cloned().unwrap_or(0..0);
+                let subpass_index = chain.map_or(0, |c| (pi - c.start) as u32);
+                let store_ops: Vec<Option<wgpu::StoreOp>> = vec![None; color_len];
+                Some(CachedPass {
+                    store_ops,
+                    subpass_index,
+                    chain_range,
+                })
+            })
+            .collect();
 
         {
             let mut w_set: Vec<Vec<&str>> = Vec::with_capacity(self.passes.len());
@@ -660,30 +772,68 @@ impl RenderGraph {
                 p.declare_resources(&mut b);
                 for d in b.declarations() {
                     match d.access {
-                        crate::graph::ResourceAccess::Read => { if !r.contains(&d.name) { r.push(d.name); } }
-                        crate::graph::ResourceAccess::Write => { if !w.contains(&d.name) { w.push(d.name); } }
+                        crate::graph::ResourceAccess::Read => {
+                            if !r.contains(&d.name) {
+                                r.push(d.name);
+                            }
+                        }
+                        crate::graph::ResourceAccess::Write => {
+                            if !w.contains(&d.name) {
+                                w.push(d.name);
+                            }
+                        }
                     }
                 }
                 w_set.push(w);
                 r_set.push(r);
             }
-            eprintln!("[RenderGraph] {} passes, {} chain(s):", self.passes.len(), self.subpass_chains.len());
+            eprintln!(
+                "[RenderGraph] {} passes, {} chain(s):",
+                self.passes.len(),
+                self.subpass_chains.len()
+            );
             for i in 0..self.passes.len() {
                 let name = self.passes[i].name();
                 let is_chain_start = self.subpass_chains.iter().any(|c| c.start == i);
-                let is_chain_mid   = self.subpass_chains.iter().any(|c| i > c.start && i < c.end);
-                let marker = if is_chain_start { " ──chain──►" } else if is_chain_mid { " │         " } else { "           " };
-                let w_str = if w_set[i].is_empty() { "–".to_string() } else { w_set[i].join(",") };
-                let r_str = if r_set[i].is_empty() { "–".to_string() } else { r_set[i].join(",") };
+                let is_chain_mid = self.subpass_chains.iter().any(|c| i > c.start && i < c.end);
+                let marker = if is_chain_start {
+                    " ──chain──►"
+                } else if is_chain_mid {
+                    " │         "
+                } else {
+                    "           "
+                };
+                let w_str = if w_set[i].is_empty() {
+                    "–".to_string()
+                } else {
+                    w_set[i].join(",")
+                };
+                let r_str = if r_set[i].is_empty() {
+                    "–".to_string()
+                } else {
+                    r_set[i].join(",")
+                };
                 eprintln!("  {:>2}. {:<28} W: {}  R: {}", i, name, w_str, r_str);
                 if i + 1 < self.passes.len() {
                     let can_fuse = w_set[i].iter().any(|w| r_set[i + 1].contains(w));
-                    let is_fused = self.subpass_chains.iter().any(|c| c.contains(&i) && c.contains(&(i + 1)));
+                    let is_fused = self
+                        .subpass_chains
+                        .iter()
+                        .any(|c| c.contains(&i) && c.contains(&(i + 1)));
                     if is_fused && !can_fuse && self.passes[i + 1].chain_transparent() {
-                        eprintln!("  {:>2}.{:>2} CHAINED  (bridged over transparent pass '{}')", "", "", self.passes[i + 1].name());
+                        eprintln!(
+                            "  {:>2}.{:>2} CHAINED  (bridged over transparent pass '{}')",
+                            "",
+                            "",
+                            self.passes[i + 1].name()
+                        );
                     } else {
                         let why = if can_fuse {
-                            let common: Vec<&str> = w_set[i].iter().filter(|w| r_set[i + 1].contains(w)).copied().collect();
+                            let common: Vec<&str> = w_set[i]
+                                .iter()
+                                .filter(|w| r_set[i + 1].contains(w))
+                                .copied()
+                                .collect();
                             format!("fusable via {}", common.join(","))
                         } else {
                             let mut reasons = Vec::new();
@@ -723,13 +873,16 @@ impl RenderGraph {
 
 // ── Standalone routing function ───────────────────────────────────────
 
-fn route_named_texture<'a>(name: &str, view: &'a wgpu::TextureView, frame: &mut libhelio::FrameResources<'a>) {
+fn route_named_texture<'a>(
+    name: &str,
+    view: &'a wgpu::TextureView,
+    frame: &mut libhelio::FrameResources<'a>,
+) {
     match name {
         "pre_aa" => frame.pre_aa.write(view, "Graph"),
         "ssao" => frame.ssao.write(view, "Graph"),
         "hiz" => frame.hiz.write(view, "Graph"),
         "sky_lut" => frame.sky_lut.write(view, "Graph"),
-        "gbuffer_lightmap_uv" => frame.gbuffer_lightmap_uv.write(view, "Graph"),
         "water_sim_texture" => frame.water_sim_texture.write(view, "Graph"),
         "water_caustics" => frame.water_caustics.write(view, "Graph"),
         "rc_cascades" => frame.rc_view.write(view, "Graph"),

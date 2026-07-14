@@ -2,20 +2,14 @@ use crate::material::MAX_TEXTURES;
 use helio_pass_perf_overlay::PerfOverlayMode;
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
-    #[cfg(not(target_arch = "wasm32"))]
-    let required =
-        wgpu::Features::TEXTURE_BINDING_ARRAY |
-        wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING;
-    #[cfg(target_arch = "wasm32")]
-    let required = wgpu::Features::empty();
-    let optional =
-        wgpu::Features::INDIRECT_FIRST_INSTANCE | // non-zero firstInstance in indirect draws (WebGPU: indirect-first-instance)
-        wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
-        wgpu::Features::PRIMITIVE_INDEX | // @builtin(primitive_index) in fs
-        wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
-        wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
-        wgpu::Features::VERTEX_WRITABLE_STORAGE;
-    required | (adapter_features & optional)
+    let timestamps =
+        wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS;
+    let optional = if adapter_features.contains(timestamps) {
+        timestamps
+    } else {
+        wgpu::Features::empty()
+    };
+    wgpu::Features::INDIRECT_FIRST_INSTANCE | optional
 }
 
 pub fn required_wgpu_limits(adapter_limits: wgpu::Limits) -> wgpu::Limits {
@@ -91,7 +85,7 @@ impl RendererConfig {
             debug_mode: 0,
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
-            shadow_atlas_size: 1024,
+            shadow_atlas_size: 256,
         }
     }
 

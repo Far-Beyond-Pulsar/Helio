@@ -126,7 +126,7 @@ pub(super) fn object_gpu_data(
             mesh_id: mesh.slot(),
             material_id: material_slot as u32,
             flags: desc.flags,
-            lightmap_index: 0xFFFFFFFF,  // No lightmap by default (populated after bake)
+            _reserved: 0,
         },
         aabb: sphere_to_aabb(desc.bounds),
         // `first_instance` is set to 0 here; the actual GPU slot is assigned during
@@ -227,4 +227,3 @@ where
         f(texture);
     }
 }
-

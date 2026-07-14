@@ -29,8 +29,11 @@ fn r1_r2_jitter(frame: u64) -> [f32; 2] {
 
 #[test]
 fn taa_uniform_size_is_24() {
-    assert_eq!(mem::size_of::<TaaUniform>(), 24,
-        "jitter(8) + upscale_factor(4) + reset(4) + time_delta(4) + _pad(4) = 24");
+    assert_eq!(
+        mem::size_of::<TaaUniform>(),
+        24,
+        "jitter(8) + upscale_factor(4) + reset(4) + time_delta(4) + _pad(4) = 24"
+    );
 }
 
 #[test]
@@ -68,7 +71,11 @@ fn r1_r2_covers_both_signs_x() {
     let mut pos = 0u32;
     for frame in 0..256u64 {
         let [jx, _] = r1_r2_jitter(frame);
-        if jx < 0.0 { neg += 1; } else { pos += 1; }
+        if jx < 0.0 {
+            neg += 1;
+        } else {
+            pos += 1;
+        }
     }
     assert!(neg > 0 && pos > 0, "neg={neg} pos={pos}");
 }
@@ -79,7 +86,11 @@ fn r1_r2_covers_both_signs_y() {
     let mut pos = 0u32;
     for frame in 0..256u64 {
         let [_, jy] = r1_r2_jitter(frame);
-        if jy < 0.0 { neg += 1; } else { pos += 1; }
+        if jy < 0.0 {
+            neg += 1;
+        } else {
+            pos += 1;
+        }
     }
     assert!(neg > 0 && pos > 0, "neg={neg} pos={pos}");
 }

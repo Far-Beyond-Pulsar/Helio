@@ -185,9 +185,6 @@ impl<T> Tracked<T> {
 pub struct FrameResources<'a> {
     /// GBuffer textures (populated after GBufferPass)
     pub gbuffer: Tracked<GBufferViews<'a>>,
-    /// GBuffer lightmap UV texture (Rg16Float) populated by GBufferPass.
-    /// Contains per-pixel lightmap atlas UVs for sampling baked_lightmap.
-    pub gbuffer_lightmap_uv: Tracked<&'a wgpu::TextureView>,
     /// Shadow atlas (2D array texture view) — populated after ShadowPass (dynamic/Movable objects)
     pub shadow_atlas: Tracked<&'a wgpu::TextureView>,
     /// Static shadow atlas (2D array texture view) — cached until Static/Stationary topology changes.
@@ -199,10 +196,6 @@ pub struct FrameResources<'a> {
     pub hiz: Tracked<&'a wgpu::TextureView>,
     /// Hi-Z sampler (min reduction sampler)
     pub hiz_sampler: Tracked<&'a wgpu::Sampler>,
-    /// Static HiZ: Pre-baked 3D voxel occlusion grid for static geometry (camera-independent)
-    pub static_hiz: Tracked<&'a wgpu::TextureView>,
-    /// Static HiZ sampler (linear, clamp)
-    pub static_hiz_sampler: Tracked<&'a wgpu::Sampler>,
     /// Atmospheric sky LUT (transmittance + aerial perspective)
     pub sky_lut: Tracked<&'a wgpu::TextureView>,
     /// Sky LUT sampler (linear, clamp)
@@ -262,106 +255,8 @@ pub struct FrameResources<'a> {
     /// Main depth texture (for passes that need to copy/sample it)
     pub depth_texture: Tracked<&'a wgpu::Texture>,
 
-    // ── Pre-baked data (populated by BakeInjectPass when baking is enabled) ──
-
-    /// Pre-baked ambient occlusion texture (R8Unorm, same format as SSAO output).
-    ///
-    /// When present, `SsaoPass` skips runtime computation and publishes this texture
-    /// instead of its own SSAO result.
-    pub baked_ao: Tracked<&'a wgpu::TextureView>,
-
-    /// Sampler for [`baked_ao`](Self::baked_ao).
-    pub baked_ao_sampler: Tracked<&'a wgpu::Sampler>,
-
-    /// Pre-baked lightmap atlas (RGBA32F or RGBA16F).
-    ///
-    /// Contains direct + multi-bounce indirect illumination for static geometry.
-    /// Indexed by per-mesh UV atlas regions stored in the baked data.
-    pub baked_lightmap: Tracked<&'a wgpu::TextureView>,
-
-    /// Sampler for [`baked_lightmap`](Self::baked_lightmap).
-    pub baked_lightmap_sampler: Tracked<&'a wgpu::Sampler>,
-
-    /// Pre-baked reflection cubemap (Rgba32Float or Rgba8Unorm RGBE, 6 faces + mip chain).
-    ///
-    /// First probe only; closest-probe blending is future work.
-    pub baked_reflection: Tracked<&'a wgpu::TextureView>,
-
-    /// Sampler for [`baked_reflection`](Self::baked_reflection) (trilinear).
-    pub baked_reflection_sampler: Tracked<&'a wgpu::Sampler>,
-
-    /// Pre-baked irradiance spherical harmonics (L2, 9 RGB coefficients = 27 × f32).
-    ///
-    /// Stored as a uniform buffer (`wgpu::BufferUsages::UNIFORM`).
-    pub baked_irradiance_sh: Tracked<&'a wgpu::Buffer>,
-
-    /// Pre-baked potentially-visible set for CPU-side visibility culling.
-    ///
-    /// Use [`BakedPvsRef::is_visible`] to test cell-to-cell visibility before
-    /// submitting draw calls. Returns `None` when PVS baking was not configured.
-    pub baked_pvs: Tracked<BakedPvsRef<'a>>,
-
     /// Corona particle emitter definitions (uploaded by the Renderer each frame)
     pub corona_emitters: Tracked<CoronaEmitterFrameData<'a>>,
-}
-
-// ── PVS CPU reference ──────────────────────────────────────────────────────────
-
-/// Borrowed reference into the pre-baked PVS bitfield grid.
-///
-/// Zero-copy view — `bits` borrows directly from the `BakedData` owned by
-/// `BakeInjectPass`. Valid for the duration of the frame.
-#[derive(Clone, Copy)]
-pub struct BakedPvsRef<'a> {
-    pub world_min: [f32; 3],
-    pub world_max: [f32; 3],
-    pub grid_dims: [u32; 3],
-    pub cell_size: f32,
-    pub cell_count: u32,
-    pub words_per_cell: u32,
-    /// Packed bitfield: `bits[from * words_per_cell + to/64] >> (to%64) & 1 == 1` means
-    /// cell `to` is potentially visible from cell `from`.
-    pub bits: &'a [u64],
-}
-
-impl<'a> BakedPvsRef<'a> {
-    /// Returns `true` if cell `to_cell` is potentially visible from cell `from_cell`.
-    #[inline]
-    pub fn is_visible(&self, from_cell: usize, to_cell: usize) -> bool {
-        let idx = from_cell * self.words_per_cell as usize + to_cell / 64;
-        if idx >= self.bits.len() { return true; } // conservative default
-        (self.bits[idx] >> (to_cell % 64)) & 1 == 1
-    }
-
-    /// Returns the grid-cell index at world position `p`, or `None` if out of bounds.
-    #[inline]
-    pub fn cell_at(&self, p: [f32; 3]) -> Option<usize> {
-        let [gx, gy, gz] = self.grid_dims;
-        let dx = ((p[0] - self.world_min[0]) / self.cell_size) as i32;
-        let dy = ((p[1] - self.world_min[1]) / self.cell_size) as i32;
-        let dz = ((p[2] - self.world_min[2]) / self.cell_size) as i32;
-        if dx < 0 || dy < 0 || dz < 0
-            || dx >= gx as i32 || dy >= gy as i32 || dz >= gz as i32
-        {
-            return None;
-        }
-        Some(dx as usize + dy as usize * gx as usize + dz as usize * gx as usize * gy as usize)
-    }
-}
-
-// ── Owned PVS data (lives in BakedData, referenced by BakedPvsRef) ────────────
-
-/// Owned CPU-side PVS data stored in [`BakedData`].
-///
-/// Published as a zero-copy [`BakedPvsRef`] into `FrameResources` each frame.
-pub struct BakedPvsData {
-    pub world_min: [f32; 3],
-    pub world_max: [f32; 3],
-    pub grid_dims: [u32; 3],
-    pub cell_size: f32,
-    pub cell_count: u32,
-    pub words_per_cell: u32,
-    pub bits: Vec<u64>,
 }
 
 impl<'a> FrameResources<'a> {
@@ -369,14 +264,11 @@ impl<'a> FrameResources<'a> {
     pub fn empty() -> Self {
         Self {
             gbuffer: Tracked::empty(),
-            gbuffer_lightmap_uv: Tracked::empty(),
             shadow_atlas: Tracked::empty(),
             static_shadow_atlas: Tracked::empty(),
             shadow_sampler: Tracked::empty(),
             hiz: Tracked::empty(),
             hiz_sampler: Tracked::empty(),
-            static_hiz: Tracked::empty(),
-            static_hiz_sampler: Tracked::empty(),
             sky_lut: Tracked::empty(),
             sky_lut_sampler: Tracked::empty(),
             ssao: Tracked::empty(),
@@ -398,14 +290,6 @@ impl<'a> FrameResources<'a> {
             water_hitbox_count: 0,
             depth_texture: Tracked::empty(),
             rc_view: Tracked::empty(),
-            baked_ao: Tracked::empty(),
-            baked_ao_sampler: Tracked::empty(),
-            baked_lightmap: Tracked::empty(),
-            baked_lightmap_sampler: Tracked::empty(),
-            baked_reflection: Tracked::empty(),
-            baked_reflection_sampler: Tracked::empty(),
-            baked_irradiance_sh: Tracked::empty(),
-            baked_pvs: Tracked::empty(),
             corona_emitters: Tracked::empty(),
         }
     }
@@ -428,14 +312,11 @@ impl<'a> FrameResources<'a> {
                 };
             }
             reset_field!(gbuffer);
-            reset_field!(gbuffer_lightmap_uv);
             reset_field!(shadow_atlas);
             reset_field!(static_shadow_atlas);
             reset_field!(shadow_sampler);
             reset_field!(hiz);
             reset_field!(hiz_sampler);
-            reset_field!(static_hiz);
-            reset_field!(static_hiz_sampler);
             reset_field!(sky_lut);
             reset_field!(sky_lut_sampler);
             reset_field!(ssao);
@@ -454,14 +335,6 @@ impl<'a> FrameResources<'a> {
             reset_field!(water_hitboxes);
             reset_field!(depth_texture);
             reset_field!(rc_view);
-            reset_field!(baked_ao);
-            reset_field!(baked_ao_sampler);
-            reset_field!(baked_lightmap);
-            reset_field!(baked_lightmap_sampler);
-            reset_field!(baked_reflection);
-            reset_field!(baked_reflection_sampler);
-            reset_field!(baked_irradiance_sh);
-            reset_field!(baked_pvs);
             reset_field!(corona_emitters);
         }
     }
@@ -485,4 +358,3 @@ pub struct VgFrameData<'a> {
     /// The pass re-uploads GPU buffers only when this advances.
     pub buffer_version: u64,
 }
-

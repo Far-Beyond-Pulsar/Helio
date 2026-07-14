@@ -1,5 +1,0 @@
-capabilities = "EARLY_DEPTH_TEST"
-targets = "SPIRV | GLSL"
-
-[glsl]
-version.Desktop = 420

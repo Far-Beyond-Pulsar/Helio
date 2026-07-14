@@ -1,6 +1,8 @@
 use bytemuck::{Pod, Zeroable};
 use helio_v3::graph::{ResourceBuilder, ResourceSize};
-use helio_v3::{DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult};
+use helio_v3::{
+    DebugViewDescriptor, PassContext, PrepareContext, RenderPass, Result as HelioResult,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -53,14 +55,9 @@ pub struct DeferredLightPass {
     fallback_caustics_view: wgpu::TextureView,
     caustics_sampler: wgpu::Sampler,
     fallback_water_volumes: wgpu::Buffer,
-    /// 1×1 white R8Unorm fallback used when neither SSAO nor baked AO is available.
+    /// 1×1 white R8Unorm fallback used when SSAO is unavailable.
     fallback_ao_view: wgpu::TextureView,
     fallback_ao_sampler: wgpu::Sampler,
-    /// 1×1 black Rgba16Float fallback used when baked lightmap is not available.
-    fallback_lightmap_view: wgpu::TextureView,
-    fallback_lightmap_sampler: wgpu::Sampler,
-    /// 1×1 black Rg16Float fallback for lightmap UVs when not available.
-    fallback_lightmap_uv_view: wgpu::TextureView,
     pub debug_mode: u32,
 }
 
@@ -71,7 +68,6 @@ impl DeferredLightPass {
         camera_buf: &wgpu::Buffer,
         pre_aa_format: wgpu::TextureFormat,
     ) -> Self {
-
         // Fallback 1-entry storage buffers used when LightCullPass is absent.
         let fallback_tile_lists = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Deferred Fallback TileLists"),
@@ -165,7 +161,7 @@ impl DeferredLightPass {
                     },
                     count: None,
                 },
-                // Screen-space AO (SSAO result or pre-baked AO). Filterable so the
+                // Screen-space AO. Filterable so the
                 // bilinear sampler can soften the AO at the edges of the screen.
                 texture_entry(5, wgpu::TextureSampleType::Float { filterable: true }),
                 wgpu::BindGroupLayoutEntry {
@@ -174,8 +170,6 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
-                // Lightmap UVs from GBuffer (binding 7, Rg16Float)
-                texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
         let bgl_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -242,15 +236,6 @@ impl DeferredLightPass {
                         view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
-                    count: None,
-                },
-                // Baked lightmap atlas texture
-                texture_entry(12, wgpu::TextureSampleType::Float { filterable: true }),
-                // Baked lightmap sampler
-                wgpu::BindGroupLayoutEntry {
-                    binding: 13,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -320,7 +305,8 @@ impl DeferredLightPass {
         });
 
         let (_fallback_shadow_tex, fallback_shadow_view) = fallback_shadow_texture(device);
-        let (_fallback_static_shadow_tex, fallback_static_shadow_view) = fallback_shadow_texture(device);
+        let (_fallback_static_shadow_tex, fallback_static_shadow_view) =
+            fallback_shadow_texture(device);
         let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("Deferred Fallback Shadow Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -380,11 +366,15 @@ impl DeferredLightPass {
         });
 
         // Fallback 1×1 white R8Unorm AO texture.
-        // Used when neither SSAO nor pre-baked AO is available so the shader sees
+        // Used when SSAO is unavailable so the shader sees
         // AO = 1.0 (fully unoccluded) rather than undefined data.
         let fallback_ao_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Deferred Fallback AO"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -400,8 +390,16 @@ impl DeferredLightPass {
                 aspect: wgpu::TextureAspect::All,
             },
             &[255u8], // white = AO 1.0
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(1),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
         );
         let fallback_ao_view = fallback_ao_tex.create_view(&Default::default());
         let fallback_ao_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -412,44 +410,6 @@ impl DeferredLightPass {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-
-        // Fallback 1×1 black Rgba16Float lightmap texture.
-        // Used when baked lightmap is not available (no indirect lighting).
-        let (fallback_lightmap_tex, fallback_lightmap_view) =
-            black_2d_texture(device, queue, "Deferred Fallback Lightmap");
-        let fallback_lightmap_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Deferred Fallback Lightmap Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            ..Default::default()
-        });
-
-        // Fallback 1×1 zero Rg16Float lightmap UV texture.
-        // Used when lightmap UVs are not available from GBuffer.
-        let fallback_lightmap_uv_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Deferred Fallback Lightmap UV"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rg16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &fallback_lightmap_uv_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &[0u8; 4], // (0.0, 0.0) UV coords
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-        );
-        let fallback_lightmap_uv_view = fallback_lightmap_uv_tex.create_view(&Default::default());
 
         Self {
             pipeline,
@@ -481,9 +441,6 @@ impl DeferredLightPass {
             fallback_water_volumes,
             fallback_ao_view,
             fallback_ao_sampler,
-            fallback_lightmap_view,
-            fallback_lightmap_sampler,
-            fallback_lightmap_uv_view,
             debug_mode: 0,
         }
     }
@@ -511,7 +468,6 @@ impl RenderPass for DeferredLightPass {
     fn reads(&self) -> &'static [&'static str] {
         &[
             "gbuffer",
-            "gbuffer_lightmap_uv",
             "depth",
             "shadow_atlas",
             "static_shadow_atlas",
@@ -525,8 +481,6 @@ impl RenderPass for DeferredLightPass {
             "water_volumes",
             "pre_aa",
             "rc_view",
-            "baked_lightmap",
-            "baked_lightmap_sampler",
         ]
     }
 
@@ -565,7 +519,7 @@ impl RenderPass for DeferredLightPass {
         let globals = DeferredGlobals {
             frame: ctx.frame_num as u32,
             delta_time: ctx.delta_time,
-            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
+            light_count: ctx.scene.lights.len() as u32,
             ambient_intensity,
             ambient_color: [ambient_color[0], ambient_color[1], ambient_color[2], 1.0],
             rc_world_min: [rc_min[0], rc_min[1], rc_min[2], 0.0],
@@ -595,8 +549,8 @@ impl RenderPass for DeferredLightPass {
         } else {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         };
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -604,8 +558,7 @@ impl RenderPass for DeferredLightPass {
                     load: load_op,
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("DeferredLight"),
             color_attachments,
@@ -624,12 +577,8 @@ impl RenderPass for DeferredLightPass {
             )
         })?;
 
-        // Screen-space AO: use baked AO (via frame.ssao, which SsaoPass publishes as override
-        // when a baked AO texture is present) or fall back to the 1×1 white texture.
+        // Fall back to white when the graph does not provide SSAO.
         let ao_view = ctx.resources.ssao.get().unwrap_or(&self.fallback_ao_view);
-        
-        // Lightmap UVs from GBuffer
-        let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
 
         let gbuffer_key = (
             gbuffer.albedo as *const _ as usize,
@@ -652,32 +601,39 @@ impl RenderPass for DeferredLightPass {
                         binding: 4,
                         resource: wgpu::BindingResource::TextureView(ctx.depth),
                     },
-                    // Screen-space AO (binding 5): SSAO or pre-baked AO from SsaoPass.publish()
+                    // Screen-space AO (binding 5)
                     texture_view_entry(5, ao_view),
                     wgpu::BindGroupEntry {
                         binding: 6,
                         resource: wgpu::BindingResource::Sampler(&self.fallback_ao_sampler),
                     },
-                    // Lightmap UVs from GBuffer (binding 7)
-                    texture_view_entry(7, lightmap_uv_view),
                 ],
             }));
             self.bind_group_1_key = Some(gbuffer_key);
         }
 
-        let shadow_view = ctx.resources.shadow_atlas.get().unwrap_or(&self.fallback_shadow_view);
-        let static_shadow_view = ctx.resources.static_shadow_atlas.get().unwrap_or(&self.fallback_static_shadow_view);
+        let shadow_view = ctx
+            .resources
+            .shadow_atlas
+            .get()
+            .unwrap_or(&self.fallback_shadow_view);
+        let static_shadow_view = ctx
+            .resources
+            .static_shadow_atlas
+            .get()
+            .unwrap_or(&self.fallback_static_shadow_view);
         let shadow_sampler = ctx
             .resources
             .shadow_sampler
-            .get().unwrap_or(&self.fallback_shadow_sampler);
-        let rc_view = ctx.resources.rc_view.get().unwrap_or(&self.fallback_rc_view);
+            .get()
+            .unwrap_or(&self.fallback_shadow_sampler);
+        let rc_view = ctx
+            .resources
+            .rc_view
+            .get()
+            .unwrap_or(&self.fallback_rc_view);
         let env_view = &self.fallback_env_view;
-        
-        // Baked lightmap atlas from bake inject pass
-        let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
-        let lightmap_sampler = ctx.resources.baked_lightmap_sampler.get().unwrap_or(&self.fallback_lightmap_sampler);
-        
+
         let scene_key = (
             ctx.scene.lights as *const _ as usize,
             shadow_view as *const _ as usize,
@@ -688,73 +644,96 @@ impl RenderPass for DeferredLightPass {
             rc_view as *const _ as usize,
         );
         if self.bind_group_2_key != Some(scene_key) {
-            self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("DeferredLight BG2"),
-                layout: &self.bgl_2,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: ctx.scene.lights.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(shadow_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Sampler(shadow_sampler),
-                    },
-                    texture_view_entry(3, env_view),
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: ctx.scene.shadow_matrices.as_entire_binding(),
-                    },
-                    texture_view_entry(5, rc_view),
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&self.fallback_env_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
-                    },
-                    // Water caustics texture (binding 8)
-                    texture_view_entry(8, ctx.resources.water_caustics.get().unwrap_or(&self.fallback_caustics_view)),
-                    // Caustics sampler (binding 9)
-                    wgpu::BindGroupEntry {
-                        binding: 9,
-                        resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
-                    },
-                    // Water volumes buffer (binding 10)
-                    wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: ctx.resources.water_volumes.get().unwrap_or(&self.fallback_water_volumes).as_entire_binding(),
-                    },
-                    // Static shadow atlas (binding 11) — cached, only changes with Static topology
-                    texture_view_entry(11, static_shadow_view),
-                    // Baked lightmap atlas (binding 12)
-                    texture_view_entry(12, lightmap_view),
-                    // Baked lightmap sampler (binding 13)
-                    wgpu::BindGroupEntry {
-                        binding: 13,
-                        resource: wgpu::BindingResource::Sampler(lightmap_sampler),
-                    },
-                ],
-            }));
+            self.bind_group_2 = Some(
+                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("DeferredLight BG2"),
+                    layout: &self.bgl_2,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: ctx.scene.lights.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(shadow_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                        },
+                        texture_view_entry(3, env_view),
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: ctx.scene.shadow_matrices.as_entire_binding(),
+                        },
+                        texture_view_entry(5, rc_view),
+                        wgpu::BindGroupEntry {
+                            binding: 6,
+                            resource: wgpu::BindingResource::Sampler(&self.fallback_env_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 7,
+                            resource: wgpu::BindingResource::Sampler(&self.shadow_depth_sampler),
+                        },
+                        // Water caustics texture (binding 8)
+                        texture_view_entry(
+                            8,
+                            ctx.resources
+                                .water_caustics
+                                .get()
+                                .unwrap_or(&self.fallback_caustics_view),
+                        ),
+                        // Caustics sampler (binding 9)
+                        wgpu::BindGroupEntry {
+                            binding: 9,
+                            resource: wgpu::BindingResource::Sampler(&self.caustics_sampler),
+                        },
+                        // Water volumes buffer (binding 10)
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: ctx
+                                .resources
+                                .water_volumes
+                                .get()
+                                .unwrap_or(&self.fallback_water_volumes)
+                                .as_entire_binding(),
+                        },
+                        // Static shadow atlas (binding 11) — cached, only changes with Static topology
+                        texture_view_entry(11, static_shadow_view),
+                    ],
+                }),
+            );
             self.bind_group_2_key = Some(scene_key);
         }
 
         // ── Bind group 3: tile light culling results ──────────────────────────
-        let tile_lists   = ctx.resources.tile_light_lists.get().unwrap_or(&self.fallback_tile_lists);
-        let tile_counts  = ctx.resources.tile_light_counts.get().unwrap_or(&self.fallback_tile_counts);
-        let tile_key = (tile_lists as *const _ as usize, tile_counts as *const _ as usize);
+        let tile_lists = ctx
+            .resources
+            .tile_light_lists
+            .get()
+            .unwrap_or(&self.fallback_tile_lists);
+        let tile_counts = ctx
+            .resources
+            .tile_light_counts
+            .get()
+            .unwrap_or(&self.fallback_tile_counts);
+        let tile_key = (
+            tile_lists as *const _ as usize,
+            tile_counts as *const _ as usize,
+        );
         if self.bind_group_3_key != Some(tile_key) {
             self.bind_group_3 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("DeferredLight BG3"),
                 layout: &self.bgl_3,
                 entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: tile_lists.as_entire_binding() },
-                    wgpu::BindGroupEntry { binding: 1, resource: tile_counts.as_entire_binding() },
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: tile_lists.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: tile_counts.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_3_key = Some(tile_key);
@@ -939,4 +918,3 @@ fn black_cube_texture(
     });
     (texture, view)
 }
-

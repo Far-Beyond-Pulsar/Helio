@@ -199,4 +199,3 @@ fn padding_fields_zeroed_by_default() {
     assert_eq!(g._pad1, 0);
     assert_eq!(g._pad2, 0);
 }
-

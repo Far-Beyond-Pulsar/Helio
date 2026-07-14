@@ -14,25 +14,23 @@ use std::sync::Arc;
 
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
+use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
+use helio_pass_gbuffer::GBufferPass;
 use helio_pass_hiz::HiZBuildPass;
 use helio_pass_indirect_dispatch::IndirectDispatchPass;
 use helio_pass_occlusion_cull::OcclusionCullPass;
-use helio_pass_gbuffer::GBufferPass;
-use helio_pass_shadow::ShadowPass;
-use helio_pass_shadow_cull::ShadowCullPass;
-use helio_pass_shadow_dirty::ShadowDirtyPass;
-use helio_pass_shadow_matrix::ShadowMatrixPass;
-use helio_pass_sky_lut::SkyLutPass;
-use helio_pass_sky::SkyPass;
-use helio_pass_virtual_geometry::VirtualGeometryPass;
-use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 use helio_pass_perf_overlay::{PerfOverlayAnalyzerPass, PerfOverlayPass, PerfOverlayShared};
+use helio_pass_shadow::ShadowPass;
+use helio_pass_shadow_matrix::ShadowMatrixPass;
+use helio_pass_sky::SkyPass;
+use helio_pass_sky_lut::SkyLutPass;
+use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_water_sim::WaterSimPass;
 use helio_v3::RenderGraph;
 
-use crate::scene::Scene;
-use crate::renderer::debug::{DebugDrawPass, DebugDrawState};
 use crate::renderer::config::RendererConfig;
+use crate::renderer::debug::{DebugDrawPass, DebugDrawState};
+use crate::scene::Scene;
 
 /// Spotlight icon embedded at compile time — used as the editor billboard sprite.
 static SPOTLIGHT_PNG: &[u8] = include_bytes!("../../../../../spotlight.png");
@@ -53,7 +51,9 @@ pub fn create_depth_resources(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth32Float,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -87,7 +87,9 @@ fn add_common_early_passes(
     let shadow_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Shadow Dirty Flags"),
         size: 64,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     }));
     let shadow_hashes_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -106,25 +108,7 @@ fn add_common_early_passes(
         &shadow_hashes_buf,
     )));
 
-    let shadow_dirty_pass = ShadowDirtyPass::new(device);
-    let face_dirty_buf = Arc::clone(&shadow_dirty_pass.face_dirty_buf);
-    let face_geom_count_buf = Arc::clone(&shadow_dirty_pass.face_geom_count_buf);
-    graph.add_pass(Box::new(shadow_dirty_pass));
-
-    // ShadowCullPass: per-face frustum culling for shadow geometry
-    let shadow_cull_pass = ShadowCullPass::new(device, Arc::clone(&face_dirty_buf));
-    let face_cull_indirect = Arc::clone(&shadow_cull_pass.face_indirect_buf);
-    let face_cull_counts = Arc::clone(&shadow_cull_pass.face_counts_buf);
-    graph.add_pass(Box::new(shadow_cull_pass));
-
-    graph.add_pass(Box::new(ShadowPass::new(
-        device,
-        face_dirty_buf,
-        face_geom_count_buf,
-        face_cull_indirect,
-        face_cull_counts,
-        config.shadow_atlas_size,
-    )));
+    graph.add_pass(Box::new(ShadowPass::new(device, config.shadow_atlas_size)));
 
     if scene.sky_context().has_sky {
         graph.add_pass(Box::new(SkyLutPass::new(device, camera_buf)));
@@ -150,27 +134,18 @@ fn add_common_early_passes(
         cull_stats_buf.clone(),
     )));
     graph.add_pass(Box::new(hiz_pass));
-    let mut occlusion_cull = OcclusionCullPass::new(
+    graph.add_pass(Box::new(OcclusionCullPass::new(
         device,
         hiz_sampler,
         w,
         h,
         cull_stats_buf.clone(),
-    );
-    // Wire static HiZ metadata from the baked voxel grid to the occlusion pass.
-    if let Some(meta) = graph.find_pass::<HiZBuildPass>()
-        .and_then(|p| p.static_hiz_metadata())
-    {
-        occlusion_cull.set_static_hiz_metadata(
-            meta.world_bounds_min,
-            meta.world_bounds_max,
-            meta.grid_resolution,
-        );
-    }
-    graph.add_pass(Box::new(occlusion_cull));
+    )));
 
     let perf_overlay_shared = PerfOverlayShared::new(device, w, h);
-    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf_overlay_shared))));
+    graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(
+        &perf_overlay_shared,
+    ))));
 
     perf_overlay_shared
 }
@@ -255,11 +230,8 @@ fn add_final_passes(
 ) {
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
-    let mut perf_overlay_pass = PerfOverlayPass::new(
-        device,
-        Arc::clone(perf),
-        config.surface_format,
-    );
+    let mut perf_overlay_pass =
+        PerfOverlayPass::new(device, Arc::clone(perf), config.surface_format);
     perf_overlay_pass.set_mode(config.perf_overlay_mode);
     graph.add_pass(Box::new(perf_overlay_pass));
 
@@ -284,7 +256,11 @@ fn add_final_passes(
     }
 }
 
-fn new_graph(device: &Arc<wgpu::Device>, queue: &Arc<wgpu::Queue>, owns_device: bool) -> RenderGraph {
+fn new_graph(
+    device: &Arc<wgpu::Device>,
+    queue: &Arc<wgpu::Queue>,
+    owns_device: bool,
+) -> RenderGraph {
     if owns_device {
         RenderGraph::new(device, queue)
     } else {

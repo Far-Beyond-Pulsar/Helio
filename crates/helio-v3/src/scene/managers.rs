@@ -279,7 +279,7 @@ impl GpuCameraBuffer {
         [p[0], p[1], p[2]]
     }
 
-        /// Returns the camera forward direction as `[x, y, z]`.
+    /// Returns the camera forward direction as `[x, y, z]`.
     pub fn forward(&self) -> [f32; 3] {
         let f = self.data.forward_far;
         [f[0], f[1], f[2]]

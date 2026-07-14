@@ -27,8 +27,10 @@ fn r1_r2_jitter(frame: u64) -> [f32; 2] {
 fn all_x_between_minus_half_and_half() {
     for frame in 0..256u64 {
         let [jx, _] = r1_r2_jitter(frame);
-        assert!(jx >= -0.5 && jx < 0.5,
-            "frame {frame}: jx = {jx} not in [-0.5, 0.5)");
+        assert!(
+            jx >= -0.5 && jx < 0.5,
+            "frame {frame}: jx = {jx} not in [-0.5, 0.5)"
+        );
     }
 }
 
@@ -36,8 +38,10 @@ fn all_x_between_minus_half_and_half() {
 fn all_y_between_minus_half_and_half() {
     for frame in 0..256u64 {
         let [_, jy] = r1_r2_jitter(frame);
-        assert!(jy >= -0.5 && jy < 0.5,
-            "frame {frame}: jy = {jy} not in [-0.5, 0.5)");
+        assert!(
+            jy >= -0.5 && jy < 0.5,
+            "frame {frame}: jy = {jy} not in [-0.5, 0.5)"
+        );
     }
 }
 

@@ -232,7 +232,6 @@ impl SkyPass {
             target_format,
         }
     }
-
 }
 
 impl RenderPass for SkyPass {
@@ -244,8 +243,7 @@ impl RenderPass for SkyPass {
         builder.write_color_raw("pre_aa", self.target_format, ResourceSize::MatchSurface);
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
-    }
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         if !ctx.frame_resources.sky.has_sky {
@@ -279,8 +277,8 @@ impl RenderPass for SkyPass {
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let pre_aa_view = resources.pre_aa.read("Sky")?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: pre_aa_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -288,8 +286,7 @@ impl RenderPass for SkyPass {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Sky"),
             color_attachments,
@@ -305,24 +302,25 @@ impl RenderPass for SkyPass {
         if let Some(sky_lut_view) = ctx.resources.sky_lut.read("Sky") {
             let key = sky_lut_view as *const _ as usize;
             if self.bind_group_1_key != Some(key) {
-                self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Sky BG1"),
-                    layout: &self.bgl_1,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: self.sky_uniform_buf.as_entire_binding(),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::TextureView(sky_lut_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: wgpu::BindingResource::Sampler(&self.sky_lut_sampler),
-                        },
-                    ],
-                }));
+                self.bind_group_1 =
+                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("Sky BG1"),
+                        layout: &self.bgl_1,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: self.sky_uniform_buf.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(sky_lut_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&self.sky_lut_sampler),
+                            },
+                        ],
+                    }));
                 self.bind_group_1_key = Some(key);
             }
         }
@@ -338,12 +336,9 @@ impl RenderPass for SkyPass {
         }
         Ok(())
     }
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
-    }
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
     fn writes(&self) -> &'static [&'static str] {
         &["pre_aa"]
     }
-
 }
-

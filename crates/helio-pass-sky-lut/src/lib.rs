@@ -202,11 +202,17 @@ impl RenderPass for SkyLutPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw("sky_lut", wgpu::TextureFormat::Rgba16Float, ResourceSize::Absolute { width: LUT_WIDTH, height: LUT_HEIGHT });
+        builder.write_color_raw(
+            "sky_lut",
+            wgpu::TextureFormat::Rgba16Float,
+            ResourceSize::Absolute {
+                width: LUT_WIDTH,
+                height: LUT_HEIGHT,
+            },
+        );
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
-    }
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         // If sky is disabled, keep LUT black and skip all sky parameters.
@@ -242,8 +248,8 @@ impl RenderPass for SkyLutPass {
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let sky_lut_view = resources.sky_lut.read("SkyLUT").unwrap();
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: sky_lut_view,
                 resolve_target: None,
                 depth_slice: None,
@@ -251,8 +257,7 @@ impl RenderPass for SkyLutPass {
                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("SkyLUT"),
             color_attachments,
@@ -274,4 +279,3 @@ impl RenderPass for SkyLutPass {
         Ok(())
     }
 }
-

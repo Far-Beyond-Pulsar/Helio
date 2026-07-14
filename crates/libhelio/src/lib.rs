@@ -23,6 +23,7 @@ pub mod movability;
 pub mod shadow;
 pub mod sky;
 pub mod water;
+pub mod webgpu_material;
 
 pub use camera::*;
 pub use corona::*;
@@ -36,4 +37,4 @@ pub use movability::*;
 pub use shadow::*;
 pub use sky::{SkyActor, VolumetricClouds};
 pub use water::*;
-
+pub use webgpu_material::*;

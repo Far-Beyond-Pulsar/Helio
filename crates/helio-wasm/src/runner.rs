@@ -19,18 +19,6 @@ use helio::{Camera, Renderer, RendererConfig};
 
 use crate::{HelioWasmApp, InputState};
 
-// ── Platform-specific time helper ─────────────────────────────────────────────
-
-#[cfg(not(target_arch = "wasm32"))]
-fn now_secs() -> f64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64()
-}
-
-#[cfg(target_arch = "wasm32")]
 fn now_secs() -> f64 {
     js_sys::Date::now() / 1000.0
 }
@@ -38,44 +26,23 @@ fn now_secs() -> f64 {
 // ── Cursor helpers ────────────────────────────────────────────────────────────
 
 fn grab_cursor(window: &Window) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        window
-            .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-            .or_else(|_| window.set_cursor_grab(winit::window::CursorGrabMode::Confined))
-            .unwrap_or_default();
-        window.set_cursor_visible(false);
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        use winit::platform::web::WindowExtWebSys;
-        if let Some(canvas) = window.canvas() {
-            canvas.request_pointer_lock();
-        }
+    use winit::platform::web::WindowExtWebSys;
+    if let Some(canvas) = window.canvas() {
+        canvas.request_pointer_lock();
     }
 }
 
 fn release_cursor(window: &Window) {
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
-        window.set_cursor_visible(true);
+    use winit::platform::web::WindowExtWebSys;
+
+    if let Some(web_window) = web_sys::window() {
+        if let Some(document) = web_window.document() {
+            document.exit_pointer_lock();
+        }
     }
-    #[cfg(target_arch = "wasm32")]
-    {
-        use winit::platform::web::WindowExtWebSys;
 
-        if let Some(web_window) = web_sys::window() {
-            if let Some(document) = web_window.document() {
-                // Release pointer lock explicitly so demos can implement
-                // hold-to-fly behaviour on right mouse button release.
-                document.exit_pointer_lock();
-            }
-        }
-
-        if let Some(canvas) = window.canvas() {
-            let _ = canvas.style().set_property("cursor", "default");
-        }
+    if let Some(canvas) = window.canvas() {
+        let _ = canvas.style().set_property("cursor", "default");
     }
 }
 
@@ -134,17 +101,11 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                 .expect("helio-wasm: failed to create window"),
         );
 
-        // Attach the canvas to <body> when running in the browser.
-        #[cfg(target_arch = "wasm32")]
         attach_canvas_to_body(&window);
 
         let state_cell = self.state.clone();
         let init_future = init_wgpu::<T>(window, state_cell);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        pollster::block_on(init_future);
-
-        #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(init_future);
     }
 
@@ -184,7 +145,11 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                 }
             },
 
-            WindowEvent::MouseInput { button, state: elem_state, .. } => {
+            WindowEvent::MouseInput {
+                button,
+                state: elem_state,
+                ..
+            } => {
                 let grab_button = T::grab_cursor_button();
 
                 // Handle cursor grab / release via the configured button.
@@ -208,8 +173,12 @@ impl<T: HelioWasmApp> ApplicationHandler for WasmRunner<T> {
                 // Track left-button press/release for demos that need click events.
                 if button == MouseButton::Left {
                     match elem_state {
-                        ElementState::Pressed  => { state.mouse_left_just_pressed  = true; }
-                        ElementState::Released => { state.mouse_left_just_released = true; }
+                        ElementState::Pressed => {
+                            state.mouse_left_just_pressed = true;
+                        }
+                        ElementState::Released => {
+                            state.mouse_left_just_released = true;
+                        }
                     }
                 }
             }
@@ -280,10 +249,7 @@ async fn init_wgpu<T: HelioWasmApp>(
     state_cell: Rc<RefCell<Option<RunnerState<T>>>>,
 ) {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        #[cfg(not(target_arch = "wasm32"))]
-        backends: wgpu::Backends::all(),
-        #[cfg(target_arch = "wasm32")]
-        backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
+        backends: wgpu::Backends::BROWSER_WEBGPU,
         flags: wgpu::InstanceFlags::empty(),
         ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
     });
@@ -388,9 +354,9 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
     let delta = state.mouse_delta;
     state.mouse_delta = (0.0, 0.0);
 
-    let just_left_pressed  = state.mouse_left_just_pressed;
+    let just_left_pressed = state.mouse_left_just_pressed;
     let just_left_released = state.mouse_left_just_released;
-    state.mouse_left_just_pressed  = false;
+    state.mouse_left_just_pressed = false;
     state.mouse_left_just_released = false;
 
     let input = InputState {
@@ -423,7 +389,6 @@ fn render_frame<T: HelioWasmApp>(state: &mut RunnerState<T>) {
 
 // ── Canvas helper (WASM only) ─────────────────────────────────────────────────
 
-#[cfg(target_arch = "wasm32")]
 fn attach_canvas_to_body(window: &Window) {
     use winit::platform::web::WindowExtWebSys;
     let canvas = match window.canvas() {
@@ -460,37 +425,15 @@ fn attach_canvas_to_body(window: &Window) {
 
 // ── Public launch function ────────────────────────────────────────────────────
 
-/// Launch the demo.  Works on both native (blocking) and WASM (non-blocking).
-///
-/// On native this is equivalent to the standard winit run-loop.  
-/// On WASM this spawns a `spawn_local` future and returns immediately; the
-/// browser drives the frame loop via `requestAnimationFrame`.
+/// Launch the application and let the browser drive it through `requestAnimationFrame`.
 pub fn launch<T: HelioWasmApp>() {
-    // Logging setup
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        env_logger::try_init().ok();
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        console_error_panic_hook::set_once();
-        console_log::init_with_level(log::Level::Debug)
-            .expect("helio-wasm: failed to init console_log");
-    }
+    console_error_panic_hook::set_once();
+    console_log::init_with_level(log::Level::Debug)
+        .expect("helio-wasm: failed to init console_log");
 
     let event_loop = EventLoop::new().expect("helio-wasm: failed to create EventLoop");
     event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
 
-    let mut runner = WasmRunner::<T>::new();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    event_loop
-        .run_app(&mut runner)
-        .expect("helio-wasm: event loop error");
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        use winit::platform::web::EventLoopExtWebSys;
-        event_loop.spawn_app(runner);
-    }
+    use winit::platform::web::EventLoopExtWebSys;
+    event_loop.spawn_app(WasmRunner::<T>::new());
 }

@@ -8,13 +8,6 @@ use bytemuck::{Pod, Zeroable};
 // Constants
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Bindless texture array size per shader stage.
-#[cfg(not(target_arch = "wasm32"))]
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
-pub(crate) const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios"))]
-pub(crate) const MAX_TEXTURES: usize = 16;
-
 pub const LOD_LEVEL_COUNT: u32 = 8;
 
 pub(crate) const INITIAL_MESHLETS: u64 = 1024;
@@ -69,7 +62,7 @@ pub(crate) struct VgGlobals {
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub(crate) struct CullUniforms {
     pub meshlet_count: u32,
-    pub screen_width:  u32,
+    pub screen_width: u32,
     pub screen_height: u32,
     pub hiz_mip_count: u32,
     pub lod_thresholds: [f32; 7],

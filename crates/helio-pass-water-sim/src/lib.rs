@@ -62,18 +62,30 @@ fn make_surface_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32)
 
 fn make_volume_box_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
     let verts: Vec<[f32; 3]> = vec![
-        [-1.0, -1.0, -1.0], [ 1.0, -1.0, -1.0], [ 1.0, -1.0,  1.0], [-1.0, -1.0,  1.0],
-        [-1.0, -1.0, -1.0], [-1.0,  1.0, -1.0], [ 1.0,  1.0, -1.0], [ 1.0, -1.0, -1.0],
-        [-1.0, -1.0,  1.0], [ 1.0, -1.0,  1.0], [ 1.0,  1.0,  1.0], [-1.0,  1.0,  1.0],
-        [-1.0, -1.0, -1.0], [-1.0, -1.0,  1.0], [-1.0,  1.0,  1.0], [-1.0,  1.0, -1.0],
-        [ 1.0, -1.0, -1.0], [ 1.0,  1.0, -1.0], [ 1.0,  1.0,  1.0], [ 1.0, -1.0,  1.0],
+        [-1.0, -1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, -1.0, 1.0],
+        [-1.0, -1.0, 1.0],
+        [-1.0, -1.0, -1.0],
+        [-1.0, 1.0, -1.0],
+        [1.0, 1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+        [-1.0, -1.0, -1.0],
+        [-1.0, -1.0, 1.0],
+        [-1.0, 1.0, 1.0],
+        [-1.0, 1.0, -1.0],
+        [1.0, -1.0, -1.0],
+        [1.0, 1.0, -1.0],
+        [1.0, 1.0, 1.0],
+        [1.0, -1.0, 1.0],
     ];
     let indices: Vec<u32> = vec![
-        0, 1, 2,  0, 2, 3,
-        4, 5, 6,  4, 6, 7,
-        8, 9, 10,  8, 10, 11,
-        12, 13, 14,  12, 14, 15,
-        16, 17, 18,  16, 18, 19,
+        0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17,
+        18, 16, 18, 19,
     ];
     let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("Water Volume Box VB"),
@@ -309,8 +321,7 @@ impl RenderPass for WaterSimPass {
         None
     }
 
-    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
-    }
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {}
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
@@ -358,7 +369,9 @@ impl RenderPass for WaterSimPass {
             &self.view_b
         };
         frame.water_sim_texture.write(view, "WaterSim");
-        frame.water_sim_sampler.write(&self.output_sampler, "WaterSim");
+        frame
+            .water_sim_sampler
+            .write(&self.output_sampler, "WaterSim");
         if let Some(view) = &self.water_output_view {
             frame.pre_aa.write(view, "WaterSim");
         }
@@ -418,8 +431,8 @@ impl RenderPass for WaterSimPass {
                 let hitboxes_key = hitboxes_buf as *const wgpu::Buffer as usize;
                 let new_key = (src_key, hitboxes_key);
                 if self.hitbox_bg_key != Some(new_key) {
-                    self.hitbox_bg = Some(
-                        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    self.hitbox_bg =
+                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("WaterSim Hitbox BG"),
                             layout: &self.hitbox_bgl,
                             entries: &[
@@ -440,8 +453,7 @@ impl RenderPass for WaterSimPass {
                                     resource: hitboxes_buf.as_entire_binding(),
                                 },
                             ],
-                        }),
-                    );
+                        }));
                     self.hitbox_bg_key = Some(new_key);
                 }
                 let bg = self.hitbox_bg.as_ref().unwrap();
@@ -488,26 +500,24 @@ impl RenderPass for WaterSimPass {
 
             let src_key = src as *const wgpu::TextureView as usize;
             if self.drop_bg_key != Some(src_key) {
-                self.drop_bg = Some(
-                    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("WaterSim Drop BG"),
-                        layout: &self.sim_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(src),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: self.drop_buf.as_entire_binding(),
-                            },
-                        ],
-                    }),
-                );
+                self.drop_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("WaterSim Drop BG"),
+                    layout: &self.sim_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(src),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.drop_buf.as_entire_binding(),
+                        },
+                    ],
+                }));
                 self.drop_bg_key = Some(src_key);
             }
             let bg = self.drop_bg.as_ref().unwrap();
@@ -553,26 +563,24 @@ impl RenderPass for WaterSimPass {
 
             let src_key = src as *const wgpu::TextureView as usize;
             if self.update_bg_key != Some(src_key) {
-                self.update_bg = Some(
-                    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("WaterSim Update BG"),
-                        layout: &self.sim_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(src),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: self.update_buf.as_entire_binding(),
-                            },
-                        ],
-                    }),
-                );
+                self.update_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("WaterSim Update BG"),
+                    layout: &self.sim_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(src),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.update_buf.as_entire_binding(),
+                        },
+                    ],
+                }));
                 self.update_bg_key = Some(src_key);
             }
             let bg = self.update_bg.as_ref().unwrap();
@@ -623,26 +631,24 @@ impl RenderPass for WaterSimPass {
 
             let src_key = src as *const wgpu::TextureView as usize;
             if self.normal_bg_key != Some(src_key) {
-                self.normal_bg = Some(
-                    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                        label: Some("WaterSim Normal BG"),
-                        layout: &self.sim_bgl,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(src),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Sampler(&self.sampler),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: self.normal_buf.as_entire_binding(),
-                            },
-                        ],
-                    }),
-                );
+                self.normal_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("WaterSim Normal BG"),
+                    layout: &self.sim_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(src),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.normal_buf.as_entire_binding(),
+                        },
+                    ],
+                }));
                 self.normal_bg_key = Some(src_key);
             }
             let bg = self.normal_bg.as_ref().unwrap();
@@ -687,8 +693,8 @@ impl RenderPass for WaterSimPass {
                 let new_key = (vols_key, sim_key);
 
                 if self.caustics_bg_key != Some(new_key) {
-                    self.caustics_bg = Some(
-                        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    self.caustics_bg =
+                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("Water Caustics BG"),
                             layout: &self.caustics_render_bgl,
                             entries: &[
@@ -702,13 +708,10 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: wgpu::BindingResource::Sampler(
-                                        &self.output_sampler,
-                                    ),
+                                    resource: wgpu::BindingResource::Sampler(&self.output_sampler),
                                 },
                             ],
-                        }),
-                    );
+                        }));
                     self.caustics_bg_key = Some(new_key);
                 }
 
@@ -755,22 +758,20 @@ impl RenderPass for WaterSimPass {
             .unwrap_or(&self.pre_aa_fallback_view);
         let blit_key = scene_view as *const _ as usize;
         if self.blit_bg_key != Some(blit_key) {
-            self.blit_bg = Some(
-                ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("Water Blit BG"),
-                    layout: &self.blit_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(scene_view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.output_sampler),
-                        },
-                    ],
-                }),
-            );
+            self.blit_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Water Blit BG"),
+                layout: &self.blit_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(scene_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.output_sampler),
+                    },
+                ],
+            }));
             self.blit_bg_key = Some(blit_key);
         }
         {
@@ -837,8 +838,8 @@ impl RenderPass for WaterSimPass {
                     gbuffer_key,
                 );
                 if self.render_bg_key != Some(new_key) {
-                    self.render_bg = Some(
-                        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    self.render_bg =
+                        Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                             label: Some("Water Render BG"),
                             layout: &self.render_bgl,
                             entries: &[
@@ -856,17 +857,12 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 3,
-                                    resource: wgpu::BindingResource::Sampler(
-                                        &self.output_sampler,
-                                    ),
+                                    resource: wgpu::BindingResource::Sampler(&self.output_sampler),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 4,
                                     resource: wgpu::BindingResource::TextureView(
-                                        ctx.resources
-                                            .water_caustics
-                                            .read("WaterSim")
-                                            .unwrap(),
+                                        ctx.resources.water_caustics.read("WaterSim").unwrap(),
                                     ),
                                 },
                                 wgpu::BindGroupEntry {
@@ -891,9 +887,7 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 9,
-                                    resource: wgpu::BindingResource::Sampler(
-                                        &self.depth_sampler,
-                                    ),
+                                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 10,
@@ -902,8 +896,7 @@ impl RenderPass for WaterSimPass {
                                     ),
                                 },
                             ],
-                        }),
-                    );
+                        }));
                     self.render_bg_key = Some(new_key);
                 }
                 let render_bg = self.render_bg.as_ref().unwrap();
@@ -921,97 +914,85 @@ impl RenderPass for WaterSimPass {
 
                 // 1. Water volume walls
                 {
-                    let mut pass =
-                        unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                            &wgpu::RenderPassDescriptor {
-                                label: Some("Water Volume Walls"),
-                                color_attachments: &color_attachments,
-                                depth_stencil_attachment: Some(
-                                    wgpu::RenderPassDepthStencilAttachment {
-                                        view: depth_view,
-                                        depth_ops: Some(wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
-                                            store: wgpu::StoreOp::Store,
-                                        }),
-                                        stencil_ops: None,
-                                    },
-                                ),
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                                multiview_mask: None,
-                            },
-                        );
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Water Volume Walls"),
+                            color_attachments: &color_attachments,
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                     pass.set_pipeline(&self.volume_walls_pipeline);
                     pass.set_bind_group(0, render_bg, &[]);
                     pass.set_vertex_buffer(0, self.volume_vbuf.slice(..));
-                    pass.set_index_buffer(
-                        self.volume_ibuf.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                    pass.set_index_buffer(self.volume_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.volume_index_count, 0, 0..1);
                 }
 
                 // 2. Water surface above
                 {
-                    let mut pass =
-                        unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                            &wgpu::RenderPassDescriptor {
-                                label: Some("Water Surface Above"),
-                                color_attachments: &color_attachments,
-                                depth_stencil_attachment: Some(
-                                    wgpu::RenderPassDepthStencilAttachment {
-                                        view: depth_view,
-                                        depth_ops: Some(wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
-                                            store: wgpu::StoreOp::Store,
-                                        }),
-                                        stencil_ops: None,
-                                    },
-                                ),
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                                multiview_mask: None,
-                            },
-                        );
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Water Surface Above"),
+                            color_attachments: &color_attachments,
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                     pass.set_pipeline(&self.surface_above_pipeline);
                     pass.set_bind_group(0, render_bg, &[]);
                     pass.set_vertex_buffer(0, self.surface_vbuf.slice(..));
-                    pass.set_index_buffer(
-                        self.surface_ibuf.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                    pass.set_index_buffer(self.surface_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
                 }
 
                 // 3. Water surface under
                 {
-                    let mut pass =
-                        unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                            &wgpu::RenderPassDescriptor {
-                                label: Some("Water Surface Under"),
-                                color_attachments: &color_attachments,
-                                depth_stencil_attachment: Some(
-                                    wgpu::RenderPassDepthStencilAttachment {
-                                        view: depth_view,
-                                        depth_ops: Some(wgpu::Operations {
-                                            load: wgpu::LoadOp::Load,
-                                            store: wgpu::StoreOp::Store,
-                                        }),
-                                        stencil_ops: None,
-                                    },
-                                ),
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                                multiview_mask: None,
-                            },
-                        );
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Water Surface Under"),
+                            color_attachments: &color_attachments,
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                     pass.set_pipeline(&self.surface_under_pipeline);
                     pass.set_bind_group(0, render_bg, &[]);
                     pass.set_vertex_buffer(0, self.surface_vbuf.slice(..));
-                    pass.set_index_buffer(
-                        self.surface_ibuf.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
+                    pass.set_index_buffer(self.surface_ibuf.slice(..), wgpu::IndexFormat::Uint32);
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
                 }
 
@@ -1021,8 +1002,8 @@ impl RenderPass for WaterSimPass {
                     let water_output_key = water_output_view as *const wgpu::TextureView as usize;
                     let new_tint_key = (vols_key, water_output_key);
                     if self.underwater_tint_bg_key != Some(new_tint_key) {
-                        self.underwater_tint_bg = Some(
-                            ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        self.underwater_tint_bg =
+                            Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                 label: Some("Water Underwater Tint BG"),
                                 layout: &self.underwater_tint_bgl,
                                 entries: &[
@@ -1047,8 +1028,7 @@ impl RenderPass for WaterSimPass {
                                         ),
                                     },
                                 ],
-                            }),
-                        );
+                            }));
                         self.underwater_tint_bg_key = Some(new_tint_key);
                     }
                     let tint_bg = self.underwater_tint_bg.as_ref().unwrap();
@@ -1061,17 +1041,16 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut tint_pass =
-                        unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                            &wgpu::RenderPassDescriptor {
-                                label: Some("Water Underwater Tint"),
-                                color_attachments: &tint_attachments,
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                                multiview_mask: None,
-                            },
-                        );
+                    let mut tint_pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Water Underwater Tint"),
+                            color_attachments: &tint_attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                     tint_pass.set_pipeline(&self.underwater_tint_pipeline);
                     tint_pass.set_bind_group(0, tint_bg, &[]);
                     tint_pass.draw(0..3, 0..1);
@@ -1090,9 +1069,7 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
-                                    resource: wgpu::BindingResource::Sampler(
-                                        &self.output_sampler,
-                                    ),
+                                    resource: wgpu::BindingResource::Sampler(&self.output_sampler),
                                 },
                             ],
                         });
@@ -1105,17 +1082,16 @@ impl RenderPass for WaterSimPass {
                             store: wgpu::StoreOp::Store,
                         },
                     })];
-                    let mut blit_pass =
-                        unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                            &wgpu::RenderPassDescriptor {
-                                label: Some("Water Tint Blit Back"),
-                                color_attachments: &blit_attachments,
-                                depth_stencil_attachment: None,
-                                timestamp_writes: None,
-                                occlusion_query_set: None,
-                                multiview_mask: None,
-                            },
-                        );
+                    let mut blit_pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Water Tint Blit Back"),
+                            color_attachments: &blit_attachments,
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                     blit_pass.set_pipeline(&self.blit_pipeline);
                     blit_pass.set_bind_group(0, &scratch_blit_bg, &[]);
                     blit_pass.draw(0..3, 0..1);

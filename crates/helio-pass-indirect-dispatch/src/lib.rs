@@ -245,8 +245,8 @@ impl RenderPass for IndirectDispatchPass {
 
         // O(1) CPU: one dispatch, GPU culls all draw calls in parallel.
         let workgroups = draw_count.div_ceil(WORKGROUP_SIZE);
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass =
+            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("IndirectDispatch"),
                 timestamp_writes: None,
             });
@@ -298,4 +298,3 @@ fn extract_frustum_planes(vp: [f32; 16]) -> [[f32; 4]; 6] {
         normalize(sub(r3, r2)), // far:     z ≤  w  → -z + w ≥ 0
     ]
 }
-

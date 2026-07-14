@@ -76,52 +76,51 @@ impl PerfOverlayShared {
             ),
         });
 
-        let color_compare_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("PerfOverlay Color Compare BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let color_compare_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("PerfOverlay Color Compare BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         let color_compare_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -149,9 +148,7 @@ impl PerfOverlayShared {
 
         let blit_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PerfOverlay Blit Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/blit_color.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/blit_color.wgsl").into()),
         });
 
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -216,72 +213,71 @@ impl PerfOverlayShared {
             ),
         });
 
-        let cost_compute_bgl =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("PerfOverlay Cost Compute BGL"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let cost_compute_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("PerfOverlay Cost Compute BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         let cost_compute_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -352,8 +348,7 @@ impl PerfOverlayShared {
         *self.mode.lock().unwrap() = mode;
     }
 
-    pub fn set_opacity(&self, _opacity: f32) {
-    }
+    pub fn set_opacity(&self, _opacity: f32) {}
 
     pub fn init_material_profiler(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         if self.material_profiler.is_none() {
@@ -476,15 +471,14 @@ impl PerfOverlayPass {
                 immediate_size: 0,
             });
 
-        let aggregate_pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("PerfOverlay Aggregate Pipeline"),
-                layout: Some(&aggregate_pipeline_layout),
-                module: &aggregate_shader,
-                entry_point: Some("cs_aggregate_tiles"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
+        let aggregate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("PerfOverlay Aggregate Pipeline"),
+            layout: Some(&aggregate_pipeline_layout),
+            module: &aggregate_shader,
+            entry_point: Some("cs_aggregate_tiles"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
 
         let aggregate_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PerfOverlay Aggregate Params"),
@@ -624,8 +618,7 @@ impl PerfOverlayPass {
         self.shared.lock().unwrap().set_mode(mode);
     }
 
-    pub fn set_opacity(&mut self, _opacity: f32) {
-    }
+    pub fn set_opacity(&mut self, _opacity: f32) {}
 }
 
 impl RenderPass for PerfOverlayPass {
@@ -691,8 +684,8 @@ impl RenderPass for PerfOverlayPass {
         _depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(
-            Box::new([Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -700,8 +693,7 @@ impl RenderPass for PerfOverlayPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            })]),
-        );
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("PerfOverlay Visualize"),
             color_attachments,
@@ -728,8 +720,8 @@ impl RenderPass for PerfOverlayPass {
             let key = (gbuffer_orm_ptr, tile_light_counts_ptr);
 
             if self.aggregate_bind_group_key != Some(key) {
-                self.aggregate_bind_group = Some(
-                    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                self.aggregate_bind_group =
+                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("PerfOverlay Aggregate BG"),
                         layout: &self.aggregate_bgl,
                         entries: &[
@@ -754,8 +746,7 @@ impl RenderPass for PerfOverlayPass {
                                 resource: self.tile_metrics_buf.as_entire_binding(),
                             },
                         ],
-                    }),
-                );
+                    }));
                 self.aggregate_bind_group_key = Some(key);
             }
 
@@ -775,11 +766,9 @@ impl RenderPass for PerfOverlayPass {
             let gbuffer_orm_ptr = gbuffer.orm as *const _ as usize;
             let key = gbuffer_orm_ptr;
 
-            if self.visualize_bind_group_key != Some(key)
-                || self.visualize_bind_group.is_none()
-            {
-                self.visualize_bind_group = Some(
-                    ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            if self.visualize_bind_group_key != Some(key) || self.visualize_bind_group.is_none() {
+                self.visualize_bind_group =
+                    Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some("PerfOverlay Visualize BG"),
                         layout: &self.visualize_bgl,
                         entries: &[
@@ -804,8 +793,7 @@ impl RenderPass for PerfOverlayPass {
                                 resource: shared.shader_cost_buf.as_entire_binding(),
                             },
                         ],
-                    }),
-                );
+                    }));
                 self.visualize_bind_group_key = Some(key);
             }
 

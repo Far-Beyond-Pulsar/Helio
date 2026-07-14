@@ -37,9 +37,7 @@ impl HelioWasmApp for Demo {
         h: u32,
     ) -> Self {
         let _ = (w, h);
-        let mut sdf = {
-            SdfPass::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, None)
-        };
+        let mut sdf = { SdfPass::new(&device, wgpu::TextureFormat::Bgra8UnormSrgb, None) };
 
         sdf.set_terrain(Some(TerrainConfig::rolling()));
 
@@ -146,4 +144,3 @@ impl HelioWasmApp for Demo {
         )
     }
 }
-

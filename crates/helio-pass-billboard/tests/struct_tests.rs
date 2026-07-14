@@ -264,4 +264,3 @@ fn bytes_of_matches_size_of() {
     let inst: BillboardInstance = Zeroable::zeroed();
     assert_eq!(bytes_of(&inst).len(), size_of::<BillboardInstance>());
 }
-

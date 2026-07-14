@@ -87,8 +87,7 @@ struct GpuInstanceData {
 
 @group(1) @binding(0) var<storage, read> materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read> material_textures:  array<MaterialTextureData>;
-@group(1) @binding(2) var                scene_textures:     binding_array<texture_2d<f32>, 256>;
-@group(1) @binding(3) var                scene_samplers:     binding_array<sampler, 256>;
+// HELIO_WEBGPU_MATERIAL_BINDINGS
 
 struct Vertex {
     @location(0) position:       vec3<f32>,
@@ -146,7 +145,6 @@ struct GBufferOutput {
     @location(1) normal:    vec4<f32>,
     @location(2) orm:       vec4<f32>,
     @location(3) emissive:  vec4<f32>,
-    @location(4) vg_flag:   vec2<f32>,
 }
 
 const NO_TEXTURE: u32 = 0xffffffffu;
@@ -164,12 +162,29 @@ fn select_uv(slot: MaterialTextureSlot, base_uv: vec2<f32>) -> vec2<f32> {
     return rotated + slot.offset_scale.xy;
 }
 
-fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<f32>) -> vec4<f32> {
+// HELIO_WEBGPU_MATERIAL_SAMPLER
+
+fn transform_uv_gradient(slot: MaterialTextureSlot, gradient: vec2<f32>) -> vec2<f32> {
+    let scaled = gradient * slot.offset_scale.zw;
+    let s = slot.rotation.x;
+    let c = slot.rotation.y;
+    return vec2<f32>(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
+}
+
+fn sample_texture(
+    slot: MaterialTextureSlot,
+    base_uv: vec2<f32>,
+    base_uv_dx: vec2<f32>,
+    base_uv_dy: vec2<f32>,
+    fallback: vec4<f32>,
+) -> vec4<f32> {
     if slot.texture_index == NO_TEXTURE {
         return fallback;
     }
     let uv = select_uv(slot, base_uv);
-    return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);
+    let uv_dx = transform_uv_gradient(slot, base_uv_dx);
+    let uv_dy = transform_uv_gradient(slot, base_uv_dy);
+    return sample_scene_texture(slot.texture_index, uv, uv_dx, uv_dy);
 }
 
 fn resolve_specular_f0(
@@ -178,10 +193,12 @@ fn resolve_specular_f0(
     albedo: vec3<f32>,
     metallic: f32,
     uv: vec2<f32>,
+    uv_dx: vec2<f32>,
+    uv_dy: vec2<f32>,
 ) -> vec3<f32> {
     if material.workflow == MATERIAL_WORKFLOW_SPECULAR {
-        let specular_color = sample_texture(material_tex.specular_color, uv, vec4<f32>(1.0)).rgb;
-        let specular_weight = sample_texture(material_tex.specular_weight, uv, vec4<f32>(1.0)).a;
+        let specular_color = sample_texture(material_tex.specular_color, uv, uv_dx, uv_dy, vec4<f32>(1.0)).rgb;
+        let specular_weight = sample_texture(material_tex.specular_weight, uv, uv_dx, uv_dy, vec4<f32>(1.0)).a;
         let ior = max(material.roughness_metallic.z, 1.0);
         let dielectric_f0 = pow((ior - 1.0) / (ior + 1.0), 2.0);
         return material.roughness_metallic.w * specular_weight * specular_color * dielectric_f0;
@@ -199,8 +216,10 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let material     = materials[input.material_id];
     let material_tex = material_textures[input.material_id];
     let uv = input.tex_coords;
+    let uv_dx = dpdx(uv);
+    let uv_dy = dpdy(uv);
 
-    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
+    let base_sample = sample_texture(material_tex.base_color, uv, uv_dx, uv_dy, vec4<f32>(1.0));
     let albedo      = material.base_color * base_sample;
     let alpha       = albedo.a;
 
@@ -212,29 +231,28 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     if material_tex.normal.texture_index != NO_TEXTURE {
         let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
         let B = cross(N_geom, T) * input.bitangent_sign;
-        var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
+        var norm_ts = sample_texture(material_tex.normal, uv, uv_dx, uv_dy, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
         norm_ts = vec3<f32>(norm_ts.x * material_tex.params.x, norm_ts.y * material_tex.params.x, norm_ts.z);
         N = normalize(T * norm_ts.x + B * norm_ts.y + N_geom * norm_ts.z);
     } else {
         N = N_geom;
     }
 
-    let orm_sample      = sample_texture(material_tex.roughness_metallic, uv, vec4<f32>(1.0));
-    let occlusion_sample = sample_texture(material_tex.occlusion, uv, vec4<f32>(1.0));
-    let emissive_sample = sample_texture(material_tex.emissive, uv, vec4<f32>(1.0));
+    let orm_sample      = sample_texture(material_tex.roughness_metallic, uv, uv_dx, uv_dy, vec4<f32>(1.0));
+    let occlusion_sample = sample_texture(material_tex.occlusion, uv, uv_dx, uv_dy, vec4<f32>(1.0));
+    let emissive_sample = sample_texture(material_tex.emissive, uv, uv_dx, uv_dy, vec4<f32>(1.0));
 
     let ao       = 1.0 + (occlusion_sample.r - 1.0) * material_tex.params.y;
     let roughness = clamp(material.roughness_metallic.x * orm_sample.g, 0.045, 1.0);
     let metallic  = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
-    let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
+    let specular_f0 = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv, uv_dx, uv_dy);
     let emissive  = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
 
     var out: GBufferOutput;
     out.albedo  = vec4<f32>(albedo.rgb, alpha);
-    out.normal  = vec4<f32>(N, specular_f0.r);
+    out.normal  = vec4<f32>(N, -(specular_f0.r + 1.0));
     out.orm     = vec4<f32>(ao, roughness, metallic, specular_f0.g);
     out.emissive = vec4<f32>(emissive, specular_f0.b);
-    out.vg_flag = vec2<f32>(-2.0, -2.0);
     return out;
 }
 
@@ -242,7 +260,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
 // Uses world-space face centroid to generate a stable per-triangle seed.
 fn tri_hash(world_pos: vec3<f32>) -> u32 {
     let centroid = floor(world_pos * 1000.0);
-    var h = u32(centroid.x) * 73856093u ^ u32(centroid.y) * 19349663u ^ u32(centroid.z) * 83492791u;
+    var h = (u32(centroid.x) * 73856093u) ^
+        (u32(centroid.y) * 19349663u) ^
+        (u32(centroid.z) * 83492791u);
     h ^= h >> 13u;
     h *= 2654435769u;
     h ^= h >> 16u;
@@ -283,10 +303,9 @@ fn fs_debug(input: VertexOutput) -> GBufferOutput {
     let face_n = normalize(cross(dpdx(input.world_position), dpdy(input.world_position)));
     var out: GBufferOutput;
     out.albedo   = vec4<f32>(base_color, 1.0);
-    out.normal   = vec4<f32>(face_n, 0.0);
+    out.normal   = vec4<f32>(face_n, -1.0);
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(base_color, 0.0);
-    out.vg_flag  = vec2<f32>(-2.0, -2.0);
     return out;
 }
 
@@ -340,9 +359,8 @@ fn fs_debug_lod(input: LodVertexOutput) -> GBufferOutput {
     let face_n = normalize(cross(dpdx(input.world_position), dpdy(input.world_position)));
     var out: GBufferOutput;
     out.albedo   = vec4<f32>(final_color, 1.0);
-    out.normal   = vec4<f32>(face_n, 0.0);
+    out.normal   = vec4<f32>(face_n, -1.0);
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(final_color, 0.0);
-    out.vg_flag  = vec2<f32>(-2.0, -2.0);
     return out;
 }

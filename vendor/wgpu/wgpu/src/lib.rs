@@ -68,8 +68,7 @@
 //! These features aren't actually features on the crate itself, but a convenient shorthand for
 //! complicated cases.
 //!
-//! - **`wgpu_core`** --- Enabled when there is any non-webgpu backend enabled on the platform.
-//! - **`naga`** --- Enabled when target `glsl` or `spirv` input is enabled, or when `wgpu_core` is enabled.
+//! This Helio vendor slice exposes only the browser WebGPU backend with WGSL input.
 //!
 //! ## Surface color spaces and HDR output
 //!
@@ -239,6 +238,9 @@
 // NOTE: Keep this in sync with `wgpu-core`.
 #![cfg_attr(not(send_sync), allow(clippy::arc_with_non_send_sync))]
 #![cfg_attr(not(any(wgpu_core, webgpu)), allow(unused))]
+
+#[cfg(not(all(target_arch = "wasm32", not(target_os = "emscripten"))))]
+compile_error!("Helio's vendored wgpu supports only wasm32 browser targets");
 
 extern crate alloc;
 #[cfg(any(std, test))]

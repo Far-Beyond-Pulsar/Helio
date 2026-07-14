@@ -468,4 +468,3 @@ impl<'a> PrepareContext<'a> {
         crate::upload::write_texture(self.queue, texture, data, data_layout, size);
     }
 }
-

@@ -346,8 +346,12 @@ impl super::super::Scene {
         self.gpu_scene.shadow_static_draw_count = static_draw_count;
         self.gpu_scene.shadow_movable_draw_count = movable_draw_count;
 
-        self.gpu_scene.shadow_static_indirect.set_data(static_indirect);
-        self.gpu_scene.shadow_movable_indirect.set_data(movable_indirect);
+        self.gpu_scene
+            .shadow_static_indirect
+            .set_data(static_indirect);
+        self.gpu_scene
+            .shadow_movable_indirect
+            .set_data(movable_indirect);
 
         log::debug!(
             "rebuild_shadow_partition_buffers: {} static + {} movable shadow draws",
@@ -356,4 +360,3 @@ impl super::super::Scene {
         );
     }
 }
-

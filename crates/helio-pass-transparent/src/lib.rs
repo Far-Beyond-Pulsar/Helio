@@ -1,12 +1,12 @@
 //! Transparent geometry pass.
 //!
-//! Renders alpha-blended transparent geometry using `multi_draw_indexed_indirect`.
+//! Renders alpha-blended transparent geometry using GPU-generated indirect draws.
 //! The pass shares the same Group 0 binding layout (camera / globals / instances) as the
 //! opaque geometry pass, but enables `SrcAlpha / OneMinusSrcAlpha` blending and uses a
 //! read-only depth attachment so transparent surfaces sort correctly against opaque ones.
 //!
-//! ## O(1) CPU cost
-//! `execute()` issues a single `multi_draw_indexed_indirect` call regardless of scene size.
+//! ## Browser command encoding
+//! `execute()` records the GPU-generated indirect commands supported by WebGPU.
 //!
 //! ## Note on prepare()
 //! `prepare()` uploads per-frame globals (frame counter, light count).  In a real renderer
@@ -236,7 +236,7 @@ impl RenderPass for TransparentPass {
         let globals = GBufferGlobals {
             frame: ctx.frame_num as u32,
             delta_time: 0.0,
-            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
+            light_count: ctx.scene.lights.len() as u32,
             ambient_intensity: 0.1,
             ambient_color: [0.1, 0.1, 0.15, 1.0],
             rc_world_min: [0.0; 4],
@@ -254,8 +254,8 @@ impl RenderPass for TransparentPass {
         depth: &'a wgpu::TextureView,
         _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] = Box::leak(Box::new([
-            Some(wgpu::RenderPassColorAttachment {
+        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
                 view: target,
                 resolve_target: None,
                 depth_slice: None,
@@ -263,8 +263,7 @@ impl RenderPass for TransparentPass {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            }),
-        ]));
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("Transparent"),
             color_attachments,
@@ -303,9 +302,6 @@ impl RenderPass for TransparentPass {
             main_scene.mesh_buffers.indices.slice(..),
             wgpu::IndexFormat::Uint32,
         );
-        #[cfg(not(target_arch = "wasm32"))]
-        rp.multi_draw_indexed_indirect(indirect, 0, draw_count);
-        #[cfg(target_arch = "wasm32")]
         for i in 0..draw_count {
             rp.draw_indexed_indirect(indirect, i as u64 * 20);
         }

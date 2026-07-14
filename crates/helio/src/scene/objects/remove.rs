@@ -79,14 +79,17 @@ impl super::super::Scene {
     /// ```
     pub fn remove_object(&mut self, id: ObjectId) -> Result<()> {
         // Check movability before removal for static atlas tracking
-        let is_static = self.objects
+        let is_static = self
+            .objects
             .get_with_index(id)
             .map(|(_, r)| !r.movability.can_move())
             .unwrap_or(false);
 
         // Capture handles before any mutation so we can cascade after.
         let (mesh_id, material_id) = {
-            let record = self.objects.get_with_index(id)
+            let record = self
+                .objects
+                .get_with_index(id)
                 .map(|(_, r)| (r.mesh, r.material))
                 .ok_or_else(|| invalid("object"))?;
             record
@@ -98,8 +101,7 @@ impl super::super::Scene {
             self.objects_dirty = true;
 
             // Still remove from CPU-side arena
-            let DenseRemove { .. } =
-                self.objects.remove(id).ok_or_else(|| invalid("object"))?;
+            let DenseRemove { .. } = self.objects.remove(id).ok_or_else(|| invalid("object"))?;
 
             // Decrement ref counts
             if let Some(material) = self
@@ -115,9 +117,7 @@ impl super::super::Scene {
         } else {
             // Persistent mode - swap_remove from GPU buffers
             let DenseRemove {
-                dense_index,
-                moved,
-                ..
+                dense_index, moved, ..
             } = self.objects.remove(id).ok_or_else(|| invalid("object"))?;
 
             // Swap-remove from GPU buffers (O(1) operations)
@@ -175,10 +175,18 @@ impl super::super::Scene {
         // Cascade: auto-free mesh and material when their ref counts hit zero.
         // remove_material already cascades into remove_texture, so a single call
         // here is sufficient to free the full chain.
-        if self.mesh_pool.get(mesh_id).map_or(false, |r| r.ref_count == 0) {
+        if self
+            .mesh_pool
+            .get(mesh_id)
+            .map_or(false, |r| r.ref_count == 0)
+        {
             let _ = self.remove_mesh(mesh_id);
         }
-        if self.materials.get(material_id).map_or(false, |r| r.ref_count == 0) {
+        if self
+            .materials
+            .get(material_id)
+            .map_or(false, |r| r.ref_count == 0)
+        {
             let _ = self.remove_material(material_id);
         }
 
@@ -190,4 +198,3 @@ impl super::super::Scene {
         Ok(())
     }
 }
-

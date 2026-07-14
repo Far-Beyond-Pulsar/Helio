@@ -42,9 +42,12 @@ pub(crate) fn format_bpp(fmt: wgpu::TextureFormat) -> u32 {
     use wgpu::TextureFormat::*;
     match fmt {
         R8Unorm | R8Snorm | R8Uint | R8Sint => 8,
-        R16Unorm | R16Snorm | R16Uint | R16Sint | R16Float | Rg8Unorm | Rg8Snorm | Rg8Uint | Rg8Sint => 16,
-        R32Uint | R32Sint | R32Float | Rg16Unorm | Rg16Snorm | Rg16Uint | Rg16Sint | Rg16Float | Rgba8Unorm | Rgba8UnormSrgb | Rgba8Snorm | Rgba8Uint | Rgba8Sint | Bgra8UnormSrgb => 32,
-        Rg32Uint | Rg32Sint | Rg32Float | Rgba16Unorm | Rgba16Snorm | Rgba16Uint | Rgba16Sint | Rgba16Float => 64,
+        R16Unorm | R16Snorm | R16Uint | R16Sint | R16Float | Rg8Unorm | Rg8Snorm | Rg8Uint
+        | Rg8Sint => 16,
+        R32Uint | R32Sint | R32Float | Rg16Unorm | Rg16Snorm | Rg16Uint | Rg16Sint | Rg16Float
+        | Rgba8Unorm | Rgba8UnormSrgb | Rgba8Snorm | Rgba8Uint | Rgba8Sint | Bgra8UnormSrgb => 32,
+        Rg32Uint | Rg32Sint | Rg32Float | Rgba16Unorm | Rgba16Snorm | Rgba16Uint | Rgba16Sint
+        | Rgba16Float => 64,
         Rgba32Uint | Rgba32Sint | Rgba32Float => 128,
         Depth32Float => 32,
         _ => 32,

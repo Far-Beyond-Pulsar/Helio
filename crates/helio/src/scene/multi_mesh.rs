@@ -207,10 +207,7 @@ impl super::Scene {
         }
 
         // Decrement asset ref-count — need to look up multi_mesh from the pool first.
-        let multi_mesh = self
-            .sectioned_instances
-            .get(id)
-            .map(|r| r.multi_mesh);
+        let multi_mesh = self.sectioned_instances.get(id).map(|r| r.multi_mesh);
         if let Some(mm) = multi_mesh {
             if let Some((_, r)) = self.multi_meshes.get_mut_with_slot(mm) {
                 r.ref_count = r.ref_count.saturating_sub(1);
@@ -250,10 +247,16 @@ impl super::Scene {
     ///
     /// Returns the [`SectionedInstanceId`] of the new copy, or an error if the
     /// source handle is stale.
-    pub fn duplicate_sectioned_object(&mut self, id: SectionedInstanceId) -> Result<SectionedInstanceId> {
+    pub fn duplicate_sectioned_object(
+        &mut self,
+        id: SectionedInstanceId,
+    ) -> Result<SectionedInstanceId> {
         // Snapshot what we need before any mutable borrows.
         let (multi_mesh, section_objects) = {
-            let rec = self.sectioned_instances.get(id).ok_or_else(|| invalid("sectioned_instance"))?;
+            let rec = self
+                .sectioned_instances
+                .get(id)
+                .ok_or_else(|| invalid("sectioned_instance"))?;
             (rec.multi_mesh, rec.section_objects.clone())
         };
 
@@ -266,8 +269,8 @@ impl super::Scene {
             let desc = self.get_object_descriptor(obj_id)?;
             materials.push(desc.material);
             if i == 0 {
-                bounds     = desc.bounds;
-                transform  = desc.transform;
+                bounds = desc.bounds;
+                transform = desc.transform;
                 movability = desc.movability;
             }
         }
@@ -275,4 +278,3 @@ impl super::Scene {
         self.insert_sectioned_object(multi_mesh, &materials, transform, bounds, movability)
     }
 }
-

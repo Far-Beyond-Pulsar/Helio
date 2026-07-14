@@ -11,4 +11,4 @@ bytemuck = { workspace = true, features = ["derive"] }
 helio-v3 = { workspace = true }
 libhelio = { workspace = true }
 log = { workspace = true }
-wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
+wgpu.workspace = true

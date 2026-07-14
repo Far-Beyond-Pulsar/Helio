@@ -193,13 +193,13 @@ impl RenderPass for ShadowMatrixPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let count = ctx.scene.movable_light_count; // Only movable lights (static/stationary shadows are baked)
+        let count = ctx.scene.light_count;
         if count == 0 {
             return Ok(());
         }
         let wg = count.div_ceil(WORKGROUP_SIZE);
-        let mut pass = unsafe { &mut *ctx.encoder_ptr }
-            .begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass =
+            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ShadowMatrix"),
                 timestamp_writes: None,
             });
@@ -209,4 +209,3 @@ impl RenderPass for ShadowMatrixPass {
         Ok(())
     }
 }
-

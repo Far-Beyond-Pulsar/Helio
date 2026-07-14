@@ -164,7 +164,14 @@ impl RenderPass for RadianceCascadesPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw("rc_cascades", wgpu::TextureFormat::Rgba16Float, ResourceSize::Absolute { width: ATLAS_W, height: ATLAS_H });
+        builder.write_color_raw(
+            "rc_cascades",
+            wgpu::TextureFormat::Rgba16Float,
+            ResourceSize::Absolute {
+                width: ATLAS_W,
+                height: ATLAS_H,
+            },
+        );
         builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
@@ -196,9 +203,14 @@ impl RenderPass for RadianceCascadesPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         // Lazily create bind group from graph-managed cascade texture.
         if self.bind_group.is_none() {
-            let tex = ctx.resource_pool.get_texture("rc_cascades").ok_or_else(|| {
-                helio_v3::Error::InvalidPassConfig("RadianceCascades: missing rc_cascades texture".into())
-            })?;
+            let tex = ctx
+                .resource_pool
+                .get_texture("rc_cascades")
+                .ok_or_else(|| {
+                    helio_v3::Error::InvalidPassConfig(
+                        "RadianceCascades: missing rc_cascades texture".into(),
+                    )
+                })?;
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("RC Fallback BG"),
@@ -231,4 +243,3 @@ impl RenderPass for RadianceCascadesPass {
         Ok(())
     }
 }
-

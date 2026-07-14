@@ -1,9 +1,9 @@
-use wgpu::util::DeviceExt;
 use crate::simulation::{DeltaUniform, DropUniform, HitboxCountUniform};
 use crate::{
     make_surface_mesh, make_volume_box_mesh, vec3_vbl, WaterSimPass, BLIT_WGSL, CAUSTICS_SIZE,
     MAX_DROPS_BUFFERED, SIM_SIZE,
 };
+use wgpu::util::DeviceExt;
 
 impl WaterSimPass {
     #[allow(clippy::too_many_arguments)]
@@ -217,12 +217,18 @@ impl WaterSimPass {
         };
 
         let drop_buf = make_ubuf("WaterSim Drop Uniform", std::mem::size_of::<DropUniform>());
-        let update_buf =
-            make_ubuf("WaterSim Update Uniform", std::mem::size_of::<DeltaUniform>());
-        let normal_buf =
-            make_ubuf("WaterSim Normal Uniform", std::mem::size_of::<DeltaUniform>());
-        let hitbox_count_buf =
-            make_ubuf("WaterSim Hitbox Count", std::mem::size_of::<HitboxCountUniform>());
+        let update_buf = make_ubuf(
+            "WaterSim Update Uniform",
+            std::mem::size_of::<DeltaUniform>(),
+        );
+        let normal_buf = make_ubuf(
+            "WaterSim Normal Uniform",
+            std::mem::size_of::<DeltaUniform>(),
+        );
+        let hitbox_count_buf = make_ubuf(
+            "WaterSim Hitbox Count",
+            std::mem::size_of::<HitboxCountUniform>(),
+        );
 
         let caustics_render_bgl =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -540,9 +546,7 @@ impl WaterSimPass {
             });
         let underwater_tint_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Underwater Tint Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/underwater_fog.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/underwater_fog.wgsl").into()),
         });
         let underwater_tint_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Underwater Tint PL"),
@@ -596,21 +600,15 @@ impl WaterSimPass {
         });
         let surface_above_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Surface Above Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/surface_above.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/surface_above.wgsl").into()),
         });
         let surface_under_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Surface Under Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/surface_under.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/surface_under.wgsl").into()),
         });
         let volume_walls_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Water Volume Walls Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/volume_walls.wgsl").into(),
-            ),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/volume_walls.wgsl").into()),
         });
 
         let vbl = vec3_vbl();

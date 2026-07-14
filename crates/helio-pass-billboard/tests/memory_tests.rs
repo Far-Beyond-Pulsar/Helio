@@ -268,4 +268,3 @@ fn different_colors_produce_different_bytes() {
     };
     assert_ne!(bytes_of(&a), bytes_of(&b));
 }
-

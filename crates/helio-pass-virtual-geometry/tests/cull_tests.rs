@@ -2,8 +2,8 @@
 // meshlet visibility, screen coverage, LOD transitions, backface cone culling.
 // Uses the actual public LodQuality API + locally mirrored private types.
 
-use std::mem;
 use helio_pass_virtual_geometry::LodQuality;
+use std::mem;
 
 // ── Mirror private types ──────────────────────────────────────────────────────
 
@@ -86,7 +86,9 @@ fn workgroup_size_is_64() {
 
 #[test]
 fn dispatch_groups_ceil_division() {
-    fn ceil_div(n: u32, d: u32) -> u32 { (n + d - 1) / d }
+    fn ceil_div(n: u32, d: u32) -> u32 {
+        (n + d - 1) / d
+    }
     assert_eq!(ceil_div(64, 64), 1);
     assert_eq!(ceil_div(65, 64), 2);
     assert_eq!(ceil_div(128, 64), 2);
@@ -142,7 +144,12 @@ fn screen_radius_close_object_above_ultra_s0() {
 
 #[test]
 fn all_quality_levels_have_positive_thresholds() {
-    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
+    for q in [
+        LodQuality::Low,
+        LodQuality::Medium,
+        LodQuality::High,
+        LodQuality::Ultra,
+    ] {
         let t = q.thresholds();
         for &v in &t {
             assert!(v > 0.0, "{:?} threshold {v}", q);
@@ -153,9 +160,7 @@ fn all_quality_levels_have_positive_thresholds() {
 // ── Backface cone culling tests ───────────────────────────────────────────────
 
 fn is_backfacing_cone(view_dir: [f32; 3], cone_axis: [f32; 3], cos_half_angle: f32) -> bool {
-    let dot = view_dir[0] * cone_axis[0]
-        + view_dir[1] * cone_axis[1]
-        + view_dir[2] * cone_axis[2];
+    let dot = view_dir[0] * cone_axis[0] + view_dir[1] * cone_axis[1] + view_dir[2] * cone_axis[2];
     dot + cos_half_angle <= 0.0
 }
 

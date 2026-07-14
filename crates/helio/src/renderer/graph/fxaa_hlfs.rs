@@ -5,10 +5,12 @@ use helio_pass_fxaa::FxaaPass;
 use helio_pass_hlfs::HlfsPass;
 use helio_v3::RenderGraph;
 
-use crate::scene::Scene;
-use crate::renderer::debug::DebugDrawState;
+use super::{
+    add_common_early_passes, add_final_passes, add_geometry_passes, add_late_passes, new_graph,
+};
 use crate::renderer::config::RendererConfig;
-use super::{add_common_early_passes, add_geometry_passes, add_late_passes, add_final_passes, new_graph};
+use crate::renderer::debug::DebugDrawState;
+use crate::scene::Scene;
 
 /// Full-resolution pipeline with HLFS lighting and FXAA anti-aliasing.
 ///
@@ -24,7 +26,17 @@ pub fn build_fxaa_hlfs_graph(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, true, debug_overlay)
+    build_fxaa_hlfs_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        true,
+        debug_overlay,
+    )
 }
 
 pub fn build_fxaa_hlfs_graph_external(
@@ -37,7 +49,17 @@ pub fn build_fxaa_hlfs_graph_external(
     cull_stats_buf: &wgpu::Buffer,
     debug_overlay: Option<&Arc<std::sync::Mutex<DebugOverlayState>>>,
 ) -> RenderGraph {
-    build_fxaa_hlfs_graph_internal(device, queue, scene, config, debug_state, debug_camera_buf, cull_stats_buf, false, debug_overlay)
+    build_fxaa_hlfs_graph_internal(
+        device,
+        queue,
+        scene,
+        config,
+        debug_state,
+        debug_camera_buf,
+        cull_stats_buf,
+        false,
+        debug_overlay,
+    )
 }
 
 fn build_fxaa_hlfs_graph_internal(
@@ -57,7 +79,15 @@ fn build_fxaa_hlfs_graph_internal(
     let mut graph = new_graph(device, queue, owns_device);
 
     let perf = add_common_early_passes(
-        &mut graph, device, scene, &config, debug_state.clone(), debug_camera_buf, cull_stats_buf, w, h,
+        &mut graph,
+        device,
+        scene,
+        &config,
+        debug_state.clone(),
+        debug_camera_buf,
+        cull_stats_buf,
+        w,
+        h,
     );
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
@@ -70,7 +100,16 @@ fn build_fxaa_hlfs_graph_internal(
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
-    add_final_passes(&mut graph, device, queue, &config, &perf, debug_state, debug_camera_buf, debug_overlay);
+    add_final_passes(
+        &mut graph,
+        device,
+        queue,
+        &config,
+        &perf,
+        debug_state,
+        debug_camera_buf,
+        debug_overlay,
+    );
 
     graph.lock(w, h);
     graph

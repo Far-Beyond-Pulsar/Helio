@@ -41,7 +41,12 @@ fn lod_quality_default_is_medium() {
 
 #[test]
 fn thresholds_return_7_elements() {
-    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
+    for q in [
+        LodQuality::Low,
+        LodQuality::Medium,
+        LodQuality::High,
+        LodQuality::Ultra,
+    ] {
         let t = q.thresholds();
         assert_eq!(t.len(), 7, "{:?}", q);
     }
@@ -51,10 +56,22 @@ fn thresholds_return_7_elements() {
 
 #[test]
 fn thresholds_strictly_decreasing() {
-    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
+    for q in [
+        LodQuality::Low,
+        LodQuality::Medium,
+        LodQuality::High,
+        LodQuality::Ultra,
+    ] {
         let t = q.thresholds();
         for i in 0..6 {
-            assert!(t[i] > t[i + 1], "{:?}: t[{i}]={} not > t[{}]={}", q, t[i], i + 1, t[i + 1]);
+            assert!(
+                t[i] > t[i + 1],
+                "{:?}: t[{i}]={} not > t[{}]={}",
+                q,
+                t[i],
+                i + 1,
+                t[i + 1]
+            );
         }
     }
 }
@@ -88,7 +105,12 @@ fn higher_quality_has_lower_s6() {
 
 #[test]
 fn all_thresholds_positive() {
-    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
+    for q in [
+        LodQuality::Low,
+        LodQuality::Medium,
+        LodQuality::High,
+        LodQuality::Ultra,
+    ] {
         let t = q.thresholds();
         for (i, &v) in t.iter().enumerate() {
             assert!(v > 0.0, "{:?} t[{i}]={v} not positive", q);
@@ -98,7 +120,12 @@ fn all_thresholds_positive() {
 
 #[test]
 fn all_thresholds_below_1() {
-    for q in [LodQuality::Low, LodQuality::Medium, LodQuality::High, LodQuality::Ultra] {
+    for q in [
+        LodQuality::Low,
+        LodQuality::Medium,
+        LodQuality::High,
+        LodQuality::Ultra,
+    ] {
         let t = q.thresholds();
         for (i, &v) in t.iter().enumerate() {
             assert!(v < 1.0, "{:?} t[{i}]={v} >= 1.0", q);
@@ -182,7 +209,7 @@ fn screen_radius_scales_linearly_with_object_size() {
 fn ultra_gives_full_detail_at_small_screen_coverage() {
     let ultra = LodQuality::Ultra.thresholds();
     let sr = 0.01; // 1% screen coverage
-    // Ultra s0 = 0.008, so 1% > 0.8% → LOD0 on Ultra
+                   // Ultra s0 = 0.008, so 1% > 0.8% → LOD0 on Ultra
     assert!(sr >= ultra[0], "sr={sr} ultra_s0={}", ultra[0]);
 }
 
@@ -190,6 +217,6 @@ fn ultra_gives_full_detail_at_small_screen_coverage() {
 fn low_quality_uses_coarse_lod_at_small_screen_coverage() {
     let low = LodQuality::Low.thresholds();
     let sr = 0.01; // 1% screen coverage
-    // Low s0 = 0.18, so 1% < 18% → NOT LOD0 on Low
+                   // Low s0 = 0.18, so 1% < 18% → NOT LOD0 on Low
     assert!(sr < low[0], "sr={sr} low_s0={}", low[0]);
 }

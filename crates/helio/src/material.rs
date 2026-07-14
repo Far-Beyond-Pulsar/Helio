@@ -2,12 +2,8 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::{GpuMaterial, TextureId};
 
-/// Maximum bindless textures per shader stage.
-/// WebGPU baseline guarantees only 16; native Vulkan/D3D12 supports 256.
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
-pub const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios"))]
-pub const MAX_TEXTURES: usize = 16;
+/// Maximum material textures exposed to a shader stage by baseline WebGPU.
+pub const MAX_TEXTURES: usize = libhelio::WEBGPU_MATERIAL_TEXTURES;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TextureSamplerDesc {
@@ -201,4 +197,3 @@ impl GpuMaterialTextures {
         }
     }
 }
-

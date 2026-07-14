@@ -70,31 +70,11 @@
 //! # unsafe impl bytemuck::Zeroable for MyUniforms {}
 //! ```
 
-// ── Platform-conditional Send + Sync bounds ────────────────────────────────
-// On native targets, wgpu types are Send + Sync, so RenderPass requires them.
-// On wasm32, wgpu's internal dyn-context types are not Send + Sync (WASM is
-// single-threaded), so we relax the bounds via blanket no-op traits.
-
-/// Blanket bound: `Send` on native, nothing on `wasm32`.
-#[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSend: Send {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Send> MaybeSend for T {}
-
-#[cfg(target_arch = "wasm32")]
+/// Browser WebGPU runs on the JavaScript agent that owns the device.
 pub trait MaybeSend {}
-#[cfg(target_arch = "wasm32")]
 impl<T> MaybeSend for T {}
 
-/// Blanket bound: `Sync` on native, nothing on `wasm32`.
-#[cfg(not(target_arch = "wasm32"))]
-pub trait MaybeSync: Sync {}
-#[cfg(not(target_arch = "wasm32"))]
-impl<T: Sync> MaybeSync for T {}
-
-#[cfg(target_arch = "wasm32")]
 pub trait MaybeSync {}
-#[cfg(target_arch = "wasm32")]
 impl<T> MaybeSync for T {}
 
 use crate::graph::ResourceBuilder;
@@ -129,9 +109,13 @@ pub trait AsAny: std::any::Any {
 /// Blanket implementation — every concrete type gets this for free.
 impl<T: std::any::Any> AsAny for T {
     #[inline]
-    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
     #[inline]
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any { self }
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 /// Core trait for all rendering passes.
@@ -283,11 +267,15 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Resources this pass reads. Checked at graph construction time.
     /// Override to declare dependencies on prior-pass outputs.
     /// Return graph resource name strings (e.g. `"pre_aa"`, `"gbuffer"`).
-    fn reads(&self) -> &'static [&'static str] { &[] }
+    fn reads(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     /// Resources this pass writes/publishes. Checked at graph construction time.
     /// Override to declare outputs for downstream passes.
-    fn writes(&self) -> &'static [&'static str] { &[] }
+    fn writes(&self) -> &'static [&'static str] {
+        &[]
+    }
 
     /// Executes the pass by recording GPU commands.
     ///
@@ -360,7 +348,9 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// Default `false`. Only opt in after auditing every encoder touch in
     /// `execute()` — a single stray `ctx.encoder_ptr` use while the chain's
     /// render pass is open is a real hazard, not just a missed optimization.
-    fn chain_transparent(&self) -> bool { false }
+    fn chain_transparent(&self) -> bool {
+        false
+    }
 
     /// Optionally prepares per-frame data before GPU execution.
     ///
@@ -416,7 +406,9 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     ///
     /// The renderer aggregates these from all passes to build a discoverable
     /// list of debug views that can be cycled at runtime.
-    fn debug_views(&self) -> &'static [DebugViewDescriptor] { &[] }
+    fn debug_views(&self) -> &'static [DebugViewDescriptor] {
+        &[]
+    }
 
     /// Declares the inter-pass resources this pass reads and writes.
     ///
@@ -441,4 +433,3 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// methods for backward compatibility.
     fn declare_resources(&self, _builder: &mut ResourceBuilder) {}
 }
-

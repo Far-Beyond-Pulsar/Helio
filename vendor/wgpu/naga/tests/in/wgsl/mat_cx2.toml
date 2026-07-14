@@ -1,4 +1,0 @@
-targets = "HLSL | SPIRV"
-
-[spv]
-debug = true
