@@ -23,7 +23,7 @@ and `helio-voxel-core` remain unchanged regression baselines.
 
 ## Active milestone
 
-- [ ] Helio bounded renderer-facing residency contract: [Helio#59](https://github.com/Far-Beyond-Pulsar/Helio/issues/59)
+- [ ] Helio bounded renderer-facing residency contract: [Helio#62](https://github.com/Far-Beyond-Pulsar/Helio/pull/62) ([issue #59](https://github.com/Far-Beyond-Pulsar/Helio/issues/59))
 
 ## Implementation milestones
 
