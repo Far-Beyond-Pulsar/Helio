@@ -12,3 +12,6 @@ helio-core = { workspace = true }
 libhelio = { workspace = true }
 log = { workspace = true }
 wgpu = { workspace = true }
+
+[dev-dependencies]
+naga = { version = "30.0.0", features = ["wgsl-in"] }

@@ -1,2 +1,7 @@
+[build]
+# Helio's public build target is currently browser WebGPU. Override this with
+# `--target` when working on an additional, explicitly selected platform.
+target = "wasm32-unknown-unknown"
+
 [target.wasm32-unknown-unknown]
 rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]

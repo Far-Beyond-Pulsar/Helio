@@ -9,6 +9,10 @@ exclude = [
 ]
 resolver = "2"
 
+[patch.crates-io]
+# Keep Naga's shared WebGPU types on the same vendored package used by wgpu.
+naga-types = { path = "vendor/wgpu/naga-types" }
+
 [workspace.dependencies]
 wgpu = { version = "30.0.0", path = "vendor/wgpu/wgpu", default-features = false, features = ["webgpu", "wgsl"] }
 blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }

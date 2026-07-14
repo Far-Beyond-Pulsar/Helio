@@ -51,10 +51,10 @@ const INITIAL_INSTANCES: u64 = 256;
 #[test]
 fn cull_shader_parses_and_validates() {
     let source = include_str!("../shaders/vg_cull.wgsl");
-    let module = wgpu::naga::front::wgsl::parse_str(source).expect("VG cull shader must parse");
-    let mut validator = wgpu::naga::valid::Validator::new(
-        wgpu::naga::valid::ValidationFlags::all(),
-        wgpu::naga::valid::Capabilities::all(),
+    let module = naga::front::wgsl::parse_str(source).expect("VG cull shader must parse");
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
     );
     validator
         .validate(&module)
@@ -64,10 +64,10 @@ fn cull_shader_parses_and_validates() {
 #[test]
 fn gbuffer_shader_parses_and_validates() {
     let source = include_str!("../shaders/vg_gbuffer.wgsl");
-    let module = wgpu::naga::front::wgsl::parse_str(source).expect("VG draw shader must parse");
-    let mut validator = wgpu::naga::valid::Validator::new(
-        wgpu::naga::valid::ValidationFlags::all(),
-        wgpu::naga::valid::Capabilities::all(),
+    let module = naga::front::wgsl::parse_str(source).expect("VG draw shader must parse");
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
     );
     validator
         .validate(&module)
