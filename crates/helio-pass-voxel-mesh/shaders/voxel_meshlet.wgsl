@@ -114,8 +114,8 @@ fn light_contribution(light: GpuLight, world_pos: vec3<f32>, normal: vec3<f32>) 
 }
 
 @fragment
-fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let n = normalize(in.world_normal);
+fn fs_main(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let n = normalize(in.world_normal) * select(-1.0, 1.0, front);
     let col = material_color(in.material);
     let emissive = material_emissive(in.material);
 
