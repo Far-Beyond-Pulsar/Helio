@@ -3225,6 +3225,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-planet-voxel-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "thiserror 2.0.18",
+ "wgpu 28.0.0",
+]
+
+[[package]]
 name = "helio-voxel-core"
 version = "0.1.0"
 dependencies = [
