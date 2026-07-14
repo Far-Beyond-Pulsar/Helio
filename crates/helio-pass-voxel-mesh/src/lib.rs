@@ -1,9 +1,8 @@
 //! GPU-driven voxel meshlet rendering pass.
 //!
-//! Extracts meshlets from voxel bricks (Marching Cubes compute) and renders
-//! them to the deferred GBuffer (albedo, normal, ORM, emissive).  The existing
-//! DeferredLightPass then handles lighting, shadows, and post-processing just
-//! like any other geometry.
+//! Manages surface extraction (Marching Cubes compute shader) and indirect
+//! multi-draw rendering of per-brick meshlets.  CPU only touches a small
+//! dirty-brick list each frame.
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
@@ -18,19 +17,24 @@ use wgpu::util::DeviceExt;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
+// Kept modest because vertex_buf/index_buf scale with
+// max_bricks * MAX_SURFACE_VERTS_PER_BRICK — at the 2048-vert budget needed to
+// avoid truncating textured terrain (see constants.rs), the original 8192
+// would allocate hundreds of MB for buffers this example never uses more than
+// 512 bricks of.
 pub const VOXEL_MESH_MAX_BRICKS: u32 = 1024;
 pub const VOXEL_MESH_MAX_DIRTY: u32 = 4096;
+// Each brick stores a padded 9x9x9 voxel block (729 voxels), not the raw 8x8x8
+// (512), so the extract shader's marching-cubes pass can read one extra voxel
+// of halo from the +X/+Y/+Z neighbor brick. Without it, no cell ever covers
+// the boundary between two bricks and the surface has a visible seam/gap at
+// every brick edge — see voxel_surface_extract.wgsl's CELLS_PER_DIM.
 pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 183; // ceil(9*9*9 / 4)
-
-// GBuffer texture formats (matches helio-pass-gbuffer).
-const GBUFFER_ALBEDO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const GBUFFER_NORMAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
-const GBUFFER_ORM_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const GBUFFER_EMISSIVE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 // ── GPU types ─────────────────────────────────────────────────────────────────
 
 /// Per-brick dirty entry uploaded to the GPU each frame.
+/// WGSL layout: brick_slot(u32) + volume_id(u32) + _pad(u32×2) + origin_size(vec4<f32>).
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DirtyBrick {
@@ -40,9 +44,19 @@ struct DirtyBrick {
     origin_size: [f32; 4], // xyz = world origin, w = voxel size
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MeshletParams {
+    light_count: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
+}
+
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 pub struct VoxelMeshPass {
+    // Pipelines
     extract_pipeline: wgpu::ComputePipeline,
     extract_bgl: wgpu::BindGroupLayout,
     extract_bind_group: wgpu::BindGroup,
@@ -50,7 +64,8 @@ pub struct VoxelMeshPass {
     render_pipeline: wgpu::RenderPipeline,
     render_bgl: wgpu::BindGroupLayout,
     render_bind_group: Option<wgpu::BindGroup>,
-    render_bind_group_key: Option<usize>,
+    render_bind_group_key: Option<(usize, usize)>,
+    meshlet_params_buf: wgpu::Buffer,
 
     // GPU buffers
     brick_meta_buf: wgpu::Buffer,
@@ -61,14 +76,17 @@ pub struct VoxelMeshPass {
     indirect_buf: wgpu::Buffer,
     dirty_brick_buf: wgpu::Buffer,
 
-    // CPU-side dirty list
+
+    // CPU-side dirty list (uploaded each frame, cleared after compute dispatch)
     dirty_bricks: Vec<DirtyBrick>,
 
     normal_buf: wgpu::Buffer,
+    surface_format: wgpu::TextureFormat,
 }
 
 impl VoxelMeshPass {
-    pub fn new(device: &wgpu::Device, _surface_format: wgpu::TextureFormat) -> Self {
+    /// Creates the pass, allocating all GPU buffers and compiling both pipelines.
+    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
         let max_bricks = VOXEL_MESH_MAX_BRICKS as u64;
         let max_verts = MAX_SURFACE_VERTS_PER_BRICK as u64;
         let max_indices = MAX_SURFACE_INDICES_PER_BRICK as u64;
@@ -110,7 +128,8 @@ impl VoxelMeshPass {
             mapped_at_creation: false,
         });
         let indirect_buf = {
-            let indirect_size = max_bricks * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
+            let indirect_size =
+                max_bricks * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
             let zeros = vec![0u8; indirect_size as usize];
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("VoxelMesh Indirect"),
@@ -136,34 +155,101 @@ impl VoxelMeshPass {
 
         // ── Shaders ──────────────────────────────────────────────────────────
         let extract_src = include_str!("../shaders/voxel_surface_extract.wgsl");
-        let vert_src = include_str!("../shaders/voxel_meshlet_vert.wgsl");
-        let frag_src = include_str!("../shaders/voxel_meshlet_frag.wgsl");
+        let meshlet_src = include_str!("../shaders/voxel_meshlet.wgsl");
 
         let extract_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("VoxelSurfaceExtract"),
             source: wgpu::ShaderSource::Wgsl(extract_src.into()),
         });
-        let vert_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("VoxelMeshletVert"),
-            source: wgpu::ShaderSource::Wgsl(vert_src.into()),
-        });
-        let frag_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("VoxelMeshletFrag"),
-            source: wgpu::ShaderSource::Wgsl(frag_src.into()),
+        let meshlet_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("VoxelMeshlet"),
+            source: wgpu::ShaderSource::Wgsl(meshlet_src.into()),
         });
 
         // ── Extract (compute) bind group layout ──────────────────────────────
         let extract_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VoxelMesh Extract BGL"),
             entries: &[
-                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
-                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 6,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -197,7 +283,7 @@ impl VoxelMeshPass {
             cache: None,
         });
 
-        // ── Render bind group layout (camera only — GBuffer fragment has no lights) ──
+        // ── Render bind group layout ─────────────────────────────────────────
         let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("VoxelMesh Render BGL"),
             entries: &[
@@ -211,10 +297,37 @@ impl VoxelMeshPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
-        // ── Render pipeline (GBuffer MRT — 4 color targets) ───────────────
+        let meshlet_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VoxelMesh Meshlet Params"),
+            size: std::mem::size_of::<MeshletParams>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // ── Render pipeline ──────────────────────────────────────────────────
         let render_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("VoxelMesh Render PL"),
             bind_group_layouts: &[Some(&render_bgl)],
@@ -225,7 +338,7 @@ impl VoxelMeshPass {
             label: Some("VoxelMesh Render"),
             layout: Some(&render_pl),
             vertex: wgpu::VertexState {
-                module: &vert_shader,
+                module: &meshlet_shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[
@@ -250,34 +363,25 @@ impl VoxelMeshPass {
                 ],
             },
             fragment: Some(wgpu::FragmentState {
-                module: &frag_shader,
+                module: &meshlet_shader,
                 entry_point: Some("fs_main"),
                 compilation_options: Default::default(),
-                targets: &[
-                    Some(wgpu::ColorTargetState {
-                        format: GBUFFER_ALBEDO_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: GBUFFER_NORMAL_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: GBUFFER_ORM_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                    Some(wgpu::ColorTargetState {
-                        format: GBUFFER_EMISSIVE_FORMAT,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    }),
-                ],
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
+                // Marching-cubes triangle winding from TRI_TABLE isn't
+                // guaranteed to come out consistently front-facing for every
+                // one of the 256 cases against this crate's edge_vertex/
+                // local_pos convention (unlike a hand-authored mesh). Backface
+                // culling here would silently drop roughly half the surface —
+                // exactly the patchy, gap-riddled look this pass had with
+                // Face::Back culling on. Disable culling instead of chasing
+                // per-case winding correctness.
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
                 ..Default::default()
@@ -300,6 +404,7 @@ impl VoxelMeshPass {
             extract_bind_group,
             render_pipeline,
             render_bgl,
+            meshlet_params_buf,
             render_bind_group: None,
             render_bind_group_key: None,
             brick_meta_buf,
@@ -311,6 +416,7 @@ impl VoxelMeshPass {
             dirty_brick_buf,
             dirty_bricks: Vec::new(),
             normal_buf,
+            surface_format,
         }
     }
 
@@ -324,6 +430,7 @@ impl VoxelMeshPass {
         &self.voxel_data_buf
     }
 
+    /// Mark a brick for re-extraction on the next frame.
     pub fn mark_dirty(
         &mut self,
         brick_slot: u32,
@@ -343,7 +450,13 @@ impl VoxelMeshPass {
         }
     }
 
-    pub fn clear_brick_slot(&self, queue: &wgpu::Queue, brick_slot: u32) {
+    /// Zero out the indirect draw for a brick slot so it stops being rendered.
+    /// Call this when a brick is deallocated.
+    pub fn clear_brick_slot(
+        &self,
+        queue: &wgpu::Queue,
+        brick_slot: u32,
+    ) {
         const ZERO: DrawIndexedIndirectArgs = DrawIndexedIndirectArgs {
             index_count: 0,
             instance_count: 0,
@@ -364,32 +477,38 @@ impl RenderPass for VoxelMeshPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["gbuffer_albedo", "gbuffer_normal", "gbuffer_orm", "gbuffer_emissive"]
+        &["pre_aa"]
     }
 
+    // Declares (and clears) "pre_aa" — this pass is meant to be the first/only
+    // opaque geometry writer in a graph, same role GBufferPass plays in the
+    // default pipeline. If it's ever combined with GBufferPass or another
+    // earlier depth-clearing pass, this Clear (see render_pass_descriptor)
+    // will need to become a Load instead.
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        builder.write_color_raw("gbuffer_albedo",   GBUFFER_ALBEDO_FORMAT,   ResourceSize::MatchSurface);
-        builder.write_color_raw("gbuffer_normal",   GBUFFER_NORMAL_FORMAT,   ResourceSize::MatchSurface);
-        builder.write_color_raw("gbuffer_orm",      GBUFFER_ORM_FORMAT,      ResourceSize::MatchSurface);
-        builder.write_color_raw("gbuffer_emissive", GBUFFER_EMISSIVE_FORMAT, ResourceSize::MatchSurface);
+        builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         if !self.dirty_bricks.is_empty() {
             let bytes = bytemuck::cast_slice(&self.dirty_bricks);
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
+            log::debug!("VoxelMeshPass: {} dirty bricks", self.dirty_bricks.len());
         }
+        let params = MeshletParams {
+            light_count: ctx.scene.lights.len() as u32,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+        };
+        ctx.write_buffer(&self.meshlet_params_buf, 0, bytemuck::bytes_of(&params));
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if ctx.scene.voxel_volume_count == 0 {
-            return Ok(());
-        }
-
         let dirty_count = self.dirty_bricks.len() as u32;
 
-        // Step 1: Compute — surface extraction on all dirty bricks
+        // ── Step 1: Compute — surface extraction on all dirty bricks ─────────
         if dirty_count > 0 {
             let mut cpass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("VoxelMesh Extract"),
@@ -400,9 +519,12 @@ impl RenderPass for VoxelMeshPass {
             cpass.dispatch_workgroups(dirty_count, 1, 1);
         }
 
-        // Step 2: Render — draw all bricks via indirect multi-draw to GBuffer
+        // ── Step 2: Render — draw all bricks via indirect multi-draw ─────────
+        // Rebuild the bind group when the camera or lights buffer pointer changes
+        // (the lights buffer can be reallocated by GrowableBuffer as it grows).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
-        if self.render_bind_group_key != Some(camera_ptr) {
+        let lights_ptr = ctx.scene.lights as *const _ as usize;
+        if self.render_bind_group_key != Some((camera_ptr, lights_ptr)) {
             self.render_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VoxelMesh Render BG"),
                 layout: &self.render_bgl,
@@ -411,9 +533,17 @@ impl RenderPass for VoxelMeshPass {
                         binding: 0,
                         resource: ctx.scene.camera.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: ctx.scene.lights.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: self.meshlet_params_buf.as_entire_binding(),
+                    },
                 ],
             }));
-            self.render_bind_group_key = Some(camera_ptr);
+            self.render_bind_group_key = Some((camera_ptr, lights_ptr));
         }
 
         let rp = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
@@ -423,6 +553,7 @@ impl RenderPass for VoxelMeshPass {
         rp.set_vertex_buffer(1, self.normal_buf.slice(..));
         rp.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
 
+        // Draw all bricks — entries with index/instance count == 0 are no-ops.
         #[cfg(not(target_arch = "wasm32"))]
         rp.multi_draw_indexed_indirect(&self.indirect_buf, 0, VOXEL_MESH_MAX_BRICKS);
         #[cfg(target_arch = "wasm32")]
@@ -431,7 +562,9 @@ impl RenderPass for VoxelMeshPass {
             rp.draw_indexed_indirect(&self.indirect_buf, off);
         }
 
+        // Flush the CPU-side dirty list after the GPU has consumed it.
         self.dirty_bricks.clear();
+
         Ok(())
     }
 
@@ -441,41 +574,24 @@ impl RenderPass for VoxelMeshPass {
         depth: &'a wgpu::TextureView,
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let gbuffer = resources.gbuffer.read("VoxelMesh")?;
+        let pre_aa_view = resources.pre_aa.read("VoxelMesh")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
-                }),
-            ]));
+            Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
+                view: pre_aa_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })]));
         Some(wgpu::RenderPassDescriptor {
             label: Some("VoxelMesh"),
             color_attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: wgpu::LoadOp::Clear(1.0),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
