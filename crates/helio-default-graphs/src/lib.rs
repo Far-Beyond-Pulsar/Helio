@@ -27,7 +27,7 @@ use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
-use helio::RenderPass;
+
 use helio_core::RenderGraph;
 
 use helio::Scene;
