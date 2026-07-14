@@ -2688,6 +2688,7 @@ dependencies = [
  "helio-pass-taa",
  "helio-pass-transparent",
  "helio-pass-virtual-geometry",
+ "helio-pass-voxel-raymarch",
  "helio-pass-water-sim",
  "image",
  "wgpu 28.0.0",

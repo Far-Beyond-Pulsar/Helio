@@ -25,8 +25,9 @@ use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
+use helio_pass_voxel_raymarch::VoxelRayMarchPass;
 use helio_pass_water_sim::WaterSimPass;
-use helio_core::RenderGraph;
+use helio_core::{RenderGraph, RenderPass};
 
 use helio::Scene;
 
@@ -338,6 +339,12 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(deferred_light_pass));
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf.clone())));
+
+    // Voxel ray march composited over deferred lighting. When no voxel volumes
+    // are present the pass is a no-op (volume_count == 0 → early return).
+    let mut voxel_rm_pass = VoxelRayMarchPass::new(device, config.surface_format);
+    voxel_rm_pass.on_resize(device, iw, ih);
+    graph.add_pass(Box::new(voxel_rm_pass));
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
 

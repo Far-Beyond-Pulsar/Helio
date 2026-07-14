@@ -272,6 +272,11 @@ impl RenderPass for VoxelRayMarchPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
+        // Skip when no voxel volumes are present (composited into default graph).
+        if ctx.scene.voxel_volume_count == 0 {
+            return Ok(());
+        }
+
         let gen = ctx.scene.camera_generation as usize;
         if self.compute_bg_key != Some(gen) || self.compute_bg.is_none() {
             self.rebuild_compute_bg(ctx);
@@ -321,7 +326,7 @@ impl RenderPass for VoxelRayMarchPass {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             }),
