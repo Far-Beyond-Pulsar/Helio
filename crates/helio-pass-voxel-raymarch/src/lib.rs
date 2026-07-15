@@ -40,6 +40,10 @@ impl AttachmentMode {
     }
 }
 
+fn shade_bind_group_matches_size(bound_size: Option<(u32, u32)>, width: u32, height: u32) -> bool {
+    bound_size == Some((width, height))
+}
+
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 pub struct VoxelRayMarchPass {
@@ -53,6 +57,7 @@ pub struct VoxelRayMarchPass {
     shade_pipeline: wgpu::RenderPipeline,
     shade_bgl: wgpu::BindGroupLayout,
     shade_bg: Option<wgpu::BindGroup>,
+    shade_bg_size: Option<(u32, u32)>,
 
     // Output textures
     color_tex: wgpu::Texture,
@@ -189,6 +194,7 @@ impl VoxelRayMarchPass {
             shade_pipeline,
             shade_bgl,
             shade_bg: None,
+            shade_bg_size: None,
             color_tex,
             color_view,
             normal_tex,
@@ -252,6 +258,7 @@ impl VoxelRayMarchPass {
             ],
         });
         self.shade_bg = Some(bg);
+        self.shade_bg_size = Some((self.width, self.height));
     }
 
     pub fn set_params(&mut self, _width: u32, _height: u32, _volume_count: u32) {
@@ -312,7 +319,9 @@ impl RenderPass for VoxelRayMarchPass {
         if self.compute_bg_key != Some(gen) || self.compute_bg.is_none() {
             self.rebuild_compute_bg(ctx);
         }
-        if self.shade_bg.is_none() {
+        if !shade_bind_group_matches_size(self.shade_bg_size, self.width, self.height)
+            || self.shade_bg.is_none()
+        {
             self.rebuild_shade_bg(ctx);
         }
 
@@ -386,12 +395,27 @@ impl RenderPass for VoxelRayMarchPass {
         self.normal_tex = nt;
         self.normal_view = nv;
         self.compute_bg_key = None;
+        // The shading bind group owns views of the old-sized textures. Drop it
+        // now so the next frame cannot stretch stale raymarch output.
+        self.shade_bg = None;
+        self.shade_bg_size = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::AttachmentMode;
+    use super::{shade_bind_group_matches_size, AttachmentMode};
+
+    #[test]
+    fn resized_output_invalidates_the_shading_bind_group() {
+        assert!(shade_bind_group_matches_size(Some((1280, 720)), 1280, 720));
+        assert!(!shade_bind_group_matches_size(
+            Some((1280, 720)),
+            1920,
+            1080
+        ));
+        assert!(!shade_bind_group_matches_size(None, 1280, 720));
+    }
 
     #[test]
     fn standalone_mode_clears_pixels_discarded_by_the_shade_pass() {

@@ -32,7 +32,6 @@ use helio_pass_voxel_raymarch::VoxelRayMarchPass;
 use helio_voxel_core::GpuVoxelMaterial;
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalPosition,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -419,8 +418,8 @@ impl ApplicationHandler for App {
                 ..
             } if !state.cursor_grabbed => {
                 let ok = state.window
-                    .set_cursor_grab(CursorGrabMode::Confined)
-                    .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
+                    .set_cursor_grab(CursorGrabMode::Locked)
+                    .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Confined))
                     .is_ok();
                 if ok {
                     state.cursor_grabbed = true;
@@ -460,19 +459,6 @@ impl ApplicationHandler for App {
                     scene.gpu_scene().voxel_data_pool.clone(),
                 );
                 AppState::place_edit(false, mat, pos, yaw, pitch, &mut state.world, &state.queue, &brick_pool, &data_pool);
-            }
-
-            WindowEvent::CursorMoved {
-                position: pos,
-                ..
-            } if state.cursor_grabbed => {
-                let center = (
-                    state.window.inner_size().width as f64 / 2.0,
-                    state.window.inner_size().height as f64 / 2.0,
-                );
-                state.mouse_delta.0 += (pos.x - center.0) as f32;
-                state.mouse_delta.1 += (pos.y - center.1) as f32;
-                let _ = state.window.set_cursor_position(PhysicalPosition::new(center.0 as i32, center.1 as i32));
             }
 
             WindowEvent::RedrawRequested => {
