@@ -177,5 +177,12 @@ impl RenderPass for FxaaPass {
         rp.draw(0..3, 0..1);
         Ok(())
     }
+
+    fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
+        // RenderGraph may replace `pre_aa` in the same texture-pool slot, so
+        // the TextureView wrapper address is not a reliable resize generation.
+        self.bind_group = None;
+        self.bind_group_key = None;
+    }
 }
 
