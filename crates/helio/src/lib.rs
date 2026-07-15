@@ -23,6 +23,9 @@ mod scene;
 mod terrain;
 mod vg;
 
+#[cfg(target_arch = "wasm32")]
+mod wasm_cpp_alloc;
+
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{

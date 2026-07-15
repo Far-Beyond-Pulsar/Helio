@@ -10,7 +10,7 @@ crate-type = ["rlib"]
 [dependencies]
 helio = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
-wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
+wgpu = { workspace = true, features = ["webgpu"] }
 winit = { workspace = true }
 log = { workspace = true }
 glam = { workspace = true, features = ["bytemuck"] }
@@ -26,6 +26,8 @@ web-sys = { version = "0.3", features = [
     "Element",
     "HtmlCanvasElement",
     "HtmlElement",
+    "Location",
+    "Navigator",
     "Performance",
 ] }
 console_log             = "1"

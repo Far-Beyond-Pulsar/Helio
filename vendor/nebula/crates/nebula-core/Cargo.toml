@@ -1,0 +1,20 @@
+[package]
+name        = "nebula-core"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+description = "Core traits, types, and GPU bake context for the Nebula baking framework"
+
+[dependencies]
+wgpu         = { workspace = true }
+glam         = { workspace = true }
+bytemuck     = { workspace = true }
+serde        = { workspace = true }
+thiserror    = { workspace = true }
+async-trait  = { workspace = true }
+log          = { workspace = true }
+bitflags     = { workspace = true }
+uuid         = { workspace = true }
+pollster     = { workspace = true }

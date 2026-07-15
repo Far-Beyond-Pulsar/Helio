@@ -191,6 +191,6 @@ glam = { workspace = true }
 winit = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }
-wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
+wgpu = { workspace = true }
 pollster = { workspace = true }
 salva3d = { version = "0.9", features = ["dim3", "parry", "rapier"] }

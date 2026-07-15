@@ -120,6 +120,9 @@ pub struct ShadowPass {
     /// Resolution of each atlas face (width × height).
     atlas_size: u32,
 
+    /// Number of texture-array layers actually allocated by the graph.
+    atlas_layers: u32,
+
     // ── Per-caster CPU dirty tracking (light movement only) ──────────────────
     /// Per-caster last-rendered generation, compared against `per_caster_dirty_gen`.
     /// Only updated when a light moves (object movement is now detected GPU-side).
@@ -144,12 +147,15 @@ impl ShadowPass {
     /// which writes them each frame; they arrive via `Arc`.
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         face_dirty_buf: Arc<wgpu::Buffer>,
         face_geom_count_buf: Arc<wgpu::Buffer>,
         face_cull_indirect: Arc<wgpu::Buffer>,
         face_cull_counts: Arc<wgpu::Buffer>,
         atlas_size: u32,
+        atlas_layers: u32,
     ) -> Self {
+        let atlas_layers = atlas_layers.clamp(1, MAX_SHADOW_FACES as u32);
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow"),
@@ -217,7 +223,7 @@ impl ShadowPass {
                 compilation_options: Default::default(),
                 // Shared mesh vertex buffer layout (stride = 40 bytes, matches GBuffer pass).
                 // Only position (Float32x3 at offset 0) is needed for depth projection.
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 40,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[wgpu::VertexAttribute {
@@ -225,7 +231,7 @@ impl ShadowPass {
                         offset: 0,
                         shader_location: 0,
                     }],
-                }],
+                })],
             },
             // Depth-only: no colour outputs, no fragment shader.
             // The GPU writes depth from the vertex clip position automatically.
@@ -272,33 +278,32 @@ impl ShadowPass {
                 immediate_size: 0,
             });
 
-        let depth_clear_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Shadow/DepthClear Pipeline"),
-                layout: Some(&depth_clear_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &clear_shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: None,
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: None,
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Always),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+        let depth_clear_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Shadow/DepthClear Pipeline"),
+            layout: Some(&depth_clear_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &clear_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
 
         // ── Clear indirect buffer ──────────────────────────────────────────────
         // 256 non-indexed draw commands, each drawing 3 vertices (the clear triangle).
@@ -306,42 +311,38 @@ impl ShadowPass {
         //                                  first_vertex: 0, first_instance: 0 }
         // `multi_draw_indirect_count` uses `face_dirty_buf[face]` as the GPU draw count
         // (0 no clear, 1 clear), with indirect_offset = face * 16.
+        let mut clear_indirect_data = vec![[0u32; 4]; MAX_SHADOW_FACES];
+        for command in &mut clear_indirect_data {
+            command[0] = 3;
+            command[1] = 1;
+        }
+        // Avoid mappedAtCreation here and below: browser WebGPU may reject the
+        // active mapping synchronously even for a small, otherwise valid buffer.
         let clear_indirect_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow/ClearIndirect"),
             size: MAX_SHADOW_FACES as u64 * 16,
-            usage: wgpu::BufferUsages::INDIRECT,
-            mapped_at_creation: true,
+            usage: wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        {
-            let mut map = clear_indirect_buf.slice(..).get_mapped_range_mut();
-            for i in 0..MAX_SHADOW_FACES {
-                let off = i * 16;
-                // vertex_count = 3
-                map[off..off + 4].copy_from_slice(&3u32.to_ne_bytes());
-                // instance_count = 1
-                map[off + 4..off + 8].copy_from_slice(&1u32.to_ne_bytes());
-                // first_vertex = 0, first_instance = 0 (already zero from wgpu init)
-            }
-        }
-        clear_indirect_buf.unmap();
+        queue.write_buffer(
+            &clear_indirect_buf,
+            0,
+            bytemuck::cast_slice(&clear_indirect_data),
+        );
         // One u32 per face at FACE_BUF_STRIDE byte intervals.
         // The CPU never touches this buffer after construction.
+        let mut face_idx_data = vec![0u8; MAX_SHADOW_FACES * FACE_BUF_STRIDE as usize];
+        for i in 0..MAX_SHADOW_FACES {
+            let offset = i * FACE_BUF_STRIDE as usize;
+            face_idx_data[offset..offset + 4].copy_from_slice(&(i as u32).to_ne_bytes());
+        }
         let face_idx_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow/FaceIdx"),
             size: MAX_SHADOW_FACES as u64 * FACE_BUF_STRIDE,
-            usage: wgpu::BufferUsages::UNIFORM,
-            mapped_at_creation: true,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        {
-            let mut map = face_idx_buf.slice(..).get_mapped_range_mut();
-            for i in 0..MAX_SHADOW_FACES {
-                let offset = i * FACE_BUF_STRIDE as usize;
-                // Write the face index as a little-endian u32; the rest of the 256-byte
-                // slot is zero-initialised by wgpu (mapped buffers are zeroed).
-                map[offset..offset + 4].copy_from_slice(&(i as u32).to_ne_bytes());
-            }
-        }
-        face_idx_buf.unmap();
+        queue.write_buffer(&face_idx_buf, 0, &face_idx_data);
 
         // ── Face views (lazily initialized from graph-owned textures) ──────────
         let face_views = Box::default();
@@ -383,11 +384,16 @@ impl ShadowPass {
                 .features()
                 .contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
             atlas_size,
+            atlas_layers,
         }
     }
 
-    fn create_face_views(texture: &wgpu::Texture, label: &str) -> Box<[wgpu::TextureView]> {
-        (0..MAX_SHADOW_FACES as u32)
+    fn create_face_views(
+        texture: &wgpu::Texture,
+        label: &str,
+        layer_count: u32,
+    ) -> Box<[wgpu::TextureView]> {
+        (0..layer_count)
             .map(|i| {
                 texture.create_view(&wgpu::TextureViewDescriptor {
                     label: Some(label),
@@ -415,11 +421,14 @@ impl RenderPass for ShadowPass {
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
-        let sz = ResourceSize::Absolute { width: self.atlas_size, height: self.atlas_size };
+        let sz = ResourceSize::Absolute {
+            width: self.atlas_size,
+            height: self.atlas_size,
+        };
         builder.write_color_raw("shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
-        builder.with_layers(256);
+        builder.with_layers(self.atlas_layers);
         builder.write_color_raw("static_shadow_atlas", wgpu::TextureFormat::Depth32Float, sz);
-        builder.with_layers(256);
+        builder.with_layers(self.atlas_layers);
     }
 
     fn name(&self) -> &'static str {
@@ -434,27 +443,30 @@ impl RenderPass for ShadowPass {
         &["shadow_atlas", "shadow_sampler", "static_shadow_atlas"]
     }
 
-    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {
-    }
+    fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let face_count = (ctx.scene.shadow_count as usize).min(MAX_SHADOW_FACES);
+        let face_count = (ctx.scene.shadow_count as usize)
+            .min(self.atlas_layers as usize)
+            .min(MAX_SHADOW_FACES);
         let static_draw_count = ctx.scene.shadow_static_draw_count;
         let movable_draw_count = ctx.scene.shadow_movable_draw_count;
 
         // ── Lazily initialize per-face views from graph-owned textures ─────────
         if self.face_views.is_empty() {
             if let Some(tex) = ctx.resource_pool.get_texture("shadow_atlas") {
-                self.face_views = Self::create_face_views(tex, "Shadow/DynamicFace");
+                self.face_views =
+                    Self::create_face_views(tex, "Shadow/DynamicFace", self.atlas_layers);
             }
         }
         if self.static_face_views.is_empty() {
             if let Some(tex) = ctx.resource_pool.get_texture("static_shadow_atlas") {
-                self.static_face_views = Self::create_face_views(tex, "Shadow/StaticFace");
+                self.static_face_views =
+                    Self::create_face_views(tex, "Shadow/StaticFace", self.atlas_layers);
             }
         }
 
@@ -485,8 +497,7 @@ impl RenderPass for ShadowPass {
         }
 
         // O(1) CPU gate: did any movable object move this frame?
-        let objects_moved =
-            ctx.scene.movable_objects_generation != self.last_movable_objects_gen;
+        let objects_moved = ctx.scene.movable_objects_generation != self.last_movable_objects_gen;
 
         if !need_static && !any_dirty_caster && !objects_moved {
             return Ok(());
@@ -501,8 +512,8 @@ impl RenderPass for ShadowPass {
 
         // ── Shared bind group (shadow_matrices + instances + face_idx) ──────────
         // Rebuilt only on GrowableBuffer reallocation (O(1) amortised).
-        let sm_ptr   = ctx.scene.shadow_matrices as *const _ as usize;
-        let inst_ptr = ctx.scene.instances       as *const _ as usize;
+        let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
+        let inst_ptr = ctx.scene.instances as *const _ as usize;
         let key = (sm_ptr, inst_ptr);
         if self.bg_0_key != Some(key) {
             self.bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -544,21 +555,25 @@ impl RenderPass for ShadowPass {
                     }
                     let face_view = &self.static_face_views[face];
                     let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Shadow/Static"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: face_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Shadow/Static"),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: face_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                     pass.set_pipeline(pipeline);
                     pass.set_bind_group(0, bg, &[dyn_offset]);
                     pass.set_vertex_buffer(0, vertices.slice(..));
@@ -573,27 +588,35 @@ impl RenderPass for ShadowPass {
             } else if need_static {
                 for face in 0..face_count {
                     let face_view = &self.static_face_views[face];
-                    let _pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Shadow/StaticClear"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: face_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                    let _pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Shadow/StaticClear"),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: face_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                 }
             }
             if need_static {
                 self.static_atlas_cache_gen = Some(static_gen);
                 self.last_rendered_shadow_count = shadow_count;
-                log::debug!("Shadow: re-rendered static atlas ({} draws, {} faces)", static_draw_count, face_count);
+                log::debug!(
+                    "Shadow: re-rendered static atlas ({} draws, {} faces)",
+                    static_draw_count,
+                    face_count
+                );
             }
         }
 
@@ -616,28 +639,32 @@ impl RenderPass for ShadowPass {
             let _movable_indirect = ctx.scene.shadow_movable_indirect;
 
             for face in 0..face_count {
-                let caster_slot  = face / 6;
-                let light_dirty  = caster_slot < 42 && dirty_casters[caster_slot];
-                let face_view    = &self.face_views[face];
-                let dyn_offset   = (face as u64 * FACE_BUF_STRIDE) as u32;
+                let caster_slot = face / 6;
+                let light_dirty = caster_slot < 42 && dirty_casters[caster_slot];
+                let face_view = &self.face_views[face];
+                let dyn_offset = (face as u64 * FACE_BUF_STRIDE) as u32;
 
                 if light_dirty {
                     // ── Light moved: full clear + culled draws ─────────────────
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("Shadow/Dynamic/LightDirty"),
-                        color_attachments: &[],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: face_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(1.0),
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                        &wgpu::RenderPassDescriptor {
+                            label: Some("Shadow/Dynamic/LightDirty"),
+                            color_attachments: &[],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: face_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        },
+                    );
                     if movable_draw_count > 0 {
                         pass.set_pipeline(pipeline);
                         pass.set_bind_group(0, bg, &[dyn_offset]);
@@ -677,21 +704,25 @@ impl RenderPass for ShadowPass {
                     //   Fall back to a full clear + draw all movable geometry,
                     //   equivalent to the LightDirty path but without per-face culling.
                     if self.supports_multi_draw_count {
-                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Shadow/Dynamic/ObjectDirty"),
-                            color_attachments: &[],
-                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                                view: face_view,
-                                depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            }),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        });
+                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                            &wgpu::RenderPassDescriptor {
+                                label: Some("Shadow/Dynamic/ObjectDirty"),
+                                color_attachments: &[],
+                                depth_stencil_attachment: Some(
+                                    wgpu::RenderPassDepthStencilAttachment {
+                                        view: face_view,
+                                        depth_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        }),
+                                        stencil_ops: None,
+                                    },
+                                ),
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            },
+                        );
 
                         if movable_draw_count > 0 {
                             // 1. Depth-clear triangle (GPU count 0 or 1 from face_dirty_buf).
@@ -720,21 +751,25 @@ impl RenderPass for ShadowPass {
                         }
                     } else {
                         // Fallback: full clear + draw all movable geometry (no per-face GPU culling).
-                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("Shadow/Dynamic/ObjectDirty/Fallback"),
-                            color_attachments: &[],
-                            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                                view: face_view,
-                                depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(1.0),
-                                    store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            }),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        });
+                        let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
+                            &wgpu::RenderPassDescriptor {
+                                label: Some("Shadow/Dynamic/ObjectDirty/Fallback"),
+                                color_attachments: &[],
+                                depth_stencil_attachment: Some(
+                                    wgpu::RenderPassDepthStencilAttachment {
+                                        view: face_view,
+                                        depth_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Clear(1.0),
+                                            store: wgpu::StoreOp::Store,
+                                        }),
+                                        stencil_ops: None,
+                                    },
+                                ),
+                                timestamp_writes: None,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            },
+                        );
                         if movable_draw_count > 0 {
                             pass.set_pipeline(pipeline);
                             pass.set_bind_group(0, bg, &[dyn_offset]);
@@ -764,4 +799,3 @@ impl RenderPass for ShadowPass {
         Ok(())
     }
 }
-

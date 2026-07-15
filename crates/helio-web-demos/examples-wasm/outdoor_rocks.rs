@@ -243,12 +243,11 @@ impl HelioWasmApp for Demo {
             self.cam_pos + forward,
             Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            1280.0 / 720.0,
+            input.aspect_ratio(),
             0.2,
             2000.0,
         )
     }
 }
-
 
 

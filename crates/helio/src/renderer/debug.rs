@@ -92,7 +92,7 @@ impl DebugPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<DebugVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -107,7 +107,7 @@ impl DebugPass {
                             shader_location: 1,
                         },
                     ],
-                }],
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -142,7 +142,7 @@ impl DebugPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: std::mem::size_of::<DebugVertex>() as u64,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -157,7 +157,7 @@ impl DebugPass {
                             shader_location: 1,
                         },
                     ],
-                }],
+                })],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -214,7 +214,7 @@ impl DebugPass {
                 module: &shader,
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
-                buffers: &[tri_vbl.clone()],
+                buffers: &[Some(tri_vbl.clone())],
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -243,7 +243,7 @@ impl DebugPass {
                     module: &shader,
                     entry_point: Some("vs_main"),
                     compilation_options: Default::default(),
-                    buffers: &[tri_vbl],
+                    buffers: &[Some(tri_vbl)],
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,

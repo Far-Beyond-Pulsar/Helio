@@ -52,7 +52,7 @@ impl Scene {
     /// # Shadow Management
     ///
     /// Automatically assigns shadow atlas layers to shadow-casting lights:
-    /// - Maximum 42 shadow casters (42 × 6 = 252 atlas layers)
+    /// - The configured atlas capacity determines the realtime caster limit
     /// - 6 slots per light (point = 6 faces, directional = 4 cascades + 2 padding, spot = 1 + 5 padding)
     /// - Lights beyond the cap have shadows disabled automatically
     ///
@@ -103,8 +103,8 @@ impl Scene {
         // Assign shadow atlas slots to the highest-importance shadow-casting lights.
         //
         // Problem with sequential assignment: the first N lights inserted always win the
-        // 42-caster budget, regardless of how far away or how dim they are. A bright
-        // close light inserted after slot 42 is full gets no shadow.
+        // caster budget, regardless of how far away or how dim they are. A bright
+        // close light inserted after the atlas is full gets no shadow.
         //
         // Solution — two-phase importance selection:
         //   Phase 1: Score every shadow-requesting light by VIEW-INDEPENDENT importance:
@@ -121,8 +121,9 @@ impl Scene {
         // triggers shadow atlas re-renders (expensive with many draw calls). The budget
         // should only change when lights are added/removed or their properties change.
         {
-            const MAX_SHADOW_CASTERS: usize = 42;
             const FACES_PER_LIGHT: u32 = 6;
+            let max_shadow_casters =
+                ((self.shadow_face_capacity / FACES_PER_LIGHT) as usize).min(42);
             let light_count = self.gpu_scene.lights.len();
 
             // Phase 1: score and select the top MAX_SHADOW_CASTERS.
@@ -149,7 +150,7 @@ impl Scene {
                 b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
             });
 
-            let winner_count = scored.len().min(MAX_SHADOW_CASTERS);
+            let winner_count = scored.len().min(max_shadow_casters);
 
             // Phase 2: re-sort winners by their buffer index (stable secondary key).
             // Lights that stay in budget from frame to frame retain the same atlas slot,
@@ -160,7 +161,7 @@ impl Scene {
             let mut next_layer: u32 = 0;
             for (rank, &(_, i)) in scored.iter().enumerate() {
                 let light = self.gpu_scene.lights.0.as_slice()[i];
-                if rank < MAX_SHADOW_CASTERS {
+                if rank < max_shadow_casters {
                     let mut assigned = light;
                     assigned.shadow_index = next_layer;
                     self.gpu_scene.lights.update(i, assigned);
@@ -214,14 +215,10 @@ impl Scene {
                         self.gpu_scene.camera.position(),
                         DIRECTIONAL_CAMERA_SNAP_METERS,
                     );
-                    let snapped_cam_forward = quantize_f32s(
-                        self.gpu_scene.camera.forward(),
-                        DIRECTIONAL_FORWARD_SNAP,
-                    );
+                    let snapped_cam_forward =
+                        quantize_f32s(self.gpu_scene.camera.forward(), DIRECTIONAL_FORWARD_SNAP);
 
-                    base_hash
-                        ^ fnv1a_f32s(&snapped_cam_pos)
-                        ^ fnv1a_f32s(&snapped_cam_forward)
+                    base_hash ^ fnv1a_f32s(&snapped_cam_pos) ^ fnv1a_f32s(&snapped_cam_forward)
                 } else {
                     base_hash
                 };

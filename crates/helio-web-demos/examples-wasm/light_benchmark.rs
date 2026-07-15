@@ -155,7 +155,7 @@ impl HelioWasmApp for Demo {
             self.cam_pos + fwd,
             Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            1280.0 / 720.0,
+            input.aspect_ratio(),
             0.1,
             200.0,
         )
@@ -178,6 +178,5 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (f32, f32, f32) {
         _ => (v, p, q),
     }
 }
-
 
 

@@ -1,0 +1,26 @@
+[package]
+name        = "nebula-probe"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+description = "Reflection & irradiance probe baking: cubemap capture, specular pre-filter, SH diffuse"
+
+[dependencies]
+nebula-core      = { workspace = true }
+nebula-gpu       = { workspace = true }
+nebula-serialize = { workspace = true }
+wgpu             = { workspace = true }
+glam             = { workspace = true }
+bytemuck         = { workspace = true }
+serde            = { workspace = true }
+thiserror        = { workspace = true }
+log              = { workspace = true }
+serde_json       = { workspace = true }
+bincode          = { workspace = true }
+async-trait      = { workspace = true }
+
+[dev-dependencies]
+pollster   = { workspace = true }
+serde_json = { workspace = true }

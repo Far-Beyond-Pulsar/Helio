@@ -22,6 +22,7 @@ pub struct ShadowMatrixPass {
     bind_group_layout: wgpu::BindGroupLayout,
     uniform_buf: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
+    shadow_atlas_size: u32,
 }
 
 impl ShadowMatrixPass {
@@ -32,6 +33,7 @@ impl ShadowMatrixPass {
         camera_buf: &wgpu::Buffer,
         shadow_dirty_buf: &wgpu::Buffer,
         shadow_hashes_buf: &wgpu::Buffer,
+        shadow_atlas_size: u32,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ShadowMatrix Shader"),
@@ -163,6 +165,7 @@ impl ShadowMatrixPass {
             bind_group_layout,
             uniform_buf,
             bind_group,
+            shadow_atlas_size: shadow_atlas_size.max(1),
         }
     }
 }
@@ -184,7 +187,7 @@ impl RenderPass for ShadowMatrixPass {
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let u = ShadowMatrixUniforms {
             light_count: ctx.scene.lights.len() as u32,
-            shadow_atlas_size: 4096,
+            shadow_atlas_size: self.shadow_atlas_size,
             _pad: [0; 2],
         };
         ctx.queue
@@ -209,4 +212,3 @@ impl RenderPass for ShadowMatrixPass {
         Ok(())
     }
 }
-

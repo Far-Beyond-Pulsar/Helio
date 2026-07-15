@@ -17,9 +17,9 @@ helio-pass-postprocess = { workspace = true }
 libhelio = { workspace = true }
 log = { workspace = true }
 thiserror = { workspace = true }
-wgpu = { workspace = true, features = ["web", "webgpu", "wgsl", "dx12", "vulkan"] }
+wgpu = { workspace = true }
 pollster = { workspace = true }
-quark = { workspace = true, package = "quark" }
+quark.workspace = true
 helio-voxel-core = { workspace = true }
 helio-bake = { path = "../helio-bake", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }

@@ -36,6 +36,8 @@ const DEMOS: &[Demo] = &[
     Demo { name: "outdoor_volcano",     title: "Outdoor Volcano",            description: "Active lava field with pulsing vent glow.",                       controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "space_station",       title: "Space Station",              description: "Orbiting station with solar arrays and navigation lights.",       controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "light_benchmark",     title: "Light Benchmark",            description: "128 animated point lights — deferred lighting stress test.",      controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "hlfs_benchmark",      title: "HLFS Compute Lighting",       description: "Hierarchical light-field compute injection and propagation.",     controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; +/- — light intensity &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "sdf_demo",            title: "SDF Demo",                   description: "Signed-distance field clipmap with live sphere edits.",           controls: "WASD/Space/Shift — move &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "rc_benchmark",        title: "Radiance Cascades",          description: "Cornell box global illumination benchmark.",                      controls: "+/- — intensity &nbsp;·&nbsp; WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "load_fbx",            title: "Load FBX",                   description: "FBX asset loading (placeholder scene on WASM).",                  controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "load_fbx_embedded",   title: "Load FBX (Embedded)",        description: "FBX loaded from bytes embedded at compile time.",                 controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
@@ -117,10 +119,9 @@ fn demo_html(demo: &Demo) -> String {
       throw e;
     }}
 
-    // Hide loading overlay once the WASM module has initialised
-    const overlay = document.getElementById('loading');
-    overlay.classList.add('hidden');
-    setTimeout(() => overlay.remove(), 500);
+    // The WASM entry point starts WebGPU asynchronously. helio-wasm hides this
+    // overlay only after the adapter, device, renderer, and demo are ready; on
+    // failure it replaces the overlay with a useful startup diagnostic.
 
     // Fade controls hint after 5 s
     const ctrl = document.getElementById('controls');

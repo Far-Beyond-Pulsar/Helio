@@ -46,6 +46,8 @@ pub use winit::event::MouseButton;
 
 /// Per-frame input snapshot passed to [`HelioWasmApp::update`].
 pub struct InputState {
+    /// Current drawable viewport size in physical pixels.
+    pub viewport_size: (u32, u32),
     /// All currently pressed keyboard keys.
     pub keys: HashSet<KeyCode>,
     /// Mouse movement since last frame (dx, dy in pixels).
@@ -60,6 +62,13 @@ pub struct InputState {
     pub mouse_left_just_pressed: bool,
     /// True for exactly one frame after the left mouse button was released.
     pub mouse_left_just_released: bool,
+}
+
+impl InputState {
+    /// Current viewport aspect ratio, safe while the window is minimized.
+    pub fn aspect_ratio(&self) -> f32 {
+        self.viewport_size.0.max(1) as f32 / self.viewport_size.1.max(1) as f32
+    }
 }
 
 /// Implement this trait to create a helio demo that runs on both native and web.
@@ -111,4 +120,3 @@ pub trait HelioWasmApp: Sized + 'static {
     /// Called when the window is resized. Override to update projection state.
     fn on_resize(&mut self, _renderer: &mut helio::Renderer, _width: u32, _height: u32) {}
 }
-

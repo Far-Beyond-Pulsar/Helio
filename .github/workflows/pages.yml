@@ -26,10 +26,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust (stable + wasm32 target)
+      - name: Install Rust (stable)
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
 
       - name: Cache Cargo registry & build artifacts
         uses: actions/cache@v4
@@ -42,17 +40,11 @@ jobs:
           key: wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: wasm-${{ runner.os }}-
 
-      - name: Install wasm-bindgen-cli
-        # Pin to the exact version recorded in Cargo.lock to avoid
-        # "schema version mismatch" errors at bindgen time.
-        run: |
-          VERSION=$(awk '/^name = "wasm-bindgen"/{found=1} found && /^version =/{gsub(/"/, "", $3); print $3; exit}' Cargo.lock)
-          cargo install wasm-bindgen-cli --version "$VERSION" --locked
+      - name: Install wasm-pack
+        run: cargo install wasm-pack
 
       - name: Build all demos (release)
-        shell: pwsh
-        run: ./build-wasm.ps1 --release
-        continue-on-error: true
+        run: ./build-wasm.sh --release
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

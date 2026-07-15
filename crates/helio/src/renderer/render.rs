@@ -9,10 +9,58 @@ use helio_core::Result as HelioResult;
 use crate::groups::GroupId;
 use crate::scene::Camera;
 
-use super::renderer_impl::{Renderer, DebugCameraUniform, HALTON_JITTER};
+use super::renderer_impl::{
+    CullStatsReadbackState, DebugCameraUniform, Renderer, HALTON_JITTER,
+};
 
 impl Renderer {
+    fn poll_cull_stats_readback(&mut self) {
+        if !self.owns_device {
+            return;
+        }
+
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let result = match &self.cull_stats_readback_state {
+            CullStatsReadbackState::Idle | CullStatsReadbackState::Disabled => return,
+            CullStatsReadbackState::Mapping(completion) => completion
+                .lock()
+                .ok()
+                .and_then(|mut completion| completion.take()),
+        };
+
+        match result {
+            Some(Ok(())) => {
+                let read_succeeded = match self.cull_stats_staging.slice(..).get_mapped_range() {
+                    Ok(mapped) => {
+                        if mapped.len() >= 32 {
+                            let ptr = mapped.as_ptr() as *const u32;
+                            self.cull_stats = unsafe { std::ptr::read_unaligned(ptr.cast()) };
+                        }
+                        drop(mapped);
+                        true
+                    }
+                    Err(_) => false,
+                };
+                self.cull_stats_staging.unmap();
+                self.cull_stats_readback_state = if read_succeeded {
+                    CullStatsReadbackState::Idle
+                } else {
+                    CullStatsReadbackState::Disabled
+                };
+            }
+            Some(Err(_)) => {
+                self.cull_stats_staging.unmap();
+                self.cull_stats_readback_state = CullStatsReadbackState::Disabled;
+            }
+            None => {}
+        }
+    }
+
     pub fn render(&mut self, camera: &Camera, target: &wgpu::TextureView) -> HelioResult<()> {
+        // Browser WebGPU buffer mapping is asynchronous. Consume the previous
+        // frame's completed readback before recording a new copy.
+        self.poll_cull_stats_readback();
+
         if let Some((w, h)) = self.pending_resize.take() {
             self.apply_resize_now(w, h);
         }
@@ -403,6 +451,11 @@ impl Renderer {
         )?;
         self.graph_time_ms = _graph_start.elapsed().as_secs_f64() as f32 * 1000.0;
 
+        if self.owns_device
+            && matches!(
+                self.cull_stats_readback_state,
+                CullStatsReadbackState::Idle
+            )
         {
             let mut read_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("CullStats Readback"),
@@ -413,21 +466,17 @@ impl Renderer {
                 32,
             );
             self.queue.submit(std::iter::once(read_encoder.finish()));
-        }
 
-        if self.owns_device {
-            let staging_slice = self.cull_stats_staging.slice(..);
-            staging_slice.map_async(wgpu::MapMode::Read, |_| {});
-            self.device.poll(wgpu::PollType::wait_indefinitely());
-            {
-                let mapped = staging_slice.get_mapped_range();
-                if mapped.len() >= 32 {
-                    let ptr = mapped.as_ptr() as *const u32;
-                    self.cull_stats = unsafe { std::ptr::read_unaligned(ptr.cast()) };
-                }
-                drop(mapped);
-            }
-            self.cull_stats_staging.unmap();
+            let completion = std::sync::Arc::new(std::sync::Mutex::new(None));
+            let callback_completion = std::sync::Arc::clone(&completion);
+            self.cull_stats_staging
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |result| {
+                    if let Ok(mut completion) = callback_completion.lock() {
+                        *completion = Some(result);
+                    }
+                });
+            self.cull_stats_readback_state = CullStatsReadbackState::Mapping(completion);
         }
 
         drop(texture_views);

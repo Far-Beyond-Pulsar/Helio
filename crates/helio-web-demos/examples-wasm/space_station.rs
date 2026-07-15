@@ -249,7 +249,7 @@ impl HelioWasmApp for Demo {
             self.cam_pos + fwd,
             Vec3::Y,
             std::f32::consts::FRAC_PI_4,
-            1280.0 / 720.0,
+            input.aspect_ratio(),
             0.1,
             300.0,
         )
@@ -259,6 +259,5 @@ impl HelioWasmApp for Demo {
 fn sx_for_nav(s: f32) -> f32 {
     s * 22.5
 }
-
 
 

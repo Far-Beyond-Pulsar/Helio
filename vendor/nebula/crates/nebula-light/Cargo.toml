@@ -1,0 +1,28 @@
+[package]
+name        = "nebula-light"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+description = "GPU-accelerated lightmap baking (direct + multi-bounce GI, area lights)"
+
+[dependencies]
+nebula-core      = { workspace = true }
+nebula-gpu       = { workspace = true }
+nebula-serialize = { workspace = true }
+wgpu             = { workspace = true }
+glam             = { workspace = true }
+bytemuck         = { workspace = true }
+serde            = { workspace = true }
+thiserror        = { workspace = true }
+log              = { workspace = true }
+uuid             = { workspace = true }
+serde_json       = { workspace = true }
+async-trait      = { workspace = true }
+rayon            = { workspace = true }
+
+[dev-dependencies]
+pollster   = { workspace = true }
+serde_json = { workspace = true }
+uuid       = { workspace = true }

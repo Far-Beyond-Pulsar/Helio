@@ -546,12 +546,11 @@ impl HelioWasmApp for Demo {
             self.cam_target,
             self.cam_up,
             std::f32::consts::FRAC_PI_4,
-            1280.0 / 720.0,
+            input.aspect_ratio(),
             0.5,
             30_000.0,
         )
     }
 }
-
 
 

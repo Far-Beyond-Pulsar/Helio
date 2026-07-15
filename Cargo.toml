@@ -1,16 +1,34 @@
+[package]
+name = "helio-workspace"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Workspace root"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "web"
+path = "src/bin/web.rs"
+
 [workspace]
 members = [
     "crates/*"
 ]
+exclude = [
+    "vendor/nebula",
+]
 resolver = "2"
 
+[patch.crates-io]
 [workspace.dependencies]
-wgpu = { git = "https://github.com/Far-Beyond-Pulsar/wgpu", rev = "fce5b80e8017304449124b12637ec324417e40c8", default-features = false, features = ["web", "webgpu", "wgsl", "dx12", "metal", "vulkan"] }
+wgpu = { version = "30.0.0", default-features = true, features = ["vulkan", "metal", "dx12", "gles", "webgpu", "wgsl"] }
 blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 blade-macros =   { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
 bytemuck = { version = "1", features = ["derive"] }
 glam = { version = "0.33", features = ["bytemuck"] }
-winit = "0.30.12"
+winit = { version = "0.30.12", default-features = false, features = ["rwh_06"] }
 env_logger = "0.11"
 log = "0.4"
 
@@ -35,3 +53,7 @@ libhelio = { path = "crates/libhelio" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-voxel-core = { path = "crates/helio-voxel-core" }
 helio-pass-corona = { path = "crates/helio-pass-corona" }
+helio-pass-sdf = { path = "crates/helio-pass-sdf" }
+
+[dependencies]
+tiny_http = "0.12"

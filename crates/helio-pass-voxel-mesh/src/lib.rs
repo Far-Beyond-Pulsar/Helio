@@ -13,8 +13,6 @@ use helio_voxel_core::{
     GpuBrickMeshlet, GpuBrickMeta, MAX_SURFACE_INDICES_PER_BRICK, MAX_SURFACE_VERTS_PER_BRICK,
 };
 use libhelio::DrawIndexedIndirectArgs;
-use wgpu::util::DeviceExt;
-
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 // Kept modest because vertex_buf/index_buf scale with
@@ -86,7 +84,11 @@ pub struct VoxelMeshPass {
 
 impl VoxelMeshPass {
     /// Creates the pass, allocating all GPU buffers and compiling both pipelines.
-    pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
         let max_bricks = VOXEL_MESH_MAX_BRICKS as u64;
         let max_verts = MAX_SURFACE_VERTS_PER_BRICK as u64;
         let max_indices = MAX_SURFACE_INDICES_PER_BRICK as u64;
@@ -128,14 +130,20 @@ impl VoxelMeshPass {
             mapped_at_creation: false,
         });
         let indirect_buf = {
-            let indirect_size =
-                max_bricks * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
+            let indirect_size = max_bricks * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
             let zeros = vec![0u8; indirect_size as usize];
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            // Keep the always-present default graph off WebGPU's fragile
+            // mappedAtCreation path; queue writes preserve initialization order.
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("VoxelMesh Indirect"),
-                contents: &zeros,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
-            })
+                size: indirect_size,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, &zeros);
+            buffer
         };
         let dirty_brick_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VoxelMesh DirtyBricks"),
@@ -342,7 +350,7 @@ impl VoxelMeshPass {
                 entry_point: Some("vs_main"),
                 compilation_options: Default::default(),
                 buffers: &[
-                    wgpu::VertexBufferLayout {
+                    Some(wgpu::VertexBufferLayout {
                         array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[wgpu::VertexAttribute {
@@ -350,8 +358,8 @@ impl VoxelMeshPass {
                             offset: 0,
                             shader_location: 0,
                         }],
-                    },
-                    wgpu::VertexBufferLayout {
+                    }),
+                    Some(wgpu::VertexBufferLayout {
                         array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[wgpu::VertexAttribute {
@@ -359,7 +367,7 @@ impl VoxelMeshPass {
                             offset: 0,
                             shader_location: 1,
                         }],
-                    },
+                    }),
                 ],
             },
             fragment: Some(wgpu::FragmentState {

@@ -51,10 +51,10 @@ const INITIAL_INSTANCES: u64 = 256;
 #[test]
 fn cull_shader_parses_and_validates() {
     let source = include_str!("../shaders/vg_cull.wgsl");
-    let module = wgpu::naga::front::wgsl::parse_str(source).expect("VG cull shader must parse");
-    let mut validator = wgpu::naga::valid::Validator::new(
-        wgpu::naga::valid::ValidationFlags::all(),
-        wgpu::naga::valid::Capabilities::all(),
+    let module = naga::front::wgsl::parse_str(source).expect("VG cull shader must parse");
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
     );
     validator
         .validate(&module)
@@ -64,14 +64,68 @@ fn cull_shader_parses_and_validates() {
 #[test]
 fn gbuffer_shader_parses_and_validates() {
     let source = include_str!("../shaders/vg_gbuffer.wgsl");
-    let module = wgpu::naga::front::wgsl::parse_str(source).expect("VG draw shader must parse");
-    let mut validator = wgpu::naga::valid::Validator::new(
-        wgpu::naga::valid::ValidationFlags::all(),
-        wgpu::naga::valid::Capabilities::all(),
+    let module = naga::front::wgsl::parse_str(source).expect("VG draw shader must parse");
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
     );
     validator
         .validate(&module)
         .expect("VG draw shader must validate");
+}
+
+fn validate_webgpu_shader(label: &str, source: &str) {
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|error| panic!("{label} must parse as WGSL: {error}"));
+    let mut validator = naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    );
+    validator
+        .validate(&module)
+        .unwrap_or_else(|error| panic!("{label} must validate: {error}"));
+}
+
+#[test]
+fn browser_shader_variants_parse_and_validate() {
+    const MAX_TEXTURES: usize = 16;
+
+    let fix_material_shader = |source: &str| {
+        let source = source
+            .replace(
+                "binding_array<texture_2d<f32>, 256>",
+                &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+            )
+            .replace(
+                "binding_array<sampler, 256>",
+                &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+            );
+        libhelio::shader::apply_webgpu_material_bindings(&source, MAX_TEXTURES)
+    };
+
+    let gbuffer = fix_material_shader(include_str!(
+        "../../helio-pass-gbuffer/shaders/gbuffer.wgsl"
+    ));
+    assert!(!gbuffer.contains("binding_array"));
+    assert!(gbuffer.contains("@binding(33) var scene_sampler_15"));
+    validate_webgpu_shader("WebGPU GBuffer shader", &gbuffer);
+
+    let vg_gbuffer = fix_material_shader(include_str!("../shaders/vg_gbuffer.wgsl"));
+    assert!(!vg_gbuffer.contains("binding_array"));
+    validate_webgpu_shader("WebGPU virtual-geometry GBuffer shader", &vg_gbuffer);
+
+    validate_webgpu_shader(
+        "Corona compute shader",
+        include_str!("../../helio-pass-corona/shaders/corona.wgsl"),
+    );
+    let corona_render = include_str!("../../helio-pass-corona/shaders/corona_render.wgsl");
+    assert!(!corona_render.contains("read_write"));
+    validate_webgpu_shader("Corona render shader", corona_render);
+
+    validate_webgpu_shader(
+        "FXAA shader",
+        include_str!("../../helio-pass-fxaa/shaders/fxaa.wgsl"),
+    );
 }
 
 // ── CullUniforms layout tests ─────────────────────────────────────────────────

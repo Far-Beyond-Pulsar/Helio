@@ -7,6 +7,6 @@ description = "Shared GPU types and utilities for the Helio renderer"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
+wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 glam.workspace = true

@@ -22,7 +22,7 @@ log.workspace = true
 thiserror = { workspace = true }
 
 # GPU
-wgpu = { workspace = true, features = ["web", "webgpu", "wgsl"] }
+wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
 
 # Image decoding

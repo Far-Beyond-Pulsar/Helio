@@ -35,7 +35,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let texel = vec2<i32>(in.uv * vec2<f32>(dimensions));
     
     // Sample center and neighbors
-    let rgb_center = textureSample(input_tex, input_sampler, in.uv).rgb;
+    let rgb_center = textureSampleLevel(input_tex, input_sampler, in.uv, 0.0).rgb;
     let luma_center = rgb2luma(rgb_center);
     
     let luma_down = rgb2luma(textureLoad(input_tex, texel + vec2<i32>(0, -1), 0).rgb);
@@ -118,5 +118,5 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
     
-    return vec4<f32>(textureSample(input_tex, input_sampler, uv_offset).rgb, 1.0);
+    return vec4<f32>(textureSampleLevel(input_tex, input_sampler, uv_offset, 0.0).rgb, 1.0);
 }

@@ -21,6 +21,7 @@ pub mod material;
 pub mod meshlet;
 pub mod movability;
 pub mod postprocess;
+pub mod shader;
 pub mod shadow;
 pub mod sky;
 pub mod water;
@@ -38,4 +39,3 @@ pub use postprocess::*;
 pub use shadow::*;
 pub use sky::{SkyActor, VolumetricClouds};
 pub use water::*;
-

@@ -12,16 +12,16 @@ use helio_core::GpuScene;
 use helio_voxel_core::VoxelEdit;
 use wgpu::util::DeviceExt;
 
+use super::types::VoxelVolumeDescriptor;
+use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
     LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId,
-    TextureId, VirtualObjectId, WaterHitboxId, WaterVolumeId, VoxelVolumeId,
+    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
-use crate::radiant::RadiantGraphRegistry;
-use super::voxel::VoxelVolumeRecord;
-use super::types::VoxelVolumeDescriptor;
 use crate::mesh::{MeshPool, MultiMeshRecord};
+use crate::radiant::RadiantGraphRegistry;
 use crate::scene::multi_mesh::SectionedInstanceRecord;
 use crate::scene::SceneActorTrait;
 use crate::vg::VirtualMeshId;
@@ -106,6 +106,10 @@ pub struct Scene {
     /// Generation counter for movable lights - increments when any Movable light's position/direction changes.
     /// Used by shadow caching to detect when Movable lights move.
     pub(in crate::scene) movable_lights_generation: u64,
+
+    /// Number of shadow-map array layers available in the active render graph.
+    /// Six consecutive layers are reserved per realtime shadow caster.
+    pub(in crate::scene) shadow_face_capacity: u32,
 
     /// Per-frame custom trait-based scene actors.
     pub(in crate::scene) custom_actors: Vec<Box<dyn SceneActorTrait>>,
@@ -293,6 +297,7 @@ impl Scene {
             group_hidden: GroupMask::NONE,
             movable_objects_generation: 0,
             movable_lights_generation: 0,
+            shadow_face_capacity: 32,
             custom_actors: Vec::new(),
             vg_meshes: HashMap::new(),
             vg_next_mesh_id: 0,
@@ -324,11 +329,18 @@ impl Scene {
         }
     }
 
-    pub fn insert_voxel_volume(&mut self, descriptor: VoxelVolumeDescriptor) -> Result<VoxelVolumeId> {
+    pub(crate) fn set_shadow_face_capacity(&mut self, capacity: u32) {
+        self.shadow_face_capacity = capacity.clamp(1, 256);
+    }
+
+    pub fn insert_voxel_volume(
+        &mut self,
+        descriptor: VoxelVolumeDescriptor,
+    ) -> Result<VoxelVolumeId> {
         let gpu_slot = self.voxel_volumes.len() as u32;
-        let id = self.voxel_volumes.insert_with(|id| {
-            VoxelVolumeRecord::new(id, gpu_slot, &descriptor)
-        });
+        let id = self
+            .voxel_volumes
+            .insert_with(|id| VoxelVolumeRecord::new(id, gpu_slot, &descriptor));
 
         if let Some(record) = self.voxel_volumes.get(id) {
             record.upload_to_gpu(&mut self.gpu_scene, gpu_slot);
@@ -370,7 +382,11 @@ impl Scene {
     }
 
     /// Update only the class_params of a material (no texture revalidation).
-    pub fn update_material_class_params(&mut self, material_id: MaterialId, params: [f32; 4]) -> Result<()> {
+    pub fn update_material_class_params(
+        &mut self,
+        material_id: MaterialId,
+        params: [f32; 4],
+    ) -> Result<()> {
         let Some((slot, record)) = self.materials.get_mut_with_slot(material_id) else {
             return Err(invalid("material"));
         };

@@ -1,0 +1,17 @@
+[package]
+name        = "nebula-serialize"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+description = "Binary (.nebula chunks) and JSON metadata serializers for Nebula bake outputs"
+
+[dependencies]
+nebula-core  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+bincode      = { workspace = true }
+zstd         = { workspace = true }
+thiserror    = { workspace = true }
+log          = { workspace = true }

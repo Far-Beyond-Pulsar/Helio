@@ -1,3 +1,5 @@
+enable wgpu_binding_array;
+
 // Virtual geometry G-buffer draw pass.
 //
 // Identical to gbuffer.wgsl but reads instance data from the VG-specific

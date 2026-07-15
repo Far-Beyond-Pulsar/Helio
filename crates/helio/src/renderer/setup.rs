@@ -1,16 +1,18 @@
 use std::sync::{Arc, Mutex};
 
-#[cfg(target_arch = "wasm32")]
-use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(target_arch = "wasm32")]
+use web_time::Instant;
 
 use crate::scene::Scene;
 use helio_core::RenderGraph;
 
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
-use super::renderer_impl::{GraphRebuilder, Renderer, DebugCameraUniform, HALTON_JITTER};
+use super::renderer_impl::{
+    CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer, HALTON_JITTER,
+};
 
 impl Renderer {
     pub(crate) fn compute_jitter_matrices(width: u32, height: u32) -> [glam::Mat4; 16] {
@@ -39,7 +41,9 @@ impl Renderer {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -60,6 +64,7 @@ impl Renderer {
         debug_camera_buffer: wgpu::Buffer,
         cull_stats_buffer: wgpu::Buffer,
     ) -> Self {
+        scene.set_shadow_face_capacity(config.shadow_face_capacity);
         scene.set_render_size(width, height);
 
         assert!(
@@ -74,11 +79,8 @@ impl Renderer {
         let internal_w = config.internal_width();
         let internal_h = config.internal_height();
 
-        let (depth_texture, depth_view) = Self::create_depth_resources(
-            &device,
-            internal_w,
-            internal_h,
-        );
+        let (depth_texture, depth_view) =
+            Self::create_depth_resources(&device, internal_w, internal_h);
 
         let (full_res_depth_texture, full_res_depth_view) = if render_scale < 1.0 {
             let (t, v) = Self::create_depth_resources(&device, width, height);
@@ -125,6 +127,11 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Camera jitter is only valid when a temporal pass reconstructs it.
+        // Applying it to FXAA/non-temporal graphs shifts the final image every
+        // frame and presents as whole-scene shimmer.
+        let enable_jitter = graph.requires_camera_jitter();
+
         // Extract the rebuilder that was stored in the graph by the builder function
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
 
@@ -147,6 +154,8 @@ impl Renderer {
             clear_color: [0.02, 0.02, 0.03, 1.0],
             gi_config: config.gi_config,
             shadow_quality: config.shadow_quality,
+            shadow_atlas_size: config.shadow_atlas_size,
+            shadow_face_capacity: config.shadow_face_capacity,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
@@ -167,6 +176,7 @@ impl Renderer {
             last_render_time: Instant::now(),
             delta_time: 0.0,
             cull_stats_staging,
+            cull_stats_readback_state: CullStatsReadbackState::Idle,
             cull_stats: [0; 8],
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
@@ -174,7 +184,7 @@ impl Renderer {
             jitter_matrices,
             jitter_cache_width: internal_w,
             jitter_cache_height: internal_h,
-            enable_jitter: true,
+            enable_jitter,
             #[cfg(feature = "bake")]
             bake_pending: None,
             #[cfg(feature = "bake")]

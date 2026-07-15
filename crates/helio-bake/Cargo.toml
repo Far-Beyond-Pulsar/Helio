@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 # Nebula baker — all heavyweight GPU bake passes live here
-nebula = { git = "https://github.com/Far-Beyond-Pulsar/Nebula", rev = "b9b7cfc9d071aab999ae1e8ce98f576e67c82c80", default-features = false, features = ["ao", "light", "probe", "visibility"] }
+nebula = { path = "../../vendor/nebula/crates/nebula", default-features = false, features = ["ao", "light", "probe", "visibility"] }
 
 # Helio internal crates
 libhelio = { workspace = true }
@@ -29,3 +29,8 @@ bincode = "1"
 # Utilities
 log = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Nebula enables UUID v4 generation, which uses getrandom 0.2. Select its
+# browser implementation explicitly for wasm32-unknown-unknown.
+getrandom = { version = "0.2", features = ["js"] }

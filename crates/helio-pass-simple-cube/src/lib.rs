@@ -127,7 +127,7 @@ impl SimpleCubePass {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[wgpu::VertexBufferLayout {
+                buffers: &[Some(wgpu::VertexBufferLayout {
                     array_stride: 36,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
@@ -147,7 +147,7 @@ impl SimpleCubePass {
                             shader_location: 2,
                         },
                     ],
-                }],
+                })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {

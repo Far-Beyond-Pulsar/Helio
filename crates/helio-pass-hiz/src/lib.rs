@@ -23,8 +23,6 @@ use std::sync::Arc;
 use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{FrameResources, PassContext, PrepareContext, RenderPass, Result as HelioResult};
-use wgpu::util::DeviceExt;
-
 const WORKGROUP_SIZE: u32 = 8;
 const MAX_MIP_LEVELS: u32 = 12;
 
@@ -80,7 +78,7 @@ pub struct HiZBuildPass {
 }
 
 impl HiZBuildPass {
-    pub fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, width: u32, height: u32) -> Self {
         let hiz_sampler = Arc::new(device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("HiZ Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -208,14 +206,20 @@ impl HiZBuildPass {
             let src_h = (height >> mip).max(1);
             let dst_w = (width >> (mip + 1)).max(1);
             let dst_h = (height >> (mip + 1)).max(1);
-            let ub = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            let uniforms = HiZUniforms {
+                src_size: [src_w, src_h],
+                dst_size: [dst_w, dst_h],
+            };
+            // `create_buffer_init` uses mappedAtCreation on WebGPU. Dawn can
+            // reject that synchronous mapping under browser resource pressure,
+            // so initialize through the queue instead.
+            let ub = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("HiZ Mip Uniform"),
-                contents: bytemuck::bytes_of(&HiZUniforms {
-                    src_size: [src_w, src_h],
-                    dst_size: [dst_w, dst_h],
-                }),
-                usage: wgpu::BufferUsages::UNIFORM,
+                size: std::mem::size_of::<HiZUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
             });
+            queue.write_buffer(&ub, 0, bytemuck::bytes_of(&uniforms));
             mip_uniforms.push(ub);
             mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
         }

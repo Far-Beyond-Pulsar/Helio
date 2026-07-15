@@ -284,6 +284,14 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// - **O(1)**: Returns a static string (no allocations)
     fn name(&self) -> &'static str;
 
+    /// Whether this pass consumes a deliberately jittered camera projection.
+    ///
+    /// Temporal reconstruction passes opt in so the renderer can keep FXAA and
+    /// other non-temporal graphs pixel-stable by default.
+    fn requires_camera_jitter(&self) -> bool {
+        false
+    }
+
     /// Resources this pass reads. Checked at graph construction time.
     /// Override to declare dependencies on prior-pass outputs.
     /// Return graph resource name strings (e.g. `"pre_aa"`, `"gbuffer"`).

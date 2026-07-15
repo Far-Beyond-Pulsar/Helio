@@ -267,7 +267,9 @@ impl GpuProfiler {
                 // Wait for the mapping to complete
                 if let Ok(Ok(())) = rx.recv() {
                     // Read the timestamp data
-                    let data = buffer_slice.get_mapped_range();
+                    let data = buffer_slice
+                        .get_mapped_range()
+                        .expect("timestamp buffer should be mapped");
                     let timestamps: &[u64] = bytemuck::cast_slice(&data);
 
                     // Calculate deltas for each pass
@@ -353,4 +355,3 @@ pub struct GpuTimestamp {
     /// Convert to milliseconds: `duration_ns as f64 / 1_000_000.0`
     pub duration_ns: u64,
 }
-

@@ -621,7 +621,7 @@ impl WaterSimPass {
             vertex: wgpu::VertexState {
                 module: &caustics_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[vbl.clone()],
+                buffers: &[Some(vbl.clone())],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -659,7 +659,7 @@ impl WaterSimPass {
                 vertex: wgpu::VertexState {
                     module: &surface_above_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[vbl.clone()],
+                    buffers: &[Some(vbl.clone())],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -696,7 +696,7 @@ impl WaterSimPass {
                 vertex: wgpu::VertexState {
                     module: &surface_under_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[vbl.clone()],
+                    buffers: &[Some(vbl.clone())],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -733,7 +733,7 @@ impl WaterSimPass {
                 vertex: wgpu::VertexState {
                     module: &volume_walls_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[vbl.clone()],
+                    buffers: &[Some(vbl.clone())],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {

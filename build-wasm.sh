@@ -22,10 +22,45 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-WASM_TARGET="wasm32-unknown-unknown"
 WASM_LIB_NAME="helio_web_demos"
 PROFILE="release"
 FILTER_NAME=""
+
+# ── Prerequisite checks ─────────────────────────────────────────────────────
+
+check_wasm_pack() {
+    if ! command -v wasm-pack >/dev/null 2>&1; then
+        echo "wasm-pack not found.  Install it with:" >&2
+        echo "  cargo install wasm-pack" >&2
+        exit 1
+    fi
+}
+
+check_cc_wasm() {
+    # meshopt and other C/C++ deps need a clang with the wasm32 target.
+    # macOS system clang doesn't include it.  Check for LLVM from Homebrew.
+    local cc="${CC:-cc}"
+    echo 'int x;' > /tmp/wasm_cc_test.c
+    if ! $cc --target=wasm32-unknown-unknown -c /tmp/wasm_cc_test.c -o /tmp/wasm_cc_test.o 2>/dev/null; then
+        if command -v "$(brew --prefix llvm 2>/dev/null)/bin/clang" >/dev/null 2>&1; then
+            export CC="$(brew --prefix llvm)/bin/clang"
+            echo "  Using LLVM clang at $CC"
+        else
+            echo "C compiler '$cc' cannot target wasm32-unknown-unknown." >&2
+            echo "" >&2
+            echo "Install a wasm-capable LLVM:" >&2
+            echo "  brew install llvm" >&2
+            echo "  export CC=\"\$(brew --prefix llvm)/bin/clang\"" >&2
+            echo "" >&2
+            echo "Then re-run this script." >&2
+            exit 1
+        fi
+    fi
+    rm -f /tmp/wasm_cc_test.c /tmp/wasm_cc_test.o
+}
+
+check_wasm_pack
+check_cc_wasm
 
 # Parse flags
 for arg in "$@"; do
@@ -50,6 +85,8 @@ declare -a ALL_EXAMPLES=(
     outdoor_volcano
     space_station
     light_benchmark
+    hlfs_benchmark
+    sdf_demo
     rc_benchmark
     load_fbx
     load_fbx_embedded
@@ -79,38 +116,37 @@ for name in "${EXAMPLES[@]}"; do
     echo ""
     echo "════ $name ════"
 
-    out_dir="$SCRIPT_DIR/target/wasm-prebuilt/$name"
-    mkdir -p "$out_dir"
+    out_dir_abs="$SCRIPT_DIR/target/wasm-prebuilt/$name"
+    mkdir -p "$out_dir_abs"
 
-    # cargo build  (build.rs writes index.html to $out_dir automatically)
-    echo "  cargo build $PROFILE_FLAG --lib -p helio-web-demos --features $name"
-    if ! cargo build $PROFILE_FLAG --lib \
-        -p helio-web-demos \
-        --target "$WASM_TARGET" \
-        --no-default-features \
-        --features "$name"; then
-        echo "  FAILED cargo build for $name" >&2
+    wasm_profile_flag=""
+    [[ "$PROFILE" == "release" ]] && wasm_profile_flag="--release"
+
+    if ! (
+        cd crates/helio-web-demos &&
+        CC="$CC" wasm-pack build \
+            $wasm_profile_flag \
+            --target web \
+            --no-default-features \
+            --features "$name"
+    ); then
+        echo "  FAILED wasm-pack build for $name" >&2
         FAILED+=("$name")
         continue
     fi
+    rm -rf "$out_dir_abs" &&
+    mv crates/helio-web-demos/pkg "$out_dir_abs" &&
+    echo "  moved pkg/ -> $out_dir_abs"
 
-    wasm_path="$SCRIPT_DIR/target/$WASM_TARGET/$PROFILE/${WASM_LIB_NAME}.wasm"
-    if [[ ! -f "$wasm_path" ]]; then
+    wasm_path="$out_dir_abs/${WASM_LIB_NAME}_bg.wasm"
+    if [[ -f "$wasm_path" ]]; then
+        wasm_mib=$(( $(wc -c < "$wasm_path") / 1048576 ))
+        echo "  wasm OK (~${wasm_mib} MiB) -> $out_dir_abs"
+    else
         echo "  FAILED: wasm not found at $wasm_path" >&2
         FAILED+=("$name")
         continue
     fi
-    wasm_mib=$(( $(wc -c < "$wasm_path") / 1048576 ))
-    echo "  wasm OK (~${wasm_mib} MiB)"
-
-    echo "  wasm-bindgen -> $out_dir"
-    if ! wasm-bindgen "$wasm_path" --out-dir "$out_dir" --target web; then
-        echo "  FAILED wasm-bindgen for $name" >&2
-        FAILED+=("$name")
-        continue
-    fi
-
-    echo "  OK -> $out_dir"
 done
 
 echo ""

@@ -13,14 +13,12 @@ pub enum PerfOverlayMode {
 
 pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Features {
     #[cfg(not(target_arch = "wasm32"))]
-    let required =
-        wgpu::Features::TEXTURE_BINDING_ARRAY |
-        wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING |
-        wgpu::Features::INDIRECT_FIRST_INSTANCE;
+    let required = wgpu::Features::TEXTURE_BINDING_ARRAY
+        | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
+        | wgpu::Features::INDIRECT_FIRST_INSTANCE;
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
-    let optional =
-        wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
+    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE;
@@ -29,14 +27,12 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
 
 #[cfg(test)]
 mod tests {
-    use super::required_wgpu_features;
+    use super::{required_wgpu_features, RendererConfig};
 
     #[test]
     fn indirect_first_instance_is_required_even_when_adapter_does_not_report_it() {
-        assert!(
-            required_wgpu_features(wgpu::Features::empty())
-                .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
-        );
+        assert!(required_wgpu_features(wgpu::Features::empty())
+            .contains(wgpu::Features::INDIRECT_FIRST_INSTANCE));
     }
 
     #[test]
@@ -44,6 +40,13 @@ mod tests {
         let requested = required_wgpu_features(wgpu::Features::empty());
         assert!(!requested.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT));
         assert!(!requested.contains(wgpu::Features::TIMESTAMP_QUERY));
+    }
+
+    #[test]
+    fn renderer_config_never_exposes_an_empty_extent() {
+        let config = RendererConfig::new(0, 0, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!((config.width, config.height), (1, 1));
+        assert_eq!((config.internal_width(), config.internal_height()), (1, 1));
     }
 }
 
@@ -107,13 +110,17 @@ pub struct RendererConfig {
     /// Resolution of each shadow atlas face (width × height). Default 1024.
     /// Higher values improve shadow quality at the cost of VRAM (N² scaling).
     pub shadow_atlas_size: u32,
+    /// Maximum number of allocated shadow-map array layers. Each realtime light
+    /// reserves six consecutive faces. A capacity of 32 supports five lights
+    /// while keeping the two 1024px browser atlases to 256 MiB total.
+    pub shadow_face_capacity: u32,
 }
 
 impl RendererConfig {
     pub fn new(width: u32, height: u32, surface_format: wgpu::TextureFormat) -> Self {
         Self {
-            width,
-            height,
+            width: width.max(1),
+            height: height.max(1),
             surface_format,
             gi_config: GiConfig::default(),
             shadow_quality: libhelio::ShadowQuality::Medium,
@@ -121,6 +128,7 @@ impl RendererConfig {
             render_scale: 0.75,
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
+            shadow_face_capacity: 32,
         }
     }
 
@@ -141,6 +149,11 @@ impl RendererConfig {
 
     pub fn with_perf_overlay_mode(mut self, mode: PerfOverlayMode) -> Self {
         self.perf_overlay_mode = mode;
+        self
+    }
+
+    pub fn with_shadow_face_capacity(mut self, capacity: u32) -> Self {
+        self.shadow_face_capacity = capacity.clamp(1, 256);
         self
     }
 

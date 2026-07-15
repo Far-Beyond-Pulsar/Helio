@@ -44,6 +44,9 @@ impl RadiantShaderCache {
     ) -> &wgpu::ShaderModule {
         if !self.modules.contains_key(&key) {
             let source = template.build_shader_source(graph_wgsl, max_textures);
+            #[cfg(target_arch = "wasm32")]
+            let source =
+                super::template::RadiantTemplate::apply_webgpu_fixups(&source, max_textures);
             let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(source.into()),

@@ -13,7 +13,6 @@
 const FACES_PER_LIGHT: u32 = 6u;
 const CSM_SPLITS: vec4f = vec4f(16.0, 80.0, 300.0, 1400.0);
 const SCENE_DEPTH: f32 = 4000.0;
-const ATLAS_TEXELS: f32 = 2048.0;
 
 // Light types (must match LightType in libhelio/src/light.rs)
 const LIGHT_TYPE_DIRECTIONAL: u32 = 0u;
@@ -53,7 +52,7 @@ struct CameraUniforms {
 
 struct ShadowMatrixParams {
     light_count: u32,
-    camera_moved: u32,  // Boolean: 1 if camera moved (triggers CSM recompute)
+    shadow_atlas_size: u32,
     _pad0: u32,
     _pad1: u32,
 }
@@ -64,7 +63,7 @@ struct ShadowMatrixParams {
 @group(0) @binding(1) var<storage, read_write> shadow_mats:    array<GpuShadowMatrix>;
 @group(0) @binding(2) var<uniform>             camera:         CameraUniforms;
 @group(0) @binding(3) var<uniform>             params:         ShadowMatrixParams;
-@group(0) @binding(4) var<storage, read_write> shadow_dirty:   array<atomic<u32>>;  // Atomic dirty flags per light
+@group(0) @binding(4) var<storage, read_write> shadow_dirty:   array<atomic<u32>>;  // Atomic dirty flags per caster slot
 @group(0) @binding(5) var<storage, read_write> shadow_hashes:  array<u32>;  // FNV hashes to detect changes
 
 // ── Matrix math helpers ───────────────────────────────────────────────────────
@@ -209,7 +208,7 @@ fn compute_directional_cascades(light_idx: u32, direction: vec3f) {
         }
 
         // Snap radius to texel boundaries
-        let texel_size = (2.0 * radius) / ATLAS_TEXELS;
+        let texel_size = (2.0 * radius) / f32(max(params.shadow_atlas_size, 1u));
         let radius_snap = ceil(radius / texel_size) * texel_size;
 
         // Texel-snapped light view
@@ -303,13 +302,14 @@ fn compute_shadow_matrices(@builtin(global_invocation_id) gid: vec3u) {
     // Hash the computed matrices to detect changes
     // This enables shadow atlas caching for static geometry
     let base_idx = light.shadow_index;
+    let caster_slot = base_idx / FACES_PER_LIGHT;
     let new_hash = fnv_hash_mats_6(base_idx);
-    let old_hash = shadow_hashes[light_idx];
+    let old_hash = shadow_hashes[caster_slot];
 
     // Update hash and mark dirty if changed
     if new_hash != old_hash {
-        shadow_hashes[light_idx] = new_hash;
+        shadow_hashes[caster_slot] = new_hash;
         // Atomically set dirty flag for this light
-        atomicStore(&shadow_dirty[light_idx], 1u);
+        atomicStore(&shadow_dirty[caster_slot], 1u);
     }
 }

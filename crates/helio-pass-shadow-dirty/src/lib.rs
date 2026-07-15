@@ -12,6 +12,7 @@
 //!
 //! ```text
 //! ShadowMatrixPass  ─writes─►  shadow_mats (VP per face)
+//!                   ─writes─►  light_dirty (per-caster matrix changes)
 //!        ↓
 //! ShadowDirtyPass   ─reads──►  instances, movable_draws, prev_positions, shadow_mats
 //!                   ─writes─►  face_dirty[256]     (0/1, is this face dirty?)
@@ -82,10 +83,13 @@ pub struct ShadowDirtyPass {
     /// `multi_draw_indexed_indirect_count` for movable geometry draws.
     pub face_geom_count_buf: Arc<wgpu::Buffer>,
 
+    /// Per-caster flags written by ShadowMatrixPass when a light matrix changes.
+    light_dirty_buf: Arc<wgpu::Buffer>,
+
     /// Bind group (lazy; rebuilt whenever the `instances` or `shadow_mats` buffer
     /// pointer changes due to `GrowableBuffer` reallocation).
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize)>,
 
     /// `movable_draw_count` seen last frame; used to detect topology changes.
     last_movable_draw_count: u32,
@@ -93,7 +97,7 @@ pub struct ShadowDirtyPass {
 
 impl ShadowDirtyPass {
     /// Allocate all GPU resources.  Pass the shared buffers to `ShadowPass::new()`.
-    pub fn new(device: &wgpu::Device) -> Self {
+    pub fn new(device: &wgpu::Device, light_dirty_buf: Arc<wgpu::Buffer>) -> Self {
         // ── Shader ────────────────────────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ShadowDirty Shader"),
@@ -181,6 +185,17 @@ impl ShadowDirtyPass {
                     },
                     count: None,
                 },
+                // 7: per-caster light dirty flags from ShadowMatrixPass
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -219,11 +234,15 @@ impl ShadowDirtyPass {
             mapped_at_creation: false,
         });
 
-        // face_dirty: one atomic<u32> per shadow face.  Zeroed by the shader each frame.
+        // face_dirty: one atomic<u32> per shadow face. Cleared by the command
+        // encoder before the compute dispatch, which provides ordering across
+        // every workgroup (a shader workgroup barrier cannot do that).
         let face_dirty_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/FaceDirty"),
             size: (MAX_SHADOW_FACES * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
@@ -231,7 +250,9 @@ impl ShadowDirtyPass {
         let face_geom_count_buf = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("ShadowDirty/FaceGeomCount"),
             size: (MAX_SHADOW_FACES * 4) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         }));
 
@@ -242,6 +263,7 @@ impl ShadowDirtyPass {
             prev_positions_buf,
             face_dirty_buf,
             face_geom_count_buf,
+            light_dirty_buf,
             bind_group: None,
             bind_group_key: None,
             last_movable_draw_count: u32::MAX, // force force_dirty_all on first frame
@@ -300,7 +322,8 @@ impl RenderPass for ShadowDirtyPass {
         let inst_ptr = ctx.scene.instances as *const _ as usize;
         let mov_ptr = ctx.scene.shadow_movable_indirect as *const _ as usize;
         let sm_ptr = ctx.scene.shadow_matrices as *const _ as usize;
-        let key = (inst_ptr, mov_ptr, sm_ptr);
+        let ld_ptr = &*self.light_dirty_buf as *const _ as usize;
+        let key = (inst_ptr, mov_ptr, sm_ptr, ld_ptr);
 
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -335,6 +358,10 @@ impl RenderPass for ShadowDirtyPass {
                         binding: 6,
                         resource: self.uniform_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: self.light_dirty_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
@@ -342,13 +369,20 @@ impl RenderPass for ShadowDirtyPass {
 
         let bg = self.bind_group.as_ref().unwrap();
 
+        // Reset the complete output arrays before dispatch. Doing this as
+        // encoder commands avoids the cross-workgroup race that occurs when
+        // invocation zero clears storage while other workgroups write it.
+        let encoder = unsafe { &mut *ctx.encoder_ptr };
+        encoder.clear_buffer(&self.face_dirty_buf, 0, None);
+        encoder.clear_buffer(&self.face_geom_count_buf, 0, None);
+
         // Dispatch enough threads to cover all movable draw calls.
-        // Thread 0 also zeroes face_dirty / face_geom_count, so dispatch at least 1.
+        // Dispatch at least one thread so topology changes with an empty
+        // movable set still pass through the force-dirty path.
         let thread_count = movable_draw_count.max(1);
         let workgroups = thread_count.div_ceil(WORKGROUP_SIZE);
 
-        let mut pass =
-            unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("ShadowDirty"),
                 timestamp_writes: None,
             });

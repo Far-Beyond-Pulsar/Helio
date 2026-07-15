@@ -981,7 +981,10 @@ impl MaterialProfiler {
                 mapped_at_creation: true,
             });
             {
-                let mut view = buf.slice(..).get_mapped_range_mut();
+                let mut view = buf
+                    .slice(..)
+                    .get_mapped_range_mut()
+                    .expect("performance overlay buffer should be mapped");
                 view.copy_from_slice(bytemuck::bytes_of(&params));
             }
             buf.unmap();
@@ -1105,9 +1108,11 @@ impl MaterialProfiler {
         }
         let buffer_slice = self.resolve_buffer.slice(..);
         buffer_slice.map_async(wgpu::MapMode::Read, |_| {});
-        device.poll(wgpu::PollType::wait_indefinitely());
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice
+            .get_mapped_range()
+            .expect("timestamp readback buffer should be mapped");
         let timestamps: &[u64] = bytemuck::cast_slice(&data);
 
         let start_ts = timestamps[0];

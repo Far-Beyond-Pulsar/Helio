@@ -72,10 +72,11 @@ fn sphere_in_frustum(vp: mat4x4<f32>, center: vec3<f32>, radius: f32) -> bool {
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let instance_idx = gid.x;
-    if instance_idx >= uniforms.instance_count { return; }
+    let draw_idx = gid.x;
+    if draw_idx >= uniforms.instance_count { return; }
 
-    let inst = instances[instance_idx];
+    let draw = src_indirect[draw_idx];
+    let inst = instances[draw.first_instance];
     let center = inst.bounds.xyz;
     let radius = inst.bounds.w;
     if radius <= 0.0 { return; }
@@ -88,7 +89,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let slot = atomicAdd(&face_counts[face], 1u);
             if slot < uniforms.max_draws_per_face {
                 let base = face * uniforms.max_draws_per_face;
-                dst_indirect[base + slot] = src_indirect[instance_idx];
+                dst_indirect[base + slot] = draw;
             }
         }
     }

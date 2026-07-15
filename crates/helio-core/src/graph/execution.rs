@@ -81,6 +81,14 @@ impl RenderGraph {
         self.delta_time = dt;
     }
 
+    /// Returns true when at least one pass reconstructs the renderer's
+    /// subpixel camera-jitter sequence.
+    pub fn requires_camera_jitter(&self) -> bool {
+        self.passes
+            .iter()
+            .any(|pass| pass.requires_camera_jitter())
+    }
+
     // ── Public API ──────────────────────────────────────────────────────
 
     /// Store opaque data (e.g. a GraphRebuilder) on the graph so the Renderer

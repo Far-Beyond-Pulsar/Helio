@@ -252,7 +252,7 @@ impl BillboardPass {
                 compilation_options: Default::default(),
                 buffers: &[
                     // Slot 0: per-vertex quad data  (stride 16)
-                    wgpu::VertexBufferLayout {
+                    Some(wgpu::VertexBufferLayout {
                         array_stride: 16,
                         step_mode: wgpu::VertexStepMode::Vertex,
                         attributes: &[
@@ -267,9 +267,9 @@ impl BillboardPass {
                                 shader_location: 1,
                             },
                         ],
-                    },
+                    }),
                     // Slot 1: per-instance billboard data  (stride 48)
-                    wgpu::VertexBufferLayout {
+                    Some(wgpu::VertexBufferLayout {
                         array_stride: 48,
                         step_mode: wgpu::VertexStepMode::Instance,
                         attributes: &[
@@ -289,7 +289,7 @@ impl BillboardPass {
                                 shader_location: 4,
                             },
                         ],
-                    },
+                    }),
                 ],
             },
             fragment: Some(wgpu::FragmentState {
@@ -551,4 +551,3 @@ impl RenderPass for BillboardPass {
         Ok(())
     }
 }
-
