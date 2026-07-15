@@ -3,6 +3,8 @@ name = "helio-web-demos"
 version = "0.1.0"
 edition = "2021"
 description = "All helio examples compiled to WASM — one feature flag per demo"
+[package.metadata]
+wasm-opt = false
 
 # cdylib  = wasm-bindgen output
 # rlib     = allows 'cargo check' on the native target for IDE support

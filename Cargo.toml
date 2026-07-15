@@ -57,3 +57,5 @@ helio-pass-sdf = { path = "crates/helio-pass-sdf" }
 
 [dependencies]
 tiny_http = "0.12"
+ratatui = "0.29"
+crossterm = "0.28"
