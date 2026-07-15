@@ -63,11 +63,16 @@ pub struct Demo {
 
 /// Insert a static box (mesh + object) at `center` with the given half-extents.
 fn add_box(renderer: &mut Renderer, center: [f32; 3], half: [f32; 3], material: MaterialId) {
+    // Build the box at the local origin and place it via the transform. The
+    // object's cull bounds are derived from the transform translation, so baking
+    // the position into the mesh (and leaving an identity transform) would put
+    // every box's bounding sphere at the world origin — making them all frustum-
+    // cull together instead of each on its own geometry.
     let mesh = renderer
         .scene_mut()
-        .insert_actor(SceneActor::mesh(box_mesh(center, half)));
+        .insert_actor(SceneActor::mesh(box_mesh([0.0, 0.0, 0.0], half)));
     let radius = (half[0] * half[0] + half[1] * half[1] + half[2] * half[2]).sqrt();
-    let _ = insert_object(renderer, mesh, material, Mat4::IDENTITY, radius);
+    let _ = insert_object(renderer, mesh, material, Mat4::from_translation(Vec3::from(center)), radius);
 }
 
 impl Demo {
