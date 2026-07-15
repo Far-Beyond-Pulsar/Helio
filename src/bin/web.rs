@@ -445,53 +445,6 @@ fn log_ui(f: &mut Frame, app: &App) {
     f.render_widget(footer, layout[0]);
 }
 
-fn final_ui(f: &mut Frame, app: &App) {
-    let ok = app.builds.iter().filter(|b| {
-        b.log.lock().unwrap().last().cloned().unwrap_or_default().starts_with("OK")
-    }).count();
-    let failed_names: Vec<String> = app.builds.iter().enumerate().filter_map(|(i, b)| {
-        let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
-        if last == "FAILED" { Some(DEMOS[i].to_string()) } else { None }
-    }).collect();
-    let total = app.total;
-
-    let mut text = vec![
-        Line::from(Span::styled(" Build Complete ", Style::new().fg(Color::Magenta).bold())),
-        Line::from(Span::raw("")),
-        Line::from(Span::styled(format!("  ✔  {ok:>3} / {total}"), Style::new().fg(Color::Green).bold())),
-    ];
-
-    if !failed_names.is_empty() {
-        text.push(Line::from(Span::raw("")));
-        text.push(Line::from(Span::styled(
-            format!("  ✘  {} failed:", failed_names.len()),
-            Style::new().fg(Color::Red).bold(),
-        )));
-        for n in &failed_names {
-            text.push(Line::from(Span::styled(format!("     {n}"), Style::new().fg(Color::Red))));
-        }
-    }
-
-    text.push(Line::from(Span::raw("")));
-    text.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("http://127.0.0.1:8000/", Style::new().fg(Color::Cyan).underlined()),
-    ]));
-    text.push(Line::from(Span::raw("")));
-    text.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled("Enter", Style::new().bold()),
-        Span::raw("  Serve  "),
-        Span::styled("Q", Style::new().bold()),
-        Span::raw("  Quit"),
-    ]));
-
-    let p = Paragraph::new(text)
-        .block(Block::default().borders(Borders::ALL).title(" Summary "))
-        .wrap(Wrap { trim: false });
-    f.render_widget(p, f.area());
-}
-
 // ── HTTP server ─────────────────────────────────────────────────────────────
 
 fn serve(root: &PathBuf, addr: &str) {
