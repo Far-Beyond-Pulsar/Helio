@@ -29,6 +29,28 @@ pub const VOXEL_MESH_MAX_DIRTY: u32 = 4096;
 // every brick edge — see voxel_surface_extract.wgsl's CELLS_PER_DIM.
 pub const VOXEL_MESH_BRICK_VOXEL_WORDS: u64 = 183; // ceil(9*9*9 / 4)
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachmentMode {
+    Standalone,
+    Composited,
+}
+
+impl AttachmentMode {
+    fn color_load(self) -> wgpu::LoadOp<wgpu::Color> {
+        match self {
+            Self::Standalone => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            Self::Composited => wgpu::LoadOp::Load,
+        }
+    }
+
+    fn depth_load(self) -> wgpu::LoadOp<f32> {
+        match self {
+            Self::Standalone => wgpu::LoadOp::Clear(1.0),
+            Self::Composited => wgpu::LoadOp::Load,
+        }
+    }
+}
+
 // ── GPU types ─────────────────────────────────────────────────────────────────
 
 /// Per-brick dirty entry uploaded to the GPU each frame.
@@ -80,14 +102,43 @@ pub struct VoxelMeshPass {
 
     normal_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
+    attachment_mode: AttachmentMode,
 }
 
 impl VoxelMeshPass {
-    /// Creates the pass, allocating all GPU buffers and compiling both pipelines.
+    /// Creates a standalone pass that clears color and depth before drawing.
     pub fn new(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::new_with_attachment_mode(
+            device,
+            queue,
+            surface_format,
+            AttachmentMode::Standalone,
+        )
+    }
+
+    /// Creates a pass that loads existing color and depth for composition.
+    pub fn new_composited(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::new_with_attachment_mode(
+            device,
+            queue,
+            surface_format,
+            AttachmentMode::Composited,
+        )
+    }
+
+    fn new_with_attachment_mode(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface_format: wgpu::TextureFormat,
+        attachment_mode: AttachmentMode,
     ) -> Self {
         let max_bricks = VOXEL_MESH_MAX_BRICKS as u64;
         let max_verts = MAX_SURFACE_VERTS_PER_BRICK as u64;
@@ -425,6 +476,7 @@ impl VoxelMeshPass {
             dirty_bricks: Vec::new(),
             normal_buf,
             surface_format,
+            attachment_mode,
         }
     }
 
@@ -488,11 +540,8 @@ impl RenderPass for VoxelMeshPass {
         &["pre_aa"]
     }
 
-    // Declares (and clears) "pre_aa" — this pass is meant to be the first/only
-    // opaque geometry writer in a graph, same role GBufferPass plays in the
-    // default pipeline. If it's ever combined with GBufferPass or another
-    // earlier depth-clearing pass, this Clear (see render_pass_descriptor)
-    // will need to become a Load instead.
+    // The constructor selects whether this pass initializes `pre_aa` and depth
+    // or composites over attachments produced by earlier graph passes.
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw("pre_aa", self.surface_format, ResourceSize::MatchSurface);
     }
@@ -589,7 +638,7 @@ impl RenderPass for VoxelMeshPass {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: self.attachment_mode.color_load(),
                     store: wgpu::StoreOp::Store,
                 },
             })]));
@@ -599,7 +648,7 @@ impl RenderPass for VoxelMeshPass {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: self.attachment_mode.depth_load(),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -608,5 +657,34 @@ impl RenderPass for VoxelMeshPass {
             occlusion_query_set: None,
             multiview_mask: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AttachmentMode;
+
+    #[test]
+    fn standalone_mode_initializes_color_and_depth() {
+        assert!(matches!(
+            AttachmentMode::Standalone.color_load(),
+            wgpu::LoadOp::Clear(color) if color == wgpu::Color::TRANSPARENT
+        ));
+        assert!(matches!(
+            AttachmentMode::Standalone.depth_load(),
+            wgpu::LoadOp::Clear(1.0)
+        ));
+    }
+
+    #[test]
+    fn composited_mode_preserves_color_and_depth() {
+        assert!(matches!(
+            AttachmentMode::Composited.color_load(),
+            wgpu::LoadOp::Load
+        ));
+        assert!(matches!(
+            AttachmentMode::Composited.depth_load(),
+            wgpu::LoadOp::Load
+        ));
     }
 }
