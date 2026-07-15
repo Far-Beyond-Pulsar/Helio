@@ -11,10 +11,6 @@
 //   7. cs_sort_local      — bitonic sort within 256-element blocks (shared memory)
 //   8. cs_sort_global     — one compare-swap step for large j (global memory, per dispatch)
 //   9. cs_sort_local_merge— j < 256 steps for large-k stages (shared memory, per k-stage)
-//
-// Render:
-//   vs_main reads compact_buf[ii] → particle index, looks up emitter for sprite atlas.
-//   fs_main samples 4×4 sprite atlas at the sprite selected by the emitter's texture_index.
 
 const PI:          f32 = 3.14159265359;
 const INV_MAX_U32: f32 = 1.0 / 4294967295.0;
@@ -22,7 +18,6 @@ const INV_MAX_U32: f32 = 1.0 / 4294967295.0;
 // above the representable range in Dawn's strict WebGPU WGSL parser.
 const F32_MAX:     f32 = 3.4028234e38;
 const WG:          u32 = 256u;
-const ATLAS_COLS:  u32 = 4u;
 
 // ── Structs ───────────────────────────────────────────────────────────────────
 
@@ -81,10 +76,7 @@ struct CameraUniforms {
     prev_view_proj: mat4x4<f32>,
 }
 
-// ── Bindings (shared across all entry points) ─────────────────────────────────
-//
-// One unified bind group layout so all pipelines share the same bind group.
-// Unused bindings for a given entry point are simply not accessed.
+// ── Compute bindings ──────────────────────────────────────────────────────────
 
 @group(0) @binding(0)  var<uniform>             uniforms:          GpuCoronaUniforms;
 @group(0) @binding(1)  var<storage, read_write>  particles:         array<Particle>;
@@ -100,8 +92,6 @@ struct CameraUniforms {
 @group(0) @binding(8)  var<storage, read_write>  block_sums_buf:    array<u32>;
 // view-space depth key per compact_buf slot; reset to -F32_MAX, then written by cs_scatter
 @group(0) @binding(9)  var<storage, read_write>  sort_key_buf:      array<f32>;
-@group(0) @binding(10) var                       particle_tex:      texture_2d<f32>;
-@group(0) @binding(11) var                       particle_sampler:  sampler;
 
 // ── Workgroup shared memory ───────────────────────────────────────────────────
 
@@ -515,71 +505,4 @@ fn cs_sort_local_merge(
         sort_key_buf[gi] = sh_keys[lid.x];
         compact_buf[gi]  = sh_vals[lid.x];
     }
-}
-
-// ── Render ────────────────────────────────────────────────────────────────────
-
-struct VOut {
-    @builtin(position)              pos:          vec4<f32>,
-    @location(0)                    uv:           vec2<f32>,
-    @location(1)                    color:        vec4<f32>,
-    @location(2) @interpolate(flat) sprite_index: u32,
-}
-
-fn quad_corner(idx: u32) -> vec2<f32> {
-    let c = array<vec2<f32>, 6>(
-        vec2<f32>(-0.5, -0.5), vec2<f32>(0.5, -0.5), vec2<f32>(-0.5,  0.5),
-        vec2<f32>(-0.5,  0.5), vec2<f32>(0.5, -0.5), vec2<f32>( 0.5,  0.5),
-    );
-    return c[idx];
-}
-
-fn quad_uv(idx: u32) -> vec2<f32> {
-    let u = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
-        vec2<f32>(0.0, 1.0), vec2<f32>(1.0, 0.0), vec2<f32>(1.0, 1.0),
-    );
-    return u[idx];
-}
-
-@vertex
-fn vs_main(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
-    let pidx = compact_buf[ii];
-    let p    = particles[pidx];
-
-    let right = vec3<f32>(camera.view[0].x, camera.view[1].x, camera.view[2].x);
-    let up    = vec3<f32>(camera.view[0].y, camera.view[1].y, camera.view[2].y);
-    let size  = max(p.size_lifetime_age.x, 0.001);
-    let corner = quad_corner(vi);
-
-    let world_pos = p.pos_and_alive.xyz
-        + right * corner.x * size
-        + up    * corner.y * size;
-
-    // velocity.w holds the emitter index written by cs_emit.
-    let emitter_idx = min(u32(p.velocity.w + 0.5), uniforms.emitter_count - 1u);
-    let tex_raw     = emitters[emitter_idx].texture_index;
-    let sprite      = select(u32(tex_raw) % 16u, 0u, tex_raw < 0);
-
-    var out: VOut;
-    out.pos          = camera.view_proj * vec4<f32>(world_pos, 1.0);
-    out.uv           = quad_uv(vi);
-    out.color        = p.color;
-    out.sprite_index = sprite;
-    return out;
-}
-
-@fragment
-fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    // Sample the 4×4 sprite atlas. Each cell is 0.25×0.25 in UV space.
-    let col    = in.sprite_index % ATLAS_COLS;
-    let row    = in.sprite_index / ATLAS_COLS;
-    let atlas_uv = vec2<f32>(
-        (f32(col) + in.uv.x) * 0.25,
-        (f32(row) + in.uv.y) * 0.25,
-    );
-    let tex   = textureSample(particle_tex, particle_sampler, atlas_uv);
-    let alpha = tex.a * in.color.a;
-    if alpha < 0.005 { discard; }
-    return vec4<f32>(in.color.rgb * tex.rgb, alpha);
 }

@@ -8,12 +8,16 @@ use super::renderer_impl::Renderer;
 
 impl Renderer {
     pub fn set_render_size(&mut self, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
         self.output_width = width;
         self.output_height = height;
         self.pending_resize = Some((width, height));
     }
 
     pub(crate) fn apply_resize_now(&mut self, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
         let resize_start = Instant::now();
 
         self.scene.set_render_size(width, height);

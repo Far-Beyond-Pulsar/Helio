@@ -218,6 +218,8 @@ impl SmaaPass {
         wgpu::Texture,
         wgpu::TextureView,
     ) {
+        let width = width.max(1);
+        let height = height.max(1);
         let edge_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("SMAA Edge Texture"),
             size: wgpu::Extent3d {

@@ -27,7 +27,7 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
 
 #[cfg(test)]
 mod tests {
-    use super::required_wgpu_features;
+    use super::{required_wgpu_features, RendererConfig};
 
     #[test]
     fn indirect_first_instance_is_required_even_when_adapter_does_not_report_it() {
@@ -40,6 +40,13 @@ mod tests {
         let requested = required_wgpu_features(wgpu::Features::empty());
         assert!(!requested.contains(wgpu::Features::MULTI_DRAW_INDIRECT_COUNT));
         assert!(!requested.contains(wgpu::Features::TIMESTAMP_QUERY));
+    }
+
+    #[test]
+    fn renderer_config_never_exposes_an_empty_extent() {
+        let config = RendererConfig::new(0, 0, wgpu::TextureFormat::Rgba8Unorm);
+        assert_eq!((config.width, config.height), (1, 1));
+        assert_eq!((config.internal_width(), config.internal_height()), (1, 1));
     }
 }
 
@@ -112,8 +119,8 @@ pub struct RendererConfig {
 impl RendererConfig {
     pub fn new(width: u32, height: u32, surface_format: wgpu::TextureFormat) -> Self {
         Self {
-            width,
-            height,
+            width: width.max(1),
+            height: height.max(1),
             surface_format,
             gi_config: GiConfig::default(),
             shadow_quality: libhelio::ShadowQuality::Medium,

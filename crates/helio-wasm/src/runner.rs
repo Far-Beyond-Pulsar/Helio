@@ -354,14 +354,19 @@ async fn init_wgpu<T: HelioWasmApp>(
         .copied()
         .unwrap_or(caps.formats[0]);
 
+    // Browser layout can transiently report a zero-sized canvas while the newly
+    // attached element is being laid out. WebGPU does not permit configuring a
+    // surface (or creating its backing texture) with an empty extent.
     let size = window.inner_size();
+    let width = size.width.max(1);
+    let height = size.height.max(1);
     surface.configure(
         &device,
         &wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: size.width,
-            height: size.height,
+            width,
+            height,
             color_space: wgpu::SurfaceColorSpace::Auto,
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
@@ -392,7 +397,7 @@ async fn init_wgpu<T: HelioWasmApp>(
         &device,
         &queue,
         &scene,
-        RendererConfig::new(size.width, size.height, surface_format),
+        RendererConfig::new(width, height, surface_format),
         debug_state.clone(),
         &debug_camera_buf,
         &cull_stats_buf,
@@ -403,10 +408,10 @@ async fn init_wgpu<T: HelioWasmApp>(
         device.clone(),
         queue.clone(),
         surface_format,
-        size.width,
-        size.height,
+        width,
+        height,
         0.75,
-        RendererConfig::new(size.width, size.height, surface_format),
+        RendererConfig::new(width, height, surface_format),
         scene,
         graph,
         debug_state,
@@ -418,8 +423,8 @@ async fn init_wgpu<T: HelioWasmApp>(
         &mut renderer,
         device.clone(),
         queue.clone(),
-        size.width,
-        size.height,
+        width,
+        height,
     );
 
     let now = now_secs();

@@ -196,6 +196,8 @@ impl TaaPass {
         // a lower internal resolution.
         // Rgba16Float preserves the full float range for the confidence counter stored
         // in the alpha channel — an 8-bit swapchain format would clamp it to [0, 1].
+        let output_width = output_width.max(1);
+        let output_height = output_height.max(1);
         let tex_desc = |label: &'static str, extra: wgpu::TextureUsages| wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d { width: output_width, height: output_height, depth_or_array_layers: 1 },
@@ -408,6 +410,8 @@ impl RenderPass for TaaPass {
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
         self.output_width = width;
         self.output_height = height;
         // Internal resolution stays at the last create-time value.
