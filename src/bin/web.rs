@@ -43,7 +43,7 @@ struct Demo {
 const DEMOS: &[Demo] = &[
     Demo { name: "render_v2_basic",     title: "Basic Render",       description: "Three lit cubes — the minimal Helio render pipeline.",                          controls: "WASD / Space / Shift — fly &nbsp;·&nbsp; Mouse — look &nbsp;·&nbsp; Click — grab cursor" },
     Demo { name: "render_v2_sky",       title: "Volumetric Sky",     description: "Real-time atmospheric scattering with a moving sun.",                           controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Q/E — rotate sun &nbsp;·&nbsp; Mouse — look" },
-    Demo { name: "debug_shapes",        title: "Debug Shapes",       description: "Coloured debug boxes exercising the geometry pass.",                            controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "debug_shapes",        title: "Debug Shapes",       description: "Animated immediate-mode debug primitives — lines, sphere, torus, cone, frustum.",  controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "indoor_room",         title: "Indoor Room",        description: "Furnished room with a flickering point light.",                                controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "indoor_corridor",     title: "Indoor Corridor",    description: "40 m corridor with overhead fluorescent lighting.",                            controls: "WASD/Space/Shift — walk &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "outdoor_night",       title: "Outdoor Night",      description: "City block under streetlamps at night.",                                       controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },

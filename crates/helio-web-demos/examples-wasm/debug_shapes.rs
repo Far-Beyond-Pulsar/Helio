@@ -1,15 +1,26 @@
-//! WASM twin of `debug_shapes` — gallery of coloured solid props.
+//! WASM twin of `debug_shapes` — an exact replica of the native demo.
+//!
+//! The native version draws no scene geometry; it exercises the renderer's
+//! immediate-mode debug primitives (`debug_line`, `debug_sphere`, `debug_torus`,
+//! …) every frame through the default graph's `DebugDrawPass`, with editor mode
+//! enabled. That pass is present in the graph the wasm runner already builds, so
+//! this twin reproduces the native draw list, camera, and look/move controls
+//! verbatim — no custom graph required.
+//!
+//! Controls:
+//!   WASD / Space / Shift — fly (5 m/s)
+//!   Mouse drag           — look (click to grab cursor)
+//!   Escape               — release cursor
 
+use std::f32::consts::FRAC_PI_2;
 use std::sync::Arc;
 
 use glam::Vec3;
 use helio::{Camera, Renderer};
-use helio_wasm::{HelioWasmApp, InputState};
+use helio_wasm::{HelioWasmApp, InputState, KeyCode};
 
-use crate::common::{box_mesh, directional_light, insert_object, make_material, point_light};
-
-const LOOK_SENS: f32 = 0.0024;
-const FLY_SPEED: f32 = 5.0;
+const LOOK_SPEED: f32 = 0.003;
+const MOVE_SPEED: f32 = 5.0;
 
 pub struct Demo {
     cam_pos: Vec3,
@@ -29,114 +40,118 @@ impl HelioWasmApp for Demo {
         _w: u32,
         _h: u32,
     ) -> Self {
-        // Materials
-        let red =
-            renderer.scene_mut().insert_material(make_material([0.9, 0.2, 0.2, 1.0], 0.5, 0.0, [0.0; 3], 0.0));
-        let green =
-            renderer.scene_mut().insert_material(make_material([0.2, 0.8, 0.3, 1.0], 0.6, 0.0, [0.0; 3], 0.0));
-        let blue =
-            renderer.scene_mut().insert_material(make_material([0.2, 0.4, 0.9, 1.0], 0.4, 0.2, [0.0; 3], 0.0));
-        let yellow =
-            renderer.scene_mut().insert_material(make_material([0.9, 0.8, 0.1, 1.0], 0.7, 0.0, [0.0; 3], 0.0));
-        let cyan =
-            renderer.scene_mut().insert_material(make_material([0.1, 0.8, 0.9, 1.0], 0.3, 0.5, [0.0; 3], 0.0));
-        let magenta =
-            renderer.scene_mut().insert_material(make_material([0.9, 0.1, 0.7, 1.0], 0.5, 0.1, [0.0; 3], 0.0));
-        let white =
-            renderer.scene_mut().insert_material(make_material([0.9, 0.9, 0.9, 1.0], 0.9, 0.0, [0.0; 3], 0.0));
-        let glow = renderer.scene_mut().insert_material(make_material(
-            [0.1, 0.1, 0.1, 1.0],
-            0.9,
-            0.0,
-            [1.0, 0.5, 0.1],
-            3.0,
-        ));
-        let metal =
-            renderer.scene_mut().insert_material(make_material([0.8, 0.8, 0.9, 1.0], 0.2, 1.0, [0.0; 3], 0.0));
-
-        // Floor
-        let floor = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh([0.0, -0.1, 0.0], [10.0, 0.1, 10.0])));
-        let _ = insert_object(renderer, floor, white, glam::Mat4::IDENTITY, 12.0);
-
-        // Gallery of shapes arranged in a grid
-        let shapes_data = [
-            ([-6.0, 0.5, -6.0], [0.5, 0.5, 0.5], red),
-            ([-3.0, 0.75, -6.0], [0.4, 0.75, 0.4], green),
-            ([0.0, 1.0, -6.0], [0.6, 1.0, 0.3], blue),
-            ([3.0, 0.5, -6.0], [0.5, 0.5, 0.5], yellow),
-            ([6.0, 1.2, -6.0], [0.3, 1.2, 0.3], cyan),
-            ([-6.0, 0.4, 0.0], [1.2, 0.4, 0.4], magenta),
-            ([-3.0, 0.6, 0.0], [0.6, 0.6, 0.6], metal),
-            ([0.0, 0.3, 0.0], [1.5, 0.3, 1.5], white),
-            ([3.0, 0.8, 0.0], [0.4, 0.8, 0.8], glow),
-            ([6.0, 0.5, 0.0], [0.5, 0.5, 0.5], red),
-        ];
-        for (pos, ext, mat) in shapes_data {
-            let mesh = renderer.scene_mut().insert_actor(helio::SceneActor::mesh(box_mesh(pos, ext)));
-            let _ = insert_object(renderer, mesh, mat, glam::Mat4::IDENTITY, 2.0);
-        }
-
-        // Lights
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(directional_light(
-            [-0.3, -0.8, -0.5],
-            [1.0, 0.95, 0.85],
-            1.5,
-        )));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([-6.0, 4.0, -6.0], [1.0, 0.2, 0.1], 8.0, 12.0)));
-        renderer.scene_mut().insert_actor(helio::SceneActor::light(point_light([6.0, 4.0, 0.0], [0.2, 0.5, 1.0], 8.0, 12.0)));
-        renderer.set_ambient([0.25, 0.28, 0.35], 0.1);
+        renderer.set_clear_color([0.12, 0.12, 0.16, 1.0]);
+        renderer.set_ambient([0.20, 0.22, 0.30], 0.18);
+        renderer.set_editor_mode(true);
 
         Self {
-            cam_pos: Vec3::new(0.0, 4.0, 14.0),
+            cam_pos: Vec3::new(0.0, 3.0, 10.0),
             cam_yaw: 0.0,
-            cam_pitch: -0.25,
+            cam_pitch: -0.35,
         }
     }
 
     fn update(
         &mut self,
-        _renderer: &mut Renderer,
+        renderer: &mut Renderer,
         dt: f32,
-        _elapsed: f32,
+        elapsed: f32,
         input: &InputState,
     ) -> Camera {
-        self.cam_yaw += input.mouse_delta.0 * LOOK_SENS;
-        self.cam_pitch = (self.cam_pitch - input.mouse_delta.1 * LOOK_SENS).clamp(-1.55, 1.55);
+        // ── Look ──────────────────────────────────────────────────────────
+        self.cam_yaw += input.mouse_delta.0 * LOOK_SPEED;
+        self.cam_pitch -= input.mouse_delta.1 * LOOK_SPEED;
+        self.cam_pitch = self.cam_pitch.clamp(-FRAC_PI_2 * 0.99, FRAC_PI_2 * 0.99);
 
+        // ── Move (horizontal basis, matching the native demo) ─────────────
+        let fwd_h = Vec3::new(self.cam_yaw.sin(), 0.0, -self.cam_yaw.cos());
+        let right = Vec3::new(self.cam_yaw.cos(), 0.0, self.cam_yaw.sin());
+        let up = Vec3::Y;
+        let mut vel = Vec3::ZERO;
+        if input.keys.contains(&KeyCode::KeyW) { vel += fwd_h; }
+        if input.keys.contains(&KeyCode::KeyS) { vel -= fwd_h; }
+        if input.keys.contains(&KeyCode::KeyD) { vel += right; }
+        if input.keys.contains(&KeyCode::KeyA) { vel -= right; }
+        if input.keys.contains(&KeyCode::Space) { vel += up; }
+        if input.keys.contains(&KeyCode::ShiftLeft) { vel -= up; }
+        if vel.length_squared() > 0.0 {
+            self.cam_pos += vel.normalize() * MOVE_SPEED * dt;
+        }
+
+        // ── Debug draw list (verbatim from the native demo) ───────────────
+        let t = elapsed;
+        renderer.debug_clear();
+
+        // Circle
+        let ring_radius = 2.5;
+        renderer.debug_circle([0.0, 0.5, 0.0], ring_radius, [1.0, 0.4, 0.1, 1.0], 64);
+
+        // Sphere
+        let sphere_center = Vec3::new((t * 0.6).cos() * 3.0, 1.0, (t * 0.6).sin() * 3.0);
+        renderer.debug_sphere(sphere_center.to_array(), 1.0, [0.2, 0.8, 0.6, 1.0], 32);
+
+        // Torus
+        let torus_center = Vec3::new((t * 0.4).sin() * 3.0, 1.5, (t * 0.4).cos() * 3.0);
+        renderer.debug_torus(torus_center.to_array(), [0.0, 1.0, 0.0], 1.2, 0.35, [1.0, 0.6, 0.7, 1.0], 24, 16);
+
+        // Cylinder
+        let cyl_base = Vec3::new(-3.5, 0.0, (t * 0.7).sin() * 3.0);
+        renderer.debug_cylinder(cyl_base.to_array(), [0.0, 1.0, 0.0], 2.0, 0.45, [0.4, 0.4, 1.0, 1.0], 28);
+
+        // Cone
+        let cone_apex = Vec3::new(3.5, 1.5, (t * 0.7).cos() * 3.0);
+        renderer.debug_cone(cone_apex.to_array(), [0.0, -1.0, 0.0], 2.0, 0.8, [0.8, 0.5, 0.2, 1.0], 32);
+
+        // Frustum
+        let frustum_origin = Vec3::new(0.0, 0.5, 0.0);
+        let frustum_dir = Vec3::new((t * 0.2).sin(), -0.15, (t * 0.2).cos()).normalize_or_zero();
+        renderer.debug_frustum(
+            frustum_origin.to_array(),
+            frustum_dir.to_array(),
+            Vec3::new(0.0, 1.0, 0.0).to_array(),
+            65.0_f32.to_radians(),
+            16.0 / 9.0,
+            0.8,
+            3.2,
+            [0.2, 1.0, 0.2, 1.0],
+        );
+
+        // Rotating cross
+        let rot = t * 0.8;
+        let p = Vec3::new(rot.cos() * 2.0, 0.0, rot.sin() * 2.0);
+        let col = [0.2 + 0.8 * ((rot * 1.23).sin() * 0.5 + 0.5), 0.80, 0.2, 1.0];
+        renderer.debug_line([p.x, 0.0, p.z], [p.x, 1.2, p.z], col);
+        renderer.debug_line([p.x - 0.6, 0.6, p.z], [p.x + 0.6, 0.6, p.z], col);
+        renderer.debug_line([p.x, 0.6, p.z - 0.6], [p.x, 0.6, p.z + 0.6], col);
+
+        // Major axis lines
+        renderer.debug_line([-40.0, 0.0, 0.0], [40.0, 0.0, 0.0], [1.0, 0.0, 0.0, 1.0]);
+        renderer.debug_line([0.0, 0.0, -40.0], [0.0, 0.0, 40.0], [0.0, 1.0, 0.0, 1.0]);
+        renderer.debug_line([0.0, 0.0, 0.0], [0.0, 40.0, 0.0], [0.0, 0.0, 1.0, 1.0]);
+
+        // Camera-forward debug vector (full pitch)
         let (sy, cy) = self.cam_yaw.sin_cos();
         let (sp, cp) = self.cam_pitch.sin_cos();
         let fwd = Vec3::new(sy * cp, sp, -cy * cp);
-        let right = Vec3::new(cy, 0.0, sy);
+        let debug_origin = self.cam_pos + fwd * 0.2;
+        let debug_target = self.cam_pos + fwd * 6.0;
+        renderer.debug_line(debug_origin.to_array(), debug_target.to_array(), [1.0, 1.0, 0.0, 1.0]);
 
-        if input.keys.contains(&helio_wasm::KeyCode::KeyW) {
-            self.cam_pos += fwd * FLY_SPEED * dt;
-        }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyS) {
-            self.cam_pos -= fwd * FLY_SPEED * dt;
-        }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyA) {
-            self.cam_pos -= right * FLY_SPEED * dt;
-        }
-        if input.keys.contains(&helio_wasm::KeyCode::KeyD) {
-            self.cam_pos += right * FLY_SPEED * dt;
-        }
-        if input.keys.contains(&helio_wasm::KeyCode::Space) {
-            self.cam_pos.y += FLY_SPEED * dt;
-        }
-        if input.keys.contains(&helio_wasm::KeyCode::ShiftLeft) {
-            self.cam_pos.y -= FLY_SPEED * dt;
-        }
+        // Near-camera cross marker
+        let world_cam_mark = self.cam_pos + fwd * 2.0;
+        let cross = 0.5;
+        renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + Vec3::new(cross, 0.0, 0.0)).to_array(), [1.0, 0.5, 0.0, 1.0]);
+        renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + Vec3::new(0.0, cross, 0.0)).to_array(), [1.0, 0.5, 0.0, 1.0]);
+        renderer.debug_line(world_cam_mark.to_array(), (world_cam_mark + Vec3::new(0.0, 0.0, cross)).to_array(), [1.0, 0.5, 0.0, 1.0]);
 
         Camera::perspective_look_at(
             self.cam_pos,
             self.cam_pos + fwd,
             Vec3::Y,
-            std::f32::consts::FRAC_PI_4,
+            70.0_f32.to_radians(),
             input.aspect_ratio(),
             0.1,
-            200.0,
+            1000.0,
         )
     }
 }
-
-
