@@ -2852,6 +2852,7 @@ dependencies = [
  "helio-pass-simple-cube",
  "helio-pass-sky",
  "helio-pass-sky-lut",
+ "helio-pass-ssr",
  "helio-pass-taa",
  "helio-pass-transparent",
  "helio-pass-virtual-geometry",
@@ -3138,6 +3139,17 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-ssr"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "naga 30.0.0",
  "wgpu 30.0.0",
 ]
 

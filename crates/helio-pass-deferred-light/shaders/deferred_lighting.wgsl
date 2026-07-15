@@ -133,6 +133,8 @@ struct ShadowConfig {
 // Baked lightmap atlas (Rgba16Float, pre-baked indirect illumination for Static geometry)
 @group(2) @binding(12) var baked_lightmap: texture_2d<f32>;
 @group(2) @binding(13) var baked_lightmap_sampler: sampler;
+// SSR accum texture (Rgba16Float, half resolution) — screen-space reflections
+@group(2) @binding(14) var ssr_accum_tex: texture_2d<f32>;
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -846,12 +848,21 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // so neither do we.  This convention matches Unreal Engine's lightmap pipeline.
     let lightmap_indirect = lightmap_sample * albedo;
 
-    // ── Indirect specular: environment cubemap ────────────────────────────────
+    // ── Indirect specular: SSR + environment cubemap ──────────────────────────
     let R            = reflect(-V, N);
     let env_lod      = roughness * 8.0;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
     let env_sample   = textureSampleLevel(env_cube, env_sampler, R, env_lod).rgb;
     let env_brdf    = env_brdf_approx(NdV, roughness);
-    let spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
+    var spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
+
+    // SSR composite — blend screen-space reflections over cubemap fallback
+    let ssr_coord    = vec2<i32>(pix / 2);
+    let ssr_hit      = textureLoad(ssr_accum_tex, ssr_coord, 0);
+    if ssr_hit.a > 0.0 {
+        let ssr_blend = 1.0 - smoothstep(0.4, 0.7, roughness);
+        let ssr_sample = ssr_hit.rgb * F_ibl;
+        spec_ind = mix(spec_ind, ssr_sample, ssr_blend);
+    }
 
     // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
     // Hemisphere ambient is shadow-INDEPENDENT.  Shadow maps only affect direct

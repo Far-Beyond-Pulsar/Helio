@@ -1,0 +1,17 @@
+[package]
+name = "helio-pass-ssr"
+version = "0.1.0"
+edition = "2021"
+description = "Helio render pass: screen-space reflections"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+helio-core = { workspace = true }
+libhelio = { workspace = true }
+wgpu = { workspace = true }
+bytemuck = { workspace = true, features = ["derive"] }
+
+[dev-dependencies]
+# Matches the naga that wgpu 30 uses internally, so the test validates the
+# shaders exactly as create_shader_module would at runtime.
+naga = { version = "30.0.0", features = ["wgsl-in"] }

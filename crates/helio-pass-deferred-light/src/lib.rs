@@ -38,7 +38,7 @@ pub struct DeferredLightPass {
     bind_group_2: Option<wgpu::BindGroup>,
     bind_group_3: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
-    bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -61,6 +61,8 @@ pub struct DeferredLightPass {
     fallback_lightmap_sampler: wgpu::Sampler,
     /// 1×1 black Rg16Float fallback for lightmap UVs when not available.
     fallback_lightmap_uv_view: wgpu::TextureView,
+    /// 1×1 black Rgba16Float fallback for SSR when not available.
+    fallback_ssr_view: wgpu::TextureView,
     pub debug_mode: u32,
 }
 
@@ -253,6 +255,8 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                // SSR accum texture (binding 14, Rgba16Float, half resolution)
+                texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
 
@@ -426,6 +430,10 @@ impl DeferredLightPass {
             ..Default::default()
         });
 
+        // Fallback 1×1 black Rgba16Float SSR texture (no SSR available).
+        let (_fallback_ssr_texture, fallback_ssr_view) =
+            black_2d_texture(device, queue, "Deferred Fallback SSR");
+
         // Fallback 1×1 zero Rg16Float lightmap UV texture.
         // Used when lightmap UVs are not available from GBuffer.
         let fallback_lightmap_uv_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -484,6 +492,7 @@ impl DeferredLightPass {
             fallback_lightmap_view,
             fallback_lightmap_sampler,
             fallback_lightmap_uv_view,
+            fallback_ssr_view,
             debug_mode: 0,
         }
     }
@@ -527,6 +536,7 @@ impl RenderPass for DeferredLightPass {
             "rc_view",
             "baked_lightmap",
             "baked_lightmap_sampler",
+            "ssr_accum",
         ]
     }
 
@@ -678,6 +688,9 @@ impl RenderPass for DeferredLightPass {
         let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx.resources.baked_lightmap_sampler.get().unwrap_or(&self.fallback_lightmap_sampler);
 
+        // SSR accum texture from SsrPass
+        let ssr_view = ctx.resources.ssr_accum.get().unwrap_or(&self.fallback_ssr_view);
+
         let scene_key = (
             ctx.scene.lights as *const _ as usize,
             shadow_view as *const _ as usize,
@@ -686,6 +699,7 @@ impl RenderPass for DeferredLightPass {
             env_view as *const _ as usize,
             ctx.scene.shadow_matrices as *const _ as usize,
             rc_view as *const _ as usize,
+            ssr_view as *const _ as usize,
         );
         if self.bind_group_2_key != Some(scene_key) {
             self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -739,6 +753,8 @@ impl RenderPass for DeferredLightPass {
                         binding: 13,
                         resource: wgpu::BindingResource::Sampler(lightmap_sampler),
                     },
+                    // SSR accum texture (binding 14)
+                    texture_view_entry(14, ssr_view),
                 ],
             }));
             self.bind_group_2_key = Some(scene_key);

@@ -26,6 +26,7 @@ use helio_pass_shadow_matrix::ShadowMatrixPass;
 use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky::SkyPass;
 use helio_pass_sky_lut::SkyLutPass;
+use helio_pass_ssr::SsrPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
@@ -382,6 +383,17 @@ fn build_default_graph_internal(
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
+
+    // SSR pass — screen-space reflections for glossy/metallic surfaces.
+    // Runs after GBuffer (needs normals + depth + Hi-Z), before deferred lighting.
+    graph.add_pass(Box::new(SsrPass::new(
+        device,
+        queue,
+        camera_buf,
+        iw,
+        ih,
+    )));
+
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
@@ -534,6 +546,15 @@ fn build_fxaa_graph_internal(
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
+
+    graph.add_pass(Box::new(SsrPass::new(
+        device,
+        queue,
+        camera_buf,
+        iw,
+        ih,
+    )));
+
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);

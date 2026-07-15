@@ -29,6 +29,7 @@ helio-pass-shadow-cull = { path = "../helio-pass-shadow-cull" }
 helio-pass-shadow-dirty = { path = "../helio-pass-shadow-dirty" }
 helio-pass-shadow-matrix = { path = "../helio-pass-shadow-matrix" }
 helio-pass-simple-cube = { path = "../helio-pass-simple-cube" }
+helio-pass-ssr = { path = "../helio-pass-ssr" }
 helio-pass-sky = { path = "../helio-pass-sky" }
 helio-pass-sky-lut = { path = "../helio-pass-sky-lut" }
 helio-pass-taa = { workspace = true }
