@@ -17,6 +17,7 @@ use helio_pass_occlusion_cull::OcclusionCullPass;
 use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
+use helio_pass_planar_reflection::PlanarReflectionPass;
 use helio_pass_postprocess::PostProcessPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_cull::ShadowCullPass;
@@ -399,6 +400,12 @@ fn build_default_graph_internal(
     )));
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
+
+    graph.add_pass(Box::new(PlanarReflectionPass::new(
+        device,
+        camera_buf,
+        config.surface_format,
+    )));
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 

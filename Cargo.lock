@@ -2843,6 +2843,7 @@ dependencies = [
  "helio-pass-light-cull",
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
+ "helio-pass-planar-reflection",
  "helio-pass-postprocess",
  "helio-pass-shadow",
  "helio-pass-shadow-cull",
@@ -3002,6 +3003,17 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-planar-reflection"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 

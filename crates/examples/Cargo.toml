@@ -167,6 +167,10 @@ path = "voxel/raymarch_demo.rs"
 name = "radiant_demo"
 path = "radiant_demo.rs"
 
+[[bin]]
+name = "planar_reflection_demo"
+path = "planar_reflection_demo.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }

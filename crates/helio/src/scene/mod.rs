@@ -88,8 +88,9 @@ mod voxel;
 mod water;
 
 pub use actor::{
-    PostProcessVolumeActor, SceneActor, SceneActorId, SceneActorTrait,
-    WaterHitboxDescriptor, WaterHitboxActor, WaterVolumeDescriptor, WaterVolumeActor,
+    PostProcessVolumeActor, ReflectionCaptureActor, ReflectionCaptureDescriptor, SceneActor,
+    SceneActorId, SceneActorTrait, WaterHitboxDescriptor, WaterHitboxActor,
+    WaterVolumeDescriptor, WaterVolumeActor,
 };
 pub use camera::Camera;
 pub use core::Scene;

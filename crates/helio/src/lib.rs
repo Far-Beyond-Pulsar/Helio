@@ -44,7 +44,8 @@ pub use renderer::{
     DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, Renderer, RendererConfig,
 };
 pub use scene::{
-    Camera, ObjectDescriptor, PickableObject, Result as SceneResult, Scene, SceneActor,
+    Camera, ObjectDescriptor, PickableObject, ReflectionCaptureActor, ReflectionCaptureDescriptor,
+    Result as SceneResult, Scene, SceneActor,
     SceneActorId, SceneActorTrait, SceneError, VoxelMode, VoxelVolumeDescriptor,
     WaterHitboxActor, WaterHitboxDescriptor,
     WaterVolumeActor, WaterVolumeDescriptor,

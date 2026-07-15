@@ -17,8 +17,8 @@ use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId,
-    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
+    SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;
@@ -28,8 +28,8 @@ use crate::vg::VirtualMeshId;
 
 use super::errors::{invalid, Result};
 use super::types::{
-    LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord, TextureRecord,
-    VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
+    LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord, ReflectionCaptureRecord,
+    TextureRecord, VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
 };
 
 /// High-level scene management with persistent GPU-driven state.
@@ -204,6 +204,10 @@ pub struct Scene {
     // ── Voxel volumes ──────────────────────────────────────────────────────────
     /// Voxel volumes (dense array)
     pub(in crate::scene) voxel_volumes: DenseArena<VoxelVolumeRecord, VoxelVolumeId>,
+
+    // ── Reflection captures ─────────────────────────────────────────────────────
+    pub(in crate::scene) reflection_captures:
+        DenseArena<ReflectionCaptureRecord, ReflectionCaptureId>,
 }
 
 impl Scene {
@@ -326,6 +330,7 @@ impl Scene {
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),
             voxel_volumes: DenseArena::new(),
+            reflection_captures: DenseArena::new(),
         }
     }
 

@@ -285,3 +285,9 @@ pub(crate) struct PostProcessVolumeRecord {
     /// GPU post-process volume descriptor with bounds, priority, and settings.
     pub gpu: GpuPostProcessVolume,
 }
+
+/// Internal record for a reflection capture.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReflectionCaptureRecord {
+    pub gpu: libhelio::GpuReflectionCapture,
+}

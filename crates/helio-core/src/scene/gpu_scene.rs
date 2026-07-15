@@ -76,6 +76,7 @@ use crate::scene::managers::{
     GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer, GpuVisibilityBuffer,
     GpuVoxelVolumeBuffer, GpuVoxelEditRing,
 };
+use crate::scene::managers::GrowableBuffer;
 use crate::scene::SceneResources;
 use std::sync::Arc;
 
@@ -245,6 +246,9 @@ pub struct GpuScene {
     /// Populated from Scene's [`RadiantGraphRegistry`](helio::radiant::RadiantGraphRegistry)
     /// during flush.  The GBuffer pass looks up WGSL by hash when building PSOs.
     pub graph_wgsl_snippets: std::collections::HashMap<u64, String>,
+
+    /// Reflection capture GPU storage buffer.
+    pub reflection_captures: GrowableBuffer<libhelio::GpuReflectionCapture>,
 }
 
 impl GpuScene {
@@ -307,6 +311,13 @@ impl GpuScene {
             mapped_at_creation: false,
         });
 
+        let reflection_captures = GrowableBuffer::new(
+            device.clone(),
+            64,
+            wgpu::BufferUsages::STORAGE,
+            "ReflectionCapture Buffer",
+        );
+
         Self {
             device,
             queue,
@@ -343,6 +354,7 @@ impl GpuScene {
             material_class_ranges: Vec::new(),
             material_graph_hashes: Vec::new(),
             graph_wgsl_snippets: std::collections::HashMap::new(),
+            reflection_captures,
         }
     }
 
@@ -406,6 +418,8 @@ impl GpuScene {
             material_class_ranges: &self.material_class_ranges,
             material_graph_hashes: &self.material_graph_hashes,
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
+            reflection_captures: self.reflection_captures.buffer(),
+            reflection_capture_count: self.reflection_captures.len() as u32,
         }
     }
 
@@ -471,9 +485,14 @@ impl GpuScene {
         self.shadow_movable_indirect.flush(queue);
         self.voxel_volumes.flush(queue);
         self.voxel_edit_ring.flush(queue);
+        self.reflection_captures.flush(queue);
     }
 
     pub fn components_mut(&mut self) -> &mut ComponentRegistry {
         &mut self.components
+    }
+
+    pub fn reflection_captures_buffer(&self) -> &wgpu::Buffer {
+        self.reflection_captures.buffer()
     }
 }

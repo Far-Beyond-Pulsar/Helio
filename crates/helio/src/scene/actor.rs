@@ -1,6 +1,6 @@
 use crate::handles::{
-    LightId, MeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId, VirtualObjectId,
-    WaterHitboxId, WaterVolumeId,
+    LightId, MeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId, SectionedInstanceId,
+    VirtualObjectId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
@@ -14,6 +14,7 @@ pub enum SceneActorId {
     None,
     Mesh(MeshId),
     Light(LightId),
+    ReflectionCapture(ReflectionCaptureId),
     VirtualMesh(VirtualMeshId),
     VirtualObject(VirtualObjectId),
     Object(ObjectId),
@@ -35,6 +36,14 @@ impl SceneActorId {
 
     pub fn as_light(self) -> Option<LightId> {
         if let SceneActorId::Light(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_reflection_capture(self) -> Option<ReflectionCaptureId> {
+        if let SceneActorId::ReflectionCapture(id) = self {
             Some(id)
         } else {
             None
@@ -761,12 +770,62 @@ impl SceneActorTrait for PostProcessVolumeActor {
     }
 }
 
+// ── Reflection Capture ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct ReflectionCaptureDescriptor {
+    pub position: [f32; 3],
+    pub influence_radius: f32,
+    pub box_min: [f32; 3],
+    pub box_max: [f32; 3],
+    pub cubemap_index: i32,
+    pub capture_type: u32,
+    pub blend_weight: f32,
+}
+
+/// A reflection capture actor (descriptor + optional handle).
+#[derive(Debug, Clone)]
+pub struct ReflectionCaptureActor {
+    pub descriptor: ReflectionCaptureDescriptor,
+    pub capture_id: Option<ReflectionCaptureId>,
+}
+
+impl ReflectionCaptureActor {
+    pub fn new(descriptor: ReflectionCaptureDescriptor) -> Self {
+        Self {
+            descriptor,
+            capture_id: None,
+        }
+    }
+
+    pub fn id(&self) -> Option<ReflectionCaptureId> {
+        self.capture_id
+    }
+}
+
+impl SceneActorTrait for ReflectionCaptureActor {
+    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
+        if self.capture_id.is_none() {
+            if let Ok(id) = scene.insert_reflection_capture(self.descriptor.clone()) {
+                self.capture_id = Some(id);
+            }
+        }
+    }
+
+    fn inserted_id(&self) -> SceneActorId {
+        self.capture_id
+            .map(SceneActorId::ReflectionCapture)
+            .unwrap_or(SceneActorId::None)
+    }
+}
+
 /// Unified scene actor type. Includes shading, geometry, and user custom logic.
 #[derive(Debug, Clone)]
 pub enum SceneActor {
     Sky(SkyActor),
     Mesh(MeshActor),
     Light(LightActor),
+    ReflectionCapture(ReflectionCaptureActor),
     VirtualMesh(VirtualMeshActor),
     VirtualObject(VirtualObjectActor),
     Object(ObjectActor),
@@ -797,6 +856,10 @@ impl SceneActor {
         movability: Option<libhelio::Movability>,
     ) -> Self {
         SceneActor::Light(LightActor::new_with_movability(light, movability))
+    }
+
+    pub fn reflection_capture(descriptor: ReflectionCaptureDescriptor) -> Self {
+        SceneActor::ReflectionCapture(ReflectionCaptureActor::new(descriptor))
     }
 
     pub fn virtual_mesh(upload: VirtualMeshUpload) -> Self {
@@ -834,6 +897,7 @@ impl SceneActorTrait for SceneActor {
             SceneActor::Sky(_) => SceneActorId::None,
             SceneActor::Mesh(actor) => actor.inserted_id(),
             SceneActor::Light(actor) => actor.inserted_id(),
+            SceneActor::ReflectionCapture(actor) => actor.inserted_id(),
             SceneActor::VirtualMesh(actor) => actor.inserted_id(),
             SceneActor::VirtualObject(actor) => actor.inserted_id(),
             SceneActor::Object(actor) => actor.inserted_id(),
@@ -850,6 +914,7 @@ impl SceneActorTrait for SceneActor {
             }
             SceneActor::Mesh(actor) => actor.on_attach(scene),
             SceneActor::Light(actor) => actor.on_attach(scene),
+            SceneActor::ReflectionCapture(actor) => actor.on_attach(scene),
             SceneActor::VirtualMesh(actor) => actor.on_attach(scene),
             SceneActor::VirtualObject(actor) => actor.on_attach(scene),
             SceneActor::Object(actor) => actor.on_attach(scene),
@@ -863,6 +928,7 @@ impl SceneActorTrait for SceneActor {
         match self {
             SceneActor::Mesh(actor) => actor.on_tick(scene),
             SceneActor::Light(actor) => actor.on_tick(scene),
+            SceneActor::ReflectionCapture(actor) => actor.on_tick(scene),
             SceneActor::VirtualMesh(actor) => actor.on_tick(scene),
             SceneActor::VirtualObject(actor) => actor.on_tick(scene),
             SceneActor::Object(actor) => actor.on_tick(scene),

@@ -313,6 +313,12 @@ pub struct FrameResources<'a> {
     /// Post-process uniform buffer (written by the Renderer, read by PostProcessPass).
     /// Points to the pass's own `GpuPostProcessUniforms` buffer.
     pub postprocess_uniforms: Tracked<&'a wgpu::Buffer>,
+
+    /// Reflection capture storage buffer
+    pub reflection_captures: Tracked<&'a wgpu::Buffer>,
+
+    /// Number of reflection captures in the buffer
+    pub reflection_capture_count: u32,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -420,6 +426,8 @@ impl<'a> FrameResources<'a> {
             baked_pvs: Tracked::empty(),
             corona_emitters: Tracked::empty(),
             postprocess_uniforms: Tracked::empty(),
+            reflection_captures: Tracked::empty(),
+            reflection_capture_count: 0,
         }
     }
 
@@ -478,6 +486,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_pvs);
             reset_field!(corona_emitters);
             reset_field!(postprocess_uniforms);
+            reset_field!(reflection_captures);
         }
     }
 }

@@ -176,4 +176,9 @@ pub struct SceneResources<'a> {
 
     /// Compiled graph WGSL snippets keyed by hash. Populated during flush.
     pub graph_wgsl_snippets: &'a std::collections::HashMap<u64, String>,
+
+    /// Reflection capture storage buffer.
+    pub reflection_captures: &'a wgpu::Buffer,
+    /// Number of reflection captures in the buffer.
+    pub reflection_capture_count: u32,
 }
