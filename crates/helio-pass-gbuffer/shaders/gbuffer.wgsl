@@ -1,3 +1,5 @@
+enable wgpu_binding_array;
+
 //! G-buffer write pass (GPU-driven).
 //!
 //! Rasterises scene geometry into four screen-sized textures:

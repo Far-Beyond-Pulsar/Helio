@@ -33,7 +33,7 @@ nebula-visibility = { path = "crates/nebula-visibility" }
 nebula-nav        = { path = "crates/nebula-nav" }
 
 # ── GPU (same fork as Helio for device/queue interop) ─────────────────────────
-wgpu = { version = "30.0.0", path = "../wgpu/wgpu", default-features = false, features = ["webgpu", "wgsl"] }
+wgpu = { version = "30.0.0", default-features = true, features = ["vulkan", "metal", "dx12", "gles", "webgpu", "wgsl"] }
 
 # ── Math + data ───────────────────────────────────────────────────────────────
 glam      = { version = "0.33", features = ["bytemuck", "serde"] }

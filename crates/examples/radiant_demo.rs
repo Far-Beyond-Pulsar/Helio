@@ -85,6 +85,7 @@ impl ApplicationHandler for App {
             compatible_surface: Some(&surface),
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .expect("No suitable GPU adapter");
 
@@ -123,6 +124,7 @@ impl ApplicationHandler for App {
                 alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
 
@@ -340,6 +342,7 @@ impl ApplicationHandler for App {
                             alpha_mode: state.alpha_mode,
                             view_formats: vec![],
                             desired_maximum_frame_latency: 2,
+                            color_space: wgpu::SurfaceColorSpace::Auto,
                         },
                     );
                     state.renderer.set_render_size(new_size.width, new_size.height);
@@ -432,8 +435,9 @@ impl ApplicationHandler for App {
                 );
 
                 let output = match state.surface.get_current_texture() {
-                    Ok(t) => t,
-                    Err(_) => return,
+                    wgpu::CurrentSurfaceTexture::Success(t)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    _ => return,
                 };
                 let view = output.texture.create_view(
                     &wgpu::TextureViewDescriptor::default()
@@ -441,7 +445,7 @@ impl ApplicationHandler for App {
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
-                output.present();
+                state.queue.present(output);
                 state.window.request_redraw();
             }
             _ => {}

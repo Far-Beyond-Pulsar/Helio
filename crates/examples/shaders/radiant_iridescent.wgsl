@@ -1,3 +1,5 @@
+enable wgpu_binding_array;
+
 // Radiant template: iridescent thin-film surface (class 1).
 // Demonstrates a custom surface archetype using class_params for
 // frequency and intensity control.
