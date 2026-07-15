@@ -94,6 +94,39 @@ pub trait HelioWasmApp: Sized + 'static {
         false
     }
 
+    /// Render scale for the demo's color targets (1.0 = full canvas
+    /// resolution). Helio's default graph upscales from a scaled buffer via
+    /// TAA, so it defaults to `0.75`. Custom graphs that have no TAA upscale
+    /// step (e.g. a plain FXAA blit) must return `1.0`, or the scaled depth
+    /// buffer will mismatch the full-resolution color attachment.
+    fn render_scale() -> f32 {
+        0.75
+    }
+
+    /// Optionally build a custom render graph for this demo.
+    ///
+    /// Return `None` (the default) to use helio's standard deferred graph.
+    /// Override to insert custom passes — voxel meshing, injected post-process
+    /// effects, etc. Called once, before [`init`](HelioWasmApp::init); the
+    /// scene is still empty at this point, so populate meshes/lights/volumes in
+    /// `init` (passes bind scene resources at render time) and only assemble
+    /// the pass pipeline here.
+    ///
+    /// `config` already carries this demo's [`render_scale`](HelioWasmApp::render_scale)
+    /// and the current `width`/`height`; use `config.width` / `config.height`
+    /// when locking the graph.
+    fn build_graph(
+        _device: &std::sync::Arc<wgpu::Device>,
+        _queue: &std::sync::Arc<wgpu::Queue>,
+        _scene: &helio::Scene,
+        _config: helio::RendererConfig,
+        _debug_state: std::sync::Arc<std::sync::Mutex<helio::DebugDrawState>>,
+        _debug_camera_buf: &wgpu::Buffer,
+        _cull_stats_buf: &wgpu::Buffer,
+    ) -> Option<helio::RenderGraph> {
+        None
+    }
+
     /// Called once after the wgpu device and renderer are ready.
     /// Build your scene (meshes, materials, lights) here.
     fn init(

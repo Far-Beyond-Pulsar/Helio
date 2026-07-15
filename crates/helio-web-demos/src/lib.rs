@@ -54,6 +54,9 @@ pub mod html {
     pub const SIMPLE_GRAPH: &str = include_str!(concat!(env!("OUT_DIR"), "/simple_graph.html"));
     pub const OUTDOOR_ROCKS: &str = include_str!(concat!(env!("OUT_DIR"), "/outdoor_rocks.html"));
     pub const EDITOR_DEMO: &str = include_str!(concat!(env!("OUT_DIR"), "/editor_demo.html"));
+    pub const VOXEL_MESH_DEMO: &str =
+        include_str!(concat!(env!("OUT_DIR"), "/voxel_mesh_demo.html"));
+    pub const VHS_BACKROOMS: &str = include_str!(concat!(env!("OUT_DIR"), "/vhs_backrooms.html"));
     pub const INDEX: &str = include_str!(concat!(env!("OUT_DIR"), "/index.html"));
 
     /// Returns the HTML for the demo identified by slug (e.g. `"ship_flight"`).
@@ -82,6 +85,8 @@ pub mod html {
             "simple_graph" => Some(SIMPLE_GRAPH),
             "outdoor_rocks" => Some(OUTDOOR_ROCKS),
             "editor_demo" => Some(EDITOR_DEMO),
+            "voxel_mesh_demo" => Some(VOXEL_MESH_DEMO),
+            "vhs_backrooms" => Some(VHS_BACKROOMS),
             _ => None,
         }
     }
@@ -176,6 +181,14 @@ mod outdoor_rocks;
 #[cfg(feature = "editor_demo")]
 #[path = "../examples-wasm/editor_demo.rs"]
 mod editor_demo;
+
+#[cfg(feature = "voxel_mesh_demo")]
+#[path = "../examples-wasm/voxel_mesh_demo.rs"]
+mod voxel_mesh_demo;
+
+#[cfg(feature = "vhs_backrooms")]
+#[path = "../examples-wasm/vhs_backrooms.rs"]
+mod vhs_backrooms;
 
 // ── WASM entry point ──────────────────────────────────────────────────────────
 // Exactly one feature is active per build; that branch calls `launch`.
@@ -293,6 +306,16 @@ pub fn start() {
         helio_wasm::launch::<editor_demo::Demo>();
         return;
     }
+    #[cfg(feature = "voxel_mesh_demo")]
+    {
+        helio_wasm::launch::<voxel_mesh_demo::Demo>();
+        return;
+    }
+    #[cfg(feature = "vhs_backrooms")]
+    {
+        helio_wasm::launch::<vhs_backrooms::Demo>();
+        return;
+    }
 }
 
 // ── Native entry (for `cargo run -p helio-web-demos --features <name>`) ───────
@@ -407,6 +430,16 @@ pub fn main() {
     #[cfg(feature = "editor_demo")]
     {
         helio_wasm::launch::<editor_demo::Demo>();
+        return;
+    }
+    #[cfg(feature = "voxel_mesh_demo")]
+    {
+        helio_wasm::launch::<voxel_mesh_demo::Demo>();
+        return;
+    }
+    #[cfg(feature = "vhs_backrooms")]
+    {
+        helio_wasm::launch::<vhs_backrooms::Demo>();
         return;
     }
 

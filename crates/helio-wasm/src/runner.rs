@@ -393,16 +393,32 @@ async fn init_wgpu<T: HelioWasmApp>(
 
     let debug_state = Arc::new(std::sync::Mutex::new(DebugDrawState::default()));
 
-    let graph = helio_default_graphs::build_default_graph(
+    // The demo may swap in a custom render graph (voxel meshing, injected
+    // post-process effects, …); otherwise fall back to the default deferred
+    // graph. `render_scale` is threaded into both the graph config and the
+    // renderer so a custom graph with no TAA upscale can pin it to 1.0.
+    let render_scale = T::render_scale();
+    let graph = T::build_graph(
         &device,
         &queue,
         &scene,
-        RendererConfig::new(width, height, surface_format),
+        RendererConfig::new(width, height, surface_format).with_render_scale(render_scale),
         debug_state.clone(),
         &debug_camera_buf,
         &cull_stats_buf,
-        None, // debug_overlay
-    );
+    )
+    .unwrap_or_else(|| {
+        helio_default_graphs::build_default_graph(
+            &device,
+            &queue,
+            &scene,
+            RendererConfig::new(width, height, surface_format).with_render_scale(render_scale),
+            debug_state.clone(),
+            &debug_camera_buf,
+            &cull_stats_buf,
+            None, // debug_overlay
+        )
+    });
 
     let mut renderer = Renderer::new(
         device.clone(),
@@ -410,8 +426,8 @@ async fn init_wgpu<T: HelioWasmApp>(
         surface_format,
         width,
         height,
-        0.75,
-        RendererConfig::new(width, height, surface_format),
+        render_scale,
+        RendererConfig::new(width, height, surface_format).with_render_scale(render_scale),
         scene,
         graph,
         debug_state,

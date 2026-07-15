@@ -94,6 +94,8 @@ declare -a ALL_EXAMPLES=(
     simple_graph
     outdoor_rocks
     editor_demo
+    voxel_mesh_demo
+    vhs_backrooms
 )
 
 if [[ -n "$FILTER_NAME" ]]; then

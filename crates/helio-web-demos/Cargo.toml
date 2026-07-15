@@ -35,6 +35,8 @@ space_station       = []
 light_benchmark     = []
 hlfs_benchmark      = []
 sdf_demo            = ["dep:helio-pass-sdf"]
+voxel_mesh_demo     = ["dep:helio-pass-voxel-mesh", "dep:helio-pass-fxaa", "dep:helio-voxel-core"]
+vhs_backrooms       = ["dep:helio-pass-postprocess", "dep:libhelio"]
 rc_benchmark        = []
 load_fbx            = []
 load_fbx_embedded   = []
@@ -51,6 +53,11 @@ helio-core          = { workspace = true }
 helio-default-graphs = { workspace = true }
 helio-asset-compat  = { workspace = true }
 helio-pass-sdf      = { workspace = true, optional = true }
+helio-pass-voxel-mesh = { workspace = true, optional = true }
+helio-pass-fxaa     = { workspace = true, optional = true }
+helio-voxel-core    = { workspace = true, optional = true }
+helio-pass-postprocess = { workspace = true, optional = true }
+libhelio            = { workspace = true, optional = true }
 wgpu                = { workspace = true }
 glam                = { workspace = true, features = ["bytemuck"] }
 log                 = { workspace = true }

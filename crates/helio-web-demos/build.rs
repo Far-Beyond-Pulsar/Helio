@@ -45,6 +45,8 @@ const DEMOS: &[Demo] = &[
     Demo { name: "simple_graph",        title: "Simple Graph",               description: "Minimal fly-camera around a lit unit cube.",                      controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "outdoor_rocks",       title: "Outdoor Rocks",              description: "Scattered rocks with an embedded FBX ship and dynamic sun.",      controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Q/E — sun &nbsp;·&nbsp; Mouse — look" },
     Demo { name: "editor_demo",          title: "Editor Demo",                description: "BVH ray-picking and transform gizmo (translate / rotate / scale).", controls: "RMB hold — fly &nbsp;·&nbsp; LMB — pick/drag &nbsp;·&nbsp; G/R/S — gizmo mode &nbsp;·&nbsp; Ctrl+D — duplicate &nbsp;·&nbsp; Del — delete &nbsp;·&nbsp; Tab — grid" },
+    Demo { name: "voxel_mesh_demo",      title: "Voxel Mesh Demo",            description: "Procedural voxel world mesh-rendered through a custom VoxelMeshPass + FXAA graph.", controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; LMB — add &nbsp;·&nbsp; X — carve &nbsp;·&nbsp; 1-4 — material &nbsp;·&nbsp; R — regenerate &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "vhs_backrooms",        title: "VHS Backrooms",              description: "Procedural backrooms maze with an injected VHS camcorder post-process shader.", controls: "WASD/Space/Shift — move &nbsp;·&nbsp; R — regenerate &nbsp;·&nbsp; Mouse — look" },
 ];
 
 // ── HTML templates ─────────────────────────────────────────────────────────────
