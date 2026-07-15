@@ -70,6 +70,40 @@ struct AppState {
 }
 
 impl AppState {
+    fn reset_transient_input(&mut self) {
+        self.keys.clear();
+        self.mouse_delta = (0.0, 0.0);
+        self.velocity = Vec3::ZERO;
+        self.cursor_grabbed = false;
+        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.last_frame = Instant::now();
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        // Native resize loops can swallow input-release events. Release cursor
+        // capture before rebuilding targets so the next click can reacquire it.
+        self.reset_transient_input();
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        self.surface.configure(
+            &self.device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: self.surface_format,
+                width,
+                height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: self.alpha_mode,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            },
+        );
+        self.renderer.set_render_size(width, height);
+    }
+
     fn update(&mut self, dt: f32) {
         let (dx, dy) = self.mouse_delta;
         self.mouse_delta = (0.0, 0.0);
@@ -337,24 +371,13 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
-            WindowEvent::Resized(new_size) => {
-                if new_size.width > 0 && new_size.height > 0 {
-                    state.surface.configure(
-                        &state.device,
-                        &wgpu::SurfaceConfiguration {
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                            format: state.surface_format,
-                            width: new_size.width,
-                            height: new_size.height,
-                            present_mode: wgpu::PresentMode::Fifo,
-                            alpha_mode: state.alpha_mode,
-                            view_formats: vec![],
-                            desired_maximum_frame_latency: 2,
-                        },
-                    );
-                    state.renderer.set_render_size(new_size.width, new_size.height);
-                }
+            WindowEvent::Resized(new_size) => state.resize(new_size.width, new_size.height),
+
+            WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. } => {
+                state.reset_transient_input();
             }
+
+            WindowEvent::Focused(true) => state.last_frame = Instant::now(),
 
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
@@ -418,8 +441,8 @@ impl ApplicationHandler for App {
                 ..
             } if !state.cursor_grabbed => {
                 let ok = state.window
-                    .set_cursor_grab(CursorGrabMode::Locked)
-                    .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Confined))
+                    .set_cursor_grab(CursorGrabMode::Confined)
+                    .or_else(|_| state.window.set_cursor_grab(CursorGrabMode::Locked))
                     .is_ok();
                 if ok {
                     state.cursor_grabbed = true;
