@@ -153,11 +153,13 @@ impl HelioWasmApp for Demo {
             });
 
             // VoxelMeshPass sums the scene lights buffer directly, the same
-            // infrastructure the default deferred lighting pass reads.
+            // infrastructure the default deferred lighting pass reads. This
+            // custom graph has no ambient fill, so the lights are turned up and
+            // a low sky-fill from below keeps shadowed faces readable.
             scene.insert_actor(SceneActor::light(GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
                 direction_outer: [0.35, -0.8, 0.25, 0.0],
-                color_intensity: [1.0, 0.95, 0.85, 3.0],
+                color_intensity: [1.0, 0.96, 0.88, 6.0],
                 shadow_index: u32::MAX,
                 light_type: LightType::Directional as u32,
                 inner_angle: 0.0,
@@ -165,14 +167,27 @@ impl HelioWasmApp for Demo {
             }));
             scene.insert_actor(SceneActor::light(GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [-0.4, -0.2, -0.6, 0.0],
-                color_intensity: [0.5, 0.6, 0.8, 0.6],
+                direction_outer: [-0.4, -0.3, -0.6, 0.0],
+                color_intensity: [0.55, 0.65, 0.85, 2.5],
+                shadow_index: u32::MAX,
+                light_type: LightType::Directional as u32,
+                inner_angle: 0.0,
+                _pad: 0,
+            }));
+            // Upward sky-fill so downward-facing faces aren't pitch black.
+            scene.insert_actor(SceneActor::light(GpuLight {
+                position_range: [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer: [0.1, 0.9, 0.2, 0.0],
+                color_intensity: [0.35, 0.4, 0.5, 1.5],
                 shadow_index: u32::MAX,
                 light_type: LightType::Directional as u32,
                 inner_angle: 0.0,
                 _pad: 0,
             }));
         }
+
+        // In case VoxelMeshPass honors the scene ambient term, lift it too.
+        renderer.set_ambient([0.5, 0.55, 0.6], 0.35);
 
         // The custom graph has no TAA to resolve the renderer's subpixel jitter,
         // so without disabling it the image shimmers frame to frame.
