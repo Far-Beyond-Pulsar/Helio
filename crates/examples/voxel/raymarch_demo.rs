@@ -100,6 +100,7 @@ impl AppState {
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: self.surface_format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 width,
                 height,
                 present_mode: wgpu::PresentMode::Fifo,
@@ -199,6 +200,7 @@ impl ApplicationHandler for App {
             compatible_surface: Some(&surface),
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .expect("No suitable GPU adapter");
 
@@ -231,6 +233,7 @@ impl ApplicationHandler for App {
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: surface_format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 width: size.width,
                 height: size.height,
                 present_mode: wgpu::PresentMode::Fifo,
@@ -494,17 +497,15 @@ impl ApplicationHandler for App {
                 let camera = state.camera(size.width, size.height);
 
                 let output = match state.surface.get_current_texture() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        log::warn!("surface error: {:?}", e);
-                        return;
-                    }
+                    wgpu::CurrentSurfaceTexture::Success(t)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    _ => return,
                 };
                 let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
-                output.present();
+                state.queue.present(output);
                 state.window.request_redraw();
             }
 
