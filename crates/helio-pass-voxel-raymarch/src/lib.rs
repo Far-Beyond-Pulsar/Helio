@@ -25,6 +25,25 @@ struct RayMarchParams {
     _pad2: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttachmentMode {
+    Standalone,
+    Composited,
+}
+
+impl AttachmentMode {
+    fn color_load(self) -> wgpu::LoadOp<wgpu::Color> {
+        match self {
+            Self::Standalone => wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            Self::Composited => wgpu::LoadOp::Load,
+        }
+    }
+}
+
+fn shade_bind_group_matches_size(bound_size: Option<(u32, u32)>, width: u32, height: u32) -> bool {
+    bound_size == Some((width, height))
+}
+
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 pub struct VoxelRayMarchPass {
@@ -38,6 +57,7 @@ pub struct VoxelRayMarchPass {
     shade_pipeline: wgpu::RenderPipeline,
     shade_bgl: wgpu::BindGroupLayout,
     shade_bg: Option<wgpu::BindGroup>,
+    shade_bg_size: Option<(u32, u32)>,
 
     // Output textures
     color_tex: wgpu::Texture,
@@ -53,10 +73,25 @@ pub struct VoxelRayMarchPass {
 
     last_volume_count: u32,
     params_frame: u64,
+    attachment_mode: AttachmentMode,
 }
 
 impl VoxelRayMarchPass {
+    /// Creates a standalone pass that clears pixels missed by the raymarch.
     pub fn new(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_attachment_mode(device, surface_format, AttachmentMode::Standalone)
+    }
+
+    /// Creates a pass that preserves existing color where no voxel is hit.
+    pub fn new_composited(device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Self {
+        Self::new_with_attachment_mode(device, surface_format, AttachmentMode::Composited)
+    }
+
+    fn new_with_attachment_mode(
+        device: &wgpu::Device,
+        surface_format: wgpu::TextureFormat,
+        attachment_mode: AttachmentMode,
+    ) -> Self {
         let (color_tex, color_view) = Self::create_tex(device, 1, 1, "VoxelRayMarch Color");
         let (normal_tex, normal_view) = Self::create_tex(device, 1, 1, "VoxelRayMarch Normal");
 
@@ -159,6 +194,7 @@ impl VoxelRayMarchPass {
             shade_pipeline,
             shade_bgl,
             shade_bg: None,
+            shade_bg_size: None,
             color_tex,
             color_view,
             normal_tex,
@@ -169,6 +205,7 @@ impl VoxelRayMarchPass {
             surface_format,
             last_volume_count: 0,
             params_frame: u64::MAX,
+            attachment_mode,
         }
     }
 
@@ -221,6 +258,7 @@ impl VoxelRayMarchPass {
             ],
         });
         self.shade_bg = Some(bg);
+        self.shade_bg_size = Some((self.width, self.height));
     }
 
     pub fn set_params(&mut self, _width: u32, _height: u32, _volume_count: u32) {
@@ -281,7 +319,9 @@ impl RenderPass for VoxelRayMarchPass {
         if self.compute_bg_key != Some(gen) || self.compute_bg.is_none() {
             self.rebuild_compute_bg(ctx);
         }
-        if self.shade_bg.is_none() {
+        if !shade_bind_group_matches_size(self.shade_bg_size, self.width, self.height)
+            || self.shade_bg.is_none()
+        {
             self.rebuild_shade_bg(ctx);
         }
 
@@ -295,8 +335,8 @@ impl RenderPass for VoxelRayMarchPass {
             if let Some(ref bg) = self.compute_bg {
                 cpass.set_bind_group(0, bg, &[]);
             }
-            let wg_x = (self.width + 7) / 8;
-            let wg_y = (self.height + 7) / 8;
+            let wg_x = self.width.div_ceil(8);
+            let wg_y = self.height.div_ceil(8);
             cpass.dispatch_workgroups(wg_x, wg_y, 1);
         }
 
@@ -326,7 +366,7 @@ impl RenderPass for VoxelRayMarchPass {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: self.attachment_mode.color_load(),
                     store: wgpu::StoreOp::Store,
                 },
             }),
@@ -355,5 +395,41 @@ impl RenderPass for VoxelRayMarchPass {
         self.normal_tex = nt;
         self.normal_view = nv;
         self.compute_bg_key = None;
+        // The shading bind group owns views of the old-sized textures. Drop it
+        // now so the next frame cannot stretch stale raymarch output.
+        self.shade_bg = None;
+        self.shade_bg_size = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{shade_bind_group_matches_size, AttachmentMode};
+
+    #[test]
+    fn resized_output_invalidates_the_shading_bind_group() {
+        assert!(shade_bind_group_matches_size(Some((1280, 720)), 1280, 720));
+        assert!(!shade_bind_group_matches_size(
+            Some((1280, 720)),
+            1920,
+            1080
+        ));
+        assert!(!shade_bind_group_matches_size(None, 1280, 720));
+    }
+
+    #[test]
+    fn standalone_mode_clears_pixels_discarded_by_the_shade_pass() {
+        assert!(matches!(
+            AttachmentMode::Standalone.color_load(),
+            wgpu::LoadOp::Clear(color) if color == wgpu::Color::TRANSPARENT
+        ));
+    }
+
+    #[test]
+    fn composited_mode_preserves_prior_color_on_ray_misses() {
+        assert!(matches!(
+            AttachmentMode::Composited.color_load(),
+            wgpu::LoadOp::Load
+        ));
     }
 }

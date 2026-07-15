@@ -25,7 +25,6 @@ use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_voxel_core::GpuVoxelMaterial;
 use winit::{
     application::ApplicationHandler,
-    dpi::PhysicalPosition,
     event::*,
     event_loop::{ActiveEventLoop, EventLoop},
     keyboard::{KeyCode, PhysicalKey},
@@ -71,6 +70,41 @@ struct AppState {
 }
 
 impl AppState {
+    fn reset_transient_input(&mut self) {
+        self.keys.clear();
+        self.mouse_delta = (0.0, 0.0);
+        self.velocity = Vec3::ZERO;
+        self.cursor_grabbed = false;
+        let _ = self.window.set_cursor_grab(CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.last_frame = Instant::now();
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        // Native resize loops can swallow input-release events. Release cursor
+        // capture before rebuilding targets so the next click can reacquire it.
+        self.reset_transient_input();
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        self.surface.configure(
+            &self.device,
+            &wgpu::SurfaceConfiguration {
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: self.surface_format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
+                width,
+                height,
+                present_mode: wgpu::PresentMode::Fifo,
+                alpha_mode: self.alpha_mode,
+                view_formats: vec![],
+                desired_maximum_frame_latency: 2,
+            },
+        );
+        self.renderer.set_render_size(width, height);
+    }
+
     fn update(&mut self, dt: f32) {
         let (dx, dy) = self.mouse_delta;
         self.mouse_delta = (0.0, 0.0);
@@ -162,6 +196,7 @@ impl ApplicationHandler for App {
             compatible_surface: Some(&surface),
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .expect("No suitable GPU adapter");
 
@@ -194,6 +229,7 @@ impl ApplicationHandler for App {
             &wgpu::SurfaceConfiguration {
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 format: surface_format,
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 width: size.width,
                 height: size.height,
                 present_mode: wgpu::PresentMode::Fifo,
@@ -338,24 +374,13 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
-            WindowEvent::Resized(new_size) => {
-                if new_size.width > 0 && new_size.height > 0 {
-                    state.surface.configure(
-                        &state.device,
-                        &wgpu::SurfaceConfiguration {
-                            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                            format: state.surface_format,
-                            width: new_size.width,
-                            height: new_size.height,
-                            present_mode: wgpu::PresentMode::Fifo,
-                            alpha_mode: state.alpha_mode,
-                            view_formats: vec![],
-                            desired_maximum_frame_latency: 2,
-                        },
-                    );
-                    state.renderer.set_render_size(new_size.width, new_size.height);
-                }
+            WindowEvent::Resized(new_size) => state.resize(new_size.width, new_size.height),
+
+            WindowEvent::Focused(false) | WindowEvent::CursorLeft { .. } => {
+                state.reset_transient_input();
             }
+
+            WindowEvent::Focused(true) => state.last_frame = Instant::now(),
 
             WindowEvent::KeyboardInput {
                 event: KeyEvent {
@@ -456,19 +481,6 @@ impl ApplicationHandler for App {
                 AppState::place_edit(false, mat, pos, yaw, pitch, &mut state.world, &queue, pass);
             }
 
-            WindowEvent::CursorMoved {
-                position: pos,
-                ..
-            } if state.cursor_grabbed => {
-                let center = (
-                    state.window.inner_size().width as f64 / 2.0,
-                    state.window.inner_size().height as f64 / 2.0,
-                );
-                state.mouse_delta.0 += (pos.x - center.0) as f32;
-                state.mouse_delta.1 += (pos.y - center.1) as f32;
-                let _ = state.window.set_cursor_position(PhysicalPosition::new(center.0 as i32, center.1 as i32));
-            }
-
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 let dt = now.duration_since(state.last_frame).as_secs_f32().min(0.05);
@@ -479,17 +491,15 @@ impl ApplicationHandler for App {
                 let camera = state.camera(size.width, size.height);
 
                 let output = match state.surface.get_current_texture() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        log::warn!("surface error: {:?}", e);
-                        return;
-                    }
+                    wgpu::CurrentSurfaceTexture::Success(t)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    _ => return,
                 };
                 let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
-                output.present();
+                state.queue.present(output);
                 state.window.request_redraw();
             }
 
