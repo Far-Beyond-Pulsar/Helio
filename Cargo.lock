@@ -3164,6 +3164,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-workspace"
+version = "0.0.0"
+
+[[package]]
 name = "hermit-abi"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

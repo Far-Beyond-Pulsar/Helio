@@ -1,3 +1,13 @@
+[package]
+name = "helio-workspace"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Workspace root"
+
+[lib]
+path = "src/lib.rs"
+
 [workspace]
 members = [
     "crates/*"
