@@ -92,33 +92,30 @@ fn serve(root: &PathBuf, addr: &str) {
             Err(_) => break,
         };
         let url = request.url().to_string();
-        let path = if url == "/" {
-            root.join("index.html")
-        } else {
+        let path = {
             let stripped = url.trim_start_matches('/');
-            root.join(stripped)
+            let candidate = root.join(stripped);
+            if candidate.is_dir() {
+                candidate.join("index.html")
+            } else {
+                candidate
+            }
         };
 
         let (status, contents) = match std::fs::read(&path) {
-            Ok(data) => {
-                let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-                let mime = mime_for(ext);
-                (tiny_http::StatusCode(200), data)
-            }
+            Ok(data) => (tiny_http::StatusCode(200), data),
             Err(_) => {
                 let msg = b"404 Not Found\n";
                 (tiny_http::StatusCode(404), msg.to_vec())
             }
         };
 
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        let cts = mime_for(ext);
         let response = tiny_http::Response::from_data(contents)
             .with_status_code(status)
             .with_header(
-                tiny_http::Header::from_bytes(
-                    &b"Content-Type"[..],
-                    mime_for(path.extension().and_then(|s| s.to_str()).unwrap_or("")).as_bytes(),
-                )
-                .unwrap(),
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], cts.as_bytes()).unwrap(),
             );
         let _ = request.respond(response);
     }
