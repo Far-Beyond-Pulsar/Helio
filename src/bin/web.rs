@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -131,86 +131,140 @@ impl App {
     }
 }
 
-fn main() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let out_base = manifest_dir.join("target/wasm-prebuilt");
-    let cc = std::env::var("CC").unwrap_or_default();
+/// Which C compiler to hand wasm-pack. meshopt and other C deps must be built
+/// with a clang that can target wasm32; macOS system clang can't.
+enum WasmCc {
+    /// The default `cc` already targets wasm32 — don't override CC.
+    Default,
+    /// Use this compiler (sets CC for the build).
+    Override(String),
+    /// No wasm-capable compiler found — the build cannot succeed.
+    Missing,
+}
 
-    enable_raw_mode().unwrap();
-    std::io::stdout().execute(EnterAlternateScreen).unwrap();
-    let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())).unwrap();
-    terminal.clear().unwrap();
+/// Can `cc` compile a trivial file for wasm32-unknown-unknown?
+fn cc_targets_wasm(cc: &str) -> bool {
+    let dir = std::env::temp_dir();
+    let src = dir.join("helio_wasm_cc_test.c");
+    let obj = dir.join("helio_wasm_cc_test.o");
+    if std::fs::write(&src, "int x;\n").is_err() {
+        return false;
+    }
+    let ok = Command::new(cc)
+        .arg("--target=wasm32-unknown-unknown")
+        .arg("-c")
+        .arg(&src)
+        .arg("-o")
+        .arg(&obj)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let _ = std::fs::remove_file(&src);
+    let _ = std::fs::remove_file(&obj);
+    ok
+}
 
-    let mut app = App::new(manifest_dir.clone());
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
+/// Resolve a wasm-capable C compiler, mirroring build-wasm.sh's check_cc_wasm:
+/// honor an explicit CC that works, else the default cc, else Homebrew LLVM.
+fn resolve_wasm_cc() -> WasmCc {
+    // An explicit, non-empty CC that can target wasm32 wins.
+    if let Ok(cc) = std::env::var("CC") {
+        let cc = cc.trim().to_string();
+        if !cc.is_empty() && cc_targets_wasm(&cc) {
+            return WasmCc::Override(cc);
+        }
+    }
+    // The default `cc` may already be wasm-capable (e.g. a real LLVM as `cc`).
+    if cc_targets_wasm("cc") {
+        return WasmCc::Default;
+    }
+    // Fall back to Homebrew LLVM clang.
+    if let Ok(out) = Command::new("brew").args(["--prefix", "llvm"]).output() {
+        if out.status.success() {
+            let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let clang = format!("{prefix}/bin/clang");
+            if Path::new(&clang).exists() && cc_targets_wasm(&clang) {
+                return WasmCc::Override(clang);
+            }
+        }
+    }
+    WasmCc::Missing
+}
 
-    // ── Spawn build threads ─────────────────────────────────────────────────
-    for (i, name) in DEMOS.iter().enumerate() {
-        let out_dir = out_base.join(name);
-        let manifest_dir = manifest_dir.clone();
-        let cc = cc.clone();
-        let state = &app.builds[i];
-        let log = Arc::clone(&state.log);
-        let running = Arc::clone(&running);
+/// Build a single demo with wasm-pack straight into `out_dir`, streaming the
+/// process output into `log`. Blocks until the build finishes. `cc`, when set,
+/// overrides the C compiler for the build.
+fn build_demo(
+    name: &str,
+    out_dir: &Path,
+    manifest_dir: &Path,
+    cc: Option<&str>,
+    log: &Arc<Mutex<Vec<String>>>,
+    running: &Arc<AtomicBool>,
+) {
+    log.lock()
+        .unwrap()
+        .push(format!("[{name}] Starting wasm-pack build..."));
 
-        std::thread::spawn(move || {
-            // Poke the log so the UI sees activity
+    // Build into a per-demo out-dir so runs never share pkg/. `--out-dir` must
+    // come before the trailing feature args, or wasm-pack forwards it to cargo
+    // (which rejects it as an unknown flag).
+    let _ = std::fs::remove_dir_all(out_dir);
+    let mut cmd = Command::new("wasm-pack");
+    cmd.arg("build")
+        .arg("--out-dir")
+        .arg(out_dir)
+        .args([
+            "--release",
+            "--target",
+            "web",
+            "--no-default-features",
+            "--features",
+            name,
+        ])
+        .current_dir(manifest_dir.join("crates/helio-web-demos"))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    // Only override CC when we resolved a specific wasm-capable compiler; never
+    // pass an empty CC, which would break meshopt's C build.
+    if let Some(cc) = cc {
+        cmd.env("CC", cc);
+    }
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
             let mut log_guard = log.lock().unwrap();
-            log_guard.push(format!("[{}] Starting wasm-pack build...", name));
-            drop(log_guard);
+            log_guard.push(format!("Failed to spawn wasm-pack: {e}"));
+            log_guard.push("FAILED".into());
+            return;
+        }
+    };
 
-            let mut child = match Command::new("wasm-pack")
-                .args([
-                    "build",
-                    "--release",
-                    "--target",
-                    "web",
-                    "--no-default-features",
-                    "--features",
-                    name,
-                ])
-                .current_dir(manifest_dir.join("crates/helio-web-demos"))
-                .env("CC", &cc)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    let mut log_guard = log.lock().unwrap();
-                    log_guard.push(format!("Failed to spawn wasm-pack: {e}"));
-                    return;
-                }
-            };
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    for line in BufReader::new(stdout).lines().flatten() {
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+        log.lock().unwrap().push(line);
+    }
+    for line in BufReader::new(stderr).lines().flatten() {
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+        log.lock().unwrap().push(line);
+    }
 
-            let stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take().unwrap();
-            let out_reader = BufReader::new(stdout);
-            let err_reader = BufReader::new(stderr);
+    let success = child.wait().ok().map(|s| s.success()).unwrap_or(false);
 
-            for line in out_reader.lines().flatten() {
-                if !running.load(Ordering::Relaxed) { break; }
-                let mut log_guard = log.lock().unwrap();
-                log_guard.push(line);
-            }
-            for line in err_reader.lines().flatten() {
-                if !running.load(Ordering::Relaxed) { break; }
-                let mut log_guard = log.lock().unwrap();
-                log_guard.push(line);
-            }
-
-            let status = child.wait().ok();
-            let success = status.map(|s| s.success()).unwrap_or(false);
-
-            // Try to move pkg/ to the output directory, then write index.html
-            let moved = success && {
-                let pkg_dir = manifest_dir.join("crates/helio-web-demos/pkg");
-                if pkg_dir.exists() {
-                    let _ = std::fs::remove_dir_all(&out_dir);
-                    if std::fs::rename(&pkg_dir, &out_dir).is_ok() {
-                        let html = format!(
-                            r#"<!DOCTYPE html><html><head>
+    // wasm-pack built straight into out_dir; just add the landing page.
+    let built = success
+        && out_dir.join("helio_web_demos_bg.wasm").exists()
+        && {
+            let html = format!(
+                r#"<!DOCTYPE html><html><head>
 <meta charset="utf-8"><title>{name}</title>
 <style>body{{margin:0;overflow:hidden;background:#000}}
 #info{{position:absolute;bottom:8px;left:8px;color:#888;font:14px monospace}}
@@ -221,27 +275,76 @@ init().catch(e=>document.body.innerHTML=`<pre style=color:red>${{e}}</pre>`);
 </script>
 <div id=info>{name}</div>
 </body></html>"#
-                        );
-                        std::fs::write(out_dir.join("index.html"), &html).is_ok()
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                }
-            };
+            );
+            std::fs::write(out_dir.join("index.html"), &html).is_ok()
+        };
 
-            let mut log_guard = log.lock().unwrap();
-            if moved {
-                let size_kb = out_dir
-                    .join("helio_web_demos_bg.wasm")
-                    .metadata()
-                    .ok()
-                    .map(|m| m.len() / 1024)
-                    .unwrap_or(0);
-                log_guard.push(format!("OK ({size_kb} KiB)"));
-            } else {
-                log_guard.push("FAILED".into());
+    let mut log_guard = log.lock().unwrap();
+    if built {
+        let size_kb = out_dir
+            .join("helio_web_demos_bg.wasm")
+            .metadata()
+            .ok()
+            .map(|m| m.len() / 1024)
+            .unwrap_or(0);
+        log_guard.push(format!("OK ({size_kb} KiB)"));
+    } else {
+        log_guard.push("FAILED".into());
+    }
+}
+
+fn main() {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let out_base = manifest_dir.join("target/wasm-prebuilt");
+
+    // Resolve a wasm-capable C compiler before touching the terminal, so a
+    // clear message can be printed if none exists.
+    let cc: Option<String> = match resolve_wasm_cc() {
+        WasmCc::Default => None,
+        WasmCc::Override(c) => {
+            eprintln!("Using wasm-capable C compiler: {c}");
+            Some(c)
+        }
+        WasmCc::Missing => {
+            eprintln!("No C compiler can target wasm32-unknown-unknown.");
+            eprintln!("meshopt and other C deps need a clang with the wasm32 target.");
+            eprintln!("Install LLVM and retry:");
+            eprintln!("  brew install llvm");
+            eprintln!("  export CC=\"$(brew --prefix llvm)/bin/clang\"");
+            return;
+        }
+    };
+
+    enable_raw_mode().unwrap();
+    std::io::stdout().execute(EnterAlternateScreen).unwrap();
+    let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())).unwrap();
+    terminal.clear().unwrap();
+
+    let mut app = App::new(manifest_dir.clone());
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    // ── Build worker ─────────────────────────────────────────────────────────
+    // Every demo is the same crate built with a different feature flag against
+    // one shared cargo target dir, so they cannot build concurrently: parallel
+    // runs serialize on cargo's target lock and still race on the shared output
+    // wasm. A single worker walks the list one demo at a time while the TUI
+    // stays responsive.
+    let jobs: Vec<(&'static str, PathBuf, Arc<Mutex<Vec<String>>>)> = DEMOS
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (*name, out_base.join(name), Arc::clone(&app.builds[i].log)))
+        .collect();
+    {
+        let manifest_dir = manifest_dir.clone();
+        let cc = cc.clone();
+        let running = Arc::clone(&running);
+        std::thread::spawn(move || {
+            for (name, out_dir, log) in jobs {
+                if !running.load(Ordering::Relaxed) {
+                    break;
+                }
+                build_demo(name, &out_dir, &manifest_dir, cc.as_deref(), &log, &running);
             }
         });
     }
