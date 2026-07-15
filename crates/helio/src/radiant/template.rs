@@ -12,7 +12,7 @@ impl RadiantTemplate {
     /// passthrough to keep the default PBR evaluation.
     pub fn build_shader_source(&self, graph_wgsl: &str, max_textures: usize) -> String {
         let max_tex_str = max_textures.to_string();
-        let src = self
+        let mut src = self
             .wgsl_source
             .replace(
                 "binding_array<texture_2d<f32>, 256>",
@@ -22,6 +22,16 @@ impl RadiantTemplate {
                 "binding_array<sampler, 256>",
                 &format!("binding_array<sampler, {max_tex_str}>"),
             );
+
+        // wgpu's Naga requires `enable wgpu_binding_array;` for binding_array
+        // support.  Browser WebGPU (Chrome's Tint) does not recognise this
+        // extension — it has binding_array support in core WGSL.  Strip it for
+        // wasm builds, keep it for native wgpu.
+        #[cfg(target_arch = "wasm32")]
+        {
+            src = src.replace("enable wgpu_binding_array;\n", "");
+            src = src.replace("enable wgpu_binding_array;\r\n", "");
+        }
 
         if graph_wgsl.is_empty() {
             // No graph: remove the override markers, leaving the default code

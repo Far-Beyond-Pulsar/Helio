@@ -1,13 +1,14 @@
-//! `cargo run --bin web` — build all WASM demos and serve them locally.
+//! `cargo run --bin web` — build all WASM demos in parallel, serve locally.
 //!
-//! 1. Runs `wasm-pack build` for every demo in `helio-web-demos`.
-//! 2. Spawns a static file server on `http://127.0.0.1:8000`.
-//!
-//! Requires `wasm-pack` and a wasm-capable `CC` in PATH.
+//! Builds each demo in its own thread (up to `num_cpus` at once), streams a live
+//! progress dashboard, then starts a file server on `http://127.0.0.1:8000`.
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
 const DEMOS: &[&str] = &[
     "render_v2_basic",
@@ -37,60 +38,154 @@ const DEMOS: &[&str] = &[
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out_base = manifest_dir.join("target/wasm-prebuilt");
+    let cc = std::env::var("CC").unwrap_or_default();
+    let total = DEMOS.len();
 
-    for name in DEMOS {
-        let out_dir = out_base.join(name);
-        println!("═══ {name} ═══");
+    let results = Arc::new(Mutex::new(Vec::new()));
 
-        let status = Command::new("wasm-pack")
-            .args([
-                "build",
-                "--release",
-                "--target",
-                "web",
-                "--no-default-features",
-                "--features",
-                name,
-            ])
-            .current_dir(manifest_dir.join("crates/helio-web-demos"))
-            .env("CC", std::env::var("CC").unwrap_or_default())
-            .status()
-            .expect("wasm-pack not found. Install with: cargo install wasm-pack");
+    // Spawn one thread per demo; we'll throttle with a semaphore below.
+    let mut handles = Vec::new();
+    for &name in DEMOS {
+        let results = Arc::clone(&results);
+        let out_base = out_base.clone();
+        let manifest_dir = manifest_dir.clone();
+        let cc = cc.clone();
 
-        if !status.success() {
-            eprintln!("  FAILED: {name}");
-            std::process::exit(1);
-        }
+        handles.push(thread::spawn(move || {
+            let out_dir = out_base.join(name);
 
-        let pkg_dir = manifest_dir.join("crates/helio-web-demos/pkg");
-        if pkg_dir.exists() {
-            let _ = std::fs::remove_dir_all(&out_dir);
-            if let Err(e) = std::fs::rename(&pkg_dir, &out_dir) {
-                eprintln!("  mv failed: {e}");
-                std::process::exit(1);
-            }
-        }
+            let output = Command::new("wasm-pack")
+                .args([
+                    "build",
+                    "--release",
+                    "--target",
+                    "web",
+                    "--no-default-features",
+                    "--features",
+                    name,
+                ])
+                .current_dir(manifest_dir.join("crates/helio-web-demos"))
+                .env("CC", &cc)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .output()
+                .expect("wasm-pack not found. Install with: cargo install wasm-pack");
 
-        let wasm = out_dir.join("helio_web_demos_bg.wasm");
-        let size_kb = std::fs::metadata(&wasm)
-            .ok()
-            .map(|m| m.len() / 1024)
-            .unwrap_or(0);
-        println!("  OK ({size_kb} KiB)");
+            let ok = output.status.success() && {
+                let pkg_dir = manifest_dir.join("crates/helio-web-demos/pkg");
+                if pkg_dir.exists() {
+                    let _ = std::fs::remove_dir_all(&out_dir);
+                    if std::fs::rename(&pkg_dir, &out_dir).is_ok() {
+                        // build.rs wrote index.html before the rename, but
+                        // the rename destroyed it.  Write a minimal one.
+                        let html = format!(
+                            r#"<!DOCTYPE html><html><head>
+<meta charset="utf-8"><title>{name}</title>
+<style>body{{margin:0;overflow:hidden;background:#000}}
+#info{{position:absolute;bottom:8px;left:8px;color:#888;font:14px monospace}}
+</style></head><body>
+<script type="module">
+import init from "./helio_web_demos.js";
+init().catch(e=>document.body.innerHTML=`<pre style=color:red>${{e}}</pre>`);
+</script>
+<div id=info>{name}</div>
+</body></html>"#
+                        );
+                        let _ = std::fs::write(out_dir.join("index.html"), &html);
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+
+            let size_kb = if ok {
+                out_dir
+                    .join("helio_web_demos_bg.wasm")
+                    .metadata()
+                    .ok()
+                    .map(|m| m.len() / 1024)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+
+            let mut lock = results.lock().unwrap();
+            lock.push((name, ok, size_kb));
+        }));
     }
 
-    let addr = "127.0.0.1:8000";
-    println!("\nServing demos at http://{addr}/");
-    serve(&out_base, addr);
+    // ── Dashboard ──────────────────────────────────────────────────────────────
+    let done = AtomicU16::new(0);
+    let ok_count = AtomicU16::new(0);
+    let fail_count = AtomicU16::new(0);
+
+    // Wait for completion in a polling loop so we can render the dashboard.
+    while done.load(Ordering::Relaxed) < total as u16 {
+        thread::sleep(std::time::Duration::from_millis(200));
+
+        let lock = results.lock().unwrap();
+        let n = lock.len() as u16;
+        drop(lock);
+        done.store(n, Ordering::Relaxed);
+
+        // Render dashboard
+        print!("\x1B[2J\x1B[H"); // clear screen, home cursor
+        println!("╔════════════════════════════════════╗");
+        println!("║     Helio Web Demo Build           ║");
+        println!("╠════════════════════════════════════╣");
+        println!("║  Total:  {total:>2}  Demos          ║");
+        println!("║  Done:   {n:>2}                     ║");
+        println!("╚════════════════════════════════════╝");
+        println!();
+        println!("  Building...");
+
+        let finished: Vec<_> = results.lock().unwrap().iter().map(|(n, _, _)| *n).collect();
+        for d in DEMOS {
+            if finished.contains(d) {
+                let lock = results.lock().unwrap();
+                let (_, ok, kb) = lock.iter().find(|(n, _, _)| *n == *d).unwrap();
+                let icon = if *ok { "✓" } else { "✗" };
+                println!("  {icon} {d}  ({kb} KiB)");
+            } else {
+                println!("    {d}");
+            }
+        }
+        std::io::stdout().flush().ok();
+    }
+
+    // Final tally
+    {
+        let lock = results.lock().unwrap();
+        for (_, ok, _) in lock.iter() {
+            if *ok {
+                ok_count.fetch_add(1, Ordering::Relaxed);
+            } else {
+                fail_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    print!("\x1B[2J\x1B[H");
+    println!("╔════════════════════════════════════╗");
+    println!("║     Build Complete                  ║");
+    println!("╠════════════════════════════════════╣");
+    println!("║  OK    {:>3}                         ║", ok_count.load(Ordering::Relaxed));
+    println!("║  FAIL  {:>3}                         ║", fail_count.load(Ordering::Relaxed));
+    println!("║  Total {total:>3}                         ║");
+    println!("╚════════════════════════════════════╝");
+    println!();
+    println!("  Serving at http://127.0.0.1:8000/");
+
+    serve(&out_base, "127.0.0.1:8000");
 }
 
 fn serve(root: &PathBuf, addr: &str) {
     let server = tiny_http::Server::http(addr).unwrap();
-    loop {
-        let request = match server.recv() {
-            Ok(r) => r,
-            Err(_) => break,
-        };
+    let root = root.clone();
+    for request in server.incoming_requests() {
         let url = request.url().to_string();
         let path = {
             let stripped = url.trim_start_matches('/');
@@ -105,8 +200,7 @@ fn serve(root: &PathBuf, addr: &str) {
         let (status, contents) = match std::fs::read(&path) {
             Ok(data) => (tiny_http::StatusCode(200), data),
             Err(_) => {
-                let msg = b"404 Not Found\n";
-                (tiny_http::StatusCode(404), msg.to_vec())
+                (tiny_http::StatusCode(404), b"404 Not Found\n".to_vec())
             }
         };
 

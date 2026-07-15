@@ -7,6 +7,7 @@ use std::collections::HashMap;
 pub enum ResourceFormat {
     Rgba16Float,
     Rgba8UnormSrgb,
+    Bgra8Unorm,
     Bgra8UnormSrgb,
     R16Float,
     R32Float,
@@ -21,6 +22,7 @@ impl ResourceFormat {
         match self {
             Self::Rgba16Float => wgpu::TextureFormat::Rgba16Float,
             Self::Rgba8UnormSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
+            Self::Bgra8Unorm => wgpu::TextureFormat::Bgra8Unorm,
             Self::Bgra8UnormSrgb => wgpu::TextureFormat::Bgra8UnormSrgb,
             Self::R16Float => wgpu::TextureFormat::R16Float,
             Self::R32Float => wgpu::TextureFormat::R32Float,
@@ -37,6 +39,7 @@ impl From<wgpu::TextureFormat> for ResourceFormat {
         match f {
             wgpu::TextureFormat::Rgba16Float => Self::Rgba16Float,
             wgpu::TextureFormat::Rgba8UnormSrgb => Self::Rgba8UnormSrgb,
+            wgpu::TextureFormat::Bgra8Unorm => Self::Bgra8Unorm,
             wgpu::TextureFormat::Bgra8UnormSrgb => Self::Bgra8UnormSrgb,
             wgpu::TextureFormat::R16Float => Self::R16Float,
             wgpu::TextureFormat::R32Float => Self::R32Float,
