@@ -392,7 +392,7 @@ fn build_default_graph_internal(
     // Voxel mesh pass — real triangles with depth testing, composited over
     // deferred lighting. When no voxel volumes are present the pass is a no-op
     // (extract pass has zero dirty bricks → no geometry emitted).
-    graph.add_pass(Box::new(VoxelMeshPass::new(
+    graph.add_pass(Box::new(VoxelMeshPass::new_composited(
         device,
         queue,
         config.surface_format,
