@@ -30,8 +30,8 @@ use crate::common::{box_mesh, insert_object, make_material, point_light};
 const VHS_SHADER_SNIPPET: &str = include_str!("vhs_effects.wgsl");
 
 const LOOK_SENS: f32 = 0.002;
-const MOVE_SPEED: f32 = 5.0;
-const DRAG: f32 = 9.0;
+const MOVE_SPEED: f32 = 12.0;
+const DRAG: f32 = 8.0;
 
 // Maze dimensions.
 const GRID: i32 = 8; // GRID × GRID cells
