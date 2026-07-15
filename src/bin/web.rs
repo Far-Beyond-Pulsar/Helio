@@ -1,51 +1,171 @@
-//! `cargo run --bin web` — fullscreen TUI that builds all WASM demos
-//! and serves them locally on http://127.0.0.1:8000.
+//! `cargo run --bin web` — builds every WASM demo and serves them locally.
 //!
-//! Arrow keys to navigate, Enter to view live logs, Q to quit.
+//! Two modes:
+//!   * **Interactive** (default, when stdout is a TTY): a fullscreen TUI shows
+//!     per-demo build progress; press Enter when done to serve on
+//!     http://127.0.0.1:8000. Arrow keys navigate, Enter views live logs, Q quits.
+//!   * **Headless** (`--headless`, or when `CI` is set / stdout is not a TTY):
+//!     builds every demo serially, streams a plain log, writes the site to
+//!     `target/wasm-prebuilt`, and exits non-zero if any demo failed. This is
+//!     what CI runs — there is no shell build script.
+//!
+//! The builder is the single source of truth for the published site: it writes
+//! each demo's landing page and the master index itself, after each wasm-pack
+//! build, so the HTML can never be clobbered or go missing.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, IsTerminal, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::ExecutableCommand;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
 
-const DEMOS: &[&str] = &[
-    "render_v2_basic",
-    "render_v2_sky",
-    "debug_shapes",
-    "indoor_room",
-    "indoor_corridor",
-    "outdoor_night",
-    "outdoor_canyon",
-    "indoor_cathedral",
-    "indoor_server_room",
-    "outdoor_city",
-    "outdoor_volcano",
-    "space_station",
-    "light_benchmark",
-    "hlfs_benchmark",
-    "sdf_demo",
-    "rc_benchmark",
-    "load_fbx",
-    "load_fbx_embedded",
-    "ship_flight",
-    "simple_graph",
-    "outdoor_rocks",
-    "editor_demo",
-    "voxel_mesh_demo",
-    "vhs_backrooms",
+// ── Demo catalogue ──────────────────────────────────────────────────────────
+// The one source of truth for which demos exist and how their landing pages
+// read. Adding a demo means adding a feature in helio-web-demos and an entry
+// here — nothing else.
+
+struct Demo {
+    name: &'static str,
+    title: &'static str,
+    description: &'static str,
+    controls: &'static str,
+}
+
+const DEMOS: &[Demo] = &[
+    Demo { name: "render_v2_basic",     title: "Basic Render",       description: "Three lit cubes — the minimal Helio render pipeline.",                          controls: "WASD / Space / Shift — fly &nbsp;·&nbsp; Mouse — look &nbsp;·&nbsp; Click — grab cursor" },
+    Demo { name: "render_v2_sky",       title: "Volumetric Sky",     description: "Real-time atmospheric scattering with a moving sun.",                           controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Q/E — rotate sun &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "debug_shapes",        title: "Debug Shapes",       description: "Coloured debug boxes exercising the geometry pass.",                            controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "indoor_room",         title: "Indoor Room",        description: "Furnished room with a flickering point light.",                                controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "indoor_corridor",     title: "Indoor Corridor",    description: "40 m corridor with overhead fluorescent lighting.",                            controls: "WASD/Space/Shift — walk &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "outdoor_night",       title: "Outdoor Night",      description: "City block under streetlamps at night.",                                       controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "outdoor_canyon",      title: "Outdoor Canyon",     description: "Desert canyon with a campfire and a dynamic sky.",                              controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Q/E — sun &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "indoor_cathedral",    title: "Indoor Cathedral",   description: "Gothic nave lit by candles and flickering torch sconces.",                     controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "indoor_server_room",  title: "Indoor Server Room", description: "Datacenter server racks with animated LED indicators.",                        controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "outdoor_city",        title: "Outdoor City",       description: "Procedural night city with street lamps and rooftop beacons.",                 controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "outdoor_volcano",     title: "Outdoor Volcano",    description: "Active lava field with pulsing vent glow.",                                    controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "space_station",       title: "Space Station",      description: "Orbiting station with solar arrays and navigation lights.",                    controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "light_benchmark",     title: "Light Benchmark",    description: "128 animated point lights — deferred lighting stress test.",                   controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "hlfs_benchmark",      title: "HLFS Compute Lighting", description: "Hierarchical light-field compute injection and propagation.",               controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; +/- — light intensity &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "sdf_demo",            title: "SDF Demo",           description: "Signed-distance field clipmap with live sphere edits.",                        controls: "WASD/Space/Shift — move &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "rc_benchmark",        title: "Radiance Cascades",  description: "Cornell box global illumination benchmark.",                                   controls: "+/- — intensity &nbsp;·&nbsp; WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "load_fbx",            title: "Load FBX",           description: "FBX asset loading (placeholder scene on WASM).",                               controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "load_fbx_embedded",   title: "Load FBX (Embedded)", description: "FBX loaded from bytes embedded at compile time.",                             controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "ship_flight",         title: "Ship Flight",        description: "6-DoF spaceship through an asteroid field.",                                   controls: "WASD — thrust &nbsp;·&nbsp; Q/E — roll &nbsp;·&nbsp; Space/Shift — lift &nbsp;·&nbsp; Mouse — aim" },
+    Demo { name: "simple_graph",        title: "Simple Graph",       description: "Minimal fly-camera around a lit unit cube.",                                   controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "outdoor_rocks",       title: "Outdoor Rocks",      description: "Scattered rocks with an embedded FBX ship and dynamic sun.",                   controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; Q/E — sun &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "editor_demo",         title: "Editor Demo",        description: "BVH ray-picking and transform gizmo (translate / rotate / scale).",            controls: "RMB hold — fly &nbsp;·&nbsp; LMB — pick/drag &nbsp;·&nbsp; G/R/S — gizmo mode &nbsp;·&nbsp; Ctrl+D — duplicate &nbsp;·&nbsp; Del — delete &nbsp;·&nbsp; Tab — grid" },
+    Demo { name: "voxel_mesh_demo",     title: "Voxel Mesh Demo",    description: "Procedural voxel world mesh-rendered through a custom VoxelMeshPass + FXAA graph.", controls: "WASD/Space/Shift — fly &nbsp;·&nbsp; LMB — add &nbsp;·&nbsp; X — carve &nbsp;·&nbsp; 1-4 — material &nbsp;·&nbsp; R — regenerate &nbsp;·&nbsp; Mouse — look" },
+    Demo { name: "vhs_backrooms",       title: "VHS Backrooms",      description: "Procedural backrooms maze with an injected VHS camcorder post-process shader.", controls: "WASD/Space/Shift — move &nbsp;·&nbsp; R — regenerate &nbsp;·&nbsp; Mouse — look" },
 ];
+
+// ── HTML templates ──────────────────────────────────────────────────────────
+
+/// Full landing page for a single demo, written into that demo's output dir.
+fn demo_page_html(d: &Demo) -> String {
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title} — Helio</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    html, body {{ width: 100%; height: 100%; overflow: hidden; background: #000; font-family: system-ui, sans-serif; }}
+    #loading {{ position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; background: #000; color: #aaa; font-size: 14px; gap: 16px; transition: opacity 0.4s; z-index: 10; }}
+    #loading.hidden {{ opacity: 0; pointer-events: none; }}
+    .spinner {{ width: 32px; height: 32px; border: 3px solid #333; border-top-color: #888; border-radius: 50%; animation: spin 0.8s linear infinite; }}
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+    #controls {{ position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); color: #555; font-size: 11px; pointer-events: none; transition: opacity 1s; white-space: nowrap; }}
+    #controls.fade {{ opacity: 0; }}
+    a.back {{ position: fixed; top: 10px; left: 12px; color: #444; font-size: 11px; text-decoration: none; transition: color 0.2s; }}
+    a.back:hover {{ color: #aaa; }}
+  </style>
+</head>
+<body>
+  <div id="loading"><div class="spinner"></div><span>Loading {title}…</span></div>
+  <div id="controls">{controls}</div>
+  <a class="back" href="../index.html">← all demos</a>
+  <script type="module">
+    import init from './helio_web_demos.js';
+    try {{
+      await init();
+    }} catch (e) {{
+      document.getElementById('loading').innerHTML =
+        '<span style="color:#c44">Failed to load WASM: ' + e + '</span>';
+      throw e;
+    }}
+    const ctrl = document.getElementById('controls');
+    setTimeout(() => ctrl.classList.add('fade'), 5000);
+  </script>
+</body>
+</html>
+"#,
+        title = d.title,
+        controls = d.controls,
+    )
+}
+
+/// Master listing page linking to every demo.
+fn index_page_html(demos: &[Demo]) -> String {
+    let cards: String = demos
+        .iter()
+        .map(|d| {
+            format!(
+                r#"    <a class="card" href="{name}/">
+      <div class="card-title">{title}</div>
+      <div class="card-desc">{description}</div>
+    </a>
+"#,
+                name = d.name,
+                title = d.title,
+                description = d.description,
+            )
+        })
+        .collect();
+
+    format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Helio — Web Demos</title>
+  <style>
+    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    html {{ background: #0a0a0c; color: #ccc; font-family: system-ui, sans-serif; }}
+    body {{ max-width: 960px; margin: 0 auto; padding: 48px 20px; }}
+    h1 {{ font-size: 28px; font-weight: 700; color: #eee; margin-bottom: 6px; }}
+    .subtitle {{ color: #555; font-size: 14px; margin-bottom: 40px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }}
+    .card {{ display: flex; flex-direction: column; gap: 6px; background: #111; border: 1px solid #1e1e22; border-radius: 8px; padding: 18px 20px; text-decoration: none; color: inherit; transition: border-color 0.15s, background 0.15s; }}
+    .card:hover {{ background: #161618; border-color: #3a3a44; }}
+    .card-title {{ font-size: 15px; font-weight: 600; color: #ddd; }}
+    .card-desc  {{ font-size: 12px; color: #666; line-height: 1.5; }}
+  </style>
+</head>
+<body>
+  <h1>Helio Web Demos</h1>
+  <p class="subtitle">Real-time rendering demos compiled to WebAssembly.</p>
+  <div class="grid">
+{cards}  </div>
+</body>
+</html>
+"#,
+        cards = cards,
+    )
+}
+
+// ── Build status (TUI) ────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 enum Status {
@@ -56,7 +176,6 @@ enum Status {
 }
 
 struct BuildState {
-    status: Status,
     log: Arc<Mutex<Vec<String>>>,
 }
 
@@ -65,21 +184,14 @@ struct App {
     list_state: ListState,
     log_scroll: usize,
     show_log: bool,
-    done: usize,
-    ok_count: usize,
-    fail_count: usize,
-    start: Instant,
     total: usize,
-    cc: String,
-    manifest_dir: PathBuf,
 }
 
 impl App {
-    fn new(manifest_dir: PathBuf) -> Self {
+    fn new() -> Self {
         let total = DEMOS.len();
         let builds = (0..total)
             .map(|_| BuildState {
-                status: Status::Pending,
                 log: Arc::new(Mutex::new(Vec::new())),
             })
             .collect();
@@ -90,18 +202,8 @@ impl App {
             list_state,
             log_scroll: 0,
             show_log: false,
-            done: 0,
-            ok_count: 0,
-            fail_count: 0,
-            start: Instant::now(),
             total,
-            cc: std::env::var("CC").unwrap_or_default(),
-            manifest_dir,
         }
-    }
-
-    fn selected(&self) -> Option<usize> {
-        self.list_state.selected()
     }
 
     fn status_icon(frame: u64, s: &Status) -> &'static str {
@@ -125,16 +227,17 @@ impl App {
 
     fn status_text(s: &Status) -> String {
         match s {
-            Status::Pending => String::new(),
-            Status::Building => String::new(),
+            Status::Pending | Status::Building => String::new(),
             Status::Success(kb) => format!("  {} KiB", kb),
             Status::Failed => "  FAILED".into(),
         }
     }
 }
 
+// ── C-compiler resolution ─────────────────────────────────────────────────────
+
 /// Which C compiler to hand wasm-pack. meshopt and other C deps must be built
-/// with a clang that can target wasm32; macOS system clang can't.
+/// with a clang that can target wasm32; macOS system clang (and Linux gcc) can't.
 enum WasmCc {
     /// The default `cc` already targets wasm32 — don't override CC.
     Default,
@@ -168,21 +271,23 @@ fn cc_targets_wasm(cc: &str) -> bool {
     ok
 }
 
-/// Resolve a wasm-capable C compiler, mirroring build-wasm.sh's check_cc_wasm:
-/// honor an explicit CC that works, else the default cc, else Homebrew LLVM.
+/// Resolve a wasm-capable C compiler: honor an explicit CC that works, else the
+/// default `cc`, else a plain `clang` (Linux/CI), else Homebrew LLVM (macOS).
 fn resolve_wasm_cc() -> WasmCc {
-    // An explicit, non-empty CC that can target wasm32 wins.
     if let Ok(cc) = std::env::var("CC") {
         let cc = cc.trim().to_string();
         if !cc.is_empty() && cc_targets_wasm(&cc) {
             return WasmCc::Override(cc);
         }
     }
-    // The default `cc` may already be wasm-capable (e.g. a real LLVM as `cc`).
     if cc_targets_wasm("cc") {
         return WasmCc::Default;
     }
-    // Fall back to Homebrew LLVM clang.
+    // LLVM `clang` targets wasm32 out of the box; present on GitHub's Linux runners.
+    if cc_targets_wasm("clang") {
+        return WasmCc::Override("clang".into());
+    }
+    // macOS: Homebrew LLVM clang.
     if let Ok(out) = Command::new("brew").args(["--prefix", "llvm"]).output() {
         if out.status.success() {
             let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -195,20 +300,23 @@ fn resolve_wasm_cc() -> WasmCc {
     WasmCc::Missing
 }
 
+// ── Build ─────────────────────────────────────────────────────────────────────
+
 /// Build a single demo with wasm-pack straight into `out_dir`, streaming the
-/// process output into `log`. Blocks until the build finishes. `cc`, when set,
-/// overrides the C compiler for the build.
+/// process output into `log`, then write the demo's landing page. Blocks until
+/// the build finishes. Returns whether the demo built successfully. `cc`, when
+/// set, overrides the C compiler for the build.
 fn build_demo(
-    name: &str,
+    demo: &Demo,
     out_dir: &Path,
     manifest_dir: &Path,
     cc: Option<&str>,
     log: &Arc<Mutex<Vec<String>>>,
     running: &Arc<AtomicBool>,
-) {
+) -> bool {
     log.lock()
         .unwrap()
-        .push(format!("[{name}] Starting wasm-pack build..."));
+        .push(format!("[{}] Starting wasm-pack build...", demo.name));
 
     // Build into a per-demo out-dir so runs never share pkg/. `--out-dir` must
     // come before the trailing feature args, or wasm-pack forwards it to cargo
@@ -224,7 +332,7 @@ fn build_demo(
             "web",
             "--no-default-features",
             "--features",
-            name,
+            demo.name,
         ])
         .current_dir(manifest_dir.join("crates/helio-web-demos"))
         .stdout(Stdio::piped())
@@ -240,19 +348,19 @@ fn build_demo(
             let mut log_guard = log.lock().unwrap();
             log_guard.push(format!("Failed to spawn wasm-pack: {e}"));
             log_guard.push("FAILED".into());
-            return;
+            return false;
         }
     };
 
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    for line in BufReader::new(stdout).lines().flatten() {
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
         if !running.load(Ordering::Relaxed) {
             break;
         }
         log.lock().unwrap().push(line);
     }
-    for line in BufReader::new(stderr).lines().flatten() {
+    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
         if !running.load(Ordering::Relaxed) {
             break;
         }
@@ -261,25 +369,11 @@ fn build_demo(
 
     let success = child.wait().ok().map(|s| s.success()).unwrap_or(false);
 
-    // wasm-pack built straight into out_dir; just add the landing page.
+    // wasm-pack built straight into out_dir; write the landing page ourselves so
+    // it can never be clobbered or go missing.
     let built = success
         && out_dir.join("helio_web_demos_bg.wasm").exists()
-        && {
-            let html = format!(
-                r#"<!DOCTYPE html><html><head>
-<meta charset="utf-8"><title>{name}</title>
-<style>body{{margin:0;overflow:hidden;background:#000}}
-#info{{position:absolute;bottom:8px;left:8px;color:#888;font:14px monospace}}
-</style></head><body>
-<script type="module">
-import init from "./helio_web_demos.js";
-init().catch(e=>document.body.innerHTML=`<pre style=color:red>${{e}}</pre>`);
-</script>
-<div id=info>{name}</div>
-</body></html>"#
-            );
-            std::fs::write(out_dir.join("index.html"), &html).is_ok()
-        };
+        && std::fs::write(out_dir.join("index.html"), demo_page_html(demo)).is_ok();
 
     let mut log_guard = log.lock().unwrap();
     if built {
@@ -293,14 +387,24 @@ init().catch(e=>document.body.innerHTML=`<pre style=color:red>${{e}}</pre>`);
     } else {
         log_guard.push("FAILED".into());
     }
+    built
+}
+
+// ── Entry point ────────────────────────────────────────────────────────────────
+
+/// Headless mode is used by CI and any non-interactive run.
+fn headless_requested() -> bool {
+    std::env::args().skip(1).any(|a| a == "--headless" || a == "--ci")
+        || std::env::var_os("CI").is_some()
+        || !std::io::stdout().is_terminal()
 }
 
 fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let out_base = manifest_dir.join("target/wasm-prebuilt");
 
-    // Resolve a wasm-capable C compiler before touching the terminal, so a
-    // clear message can be printed if none exists.
+    // Resolve a wasm-capable C compiler up front so a clear message can be
+    // printed (and CI can fail fast) if none exists.
     let cc: Option<String> = match resolve_wasm_cc() {
         WasmCc::Default => None,
         WasmCc::Override(c) => {
@@ -310,21 +414,73 @@ fn main() {
         WasmCc::Missing => {
             eprintln!("No C compiler can target wasm32-unknown-unknown.");
             eprintln!("meshopt and other C deps need a clang with the wasm32 target.");
-            eprintln!("Install LLVM and retry:");
-            eprintln!("  brew install llvm");
-            eprintln!("  export CC=\"$(brew --prefix llvm)/bin/clang\"");
-            return;
+            eprintln!("Install LLVM and retry (macOS):");
+            eprintln!("  brew install llvm && export CC=\"$(brew --prefix llvm)/bin/clang\"");
+            eprintln!("On Linux, install clang (e.g. `apt-get install clang`).");
+            std::process::exit(1);
         }
     };
 
+    // The master index is static; write it up front so it's always present.
+    let _ = std::fs::create_dir_all(&out_base);
+    let _ = std::fs::write(out_base.join("index.html"), index_page_html(DEMOS));
+
+    if headless_requested() {
+        std::process::exit(run_headless(&manifest_dir, &out_base, cc.as_deref()));
+    }
+    run_tui(manifest_dir, out_base, cc);
+}
+
+/// Build every demo serially, logging plainly. Returns a process exit code.
+fn run_headless(manifest_dir: &Path, out_base: &Path, cc: Option<&str>) -> i32 {
+    let running = Arc::new(AtomicBool::new(true));
+    println!("Building {} WASM demos (release)…", DEMOS.len());
+    let mut failed: Vec<&str> = Vec::new();
+
+    for demo in DEMOS {
+        let out_dir = out_base.join(demo.name);
+        let log = Arc::new(Mutex::new(Vec::new()));
+        print!("  {:<20} ", demo.name);
+        let _ = std::io::stdout().flush();
+
+        let ok = build_demo(demo, &out_dir, manifest_dir, cc, &log, &running);
+        if ok {
+            let size_kb = out_dir
+                .join("helio_web_demos_bg.wasm")
+                .metadata()
+                .ok()
+                .map(|m| m.len() / 1024)
+                .unwrap_or(0);
+            println!("OK ({size_kb} KiB)");
+        } else {
+            println!("FAILED");
+            eprintln!("──── {} build log ────", demo.name);
+            for line in log.lock().unwrap().iter() {
+                eprintln!("{line}");
+            }
+            eprintln!("──── end {} log ────", demo.name);
+            failed.push(demo.name);
+        }
+    }
+
+    if failed.is_empty() {
+        println!("\nAll {} demos built → {}", DEMOS.len(), out_base.display());
+        0
+    } else {
+        eprintln!("\n{} demo(s) FAILED: {}", failed.len(), failed.join(", "));
+        1
+    }
+}
+
+/// Interactive TUI: build in the background, then optionally serve.
+fn run_tui(manifest_dir: PathBuf, out_base: PathBuf, cc: Option<String>) {
     enable_raw_mode().unwrap();
     std::io::stdout().execute(EnterAlternateScreen).unwrap();
     let mut terminal = Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout())).unwrap();
     terminal.clear().unwrap();
 
-    let mut app = App::new(manifest_dir.clone());
+    let mut app = App::new();
     let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
 
     // ── Build worker ─────────────────────────────────────────────────────────
     // Every demo is the same crate built with a different feature flag against
@@ -332,21 +488,20 @@ fn main() {
     // runs serialize on cargo's target lock and still race on the shared output
     // wasm. A single worker walks the list one demo at a time while the TUI
     // stays responsive.
-    let jobs: Vec<(&'static str, PathBuf, Arc<Mutex<Vec<String>>>)> = DEMOS
+    let jobs: Vec<(&'static Demo, PathBuf, Arc<Mutex<Vec<String>>>)> = DEMOS
         .iter()
         .enumerate()
-        .map(|(i, name)| (*name, out_base.join(name), Arc::clone(&app.builds[i].log)))
+        .map(|(i, demo)| (demo, out_base.join(demo.name), Arc::clone(&app.builds[i].log)))
         .collect();
     {
         let manifest_dir = manifest_dir.clone();
-        let cc = cc.clone();
         let running = Arc::clone(&running);
         std::thread::spawn(move || {
-            for (name, out_dir, log) in jobs {
+            for (demo, out_dir, log) in jobs {
                 if !running.load(Ordering::Relaxed) {
                     break;
                 }
-                build_demo(name, &out_dir, &manifest_dir, cc.as_deref(), &log, &running);
+                build_demo(demo, &out_dir, &manifest_dir, cc.as_deref(), &log, &running);
             }
         });
     }
@@ -365,7 +520,7 @@ fn main() {
             if let Event::Key(key) = event::read().unwrap() {
                 if key.kind == KeyEventKind::Press {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break 'main,
+                        KeyCode::Char('q') | KeyCode::Esc if !app.show_log => break 'main,
                         KeyCode::Down => {
                             if app.show_log {
                                 app.log_scroll = app.log_scroll.saturating_add(1);
@@ -391,7 +546,7 @@ fn main() {
                             app.log_scroll = 0;
                         }
                         KeyCode::Enter => {
-                            // All done, Enter starts the server
+                            // All done, Enter starts the server.
                             serve_started.store(true, Ordering::Relaxed);
                             break 'main;
                         }
@@ -404,7 +559,6 @@ fn main() {
             }
         }
 
-        // Check if all builds are done
         if !all_done_val {
             let done = app.builds.iter().filter(|b| {
                 let last = b.log.lock().unwrap().last().cloned().unwrap_or_default();
@@ -416,11 +570,11 @@ fn main() {
         }
     }
 
+    running.store(false, Ordering::Relaxed);
     disable_raw_mode().unwrap();
     std::io::stdout().execute(LeaveAlternateScreen).unwrap();
 
     if serve_started.load(Ordering::Relaxed) || all_done.load(Ordering::Relaxed) {
-        let out_base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/wasm-prebuilt");
         println!("\nServing at http://127.0.0.1:8000/");
         serve(&out_base, "127.0.0.1:8000");
     }
@@ -452,11 +606,7 @@ fn list_ui(f: &mut Frame, app: &App, all_done: bool) {
     let bar_width = f.area().width.saturating_sub(4) as usize;
     let filled = (pct * bar_width as f64).round() as usize;
     let empty = bar_width.saturating_sub(filled);
-    let bar = format!(
-        "{}│{}",
-        "█".repeat(filled),
-        "░".repeat(empty),
-    );
+    let bar = format!("{}│{}", "█".repeat(filled), "░".repeat(empty));
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -481,8 +631,7 @@ fn list_ui(f: &mut Frame, app: &App, all_done: bool) {
             Style::new().fg(Color::Green).bold(),
         ));
     }
-    let header = Paragraph::new(Line::from(header_spans))
-        .block(Block::default());
+    let header = Paragraph::new(Line::from(header_spans)).block(Block::default());
     f.render_widget(header, layout[0]);
 
     // Demo list
@@ -493,7 +642,7 @@ fn list_ui(f: &mut Frame, app: &App, all_done: bool) {
                 .trim_end_matches(" KiB)").parse().unwrap_or(0))
         } else if last == "FAILED" {
             Status::Failed
-        } else if b.log.lock().unwrap().len() > 0 {
+        } else if !b.log.lock().unwrap().is_empty() {
             Status::Building
         } else {
             Status::Pending
@@ -501,7 +650,7 @@ fn list_ui(f: &mut Frame, app: &App, all_done: bool) {
         let icon = App::status_icon(frame, &status);
         let color = App::status_color(&status);
         let text = App::status_text(&status);
-        let name = DEMOS[i];
+        let name = DEMOS[i].name;
         let is_selected = app.list_state.selected() == Some(i);
         let bg = if is_selected { Color::DarkGray } else { Color::Reset };
         let fg = if is_selected { Color::White } else { Color::Reset };
@@ -523,7 +672,7 @@ fn list_ui(f: &mut Frame, app: &App, all_done: bool) {
 
 fn log_ui(f: &mut Frame, app: &App) {
     let idx = app.list_state.selected().unwrap_or(0);
-    let name = DEMOS[idx];
+    let name = DEMOS[idx].name;
     let log = app.builds[idx].log.lock().unwrap();
     let lines: Vec<Line> = log.iter().map(|l| Line::from(Span::raw(l))).collect();
 
@@ -552,9 +701,9 @@ fn log_ui(f: &mut Frame, app: &App) {
 
 // ── HTTP server ─────────────────────────────────────────────────────────────
 
-fn serve(root: &PathBuf, addr: &str) {
+fn serve(root: &Path, addr: &str) {
     let server = tiny_http::Server::http(addr).unwrap();
-    let root = root.clone();
+    let root = root.to_path_buf();
     println!("\nServing at http://{addr}/");
     for request in server.incoming_requests() {
         let url = request.url().to_string();

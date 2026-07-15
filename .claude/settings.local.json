@@ -49,7 +49,8 @@
       "Bash(do sed -i 's/libhelio::Movability/helio::Movability/g' \"$f\")",
       "Bash(cat)",
       "Bash(python3 /tmp/gen_tables.py)",
-      "Read(//tmp/**)"
+      "Read(//tmp/**)",
+      "Bash(git rm *)"
     ]
   }
 }

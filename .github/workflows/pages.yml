@@ -43,8 +43,16 @@ jobs:
       - name: Install wasm-pack
         run: cargo install wasm-pack
 
-      - name: Build all demos (release)
-        run: ./build-wasm.sh --release
+      - name: Add wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build all demos (headless)
+        # The `web` binary is the build tool: it builds every demo with
+        # wasm-pack, writes the landing pages + master index, and exits non-zero
+        # if any demo fails. `clang` targets wasm32 for meshopt's C deps.
+        run: cargo run --release --bin web -- --headless
+        env:
+          CC: clang
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
