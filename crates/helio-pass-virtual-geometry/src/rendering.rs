@@ -92,7 +92,11 @@ impl VirtualGeometryPass {
                         &format!("binding_array<sampler, {MAX_TEXTURES}>"),
                     );
                 #[cfg(target_arch = "wasm32")]
-                let s = libhelio::shader::apply_webgpu_material_bindings(&s, MAX_TEXTURES);
+                let s = {
+                    let s = libhelio::shader::apply_webgpu_material_bindings(&s, MAX_TEXTURES);
+                    s.replace("enable wgpu_binding_array;\n", "")
+                     .replace("enable wgpu_binding_array;\r\n", "")
+                };
                 s.into()
             }),
         });
