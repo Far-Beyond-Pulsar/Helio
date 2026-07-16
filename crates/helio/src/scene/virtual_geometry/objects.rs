@@ -233,7 +233,7 @@ mod tests {
 
     fn create_test_scene() -> Scene {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::BROWSER_WEBGPU,
+            backends: wgpu::Backends::from_env().unwrap_or(wgpu::Backends::PRIMARY),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
