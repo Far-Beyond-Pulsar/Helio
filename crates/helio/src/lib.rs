@@ -29,7 +29,7 @@ mod wasm_cpp_alloc;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
-    LightId, MaterialId, MeshId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId,
+    DecalId, LightId, MaterialId, MeshId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId,
     VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 pub use material::{
@@ -44,8 +44,8 @@ pub use renderer::{
     DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, Renderer, RendererConfig,
 };
 pub use scene::{
-    Camera, ObjectDescriptor, PickableObject, ReflectionCaptureActor, ReflectionCaptureDescriptor,
-    Result as SceneResult, Scene, SceneActor,
+    Camera, DecalActor, ObjectDescriptor, PickableObject, ReflectionCaptureActor,
+    ReflectionCaptureDescriptor, Result as SceneResult, Scene, SceneActor,
     SceneActorId, SceneActorTrait, SceneError, VoxelMode, VoxelVolumeDescriptor,
     WaterHitboxActor, WaterHitboxDescriptor,
     WaterVolumeActor, WaterVolumeDescriptor,

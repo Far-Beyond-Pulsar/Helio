@@ -152,6 +152,10 @@ name = "indoor_cathedral_pp_volumes"
 path = "indoor_cathedral_pp_volumes.rs"
 
 [[bin]]
+name = "indoor_cathedral_decals"
+path = "indoor_cathedral_decals.rs"
+
+[[bin]]
 name = "vhs_backrooms"
 path = "vhs_backrooms.rs"
 
