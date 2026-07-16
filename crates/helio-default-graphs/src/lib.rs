@@ -5,6 +5,7 @@ use helio::GraphRebuilder;
 use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
+use helio_pass_decal::DecalPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
@@ -384,6 +385,18 @@ fn build_default_graph_internal(
 
     let camera_buf = scene.gpu_scene().camera.buffer();
 
+    // Decal pass — projects decals into the G-buffer after it's been written.
+    // Runs as a compute pass between GBuffer and deferred lighting.
+    let decal_buf = scene.gpu_scene().decals.buffer();
+    graph.add_pass(Box::new(DecalPass::new(
+        device,
+        queue,
+        decal_buf,
+        camera_buf,
+        iw,
+        ih,
+    )));
+
     // SSR pass — screen-space reflections for glossy/metallic surfaces.
     // Runs after GBuffer (needs normals + depth + Hi-Z), before deferred lighting.
     graph.add_pass(Box::new(SsrPass::new(
@@ -547,6 +560,17 @@ fn build_fxaa_graph_internal(
 
     let camera_buf = scene.gpu_scene().camera.buffer();
 
+    // Decal pass
+    let decal_buf = scene.gpu_scene().decals.buffer();
+    graph.add_pass(Box::new(DecalPass::new(
+        device,
+        queue,
+        decal_buf,
+        camera_buf,
+        iw,
+        ih,
+    )));
+
     graph.add_pass(Box::new(SsrPass::new(
         device,
         queue,
@@ -649,6 +673,19 @@ fn build_hlfs_graph_internal(
     );
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
+
+    let camera_buf = scene.gpu_scene().camera.buffer();
+
+    // Decal pass
+    let decal_buf = scene.gpu_scene().decals.buffer();
+    graph.add_pass(Box::new(DecalPass::new(
+        device,
+        queue,
+        decal_buf,
+        camera_buf,
+        iw,
+        ih,
+    )));
 
     let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
@@ -807,6 +844,19 @@ fn build_fxaa_hlfs_graph_internal(
     );
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
+
+    let camera_buf = scene.gpu_scene().camera.buffer();
+
+    // Decal pass
+    let decal_buf = scene.gpu_scene().decals.buffer();
+    graph.add_pass(Box::new(DecalPass::new(
+        device,
+        queue,
+        decal_buf,
+        camera_buf,
+        w,
+        h,
+    )));
 
     let mut hlfs_pass = HlfsPass::new(device, queue, w, h, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);

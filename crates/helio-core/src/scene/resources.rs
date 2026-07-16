@@ -121,6 +121,8 @@ pub struct SceneResources<'a> {
     pub aabbs: &'a wgpu::Buffer,
     pub draw_calls: &'a wgpu::Buffer,
     pub lights: &'a wgpu::Buffer,
+    pub decals: &'a wgpu::Buffer,
+    pub decal_count: u32,
     pub materials: &'a wgpu::Buffer,
     pub shadow_matrices: &'a wgpu::Buffer,
     pub indirect: &'a wgpu::Buffer,

@@ -286,6 +286,14 @@ pub(crate) struct PostProcessVolumeRecord {
     pub gpu: GpuPostProcessVolume,
 }
 
+/// Internal record for a decal.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DecalRecord {
+    pub gpu: libhelio::GpuDecal,
+    pub movability: libhelio::Movability,
+    pub user_tag: u64,
+}
+
 /// Internal record for a reflection capture.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ReflectionCaptureRecord {

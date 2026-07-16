@@ -5,7 +5,7 @@
 //! with flush operations.
 
 use bytemuck::Zeroable;
-use libhelio::{GpuLight, GpuShadowMatrix};
+use libhelio::{GpuDecal, GpuLight, GpuShadowMatrix};
 
 use crate::scene::Scene;
 
@@ -273,6 +273,22 @@ impl Scene {
             }
             if any_dirty {
                 self.gpu_scene.voxel_volumes_generation += 1;
+            }
+        }
+
+        // ── Decal flush ──────────────────────────────────────────────────────
+        {
+            if self.decals_dirty {
+                let count = self.decals.dense_len();
+                let mut decals: Vec<GpuDecal> = Vec::with_capacity(count);
+                for i in 0..count {
+                    if let Some(record) = self.decals.get_dense(i) {
+                        decals.push(record.gpu);
+                    }
+                }
+                self.gpu_scene.decals.set_data(decals);
+                self.decals_dirty = false;
+                self.decals_dirty_range = None;
             }
         }
 

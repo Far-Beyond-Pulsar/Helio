@@ -13,6 +13,7 @@
 
 pub mod camera;
 pub mod corona;
+pub mod decal;
 pub mod draw;
 pub mod frame;
 pub mod instance;
@@ -29,6 +30,7 @@ pub mod water;
 
 pub use camera::*;
 pub use corona::*;
+pub use decal::*;
 pub use draw::*;
 pub use frame::*;
 pub use instance::*;

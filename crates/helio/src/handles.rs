@@ -55,4 +55,5 @@ define_handle!(WaterHitboxId);
 define_handle!(PostProcessVolumeId);
 define_handle!(ReflectionCaptureId);
 define_handle!(VoxelVolumeId);
+define_handle!(DecalId);
 

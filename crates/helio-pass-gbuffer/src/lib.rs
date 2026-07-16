@@ -202,21 +202,25 @@ impl RenderPass for GBufferPass {
             wgpu::TextureFormat::Rgba8Unorm,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_normal",
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_orm",
             wgpu::TextureFormat::Rgba8Unorm,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_emissive",
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_lightmap_uv",
             wgpu::TextureFormat::Rg16Float,

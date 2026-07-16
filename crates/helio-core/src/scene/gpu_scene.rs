@@ -72,9 +72,9 @@
 
 use crate::component::ComponentRegistry;
 use crate::scene::managers::{
-    GpuAabbBuffer, GpuCameraBuffer, GpuDrawCallBuffer, GpuIndirectBuffer, GpuInstanceBuffer,
-    GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer, GpuVisibilityBuffer,
-    GpuVoxelVolumeBuffer, GpuVoxelEditRing,
+    GpuAabbBuffer, GpuCameraBuffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
+    GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing,
 };
 use crate::scene::managers::GrowableBuffer;
 use crate::scene::SceneResources;
@@ -179,6 +179,7 @@ pub struct GpuScene {
     pub aabbs: GpuAabbBuffer,
     pub draw_calls: GpuDrawCallBuffer,
     pub lights: GpuLightBuffer,
+    pub decals: GpuDecalBuffer,
     pub materials: GpuMaterialBuffer,
     pub shadow_matrices: GpuShadowMatrixBuffer,
     pub indirect: GpuIndirectBuffer,
@@ -284,6 +285,7 @@ impl GpuScene {
         let aabbs = GpuAabbBuffer::new(device.clone());
         let draw_calls = GpuDrawCallBuffer::new(device.clone());
         let lights = GpuLightBuffer::new(device.clone());
+        let decals = GpuDecalBuffer::new(device.clone());
         let materials = GpuMaterialBuffer::new(device.clone());
         let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
         let indirect = GpuIndirectBuffer::new(device.clone());
@@ -333,6 +335,7 @@ impl GpuScene {
             aabbs,
             draw_calls,
             lights,
+            decals,
             materials,
             shadow_matrices,
             indirect,
@@ -390,6 +393,8 @@ impl GpuScene {
             aabbs: self.aabbs.buffer(),
             draw_calls: self.draw_calls.buffer(),
             lights: self.lights.buffer(),
+            decals: self.decals.buffer(),
+            decal_count: self.decals.len() as u32,
             materials: self.materials.buffer(),
             shadow_matrices: self.shadow_matrices.buffer(),
             indirect: self.indirect.buffer(),
@@ -477,6 +482,7 @@ impl GpuScene {
         self.aabbs.flush(queue);
         self.draw_calls.flush(queue);
         self.lights.flush(queue);
+        self.decals.flush(queue);
         self.materials.flush(queue);
         self.shadow_matrices.flush(queue);
         self.indirect.flush(queue);

@@ -17,7 +17,7 @@ use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
+    DecalId, LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
     SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
@@ -28,8 +28,9 @@ use crate::vg::VirtualMeshId;
 
 use super::errors::{invalid, Result};
 use super::types::{
-    LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord, ReflectionCaptureRecord,
-    TextureRecord, VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
+    DecalRecord, LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord,
+    ReflectionCaptureRecord, TextureRecord, VirtualMeshRecord, VirtualObjectRecord,
+    WaterHitboxRecord, WaterVolumeRecord,
 };
 
 /// High-level scene management with persistent GPU-driven state.
@@ -64,6 +65,11 @@ pub struct Scene {
     pub(in crate::scene) materials: SparsePool<MaterialRecord, MaterialId>,
 
     /// Light pool (dense array)
+    /// Decal pool (dense array)
+    pub(in crate::scene) decals: DenseArena<DecalRecord, DecalId>,
+    pub(in crate::scene) decals_dirty: bool,
+    pub(in crate::scene) decals_dirty_range: Option<(usize, usize)>,
+
     pub(in crate::scene) lights: DenseArena<LightRecord, LightId>,
 
     /// Object pool (dense array)
@@ -290,6 +296,9 @@ impl Scene {
             placeholder_view,
             placeholder_sampler,
             materials: SparsePool::new(),
+            decals: DenseArena::new(),
+            decals_dirty: false,
+            decals_dirty_range: None,
             lights: DenseArena::new(),
             objects: DenseArena::new(),
             objects_dirty: true,             // rebuild on first flush
@@ -412,5 +421,64 @@ impl Scene {
 
     pub fn voxel_volume(&self, id: VoxelVolumeId) -> Option<&VoxelVolumeRecord> {
         self.voxel_volumes.get(id)
+    }
+
+    pub fn insert_decal(&mut self, decal: libhelio::GpuDecal) -> DecalId {
+        let (id, slot) = self.decals.insert(DecalRecord {
+            gpu: decal,
+            movability: libhelio::Movability::Movable,
+            user_tag: 0,
+        });
+        self.gpu_scene.decals.push(decal);
+        self.decals_dirty = true;
+        self.decals_dirty_range = match self.decals_dirty_range {
+            Some((start, end)) => Some((start.min(slot), end.max(slot + 1))),
+            None => Some((slot, slot + 1)),
+        };
+        id
+    }
+
+    pub fn insert_decal_with_tag(
+        &mut self,
+        decal: libhelio::GpuDecal,
+        user_tag: u64,
+        movability: Option<libhelio::Movability>,
+    ) -> DecalId {
+        let (id, slot) = self.decals.insert(DecalRecord {
+            gpu: decal,
+            movability: movability.unwrap_or(libhelio::Movability::Movable),
+            user_tag,
+        });
+        self.gpu_scene.decals.push(decal);
+        self.decals_dirty = true;
+        self.decals_dirty_range = match self.decals_dirty_range {
+            Some((start, end)) => Some((start.min(slot), end.max(slot + 1))),
+            None => Some((slot, slot + 1)),
+        };
+        id
+    }
+
+    pub fn remove_decal(&mut self, id: DecalId) -> bool {
+        let removed = self.decals.remove(id);
+        if removed.is_some() {
+            self.decals_dirty = true;
+            self.decals_dirty_range = None; // full rebuild on remove for simplicity
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn update_decal(&mut self, id: DecalId, decal: libhelio::GpuDecal) -> bool {
+        if let Some((slot, record)) = self.decals.get_mut_with_index(id) {
+            record.gpu = decal;
+            self.gpu_scene.decals.update(slot, decal);
+            return true;
+        }
+        false
+    }
+
+    pub fn decal_count(&self) -> usize {
+        self.decals.dense_len()
     }
 }
