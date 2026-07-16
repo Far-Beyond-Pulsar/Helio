@@ -6,11 +6,14 @@
 //! are deliberately separate promotion gates.
 
 mod config;
+mod extraction;
 mod gpu;
 mod table;
 
 pub use config::*;
+pub use extraction::*;
 pub use gpu::*;
 pub use table::*;
 
+pub const EXTRACTION_LAYOUT_WGSL: &str = include_str!("extraction_layout.wgsl");
 pub const RESIDENCY_WGSL: &str = include_str!("residency.wgsl");

@@ -1,6 +1,7 @@
 use helio_pass_planetary_voxel::{
-    GpuLookupQuery, GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
-    RESIDENCY_WGSL,
+    GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest, GpuLookupQuery,
+    GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
+    GpuTerrainMeshlet, GpuTerrainVertex, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
@@ -10,7 +11,11 @@ use wgpu::naga::{
 };
 
 fn wgsl_struct(name: &str) -> (u32, Vec<(String, u32)>) {
-    let module = wgsl::parse_str(RESIDENCY_WGSL)
+    wgsl_struct_in(RESIDENCY_WGSL, name)
+}
+
+fn wgsl_struct_in(source: &str, name: &str) -> (u32, Vec<(String, u32)>) {
+    let module = wgsl::parse_str(source)
         .unwrap_or_else(|error| panic!("planetary residency WGSL must parse: {error}"));
     Validator::new(ValidationFlags::all(), Capabilities::all())
         .validate(&module)
@@ -35,6 +40,115 @@ fn wgsl_struct(name: &str) -> (u32, Vec<(String, u32)>) {
             })
             .collect(),
     )
+}
+
+#[test]
+fn extraction_layout_parses_and_validates() {
+    let module = wgsl::parse_str(EXTRACTION_LAYOUT_WGSL).expect("extraction WGSL parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("extraction WGSL validates");
+}
+
+#[test]
+fn extraction_request_and_range_match_wgsl_exactly() {
+    assert_eq!(align_of::<GpuExtractionRequest>(), 16);
+    assert_eq!(size_of::<GpuExtractionRequest>(), 32);
+    assert_eq!(
+        wgsl_struct_in(EXTRACTION_LAYOUT_WGSL, "GpuExtractionRequest"),
+        (
+            32,
+            vec![
+                ("page_slot".into(), 0),
+                ("generation_low".into(), 4),
+                ("generation_high".into(), 8),
+                ("transition_mask".into(), 12),
+                ("algorithm".into(), 16),
+                ("dirty_microbricks_low".into(), 20),
+                ("dirty_microbricks_high".into(), 24),
+                ("_pad".into(), 28),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuExtractionRange>(), 16);
+    assert_eq!(size_of::<GpuExtractionRange>(), 32);
+    assert_eq!(
+        wgsl_struct_in(EXTRACTION_LAYOUT_WGSL, "GpuExtractionRange"),
+        (
+            32,
+            vec![
+                ("first_vertex".into(), 0),
+                ("vertex_count".into(), 4),
+                ("first_index".into(), 8),
+                ("index_count".into(), 12),
+                ("first_meshlet".into(), 16),
+                ("meshlet_count".into(), 20),
+                ("generation_low".into(), 24),
+                ("generation_high".into(), 28),
+            ],
+        )
+    );
+}
+
+#[test]
+fn extraction_outputs_and_counters_match_wgsl_exactly() {
+    assert_eq!(align_of::<GpuTerrainVertex>(), 16);
+    assert_eq!(size_of::<GpuTerrainVertex>(), 32);
+    assert_eq!(
+        wgsl_struct_in(EXTRACTION_LAYOUT_WGSL, "GpuTerrainVertex"),
+        (
+            32,
+            vec![
+                ("position".into(), 0),
+                ("material".into(), 12),
+                ("normal".into(), 16),
+                ("flags".into(), 28),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTerrainMeshlet>(), 16);
+    assert_eq!(size_of::<GpuTerrainMeshlet>(), 32);
+    assert_eq!(
+        wgsl_struct_in(EXTRACTION_LAYOUT_WGSL, "GpuTerrainMeshlet"),
+        (
+            32,
+            vec![
+                ("first_index".into(), 0),
+                ("index_count".into(), 4),
+                ("first_vertex".into(), 8),
+                ("vertex_count".into(), 12),
+                ("bounds_offset".into(), 16),
+                ("generation_low".into(), 20),
+                ("generation_high".into(), 24),
+                ("_pad".into(), 28),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuExtractionCounters>(), 16);
+    assert_eq!(size_of::<GpuExtractionCounters>(), 48);
+    assert_eq!(
+        wgsl_struct_in(EXTRACTION_LAYOUT_WGSL, "GpuExtractionCounters"),
+        (
+            48,
+            vec![
+                ("requests".into(), 0),
+                ("active_cells".into(), 4),
+                ("vertices".into(), 8),
+                ("indices".into(), 12),
+                ("meshlets".into(), 16),
+                ("completed".into(), 20),
+                ("stale_rejected".into(), 24),
+                ("overflowed".into(), 28),
+                ("vertex_overflow".into(), 32),
+                ("index_overflow".into(), 36),
+                ("meshlet_overflow".into(), 40),
+                ("_pad".into(), 44),
+            ],
+        )
+    );
 }
 
 #[test]
