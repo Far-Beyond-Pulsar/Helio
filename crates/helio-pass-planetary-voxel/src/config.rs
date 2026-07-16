@@ -130,7 +130,7 @@ impl PlanetaryVoxelGpuConfig {
         limits: &wgpu::Limits,
     ) -> Result<GpuAllocationPlan, GpuConfigError> {
         let page_bytes = PAGE_CELL_BYTES as u64;
-        let max_storage_bytes = limits.max_storage_buffer_binding_size as u64;
+        let max_storage_bytes = limits.max_storage_buffer_binding_size;
         let max_shard_bytes = limits.max_buffer_size.min(max_storage_bytes);
         let pages_per_shard = (max_shard_bytes / page_bytes).min(u64::from(u32::MAX));
         if pages_per_shard == 0 {
@@ -182,7 +182,7 @@ impl PlanetaryVoxelGpuConfig {
             }
         }
         let uniform_bytes = core::mem::size_of::<GpuResidencyUniform>() as u64;
-        if uniform_bytes > u64::from(limits.max_uniform_buffer_binding_size) {
+        if uniform_bytes > limits.max_uniform_buffer_binding_size {
             return Err(GpuConfigError::UniformBindingLimit {
                 requested: uniform_bytes,
                 maximum: limits.max_uniform_buffer_binding_size,
@@ -293,7 +293,7 @@ pub enum GpuConfigError {
         max_storage_bytes: u64,
     },
     #[error("residency uniform requests {requested} bytes; device binding limit is {maximum}")]
-    UniformBindingLimit { requested: u64, maximum: u32 },
+    UniformBindingLimit { requested: u64, maximum: u64 },
 }
 
 #[cfg(test)]
@@ -326,7 +326,7 @@ mod tests {
         let config = PlanetaryVoxelGpuConfig::new(4, 16, 8, 2, 8, 4).unwrap();
         let limits = wgpu::Limits {
             max_buffer_size: 2 * PAGE_CELL_BYTES as u64,
-            max_storage_buffer_binding_size: (2 * PAGE_CELL_BYTES) as u32,
+            max_storage_buffer_binding_size: (2 * PAGE_CELL_BYTES) as u64,
             ..wgpu::Limits::downlevel_defaults()
         };
         let plan = config.allocation_plan(&limits).unwrap();
@@ -341,7 +341,7 @@ mod tests {
         let config = PlanetaryVoxelGpuConfig::new(4, 16, 8, 2, 8, 4).unwrap();
         let limits = wgpu::Limits {
             max_buffer_size: PAGE_CELL_BYTES as u64,
-            max_storage_buffer_binding_size: PAGE_CELL_BYTES as u32,
+            max_storage_buffer_binding_size: PAGE_CELL_BYTES as u64,
             max_storage_buffers_per_shader_stage: 4,
             ..wgpu::Limits::downlevel_defaults()
         };

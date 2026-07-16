@@ -15,7 +15,9 @@ use wgpu::util::DeviceExt;
 #[test]
 fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::default());
+        let instance = wgpu::Instance::new(
+            wgpu::InstanceDescriptor::new_without_display_handle(),
+        );
         let adapter = request_test_adapter(&instance).await;
         let Some(adapter) = adapter else {
             eprintln!(
@@ -352,6 +354,7 @@ async fn request_test_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter,
+                apply_limit_buckets: false,
             })
             .await
         {
@@ -463,7 +466,9 @@ fn read_buffer_range<T: Pod + Copy>(
     rx.recv()
         .expect("GPU readback callback must run")
         .expect("GPU readback mapping must succeed");
-    let mapped = slice.get_mapped_range();
+    let mapped = slice
+        .get_mapped_range()
+        .expect("GPU readback range must be available");
     let values = bytemuck::cast_slice::<u8, T>(&mapped).to_vec();
     drop(mapped);
     readback.unmap();
