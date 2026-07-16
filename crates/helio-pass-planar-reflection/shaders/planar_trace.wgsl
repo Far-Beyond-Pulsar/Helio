@@ -127,11 +127,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let world_pos = helio_world_from_depth(camera.view_proj_inv, uv, depth_01);
         let to_surface = world_pos - planar.plane_pos.xyz;
         // Build a local 2D frame on the plane.
-        let tangent = normalize(
-            abs(planar.plane_normal.x) > 0.99
-                ? cross(planar.plane_normal.xyz, vec3<f32>(0.0, 0.0, 1.0))
-                : cross(planar.plane_normal.xyz, vec3<f32>(0.0, 1.0, 0.0))
-        );
+        let tangent = normalize(select(
+            cross(planar.plane_normal.xyz, vec3<f32>(0.0, 1.0, 0.0)),
+            cross(planar.plane_normal.xyz, vec3<f32>(0.0, 0.0, 1.0)),
+            abs(planar.plane_normal.x) > 0.99,
+        ));
         let bitangent = cross(planar.plane_normal.xyz, tangent);
         let proj_x = abs(dot(to_surface, tangent));
         let proj_y = abs(dot(to_surface, bitangent));
