@@ -881,8 +881,7 @@ fn route_named_texture<'a>(name: &str, view: &'a wgpu::TextureView, frame: &mut 
         "rc_cascades" => frame.rc_view.write(view, "Graph"),
         "shadow_atlas" => frame.shadow_atlas.write(view, "Graph"),
         "static_shadow_atlas" => frame.static_shadow_atlas.write(view, "Graph"),
-        "ssr_accum" => frame.ssr_accum.write(view, "Graph"),
-        "ssr_history" => frame.ssr_history.write(view, "Graph"),
+        "ssr_trace" => frame.ssr_trace.write(view, "Graph"),
         "gbuffer_albedo" | "gbuffer_normal" | "gbuffer_orm" | "gbuffer_emissive" => {}
         _ => {}
     }

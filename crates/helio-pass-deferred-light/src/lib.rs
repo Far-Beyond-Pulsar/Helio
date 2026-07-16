@@ -536,7 +536,7 @@ impl RenderPass for DeferredLightPass {
             "rc_view",
             "baked_lightmap",
             "baked_lightmap_sampler",
-            "ssr_accum",
+            "ssr_trace",
         ]
     }
 
@@ -688,8 +688,8 @@ impl RenderPass for DeferredLightPass {
         let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
         let lightmap_sampler = ctx.resources.baked_lightmap_sampler.get().unwrap_or(&self.fallback_lightmap_sampler);
 
-        // SSR accum texture from SsrPass
-        let ssr_view = ctx.resources.ssr_accum.get().unwrap_or(&self.fallback_ssr_view);
+        // SSR texture from SsrPass
+        let ssr_view = ctx.resources.ssr_trace.get().unwrap_or(&self.fallback_ssr_view);
 
         let scene_key = (
             ctx.scene.lights as *const _ as usize,

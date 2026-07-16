@@ -378,6 +378,7 @@ pub mod error;
 pub mod graph;
 pub mod profiling;
 pub mod scene;
+pub mod shader;
 pub mod traits;
 pub mod upload;
 

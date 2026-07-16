@@ -65,10 +65,14 @@ fn hash13(p3: vec3<f32>) -> f32 {
 }
 
 fn reconstruct_world_pos(pixel_pos: vec2<u32>, depth: f32) -> vec3<f32> {
+    // Depth goes in as-is. wgpu NDC z is [0,1] (the engine builds its projection
+    // with glam Mat4::perspective_rh), so the OpenGL-style `depth * 2.0 - 1.0`
+    // remap this used to do pushed every reconstructed point toward the far
+    // plane. hlfs_shade.wgsl already passes depth through unmodified.
     let ndc = vec4<f32>(
         (f32(pixel_pos.x) + 0.5) / f32(globals.screen_width) * 2.0 - 1.0,
         1.0 - (f32(pixel_pos.y) + 0.5) / f32(globals.screen_height) * 2.0,
-        depth * 2.0 - 1.0,
+        depth,
         1.0,
     );
     let world_h = camera.view_proj_inv * ndc;

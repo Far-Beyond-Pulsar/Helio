@@ -134,7 +134,7 @@ struct ShadowConfig {
 @group(2) @binding(12) var baked_lightmap: texture_2d<f32>;
 @group(2) @binding(13) var baked_lightmap_sampler: sampler;
 // SSR accum texture (Rgba16Float, half resolution) — screen-space reflections
-@group(2) @binding(14) var ssr_accum_tex: texture_2d<f32>;
+@group(2) @binding(14) var ssr_tex: texture_2d<f32>;
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -855,9 +855,9 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let env_brdf    = env_brdf_approx(NdV, roughness);
     var spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
 
-    // SSR composite — blend screen-space reflections over cubemap fallback
-    let ssr_coord    = vec2<i32>(pix / 2);
-    let ssr_hit      = textureLoad(ssr_accum_tex, ssr_coord, 0);
+    // SSR composite — blend screen-space reflections over cubemap fallback.
+    // Full resolution, so this is a 1:1 read (it used to be a half-res pix / 2).
+    let ssr_hit      = textureLoad(ssr_tex, pix, 0);
     if ssr_hit.a > 0.0 {
         let ssr_blend = 1.0 - smoothstep(0.4, 0.7, roughness);
         let ssr_sample = ssr_hit.rgb * F_ibl;

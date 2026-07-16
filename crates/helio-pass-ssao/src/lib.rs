@@ -80,10 +80,11 @@ impl SsaoPass {
         gbuf_emissive: &wgpu::TextureView,
         gbuf_depth: &wgpu::TextureView,
     ) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("SSAO Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/ssao.wgsl").into()),
-        });
+        let shader = helio_core::shader::module(
+            device,
+            "SSAO Shader",
+            include_str!("../shaders/ssao.wgsl"),
+        );
 
         // ── Buffers ────────────────────────────────────────────────────────────
 

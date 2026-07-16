@@ -320,14 +320,10 @@ pub struct FrameResources<'a> {
     /// Number of reflection captures in the buffer
     pub reflection_capture_count: u32,
 
-    /// SSR accum texture (Rgba16Float, half resolution) — final SSR output.
+    /// SSR texture (Rgba16Float, full resolution) — SSR output.
     /// RGB = reflected colour, A = hit confidence (0 = no hit, 1 = confident).
     /// Written by SsrPass, read by DeferredLightPass.
-    pub ssr_accum: Tracked<&'a wgpu::TextureView>,
-
-    /// SSR history texture (Rgba16Float, half resolution) — previous frame's SSR
-    /// output for temporal reprojection. Written by SsrPass, read by SsrPass next frame.
-    pub ssr_history: Tracked<&'a wgpu::TextureView>,
+    pub ssr_trace: Tracked<&'a wgpu::TextureView>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -437,8 +433,7 @@ impl<'a> FrameResources<'a> {
             postprocess_uniforms: Tracked::empty(),
             reflection_captures: Tracked::empty(),
             reflection_capture_count: 0,
-            ssr_accum: Tracked::empty(),
-            ssr_history: Tracked::empty(),
+            ssr_trace: Tracked::empty(),
         }
     }
 
@@ -498,8 +493,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(corona_emitters);
             reset_field!(postprocess_uniforms);
             reset_field!(reflection_captures);
-            reset_field!(ssr_accum);
-            reset_field!(ssr_history);
+            reset_field!(ssr_trace);
         }
     }
 }

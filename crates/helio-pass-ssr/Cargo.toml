@@ -10,8 +10,3 @@ helio-core = { workspace = true }
 libhelio = { workspace = true }
 wgpu = { workspace = true }
 bytemuck = { workspace = true, features = ["derive"] }
-
-[dev-dependencies]
-# Matches the naga that wgpu 30 uses internally, so the test validates the
-# shaders exactly as create_shader_module would at runtime.
-naga = { version = "30.0.0", features = ["wgsl-in"] }
