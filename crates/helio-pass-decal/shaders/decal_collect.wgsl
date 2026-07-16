@@ -66,6 +66,23 @@ fn blend_nrm(back: vec3<f32>, front: vec3<f32>, a: f32) -> vec3<f32> {
     return normalize(mix(back, front, a));
 }
 
+/// Rotate a decal tangent-space normal into world space.
+///
+/// `transform` maps world -> decal space, so the *rows* of its upper 3x3 are the
+/// decal's axes in world space (row i dotted with a world position gives decal
+/// coordinate i). Rotating by the transpose therefore takes decal space back to
+/// world. `m[c][r]` is column c, row r, hence the indexing below.
+///
+/// The projection axis (row 2) is deliberately not used to *replace* the surface
+/// normal: its sign depends on how the caller built the transform, and a decal
+/// with no normal map should leave the shading normal alone regardless.
+fn decal_tangent_to_world(m: mat4x4<f32>, n: vec3<f32>) -> vec3<f32> {
+    let tx = normalize(vec3<f32>(m[0][0], m[1][0], m[2][0]));
+    let ty = normalize(vec3<f32>(m[0][1], m[1][1], m[2][1]));
+    let tz = normalize(vec3<f32>(m[0][2], m[1][2], m[2][2]));
+    return normalize(n.x * tx + n.y * ty + n.z * tz);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let pxl = vec2<i32>(id.xy);
@@ -111,15 +128,30 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
 
         let wn = normalize(en.xyz);
         let dc = vec4<f32>(decal_albedo.rgb * tint.rgb, opa);
-        let fnrm = select(vec3<f32>(0.0, 0.0, 1.0), wn, d.normal_adapt == 1u);
+
+        // Only a decal that carries a normal map may perturb the shading normal.
+        // Without one there is nothing to say about the surface's orientation, so
+        // the G-buffer normal is left exactly as the geometry pass wrote it.
+        let has_normal_map = d.normal_texture_index != NO_TEXTURE;
+        var fnrm = wn;
+        if has_normal_map {
+            let tn = sample_decal_texture(d.normal_texture_index, duvc).xyz * 2.0 - 1.0;
+            // normal_adapt re-anchors the perturbation to the surface the decal
+            // landed on, rather than the decal's own projection frame.
+            fnrm = select(
+                decal_tangent_to_world(d.transform, tn),
+                blend_nrm(wn, decal_tangent_to_world(d.transform, tn), 0.5),
+                d.normal_adapt == 1u,
+            );
+        }
 
         if d.decal_type == DT_AN || d.decal_type == DT_AL {
             if d.blend_mode == BT || d.blend_mode == BA { ra = blend_over(ra, dc); }
             else if d.blend_mode == BADD { ra = blend_add(ra, dc); }
             else if d.blend_mode == BMUL { ra = blend_mul(ra, dc); }
-            rn = vec4<f32>(blend_nrm(wn, fnrm, opa), en.a);
+            if has_normal_map { rn = vec4<f32>(blend_nrm(wn, fnrm, opa), en.a); }
         }
-        if d.decal_type == DT_NO {
+        if d.decal_type == DT_NO && has_normal_map {
             rn = vec4<f32>(blend_nrm(wn, fnrm, opa), en.a);
         }
         if d.decal_type == DT_EM || d.decal_type == DT_AL {
