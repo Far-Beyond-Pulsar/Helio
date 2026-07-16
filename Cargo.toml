@@ -18,6 +18,10 @@ members = [
 ]
 exclude = [
     "vendor/nebula",
+    # Bake output, not a crate. Lands here when a demo is run with `crates/` as
+    # the working directory, and the `crates/*` member glob would otherwise try
+    # to read it as a workspace member and fail.
+    "crates/bake_cache",
 ]
 resolver = "2"
 

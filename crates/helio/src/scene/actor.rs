@@ -907,7 +907,10 @@ impl ReflectionCaptureDescriptor {
         }
     }
 
-    /// Re-render this capture at runtime instead of baking it offline.
+    /// Mark this capture as realtime rather than baked.
+    ///
+    /// Inert today — see [`ReflectionCaptureMobility::Dynamic`] for what this
+    /// is intended to mean and why it contributes nothing yet.
     pub fn dynamic(mut self) -> Self {
         self.mobility = ReflectionCaptureMobility::Dynamic;
         self

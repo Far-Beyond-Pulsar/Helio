@@ -22,7 +22,22 @@ pub enum ReflectionCaptureShape {
 pub enum ReflectionCaptureMobility {
     /// Pre-filtered offline by the probe baker. Never re-rendered at runtime.
     Static = 0,
-    /// Re-rendered and re-filtered at runtime on a refresh budget.
+    /// Re-rendered at runtime rather than baked.
+    ///
+    /// TODO: not implemented — dynamic captures are inert. They are never
+    /// assigned a cubemap layer, so `cubemap_index` stays -1 and the shader
+    /// skips them. Do not hand one a layer without also adding the runtime
+    /// array and a `mobility` branch to the sampling code: layer indices are
+    /// per-array, so a dynamic capture holding an index today would read the
+    /// *baked* array and silently show the wrong probe.
+    ///
+    /// Intended semantics when implemented: a dynamic capture scopes realtime
+    /// lighting — it bounds where whatever realtime lighting is currently
+    /// active takes effect, and which objects that lighting considers. It is
+    /// deliberately not tied to one lighting system. A scene with no dynamic
+    /// captures applies realtime lighting everywhere. Spatial partitioning
+    /// applies either way; the capture set bounds the work rather than
+    /// replacing the partition.
     Dynamic = 1,
 }
 
