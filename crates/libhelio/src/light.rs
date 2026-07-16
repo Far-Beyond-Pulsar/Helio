@@ -113,9 +113,9 @@ impl Default for GpuLight {
             // 0.0 would make `god_rays_enabled = 1` render nothing and look broken.
             god_rays_enabled: 0,
             god_rays_density: 1.0,
-            god_rays_weight: 1.0,
+            god_rays_weight: 0.6,
             god_rays_decay: 1.0,
-            god_rays_exposure: 1.0,
+            god_rays_exposure: 0.7,
             _pad2: [0; 3],
         }
     }

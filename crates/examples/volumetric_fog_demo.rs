@@ -313,7 +313,7 @@ impl ApplicationHandler for App {
                     unbound: false,
                     settings: PostProcessSettings {
                         fog_enabled: true,
-                        fog_density: 0.30,
+                        fog_density: 0.08,
                         fog_color: [0.75, 0.80, 0.95],
                         fog_scattering_anisotropy: 0.7,
                         ..Default::default()
@@ -342,7 +342,7 @@ impl ApplicationHandler for App {
             fog_enabled: true,
             shafts_enabled: true,
             fog_mode: FogMode::Uniform,
-            fog_density: 0.06,
+            fog_density: 0.015,
             fog_anisotropy: 0.6,
         });
     }

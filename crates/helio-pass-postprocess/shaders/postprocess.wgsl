@@ -677,6 +677,9 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     //
     // fog.rgb is already premultiplied by the transmittance in front of it, so this
     // is a straight over: attenuate the scene, add what scattered in.
+    // The min/max clamps ensure the fog never fully hides the background and never
+    // clips — otherwise dense fog + bright sun produces values > 1.0 that blow out
+    // every surface to solid white.
     if postprocess.fog_enabled != 0u {
         let fog_d = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
         // Slices are planes of constant view depth, so convert the buffer value
@@ -688,7 +691,9 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
             1.0,
         );
         let fog = textureSampleLevel(fog_input, linear_samp, vec3<f32>(uv, slice), 0.0);
-        color = color * fog.a + fog.rgb;
+        // Cap the fog contribution so the background is always at least 5% visible
+        // and the inscattering never clips — a soft failure mode instead of blowout.
+        color = color * max(fog.a, 0.05) + min(fog.rgb, vec3<f32>(0.95));
     }
 
     //%P0
