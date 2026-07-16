@@ -7,11 +7,13 @@
 
 mod config;
 mod extraction;
+mod fixture;
 mod gpu;
 mod table;
 
 pub use config::*;
 pub use extraction::*;
+pub use fixture::*;
 pub use gpu::*;
 pub use table::*;
 
