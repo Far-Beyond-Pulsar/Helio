@@ -66,21 +66,31 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let cur_conf = current.a;
 
     var output = current;
+    let depth = textureLoad(gbuf_depth, vec2<i32>(gid.xy * 2u), 0);
 
-    if cur_conf > 0.0 {
-        let depth = textureLoad(gbuf_depth, vec2<i32>(gid.xy * 2u), 0);
+    // Reprojection runs even where this frame's ray missed. The trace is a
+    // dithered point sample: a miss is a gap in sampling, not proof there is no
+    // reflection. Gating on `cur_conf > 0` made every miss punch a black hole
+    // that history was never allowed to fill, which is what kept the result
+    // sparse no matter how long the camera sat still.
+    if params.frame_index > 0u && depth < 1.0 {
+        let world_pos = world_from_depth(full_uv, depth);
 
-        if depth < 1.0 {
-            let world_pos = world_from_depth(full_uv, depth);
+        // Reproject to previous frame
+        let prev_clip = camera.prev_view_proj * vec4<f32>(world_pos, 1.0);
+        let prev_uv = ndc_to_uv(prev_clip.xy / prev_clip.w);
 
-            // Reproject to previous frame
-            let prev_clip = camera.prev_view_proj * vec4<f32>(world_pos, 1.0);
-            let prev_uv = ndc_to_uv(prev_clip.xy / prev_clip.w);
+        if prev_clip.w > 0.0 && all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0)) {
+            let history = textureSampleLevel(ssr_history, linear_sampler, prev_uv, 0.0);
 
-            if prev_clip.w > 0.0 && all(prev_uv >= vec2<f32>(0.0)) && all(prev_uv <= vec2<f32>(1.0)) {
-                // AABB neighborhood clamp: compute min/max of 3x3 neighbourhood
-                var neighbourhood_min = vec3<f32>(1.0e6);
-                var neighbourhood_max = vec3<f32>(-1.0e6);
+            if history.a > 0.0 {
+                // AABB clamp over the 3x3 neighbourhood, built only from pixels
+                // that actually hit. Including misses would stretch the box down
+                // to black and make the clamp a no-op — which is exactly what
+                // lets stale history ghost through.
+                var nmin = vec3<f32>(1.0e6);
+                var nmax = vec3<f32>(-1.0e6);
+                var found = false;
 
                 for (var dy = -1; dy <= 1; dy++) {
                     for (var dx = -1; dx <= 1; dx++) {
@@ -89,35 +99,38 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
                             vec2<i32>(0),
                             vec2<i32>(half_dims) - 1
                         );
-                        let n = textureLoad(ssr_current, c, 0).rgb;
-                        neighbourhood_min = min(neighbourhood_min, n);
-                        neighbourhood_max = max(neighbourhood_max, n);
+                        let n = textureLoad(ssr_current, c, 0);
+                        if n.a > 0.0 {
+                            nmin = min(nmin, n.rgb);
+                            nmax = max(nmax, n.rgb);
+                            found = true;
+                        }
                     }
                 }
 
-                let history = textureSampleLevel(ssr_history, linear_sampler, prev_uv, 0.0);
-
-                if history.a > 0.0 {
-                    // Clamp history to neighbourhood AABB (anti-ghosting)
-                    let clamped_history = clamp(history.rgb, neighbourhood_min, neighbourhood_max);
-
-                    let luma_diff = abs(luma(cur_color) - luma(clamped_history));
-
-                    if luma_diff < REJECT_LUMA {
-                        let blend = HISTORY_BLEND * history.a;
-                        let blended = mix(cur_color, clamped_history, vec3<f32>(blend));
-                        // Confidence is the current frame's alone. Accumulating it
-                        // across frames drove alpha to 1 everywhere history existed,
-                        // so the composite trusted stale reflections completely.
-                        output = vec4<f32>(blended, cur_conf);
+                var hist_color = history.rgb;
+                var accept = true;
+                if found {
+                    hist_color = clamp(history.rgb, nmin, nmax);
+                    // Luma rejection only applies where there is a current-frame
+                    // signal to compare against. Comparing a miss (luma 0) to
+                    // bright history always "rejected", defeating accumulation.
+                    if cur_conf > 0.0 {
+                        accept = abs(luma(cur_color) - luma(hist_color)) < REJECT_LUMA;
                     }
+                }
+
+                if accept {
+                    // Blend colour toward history, and confidence with it, so a
+                    // pixel that hits intermittently converges on a steady partial
+                    // confidence rather than strobing between hit and black.
+                    let blend = HISTORY_BLEND;
+                    let blended = mix(cur_color, hist_color, blend);
+                    let conf = mix(cur_conf, history.a, blend);
+                    output = vec4<f32>(blended, conf);
                 }
             }
         }
-    }
-
-    if params.frame_index == 0u {
-        output = vec4<f32>(output.rgb, cur_conf);
     }
 
     textureStore(ssr_output, vec2<i32>(gid.xy), output);

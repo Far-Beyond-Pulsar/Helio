@@ -38,14 +38,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let full_coord = vec2<i32>(gid.xy * 2u);
 
     let center_ssr = textureLoad(ssr_input, vec2<i32>(gid.xy), 0);
-    if center_ssr.a <= 0.0 {
-        textureStore(ssr_output, vec2<i32>(gid.xy), center_ssr);
+    let center_depth = textureLoad(gbuf_depth, full_coord, 0);
+
+    // Sky has no surface to reflect off.
+    if center_depth >= 1.0 {
+        textureStore(ssr_output, vec2<i32>(gid.xy), vec4<f32>(0.0));
         return;
     }
 
+    // A missed pixel is NOT skipped: the trace is a dithered point sample, so
+    // misses are gaps in sampling rather than evidence of no reflection. This
+    // kernel is a reconstruction filter — it pulls colour and confidence from
+    // neighbours that did hit, which is what turns sparse hits into a surface.
+
     // G-buffer stores world normals raw in Rgba16Float — no unorm decode.
     let center_normal = normalize(textureLoad(gbuf_normal, full_coord, 0).xyz);
-    let center_depth = textureLoad(gbuf_depth, full_coord, 0);
     let near = camera.position_near.w;
     let far = camera.forward_far.w;
     let center_linear = linearize(center_depth, near, far);
@@ -59,6 +66,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     var total_weight = 0.0;
     var weighted_color = vec3<f32>(0.0);
+    var weighted_alpha = 0.0;
 
     for (var dy = -KERNEL_HALF; dy <= KERNEL_HALF; dy++) {
         for (var dx = -KERNEL_HALF; dx <= KERNEL_HALF; dx++) {
@@ -69,7 +77,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             }
 
             let sample_ssr = textureLoad(ssr_input, sample_coord, 0);
-            // Misses carry no colour — averaging them in bleeds black into hits.
+            // Misses contribute nothing rather than averaging black in: a miss
+            // carries no colour, so it must lower confidence, not darken it.
             if sample_ssr.a <= 0.0 { continue; }
 
             let sample_full = sample_coord * 2;
@@ -88,9 +97,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             let weight = spatial * depth_weight * normal_weight;
             total_weight += weight;
             weighted_color += sample_ssr.rgb * weight;
+            weighted_alpha += sample_ssr.a * weight;
         }
     }
 
-    let result = select(center_ssr.rgb, weighted_color / total_weight, total_weight > 0.0);
-    textureStore(ssr_output, vec2<i32>(gid.xy), vec4<f32>(result, center_ssr.a));
+    if total_weight <= 0.0 {
+        textureStore(ssr_output, vec2<i32>(gid.xy), vec4<f32>(0.0));
+        return;
+    }
+
+    // Colour is normalised over contributing (hit) neighbours only, so it stays
+    // full-intensity. Confidence is normalised over the *full* kernel weight, so
+    // a pixel whose neighbourhood mostly missed ends up genuinely less confident
+    // and the composite leans on the cubemap instead.
+    var kernel_weight = 0.0;
+    for (var dy = -KERNEL_HALF; dy <= KERNEL_HALF; dy++) {
+        for (var dx = -KERNEL_HALF; dx <= KERNEL_HALF; dx++) {
+            kernel_weight += exp(-f32(dx * dx + dy * dy) / (2.0 * sigma * sigma));
+        }
+    }
+
+    let color = weighted_color / total_weight;
+    let alpha = clamp(weighted_alpha / max(kernel_weight, 0.001), 0.0, 1.0);
+    textureStore(ssr_output, vec2<i32>(gid.xy), vec4<f32>(color, alpha));
 }

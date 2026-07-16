@@ -32,11 +32,12 @@ struct Camera {
 @group(1) @binding(4) var linear_sampler:       sampler;
 @group(1) @binding(5) var ssr_output:           texture_storage_2d<rgba16float, write>;
 
-const MAX_STEPS:     u32 = 64u;
+const MAX_STEPS:     u32 = 32u;
 const BINARY_STEPS:  u32 = 6u;
 const MAX_RAY_DIST:  f32 = 100.0;
-const PIXEL_STRIDE:  f32 = 2.0;   // half-res pixels advanced per coarse step
+const PIXEL_STRIDE:  f32 = 4.0;   // half-res pixels advanced per coarse step
 const THICKNESS:     f32 = 0.25;  // surface thickness as a fraction of view depth
+const DEPTH_BIAS:    f32 = 0.002; // relative, keeps grazing rays off their own surface
 const FADE_START:    f32 = 0.6;   // ray-length fraction where confidence starts to drop
 
 /// wgpu NDC: y+ is up, but UV y+ is down — the axes disagree, hence the flip.
@@ -155,9 +156,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             textureLoad(gbuf_depth, vec2<i32>(uv * vec2<f32>(full_dims)), 0)
         );
 
-        // Thickness scales with depth: a fixed world-space slab is far too thin
-        // up close and far too thick in the distance.
-        if ray_depth > scene_depth && ray_depth < scene_depth * (1.0 + THICKNESS) {
+        // Test only for the crossing here, not for the thickness window. At a
+        // multi-pixel stride the ray leaps clean over a thin window, so checking
+        // it at coarse rate drops most real hits. Thickness is validated once,
+        // after the binary search has pinned the crossing down.
+        if ray_depth > scene_depth * (1.0 + DEPTH_BIAS) {
             hit = true;
             hit_t = t;
             break;
@@ -191,6 +194,21 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let final_t = hi;
     let hit_uv = mix(uv0, uv1, final_t);
+
+    // ── Thickness validation ────────────────────────────────────────────────
+    // The crossing is real, but the ray may have passed *behind* the surface
+    // rather than into it — the depth buffer has no back face, so a ray that
+    // dives behind a thin pillar would otherwise reflect it as if it were solid.
+    // Scaled by depth: a fixed world-space slab is far too thin up close and far
+    // too thick in the distance.
+    let final_ray_depth = -(mix(z0, z1, final_t) / mix(k0, k1, final_t));
+    let final_scene_depth = linearize_depth(
+        textureLoad(gbuf_depth, vec2<i32>(hit_uv * vec2<f32>(full_dims)), 0)
+    );
+    if final_ray_depth > final_scene_depth * (1.0 + THICKNESS) {
+        textureStore(ssr_output, vec2<i32>(gid.xy), vec4<f32>(0.0));
+        return;
+    }
 
     // ── Confidence ──────────────────────────────────────────────────────────
     // Per-axis border fade on the *hit* — a radial fade from the source pixel
