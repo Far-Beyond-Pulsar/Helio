@@ -34,6 +34,7 @@ helio-pass-ssr = { path = "../helio-pass-ssr" }
 helio-pass-sky = { path = "../helio-pass-sky" }
 helio-pass-sky-lut = { path = "../helio-pass-sky-lut" }
 helio-pass-taa = { workspace = true }
+helio-pass-volumetric-fog = { workspace = true }
 helio-pass-transparent = { path = "../helio-pass-transparent" }
 helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "../helio-pass-water-sim" }

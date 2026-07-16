@@ -83,3 +83,117 @@ fn helio_view_depth(depth: f32, near: f32, far: f32) -> f32 {
 fn helio_gbuffer_normal(raw: vec3<f32>) -> vec3<f32> {
     return normalize(raw);
 }
+
+// ── Shadows ─────────────────────────────────────────────────────────────────
+// The *math* of shadow lookup, shared; the texture sample itself stays in the
+// consumer. WGSL cannot take a storage-array pointer as a plain function
+// parameter, so a full `shadow_factor()` here would have to hard-code the atlas
+// binding — and the whole point of the prelude is that group/binding stays the
+// caller's business. Cascade selection and projection are the parts that
+// actually drifted, and they are pure functions.
+
+/// Which cascade(s) a view distance falls in, and how much to blend between them.
+struct HelioCsmSelection {
+    /// Primary cascade index (0..3).
+    cascade_a: u32,
+    /// Cascade to blend toward; equals `cascade_a` outside a blend zone.
+    cascade_b: u32,
+    /// 0 = use `cascade_a` alone, >0 = mix toward `cascade_b`.
+    blend: f32,
+}
+
+/// Fraction of a split distance spent cross-fading between adjacent cascades.
+/// Without it, a cascade boundary is a hard line across the floor.
+const HELIO_CSM_BLEND_ZONE: f32 = 0.1;
+
+/// Pick CSM cascades for a view distance.
+///
+/// `splits` is `Globals.csm_splits`: xyz are the three cascade boundaries
+/// (cascade 3 runs from splits.z to the far plane). `view_dist` is the distance
+/// from the camera to the shaded point, not its depth-buffer value.
+fn helio_csm_select(view_dist: f32, splits: vec4<f32>) -> HelioCsmSelection {
+    var s: HelioCsmSelection;
+    s.cascade_a = 3u;
+    s.cascade_b = 3u;
+    s.blend = 0.0;
+
+    let half_zone = HELIO_CSM_BLEND_ZONE * 0.5;
+
+    if view_dist < splits.x * (1.0 - half_zone) {
+        s.cascade_a = 0u;
+    } else if view_dist < splits.x * (1.0 + half_zone) {
+        s.cascade_a = 0u;
+        s.cascade_b = 1u;
+        s.blend = smoothstep(splits.x * (1.0 - half_zone), splits.x * (1.0 + half_zone), view_dist);
+    } else if view_dist < splits.y * (1.0 - half_zone) {
+        s.cascade_a = 1u;
+    } else if view_dist < splits.y * (1.0 + half_zone) {
+        s.cascade_a = 1u;
+        s.cascade_b = 2u;
+        s.blend = smoothstep(splits.y * (1.0 - half_zone), splits.y * (1.0 + half_zone), view_dist);
+    } else if view_dist < splits.z * (1.0 - half_zone) {
+        s.cascade_a = 2u;
+    } else if view_dist < splits.z * (1.0 + half_zone) {
+        s.cascade_a = 2u;
+        s.cascade_b = 3u;
+        s.blend = smoothstep(splits.z * (1.0 - half_zone), splits.z * (1.0 + half_zone), view_dist);
+    }
+
+    return s;
+}
+
+/// A world position projected into a shadow map.
+struct HelioShadowProj {
+    /// Atlas UV (y down), only meaningful when `valid`.
+    uv: vec2<f32>,
+    /// [0,1] depth to compare against, only meaningful when `valid`.
+    depth: f32,
+    /// False when the point is behind the light or outside the map — callers
+    /// must treat that as *lit*, not shadowed, or geometry outside the cascade
+    /// goes black.
+    valid: bool,
+}
+
+/// Project a world position into a shadow map's UV + depth.
+///
+/// `light_view_proj` is `shadow_matrices[layer].mat`. The y-flip goes through
+/// `helio_ndc_to_uv` for the same reason it does everywhere else — shadow UV is
+/// framebuffer-oriented (y down) while NDC is y up.
+fn helio_shadow_project(light_view_proj: mat4x4<f32>, world_pos: vec3<f32>) -> HelioShadowProj {
+    var s: HelioShadowProj;
+    s.uv = vec2<f32>(0.0);
+    s.depth = 0.0;
+    s.valid = false;
+
+    let clip = light_view_proj * vec4<f32>(world_pos, 1.0);
+    // Behind the light's near plane: the perspective divide would mirror the
+    // point back into frame and shadow it against unrelated depths.
+    if clip.w <= 0.0 { return s; }
+
+    let ndc = clip.xyz / clip.w;
+    let uv = helio_ndc_to_uv(ndc.xy);
+    if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) || ndc.z < 0.0 || ndc.z > 1.0 {
+        return s;
+    }
+
+    s.uv = uv;
+    s.depth = ndc.z;
+    s.valid = true;
+    return s;
+}
+
+// ── Volumetric scattering ───────────────────────────────────────────────────
+
+const HELIO_PI: f32 = 3.14159265359;
+
+/// Henyey-Greenstein phase function.
+///
+/// `cos_theta` is `dot(ray_dir, dir_to_light)` — 1.0 when looking straight down
+/// the light's path toward it. `g` in (-1, 1): 0 isotropic, >0 forward-scattering
+/// (the bright halo around a low sun), <0 back-scattering. |g| = 1 is a
+/// singularity — the caller is expected to have clamped.
+fn helio_hg_phase(cos_theta: f32, g: f32) -> f32 {
+    let g2 = g * g;
+    let denom = 1.0 + g2 - 2.0 * g * cos_theta;
+    return (1.0 - g2) / (4.0 * HELIO_PI * pow(max(denom, 1e-4), 1.5));
+}

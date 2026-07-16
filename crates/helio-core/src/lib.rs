@@ -370,6 +370,7 @@
 //! - [`PassContext`] - Zero-copy context passed to `execute()`
 //! - [`Profiler`] - Automatic CPU/GPU profiling system
 
+pub mod acceleration;
 pub mod actor;
 pub mod component;
 pub mod context;
@@ -390,6 +391,7 @@ pub use libhelio::{
 
 pub use libhelio::sky::{SkyContext, SkyUniforms};
 // Re-export managers
+pub use crate::acceleration::{BlasManager, TlasInstanceInput, TlasManager};
 pub use crate::scene::managers::*;
 // Re-export core types
 pub use actor::Actor;

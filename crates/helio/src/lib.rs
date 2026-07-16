@@ -40,7 +40,7 @@ pub use mesh::{MeshBuffers, MeshSlice, MeshUpload, PackedVertex, SectionedMeshUp
 pub use picking::{PickHit, ScenePicker};
 pub use quark_commands::{register_helio_commands, HelioAction, HelioCommandBridge};
 pub use renderer::{
-    required_wgpu_features, required_wgpu_limits, DebugCameraUniform, DebugDrawPass,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, DebugCameraUniform, DebugDrawPass,
     DebugDrawState, GiConfig, GraphRebuilder, PerfOverlayMode, Renderer, RendererConfig,
 };
 pub use scene::{

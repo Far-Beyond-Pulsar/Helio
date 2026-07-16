@@ -183,4 +183,7 @@ pub struct SceneResources<'a> {
     pub reflection_captures: &'a wgpu::Buffer,
     /// Number of reflection captures in the buffer.
     pub reflection_capture_count: u32,
+
+    /// Whether hardware ray tracing (TLAS + ray queries) is available.
+    pub rt_available: bool,
 }

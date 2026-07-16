@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, GpuLight, LightType, Renderer,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, GpuLight, LightType, Renderer,
     RendererConfig, Scene, SceneActor, SkyActor,
 };
 use helio_default_graphs::build_default_graph;
@@ -203,6 +203,7 @@ impl ApplicationHandler for App {
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                 required_features: required_wgpu_features(adapter.features()),
                 required_limits: required_wgpu_limits(adapter.limits()),
+                experimental_features: required_experimental_features(adapter.features()),
                 ..Default::default()
             }))
             .expect("no device");
@@ -266,6 +267,7 @@ impl ApplicationHandler for App {
             light_type: LightType::Directional as u32,
             inner_angle: 0.0,
             _pad: 0,
+            ..Default::default()
         }));
         renderer.set_ambient([0.08, 0.10, 0.18], 0.6);
         renderer.set_clear_color([0.02, 0.03, 0.08, 1.0]);

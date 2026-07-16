@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, GpuLight, LightType, Renderer,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, GpuLight, LightType, Renderer,
     RendererConfig, Scene, SceneActor, RenderGraph, RenderPass, VoxelTerrain,
     VoxelVolumeDescriptor, VoxelMode, VoxelVolumeId, VOXEL_TERRAIN_GRID_DIM,
 };
@@ -208,6 +208,7 @@ impl ApplicationHandler for App {
             &wgpu::DeviceDescriptor {
                 required_features: required_wgpu_features(adapter.features()),
                 required_limits: required_wgpu_limits(adapter.limits()),
+                experimental_features: required_experimental_features(adapter.features()),
                 ..Default::default()
             },
         ))
@@ -295,6 +296,7 @@ impl ApplicationHandler for App {
             light_type: LightType::Directional as u32,
             inner_angle: 0.0,
             _pad: 0,
+            ..Default::default()
         }));
         scene.insert_actor(SceneActor::light(GpuLight {
             position_range: [0.0, 0.0, 0.0, f32::MAX],
@@ -304,6 +306,7 @@ impl ApplicationHandler for App {
             light_type: LightType::Directional as u32,
             inner_angle: 0.0,
             _pad: 0,
+            ..Default::default()
         }));
 
         // Procedurally generate the world on the CPU and bake it straight to the

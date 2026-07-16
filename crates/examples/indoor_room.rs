@@ -9,7 +9,7 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, LightId, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph;
 use v3_demo_common::{box_mesh, make_material, plane_mesh, point_light};
@@ -95,6 +95,7 @@ impl ApplicationHandler for App {
             label: Some("Device"),
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("device");

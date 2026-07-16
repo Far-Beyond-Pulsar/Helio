@@ -11,7 +11,7 @@
 //!   Escape               — release cursor / exit
 
 
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, Renderer, RendererConfig, Scene};
+use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, Renderer, RendererConfig, Scene};
 use helio_default_graphs::build_default_graph;
 
 use winit::{
@@ -84,6 +84,7 @@ impl ApplicationHandler for App {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("device");

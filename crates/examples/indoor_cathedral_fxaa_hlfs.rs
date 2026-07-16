@@ -20,7 +20,7 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, DebugDrawState, HelioAction, HelioCommandBridge, LightId, MeshId, Movability, Renderer, RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, DebugDrawState, HelioAction, HelioCommandBridge, LightId, MeshId, Movability, Renderer, RendererConfig, Scene,
 };
 use helio_pass_perf_overlay::PerfOverlayMode;
 use helio_default_graphs::{build_default_graph, build_fxaa_hlfs_graph};
@@ -184,6 +184,7 @@ impl ApplicationHandler for App {
             label: Some("Device"),
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("device");

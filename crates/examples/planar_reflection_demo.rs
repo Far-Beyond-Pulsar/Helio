@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec3};
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, ObjectDescriptor,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, ObjectDescriptor,
     Renderer, RendererConfig, Scene, SceneActor, SkyActor, VolumetricClouds,
 };
 use helio_default_graphs::build_default_graph;
@@ -96,6 +96,7 @@ impl ApplicationHandler for App {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("no device");
@@ -308,6 +309,7 @@ impl ApplicationHandler for App {
             light_type: helio::LightType::Point as u32,
             inner_angle: 0.0,
             _pad: 0,
+            ..Default::default()
         }));
 
         scene.insert_actor(SceneActor::light(helio::GpuLight {
@@ -318,6 +320,7 @@ impl ApplicationHandler for App {
             light_type: helio::LightType::Point as u32,
             inner_angle: 0.0,
             _pad: 0,
+            ..Default::default()
         }));
 
         // ── Build renderer ─────────────────────────────────────────────────

@@ -343,6 +343,7 @@ impl Renderer {
                 ambient_intensity: self.ambient_intensity,
                 rc_world_min: rc_min,
                 rc_world_max: rc_max,
+                tlas: self.scene.tlas(),
             },
             "Renderer",
         );

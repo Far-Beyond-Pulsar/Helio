@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use glam::{EulerRot, Quat, Vec3};
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, Renderer, RendererConfig, Scene};
+use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, Renderer, RendererConfig, Scene};
 use helio_default_graphs::build_simple_graph;
 use winit::{
     application::ApplicationHandler,
@@ -158,6 +158,7 @@ impl ApplicationHandler for App {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("no device");

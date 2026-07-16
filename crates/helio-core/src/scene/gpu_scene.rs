@@ -70,6 +70,7 @@
 //! // let mesh_buffer = resources.meshes.buffer();   // &wgpu::Buffer
 //! ```
 
+use crate::acceleration::{BlasManager, TlasManager};
 use crate::component::ComponentRegistry;
 use crate::scene::managers::{
     GpuAabbBuffer, GpuCameraBuffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
@@ -250,6 +251,12 @@ pub struct GpuScene {
 
     /// Reflection capture GPU storage buffer.
     pub reflection_captures: GrowableBuffer<libhelio::GpuReflectionCapture>,
+
+    /// Bottom-Level Acceleration Structure manager (ray tracing).
+    pub blas_manager: BlasManager,
+
+    /// Top-Level Acceleration Structure manager (ray tracing, per-frame).
+    pub tlas_manager: TlasManager,
 }
 
 impl GpuScene {
@@ -320,6 +327,8 @@ impl GpuScene {
             "ReflectionCapture Buffer",
         );
 
+        let device_for_rt = Arc::clone(&device);
+
         Self {
             device,
             queue,
@@ -358,6 +367,8 @@ impl GpuScene {
             material_graph_hashes: Vec::new(),
             graph_wgsl_snippets: std::collections::HashMap::new(),
             reflection_captures,
+            blas_manager: BlasManager::new(device_for_rt.clone()),
+            tlas_manager: TlasManager::new(device_for_rt, 65536),
         }
     }
 
@@ -425,6 +436,7 @@ impl GpuScene {
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
             reflection_captures: self.reflection_captures.buffer(),
             reflection_capture_count: self.reflection_captures.len() as u32,
+            rt_available: self.tlas_manager.is_rt_available(),
         }
     }
 

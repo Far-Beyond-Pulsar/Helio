@@ -156,6 +156,10 @@ name = "indoor_cathedral_decals"
 path = "indoor_cathedral_decals.rs"
 
 [[bin]]
+name = "volumetric_fog_demo"
+path = "volumetric_fog_demo.rs"
+
+[[bin]]
 name = "vhs_backrooms"
 path = "vhs_backrooms.rs"
 

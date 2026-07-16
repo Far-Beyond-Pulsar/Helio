@@ -20,7 +20,7 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, GroupMask, HelioAction,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, GroupMask, HelioAction,
     HelioCommandBridge, LightId, MaterialId, MeshId, Movability, ObjectDescriptor, Renderer,
     RendererConfig, Scene,
 };
@@ -1023,6 +1023,7 @@ impl ApplicationHandler for App {
             label: Some("Device"),
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("device");

@@ -36,6 +36,7 @@ pub fn directional_light(direction: [f32; 3], color: [f32; 3], intensity: f32) -
         light_type: LightType::Directional as u32,
         inner_angle: 0.0,
         _pad: 0,
+        ..Default::default()
     }
 }
 
@@ -48,6 +49,7 @@ pub fn point_light(position: [f32; 3], color: [f32; 3], intensity: f32, range: f
         light_type: LightType::Point as u32,
         inner_angle: 0.0,
         _pad: 0,
+        ..Default::default()
     }
 }
 
@@ -68,6 +70,7 @@ pub fn spot_light(
         light_type: LightType::Spot as u32,
         inner_angle: inner_angle.cos(),
         _pad: 0,
+        ..Default::default()
     }
 }
 

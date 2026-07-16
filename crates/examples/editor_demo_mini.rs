@@ -27,7 +27,7 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, EditorState,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, EditorState,
     GizmoMode, Renderer, RendererConfig, Scene, SceneActor, ScenePicker, VirtualMeshUpload,
     VirtualObjectDescriptor,
 };
@@ -133,6 +133,7 @@ impl ApplicationHandler for App {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("device");

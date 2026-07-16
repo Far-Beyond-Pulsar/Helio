@@ -873,6 +873,7 @@ fn route_named_texture<'a>(name: &str, view: &'a wgpu::TextureView, frame: &mut 
     match name {
         "pre_aa" => frame.pre_aa.write(view, "Graph"),
         "ssao" => frame.ssao.write(view, "Graph"),
+        "fog_accum" => frame.fog_accum.write(view, "Graph"),
         "hiz" => frame.hiz.write(view, "Graph"),
         "sky_lut" => frame.sky_lut.write(view, "Graph"),
         "gbuffer_lightmap_uv" => frame.gbuffer_lightmap_uv.write(view, "Graph"),

@@ -103,6 +103,22 @@ struct GpuPostProcessUniforms {
     blend_weight_grain:        f32,
     blend_weight_exposure:     f32,
     _pad14:                    f32,
+    // ── Volumetric fog (64 bytes, offsets 304..368) ──
+    // fog_color lands at 336 and fog_emissive at 352 — both multiples of 16, which
+    // is what lets this match #[repr(C)] on the CPU. vec3<f32> aligns to 16 in WGSL
+    // but to 4 in Rust, so reordering these fields silently desyncs the two sides.
+    fog_enabled:               u32,   // 304
+    fog_mode:                  u32,   // 308
+    fog_density:               f32,   // 312
+    fog_height_falloff:        f32,   // 316
+    fog_start_distance:        f32,   // 320
+    fog_max_distance:          f32,   // 324
+    fog_height:                f32,   // 328
+    fog_scattering_anisotropy: f32,   // 332
+    fog_color:                 vec3<f32>, // 336
+    _pad_fog_color:            f32,   // 348
+    fog_emissive:              vec3<f32>, // 352
+    _pad_fog_emissive:         f32,   // 364 → struct ends at 368
 }
 
 struct CameraUniforms {
@@ -119,14 +135,18 @@ struct CameraUniforms {
 // ── GpuPostProcessVolume (matches CPU-side layout) ─────────────────────────────
 
 struct GpuPostProcessVolume {
-    bounds_min:     vec4<f32>,
-    bounds_max:     vec4<f32>,
-    priority:       f32,
-    blend_radius:   f32,
-    blend_weight:   f32,
-    unbound:        u32,
-    _pad_vol:       vec2<f32>,
-    settings:       GpuPostProcessUniforms,
+    bounds_min:     vec4<f32>,   // 0
+    bounds_max:     vec4<f32>,   // 16
+    priority:       f32,         // 32
+    blend_radius:   f32,         // 36
+    blend_weight:   f32,         // 40
+    unbound:        u32,         // 44
+    // vec4, not vec2: `settings` contains vec3s so it aligns to 16 and lands at
+    // 64 regardless. Spelling the pad out to 64 keeps this struct honest about
+    // where settings actually starts — the CPU side has to pad to match, and a
+    // vec2 here silently hid an 8-byte hole that #[repr(C)] did not reproduce.
+    _pad_vol:       vec4<f32>,   // 48..64
+    settings:       GpuPostProcessUniforms,  // 64
 }
 
 // ── Group 0: main bindings ─────────────────────────────────────────────────────
@@ -148,6 +168,10 @@ struct GpuPostProcessVolume {
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
 @group(0) @binding(15) var<storage, read>      pp_volumes:   array<GpuPostProcessVolume>;
 @group(0) @binding(16) var<storage, read_write> blend_output: GpuPostProcessUniforms;
+// Volumetric fog accumulation at quarter internal resolution (fs_uber only).
+// rgb = in-scattered radiance, a = transmittance. Bound to a 1x1 (0,0,0,1)
+// fallback when no fog pass is in the graph, which composites to a no-op.
+@group(0) @binding(17) var                     fog_input:    texture_2d<f32>;
 
 // ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
 
@@ -239,11 +263,26 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.blend_weight_ca           = lerpf(base.blend_weight_ca, vol.blend_weight_ca, t);
     r.blend_weight_grain        = lerpf(base.blend_weight_grain, vol.blend_weight_grain, t);
     r.blend_weight_exposure     = lerpf(base.blend_weight_exposure, vol.blend_weight_exposure, t);
+    // Fog. Every field must be assigned: `r` is declared uninitialized, so a field
+    // left unwritten here is indeterminate — and the caller copies this whole struct
+    // over the post-process uniform buffer, so a miss would corrupt fog config for
+    // every frame in which any post-process volume is active.
+    r.fog_enabled               = select(base.fog_enabled, vol.fog_enabled, t > 0.5);
+    r.fog_mode                  = select(base.fog_mode, vol.fog_mode, t > 0.5);
+    r.fog_density               = lerpf(base.fog_density, vol.fog_density, t);
+    r.fog_height_falloff        = lerpf(base.fog_height_falloff, vol.fog_height_falloff, t);
+    r.fog_start_distance        = lerpf(base.fog_start_distance, vol.fog_start_distance, t);
+    r.fog_max_distance          = lerpf(base.fog_max_distance, vol.fog_max_distance, t);
+    r.fog_height                = lerpf(base.fog_height, vol.fog_height, t);
+    r.fog_scattering_anisotropy = lerpf(base.fog_scattering_anisotropy, vol.fog_scattering_anisotropy, t);
+    r.fog_color                 = lerp3v(base.fog_color, vol.fog_color, t);
+    r.fog_emissive              = lerp3v(base.fog_emissive, vol.fog_emissive, t);
     // Padding fields are implicitly copied via the field-by-field assignment above.
     // The struct is fully written by this function; uninitialized fields get default values.
     r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
     r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
     r._pad12 = 0.0; r._pad13 = 0.0; r._pad14 = 0.0;
+    r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0;
     return r;
 }
 
@@ -617,6 +656,21 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     let uv = in.uv;
 
     var color = textureSampleLevel(hdr_input, linear_samp, uv, 0.0).rgb;
+
+    // 0. Volumetric fog composite.
+    //
+    // Before exposure and tonemapping, not after: in-scattering is scene-linear
+    // radiance like anything else in hdr_input, so it has to go through the same
+    // exposure and tonemap curve. Composited after the tonemapper it would sit in
+    // display-referred space — unresponsive to exposure, washed out, and invisible
+    // to bloom, so bright shafts could never bloom.
+    //
+    // fog.rgb is already premultiplied by the transmittance in front of it, so this
+    // is a straight over: attenuate the scene, add what scattered in.
+    if postprocess.fog_enabled != 0u {
+        let fog = textureSampleLevel(fog_input, linear_samp, uv, 0.0);
+        color = color * fog.a + fog.rgb;
+    }
 
     //%P0
 

@@ -28,7 +28,7 @@ mod v3_demo_common;
 
 use helio::{
     Camera, DebugDrawState, EditorState, GizmoMode, Renderer, RendererConfig,
-    Scene, SceneActor, ScenePicker, required_wgpu_features, required_wgpu_limits,
+    Scene, SceneActor, ScenePicker, required_experimental_features, required_wgpu_features, required_wgpu_limits,
 };
 use helio_default_graphs::build_default_graph;
 use helio_asset_compat::{load_scene_bytes_with_config, upload_sectioned_scene, LoadConfig};
@@ -129,6 +129,7 @@ impl ApplicationHandler for App {
             &wgpu::DeviceDescriptor {
                 required_features: required_wgpu_features(adapter.features()),
                 required_limits: required_wgpu_limits(adapter.limits()),
+                experimental_features: required_experimental_features(adapter.features()),
                 ..Default::default()
             },
         ))

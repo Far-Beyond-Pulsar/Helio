@@ -10,7 +10,7 @@
 mod v3_demo_common;
 use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, point_light, plane_mesh};
 
-use helio::{required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, MaterialId, ObjectId, Renderer, RendererConfig, Scene};
+use helio::{required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, MaterialId, ObjectId, Renderer, RendererConfig, Scene};
 use helio_default_graphs::build_default_graph;
 use rapier3d::prelude::*;
 use std::collections::HashSet;
@@ -79,7 +79,7 @@ impl ApplicationHandler for App {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), flags: wgpu::InstanceFlags::empty(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false, apply_limit_buckets: true })).expect("adapter");
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: required_wgpu_features(adapter.features()), required_limits: required_wgpu_limits(adapter.limits()), ..Default::default() })).expect("device");
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: required_wgpu_features(adapter.features()), required_limits: required_wgpu_limits(adapter.limits()), experimental_features: required_experimental_features(adapter.features()), ..Default::default() })).expect("device");
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| { panic!("[GPU] {:?}", e) }));
         let device = Arc::new(device);
         let queue = Arc::new(queue);

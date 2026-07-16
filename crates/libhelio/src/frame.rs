@@ -75,6 +75,8 @@ pub struct MainSceneResources<'a> {
     /// RC active within these bounds, simpler ambient fallback outside.
     pub rc_world_min: [f32; 3],
     pub rc_world_max: [f32; 3],
+    /// Hardware ray tracing TLAS, if available. None on non-RT hardware or WASM.
+    pub tlas: Option<&'a wgpu::Tlas>,
 }
 
 /// Debug-tracked resource slot.
@@ -216,6 +218,9 @@ pub struct FrameResources<'a> {
     pub sky_lut_sampler: Tracked<&'a wgpu::Sampler>,
     /// SSAO result texture
     pub ssao: Tracked<&'a wgpu::TextureView>,
+    /// Volumetric fog accumulation, quarter internal resolution.
+    /// rgb = in-scattered radiance, a = transmittance to the surface.
+    pub fog_accum: Tracked<&'a wgpu::TextureView>,
     /// Pre-AA HDR color buffer (input to TAA/FXAA/SMAA)
     pub pre_aa: Tracked<&'a wgpu::TextureView>,
     /// Tiled light lists buffer (populated by LightCullPass, consumed by DeferredLightPass).
@@ -410,6 +415,7 @@ impl<'a> FrameResources<'a> {
             sky_lut: Tracked::empty(),
             sky_lut_sampler: Tracked::empty(),
             ssao: Tracked::empty(),
+            fog_accum: Tracked::empty(),
             pre_aa: Tracked::empty(),
             tile_light_lists: Tracked::empty(),
             tile_light_counts: Tracked::empty(),

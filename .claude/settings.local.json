@@ -54,7 +54,12 @@
       "WebFetch(domain:www.gamedev.net)",
       "WebFetch(domain:sakibsaikia.github.io)",
       "Bash(python3 -c ' *)",
-      "Bash(perl -0pi -e 's/\\(add_late_passes\\\\\\(&mut graph, device, queue, scene, &config, &perf, \\)\\(\\\\w+\\), \\(\\\\w+\\)\\\\\\);/$1debug_state.clone\\(\\), debug_camera_buf, $2, $3\\);/g' crates/helio-default-graphs/src/lib.rs)"
+      "Bash(perl -0pi -e 's/\\(add_late_passes\\\\\\(&mut graph, device, queue, scene, &config, &perf, \\)\\(\\\\w+\\), \\(\\\\w+\\)\\\\\\);/$1debug_state.clone\\(\\), debug_camera_buf, $2, $3\\);/g' crates/helio-default-graphs/src/lib.rs)",
+      "Bash(perl -0pi -e 's/    volume_blend_pipeline: wgpu::ComputePipeline,\\\\n//' crates/helio-pass-postprocess/src/lib.rs)",
+      "Bash(perl -0pi -e 's/    blend_bgl: wgpu::BindGroupLayout,\\\\n//' crates/helio-pass-postprocess/src/lib.rs)",
+      "Bash(perl -0pi -e 's/    blend_bg: Option<wgpu::BindGroup>,\\\\n//' crates/helio-pass-postprocess/src/lib.rs)",
+      "Bash(perl -0pi -e 's/            volume_blend_pipeline,\\\\n//' crates/helio-pass-postprocess/src/lib.rs)",
+      "Bash(perl -0pi -e 's/            blend_bgl,\\\\n//' crates/helio-pass-postprocess/src/lib.rs)"
     ]
   }
 }

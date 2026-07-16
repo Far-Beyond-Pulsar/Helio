@@ -481,4 +481,11 @@ impl Scene {
     pub fn decal_count(&self) -> usize {
         self.decals.dense_len()
     }
+
+    /// Returns a reference to the TLAS (Top-Level Acceleration Structure) for
+    /// hardware ray tracing, if available. Returns `None` on non-RT hardware
+    /// or when the TLAS has not been built yet.
+    pub fn tlas(&self) -> Option<&wgpu::Tlas> {
+        self.gpu_scene.tlas_manager.tlas()
+    }
 }

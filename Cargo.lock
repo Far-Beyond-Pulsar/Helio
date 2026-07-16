@@ -2859,6 +2859,7 @@ dependencies = [
  "helio-pass-taa",
  "helio-pass-transparent",
  "helio-pass-virtual-geometry",
+ "helio-pass-volumetric-fog",
  "helio-pass-voxel-mesh",
  "helio-pass-water-sim",
  "image",
@@ -3204,6 +3205,16 @@ dependencies = [
  "libhelio",
  "log",
  "naga 30.0.0",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-volumetric-fog"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
  "wgpu 30.0.0",
 ]
 

@@ -19,7 +19,7 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
-use helio_pass_postprocess::PostProcessPass;
+use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_cull::ShadowCullPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
@@ -29,6 +29,7 @@ use helio_pass_sky::SkyPass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_taa::TaaPass;
+use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
@@ -443,6 +444,11 @@ fn build_default_graph_internal(
         config.surface_format,
     )));
 
+    // Before AA, at internal resolution: fog accumulates against internal-res
+    // depth, and the AA pass then resolves it with the rest of the frame.
+    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
+    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
+
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
@@ -600,6 +606,12 @@ fn build_fxaa_graph_internal(
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
 
+    // Before TAA, at internal resolution. Fog accumulates in the same space as the
+    // depth it reads, and TAA then resolves it along with everything else — which
+    // is why the pass needs no jitter handling of its own.
+    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
+    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
+
     graph.add_pass(Box::new(TaaPass::new(
         device,
         iw,
@@ -699,6 +711,12 @@ fn build_hlfs_graph_internal(
     graph.add_pass(Box::new(hlfs_pass));
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
+
+    // Before TAA, at internal resolution. Fog accumulates in the same space as the
+    // depth it reads, and TAA then resolves it along with everything else — which
+    // is why the pass needs no jitter handling of its own.
+    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
+    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
     graph.add_pass(Box::new(TaaPass::new(
         device,
@@ -868,6 +886,11 @@ fn build_fxaa_hlfs_graph_internal(
     graph.add_pass(Box::new(hlfs_pass));
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, w, h);
+
+    // Before AA, at internal resolution: fog accumulates against internal-res
+    // depth, and the AA pass then resolves it with the rest of the frame.
+    graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
+    graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
