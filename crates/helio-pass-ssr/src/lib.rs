@@ -129,11 +129,30 @@ impl SsrPass {
 
         // ── RT pipeline (Hi-Z + ray query) ──────────────────────────────
         let rt_pipeline = use_rt.then(|| {
-            let rt_shader = helio_core::shader::module(
-                device,
-                "SSR RT Trace Shader",
-                include_str!("../shaders/ssr_trace_rt.wgsl"),
+            // Build the source manually: `enable wgpu_ray_query;` must appear
+            // before any global declaration (including the prelude).  We strip
+            // the `//!use helio_prelude` marker and compose:
+            //   enable wgpu_ray_query;\n{PRELUDE}\n{source_body}
+            let rt_src = include_str!("../shaders/ssr_trace_rt.wgsl");
+            // Remove the `//!use helio_prelude` marker — we are assembling the
+            // source manually and need `enable wgpu_ray_query;` at the very top.
+            let rt_src_stripped = if rt_src.contains("//!use helio_prelude") {
+                rt_src.lines()
+                    .filter(|l| !l.trim().starts_with("//!use"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                rt_src.to_string()
+            };
+            let combined = format!(
+                "enable wgpu_ray_query;\n{prelude}\n{body}",
+                prelude = helio_core::shader::PRELUDE,
+                body = rt_src_stripped,
             );
+            let rt_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("SSR RT Trace Shader"),
+                source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Owned(combined)),
+            });
 
             let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("SSR RT PL"),
