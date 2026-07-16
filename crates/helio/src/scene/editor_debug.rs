@@ -11,7 +11,9 @@ use crate::renderer::DebugVertex;
 
 // One colour per volume class, so overlapping volumes stay tellable apart.
 const COLOR_LIGHT: [f32; 4] = [1.0, 0.85, 0.2, 1.0]; // amber
+const COLOR_LIGHT_INNER: [f32; 4] = [1.0, 0.55, 0.1, 1.0]; // deeper amber
 const COLOR_REFLECTION: [f32; 4] = [0.3, 0.8, 1.0, 1.0]; // cyan
+const COLOR_VOXEL: [f32; 4] = [0.6, 1.0, 0.3, 1.0]; // lime
 const COLOR_POST_PROCESS: [f32; 4] = [0.75, 0.4, 1.0, 1.0]; // violet
 const COLOR_POST_PROCESS_BLEND: [f32; 4] = [0.45, 0.25, 0.6, 1.0]; // dim violet
 const COLOR_WATER: [f32; 4] = [0.2, 0.55, 1.0, 1.0]; // blue
@@ -147,15 +149,38 @@ impl super::Scene {
         let mut sink = LineSink::default();
 
         // Lights — the attenuation volume, which is the invisible part.
+        //
+        // Spots get both cones: the outer one is where the light stops, the
+        // inner one where its falloff begins, and the gap between them is the
+        // fade. Points get their attenuation radius.
         for (_, rec) in self.lights.iter_with_handles() {
             let g = &rec.gpu;
             let pos = v3(&g.position_range);
             let range = g.position_range[3];
+            let dir = v3(&g.direction_outer);
             if g.light_type == LightType::Spot as u32 {
+                // Cone base radius at the far end of the range, from the
+                // half-angle the shader actually uses.
                 let outer_cos = g.direction_outer[3].clamp(-1.0, 1.0);
-                // Radius of the cone's base at the far end of its range.
-                let radius = range * outer_cos.acos().tan().abs();
-                sink.wire_cone(pos, v3(&g.direction_outer), range, radius, COLOR_LIGHT);
+                sink.wire_cone(
+                    pos,
+                    dir,
+                    range,
+                    range * outer_cos.acos().tan().abs(),
+                    COLOR_LIGHT,
+                );
+                let inner_cos = g.inner_angle.clamp(-1.0, 1.0);
+                // Only worth drawing when it is actually distinct from the
+                // outer cone; a hard-edged spot would just double the lines.
+                if inner_cos > outer_cos + 1e-4 {
+                    sink.wire_cone(
+                        pos,
+                        dir,
+                        range,
+                        range * inner_cos.acos().tan().abs(),
+                        COLOR_LIGHT_INNER,
+                    );
+                }
             } else if g.light_type == LightType::Point as u32
                 || g.light_type == LightType::Area as u32
             {
@@ -213,6 +238,21 @@ impl super::Scene {
         for (_, rec) in self.decals.iter_with_handles() {
             let world_to_local = Mat4::from_cols_array(&rec.gpu.transform);
             sink.wire_box(world_to_local.inverse(), Vec3::ONE, COLOR_DECAL);
+        }
+
+        // Voxel volumes — the octree root's extent, placed by the volume's
+        // transform, so a rotated volume outlines correctly.
+        for (_, rec) in self.voxel_volumes.iter_with_handles() {
+            let root = &rec.octree.root;
+            let min = Vec3::from(root.aabb_min);
+            let max = Vec3::from(root.aabb_max);
+            let center = (min + max) * 0.5;
+            let half = (max - min) * 0.5;
+            sink.wire_box(
+                rec.local_to_world * Mat4::from_translation(center),
+                half,
+                COLOR_VOXEL,
+            );
         }
 
         sink.verts

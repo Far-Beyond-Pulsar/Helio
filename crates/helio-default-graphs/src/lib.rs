@@ -58,8 +58,6 @@ fn add_common_early_passes(
     queue: &Arc<wgpu::Queue>,
     scene: &Scene,
     config: &RendererConfig,
-    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
-    debug_camera_buf: &wgpu::Buffer,
     cull_stats_buf: &wgpu::Buffer,
     w: u32,
     h: u32,
@@ -126,15 +124,6 @@ fn add_common_early_passes(
         )));
     }
 
-    graph.add_pass(Box::new(helio::DebugDrawPass::new(
-        device,
-        debug_camera_buf,
-        config.surface_format,
-        debug_state,
-        false,
-        true,
-    )));
-
     graph.add_pass(Box::new(IndirectDispatchPass::new(
         device,
         cull_stats_buf.clone(),
@@ -186,6 +175,8 @@ fn add_late_passes(
     scene: &Scene,
     config: &RendererConfig,
     perf: &Arc<std::sync::Mutex<PerfOverlayShared>>,
+    debug_state: Arc<std::sync::Mutex<DebugDrawState>>,
+    debug_camera_buf: &wgpu::Buffer,
     w: u32,
     h: u32,
 ) {
@@ -224,6 +215,25 @@ fn add_late_passes(
         config.surface_format,
     )));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
+
+    // Editor overlay: grid, and the wireframe bounds of every scene volume.
+    //
+    // Position is load-bearing in both directions. It must come after
+    // DeferredLightPass, which writes the same "pre_aa" target and would
+    // otherwise paint over it — that is why the grid never appeared while this
+    // sat with the early passes. It must also come before FXAA/post-process
+    // consume pre_aa, or it would be drawn into an image nothing reads again.
+    //
+    // Depth-tested against the internal-res scene depth so geometry genuinely
+    // in front occludes the bounds, exactly as BillboardPass does.
+    graph.add_pass(Box::new(helio::DebugDrawPass::new(
+        device,
+        debug_camera_buf,
+        config.surface_format,
+        debug_state,
+        true,
+        true,
+    )));
 }
 
 fn convert_perf_mode(mode: helio::PerfOverlayMode) -> helio_pass_perf_overlay::PerfOverlayMode {
@@ -255,6 +265,9 @@ fn add_final_passes(
     perf_overlay_pass.set_mode(convert_perf_mode(config.perf_overlay_mode));
     graph.add_pass(Box::new(perf_overlay_pass));
 
+    // User debug lines/tris, drawn at output resolution over the final image.
+    // The editor overlay is a separate instance added in add_late_passes,
+    // because it needs the internal-res scene depth to occlude correctly.
     graph.add_pass(Box::new(helio::DebugDrawPass::new(
         device,
         debug_camera_buf,
@@ -372,8 +385,6 @@ fn build_default_graph_internal(
         queue,
         scene,
         &config,
-        debug_state.clone(),
-        debug_camera_buf,
         cull_stats_buf,
         iw,
         ih,
@@ -424,7 +435,7 @@ fn build_default_graph_internal(
         config.surface_format,
     )));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
+    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
 
     graph.add_pass(Box::new(PlanarReflectionPass::new(
         device,
@@ -547,8 +558,6 @@ fn build_fxaa_graph_internal(
         queue,
         scene,
         &config,
-        debug_state.clone(),
-        debug_camera_buf,
         cull_stats_buf,
         iw,
         ih,
@@ -589,7 +598,7 @@ fn build_fxaa_graph_internal(
     ))));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf))));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
+    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
 
     graph.add_pass(Box::new(TaaPass::new(
         device,
@@ -665,8 +674,6 @@ fn build_hlfs_graph_internal(
         queue,
         scene,
         &config,
-        debug_state.clone(),
-        debug_camera_buf,
         cull_stats_buf,
         iw,
         ih,
@@ -691,7 +698,7 @@ fn build_hlfs_graph_internal(
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, iw, ih);
+    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
 
     graph.add_pass(Box::new(TaaPass::new(
         device,
@@ -836,8 +843,6 @@ fn build_fxaa_hlfs_graph_internal(
         queue,
         scene,
         &config,
-        debug_state.clone(),
-        debug_camera_buf,
         cull_stats_buf,
         w,
         h,
@@ -862,7 +867,7 @@ fn build_fxaa_hlfs_graph_internal(
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, w, h);
+    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, w, h);
 
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 

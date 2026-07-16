@@ -53,7 +53,8 @@
       "Bash(git rm *)",
       "WebFetch(domain:www.gamedev.net)",
       "WebFetch(domain:sakibsaikia.github.io)",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(perl -0pi -e 's/\\(add_late_passes\\\\\\(&mut graph, device, queue, scene, &config, &perf, \\)\\(\\\\w+\\), \\(\\\\w+\\)\\\\\\);/$1debug_state.clone\\(\\), debug_camera_buf, $2, $3\\);/g' crates/helio-default-graphs/src/lib.rs)"
     ]
   }
 }
