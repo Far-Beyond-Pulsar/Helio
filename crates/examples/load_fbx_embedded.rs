@@ -237,6 +237,7 @@ struct AppState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     renderer: Renderer,
     movement_speed: f32,
@@ -313,6 +314,7 @@ impl ApplicationHandler for App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .expect("no adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(
@@ -344,6 +346,7 @@ impl ApplicationHandler for App {
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
         let config = RendererConfig::new(size.width, size.height, surface_format);
@@ -403,6 +406,7 @@ impl ApplicationHandler for App {
                     window,
                     surface,
                     device,
+                    queue,
                     surface_format,
                     renderer,
                     movement_speed: fallback_bounds.movement_speed(),
@@ -453,6 +457,7 @@ impl ApplicationHandler for App {
             window,
             surface,
             device,
+            queue,
             surface_format,
             renderer,
             movement_speed: bounds.movement_speed(),
@@ -501,6 +506,7 @@ impl ApplicationHandler for App {
                         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                     },
                 );
                 state.renderer.set_render_size(size.width, size.height);
@@ -558,11 +564,9 @@ impl ApplicationHandler for App {
                     200.0,
                 );
                 let output = match state.surface.get_current_texture() {
-                    Ok(texture) => texture,
-                    Err(error) => {
-                        log::warn!("surface error: {:?}", error);
-                        return;
-                    }
+                    wgpu::CurrentSurfaceTexture::Success(texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+                    _ => return,
                 };
                 let view = output
                     .texture
@@ -570,7 +574,7 @@ impl ApplicationHandler for App {
                 if let Err(error) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", error);
                 }
-                output.present();
+                state.queue.present(output);
             }
             _ => {}
         }

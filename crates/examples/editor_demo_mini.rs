@@ -70,6 +70,7 @@ struct AppState {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     surface_format: wgpu::TextureFormat,
     surface_alpha_mode: wgpu::CompositeAlphaMode,
     renderer: Renderer,
@@ -119,13 +120,14 @@ impl ApplicationHandler for App {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         }))
         .expect("adapter");
 
@@ -161,6 +163,7 @@ impl ApplicationHandler for App {
                 alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
 
@@ -799,6 +802,7 @@ impl ApplicationHandler for App {
             window,
             surface,
             device,
+            queue,
             surface_format: format,
             surface_alpha_mode: alpha_mode,
             renderer,
@@ -1164,6 +1168,7 @@ impl AppState {
                 alpha_mode: self.surface_alpha_mode,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
         self.renderer.set_render_size(width, height);
@@ -1298,11 +1303,9 @@ impl AppState {
         }
 
         let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("surface: {:?}", e);
-                return;
-            }
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => texture,
+            _ => return,
         };
         let view = output
             .texture
@@ -1310,6 +1313,6 @@ impl AppState {
         if let Err(e) = self.renderer.render(&camera, &view) {
             log::error!("render: {:?}", e);
         }
-        output.present();
+        self.queue.present(output);
     }
 }
