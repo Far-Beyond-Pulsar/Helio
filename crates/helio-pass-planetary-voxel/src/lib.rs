@@ -10,12 +10,14 @@ mod extraction;
 mod fixture;
 mod gpu;
 mod table;
+mod transvoxel;
 
 pub use config::*;
 pub use extraction::*;
 pub use fixture::*;
 pub use gpu::*;
 pub use table::*;
+pub use transvoxel::*;
 
 pub const EXTRACTION_LAYOUT_WGSL: &str = include_str!("extraction_layout.wgsl");
 pub const RESIDENCY_WGSL: &str = include_str!("residency.wgsl");
