@@ -38,9 +38,9 @@ pub enum DecalBlendMode {
 ///     fade_time:          f32,          // lifetime (0 = persistent)
 ///     fade_start_delay:   f32,          // seconds before fade begins
 ///     age:                f32,          // updated per frame on CPU or GPU
+///     normal_adapt:       u32,          // 1 = adapt normal to surface orientation
 ///     _pad0:              f32,
 ///     _pad1:              f32,
-///     _pad2:              f32,
 /// }
 /// ```
 #[repr(C)]
@@ -68,7 +68,8 @@ pub struct GpuDecal {
     pub fade_start_delay: f32,
     /// Age in seconds (updated per frame)
     pub age: f32,
+    /// 1 = adapt decal normal perturbation to match the underlying surface normal
+    pub normal_adapt: u32,
     pub _pad0: f32,
     pub _pad1: f32,
-    pub _pad2: f32,
 }

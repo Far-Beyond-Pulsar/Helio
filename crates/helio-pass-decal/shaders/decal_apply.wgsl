@@ -28,9 +28,9 @@ struct GpuDecal {
     fade_time:          f32,
     fade_start_delay:   f32,
     age:                f32,
+    normal_adapt:       u32,
     _pad0:              f32,
     _pad1:              f32,
-    _pad2:              f32,
 }
 
 const DECAL_BLEND_TRANSLUCENT: u32 = 0u;
@@ -105,6 +105,49 @@ fn blend_normal(back_normal: vec3<f32>, front_normal: vec3<f32>, blend_alpha: f3
     return normalize(mix(back_normal, front_normal, blend_alpha));
 }
 
+/// Adapt decal tangent-space normal to the surface orientation.
+///
+/// Instead of using the decal's predefined world-space orientation, this
+/// constructs a tangent frame from the sampled G-buffer surface normal,
+/// then transforms the decal normal perturbation through it. This lets
+/// the decal's normal detail conform to whatever geometry it lands on
+/// (e.g. wrapping around a corner correctly).
+///
+/// `decal_T/decal_B/decal_N` are the decal's local right/up/forward
+/// extracted from the world-to-decal transform matrix columns.
+/// `ts_normal` is the decal normal map value unpacked to [-1, 1]³.
+/// `surface_normal` is the G-buffer world normal at the pixel.
+fn adapt_decal_normal(
+    decal_T: vec3<f32>,
+    decal_B: vec3<f32>,
+    ts_normal: vec3<f32>,
+    surface_normal: vec3<f32>,
+) -> vec3<f32> {
+    // Project the decal's tangent onto the surface plane.
+    var T = decal_T - dot(decal_T, surface_normal) * surface_normal;
+    let t_len = length(T);
+    if t_len < 0.001 {
+        // decal_T is nearly parallel to the surface normal — fall back to decal_B.
+        T = decal_B - dot(decal_B, surface_normal) * surface_normal;
+        let t2_len = length(T);
+        if t2_len < 0.001 {
+            // Both are degenerate — construct an arbitrary orthonormal basis.
+            let ref_dir = vec3<f32>(0.0, 1.0, 0.0);
+            T = normalize(cross(surface_normal, ref_dir));
+            if length(T) < 0.001 {
+                T = normalize(cross(surface_normal, vec3<f32>(1.0, 0.0, 0.0)));
+            }
+        } else {
+            T /= t2_len;
+        }
+    } else {
+        T /= t_len;
+    }
+
+    let B = cross(surface_normal, T);
+    return normalize(T * ts_normal.x + B * ts_normal.y + surface_normal * ts_normal.z);
+}
+
 @compute @workgroup_size(16, 16, 1)
 fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let pixel = vec2<i32>(id.xy);
@@ -171,6 +214,24 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         var result_orm = existing_orm;
         var result_emissive = existing_emissive;
 
+        // Extract the decal's world-space tangent frame from the transform.
+        // For a world-to-decal matrix stored column-major, the columns'
+        // xyz components give the decal local axes scaled by the inverse
+        // of the decal's world-space extent.
+        let decal_T = normalize(vec3<f32>(decal.transform[0].x, decal.transform[1].x, decal.transform[2].x));
+        let decal_B = normalize(vec3<f32>(decal.transform[0].y, decal.transform[1].y, decal.transform[2].y));
+        let ts_normal = normalize(decal_normal_raw.xyz * 2.0 - 1.0);
+
+        let existing_world_normal = normalize(existing_normal.xyz);
+
+        // Resolve the decal normal: either adapt to the surface or use the
+        // raw decal world normal from the decal's predefined orientation.
+        let final_decal_normal = select(
+            decal_normal,  // normal_adapt == 0: use the decal's fixed orientation
+            adapt_decal_normal(decal_T, decal_B, ts_normal, existing_world_normal),
+            decal.normal_adapt == 1u,
+        );
+
         if decal_type == DECAL_TYPE_ALBEDO_NORMAL || decal_type == DECAL_TYPE_ALL {
             let decal_color = vec4<f32>(decal_albedo.rgb * tint.rgb, opacity);
 
@@ -182,14 +243,12 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
                 result_albedo = blend_multiply(existing_albedo, decal_color);
             }
 
-            let existing_world_normal = normalize(existing_normal.xyz);
-            let blended_normal = blend_normal(existing_world_normal, decal_normal, opacity);
+            let blended_normal = blend_normal(existing_world_normal, final_decal_normal, opacity);
             result_normal = vec4<f32>(blended_normal, existing_normal.a);
         }
 
         if decal_type == DECAL_TYPE_NORMAL_ONLY {
-            let existing_world_normal = normalize(existing_normal.xyz);
-            let blended_normal = blend_normal(existing_world_normal, decal_normal, opacity);
+            let blended_normal = blend_normal(existing_world_normal, final_decal_normal, opacity);
             result_normal = vec4<f32>(blended_normal, existing_normal.a);
         }
 
