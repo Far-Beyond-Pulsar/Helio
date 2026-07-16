@@ -1,33 +1,13 @@
-//! Indoor cathedral decal demo – projects decals onto the cathedral geometry
+//! Indoor cathedral decal demo — cathedral scene with projected decals
 //!
-//! Demonstrates the decal rendering system: bullet holes, cracks, blood
-//! splatters, wear marks, soot, and glowing runes — all projected onto
-//! the existing G-buffer without modifying geometry.
-//!
-//! Decals placed:
-//!   • Worn path on the nave floor (multiply blend)
-//!   • Fading blood splatters near the altar (translucent)
-//!   • Crack on a stone column (normal-only perturbation)
-//!   • Graffiti / sticker on the left wall (alpha blend)
-//!   • Bullet holes on the right wall near entrance (alpha blend)
-//!   • Soot marks on the ceiling under each chandelier (translucent)
-//!   • A glowing rune on the altar (emissive, additive blend)
-//!   • Age-fading decal near the entrance that decays over time
-//!
-//! Controls:
-//!   WASD        — move forward/left/back/right
-//!   Space/Shift — move up/down
-//!   F1          — cycle debug modes
-//!   F2          — toggle performance overlay
-//!   F3          — toggle debug overlay
-//!   F5          — spawn a fresh batch of bullet-hole decals at camera target
-//!   Mouse drag  — look around (click to grab cursor)
-//!   Escape      — release cursor / exit
+//! Same cathedral as `indoor_cathedral` but with a few decals projected
+//! onto the geometry: floor wear marks, a wall crack, blood splatters,
+//! bullet holes, soot, and a glowing rune on the altar.
 
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, DebugDrawState, DecalId,
+    required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, DebugDrawState,
     HelioAction, HelioCommandBridge, LightId, MeshId, Movability, Renderer, RendererConfig, Scene,
 };
 use libhelio::{DecalBlendMode, DecalType, GpuDecal};
@@ -49,48 +29,23 @@ use winit::{
 
 use std::collections::HashSet;
 
-/// Build a world-to-decal-space transform for a decal at `position`
-/// facing `normal`, with the given half-extents.
-fn decal_transform(position: [f32; 3], normal: [f32; 3], half_extents: [f32; 3]) -> [f32; 16] {
-    let p = glam::Vec3::from_array(position);
+fn decal_xform(pos: [f32; 3], normal: [f32; 3], half: [f32; 3]) -> [f32; 16] {
+    let p = glam::Vec3::from_array(pos);
     let n = glam::Vec3::from_array(normal).normalize();
-    let rot = glam::Quat::from_rotation_arc(glam::Vec3::Z, n);
-    // world-to-decal: translate to origin, rotate to align Z with normal, scale to [-1,1]³
-    let m = glam::Mat4::from_scale(glam::Vec3::new(
-        1.0 / half_extents[0],
-        1.0 / half_extents[1],
-        1.0 / half_extents[2],
-    )) * glam::Mat4::from_quat(rot)
-        * glam::Mat4::from_translation(-p);
-    m.to_cols_array()
+    let r = glam::Quat::from_rotation_arc(glam::Vec3::Z, n);
+    (glam::Mat4::from_scale(glam::Vec3::new(1.0/half[0], 1.0/half[1], 1.0/half[2]))
+        * glam::Mat4::from_quat(r) * glam::Mat4::from_translation(-p)).to_cols_array()
 }
 
-fn make_decal(
-    position: [f32; 3],
-    normal: [f32; 3],
-    half_extents: [f32; 3],
-    color: [f32; 4],
-    blend_mode: DecalBlendMode,
-    decal_type: DecalType,
-    normal_adapt: bool,
-    fade_time: f32,
-    fade_start_delay: f32,
-) -> GpuDecal {
+fn make_decal(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
+              blend: DecalBlendMode, dtype: DecalType, adapt: bool) -> GpuDecal {
     GpuDecal {
-        transform: decal_transform(position, normal, half_extents),
-        color,
-        albedo_texture_index: u32::MAX,
-        normal_texture_index: u32::MAX,
-        roughness_texture_index: u32::MAX,
-        metalness_texture_index: u32::MAX,
-        blend_mode: blend_mode as u32,
-        decal_type: decal_type as u32,
-        fade_time,
-        fade_start_delay,
-        age: 0.0,
-        normal_adapt: if normal_adapt { 1 } else { 0 },
-        _pad0: 0.0,
-        _pad1: 0.0,
+        transform: decal_xform(pos, normal, half), color,
+        albedo_texture_index: u32::MAX, normal_texture_index: u32::MAX,
+        roughness_texture_index: u32::MAX, metalness_texture_index: u32::MAX,
+        blend_mode: blend as u32, decal_type: dtype as u32,
+        fade_time: 0.0, fade_start_delay: 0.0, age: 0.0,
+        normal_adapt: if adapt { 1 } else { 0 }, _pad0: 0.0, _pad1: 0.0,
     }
 }
 
@@ -197,12 +152,6 @@ struct AppState {
     chandelier_light_ids: Vec<LightId>,
     candle_light_ids: Vec<LightId>,
     start_time: std::time::Instant,
-
-    // Decals
-    decal_ids: Vec<DecalId>,
-    fading_decal_id: Option<DecalId>,
-    bullet_hole_ids: Vec<DecalId>,
-    bullet_hole_spawn_timer: f32,
 }
 
 impl App {
@@ -591,144 +540,38 @@ impl ApplicationHandler for App {
         // run full tiled PCF every frame even though they're fixed.
         renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
 
-        // ── Decals ───────────────────────────────────────────────────────────
-        let mut decal_ids = Vec::new();
-        let mut bullet_hole_ids = Vec::new();
-
-        // 1. Worn path on the floor along the nave (multiply blend, dark brown)
-        for z in (-24..24).step_by(3) {
-            let zf = z as f32;
-            decal_ids.push(renderer.scene_mut().insert_actor(
-                helio::SceneActor::decal(make_decal(
-                    [0.0, 0.02, zf],
-                    [0.0, 1.0, 0.0],
-                    [1.8, 0.02, 1.2],
-                    [0.25, 0.18, 0.12, 0.35],
-                    DecalBlendMode::Multiply,
-                    DecalType::AlbedoNormal,
-                    false,  // normal_adapt: floor is flat, no need
-                    0.0,    // persistent
-                    0.0,
-                )),
-            ));
+        // Decals
+        for z in (-24..24).step_by(4) {
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
+                [0.0, 0.02, z as f32], [0.0, 1.0, 0.0], [1.8, 0.02, 1.2],
+                [0.25, 0.18, 0.12, 0.35], DecalBlendMode::Multiply, DecalType::AlbedoNormal, false,
+            )));
         }
-
-        // 2. Blood splatters near the altar (translucent, red)
-        for i in 0..5 {
-            let angle = i as f32 * 1.256;
-            let r = 0.8 + (i as f32 * 0.3).fract();
-            decal_ids.push(renderer.scene_mut().insert_actor(
-                helio::SceneActor::decal(make_decal(
-                    [(angle.cos() * r) * 1.5, 0.02, -25.0 + (angle.sin() * r) * 1.0],
-                    [0.0, 1.0, 0.0],
-                    [0.5, 0.02, 0.5],
-                    [0.6, 0.02, 0.02, 0.7],
-                    DecalBlendMode::AlphaBlend,
-                    DecalType::AlbedoNormal,
-                    false,
-                    0.0,
-                    0.0,
-                )),
-            ));
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
+            [-5.5, 5.0, -6.0], [1.0, 0.0, 0.0], [0.08, 2.5, 0.3],
+            [0.5, 0.5, 0.5, 0.8], DecalBlendMode::Translucent, DecalType::NormalOnly, true,
+        )));
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
+            [-10.95, 4.0, 10.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.05],
+            [0.0, 0.8, 0.8, 0.6], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, true,
+        )));
+        for i in 0..6 {
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
+                [10.9, 2.0 + i as f32 * 0.7, 22.0 - i as f32 * 1.3],
+                [-1.0, 0.0, 0.0], [0.04, 0.04, 0.04],
+                [0.1, 0.1, 0.1, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, true,
+            )));
         }
-
-        // 3. Crack on the left column at z = -6 (normal-only, grey)
-        decal_ids.push(renderer.scene_mut().insert_actor(
-            helio::SceneActor::decal(make_decal(
-                [-5.5, 5.0, -6.0],
-                [1.0, 0.0, 0.0],  // facing right (toward nave)
-                [0.08, 2.5, 0.3],
-                [0.5, 0.5, 0.5, 0.8],
-                DecalBlendMode::Translucent,
-                DecalType::NormalOnly,
-                true,   // normal_adapt: conform to column surface
-                0.0,
-                0.0,
-            )),
-        ));
-
-        // 4. Graffiti on left wall (alpha blend, cyan)
-        decal_ids.push(renderer.scene_mut().insert_actor(
-            helio::SceneActor::decal(make_decal(
-                [-10.95, 4.0, 10.0],
-                [1.0, 0.0, 0.0],  // facing +X (into the nave)
-                [1.0, 1.0, 0.05],
-                [0.0, 0.8, 0.8, 0.6],
-                DecalBlendMode::AlphaBlend,
-                DecalType::AlbedoNormal,
-                true,   // normal_adapt: conform to wall surface
-                0.0,
-                0.0,
-            )),
-        ));
-
-        // 5. Bullet holes on right wall near entrance (alpha blend, dark grey)
-        for i in 0..8 {
-            let x = 10.9;
-            let y = 2.0 + i as f32 * 0.7;
-            let z = 22.0 - (i as f32 * 1.3);
-            decal_ids.push(renderer.scene_mut().insert_actor(
-                helio::SceneActor::decal(make_decal(
-                    [x, y, z],
-                    [-1.0, 0.0, 0.0],  // facing -X (into the nave)
-                    [0.04, 0.04, 0.04],
-                    [0.1, 0.1, 0.1, 0.9],
-                    DecalBlendMode::AlphaBlend,
-                    DecalType::AlbedoNormal,
-                    true,
-                    0.0,
-                    0.0,
-                )),
-            ));
-            bullet_hole_ids.push(decal_ids[decal_ids.len() - 1]);
-        }
-
-        // 6. Soot marks on ceiling under each chandelier (translucent, black)
         for &z in CHANDELIER_Z {
-            decal_ids.push(renderer.scene_mut().insert_actor(
-                helio::SceneActor::decal(make_decal(
-                    [0.0, 20.98, z],
-                    [0.0, -1.0, 0.0],  // facing down
-                    [1.8, 0.02, 1.8],
-                    [0.02, 0.02, 0.02, 0.5],
-                    DecalBlendMode::Translucent,
-                    DecalType::AlbedoNormal,
-                    false,
-                    0.0,
-                    0.0,
-                )),
-            ));
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
+                [0.0, 20.98, z], [0.0, -1.0, 0.0], [1.8, 0.02, 1.8],
+                [0.02, 0.02, 0.02, 0.5], DecalBlendMode::Translucent, DecalType::AlbedoNormal, false,
+            )));
         }
-
-        // 7. Glowing rune on the altar (emissive, additive blend, green)
-        decal_ids.push(renderer.scene_mut().insert_actor(
-            helio::SceneActor::decal(make_decal(
-                [0.0, 0.90, -25.5],
-                [0.0, 1.0, 0.0],
-                [0.6, 0.02, 0.4],
-                [0.0, 1.5, 0.3, 0.8],
-                DecalBlendMode::Additive,
-                DecalType::Emissive,
-                false,
-                0.0,
-                0.0,
-            )),
-        ));
-
-        // 8. Fading decal near entrance — will disappear after 15 seconds
-        let fading_decal_id = Some(renderer.scene_mut().insert_actor(
-            helio::SceneActor::decal(make_decal(
-                [-10.95, 6.0, 24.0],
-                [1.0, 0.0, 0.0],
-                [0.8, 0.8, 0.05],
-                [1.0, 0.3, 0.1, 1.0],
-                DecalBlendMode::AlphaBlend,
-                DecalType::AlbedoNormal,
-                true,
-                8.0,   // fade over 8 seconds
-                5.0,   // start fading after 5 seconds
-            )),
-        ));
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
+            [0.0, 0.90, -25.5], [0.0, 1.0, 0.0], [0.6, 0.02, 0.4],
+            [0.0, 1.5, 0.3, 0.8], DecalBlendMode::Additive, DecalType::Emissive, false,
+        )));
 
         let renderer = Arc::new(Mutex::new(renderer));
         let (bridge, action_rx) = HelioCommandBridge::new();
@@ -793,10 +636,6 @@ impl ApplicationHandler for App {
             chandelier_light_ids,
             candle_light_ids,
             start_time: std::time::Instant::now(),
-            decal_ids,
-            fading_decal_id,
-            bullet_hole_ids,
-            bullet_hole_spawn_timer: 0.0,
         });
     }
 
@@ -865,53 +704,6 @@ impl ApplicationHandler for App {
                     }
                 }
                 println!("[debug] perf overlay mode = {:?}", state.perf_overlay_mode);
-            }
-
-            // F5: spawn bullet-hole decals near camera
-            WindowEvent::KeyboardInput {
-                event:
-                    KeyEvent {
-                        state: ElementState::Pressed,
-                        physical_key: PhysicalKey::Code(KeyCode::F5),
-                        ..
-                    },
-                ..
-            } => {
-                if let Ok(mut renderer) = state.renderer.lock() {
-                    let fwd = glam::Vec3::new(
-                        state.cam_yaw.sin() * state.cam_pitch.cos(),
-                        state.cam_pitch.sin(),
-                        -state.cam_yaw.cos() * state.cam_pitch.cos(),
-                    );
-                    for i in 0..5 {
-                        let spread = 0.3;
-                        let offset = glam::Vec3::new(
-                            (i as f32 * 0.7 - 1.4) * spread,
-                            (i as f32 * 0.3) * spread,
-                            0.0,
-                        );
-                        let hit_pos = state.cam_pos + fwd * 3.0 + offset;
-                        let decal = make_decal(
-                            [hit_pos.x, hit_pos.y, hit_pos.z],
-                            [fwd.x, fwd.y, fwd.z],
-                            [0.04, 0.04, 0.04],
-                            [0.08, 0.08, 0.08, 0.9],
-                            DecalBlendMode::AlphaBlend,
-                            DecalType::AlbedoNormal,
-                            true,
-                            0.0,
-                            0.0,
-                        );
-                        let id = renderer
-                            .scene_mut()
-                            .insert_actor(helio::SceneActor::decal(decal))
-                            .as_decal()
-                            .unwrap();
-                        state.bullet_hole_ids.push(id);
-                        state.decal_ids.push(id);
-                    }
-                    println!("[decals] spawned 5 bullet holes");
-                }
             }
 
             // F3: toggle debug overlay (FPS, timings, texture stats)
@@ -1092,63 +884,7 @@ impl AppState {
             );
         }
 
-        // ── Update fading decal age ──────────────────────────────────────
-        if let Some(id) = self.fading_decal_id {
-            let mut renderer = self.renderer.lock().unwrap();
-            // Read current decal, advance age, write back
-            // We reconstruct the decal on the app side since Scene::decals is crate-internal
-            let decal = make_decal(
-                [-10.95, 6.0, 24.0],
-                [1.0, 0.0, 0.0],
-                [0.8, 0.8, 0.05],
-                [1.0, 0.3, 0.1, 1.0],
-                DecalBlendMode::AlphaBlend,
-                DecalType::AlbedoNormal,
-                true,
-                8.0,
-                5.0,
-            );
-            // We need to track the age separately since we can't read the GPU value
-            // For simplicity, reconstruct with an incrementing age
-            // In a real app, you'd store ages on CPU or expose decal read access
-            let age = self.start_time.elapsed().as_secs_f32() - 0.0; // Start at zero
-            let updated = GpuDecal {
-                age,
-                ..decal
-            };
-            renderer.scene_mut().update_decal(id, updated);
-        }
-
-        // Auto-spawn bullet holes periodically
-        self.bullet_hole_spawn_timer += dt;
-        if self.bullet_hole_spawn_timer > 3.0 {
-            self.bullet_hole_spawn_timer = 0.0;
-            let mut renderer = self.renderer.lock().unwrap();
-            let fwd = glam::Vec3::new(
-                self.cam_yaw.sin() * self.cam_pitch.cos(),
-                self.cam_pitch.sin(),
-                -self.cam_yaw.cos() * self.cam_pitch.cos(),
-            );
-            let right = glam::Vec3::new(self.cam_yaw.cos(), 0.0, self.cam_yaw.sin());
-            let hit_pos = self.cam_pos + fwd * 4.0 + right * 1.5;
-            let decal = make_decal(
-                [hit_pos.x, hit_pos.y, hit_pos.z],
-                [fwd.x, fwd.y, fwd.z],
-                [0.04, 0.04, 0.04],
-                [0.08, 0.08, 0.08, 0.9],
-                DecalBlendMode::AlphaBlend,
-                DecalType::AlbedoNormal,
-                true,
-                0.0,
-                0.0,
-            );
-            let id = renderer
-                .scene_mut()
-                .insert_actor(helio::SceneActor::decal(decal))
-                .as_decal()
-                .unwrap();
-            self.decal_ids.push(id);
-        }
+        // Scene state is persistent — no per-frame setup needed.
 
         let output = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => t,
