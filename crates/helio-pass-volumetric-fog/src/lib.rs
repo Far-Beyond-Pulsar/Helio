@@ -70,6 +70,13 @@ pub struct VolumetricFogPass {
     inject_pipeline: wgpu::ComputePipeline,
     integrate_pipeline: wgpu::ComputePipeline,
     inject_bgl: wgpu::BindGroupLayout,
+    /// Group 0 for cs_integrate: camera + fog only.
+    ///
+    /// Deliberately *not* inject_bgl. That one binds the scattering grid as a
+    /// write-only storage texture, and cs_integrate samples the same grid from
+    /// group 1 — binding both in one dispatch is a usage conflict wgpu rejects
+    /// outright (STORAGE_WRITE_ONLY is exclusive).
+    integrate_g0_bgl: wgpu::BindGroupLayout,
     integrate_bgl: wgpu::BindGroupLayout,
 
     /// The fog block, copied out of the post-process uniform buffer each frame.
@@ -91,6 +98,7 @@ pub struct VolumetricFogPass {
 
     inject_bg: [Option<wgpu::BindGroup>; 2],
     inject_bg_key: Option<(usize, usize)>,
+    integrate_g0_bg: Option<wgpu::BindGroup>,
     integrate_bg: [Option<wgpu::BindGroup>; 2],
 
     frame: u32,
@@ -205,6 +213,12 @@ impl VolumetricFogPass {
             ],
         });
 
+        // Only what cs_integrate actually reads — see the field's doc comment.
+        let integrate_g0_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Volumetric Fog Integrate Group0 BGL"),
+            entries: &[uniform(0), uniform(1)],
+        });
+
         let integrate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Volumetric Fog Integrate BGL"),
             entries: &[tex3d(0), storage3d(1)],
@@ -215,10 +229,9 @@ impl VolumetricFogPass {
             bind_group_layouts: &[Some(&inject_bgl)],
             immediate_size: 0,
         });
-        // cs_integrate reads camera and fog from group 0 as well as its own group.
         let integrate_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Volumetric Fog Integrate PL"),
-            bind_group_layouts: &[Some(&inject_bgl), Some(&integrate_bgl)],
+            bind_group_layouts: &[Some(&integrate_g0_bgl), Some(&integrate_bgl)],
             immediate_size: 0,
         });
 
@@ -280,6 +293,7 @@ impl VolumetricFogPass {
             inject_pipeline,
             integrate_pipeline,
             inject_bgl,
+            integrate_g0_bgl,
             integrate_bgl,
             fog_uniform_buf,
             globals_buf,
@@ -292,6 +306,7 @@ impl VolumetricFogPass {
             write_idx: 0,
             inject_bg: [None, None],
             inject_bg_key: None,
+            integrate_g0_bg: None,
             integrate_bg: [None, None],
             frame: 0,
             history_valid: false,
@@ -408,6 +423,17 @@ impl RenderPass for VolumetricFogPass {
                 }));
         }
 
+        if self.integrate_g0_bg.is_none() {
+            self.integrate_g0_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Volumetric Fog Integrate Group0 BG"),
+                layout: &self.integrate_g0_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: camera_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: self.fog_uniform_buf.as_entire_binding() },
+                ],
+            }));
+        }
+
         if self.integrate_bg[write_idx].is_none() {
             self.integrate_bg[write_idx] =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -428,8 +454,9 @@ impl RenderPass for VolumetricFogPass {
                 }));
         }
 
-        let (Some(inject_bg), Some(integrate_bg)) = (
+        let (Some(inject_bg), Some(integrate_g0_bg), Some(integrate_bg)) = (
             self.inject_bg[write_idx].as_ref(),
+            self.integrate_g0_bg.as_ref(),
             self.integrate_bg[write_idx].as_ref(),
         ) else {
             return Ok(());
@@ -465,7 +492,7 @@ impl RenderPass for VolumetricFogPass {
                 timestamp_writes: None,
             });
             cpass.set_pipeline(&self.integrate_pipeline);
-            cpass.set_bind_group(0, inject_bg, &[]);
+            cpass.set_bind_group(0, integrate_g0_bg, &[]);
             cpass.set_bind_group(1, integrate_bg, &[]);
             cpass.dispatch_workgroups(FROXEL_W.div_ceil(WG_X), FROXEL_H.div_ceil(WG_Y), 1);
         }
