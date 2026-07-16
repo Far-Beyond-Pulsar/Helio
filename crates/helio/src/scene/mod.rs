@@ -72,6 +72,7 @@
 mod actor;
 mod camera;
 mod core;
+mod editor_debug;
 mod errors;
 mod flush;
 mod groups;

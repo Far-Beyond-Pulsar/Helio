@@ -11,6 +11,13 @@ pub struct DebugDrawState {
     pub user_lines_generation: u64,
     pub user_tris: Vec<DebugVertex>,
     pub user_tris_generation: u64,
+    /// Wireframe bounds of every scene volume, rebuilt by the renderer while
+    /// the editor overlay is on. Kept separate from `user_lines` because the
+    /// editor path deliberately ignores those.
+    pub editor_volume_lines: Vec<DebugVertex>,
+    /// Bumped whenever `editor_volume_lines` changes, so the pass can keep
+    /// caching its uploads instead of re-sending the set every frame.
+    pub editor_volume_generation: u64,
 }
 
 impl Default for DebugDrawState {
@@ -22,6 +29,8 @@ impl Default for DebugDrawState {
             user_lines_generation: 0,
             user_tris: Vec::new(),
             user_tris_generation: 0,
+            editor_volume_lines: Vec::new(),
+            editor_volume_generation: 0,
         }
     }
 }
@@ -512,6 +521,7 @@ pub struct DebugDrawPass {
     editor_marker_lines: [DebugVertex; 6],
     editor_last_key: Option<(bool, i32, i32, i32)>,
     editor_last_cam: Option<[f32; 3]>,
+    editor_last_volume_gen: Option<u64>,
 }
 
 impl DebugDrawPass {
@@ -537,6 +547,7 @@ impl DebugDrawPass {
             }; 6],
             editor_last_key: None,
             editor_last_cam: None,
+            editor_last_volume_gen: None,
         }
     }
 
@@ -688,7 +699,7 @@ impl RenderPass for DebugDrawPass {
         if self.editor_mode {
             let editor_enabled = state.editor_enabled;
             let cam = state.camera_position;
-            drop(state);
+            let volume_gen = state.editor_volume_generation;
 
             if !editor_enabled {
                 if self.cached_line_gen != 0 {
@@ -723,12 +734,20 @@ impl RenderPass for DebugDrawPass {
                 (center_x * 1000.0) as i32,
                 (center_z * 1000.0) as i32,
             );
+            // Grid and volume bounds both change rarely, so they share one
+            // cached prefix and the per-frame camera marker gets patched in
+            // after them.
             let mut grid_rebuilt = false;
-            if self.editor_last_key != Some(key) {
+            if self.editor_last_key != Some(key) || self.editor_last_volume_gen != Some(volume_gen)
+            {
                 self.rebuild_editor_grid_cache(center_x, center_z, grid_step);
+                self.editor_grid_cache
+                    .extend_from_slice(&state.editor_volume_lines);
                 self.editor_last_key = Some(key);
+                self.editor_last_volume_gen = Some(volume_gen);
                 grid_rebuilt = true;
             }
+            drop(state);
 
             let cam_arr = [cam.x, cam.y, cam.z];
             if self.editor_last_cam != Some(cam_arr)

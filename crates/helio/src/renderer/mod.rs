@@ -8,4 +8,6 @@ mod setup;
 
 pub use config::{required_wgpu_features, required_wgpu_limits, GiConfig, PerfOverlayMode, RendererConfig};
 pub use debug::{DebugDrawPass, DebugDrawState};
-pub use renderer_impl::{DebugBatch, DebugCameraUniform, GraphRebuilder, Renderer};
+pub use renderer_impl::{
+    DebugBatch, DebugCameraUniform, DebugVertex, GraphRebuilder, Renderer,
+};

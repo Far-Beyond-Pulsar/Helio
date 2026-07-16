@@ -58,7 +58,7 @@ pub struct DebugCameraUniform {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct DebugVertex {
     pub position: [f32; 3],
     pub _pad: f32,
