@@ -100,6 +100,12 @@ const NO_SHADOW: u32 = 4294967295u;
 @group(0) @binding(8) var                linear_samp:     sampler;
 /// rgb = in-scattered radiance * density, a = extinction.
 @group(0) @binding(9) var                scatter_out:     texture_storage_3d<rgba16float, write>;
+/// Scene depth buffer at internal resolution — used to occlude fog behind solid
+/// geometry.  Froxels whose view-space depth exceeds the scene depth at their
+/// screen position are inside (or behind) a surface; their density is zeroed
+/// so the volume respects the scene's occlusion, matching unreal's volumetric
+/// fog behaviour.
+@group(0) @binding(10) var               scene_depth:     texture_depth_2d;
 
 // Integration reads the scattering grid written above and writes the accumulated
 // result. Separate group so the two dispatches can swap only what differs.
@@ -118,6 +124,14 @@ fn density_at(p: vec3<f32>) -> f32 {
         return fog.fog_density * exp(-max(h, 0.0) * fog.fog_height_falloff);
     }
     return fog.fog_density;
+}
+
+fn effective_density_at(p: vec3<f32>, view_depth: f32) -> f32 {
+    // No fog before the start distance — the camera's near field stays clear.
+    if view_depth < fog.fog_start_distance {
+        return 0.0;
+    }
+    return density_at(p);
 }
 
 // ── Froxel <-> world ────────────────────────────────────────────────────────
@@ -287,7 +301,21 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
     let p = froxel_world_pos(uv, slice_norm);
     let ray_dir = normalize(p - camera.position_near.xyz);
 
-    let density = density_at(p);
+    let view_depth = helio_froxel_view_depth_from_slice(slice_norm, fog.fog_max_distance);
+    var density = effective_density_at(p, view_depth);
+
+    // Occlude fog behind scene geometry.  Sample the depth buffer at this
+    // froxel's screen position; if a surface is closer than the froxel then
+    // the volume is inside solid geometry and should not contribute.
+    if density > 0.0 {
+        let dd = textureDimensions(scene_depth);
+        let dc = vec2<i32>(i32(uv.x * f32(dd.x)), i32(uv.y * f32(dd.y)));
+        let scene_raw = textureLoad(scene_depth, dc, 0);
+        let scene_z = helio_view_depth(scene_raw, camera.position_near.w, camera.forward_far.w);
+        if view_depth > scene_z + 0.1 {
+            density = 0.0;
+        }
+    }
 
     var scattering = vec3<f32>(0.0);
     if density > 0.0 {
@@ -296,8 +324,10 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
             radiance += inscatter_from_light(li, p, ray_dir);
         }
         // fog_color is the medium's albedo — what in-scattered light bounces off.
-        // Emissive is self-illumination and is not tinted by it.
-        scattering = (radiance * fog.fog_color + fog.fog_emissive) * density;
+        // A small ambient term keeps the fog visible even where no direct god-ray
+        // light reaches, matching the real-world illumination of fog by skylight.
+        let ambient = fog.fog_color * 0.1;
+        scattering = (radiance * fog.fog_color + ambient + fog.fog_emissive) * density;
     }
 
     var result = vec4<f32>(scattering, density);

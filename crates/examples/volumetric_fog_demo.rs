@@ -586,6 +586,7 @@ impl AppState {
         camera.postprocess_settings.fog_scattering_anisotropy = self.fog_anisotropy;
         camera.postprocess_settings.fog_max_distance = 200.0;
         // Height fog sits at floor level and thins upward.
+        camera.postprocess_settings.fog_start_distance = 1.5;
         camera.postprocess_settings.fog_height = 0.0;
         camera.postprocess_settings.fog_height_falloff = 0.25;
 

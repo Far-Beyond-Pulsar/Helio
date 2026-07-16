@@ -97,7 +97,7 @@ pub struct VolumetricFogPass {
     write_idx: usize,
 
     inject_bg: [Option<wgpu::BindGroup>; 2],
-    inject_bg_key: Option<(usize, usize)>,
+    inject_bg_key: Option<(usize, usize, usize)>,
     integrate_g0_bg: Option<wgpu::BindGroup>,
     integrate_bg: [Option<wgpu::BindGroup>; 2],
 
@@ -210,6 +210,16 @@ impl VolumetricFogPass {
                     count: None,
                 },
                 storage3d(9), // scatter out
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: cv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -392,9 +402,16 @@ impl RenderPass for VolumetricFogPass {
         let write_idx = self.write_idx;
         let history_idx = 1 - write_idx;
 
+        let depth_tex = ctx.resources.depth_texture.get().ok_or_else(|| {
+            helio_core::Error::InvalidPassConfig(
+                "VolumetricFogPass requires depth_texture".to_string(),
+            )
+        })?;
+        let depth_tex_ptr = depth_tex as *const _ as usize;
         let key = (
             shadow_atlas as *const _ as usize,
             lights_buf as *const _ as usize,
+            depth_tex_ptr,
         );
         if self.inject_bg_key != Some(key) {
             // Both sides are rebuilt together: each pins a fixed history/write
@@ -404,6 +421,7 @@ impl RenderPass for VolumetricFogPass {
         }
 
         if self.inject_bg[write_idx].is_none() {
+            let depth_view = depth_tex.create_view(&wgpu::TextureViewDescriptor::default());
             self.inject_bg[write_idx] =
                 Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Volumetric Fog Inject BG"),
@@ -419,6 +437,10 @@ impl RenderPass for VolumetricFogPass {
                         wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&self.scatter_view[history_idx]) },
                         wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::Sampler(&self.linear_sampler) },
                         wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::TextureView(&self.scatter_view[write_idx]) },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: wgpu::BindingResource::TextureView(&depth_view),
+                        },
                     ],
                 }));
         }
