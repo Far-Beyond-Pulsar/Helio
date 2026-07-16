@@ -3273,6 +3273,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-snapshot"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "env_logger",
+ "futures-channel",
+ "glam 0.33.2",
+ "helio",
+ "helio-asset-compat",
+ "helio-default-graphs",
+ "image",
+ "log",
+ "pollster 0.4.0",
+ "thiserror 2.0.18",
+ "wgpu 30.0.0",
+]
+
+[[package]]
 name = "helio-voxel-core"
 version = "0.1.0"
 dependencies = [

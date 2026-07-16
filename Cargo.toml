@@ -14,7 +14,8 @@ path = "src/bin/web.rs"
 
 [workspace]
 members = [
-    "crates/*"
+    "crates/*",
+    "crates_other/*"
 ]
 exclude = [
     "vendor/nebula",

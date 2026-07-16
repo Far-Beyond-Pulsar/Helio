@@ -304,15 +304,19 @@ fn cs_inject(@builtin(global_invocation_id) gid: vec3<u32>) {
     let view_depth = helio_froxel_view_depth_from_slice(slice_norm, fog.fog_max_distance);
     var density = effective_density_at(p, view_depth);
 
-    // Occlude fog behind scene geometry.  Sample the depth buffer at this
-    // froxel's screen position; if a surface is closer than the froxel then
-    // the volume is inside solid geometry and should not contribute.
+    // Occlude fog behind scene geometry.  Compare the froxel's front (near)
+    // face against the scene depth at this screen position — the front-face
+    // depth is stable (no jitter), and using the near edge means a froxel is
+    // only fully discarded when it sits entirely behind a surface, preventing
+    // the "billboard" pop-in that single-sample-center checks cause.
     if density > 0.0 {
+        let froxel_near = helio_froxel_view_depth_from_slice(
+            f32(gid.z) / f32(dims.z), fog.fog_max_distance);
         let dd = textureDimensions(scene_depth);
         let dc = vec2<i32>(i32(uv.x * f32(dd.x)), i32(uv.y * f32(dd.y)));
         let scene_raw = textureLoad(scene_depth, dc, 0);
         let scene_z = helio_view_depth(scene_raw, camera.position_near.w, camera.forward_far.w);
-        if view_depth > scene_z + 0.1 {
+        if froxel_near > scene_z + 0.1 {
             density = 0.0;
         }
     }
