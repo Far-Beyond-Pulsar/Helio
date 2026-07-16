@@ -22,7 +22,10 @@ struct DeferredGlobals {
     has_rc_gi: u32,
     /// Number of tiles in the X dimension for tiled light culling.
     num_tiles_x: u32,
-    _pad2: u32,
+    /// Number of reflection captures in the capture storage buffer. Zero means
+    /// the shader skips capture blending and falls straight through to the
+    /// skylight cubemap.
+    reflection_capture_count: u32,
 }
 
 pub struct DeferredLightPass {
@@ -38,7 +41,8 @@ pub struct DeferredLightPass {
     bind_group_2: Option<wgpu::BindGroup>,
     bind_group_3: Option<wgpu::BindGroup>,
     bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
-    bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    bind_group_2_key:
+        Option<(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
     fallback_tile_counts: wgpu::Buffer,
@@ -204,12 +208,13 @@ impl DeferredLightPass {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                // Reflection cube array: layer 6*i is capture i's cubemap.
                 wgpu::BindGroupLayoutEntry {
                     binding: 3,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        view_dimension: wgpu::TextureViewDimension::CubeArray,
                         multisampled: false,
                     },
                     count: None,
@@ -261,6 +266,8 @@ impl DeferredLightPass {
                 },
                 // SSR accum texture (binding 14, Rgba16Float, half resolution)
                 texture_entry(14, wgpu::TextureSampleType::Float { filterable: false }),
+                // Reflection captures (binding 15), sorted largest influence first
+                storage_entry(15),
             ],
         });
 
@@ -593,7 +600,7 @@ impl RenderPass for DeferredLightPass {
             debug_mode: self.debug_mode,
             has_rc_gi: has_rc_gi as u32,
             num_tiles_x: ctx.width.div_ceil(16),
-            _pad2: 0,
+            reflection_capture_count: ctx.scene.reflection_captures.len() as u32,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -698,7 +705,19 @@ impl RenderPass for DeferredLightPass {
             .shadow_sampler
             .get().unwrap_or(&self.fallback_shadow_sampler);
         let rc_view = ctx.resources.rc_view.get().unwrap_or(&self.fallback_rc_view);
-        let env_view = &self.fallback_env_view;
+        // Baked reflection cube array from the probe bake. Falls back to a 1×1
+        // black cube array when nothing has been baked, which reads as "no
+        // environment" rather than failing to bind.
+        let env_view = ctx
+            .resources
+            .baked_reflection
+            .get()
+            .unwrap_or(&self.fallback_env_view);
+        let env_sampler = ctx
+            .resources
+            .baked_reflection_sampler
+            .get()
+            .unwrap_or(&self.fallback_env_sampler);
 
         // Baked lightmap atlas from bake inject pass
         let lightmap_view = ctx.resources.baked_lightmap.get().unwrap_or(&self.fallback_lightmap_view);
@@ -716,6 +735,8 @@ impl RenderPass for DeferredLightPass {
             ctx.scene.shadow_matrices as *const _ as usize,
             rc_view as *const _ as usize,
             ssr_view as *const _ as usize,
+            env_sampler as *const _ as usize,
+            ctx.scene.reflection_captures as *const _ as usize,
         );
         if self.bind_group_2_key != Some(scene_key) {
             self.bind_group_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -742,7 +763,7 @@ impl RenderPass for DeferredLightPass {
                     texture_view_entry(5, rc_view),
                     wgpu::BindGroupEntry {
                         binding: 6,
-                        resource: wgpu::BindingResource::Sampler(&self.fallback_env_sampler),
+                        resource: wgpu::BindingResource::Sampler(env_sampler),
                     },
                     wgpu::BindGroupEntry {
                         binding: 7,
@@ -771,6 +792,10 @@ impl RenderPass for DeferredLightPass {
                     },
                     // SSR accum texture (binding 14)
                     texture_view_entry(14, ssr_view),
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: ctx.scene.reflection_captures.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_2_key = Some(scene_key);
@@ -931,12 +956,15 @@ fn black_2d_texture(
     (texture, view)
 }
 
+/// A 1×1×6 black cube *array* of a single layer, bound when no baked
+/// reflection array is resident. The view dimension has to match BGL2's
+/// `CubeArray` or bind group creation fails, so this cannot be a plain Cube.
 fn black_cube_texture(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Deferred Fallback Env Cube"),
+        label: Some("Deferred Fallback Env Cube Array"),
         size: wgpu::Extent3d {
             width: 1,
             height: 1,
@@ -970,7 +998,7 @@ fn black_cube_texture(
         },
     );
     let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        dimension: Some(wgpu::TextureViewDimension::Cube),
+        dimension: Some(wgpu::TextureViewDimension::CubeArray),
         ..Default::default()
     });
     (texture, view)

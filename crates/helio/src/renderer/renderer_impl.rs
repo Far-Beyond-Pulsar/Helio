@@ -451,8 +451,33 @@ impl Renderer {
     }
 
     #[cfg(feature = "bake")]
-    pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
+    pub fn configure_bake(&mut self, mut request: helio_bake::BakeRequest) {
+        self.sync_reflection_capture_probes(&mut request.config);
         self.bake_pending = Some(request);
+    }
+
+    /// Point the probe bake at the scene's static reflection captures, and bind
+    /// each capture to the cube array layer its probe will land in.
+    ///
+    /// Both halves come from one ordered traversal, which is the whole point:
+    /// hand-authored probe positions and hand-set layer indices are two lists
+    /// that silently rot apart the moment a capture moves or is deleted.
+    #[cfg(feature = "bake")]
+    fn sync_reflection_capture_probes(&mut self, config: &mut helio_bake::BakeConfig) {
+        let positions = self.scene.static_reflection_capture_positions();
+        if positions.is_empty() {
+            return;
+        }
+        match config.probes.as_mut() {
+            Some(spec) => spec.positions = positions,
+            None => {
+                config.probes = Some(helio_bake::ProbeSpec {
+                    positions,
+                    config: helio_bake::ProbeConfig::default(),
+                })
+            }
+        }
+        self.scene.assign_reflection_capture_layers();
     }
 
     #[cfg(feature = "bake")]

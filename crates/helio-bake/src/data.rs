@@ -297,11 +297,8 @@ impl BakedData {
         let Some(probes) = probes else { return self };
         if probes.positions.is_empty() { return self; }
 
-        // Upload only the first probe for now (closest-probe selection is CPU-side in future work)
-        let face_data = &probes.face_data[..probes.bytes_per_probe.min(probes.face_data.len())];
-
+        let probe_count = probes.positions.len() as u32;
         let res = probes.face_resolution;
-        let bytes_per_face = probes.bytes_per_probe / (6 * probes.mip_levels as usize).max(1);
         let format = if probes.is_rgbe {
             wgpu::TextureFormat::Rgba8Unorm
         } else {
@@ -309,9 +306,15 @@ impl BakedData {
         };
         let bytes_per_pixel = if probes.is_rgbe { 4u32 } else { 16u32 };
 
+        // One cube array covering every baked probe: layer 6*i..6*i+6 is probe
+        // i's faces, which is what GpuReflectionCapture.cubemap_index selects.
         let tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Baked Reflection Cubemap"),
-            size: wgpu::Extent3d { width: res, height: res, depth_or_array_layers: 6 },
+            label: Some("Baked Reflection Cubemap Array"),
+            size: wgpu::Extent3d {
+                width: res,
+                height: res,
+                depth_or_array_layers: 6 * probe_count,
+            },
             mip_level_count: probes.mip_levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -320,36 +323,50 @@ impl BakedData {
             view_formats: &[],
         });
 
-        // Upload each mip × face
-        let mut offset = 0usize;
-        for mip in 0..probes.mip_levels {
-            let mip_res = (res >> mip).max(1);
-            let face_bytes = (mip_res * mip_res * bytes_per_pixel) as usize;
-            for face in 0..6u32 {
-                let end = (offset + face_bytes).min(face_data.len());
-                if end <= offset { break; }
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &tex,
-                        mip_level: mip,
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: face },
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &face_data[offset..end],
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(mip_res * bytes_per_pixel),
-                        rows_per_image: Some(mip_res),
-                    },
-                    wgpu::Extent3d { width: mip_res, height: mip_res, depth_or_array_layers: 1 },
-                );
-                offset = end;
+        // Each probe's slice of face_data is laid out [mip][face], so walk it
+        // per probe and clamp to that probe's slice — running the cursor past
+        // bytes_per_probe would bleed one probe's mips into the next.
+        for probe in 0..probe_count as usize {
+            let probe_start = probe * probes.bytes_per_probe;
+            let probe_end = (probe_start + probes.bytes_per_probe).min(probes.face_data.len());
+            let mut offset = probe_start;
+            for mip in 0..probes.mip_levels {
+                let mip_res = (res >> mip).max(1);
+                let face_bytes = (mip_res * mip_res * bytes_per_pixel) as usize;
+                for face in 0..6u32 {
+                    let end = (offset + face_bytes).min(probe_end);
+                    if end <= offset { break; }
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo {
+                            texture: &tex,
+                            mip_level: mip,
+                            origin: wgpu::Origin3d {
+                                x: 0,
+                                y: 0,
+                                z: probe as u32 * 6 + face,
+                            },
+                            aspect: wgpu::TextureAspect::All,
+                        },
+                        &probes.face_data[offset..end],
+                        wgpu::TexelCopyBufferLayout {
+                            offset: 0,
+                            bytes_per_row: Some(mip_res * bytes_per_pixel),
+                            rows_per_image: Some(mip_res),
+                        },
+                        wgpu::Extent3d {
+                            width: mip_res,
+                            height: mip_res,
+                            depth_or_array_layers: 1,
+                        },
+                    );
+                    offset = end;
+                }
             }
         }
 
         let view = Arc::new(tex.create_view(&wgpu::TextureViewDescriptor {
             label: Some("Baked Reflection View"),
-            dimension: Some(wgpu::TextureViewDimension::Cube),
+            dimension: Some(wgpu::TextureViewDimension::CubeArray),
             ..Default::default()
         }));
         let sampler = Arc::new(device.create_sampler(&wgpu::SamplerDescriptor {

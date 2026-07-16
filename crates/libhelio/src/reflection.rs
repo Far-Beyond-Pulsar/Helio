@@ -1,14 +1,94 @@
+//! GPU reflection capture types.
+
 use bytemuck::{Pod, Zeroable};
 
+/// Influence volume shape for a reflection capture.
+///
+/// Both shapes are parallax-corrected: the reflection ray is intersected
+/// against the volume so the cubemap appears anchored to the room rather
+/// than infinitely far away.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflectionCaptureShape {
+    /// Radial influence, faded over the outer 10% of `influence_radius`.
+    Sphere = 0,
+    /// Oriented box influence, faded over `transition_distance` from each face.
+    Box = 1,
+}
+
+/// How a capture's cubemap pixels are produced.
+#[repr(u32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReflectionCaptureMobility {
+    /// Pre-filtered offline by the probe baker. Never re-rendered at runtime.
+    Static = 0,
+    /// Re-rendered and re-filtered at runtime on a refresh budget.
+    Dynamic = 1,
+}
+
+/// Per-capture GPU data. 112 bytes.
+///
+/// Captures are uploaded sorted by influence volume, smallest first, so the
+/// shader can blend them front-to-back and let a small capture override the
+/// larger one it sits inside.
+///
+/// # WGSL equivalent
+/// ```wgsl
+/// struct GpuReflectionCapture {
+///     position_radius:    vec4<f32>,   // xyz = world position, w = influence radius
+///     extents_transition: vec4<f32>,   // xyz = local half-extents (box), w = transition distance
+///     world_to_local:     mat4x4<f32>, // box parallax; identity for spheres
+///     cubemap_index:      i32,         // cube array layer, -1 = no cubemap
+///     shape:              u32,         // ReflectionCaptureShape
+///     mobility:           u32,         // ReflectionCaptureMobility
+///     brightness:         f32,
+/// }
+/// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuReflectionCapture {
-    pub position_influence: [f32; 4],
-    pub box_min: [f32; 4],
-    pub box_max: [f32; 4],
+    /// xyz = world position, w = influence radius.
+    pub position_radius: [f32; 4],
+    /// xyz = local half-extents (box only), w = transition distance.
+    pub extents_transition: [f32; 4],
+    /// World → capture-local transform, used for oriented-box parallax.
+    /// Identity for spheres, which parallax-correct in world space.
+    pub world_to_local: [[f32; 4]; 4],
+    /// Layer in the reflection cube array, or -1 when no cubemap is resident.
     pub cubemap_index: i32,
-    pub capture_type: u32,
-    pub blend_weight: f32,
-    pub _pad0: u32,
-    pub _pad1: [f32; 4],
+    /// [`ReflectionCaptureShape`] as u32.
+    pub shape: u32,
+    /// [`ReflectionCaptureMobility`] as u32.
+    pub mobility: u32,
+    /// Linear multiplier applied to the sampled radiance.
+    pub brightness: f32,
+}
+
+impl GpuReflectionCapture {
+    /// A capture that contributes nothing, used to pad unused slots.
+    pub fn disabled() -> Self {
+        Self {
+            position_radius: [0.0; 4],
+            extents_transition: [0.0; 4],
+            world_to_local: [[0.0; 4]; 4],
+            cubemap_index: -1,
+            shape: ReflectionCaptureShape::Sphere as u32,
+            mobility: ReflectionCaptureMobility::Static as u32,
+            brightness: 0.0,
+        }
+    }
+
+    /// Relative size of the influence volume, used to order captures so the
+    /// smallest (most specific) capture is blended last and therefore wins.
+    pub fn influence_size(&self) -> f32 {
+        match self.shape {
+            x if x == ReflectionCaptureShape::Box as u32 => {
+                let e = self.extents_transition;
+                // Sphere-equivalent radius of the box, so both shapes sort on
+                // a comparable scale.
+                (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt()
+            }
+            _ => self.position_radius[3],
+        }
+    }
 }

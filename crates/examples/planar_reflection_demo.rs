@@ -263,19 +263,20 @@ impl ApplicationHandler for App {
             .unwrap();
 
         // ── Reflection capture ─────────────────────────────────────────────
+        // A box capture spanning the room, centred on the box's own centre.
+        // Its cubemap layer is assigned by the probe bake, so this contributes
+        // nothing until the scene has been baked.
         scene
-            .insert_reflection_capture(helio::ReflectionCaptureDescriptor {
-                position: [0.0, -1.0, 0.0],
-                influence_radius: 10.0,
-                box_min: [-6.0, -2.0, -6.0],
-                box_max: [6.0, 4.0, 6.0],
-                cubemap_index: 0,
-                capture_type: 2,
-                blend_weight: 1.0,
-            })
+            .insert_reflection_capture(
+                helio::ReflectionCaptureDescriptor::boxed(
+                    Mat4::from_translation(Vec3::new(0.0, 1.0, 0.0)),
+                    [6.0, 3.0, 6.0],
+                )
+                .with_transition_distance(1.0),
+            )
             .unwrap();
 
-        // ── Sky (provides environment cubemap for mirror reflections) ──────
+        // ── Sky ────────────────────────────────────────────────────────────
         scene.insert_actor(SceneActor::sky(
             SkyActor::new()
                 .with_sky_color([0.6, 0.7, 1.0])

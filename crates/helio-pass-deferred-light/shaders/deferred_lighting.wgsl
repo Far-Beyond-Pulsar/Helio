@@ -47,7 +47,9 @@ struct Globals {
     // of its ~128 texture loads.
     has_rc_gi:         u32,
     num_tiles_x:       u32,
-    _pad2:             u32,
+    // Number of entries in reflection_captures. Zero skips capture blending
+    // entirely and falls through to the skylight cubemap (layer 0).
+    reflection_capture_count: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -126,7 +128,10 @@ struct ShadowConfig {
 @group(2) @binding(1)  var shadow_atlas:         texture_depth_2d_array;  // Dynamic (Movable objects)
 @group(2) @binding(11) var static_shadow_atlas:  texture_depth_2d_array;  // Static (cached forever)
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
-@group(2) @binding(3) var env_cube:       texture_cube<f32>;
+// Reflection cube array. Layer i is capture i's pre-filtered cubemap; mip m
+// corresponds to a GGX lobe of increasing roughness. Layer 0 doubles as the
+// skylight fallback for surfaces no capture reaches.
+@group(2) @binding(3) var env_cube:       texture_cube_array<f32>;
 @group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
 @group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
@@ -139,6 +144,26 @@ struct ShadowConfig {
 @group(2) @binding(13) var baked_lightmap_sampler: sampler;
 // SSR accum texture (Rgba16Float, half resolution) — screen-space reflections
 @group(2) @binding(14) var ssr_tex: texture_2d<f32>;
+
+// Reflection captures, uploaded sorted by influence volume, largest first.
+// The blend below runs front-to-back and saturates, so ordering is what lets a
+// small capture override the larger one it sits inside.
+struct GpuReflectionCapture {
+    position_radius:    vec4<f32>,   // xyz = world position, w = influence radius
+    extents_transition: vec4<f32>,   // xyz = local half-extents (box), w = transition distance
+    world_to_local:     mat4x4<f32>, // box parallax; identity for spheres
+    cubemap_index:      i32,         // cube array layer, -1 = no cubemap
+    shape:              u32,         // 0 = sphere, 1 = box
+    mobility:           u32,         // 0 = static, 1 = dynamic
+    brightness:         f32,
+}
+@group(2) @binding(15) var<storage, read> reflection_captures: array<GpuReflectionCapture>;
+
+const CAPTURE_SHAPE_SPHERE: u32 = 0u;
+const CAPTURE_SHAPE_BOX:    u32 = 1u;
+
+// Highest mip index in the pre-filtered chain. roughness 1.0 maps here.
+const ENV_MAX_LOD: f32 = 8.0;
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -566,13 +591,134 @@ fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> v
     return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
+// Split-sum DFG term: the second half of Karis' split-sum approximation,
+// returning (scale, bias) so specular = F0 * scale + bias.
+//
+// This is Lazarov's analytic fit to the same integral a baked BRDF LUT would
+// store. It replaces an ad-hoc curve that was not the split-sum term at all and
+// left grazing-angle specular visibly wrong. A precomputed LUT texture would be
+// marginally more accurate; the fit avoids another binding for error well under
+// what the pre-filtered cubemap itself introduces.
 fn env_brdf_approx(NdotV: f32, roughness: f32) -> vec2<f32> {
-    let a    = roughness * roughness;
-    let a2   = a * a;
-    let ndv  = NdotV;
-    let bias = 1.0 - a2 * 0.5 / (a2 * 0.5 + 0.33) * ndv;
-    let scale = 1.0 - bias;
-    return vec2<f32>(scale, bias);
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r  = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+}
+
+// ── Reflection captures ──────────────────────────────────────────────────────
+
+// Anchor the reflection ray to the capture's sphere so the cubemap reads as a
+// room at a real distance rather than an infinitely distant backdrop.
+fn parallax_sphere(P: vec3<f32>, R: vec3<f32>, center: vec3<f32>, radius: f32) -> vec3<f32> {
+    let oc = P - center;
+    let b  = dot(oc, R);
+    let c  = dot(oc, oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return R;
+    }
+    let t = -b + sqrt(disc);  // far hit: the ray leaves the volume here
+    if t <= 0.0 {
+        return R;
+    }
+    return (P + R * t) - center;
+}
+
+// Box parallax against the capture's oriented box.
+//
+// The slab test runs in capture-local space, but the resulting ray parameter t
+// is invariant under the affine world→local transform, so the hit point can be
+// reconstructed in world space as P + R*t. That keeps this to a single stored
+// matrix — reconstructing the hit in local space instead would need the inverse
+// transform as well, just to rotate the direction back.
+fn parallax_box(P: vec3<f32>, R: vec3<f32>, cap: GpuReflectionCapture) -> vec3<f32> {
+    let pl = (cap.world_to_local * vec4<f32>(P, 1.0)).xyz;
+    let rl = (cap.world_to_local * vec4<f32>(R, 0.0)).xyz;
+    let e  = cap.extents_transition.xyz;
+
+    // Components of rl at zero produce infinities here; max() then discards
+    // them, which is the correct answer for a ray parallel to that slab.
+    let inv = 1.0 / rl;
+    let t1  = (-e - pl) * inv;
+    let t2  = (e - pl) * inv;
+    let tv  = max(t1, t2);
+    let t   = min(min(tv.x, tv.y), tv.z);
+    if t <= 0.0 || !(t < 3.402823e38) {
+        return R;
+    }
+    return (P + R * t) - cap.position_radius.xyz;
+}
+
+// How strongly a capture claims this point: 1 well inside, falling to 0 at the
+// volume boundary so neighbouring captures cross-fade instead of popping.
+fn capture_weight(P: vec3<f32>, cap: GpuReflectionCapture) -> f32 {
+    if cap.shape == CAPTURE_SHAPE_BOX {
+        let pl = (cap.world_to_local * vec4<f32>(P, 1.0)).xyz;
+        let e  = cap.extents_transition.xyz;
+        let d  = e - abs(pl);  // distance inside each pair of faces
+        if d.x < 0.0 || d.y < 0.0 || d.z < 0.0 {
+            return 0.0;
+        }
+        let transition = max(cap.extents_transition.w, 1e-4);
+        return clamp(min(min(d.x, d.y), d.z) / transition, 0.0, 1.0);
+    }
+    let radius = cap.position_radius.w;
+    let dist   = distance(P, cap.position_radius.xyz);
+    if dist > radius {
+        return 0.0;
+    }
+    // Fade across the outer 10% of the radius.
+    let fade = max(radius * 0.1, 1e-4);
+    return clamp((radius - dist) / fade, 0.0, 1.0);
+}
+
+// Blend every capture covering P, then let the skylight fill whatever coverage
+// is left over.
+//
+// Captures arrive sorted smallest-influence-first, so accumulating front-to-back
+// gives a small capture first claim on the pixel and lets the loop stop early
+// once coverage saturates.
+fn sample_reflection_environment(P: vec3<f32>, R: vec3<f32>, lod: f32) -> vec3<f32> {
+    var accum   = vec3<f32>(0.0);
+    var accum_a = 0.0;
+
+    let count = min(globals.reflection_capture_count, 64u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        if accum_a >= 0.999 {
+            break;
+        }
+        let cap = reflection_captures[i];
+        if cap.cubemap_index < 0 {
+            continue;  // no cubemap resident yet (unbaked, or awaiting capture)
+        }
+        let w = capture_weight(P, cap);
+        if w <= 0.0 {
+            continue;
+        }
+
+        var dir: vec3<f32>;
+        if cap.shape == CAPTURE_SHAPE_BOX {
+            dir = parallax_box(P, R, cap);
+        } else {
+            dir = parallax_sphere(P, R, cap.position_radius.xyz, cap.position_radius.w);
+        }
+
+        let s = textureSampleLevel(env_cube, env_sampler, dir, cap.cubemap_index, lod).rgb
+              * cap.brightness;
+        let contrib = w * (1.0 - accum_a);
+        accum   = accum + s * contrib;
+        accum_a = accum_a + contrib;
+    }
+
+    if accum_a < 0.999 {
+        // Layer 0 stands in as the skylight: an un-parallaxed lookup for points
+        // no capture reaches.
+        let sky = textureSampleLevel(env_cube, env_sampler, R, 0, lod).rgb;
+        accum = accum + sky * (1.0 - accum_a);
+    }
+    return accum;
 }
 
 // Evaluate one direct light with the full Cook-Torrance BRDF.
@@ -980,8 +1126,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
 
     // ── Indirect specular: SSR + environment cubemap ──────────────────────────
     let R            = reflect(-V, N);
-    let env_lod      = roughness * 8.0;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
-    let env_sample   = textureSampleLevel(env_cube, env_sampler, R, env_lod).rgb;
+    let env_lod      = roughness * ENV_MAX_LOD;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
+    // Parallax-corrected, influence-blended captures, falling back to the
+    // skylight where none reach. Rougher surfaces pull from higher mips of the
+    // pre-filtered chain, so reflection blur tracks roughness.
+    let env_sample   = sample_reflection_environment(world_pos, R, env_lod);
     let env_brdf    = env_brdf_approx(NdV, roughness);
     var spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
 

@@ -5,8 +5,12 @@ use crate::handles::{
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
+use glam::{Mat4, Vec3};
 use helio_core::{GpuLight, SkyContext};
-use libhelio::{GpuWaterVolume, PostProcessVolumeDescriptor, SkyActor};
+use libhelio::{
+    GpuWaterVolume, PostProcessVolumeDescriptor, ReflectionCaptureMobility,
+    ReflectionCaptureShape, SkyActor,
+};
 
 /// Result of inserting a typed scene actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -839,15 +843,90 @@ impl SceneActorTrait for DecalActor {
 
 // ── Reflection Capture ──────────────────────────────────────────────────────────
 
+/// Where a reflection capture sits, how far it reaches, and how its cubemap
+/// is produced.
+///
+/// The cubemap layer is not part of this descriptor: the engine assigns it
+/// when captures are matched to baked probes, so the two cannot drift apart.
 #[derive(Debug, Clone)]
 pub struct ReflectionCaptureDescriptor {
-    pub position: [f32; 3],
+    pub shape: ReflectionCaptureShape,
+    pub mobility: ReflectionCaptureMobility,
+    /// World transform. Box captures take their rotation from here, so a box
+    /// capture can line up with a room that isn't axis-aligned. Sphere
+    /// captures use only the translation.
+    pub transform: Mat4,
+    /// Sphere influence radius, in world units.
     pub influence_radius: f32,
-    pub box_min: [f32; 3],
-    pub box_max: [f32; 3],
-    pub cubemap_index: i32,
-    pub capture_type: u32,
-    pub blend_weight: f32,
+    /// Box half-extents, in capture-local space.
+    pub extents: [f32; 3],
+    /// Distance over which a box capture fades out at its faces. Sphere
+    /// captures fade over the outer 10% of `influence_radius` instead.
+    pub transition_distance: f32,
+    /// Linear multiplier on the sampled radiance.
+    pub brightness: f32,
+}
+
+impl Default for ReflectionCaptureDescriptor {
+    fn default() -> Self {
+        Self {
+            shape: ReflectionCaptureShape::Sphere,
+            mobility: ReflectionCaptureMobility::Static,
+            transform: Mat4::IDENTITY,
+            influence_radius: 10.0,
+            extents: [5.0; 3],
+            transition_distance: 1.0,
+            brightness: 1.0,
+        }
+    }
+}
+
+impl ReflectionCaptureDescriptor {
+    /// A sphere capture centred on `center` reaching `radius` world units.
+    pub fn sphere(center: [f32; 3], radius: f32) -> Self {
+        Self {
+            shape: ReflectionCaptureShape::Sphere,
+            transform: Mat4::from_translation(Vec3::from(center)),
+            influence_radius: radius,
+            ..Default::default()
+        }
+    }
+
+    /// A box capture filling `transform`'s volume out to `extents` half-extents.
+    pub fn boxed(transform: Mat4, extents: [f32; 3]) -> Self {
+        // Influence radius still bounds the box for the coarse distance
+        // rejection the shader does before the per-shape test.
+        let radius = (extents[0] * extents[0] + extents[1] * extents[1] + extents[2] * extents[2])
+            .sqrt();
+        Self {
+            shape: ReflectionCaptureShape::Box,
+            transform,
+            extents,
+            influence_radius: radius,
+            ..Default::default()
+        }
+    }
+
+    /// Re-render this capture at runtime instead of baking it offline.
+    pub fn dynamic(mut self) -> Self {
+        self.mobility = ReflectionCaptureMobility::Dynamic;
+        self
+    }
+
+    pub fn with_brightness(mut self, brightness: f32) -> Self {
+        self.brightness = brightness;
+        self
+    }
+
+    pub fn with_transition_distance(mut self, distance: f32) -> Self {
+        self.transition_distance = distance;
+        self
+    }
+
+    /// World-space position of the capture, which is where its probe is baked.
+    pub fn position(&self) -> [f32; 3] {
+        self.transform.w_axis.truncate().to_array()
+    }
 }
 
 /// A reflection capture actor (descriptor + optional handle).
