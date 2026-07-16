@@ -37,7 +37,7 @@ fn decal_xform(pos: [f32; 3], normal: [f32; 3], half: [f32; 3]) -> [f32; 16] {
         * glam::Mat4::from_quat(r) * glam::Mat4::from_translation(-p)).to_cols_array()
 }
 
-fn make_decal_tex(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
+fn make_decal(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
               blend: DecalBlendMode, dtype: DecalType, adapt: bool) -> GpuDecal {
     GpuDecal {
         transform: decal_xform(pos, normal, half), color,
@@ -51,7 +51,7 @@ fn make_decal_tex(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 
 
 fn make_decal_tex(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
                   blend: DecalBlendMode, dtype: DecalType, adapt: bool, tex_idx: u32) -> GpuDecal {
-    let mut d = make_decal_tex(pos, normal, half, color, blend, dtype, adapt);
+    let mut d = make_decal(pos, normal, half, color, blend, dtype, adapt);
     d.albedo_texture_index = tex_idx;
     d
 }
@@ -560,12 +560,12 @@ impl ApplicationHandler for App {
         for z in (-24..24).step_by(4) {
             let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
                 [0.0, 0.0, z as f32], [0.0, 1.0, 0.0], [1.8, 1.2, 0.02],
-                [0.0, 0.0, 1.0, 0.8], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false,
+                [0.0, 0.0, 1.0, 0.8], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false, 0,
             )));
         }
         let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
             [-3.0, 0.0, -6.0], [0.0, 1.0, 0.0], [0.8, 0.4, 0.02],
-            [1.0, 1.0, 0.0, 0.9], DecalBlendMode::Translucent, DecalType::NormalOnly, false,
+            [1.0, 1.0, 0.0, 0.9], DecalBlendMode::Translucent, DecalType::NormalOnly, false, 0,
         )));
         let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
             [3.0, 0.0, 22.0], [0.0, 1.0, 0.0], [1.5, 1.5, 0.02],
@@ -575,18 +575,18 @@ impl ApplicationHandler for App {
             let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
                 [-3.0 + i as f32 * 1.2, 0.0, 18.0 - i as f32 * 2.0],
                 [0.0, 1.0, 0.0], [0.3, 0.3, 0.02],
-                [1.0, 0.0, 1.0, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false,
+                [1.0, 0.0, 1.0, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false, 0,
             )));
         }
         for &z in CHANDELIER_Z {
             let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
                 [5.0, 0.0, z], [0.0, 1.0, 0.0], [1.2, 1.2, 0.02],
-                [0.0, 0.0, 1.0, 0.7], DecalBlendMode::Translucent, DecalType::AlbedoNormal, false,
+                [0.0, 0.0, 1.0, 0.7], DecalBlendMode::Translucent, DecalType::AlbedoNormal, false, 0,
             )));
         }
         let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
             [0.0, 0.90, -25.5], [0.0, 1.0, 0.0], [0.6, 0.4, 0.02],
-            [1.0, 0.5, 0.0, 1.0], DecalBlendMode::Additive, DecalType::Emissive, false,
+            [1.0, 0.5, 0.0, 1.0], DecalBlendMode::Additive, DecalType::Emissive, false, 0,
         )));
 
         let renderer = Arc::new(Mutex::new(renderer));
