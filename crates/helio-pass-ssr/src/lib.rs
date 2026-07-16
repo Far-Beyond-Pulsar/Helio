@@ -281,7 +281,7 @@ impl RenderPass for SsrPass {
             let tlas = main_scene.and_then(|ms| ms.tlas);
 
             if let Some(tlas_binding) = tlas {
-                let rc_view = ctx.resources.rc_view.get().copied();
+                let rc_view = ctx.resources.rc_view.get();
 
                 let rt_key = (
                     tlas_binding as *const _ as usize,
