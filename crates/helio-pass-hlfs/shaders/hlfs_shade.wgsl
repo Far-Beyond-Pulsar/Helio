@@ -85,6 +85,11 @@ fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
+fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let one_minus_r = vec3<f32>(1.0 - roughness);
+    return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
+}
+
 struct LightMatrix {
     mat: mat4x4<f32>,
 }
@@ -364,11 +369,12 @@ fn evaluate_light(light: GpuLight, world_pos: vec3<f32>, N: vec3<f32>, V: vec3<f
 }
 
 // Group 1: GBuffer inputs
-@group(1) @binding(0) var gbuf_albedo:   texture_2d<f32>;
-@group(1) @binding(1) var gbuf_normal:   texture_2d<f32>;
-@group(1) @binding(2) var gbuf_orm:      texture_2d<f32>;
-@group(1) @binding(3) var gbuf_emissive: texture_2d<f32>;
-@group(1) @binding(4) var gbuf_depth:    texture_depth_2d;
+@group(1) @binding(0) var gbuf_albedo:      texture_2d<f32>;
+@group(1) @binding(1) var gbuf_normal:      texture_2d<f32>;
+@group(1) @binding(2) var gbuf_orm:         texture_2d<f32>;
+@group(1) @binding(3) var gbuf_emissive:    texture_2d<f32>;
+@group(1) @binding(4) var gbuf_depth:       texture_depth_2d;
+@group(1) @binding(5) var gbuf_lightmap_uv: texture_2d<f32>;
 
 // Vertex shader - fullscreen triangle
 struct VSOut {
@@ -453,9 +459,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         direct_lighting = direct_lighting + evaluate_light(light, world_pos, normal, V, F0, albedo, roughness, metallic, vis);
     }
 
+    let NdV = max(dot(normal, V), 0.0);
+    let F_ibl = fresnel_schlick_roughness(NdV, F0, roughness);
+    let kD_ibl = (1.0 - F_ibl) * (1.0 - metallic);
     let ambient = vec3<f32>(0.03);
-    let base = albedo * (1.0 - metallic) * (direct_lighting + ambient);
-    let final_color = base + indirect + emissive;
+    let indirect_lighting = kD_ibl * (indirect + ambient) * albedo;
+    let final_color = direct_lighting + indirect_lighting + emissive;
 
     return vec4<f32>(final_color, 1.0);
 }

@@ -70,7 +70,10 @@ pub struct HlfsPass {
     /// Cached shade bind group 1 (GBuffer + depth).
     bind_group_shade1: Option<wgpu::BindGroup>,
     /// Raw-pointer key for lazy rebuild of shade BG1.
-    bind_group_shade1_key: Option<(usize, usize, usize, usize, usize)>,
+    bind_group_shade1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+
+    fallback_lightmap_uv_tex: wgpu::Texture,
+    fallback_lightmap_uv_view: wgpu::TextureView,
 
     width: u32,
     height: u32,
@@ -85,8 +88,10 @@ pub struct HlfsPass {
 }
 
 impl HlfsPass {
+    #[allow(unused)]
     pub fn new(
         device: &wgpu::Device,
+        queue: &wgpu::Queue,
         width: u32,
         height: u32,
         output_format: wgpu::TextureFormat,
@@ -589,6 +594,17 @@ impl HlfsPass {
                     },
                     count: None,
                 },
+                // gbuf_lightmap_uv
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -692,6 +708,30 @@ impl HlfsPass {
             ..Default::default()
         });
 
+        // Fallback 1x1 RG16Float texture for lightmap UVs (when gbuffer_lightmap_uv is not available).
+        let fallback_lightmap_uv_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("HLFS Fallback Lightmap UV"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &fallback_lightmap_uv_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8; 4], // (0.0, 0.0) UV coords
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_lightmap_uv_view = fallback_lightmap_uv_tex.create_view(&Default::default());
+
         let fallback_shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("HLFS Fallback Shadow Sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -725,6 +765,8 @@ impl HlfsPass {
             bind_group_shade0_key: None,
             bind_group_shade1: None,
             bind_group_shade1_key: None,
+            fallback_lightmap_uv_tex,
+            fallback_lightmap_uv_view,
             width,
             height,
             output_texture,
@@ -911,12 +953,15 @@ impl RenderPass for HlfsPass {
             )
         })?;
 
+        let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
+
         let shade1_key = (
             gbuffer.albedo as *const _ as usize,
             gbuffer.normal as *const _ as usize,
             gbuffer.orm as *const _ as usize,
             gbuffer.emissive as *const _ as usize,
             ctx.depth as *const _ as usize,
+            lightmap_uv_view as *const _ as usize,
         );
         if self.bind_group_shade1_key != Some(shade1_key) {
             self.bind_group_shade1 =
@@ -943,6 +988,10 @@ impl RenderPass for HlfsPass {
                         wgpu::BindGroupEntry {
                             binding: 4,
                             resource: wgpu::BindingResource::TextureView(ctx.depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: wgpu::BindingResource::TextureView(lightmap_uv_view),
                         },
                     ],
                 }));

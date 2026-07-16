@@ -650,7 +650,7 @@ fn build_hlfs_graph_internal(
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
-    let mut hlfs_pass = HlfsPass::new(device, iw, ih, config.surface_format);
+    let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
@@ -808,7 +808,7 @@ fn build_fxaa_hlfs_graph_internal(
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
-    let mut hlfs_pass = HlfsPass::new(device, w, h, config.surface_format);
+    let mut hlfs_pass = HlfsPass::new(device, queue, w, h, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
