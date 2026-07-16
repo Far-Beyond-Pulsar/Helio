@@ -2,7 +2,8 @@
 ///
 /// Browser WebGPU does not expose wgpu's `binding_array` WGSL extension. The
 /// fixed bindings and switch preserve every material texture slot without
-/// requiring a native-only feature.
+/// requiring a native-only feature. The native-only extension directive is
+/// removed together with the binding-array declarations.
 pub fn apply_webgpu_material_bindings(src: &str, max_textures: usize) -> String {
     let mut declarations = String::new();
     for index in 0..max_textures {
@@ -20,7 +21,9 @@ pub fn apply_webgpu_material_bindings(src: &str, max_textures: usize) -> String 
 
     let mut source = String::with_capacity(src.len() + declarations.len());
     for line in src.lines() {
-        if line.contains("scene_textures:") && line.contains("binding_array<texture_2d") {
+        if line.trim() == "enable wgpu_binding_array;" {
+            // The rewritten shader no longer uses this native-only extension.
+        } else if line.contains("scene_textures:") && line.contains("binding_array<texture_2d") {
             source.push_str(&declarations);
         } else if line.contains("scene_samplers:") && line.contains("binding_array<sampler") {
             // Both binding tables were emitted in place of scene_textures.
@@ -51,6 +54,7 @@ mod tests {
     #[test]
     fn expands_material_binding_arrays() {
         let source = r#"
+enable wgpu_binding_array;
 @group(1) @binding(2) var scene_textures: binding_array<texture_2d<f32>, 2>;
 @group(1) @binding(3) var scene_samplers: binding_array<sampler, 2>;
 fn sample_texture(slot: MaterialTextureSlot, uv: vec2<f32>, fallback: vec4<f32>) -> vec4<f32> {
