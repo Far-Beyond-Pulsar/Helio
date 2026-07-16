@@ -60,15 +60,124 @@ struct RCDynamic {
     _pad1:       u32,
     sky_color:   vec4<f32>,
 }
-@group(0) @binding(0) var cascade_out: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(1) var<uniform>  rc_dyn: RCDynamic;
+
+struct Camera {
+    view:           mat4x4<f32>,
+    proj:           mat4x4<f32>,
+    view_proj:      mat4x4<f32>,
+    view_proj_inv:  mat4x4<f32>,
+    position_near:  vec4<f32>,
+    forward_far:    vec4<f32>,
+    jitter_frame:   vec4<f32>,
+    prev_view_proj: mat4x4<f32>,
+}
+
+@group(0) @binding(0) var cascade_out:   texture_storage_2d<rgba16float, write>;
+@group(0) @binding(1) var<uniform>  rc_dyn:      RCDynamic;
+@group(0) @binding(2) var depth_tex:    texture_depth_2d;
+@group(0) @binding(3) var scene_color:  texture_2d<f32>;
+@group(0) @binding(4) var<uniform> camera:       Camera;
+
+const PROBE_DIM:   u32 = 8u;
+const DIR_DIM:     u32 = 4u;
+const MAX_RAY_DIST: f32 = 100.0;
+const MARCH_STEPS:  u32 = 32u;
+
+fn oct_decode(uv: vec2<f32>) -> vec3<f32> {
+    let f  = uv * 2.0 - 1.0;
+    let af = abs(f);
+    let l  = af.x + af.y;
+    var n: vec3<f32>;
+    if l > 1.0 {
+        let sx = select(-1.0, 1.0, f.x >= 0.0);
+        let sz = select(-1.0, 1.0, f.y >= 0.0);
+        n = vec3<f32>((1.0 - af.y) * sx, 1.0 - l, (1.0 - af.x) * sz);
+    } else {
+        n = vec3<f32>(f.x, 1.0 - l, f.y);
+    }
+    return normalize(n);
+}
+
+fn helio_ndc_to_uv(ndc: vec2<f32>) -> vec2<f32> {
+    return vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+}
 
 @compute @workgroup_size(8, 8)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let dims = textureDimensions(cascade_out);
-    if gid.x >= dims.x || gid.y >= dims.y { return; }
+    let atlas_w = PROBE_DIM * DIR_DIM;
+    let atlas_h = PROBE_DIM * PROBE_DIM * DIR_DIM;
+
+    if gid.x >= atlas_w || gid.y >= atlas_h { return; }
+
+    let dx = gid.x % DIR_DIM;
+    let px = gid.x / DIR_DIM;
+    let dy = gid.y % DIR_DIM;
+    let pyz = gid.y / DIR_DIM;
+    let pz = pyz % PROBE_DIM;
+    let py = pyz / PROBE_DIM;
+
+    let dir_uv = (vec2<f32>(f32(dx), f32(dy)) + 0.5) / f32(DIR_DIM);
+    let dir = oct_decode(dir_uv);
+
+    let t = (vec3<f32>(f32(px), f32(py), f32(pz)) + 0.5) / f32(PROBE_DIM);
+    let world_size = rc_dyn.world_max.xyz - rc_dyn.world_min.xyz;
+    let probe_pos = rc_dyn.world_min.xyz + t * world_size;
+
+    let start_world = probe_pos;
+    let end_world   = start_world + dir * MAX_RAY_DIST;
+
+    let clip_start = camera.view_proj * vec4<f32>(start_world, 1.0);
+    let clip_end   = camera.view_proj * vec4<f32>(end_world, 1.0);
+
+    if clip_start.w <= 0.0 {
+        textureStore(cascade_out, vec2<i32>(i32(gid.x), i32(gid.y)),
+            vec4<f32>(rc_dyn.sky_color.rgb, 0.0));
+        return;
+    }
+
+    let ndc_start = clip_start.xyz / clip_start.w;
+    let ndc_end   = clip_end.xyz   / clip_end.w;
+
+    let uv_start    = helio_ndc_to_uv(ndc_start.xy);
+    let uv_end      = helio_ndc_to_uv(ndc_end.xy);
+    let depth_start = ndc_start.z;
+    let depth_end   = ndc_end.z;
+
+    let delta_uv    = uv_end - uv_start;
+    let delta_depth = depth_end - depth_start;
+
+    let scene_dims = vec2<f32>(textureDimensions(scene_color));
+    let depth_dims = vec2<f32>(textureDimensions(depth_tex));
+
+    var radiance = vec3<f32>(0.0);
+    var hit = false;
+
+    for (var i: u32 = 1u; i <= MARCH_STEPS; i++) {
+        let t_step = f32(i) / f32(MARCH_STEPS);
+        let uv = uv_start + delta_uv * t_step;
+        let d  = depth_start + delta_depth * t_step;
+
+        if any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0)) { break; }
+
+        let scene_d = textureLoad(depth_tex,
+            vec2<i32>(i32(uv.x * depth_dims.x), i32(uv.y * depth_dims.y)), 0);
+
+        if scene_d >= 1.0 { continue; }
+
+        if d >= scene_d {
+            radiance = textureLoad(scene_color,
+                vec2<i32>(i32(uv.x * scene_dims.x), i32(uv.y * scene_dims.y)), 0).rgb;
+            hit = true;
+            break;
+        }
+    }
+
+    if !hit {
+        radiance = rc_dyn.sky_color.rgb;
+    }
+
     textureStore(cascade_out, vec2<i32>(i32(gid.x), i32(gid.y)),
-        vec4<f32>(rc_dyn.sky_color.rgb * 0.05, 1.0));
+        vec4<f32>(radiance, 0.0));
 }
 "#;
 
@@ -113,6 +222,36 @@ impl RadianceCascadesPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -273,6 +412,10 @@ impl RenderPass for RadianceCascadesPass {
         "RadianceCascades"
     }
 
+    fn reads(&self) -> &'static [&'static str] {
+        &["pre_aa"]
+    }
+
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.write_color_raw(
             "rc_cascades",
@@ -348,38 +491,55 @@ impl RenderPass for RadianceCascadesPass {
 
 impl RadianceCascadesPass {
     fn execute_fallback(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        if self.fb_bind_group.is_none() {
-            let tex = ctx
-                .resource_pool
-                .get_texture("rc_cascades")
-                .ok_or_else(|| {
-                    helio_core::Error::InvalidPassConfig(
-                        "RadianceCascades: missing rc_cascades texture".into(),
-                    )
-                })?;
-            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-            self.fb_bind_group =
-                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("RC Fallback BG"),
-                    layout: &self.fb_bgl,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: self.uniform_buf.as_entire_binding(),
-                        },
-                    ],
-                }));
-        }
+        let tex = ctx
+            .resource_pool
+            .get_texture("rc_cascades")
+            .ok_or_else(|| {
+                helio_core::Error::InvalidPassConfig(
+                    "RadianceCascades: missing rc_cascades texture".into(),
+                )
+            })?;
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let depth_view = ctx.depth;
+        let pre_aa_view = match ctx.resources.pre_aa.get() {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+
+        self.fb_bind_group =
+            Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("RC Fallback BG"),
+                layout: &self.fb_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: self.uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(depth_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: ctx.scene.camera.as_entire_binding(),
+                    },
+                ],
+            }));
 
         let wg_x = ATLAS_W.div_ceil(WORKGROUP_SIZE_X);
         let wg_y = ATLAS_H.div_ceil(WORKGROUP_SIZE_Y);
 
         let desc = wgpu::ComputePassDescriptor {
-            label: Some("RadianceCascades"),
+            label: Some("RadianceCascades (Fallback)"),
             timestamp_writes: None,
         };
         let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&desc);

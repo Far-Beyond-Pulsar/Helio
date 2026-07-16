@@ -19,6 +19,7 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
+use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_cull::ShadowCullPass;
@@ -393,6 +394,11 @@ fn build_default_graph_internal(
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
 
+    graph.add_pass(Box::new(RadianceCascadesPass::new(
+        device,
+        scene.gpu_scene().lights.buffer(),
+    )));
+
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
     let camera_buf = scene.gpu_scene().camera.buffer();
@@ -573,6 +579,11 @@ fn build_fxaa_graph_internal(
     );
 
     graph.add_pass(Box::new(LightCullPass::new(device, iw, ih)));
+
+    graph.add_pass(Box::new(RadianceCascadesPass::new(
+        device,
+        scene.gpu_scene().lights.buffer(),
+    )));
 
     add_geometry_passes(&mut graph, device, scene, &config, &perf);
 
