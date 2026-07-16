@@ -579,6 +579,8 @@ fn env_brdf_approx(NdotV: f32, roughness: f32) -> vec2<f32> {
 // `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
 // When `is_anisotropic` is true, uses anisotropic GGX distribution with the
 // given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
+// For SSS surfaces (has_subsurface), applies wrap-diffuse lighting with
+// transmission through the subsurface, tinted by subsurface_color.
 fn pbr_direct_light(
     light:     GpuLight,
     world_pos: vec3<f32>,
@@ -593,6 +595,8 @@ fn pbr_direct_light(
     T:         vec3<f32>,
     ax:        f32,
     ay:        f32,
+    has_subsurface: bool,
+    subsurface_color: vec3<f32>,
 ) -> vec3<f32> {
     var L:        vec3<f32>;
     var radiance: vec3<f32>;
@@ -637,7 +641,26 @@ fn pbr_direct_light(
         specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
     }
 
-    return (kD * albedo / PI + specular) * radiance * NdL * sf;
+    var diffuse_term = kD * albedo / PI;
+    var NdotL_effective = NdL;
+
+    // Subsurface scattering: wrap-diffuse + transmission approximation.
+    // Light penetrates the surface, scatters internally tinted by
+    // subsurface_color, and exits.  The wrap term extends the diffuse
+    // lobe into the back-facing hemisphere, mimicking internal scatter.
+    if has_subsurface {
+        let wrap = 0.2 + 0.4 * (1.0 - roughness); // tighter wrap for smoother surfaces
+        NdotL_effective = max((dot(N, L) + wrap) / (1.0 + wrap), 0.0);
+        // SSS diffuse: standard diffuse dimmed, plus a tinted wrap term
+        let sss_diffuse = (1.0 - F) * albedo / PI * (1.0 - metallic);
+        let sss_scatter = subsurface_color * (1.0 / PI);
+        diffuse_term = mix(sss_diffuse, sss_scatter, 0.5);
+        // Reduce shadow occlusion — SSS surfaces let light through
+        let sf_sss = mix(sf, 1.0, 0.3);
+        return (diffuse_term + specular) * radiance * NdotL_effective * sf_sss;
+    }
+
+    return (diffuse_term + specular) * radiance * NdotL_effective * sf;
 }
 
 // ── Radiance Cascades GI ──────────────────────────────────────────────────────
@@ -914,15 +937,27 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if !is_vg {
                 sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
             }
-            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay);
+            let sss_color = sss_r.rgb;
+            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
         }
+    }
+
+    // ── SSS transmission glow (rim-light approximation) ──────────────────────
+    // Light enters the surface near the silhouette, scatters internally tinted
+    // by subsurface_color, and exits.  Modelled as a view-angle-dependent glow
+    // that peaks at grazing angles (where the light path through the medium is
+    // shortest/dimmest physically, but the perceived scatter volume is largest).
+    var sss_transmission = vec3<f32>(0.0);
+    if has_subsurface {
+        let rim = pow(1.0 - NdV, 3.0);
+        sss_transmission = sss_r.rgb * rim * 1.2;
     }
 
     // ── RC indirect diffuse ───────────────────────────────────────────────────
     let rc_irr   = sample_rc_irradiance(world_pos, N);
     let F_ibl    = fresnel_schlick_roughness(NdV, F0, roughness);
     let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
-    let diff_ind = kD_ibl * rc_irr * albedo;
+    var diff_ind = kD_ibl * rc_irr * albedo;
     
     // ── Baked lightmap indirect diffuse ───────────────────────────────────────
     // For static geometry: pre-computed multi-bounce GI from offline baking.
@@ -1013,6 +1048,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let indirect      = select(indirect_dyn, indirect_bake, has_lightmap);
     var color         = lo_final + indirect;
     color        += emissive;               // emissive from G-buffer
+    color        += sss_transmission;       // SSS rim glow
 
     // ── Water caustics ────────────────────────────────────────────────────────
     // Add caustics to surfaces below water
