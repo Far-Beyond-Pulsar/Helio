@@ -234,20 +234,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // ── Confidence ──────────────────────────────────────────────────────────
+    // ── Validity and confidence ─────────────────────────────────────────────
+    // Attenuations combine multiplicatively.
+
+    // Back-face rejection. The depth buffer stores front faces only, so a ray that
+    // travels *behind* an object still crosses its depth and reports a hit —
+    // smearing the object backward along the view ray. A real hit arrives against
+    // the surface it lands on; if the stored normal there faces the same way the
+    // ray is going, the ray went behind that surface and the hit is fiction.
+    // Thickness alone cannot catch this, which is why tightening it only reduced
+    // the streaks instead of removing them.
+    let n_hit = helio_gbuffer_normal(
+        textureLoad(gbuf_normal, vec2<i32>(hit_uv * vec2<f32>(dims)), 0).xyz
+    );
+    let arriving = -dot(R, n_hit); // +1 = head-on into a front face, <= 0 = back face
+    //
+    // A soft fade centred on zero, NOT a threshold. Near-tangent hits are
+    // genuinely ambiguous: a real grazing reflection and a ray skimming just
+    // behind a silhouette both land at arriving ~= 0, and no cutoff separates
+    // them — putting the edge above zero shreds real reflections, putting it below
+    // lets the silhouette streaks through at full strength. Since alpha now drives
+    // the composite, ambiguity can be expressed as partial confidence instead of
+    // being decided: certain hits (>0.15) composite fully, reversed ones (<-0.15)
+    // vanish, and the tangent band dissolves proportionally into the cubemap.
+    let backface_fade = smoothstep(-0.15, 0.15, arriving);
+
     // Per-axis border fade on the *hit*: a radial fade from the source pixel has
     // nothing to do with where the ray actually left the screen.
     let border = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
     let edge_fade = smoothstep(0.0, 0.1, border);
 
-    // Rays aimed back at the camera have no on-screen data behind them.
-    let facing_fade = 1.0 - smoothstep(0.25, 0.6, dot(R, -V));
+    // Rays aimed back at the viewer have no on-screen data behind them. For a
+    // mirror, dot(R, V) = cos(2*incidence): it goes to +1 at normal incidence
+    // (ray returns to the eye — nothing to sample) and to -1 at grazing (ray
+    // crosses the screen — the case SSR handles best). So this fades toward +1.
+    let facing_fade = 1.0 - smoothstep(0.26, 0.5, dot(R, V));
 
     // Fade as the ray runs out of budget, so hits don't pop at MAX_RAY_DIST.
     let travelled = length(hit_uv - p0.xy) / max(length(d.xy), 1e-6);
     let dist_fade = 1.0 - smoothstep(FADE_START, 1.0, travelled);
 
-    let confidence = clamp(edge_fade * facing_fade * dist_fade * roughness_fade, 0.0, 1.0);
+    let confidence = clamp(
+        backface_fade * edge_fade * facing_fade * dist_fade * roughness_fade,
+        0.0,
+        1.0,
+    );
 
     // scene_color has no mip chain (pre_aa is MatchSurface, 1 mip), so roughness
     // blur comes from the denoise pass rather than a mip bias here.

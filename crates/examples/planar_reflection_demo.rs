@@ -125,7 +125,14 @@ impl ApplicationHandler for App {
             },
         );
 
-        let renderer_config = RendererConfig::new(size.width, size.height, surface_format);
+        let mut renderer_config = RendererConfig::new(size.width, size.height, surface_format);
+        // HELIO_DEBUG_MODE=30 -> SSR confidence, 31 -> SSR colour. See the debug
+        // blocks in deferred_lighting.wgsl for the full list.
+        if let Ok(mode) = std::env::var("HELIO_DEBUG_MODE") {
+            if let Ok(mode) = mode.parse::<u32>() {
+                renderer_config.debug_mode = mode;
+            }
+        }
 
         let mut scene = Scene::new(device.clone(), queue.clone());
 

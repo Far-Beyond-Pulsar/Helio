@@ -50,7 +50,9 @@
       "Bash(cat)",
       "Bash(python3 /tmp/gen_tables.py)",
       "Read(//tmp/**)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "WebFetch(domain:www.gamedev.net)",
+      "WebFetch(domain:sakibsaikia.github.io)"
     ]
   }
 }

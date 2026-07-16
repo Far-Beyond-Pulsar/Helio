@@ -769,6 +769,25 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(sf, sf, sf, 1.0);
     }
 
+    // ── Debug modes 30/31: SSR diagnosis ─────────────────────────────────────
+    // Use these as a PAIR. SsrPass writes (0,0,0,0) when the ray found nothing,
+    // and (colour, confidence) when it hit — so comparing the two separates the
+    // two very different reasons a reflection can be absent:
+    //
+    //   31 black  + 30 black  → the march found no hit (traversal/geometry).
+    //   31 colour + 30 black  → a hit was found and then faded away by a
+    //                           confidence term (back-face/facing/edge/distance).
+    //
+    // Without this pair the two are indistinguishable in the final image: both
+    // just look like missing reflection, and tuning is guesswork.
+    if globals.debug_mode == 30u {
+        let a = textureLoad(ssr_tex, pix, 0).a;
+        return vec4<f32>(a, a, a, 1.0);
+    }
+    if globals.debug_mode == 31u {
+        return vec4<f32>(textureLoad(ssr_tex, pix, 0).rgb, 1.0);
+    }
+
     // ── Debug mode 11: light-space projection for first light face 0 ─────────
     // Orange gradient = pixel is inside the light frustum, depth = ndc.z.
     // Dark blue = pixel is outside the frustum (w<=0 or uv out of [0,1]).
@@ -855,13 +874,23 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let env_brdf    = env_brdf_approx(NdV, roughness);
     var spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
 
-    // SSR composite — blend screen-space reflections over cubemap fallback.
+    // SSR composite — blend screen-space reflections over the cubemap fallback,
+    // weighted by the trace's confidence.
+    //
     // Full resolution, so this is a 1:1 read (it used to be a half-res pix / 2).
+    //
+    // Alpha IS the blend weight. SsrPass folds every validity term into it — edge,
+    // viewer-facing, back-face, ray distance, and roughness — precisely so this
+    // composite can dissolve an untrustworthy reflection back into the probe.
+    // Treating alpha as a mere >0 gate and blending on roughness instead (as this
+    // did) threw all of that away: a 0.01-confidence hit composited exactly as
+    // strongly as a certain one, which is what makes bad hits show up at full
+    // intensity rather than fading out. It also applied roughness twice, since the
+    // trace already folds it in.
     let ssr_hit      = textureLoad(ssr_tex, pix, 0);
     if ssr_hit.a > 0.0 {
-        let ssr_blend = 1.0 - smoothstep(0.4, 0.7, roughness);
         let ssr_sample = ssr_hit.rgb * F_ibl;
-        spec_ind = mix(spec_ind, ssr_sample, ssr_blend);
+        spec_ind = mix(spec_ind, ssr_sample, ssr_hit.a);
     }
 
     // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
