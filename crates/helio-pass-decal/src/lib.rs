@@ -1,7 +1,14 @@
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
+
+/// Size of the scene's bindless texture table. Must match `helio::material::MAX_TEXTURES`,
+/// which the renderer uses to size the per-frame view/sampler arrays.
+/// Capped at 16 on wasm32 and Apple native Metal; 256 on other desktop backends.
+#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
+const MAX_TEXTURES: usize = 256;
+#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios"))]
+const MAX_TEXTURES: usize = 16;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -12,26 +19,31 @@ pub struct DecalPass {
     apply_pipeline: wgpu::ComputePipeline,
     bgl_collect: wgpu::BindGroupLayout,
     bgl_apply: wgpu::BindGroupLayout,
+    bgl_textures: wgpu::BindGroupLayout,
     bg_collect: Option<wgpu::BindGroup>,
     bg_apply: Option<wgpu::BindGroup>,
-    bg_collect_key: Option<(usize, usize, usize, usize, usize, usize, u64, u64)>,
-    bg_apply_key: Option<(usize, usize, usize, usize, usize, usize, u64, u64)>,
+    bg_textures: Option<wgpu::BindGroup>,
+    bg_collect_key: Option<(usize, usize, usize, usize, usize, usize, u64)>,
+    bg_apply_key: Option<(usize, usize, usize, usize, usize, usize, u64)>,
+    bg_textures_version: Option<u64>,
     globals_buf: wgpu::Buffer,
     temp_albedo: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_normal: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_orm: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_emissive: Option<(wgpu::Texture, wgpu::TextureView)>,
     device: Arc<wgpu::Device>,
-    decal_tex: Option<(wgpu::Texture, wgpu::TextureView, wgpu::Sampler)>,
     last_w: u32, last_h: u32,
 }
 
 impl DecalPass {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, decal_buf: &wgpu::Buffer,
-               camera_buf: &wgpu::Buffer, _w: u32, _h: u32) -> Self {
+    /// Decal textures now come from the scene's bindless table (bound per-frame
+    /// from `main_scene`), so this pass owns no texture state of its own.
+    pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue, _decal_buf: &wgpu::Buffer,
+               _camera_buf: &wgpu::Buffer, _w: u32, _h: u32) -> Self {
+        let collect_src = decal_collect_source();
         let collect_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Collect"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/decal_collect.wgsl").into()),
+            source: wgpu::ShaderSource::Wgsl(collect_src.into()),
         });
         let apply_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Decal Apply"),
@@ -59,16 +71,13 @@ impl DecalPass {
                 bgl_entry_tex_storage(9, wgpu::StorageTextureAccess::WriteOnly, wgpu::TextureFormat::Rgba16Float),
                 bgl_entry_tex_storage(10, wgpu::StorageTextureAccess::WriteOnly, wgpu::TextureFormat::Rgba8Unorm),
                 bgl_entry_tex_storage(11, wgpu::StorageTextureAccess::WriteOnly, wgpu::TextureFormat::Rgba16Float),
-                bgl_entry_tex(12, wgpu::TextureSampleType::Float { filterable: true }),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 13, visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
             ],
         });
+        let bgl_textures = create_decal_texture_bgl(device);
         let collect_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Decal Collect PL"), bind_group_layouts: &[Some(&bgl_collect)], immediate_size: 0,
+            label: Some("Decal Collect PL"),
+            bind_group_layouts: &[Some(&bgl_collect), Some(&bgl_textures)],
+            immediate_size: 0,
         });
         let collect_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("Decal Collect"), layout: Some(&collect_pl), module: &collect_mod,
@@ -100,37 +109,12 @@ impl DecalPass {
             entry_point: Some("cs_main"), compilation_options: Default::default(), cache: None,
         });
 
-        let white_tex = device.create_texture_with_data(
-            queue,
-            &wgpu::TextureDescriptor {
-                label: Some("Decal White Tex"),
-                size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &[255u8, 255, 255, 255],
-        );
-        let wv = white_tex.create_view(&Default::default());
-        let ws = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Decal White Samp"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-
         Self {
-            collect_pipeline, apply_pipeline, bgl_collect, bgl_apply,
-            bg_collect: None, bg_apply: None, bg_collect_key: None, bg_apply_key: None,
+            collect_pipeline, apply_pipeline, bgl_collect, bgl_apply, bgl_textures,
+            bg_collect: None, bg_apply: None, bg_textures: None,
+            bg_collect_key: None, bg_apply_key: None, bg_textures_version: None,
             globals_buf, temp_albedo: None, temp_normal: None, temp_orm: None, temp_emissive: None,
             device: Arc::new(device.clone()),
-            decal_tex: Some((white_tex, wv, ws)),
             last_w: 0, last_h: 0,
         }
     }
@@ -158,6 +142,77 @@ fn make_temp(device: &wgpu::Device, format: wgpu::TextureFormat, label: &str, si
     (t, v)
 }
 
+/// Decal collect shader source, resized to this platform's bindless table.
+///
+/// The WGSL is written against the 256-entry native table; on wasm the arrays are
+/// rewritten to individual bindings (baseline WebGPU has no `binding_array`), and
+/// elsewhere the declared length is resized to match [`MAX_TEXTURES`] — the BGL and
+/// the shader must agree exactly or `create_bind_group` fails validation.
+fn decal_collect_source() -> String {
+    let src = include_str!("../shaders/decal_collect.wgsl");
+    #[cfg(target_arch = "wasm32")]
+    {
+        libhelio::shader::apply_webgpu_decal_bindings(src, MAX_TEXTURES)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        src.replace(
+            "binding_array<texture_2d<f32>, 256>",
+            &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+        )
+        .replace(
+            "binding_array<sampler, 256>",
+            &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+        )
+    }
+}
+
+/// BGL for group 1: the scene's bindless texture table, shared with the GBuffer pass.
+fn create_decal_texture_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    #[allow(unused_mut)]
+    let mut entries: Vec<wgpu::BindGroupLayoutEntry> = Vec::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let count = std::num::NonZeroU32::new(MAX_TEXTURES as u32);
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 0, visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+            },
+            count,
+        });
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 1, visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count,
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for index in 0..MAX_TEXTURES as u32 {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: index, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2, multisampled: false,
+                },
+                count: None,
+            });
+        }
+        for index in 0..MAX_TEXTURES as u32 {
+            entries.push(wgpu::BindGroupLayoutEntry {
+                binding: MAX_TEXTURES as u32 + index, visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            });
+        }
+    }
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Decal Textures BGL"), entries: &entries,
+    })
+}
+
 fn bgl_entry_buf(binding: u32, ty: wgpu::BufferBindingType) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer { ty, has_dynamic_offset: false, min_binding_size: None },
@@ -176,7 +231,7 @@ fn bgl_entry_tex_storage(binding: u32, access: wgpu::StorageTextureAccess, forma
 
 impl RenderPass for DecalPass {
     fn name(&self) -> &'static str { "DecalApply" }
-    fn declare_resources(&self, builder: &mut ResourceBuilder) { builder.read("gbuffer"); builder.read("depth"); }
+    fn declare_resources(&self, builder: &mut ResourceBuilder) { builder.read("gbuffer"); builder.read("depth"); builder.read("main_scene"); }
     fn publish<'a>(&'a self, _: &mut libhelio::FrameResources<'a>) {}
     fn render_pass_descriptor<'a>(&'a self, _: &'a wgpu::TextureView, _: &'a wgpu::TextureView, _: &'a libhelio::FrameResources<'a>) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -187,6 +242,9 @@ impl RenderPass for DecalPass {
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if ctx.scene.decal_count == 0 { return Ok(()); }
         let gb = match ctx.resources.gbuffer.read(self.name()) { Some(g) => g, None => return Ok(()) };
+        // The bindless table is published per-frame by the renderer, so it
+        // survives graph rebuilds that drop this pass's own state.
+        let main_scene = match ctx.resources.main_scene.read(self.name()) { Some(m) => m, None => return Ok(()) };
         let dv = ctx.depth;
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let decal_ptr = ctx.scene.decals as *const _ as usize;
@@ -196,12 +254,10 @@ impl RenderPass for DecalPass {
         let (_, to) = self.temp_orm.as_ref().unwrap();
         let (_, te) = self.temp_emissive.as_ref().unwrap();
 
-        let decal_tex_ptr = self.decal_tex.as_ref().map(|(_, v, _)| v as *const _ as usize).unwrap_or(0);
         let ck = (camera_ptr, decal_ptr, dv as *const _ as usize, gb.albedo as *const _ as usize,
                    gb.normal as *const _ as usize, gb.orm as *const _ as usize,
-                   u64::from(self.last_w) | (u64::from(self.last_h) << 32), decal_tex_ptr as u64);
-        if self.bg_collect_key != Some(ck) {
-            let (_, dtv, dts) = self.decal_tex.as_ref().unwrap();
+                   u64::from(self.last_w) | (u64::from(self.last_h) << 32));
+        if self.bg_collect_key != Some(ck) || self.bg_collect.is_none() {
             self.bg_collect = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Decal Collect BG"), layout: &self.bgl_collect,
                 entries: &[
@@ -209,10 +265,18 @@ impl RenderPass for DecalPass {
                     bind_buf(2, ctx.scene.decals), bind_tex(3, dv),
                     bind_tex(4, gb.albedo), bind_tex(5, gb.normal), bind_tex(6, gb.orm), bind_tex(7, gb.emissive),
                     bind_tex(8, ta), bind_tex(9, tn), bind_tex(10, to), bind_tex(11, te),
-                    bind_tex(12, dtv), wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(dts) },
                 ],
             }));
             self.bg_collect_key = Some(ck);
+        }
+
+        // Rebuild the texture table only when the scene's texture set changes.
+        let tex_version = main_scene.material_textures.version;
+        if self.bg_textures_version != Some(tex_version) || self.bg_textures.is_none() {
+            self.bg_textures = Some(build_texture_bind_group(
+                ctx.device, &self.bgl_textures, &main_scene.material_textures,
+            ));
+            self.bg_textures_version = Some(tex_version);
         }
 
         {
@@ -220,13 +284,14 @@ impl RenderPass for DecalPass {
                 .begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("DecalCollect"), timestamp_writes: None });
             cp.set_pipeline(&self.collect_pipeline);
             cp.set_bind_group(0, self.bg_collect.as_ref().unwrap(), &[]);
+            cp.set_bind_group(1, self.bg_textures.as_ref().unwrap(), &[]);
             cp.dispatch_workgroups((ctx.width + 15) / 16, (ctx.height + 15) / 16, 1);
         }
 
         let ak = (camera_ptr, decal_ptr, ta as *const _ as usize, tn as *const _ as usize,
                    to as *const _ as usize, te as *const _ as usize,
-                   u64::from(self.last_w) | (u64::from(self.last_h) << 32), decal_tex_ptr as u64);
-        if self.bg_apply_key != Some(ak) {
+                   u64::from(self.last_w) | (u64::from(self.last_h) << 32));
+        if self.bg_apply_key != Some(ak) || self.bg_apply.is_none() {
             self.bg_apply = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Decal Apply BG"), layout: &self.bgl_apply,
                 entries: &[
@@ -250,42 +315,47 @@ impl RenderPass for DecalPass {
         Ok(())
     }
 
-    fn reads(&self) -> &'static [&'static str] { &["gbuffer", "depth"] }
+    fn reads(&self) -> &'static [&'static str] { &["gbuffer", "depth", "main_scene"] }
     fn writes(&self) -> &'static [&'static str] { &["gbuffer"] }
 }
 
-impl DecalPass {
-    /// Load RGBA data as the decal sprite texture. Width/height in pixels.
-    pub fn load_decal_texture(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, rgba: &[u8], w: u32, h: u32) {
-        let expected = (w as usize) * (h as usize) * 4;
-        if expected == 0 || rgba.len() < expected || w == 0 || h == 0 { return; }
-        let tex = device.create_texture_with_data(
-            queue,
-            &wgpu::TextureDescriptor {
-                label: Some("Decal Sprite"),
-                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &rgba[..expected],
-        );
-        let view = tex.create_view(&Default::default());
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("Decal Sprite Sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
+/// Bind the scene's bindless texture table for group 1.
+fn build_texture_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    textures: &libhelio::MaterialTextureBindings,
+) -> wgpu::BindGroup {
+    #[allow(unused_mut)]
+    let mut entries: Vec<wgpu::BindGroupEntry> = Vec::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureViewArray(textures.texture_views),
         });
-        self.decal_tex = Some((tex, view, sampler));
-        self.bg_collect = None; // invalidate bind group
+        entries.push(wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::SamplerArray(textures.samplers),
+        });
     }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for (index, view) in textures.texture_views.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: index as u32,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+        }
+        for (index, sampler) in textures.samplers.iter().enumerate() {
+            entries.push(wgpu::BindGroupEntry {
+                binding: MAX_TEXTURES as u32 + index as u32,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            });
+        }
+    }
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("Decal Textures BG"), layout, entries: &entries,
+    })
 }
 
 fn bind_buf<'a>(binding: u32, buf: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a> {
@@ -293,4 +363,30 @@ fn bind_buf<'a>(binding: u32, buf: &'a wgpu::Buffer) -> wgpu::BindGroupEntry<'a>
 }
 fn bind_tex<'a>(binding: u32, view: &'a wgpu::TextureView) -> wgpu::BindGroupEntry<'a> {
     wgpu::BindGroupEntry { binding, resource: wgpu::BindingResource::TextureView(view) }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The wasm fixup rewrites the shader by matching exact source strings, so a
+    /// harmless-looking edit to the binding-array declarations or the sampling
+    /// call would silently leave `binding_array` in the WebGPU source and only
+    /// fail at shader-compile time in a browser. Pin the coupling here.
+    #[test]
+    fn webgpu_fixup_rewrites_every_binding_array_in_the_real_shader() {
+        let src = include_str!("../shaders/decal_collect.wgsl");
+        let fixed = libhelio::shader::apply_webgpu_decal_bindings(src, super::MAX_TEXTURES);
+
+        assert!(
+            !fixed.contains("binding_array"),
+            "decal_collect.wgsl still declares a binding_array after the WebGPU fixup",
+        );
+        assert!(
+            !fixed.contains("enable wgpu_binding_array"),
+            "decal_collect.wgsl still enables the wgpu-only binding_array extension",
+        );
+        assert!(
+            fixed.contains("case 0u: { return textureSampleLevel(scene_texture_0"),
+            "the decal sampling call was not rewritten into a per-slot switch",
+        );
+    }
 }

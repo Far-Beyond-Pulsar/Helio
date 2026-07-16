@@ -1,3 +1,5 @@
+enable wgpu_binding_array;
+
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, view_proj: mat4x4<f32>,
     view_proj_inv: mat4x4<f32>, position_near: vec4<f32>,
@@ -16,6 +18,9 @@ struct GpuDecal {
 const BT: u32 = 0u; const BA: u32 = 1u; const BADD: u32 = 2u; const BMUL: u32 = 3u;
 const DT_AN: u32 = 0u; const DT_NO: u32 = 1u; const DT_EM: u32 = 2u; const DT_AL: u32 = 3u;
 
+// Matches GpuMaterial::NO_TEXTURE — decal uses tint only.
+const NO_TEXTURE: u32 = 0xFFFFFFFFu;
+
 struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -30,8 +35,16 @@ struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 @group(0) @binding(9) var temp_normal: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(10) var temp_orm: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(11) var temp_emissive: texture_storage_2d<rgba16float, write>;
-@group(0) @binding(12) var decal_tex: texture_2d<f32>;
-@group(0) @binding(13) var decal_samp: sampler;
+// Scene-wide bindless texture table, shared with the GBuffer pass. Indexed by
+// GpuDecal::albedo_texture_index, which is a texture slot (TextureId::slot()).
+@group(1) @binding(0) var scene_textures: binding_array<texture_2d<f32>, 256>;
+@group(1) @binding(1) var scene_samplers: binding_array<sampler, 256>;
+
+// Compute shaders cannot use textureSample (no implicit derivatives), so the
+// decal table is always sampled at mip 0.
+fn sample_decal_texture(texture_index: u32, uv: vec2<f32>) -> vec4<f32> {
+    return textureSampleLevel(scene_textures[texture_index], scene_samplers[texture_index], uv, 0.0);
+}
 
 fn fade_opacity(age: f32, delay: f32, time: f32) -> f32 {
     if time <= 0.0 { return 1.0; }
@@ -85,12 +98,16 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let duvc = clamp(duv, vec2<f32>(0.0), vec2<f32>(1.0));
 
         let tint = d.color;
-        let opa = tint.a * da;
 
-        // Sample decal texture (or use tint if no texture index)
-        let has_tex = d.albedo_texture_index != 0xFFFFFFFFu;
         var decal_albedo = vec4<f32>(1.0);
-        if has_tex { decal_albedo = textureSampleLevel(decal_tex, decal_samp, duvc, 0.0); }
+        if d.albedo_texture_index != NO_TEXTURE {
+            decal_albedo = sample_decal_texture(d.albedo_texture_index, duvc);
+        }
+
+        // The texture's alpha is the decal's shape mask, so it gates every
+        // channel below (including emissive) rather than just albedo.
+        let opa = tint.a * da * decal_albedo.a;
+        if opa <= 0.0 { continue; }
 
         let wn = normalize(en.xyz);
         let dc = vec4<f32>(decal_albedo.rgb * tint.rgb, opa);

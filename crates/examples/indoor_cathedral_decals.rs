@@ -9,6 +9,7 @@ mod v3_demo_common;
 use helio::{
     required_wgpu_features, required_wgpu_limits, BakeConfig, Camera, DebugDrawState,
     HelioAction, HelioCommandBridge, LightId, MeshId, Movability, Renderer, RendererConfig, Scene,
+    TextureSamplerDesc, TextureUpload,
 };
 use libhelio::{DecalBlendMode, DecalType, GpuDecal};
 use helio_pass_perf_overlay::PerfOverlayMode;
@@ -54,6 +55,38 @@ fn make_decal_tex(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 
     let mut d = make_decal(pos, normal, half, color, blend, dtype, adapt);
     d.albedo_texture_index = tex_idx;
     d
+}
+
+const RING_SIZE: u32 = 256;
+
+/// Decode the graffiti sprite shipped at the repo root. Returns RGBA8 + dimensions.
+fn grafiti_texture() -> (Vec<u8>, u32, u32) {
+    let img = image::load_from_memory(include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../grafiti.png"
+    )))
+    .expect("decode grafiti.png")
+    .to_rgba8();
+    let (w, h) = img.dimensions();
+    (img.into_raw(), w, h)
+}
+
+/// Alpha-masked ring — a second, visually distinct texture that also exercises
+/// texture alpha as the decal's shape mask (the corners must not draw).
+fn ring_pixels() -> Vec<u8> {
+    let mut pixels = Vec::with_capacity((RING_SIZE * RING_SIZE * 4) as usize);
+    let center = RING_SIZE as f32 * 0.5;
+    for y in 0..RING_SIZE {
+        for x in 0..RING_SIZE {
+            let dx = x as f32 + 0.5 - center;
+            let dy = y as f32 + 0.5 - center;
+            let r = (dx * dx + dy * dy).sqrt() / center;
+            // Solid band between 0.45 and 0.95 of the radius, feathered at both edges.
+            let alpha = ((r - 0.45) / 0.1).clamp(0.0, 1.0) * (1.0 - ((r - 0.85) / 0.1).clamp(0.0, 1.0));
+            pixels.extend_from_slice(&[240, 240, 255, (alpha * 255.0) as u8]);
+        }
+    }
+    pixels
 }
 
 // ── Scene data ────────────────────────────────────────────────────────────────
@@ -256,15 +289,36 @@ impl ApplicationHandler for App {
         );
         renderer.set_editor_mode(true);
 
-        // Load decal texture into the DecalPass
-        if let Some(pass) = renderer.find_pass_mut::<helio_pass_decal::DecalPass>() {
-            if let Ok(img) = image::load_from_memory(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../grafiti.png"))) {
-                let rgba = img.to_rgba8();
-                let (gw, gh) = rgba.dimensions();
-                pass.load_decal_texture(&device, &queue, rgba.as_raw(), gw, gh);
-                println!("[decals] Loaded grafiti.png ({}x{})", gw, gh);
-            }
-        }
+        // Decal textures live in the scene's bindless table, the same one materials
+        // use. `albedo_texture_index` on a GpuDecal is a slot from TextureId::slot().
+        let (grafiti_rgba, grafiti_w, grafiti_h) = grafiti_texture();
+        let grafiti_slot = renderer
+            .scene_mut()
+            .insert_texture(TextureUpload::rgba8(
+                "Decal Grafiti",
+                grafiti_w,
+                grafiti_h,
+                true,
+                grafiti_rgba,
+                TextureSamplerDesc::default(),
+            ))
+            .expect("decal grafiti texture")
+            .slot();
+        let ring_slot = renderer
+            .scene_mut()
+            .insert_texture(TextureUpload::rgba8(
+                "Decal Ring",
+                RING_SIZE,
+                RING_SIZE,
+                true,
+                ring_pixels(),
+                TextureSamplerDesc::default(),
+            ))
+            .expect("decal ring texture")
+            .slot();
+        println!(
+            "[decals] texture slots: grafiti={grafiti_slot} ({grafiti_w}x{grafiti_h}) ring={ring_slot}"
+        );
 
         let mat = renderer.scene_mut().insert_material(make_material(
             [0.75, 0.72, 0.68, 1.0],
@@ -557,36 +611,47 @@ impl ApplicationHandler for App {
         // run full tiled PCF every frame even though they're fixed.
         renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
 
+        // Graffiti down the nave. White tint so the texture shows through unmodulated —
+        // the tint multiplies the sampled colour, so a saturated tint would mask it.
         for z in (-24..24).step_by(4) {
             let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
                 [0.0, 0.0, z as f32], [0.0, 1.0, 0.0], [1.8, 1.2, 0.02],
-                [0.0, 0.0, 1.0, 0.8], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false, 0,
+                [1.0, 1.0, 1.0, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false,
+                grafiti_slot,
             )));
         }
+        // Normal-only decal: no albedo texture, so u32::MAX (tint only).
         let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
             [-3.0, 0.0, -6.0], [0.0, 1.0, 0.0], [0.8, 0.4, 0.02],
-            [1.0, 1.0, 0.0, 0.9], DecalBlendMode::Translucent, DecalType::NormalOnly, false, 0,
+            [1.0, 1.0, 0.0, 0.9], DecalBlendMode::Translucent, DecalType::NormalOnly, false,
+            u32::MAX,
         )));
         let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
             [3.0, 0.0, 22.0], [0.0, 1.0, 0.0], [1.5, 1.5, 0.02],
-            [1.0, 1.0, 1.0, 1.0], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false, 0,
+            [1.0, 1.0, 1.0, 1.0], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false,
+            grafiti_slot,
         )));
+        // A second texture alongside the first — proves the table is per-decal, and
+        // the ring's alpha masks its corners away.
         for i in 0..6 {
             let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
                 [-3.0 + i as f32 * 1.2, 0.0, 18.0 - i as f32 * 2.0],
                 [0.0, 1.0, 0.0], [0.3, 0.3, 0.02],
-                [1.0, 0.0, 1.0, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false, 0,
+                [1.0, 0.4, 1.0, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false,
+                ring_slot,
             )));
         }
         for &z in CHANDELIER_Z {
             let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
                 [5.0, 0.0, z], [0.0, 1.0, 0.0], [1.2, 1.2, 0.02],
-                [0.0, 0.0, 1.0, 0.7], DecalBlendMode::Translucent, DecalType::AlbedoNormal, false, 0,
+                [0.6, 0.8, 1.0, 0.7], DecalBlendMode::Translucent, DecalType::AlbedoNormal, false,
+                ring_slot,
             )));
         }
         let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
             [0.0, 0.90, -25.5], [0.0, 1.0, 0.0], [0.6, 0.4, 0.02],
-            [1.0, 0.5, 0.0, 1.0], DecalBlendMode::Additive, DecalType::Emissive, false, 0,
+            [1.0, 0.5, 0.0, 1.0], DecalBlendMode::Additive, DecalType::Emissive, false,
+            u32::MAX,
         )));
 
         let renderer = Arc::new(Mutex::new(renderer));
