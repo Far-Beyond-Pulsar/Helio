@@ -21,6 +21,7 @@ pub struct DecalPass {
     temp_orm: Option<(wgpu::Texture, wgpu::TextureView)>,
     temp_emissive: Option<(wgpu::Texture, wgpu::TextureView)>,
     device: Arc<wgpu::Device>,
+    fallback_samp: wgpu::Sampler,
     last_w: u32, last_h: u32,
 }
 
@@ -57,6 +58,12 @@ impl DecalPass {
                 bgl_entry_tex_storage(9, wgpu::StorageTextureAccess::WriteOnly, wgpu::TextureFormat::Rgba16Float),
                 bgl_entry_tex_storage(10, wgpu::StorageTextureAccess::WriteOnly, wgpu::TextureFormat::Rgba8Unorm),
                 bgl_entry_tex_storage(11, wgpu::StorageTextureAccess::WriteOnly, wgpu::TextureFormat::Rgba16Float),
+                bgl_entry_tex(12, wgpu::TextureSampleType::Float { filterable: true }),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13, visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
         let collect_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -96,7 +103,18 @@ impl DecalPass {
             collect_pipeline, apply_pipeline, bgl_collect, bgl_apply,
             bg_collect: None, bg_apply: None, bg_collect_key: None, bg_apply_key: None,
             globals_buf, temp_albedo: None, temp_normal: None, temp_orm: None, temp_emissive: None,
-            device: Arc::new(device.clone()), last_w: 0, last_h: 0,
+            device: Arc::new(device.clone()),
+            fallback_samp: device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("Decal Fallback Sampler"),
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
+            }),
+            last_w: 0, last_h: 0,
         }
     }
 
@@ -165,6 +183,14 @@ impl RenderPass for DecalPass {
                    gb.normal as *const _ as usize, gb.orm as *const _ as usize,
                    u64::from(self.last_w) | (u64::from(self.last_h) << 32));
         if self.bg_collect_key != Some(ck) {
+            // Find a decal texture view + sampler (use first scene texture or a fallback)
+            let (dtv, dts) = ctx.resources.main_scene.read(self.name())
+                .and_then(|ms| {
+                    let tex = ms.material_textures.texture_views.first().copied();
+                    let samp = ms.material_textures.samplers.first().copied();
+                    tex.zip(samp)
+                })
+                .unwrap_or((gb.albedo, &self.fallback_samp));
             self.bg_collect = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Decal Collect BG"), layout: &self.bgl_collect,
                 entries: &[
@@ -172,6 +198,7 @@ impl RenderPass for DecalPass {
                     bind_buf(2, ctx.scene.decals), bind_tex(3, dv),
                     bind_tex(4, gb.albedo), bind_tex(5, gb.normal), bind_tex(6, gb.orm), bind_tex(7, gb.emissive),
                     bind_tex(8, ta), bind_tex(9, tn), bind_tex(10, to), bind_tex(11, te),
+                    bind_tex(12, dtv), wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(dts) },
                 ],
             }));
             self.bg_collect_key = Some(ck);

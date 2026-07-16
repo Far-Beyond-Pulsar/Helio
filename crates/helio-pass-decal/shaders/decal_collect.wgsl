@@ -1,5 +1,3 @@
-//! Decal collect: reads GBuffer + decals, writes blended result to temp textures.
-
 struct Camera {
     view: mat4x4<f32>, proj: mat4x4<f32>, view_proj: mat4x4<f32>,
     view_proj_inv: mat4x4<f32>, position_near: vec4<f32>,
@@ -28,11 +26,12 @@ struct DecalGlobals { decal_count: u32, _pad0: u32, _pad1: u32, _pad2: u32 }
 @group(0) @binding(5) var gbuf_normal: texture_2d<f32>;
 @group(0) @binding(6) var gbuf_orm: texture_2d<f32>;
 @group(0) @binding(7) var gbuf_emissive: texture_2d<f32>;
-
 @group(0) @binding(8) var temp_albedo: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(9) var temp_normal: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(10) var temp_orm: texture_storage_2d<rgba8unorm, write>;
 @group(0) @binding(11) var temp_emissive: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(12) var decal_tex: texture_2d<f32>;
+@group(0) @binding(13) var decal_samp: sampler;
 
 fn fade_opacity(age: f32, delay: f32, time: f32) -> f32 {
     if time <= 0.0 { return 1.0; }
@@ -63,8 +62,8 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
     let depth = textureLoad(gbuf_depth, pxl, 0);
     if depth >= 1.0 { return; }
 
-    let uv = vec2<f32>((f32(pxl.x)+0.5)/f32(sz.x), (f32(pxl.y)+0.5)/f32(sz.y));
-    let ndc = vec4<f32>(uv.x*2.0-1.0, 1.0-uv.y*2.0, depth, 1.0);
+    let uv_scr = vec2<f32>((f32(pxl.x)+0.5)/f32(sz.x), (f32(pxl.y)+0.5)/f32(sz.y));
+    let ndc = vec4<f32>(uv_scr.x*2.0-1.0, 1.0-uv_scr.y*2.0, depth, 1.0);
     let world_pos = (camera.view_proj_inv * ndc).xyz / (camera.view_proj_inv * ndc).w;
 
     let ea = textureLoad(gbuf_albedo, pxl, 0);
@@ -82,29 +81,35 @@ fn cs_main(@builtin(global_invocation_id) id: vec3<u32>) {
         let dl = d.transform * vec4<f32>(world_pos, 1.0);
         if abs(dl.x) > 1.0 || abs(dl.y) > 1.0 || dl.z < -1.0 || dl.z > 1.0 { continue; }
 
-        let dt = d.decal_type;
-        let bl = d.blend_mode;
+        let duv = vec2<f32>(dl.x*0.5+0.5, 0.5-dl.y*0.5);
+        let duvc = clamp(duv, vec2<f32>(0.0), vec2<f32>(1.0));
+
         let tint = d.color;
         let opa = tint.a * da;
-        let dc = vec4<f32>(tint.rgb, opa);
-        let wn = normalize(en.xyz);
 
+        // Sample decal texture (or use tint if no texture index)
+        let has_tex = d.albedo_texture_index != 0xFFFFFFFFu;
+        var decal_albedo = vec4<f32>(1.0);
+        if has_tex { decal_albedo = textureSampleLevel(decal_tex, decal_samp, duvc, 0.0); }
+
+        let wn = normalize(en.xyz);
+        let dc = vec4<f32>(decal_albedo.rgb * tint.rgb, opa);
         let fnrm = select(vec3<f32>(0.0, 0.0, 1.0), wn, d.normal_adapt == 1u);
 
-        if dt == DT_AN || dt == DT_AL {
-            if bl == BT || bl == BA { ra = blend_over(ra, dc); }
-            else if bl == BADD { ra = blend_add(ra, dc); }
-            else if bl == BMUL { ra = blend_mul(ra, dc); }
+        if d.decal_type == DT_AN || d.decal_type == DT_AL {
+            if d.blend_mode == BT || d.blend_mode == BA { ra = blend_over(ra, dc); }
+            else if d.blend_mode == BADD { ra = blend_add(ra, dc); }
+            else if d.blend_mode == BMUL { ra = blend_mul(ra, dc); }
             rn = vec4<f32>(blend_nrm(wn, fnrm, opa), en.a);
         }
-        if dt == DT_NO {
+        if d.decal_type == DT_NO {
             rn = vec4<f32>(blend_nrm(wn, fnrm, opa), en.a);
         }
-        if dt == DT_EM || dt == DT_AL {
+        if d.decal_type == DT_EM || d.decal_type == DT_AL {
             let de = vec4<f32>(tint.rgb * opa, ee.a);
-            re = select(blend_over(re, de), blend_add(re, de), bl == BADD);
+            re = select(blend_over(re, de), blend_add(re, de), d.blend_mode == BADD);
         }
-        if dt == DT_AL && (bl == BT || bl == BA) {
+        if d.decal_type == DT_AL && (d.blend_mode == BT || d.blend_mode == BA) {
             ro = vec4<f32>(mix(ro.r, 1.0, opa), mix(ro.g, 0.5, opa), mix(ro.b, 0.0, opa), ro.a);
         }
     }
