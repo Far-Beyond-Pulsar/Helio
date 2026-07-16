@@ -116,6 +116,10 @@ struct ShadowConfig {
 @group(1) @binding(6) var screen_ao_samp: sampler;
 // Lightmap UVs from GBuffer (Rg16Float, contains atlas UV coordinates for lightmap lookup)
 @group(1) @binding(7) var gbuf_lightmap_uv: texture_2d<f32>;
+// SSS data (Rgba16Float): subsurface_color.rgb, subsurface_radius
+@group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
+// Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(surface_flags)
+@group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
@@ -498,6 +502,12 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
     }
 }
 
+// ── Surface flags (read from gbuf_extra.a) ──────────────────────────────────
+
+const SURFACE_FLAG_SUBSURFACE: u32 = 1u << 0u;
+const SURFACE_FLAG_ANISOTROPIC: u32 = 1u << 1u;
+const SURFACE_FLAG_LOW_SPECULAR: u32 = 1u << 2u;
+
 // ── BRDF helpers ─────────────────────────────────────────────────────────────
 
 const PI: f32 = 3.14159265359;
@@ -512,6 +522,17 @@ fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
     return a2 / (PI * denom * denom + 0.0001);
 }
 
+fn distribution_ggx_anisotropic(NdotH: f32, ax: f32, ay: f32, phi_h: f32) -> f32 {
+    let cos2_h = NdotH * NdotH;
+    let sin2_h = 1.0 - cos2_h;
+    let ax2 = ax * ax;
+    let ay2 = ay * ay;
+    let cos_phi = cos(phi_h);
+    let sin_phi = sin(phi_h);
+    let denom = cos2_h + sin2_h * (cos_phi * cos_phi / ax2 + sin_phi * sin_phi / ay2);
+    return 1.0 / (PI * ax * ay * denom * denom + 0.0001);
+}
+
 fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 {
     let r = roughness + 1.0;
     let k = (r * r) / 8.0;
@@ -522,6 +543,18 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
     let NdV = max(dot(N, V), 0.0);
     let NdL = max(dot(N, L), 0.0);
     return geometry_schlick_ggx(NdV, roughness) * geometry_schlick_ggx(NdL, roughness);
+}
+
+fn geometry_smith_anisotropic(NdotV: f32, NdotL: f32, ax: f32, ay: f32) -> f32 {
+    let Gv = NdotV / (NdotV + sqrt(ax*ax + (1.0 - ax*ax) * NdotV * NdotV) + 0.0001);
+    let Gl = NdotL / (NdotL + sqrt(ay*ay + (1.0 - ay*ay) * NdotL * NdotL) + 0.0001);
+    return Gv * Gl;
+}
+
+fn compute_phi_h(N: vec3<f32>, H: vec3<f32>, T: vec3<f32>, B: vec3<f32>) -> f32 {
+    let H_tangent = dot(H, T);
+    let H_bitangent = dot(H, B);
+    return atan2(H_bitangent, H_tangent);
 }
 
 fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
@@ -544,6 +577,8 @@ fn env_brdf_approx(NdotV: f32, roughness: f32) -> vec2<f32> {
 
 // Evaluate one direct light with the full Cook-Torrance BRDF.
 // `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
+// When `is_anisotropic` is true, uses anisotropic GGX distribution with the
+// given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
 fn pbr_direct_light(
     light:     GpuLight,
     world_pos: vec3<f32>,
@@ -554,6 +589,10 @@ fn pbr_direct_light(
     roughness: f32,
     metallic:  f32,
     sf:        f32,
+    is_anisotropic: bool,
+    T:         vec3<f32>,
+    ax:        f32,
+    ay:        f32,
 ) -> vec3<f32> {
     var L:        vec3<f32>;
     var radiance: vec3<f32>;
@@ -581,12 +620,22 @@ fn pbr_direct_light(
 
     if all(radiance < vec3<f32>(0.002)) { return vec3<f32>(0.0); }
 
-    let H        = normalize(V + L);
-    let D        = distribution_ggx(N, H, roughness);
-    let G        = geometry_smith(N, V, L, roughness);
-    let F        = fresnel_schlick(max(dot(H, V), 0.0), F0);
-    let kD       = (1.0 - F) * (1.0 - metallic);
-    let specular = D * G * F / (4.0 * max(dot(N, V), 0.0) * NdL + 0.0001);
+    let H         = normalize(V + L);
+    let F         = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    let kD        = (1.0 - F) * (1.0 - metallic);
+    let NdV       = max(dot(N, V), 0.0);
+    var specular: vec3<f32>;
+
+    if is_anisotropic {
+        let phi_h    = compute_phi_h(N, H, T, cross(N, T));
+        let D        = distribution_ggx_anisotropic(max(dot(N, H), 0.0), ax, ay, phi_h);
+        let G        = geometry_smith_anisotropic(NdV, NdL, ax, ay);
+        specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
+    } else {
+        let D        = distribution_ggx(N, H, roughness);
+        let G        = geometry_smith(N, V, L, roughness);
+        specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
+    }
 
     return (kD * albedo / PI + specular) * radiance * NdL * sf;
 }
@@ -810,6 +859,33 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let V   = normalize(camera.position_near.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0);
 
+    // ── SSS / Extra surface data ──────────────────────────────────────────────
+    let sss_r        = textureLoad(gbuf_sss, pix, 0);
+    let extra_r      = textureLoad(gbuf_extra, pix, 0);
+    let surface_flags = bitcast<u32>(extra_r.a);
+    let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
+    let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
+    let low_specular   = (surface_flags & SURFACE_FLAG_LOW_SPECULAR) != 0u;
+
+    // Anisotropic GGX parameters
+    let aniso_ax    = extra_r.r;
+    let aniso_ay    = extra_r.g;
+    let aniso_rot   = extra_r.b;
+
+    // Compute aniso tangent direction from world normal + rotation
+    var aniso_T = vec3<f32>(0.0);
+    if is_anisotropic {
+        let up_ref = vec3<f32>(0.0, 1.0, 0.0);
+        var T_ref = normalize(cross(cross(N, up_ref), N));
+        if length(T_ref) < 0.001 {
+            T_ref = normalize(cross(cross(N, vec3<f32>(1.0, 0.0, 0.0)), N));
+        }
+        let B = cross(N, T_ref);
+        let cos_a = cos(aniso_rot);
+        let sin_a = sin(aniso_rot);
+        aniso_T = T_ref * cos_a + B * sin_a;
+    }
+
     // ── Direct lighting ────────────────────────────────────────────────────────
     // GPU-driven: iterate all visible lights (already culled on CPU by distance).
     // Shadow factor affects ONLY direct lighting (Lo).  Ambient / indirect light
@@ -838,7 +914,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if !is_vg {
                 sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
             }
-            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf);
+            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay);
         }
     }
 

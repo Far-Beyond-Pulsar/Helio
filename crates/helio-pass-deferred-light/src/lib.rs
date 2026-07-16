@@ -37,7 +37,7 @@ pub struct DeferredLightPass {
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_2: Option<wgpu::BindGroup>,
     bind_group_3: Option<wgpu::BindGroup>,
-    bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bind_group_1_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_2_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
     bind_group_3_key: Option<(usize, usize)>,
     fallback_tile_lists: wgpu::Buffer,
@@ -178,6 +178,10 @@ impl DeferredLightPass {
                 },
                 // Lightmap UVs from GBuffer (binding 7, Rg16Float)
                 texture_entry(7, wgpu::TextureSampleType::Float { filterable: false }),
+                // SSS data: subsurface_color.rgb + subsurface_radius (Rgba16Float)
+                texture_entry(8, wgpu::TextureSampleType::Float { filterable: false }),
+                // Extra surface data: roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(flags) (Rgba16Float)
+                texture_entry(9, wgpu::TextureSampleType::Float { filterable: false }),
             ],
         });
         let bgl_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -521,6 +525,8 @@ impl RenderPass for DeferredLightPass {
         &[
             "gbuffer",
             "gbuffer_lightmap_uv",
+            "gbuffer_sss",
+            "gbuffer_extra",
             "depth",
             "shadow_atlas",
             "static_shadow_atlas",
@@ -641,6 +647,10 @@ impl RenderPass for DeferredLightPass {
         // Lightmap UVs from GBuffer
         let lightmap_uv_view = ctx.resources.gbuffer_lightmap_uv.get().unwrap_or(&self.fallback_lightmap_uv_view);
 
+        // SSS/Extra data from GBuffer
+        let sss_view = ctx.resources.gbuffer_sss.get().unwrap_or(&self.fallback_lightmap_uv_view);
+        let extra_view = ctx.resources.gbuffer_extra.get().unwrap_or(&self.fallback_lightmap_uv_view);
+
         let gbuffer_key = (
             gbuffer.albedo as *const _ as usize,
             gbuffer.normal as *const _ as usize,
@@ -648,6 +658,8 @@ impl RenderPass for DeferredLightPass {
             gbuffer.emissive as *const _ as usize,
             ctx.depth as *const _ as usize,
             ao_view as *const _ as usize,
+            sss_view as *const _ as usize,
+            extra_view as *const _ as usize,
         );
         if self.bind_group_1_key != Some(gbuffer_key) {
             self.bind_group_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -670,6 +682,10 @@ impl RenderPass for DeferredLightPass {
                     },
                     // Lightmap UVs from GBuffer (binding 7)
                     texture_view_entry(7, lightmap_uv_view),
+                    // SSS data (binding 8)
+                    texture_view_entry(8, sss_view),
+                    // Extra surface data (binding 9)
+                    texture_view_entry(9, extra_view),
                 ],
             }));
             self.bind_group_1_key = Some(gbuffer_key);

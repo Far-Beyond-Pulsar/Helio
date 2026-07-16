@@ -188,6 +188,13 @@ pub struct FrameResources<'a> {
     /// GBuffer lightmap UV texture (Rg16Float) populated by GBufferPass.
     /// Contains per-pixel lightmap atlas UVs for sampling baked_lightmap.
     pub gbuffer_lightmap_uv: Tracked<&'a wgpu::TextureView>,
+    /// GBuffer SSS data (Rgba16Float): subsurface_color.rgb, subsurface_radius.
+    /// Populated by GBufferPass, consumed by DeferredLightPass and SssBlurPass.
+    pub gbuffer_sss: Tracked<&'a wgpu::TextureView>,
+    /// GBuffer extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y,
+    /// aniso_rotation, bitcast<f32>(surface_flags).
+    /// Populated by GBufferPass, consumed by DeferredLightPass.
+    pub gbuffer_extra: Tracked<&'a wgpu::TextureView>,
     /// Shadow atlas (2D array texture view) — populated after ShadowPass (dynamic/Movable objects)
     pub shadow_atlas: Tracked<&'a wgpu::TextureView>,
     /// Static shadow atlas (2D array texture view) — cached until Static/Stationary topology changes.
@@ -391,6 +398,8 @@ impl<'a> FrameResources<'a> {
         Self {
             gbuffer: Tracked::empty(),
             gbuffer_lightmap_uv: Tracked::empty(),
+            gbuffer_sss: Tracked::empty(),
+            gbuffer_extra: Tracked::empty(),
             shadow_atlas: Tracked::empty(),
             static_shadow_atlas: Tracked::empty(),
             shadow_sampler: Tracked::empty(),
@@ -456,6 +465,8 @@ impl<'a> FrameResources<'a> {
             }
             reset_field!(gbuffer);
             reset_field!(gbuffer_lightmap_uv);
+            reset_field!(gbuffer_sss);
+            reset_field!(gbuffer_extra);
             reset_field!(shadow_atlas);
             reset_field!(static_shadow_atlas);
             reset_field!(shadow_sampler);

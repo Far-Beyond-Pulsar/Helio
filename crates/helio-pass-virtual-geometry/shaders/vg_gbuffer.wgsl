@@ -158,6 +158,8 @@ struct GBufferOutput {
     @location(2) orm:       vec4<f32>,
     @location(3) emissive:  vec4<f32>,
     @location(4) vg_flag:   vec2<f32>,
+    @location(5) sss:       vec4<f32>,
+    @location(6) extra:     vec4<f32>,
 }
 
 const NO_TEXTURE: u32 = 0xffffffffu;
@@ -246,14 +248,14 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.orm     = vec4<f32>(ao, roughness, metallic, specular_f0.g);
     out.emissive = vec4<f32>(emissive, specular_f0.b);
     out.vg_flag = vec2<f32>(-2.0, -2.0);
+    out.sss     = vec4<f32>(0.0);
+    out.extra   = vec4<f32>(0.0);
     return out;
 }
 
 // ── VG meshlet debug (mode 20): one unlit solid colour per meshlet ──────────
 @fragment
 fn fs_debug(input: VertexOutput) -> GBufferOutput {
-    // `meshlet_id` is flat-interpolated draw metadata emitted by the cull
-    // shader, so every triangle in one meshlet receives exactly one color.
     var h = (input.meshlet_id * 2747636419u);
     h ^= h >> 16u;
     h *= 2654435769u;
@@ -275,8 +277,6 @@ fn fs_debug(input: VertexOutput) -> GBufferOutput {
     pal[11] = vec3<f32>(1.00, 0.70, 0.10);
 
     let base_color = pal[idx];
-
-    // Unlit: write colour directly, flat face normal, no material/lighting.
     let face_n = normalize(cross(dpdx(input.world_position), dpdy(input.world_position)));
     var out: GBufferOutput;
     out.albedo   = vec4<f32>(base_color, 1.0);
@@ -284,12 +284,10 @@ fn fs_debug(input: VertexOutput) -> GBufferOutput {
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(base_color, 0.0);
     out.vg_flag  = vec2<f32>(-2.0, -2.0);
+    out.sss      = vec4<f32>(0.0);
+    out.extra    = vec4<f32>(0.0);
     return out;
 }
-
-// ── VG LOD heatmap debug (mode 21) ─────────────────────────────────────────
-// One flat colour per selected object LOD. Green is LOD0/full detail and dark
-// magenta is LOD7/coarsest. Triangle variation would falsely imply mixed LODs.
 
 struct LodVertexOutput {
     @invariant @builtin(position) clip_position: vec4<f32>,
@@ -303,7 +301,6 @@ fn vs_debug_lod(v: Vertex, @builtin(instance_index) draw_slot: u32) -> LodVertex
     let lod_level = draw.lod_level;
     let inst      = instance_data[draw.instance_index];
     let world_pos = inst.transform * vec4<f32>(v.position, 1.0);
-
     var out: LodVertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;
@@ -313,21 +310,18 @@ fn vs_debug_lod(v: Vertex, @builtin(instance_index) draw_slot: u32) -> LodVertex
 
 @fragment
 fn fs_debug_lod(input: LodVertexOutput) -> GBufferOutput {
-    // 8-stop colour ramp: LOD0=green → LOD7=red
     var pal: array<vec3<f32>, 8>;
-    pal[0] = vec3<f32>(0.10, 0.95, 0.10); // LOD 0 — bright green
-    pal[1] = vec3<f32>(0.50, 0.95, 0.10); // LOD 1 — yellow-green
-    pal[2] = vec3<f32>(0.85, 0.90, 0.10); // LOD 2 — yellow
-    pal[3] = vec3<f32>(1.00, 0.70, 0.10); // LOD 3 — amber
-    pal[4] = vec3<f32>(1.00, 0.45, 0.05); // LOD 4 — orange
-    pal[5] = vec3<f32>(1.00, 0.25, 0.05); // LOD 5 — red-orange
-    pal[6] = vec3<f32>(0.90, 0.10, 0.05); // LOD 6 — red
-    pal[7] = vec3<f32>(0.60, 0.05, 0.30); // LOD 7 — dark magenta
+    pal[0] = vec3<f32>(0.10, 0.95, 0.10);
+    pal[1] = vec3<f32>(0.50, 0.95, 0.10);
+    pal[2] = vec3<f32>(0.85, 0.90, 0.10);
+    pal[3] = vec3<f32>(1.00, 0.70, 0.10);
+    pal[4] = vec3<f32>(1.00, 0.45, 0.05);
+    pal[5] = vec3<f32>(1.00, 0.25, 0.05);
+    pal[6] = vec3<f32>(0.90, 0.10, 0.05);
+    pal[7] = vec3<f32>(0.60, 0.05, 0.30);
 
     let idx = min(u32(input.lod_level + 0.5), 7u);
     let lod_color = pal[idx];
-
-    // Unlit: emit colour directly, no material/lighting.
     let face_n = normalize(cross(dpdx(input.world_position), dpdy(input.world_position)));
     var out: GBufferOutput;
     out.albedo   = vec4<f32>(lod_color, 1.0);
@@ -335,5 +329,7 @@ fn fs_debug_lod(input: LodVertexOutput) -> GBufferOutput {
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(lod_color, 0.0);
     out.vg_flag  = vec2<f32>(-2.0, -2.0);
+    out.sss      = vec4<f32>(0.0);
+    out.extra    = vec4<f32>(0.0);
     return out;
 }

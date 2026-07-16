@@ -1,7 +1,7 @@
 // Radiant Material System Demo
 // Demonstrates all three tiers of the Radiant material system:
 //   Tier 1 — Feature flags on the default PBR uber-shader
-//   Tier 2 — Template + graph-snippet override
+//   Tier 2 — Hand-authored surface templates (clear coat, SSS, anisotropic, skin)
 //   Tier 3 — Full custom template (iridescent thin-film surface)
 
 use std::collections::HashSet;
@@ -13,7 +13,10 @@ use helio::{
     required_wgpu_features, required_wgpu_limits, Camera, Renderer,
     RendererConfig, Scene, SceneActor,
 };
-use libhelio::{FLAG_HAS_NORMAL_MAP, MATERIAL_CLASS_DEFAULT};
+use libhelio::{
+    FLAG_HAS_NORMAL_MAP, MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT,
+    MATERIAL_CLASS_DEFAULT, MATERIAL_CLASS_SKIN, MATERIAL_CLASS_SUBSURFACE,
+};
 use helio_default_graphs::build_default_graph;
 use helio_pass_gbuffer::GBufferPass;
 use winit::{
@@ -64,8 +67,10 @@ struct AppState {
     keys: HashSet<KeyCode>,
     cursor_grabbed: bool,
     mouse_delta: (f32, f32),
-    // Scene objects for per-frame manipulation
-    animated_mat_id: helio::MaterialId,
+    // Materials for per-frame animation
+    animated_iri_id: helio::MaterialId,
+    sss_material_id: helio::MaterialId,
+    aniso_material_id: helio::MaterialId,
     sun_light_id: helio::LightId,
 }
 
@@ -159,6 +164,10 @@ impl ApplicationHandler for App {
             config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
 
+        // Tier-2 templates (clear_coat, subsurface, anisotropic, skin) are
+        // auto-registered at engine startup by RadiantTemplateRegistry::new()
+        // with their MATERIAL_CLASS_* IDs.
+
         // ── Register the iridescent template (Tier 3) ────────────────────────
 
         let iridescent_wgsl = include_str!("shaders/radiant_iridescent.wgsl");
@@ -177,23 +186,32 @@ impl ApplicationHandler for App {
 
         // ── Materials ────────────────────────────────────────────────────────
 
+        let make_mat = v3_demo_common::make_material;
+
         // Tier 1a: Gold metallic (uber-shader, flags only)
-        let gold_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
+        let gold_mat = renderer.scene_mut().insert_material(make_mat(
             [1.0, 0.75, 0.2, 1.0], 0.2, 1.0, [0.0; 3], 0.0,
         ));
 
         // Tier 1b: Rough red plastic (uber-shader, flags only)
-        let plastic_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
+        let plastic_mat = renderer.scene_mut().insert_material(make_mat(
             [0.9, 0.15, 0.1, 1.0], 0.8, 0.0, [0.0; 3], 0.0,
         ));
 
-        // Tier 1c: Blue dielectric with clear-coat flag (just a flag toggle, no PSO switch)
-        let clear_coat_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
-            [0.15, 0.3, 0.85, 1.0], 0.3, 0.0, [0.0; 3], 0.0,
+        // Tier 2: Clear coat — deep blue metallic with clear-coat template
+        // class_params: x=coat_strength, y=coat_roughness, z=coat_IOR, w=unused
+        let coat_mat = renderer.scene_mut().insert_material(make_mat(
+            [0.05, 0.1, 0.6, 1.0], 0.25, 0.6, [0.0; 3], 0.0,
         ));
+        renderer.scene_mut().set_material_class(
+            coat_mat, MATERIAL_CLASS_CLEAR_COAT, 0, None,
+        ).unwrap();
+        renderer.scene_mut().update_material_class_params(
+            coat_mat, [1.0, 0.04, 0.0, 0.0], // full strength, very smooth coat
+        );
 
         // Tier 2: PBR + graph snippet override (animated emissive pulse)
-        let pulse_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
+        let pulse_mat = renderer.scene_mut().insert_material(make_mat(
             [0.3, 0.3, 0.35, 1.0], 0.5, 0.5, [0.0; 3], 0.0,
         ));
         renderer.scene_mut().set_material_class(
@@ -201,20 +219,59 @@ impl ApplicationHandler for App {
             Some(FLAG_HAS_NORMAL_MAP),
         ).unwrap();
 
+        // Tier 2: Opal (subsurface + internal colour flashes)
+        // class_params: xyz=subsurface_color (play-of-color tint), w=subsurface_radius (mm)
+        // Opal's internal colour is approximated via SSS with a bright, rainbow-tinted
+        // transmission colour and very low roughness so light penetrates and scatters
+        // within the gemstone body before exiting.
+        let sss_mat = renderer.scene_mut().insert_material(make_mat(
+            [0.92, 0.88, 0.82, 1.0], 0.04, 0.0, [0.0; 3], 0.0, // milky white body
+        ));
+        renderer.scene_mut().set_material_class(
+            sss_mat, MATERIAL_CLASS_SUBSURFACE, 0, None,
+        ).unwrap();
+        renderer.scene_mut().update_material_class_params(
+            sss_mat, [0.6, 0.8, 0.9, 3.0], // cyan-blue internal tint, 3mm scatter radius
+        );
+
+        // Tier 2: Brushed metal (anisotropic GGX)
+        // class_params: x=anisotropy (0-1), y=rotation (radians), zw=unused
+        let aniso_mat = renderer.scene_mut().insert_material(make_mat(
+            [0.85, 0.7, 0.5, 1.0], 0.25, 1.0, [0.0; 3], 0.0, // brass colour
+        ));
+        renderer.scene_mut().set_material_class(
+            aniso_mat, MATERIAL_CLASS_ANISOTROPIC, 0, None,
+        ).unwrap();
+        renderer.scene_mut().update_material_class_params(
+            aniso_mat, [0.85, 0.3, 0.0, 0.0], // strong anisotropy, slight rotation
+        );
+
+        // Tier 2: Skin (SSS + dielectric specular at 0.028)
+        // class_params: xyz=blood colour, w=subsurface_radius (mm)
+        let skin_mat = renderer.scene_mut().insert_material(make_mat(
+            [0.85, 0.65, 0.55, 1.0], 0.4, 0.0, [0.0; 3], 0.0, // skin tone
+        ));
+        renderer.scene_mut().set_material_class(
+            skin_mat, MATERIAL_CLASS_SKIN, 0, None,
+        ).unwrap();
+        renderer.scene_mut().update_material_class_params(
+            skin_mat, [0.8, 0.15, 0.05, 3.0], // reddish blood colour, 3mm radius
+        );
+
         // Tier 3: Iridescent thin-film surface (full custom template)
-        let iri_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
+        let iri_mat = renderer.scene_mut().insert_material(make_mat(
             [0.6, 0.6, 0.8, 1.0], 0.15, 0.8, [0.0; 3], 0.0,
         ));
         renderer.scene_mut().set_material_class(
             iri_mat, iridescent_class, 0, None,
         ).unwrap();
 
-        // ── Animated material (class_params changes per frame) ───────────────
-        let anim_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
+        // Animated iridescent (class_params change per-frame)
+        let anim_iri_mat = renderer.scene_mut().insert_material(make_mat(
             [0.5, 0.5, 0.6, 1.0], 0.2, 0.6, [0.0; 3], 0.0,
         ));
         renderer.scene_mut().set_material_class(
-            anim_mat, iridescent_class, 0, None,
+            anim_iri_mat, iridescent_class, 0, None,
         ).unwrap();
 
         // ── Meshes ───────────────────────────────────────────────────────────
@@ -224,82 +281,116 @@ impl ApplicationHandler for App {
         ).as_mesh().unwrap();
 
         let plane_mesh = renderer.scene_mut().insert_actor(
-            SceneActor::mesh(v3_demo_common::plane_mesh([0.0; 3], 10.0))
+            SceneActor::mesh(v3_demo_common::plane_mesh([0.0; 3], 12.0))
         ).as_mesh().unwrap();
 
         // ── Scene objects ────────────────────────────────────────────────────
 
-        let spacing = 2.8;
-        let y_pos = 0.0;
+        let s = 2.7; // spacing
+        let yp = 0.0;
+        let front_z = 0.0;
+        let mid_z = -3.8;
+        let back_z = -6.8;
 
-        // Ground plane (simple, no flags)
-        let plane_mat = renderer.scene_mut().insert_material(v3_demo_common::make_material(
-            [0.12, 0.12, 0.14, 1.0], 0.9, 0.0, [0.0; 3], 0.0,
+        // Ground plane
+        let plane_mat = renderer.scene_mut().insert_material(make_mat(
+            [0.10, 0.10, 0.12, 1.0], 0.9, 0.0, [0.0; 3], 0.0,
         ));
         v3_demo_common::insert_object(&mut renderer, plane_mesh, plane_mat,
-            Mat4::from_translation(Vec3::new(0.0, -1.5, 0.0)), 14.0);
+            Mat4::from_translation(Vec3::new(0.0, -1.5, 0.0)), 12.0);
 
-        // Tier 1: Gold metallic
+        // ── Front row: Tier 1 & 2 basics ─────────────────────────────────────
+
         v3_demo_common::insert_object(&mut renderer, sphere_mesh, gold_mat,
-            Mat4::from_translation(Vec3::new(-spacing * 1.5, y_pos, 0.0)), 1.0);
+            Mat4::from_translation(Vec3::new(-s * 1.5, yp, front_z)), 1.0);
 
-        // Tier 1: Red plastic
         v3_demo_common::insert_object(&mut renderer, sphere_mesh, plastic_mat,
-            Mat4::from_translation(Vec3::new(-spacing * 0.5, y_pos, 0.0)), 1.0);
+            Mat4::from_translation(Vec3::new(-s * 0.5, yp, front_z)), 1.0);
 
-        // Tier 1: Blue clear-coat
-        v3_demo_common::insert_object(&mut renderer, sphere_mesh, clear_coat_mat,
-            Mat4::from_translation(Vec3::new(spacing * 0.5, y_pos, 0.0)), 1.0);
+        // Clear coat template (Tier 2)
+        v3_demo_common::insert_object(&mut renderer, sphere_mesh, coat_mat,
+            Mat4::from_translation(Vec3::new(s * 0.5, yp, front_z)), 1.0);
 
-        // Tier 2: PBR + emissive pulse graph
+        // PBR + graph snippet (Tier 2)
         v3_demo_common::insert_object(&mut renderer, sphere_mesh, pulse_mat,
-            Mat4::from_translation(Vec3::new(spacing * 1.5, y_pos, 0.0)), 1.0);
+            Mat4::from_translation(Vec3::new(s * 1.5, yp, front_z)), 1.0);
 
-        // Tier 3: Iridescent (static params)
+        // ── Middle row: Tier 3 custom ────────────────────────────────────────
+
         v3_demo_common::insert_object(&mut renderer, sphere_mesh, iri_mat,
-            Mat4::from_translation(Vec3::new(-spacing * 1.0, y_pos, -3.5)), 1.0);
+            Mat4::from_translation(Vec3::new(-s * 0.5, yp, mid_z)), 1.0);
 
-        // Tier 3: Iridescent (animated params — class_params.x/y change per frame)
-        v3_demo_common::insert_object(&mut renderer, sphere_mesh, anim_mat,
-            Mat4::from_translation(Vec3::new(spacing * 1.0, y_pos, -3.5)), 1.0);
+        v3_demo_common::insert_object(&mut renderer, sphere_mesh, anim_iri_mat,
+            Mat4::from_translation(Vec3::new(s * 0.5, yp, mid_z)), 1.0);
+
+        // ── Back row: Tier 2 template demos ──────────────────────────────────
+
+        // Opal (subsurface scattering)
+        v3_demo_common::insert_object(&mut renderer, sphere_mesh, sss_mat,
+            Mat4::from_translation(Vec3::new(-s * 1.5, yp, back_z)), 1.0);
+
+        // Brushed metal (anisotropic GGX)
+        v3_demo_common::insert_object(&mut renderer, sphere_mesh, aniso_mat,
+            Mat4::from_translation(Vec3::new(-s * 0.5, yp, back_z)), 1.0);
+
+        // Skin
+        v3_demo_common::insert_object(&mut renderer, sphere_mesh, skin_mat,
+            Mat4::from_translation(Vec3::new(s * 0.5, yp, back_z)), 1.0);
+
+        // Anisotropic with rotating direction (animated)
+        let aniso2_mat = renderer.scene_mut().insert_material(make_mat(
+            [0.6, 0.6, 0.7, 1.0], 0.15, 0.9, [0.0; 3], 0.0,
+        ));
+        renderer.scene_mut().set_material_class(
+            aniso2_mat, MATERIAL_CLASS_ANISOTROPIC, 0, None,
+        ).unwrap();
+        v3_demo_common::insert_object(&mut renderer, sphere_mesh, aniso2_mat,
+            Mat4::from_translation(Vec3::new(s * 1.5, yp, back_z)), 1.0);
 
         // ── Lights ───────────────────────────────────────────────────────────
 
-        // Sun
-        let sun_id = renderer.scene_mut().insert_actor(SceneActor::light(v3_demo_common::directional_light(
-            [0.4, -0.75, 0.3], [1.0, 0.95, 0.85], 3.0,
-        ))).as_light().unwrap();
+        let sun_id = renderer.scene_mut().insert_actor(SceneActor::light(
+            v3_demo_common::directional_light(
+                [0.4, -0.75, 0.3], [1.0, 0.95, 0.85], 3.5,
+            ),
+        )).as_light().unwrap();
 
-        // Fill
-        renderer.scene_mut().insert_actor(SceneActor::light(v3_demo_common::directional_light(
-            [-0.3, -0.4, -0.5], [0.5, 0.6, 0.8], 0.6,
-        )));
+        renderer.scene_mut().insert_actor(SceneActor::light(
+            v3_demo_common::directional_light(
+                [-0.3, -0.4, -0.5], [0.5, 0.6, 0.8], 0.6,
+            ),
+        ));
 
-        // Rim
-        renderer.scene_mut().insert_actor(SceneActor::light(v3_demo_common::directional_light(
-            [0.0, 0.5, -0.8], [0.3, 0.4, 0.6], 0.4,
-        )));
+        renderer.scene_mut().insert_actor(SceneActor::light(
+            v3_demo_common::directional_light(
+                [0.0, 0.5, -0.8], [0.3, 0.4, 0.6], 0.4,
+            ),
+        ));
 
         // ── Sky ──────────────────────────────────────────────────────────────
 
         renderer.scene_mut().insert_actor(SceneActor::Sky(
-            helio::SkyActor::new().with_sky_color([0.15, 0.2, 0.35]),
+            helio::SkyActor::new().with_sky_color([0.12, 0.15, 0.28]),
         ));
-        renderer.set_ambient([0.05, 0.05, 0.1], 0.06);
+        renderer.set_ambient([0.04, 0.04, 0.08], 0.08);
 
         // ── Print legend ─────────────────────────────────────────────────────
 
         log::info!("");
         log::info!("═══ Helio Radiant Material Demo ═══");
-        log::info!("  Tier 1 — Uber-shader (flags only):");
-        log::info!("    Leftmost:   Gold metallic  (FLAG_HAS_NORMAL_MAP)");
-        log::info!("    Center-L:   Red plastic    (uber, no flags)");
-        log::info!("    Center-R:   Blue clear-coat (FLAG_HAS_CLEAR_COAT)");
-        log::info!("  Tier 2 — PBR + graph snippet:");
-        log::info!("    Rightmost:  Animated emissive pulse via graph override");
-        log::info!("  Tier 3 — Custom template:");
-        log::info!("    Back-left:  Iridescent thin-film (static params)");
-        log::info!("    Back-right: Iridescent thin-film (animated params)");
+        log::info!("  ── Front row ──");
+        log::info!("    Gold metallic      (Tier 1, uber-shader, flags only)");
+        log::info!("    Red plastic        (Tier 1, uber-shader, flags only)");
+        log::info!("    Clear coat         (Tier 2, clear_coat template)");
+        log::info!("    Emissive pulse     (Tier 2, PBR + graph snippet)");
+        log::info!("  ── Middle row ──");
+        log::info!("    Iridescent static  (Tier 3, custom template)");
+        log::info!("    Iridescent anim    (Tier 3, animated class_params)");
+        log::info!("  ── Back row ──");
+        log::info!("    Opal (play-of-colour)  (Tier 2, subsurface template, animated)");
+        log::info!("    Brushed metal          (Tier 2, anisotropic template)");
+        log::info!("    Skin                   (Tier 2, skin template)");
+        log::info!("    Brushed metal (moving) (Tier 2, anisotropic, anim direction)");
         log::info!("");
         log::info!("  Controls: WASD fly, mouse look, Space/Shift up/down");
         log::info!("");
@@ -313,14 +404,16 @@ impl ApplicationHandler for App {
             alpha_mode,
             renderer,
             last_frame: Instant::now(),
-            cam_pos: Vec3::new(0.0, 2.5, 9.0),
+            cam_pos: Vec3::new(0.0, 2.0, 10.0),
             yaw: 0.0,
-            pitch: -0.15,
+            pitch: -0.12,
             velocity: Vec3::ZERO,
             keys: HashSet::new(),
             cursor_grabbed: false,
             mouse_delta: (0.0, 0.0),
-            animated_mat_id: anim_mat,
+            animated_iri_id: anim_iri_mat,
+            sss_material_id: sss_mat,
+            aniso_material_id: aniso2_mat,
             sun_light_id: sun_id,
         });
     }
@@ -416,22 +509,42 @@ impl ApplicationHandler for App {
                 let size = state.window.inner_size();
                 let camera = state.camera(size.width, size.height);
 
-                // Update sun position with a slow orbit
-                let angle = now.duration_since(state.last_frame).as_secs_f32() * 0.02 + state.yaw;
-                let sun_pos = glam::Vec3::new(angle.sin() * 12.0, 6.0, angle.cos() * 12.0);
+                // Slow sun orbit
+                let elapsed = now.duration_since(state.last_frame).as_secs_f32();
+                let angle = elapsed * 0.015 + state.yaw;
+                let sun_pos = Vec3::new(angle.sin() * 14.0, 7.0, angle.cos() * 14.0);
                 let _ = state.renderer.scene_mut().update_light(
                     state.sun_light_id,
                     v3_demo_common::directional_light(
-                        [-sun_pos.x, -sun_pos.y, -sun_pos.z], [1.0, 0.95, 0.85], 3.0,
+                        [-sun_pos.x, -sun_pos.y, -sun_pos.z], [1.0, 0.95, 0.85], 3.5,
                     ),
                 );
 
-                // Animate class_params on the animated iridescent sphere
+                // Animate iridescent params
                 let t = now.duration_since(Instant::now()).as_secs_f32();
-                let freq = 3.0 + (t * 0.3).sin() * 2.0;
-                let intensity = 0.5 + (t * 0.5).sin() * 0.5;
                 state.renderer.scene_mut().update_material_class_params(
-                    state.animated_mat_id, [freq, intensity, 0.0, 0.0],
+                    state.animated_iri_id,
+                    [3.0 + (t * 0.3).sin() * 2.0, 0.5 + (t * 0.5).sin() * 0.5, 0.0, 0.0],
+                );
+
+                // Animate opal: cycle internal colour through the spectrum (play-of-colour)
+                let hue = (t * 0.3).sin() * 0.5 + 0.5;
+                let opal_color = [
+                    0.5 + (t * 1.1).cos() * 0.4,
+                    0.5 + (t * 1.3 + 2.0).cos() * 0.4,
+                    0.5 + (t * 0.9 + 4.0).cos() * 0.4,
+                ];
+                let sss_radius = 2.5 + (t * 0.5).sin() * 0.8;
+                state.renderer.scene_mut().update_material_class_params(
+                    state.sss_material_id,
+                    [opal_color[0], opal_color[1], opal_color[2], sss_radius],
+                );
+
+                // Animate anisotropic: rotate the brush direction
+                let aniso_rot = t * 0.4;
+                state.renderer.scene_mut().update_material_class_params(
+                    state.aniso_material_id,
+                    [0.8, aniso_rot, 0.0, 0.0],
                 );
 
                 let output = match state.surface.get_current_texture() {

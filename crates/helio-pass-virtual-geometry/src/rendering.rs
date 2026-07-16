@@ -412,6 +412,16 @@ impl VirtualGeometryPass {
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
         ];
         let draw_primitive = wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -1220,7 +1230,7 @@ impl RenderPass for VirtualGeometryPass {
         &["gbuffer", "main_scene", "vg", "hiz"]
     }
     fn writes(&self) -> &'static [&'static str] {
-        &["gbuffer", "gbuffer_lightmap_uv"]
+        &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
