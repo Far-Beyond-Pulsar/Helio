@@ -34,7 +34,13 @@ const MAX_ITER:      u32 = 64u;
 const START_LEVEL:   i32 = 2;
 const MAX_LEVEL:     i32 = 8;
 const MAX_RAY_DIST:  f32 = 100.0;
-const THICKNESS:     f32 = 0.25;   // surface thickness as a fraction of view depth
+// Surface thickness, as a fraction of view depth. Small on purpose: the march
+// advances the ray onto the depth plane, so a genuine hit lands with
+// ray_depth ~= scene_depth and needs only enough slack to absorb texel
+// quantization. Anything larger extrudes objects backward along the view ray —
+// the depth buffer has no back faces, so a loose slab makes every ray passing
+// *behind* a sphere report a hit on it, smearing it into a cylinder.
+const THICKNESS:     f32 = 0.02;
 const NORMAL_OFFSET: f32 = 0.002;  // ray origin nudge, relative to view depth
 const FADE_START:    f32 = 0.6;    // ray-length fraction where confidence drops
 
