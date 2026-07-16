@@ -114,7 +114,10 @@ async fn render_snapshot_async<P: AsRef<Path>>(
     // ── 3. Initialise headless GPU ────────────────────────────────────────────
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
-        ..Default::default()
+        flags: wgpu::InstanceFlags::default(),
+        memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+        backend_options: wgpu::BackendOptions::default(),
+        display: None,
     });
 
     let adapter = instance
@@ -122,6 +125,7 @@ async fn render_snapshot_async<P: AsRef<Path>>(
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: false,
         })
         .await
         .map_err(|_| SnapshotError::NoAdapter)?;
@@ -234,6 +238,12 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         light_type: LightType::Directional as u32,
         inner_angle: 0.0,
         _pad: 0,
+        god_rays_enabled: 0,
+        god_rays_density: 1.0,
+        god_rays_weight: 0.6,
+        god_rays_decay: 1.0,
+        god_rays_exposure: 0.7,
+        _pad2: [0; 3],
     }));
     renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
         position_range: [0.0, 0.0, 0.0, f32::MAX],
@@ -243,6 +253,12 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         light_type: LightType::Directional as u32,
         inner_angle: 0.0,
         _pad: 0,
+        god_rays_enabled: 0,
+        god_rays_density: 1.0,
+        god_rays_weight: 0.6,
+        god_rays_decay: 1.0,
+        god_rays_exposure: 0.7,
+        _pad2: [0; 3],
     }));
 
     renderer.scene_mut().flush();
@@ -357,7 +373,9 @@ async fn readback_rgba(
     rx.await.unwrap()?;
 
     // Strip the 256-byte row padding before building the image.
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().map_err(|_| {
+        SnapshotError::Render("readback buffer mapping failed".into())
+    })?;
     let mut pixels = Vec::with_capacity((width * height * 4) as usize);
     for row in 0..height {
         let start = (row * bytes_per_row) as usize;
@@ -430,7 +448,10 @@ impl SnapshotBatch {
     async fn new_async(config: SnapshotConfig) -> Result<Self, SnapshotError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
-            ..Default::default()
+            flags: wgpu::InstanceFlags::default(),
+            memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
+            backend_options: wgpu::BackendOptions::default(),
+            display: None,
         });
 
         let adapter = instance
@@ -438,6 +459,7 @@ impl SnapshotBatch {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: None,
                 force_fallback_adapter: false,
+                apply_limit_buckets: false,
             })
             .await
             .map_err(|_| SnapshotError::NoAdapter)?;
@@ -566,13 +588,19 @@ impl SnapshotBatch {
             (rim_dir,  [0.90, 0.95, 1.00],     0.8,     u32::MAX),
         ] {
             self.renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
-                position_range:  [0.0, 0.0, 0.0, f32::MAX],
-                direction_outer: [dir.x, dir.y, dir.z, 0.0],
-                color_intensity: [color[0], color[1], color[2], intensity],
-                shadow_index:    shadow,
-                light_type:      LightType::Directional as u32,
-                inner_angle:     0.0,
-                _pad:            0,
+                position_range:      [0.0, 0.0, 0.0, f32::MAX],
+                direction_outer:     [dir.x, dir.y, dir.z, 0.0],
+                color_intensity:     [color[0], color[1], color[2], intensity],
+                shadow_index:        shadow,
+                light_type:          LightType::Directional as u32,
+                inner_angle:         0.0,
+                _pad:                0,
+                god_rays_enabled:    0,
+                god_rays_density:    1.0,
+                god_rays_weight:     0.6,
+                god_rays_decay:      1.0,
+                god_rays_exposure:   0.7,
+                _pad2:               [0; 3],
             }));
         }
 
