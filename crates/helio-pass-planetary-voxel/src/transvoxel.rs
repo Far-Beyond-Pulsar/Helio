@@ -4,7 +4,7 @@
 //! Keeping a small CPU decoder lets tests exhaustively check every table case,
 //! winding flag, edge endpoint, and triangle index before shader integration.
 
-mod generated {
+pub(crate) mod generated {
     include!("transvoxel_tables.rs");
 }
 

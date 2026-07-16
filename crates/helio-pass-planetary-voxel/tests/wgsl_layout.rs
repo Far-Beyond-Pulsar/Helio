@@ -1,7 +1,8 @@
 use helio_pass_planetary_voxel::{
     GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest, GpuLookupQuery,
     GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
-    GpuTerrainMeshlet, GpuTerrainVertex, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL,
+    GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelClassifyCounters,
+    GpuTransvoxelDispatch, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL, TRANSVOXEL_CLASSIFY_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
@@ -295,6 +296,64 @@ fn counters_are_explicitly_padded_and_pod_sized() {
                 ("atlas_shards".into(), 80),
                 ("device_rebuilds".into(), 84),
                 ("_pad".into(), 88),
+            ],
+        )
+    );
+}
+
+#[test]
+fn transvoxel_classifier_layouts_match_wgsl_exactly() {
+    let module =
+        wgsl::parse_str(TRANSVOXEL_CLASSIFY_WGSL).expect("Transvoxel classify WGSL parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("Transvoxel classify WGSL validates");
+
+    assert_eq!(align_of::<GpuTransvoxelDispatch>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelDispatch>(), 32);
+    assert_eq!(
+        wgsl_struct_in(TRANSVOXEL_CLASSIFY_WGSL, "GpuTransvoxelDispatch"),
+        (
+            32,
+            vec![
+                ("dirty_microbricks_low".into(), 0),
+                ("dirty_microbricks_high".into(), 4),
+                ("generation_low".into(), 8),
+                ("generation_high".into(), 12),
+                ("cell_count".into(), 16),
+                ("_pad0".into(), 20),
+                ("_pad1".into(), 24),
+                ("_pad2".into(), 28),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTransvoxelCell>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelCell>(), 16);
+    assert_eq!(
+        wgsl_struct_in(TRANSVOXEL_CLASSIFY_WGSL, "GpuTransvoxelCell"),
+        (
+            16,
+            vec![
+                ("packed_case_class_counts".into(), 0),
+                ("generation_low".into(), 4),
+                ("generation_high".into(), 8),
+                ("_pad".into(), 12),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTransvoxelClassifyCounters>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelClassifyCounters>(), 16);
+    assert_eq!(
+        wgsl_struct_in(TRANSVOXEL_CLASSIFY_WGSL, "GpuTransvoxelClassifyCounters"),
+        (
+            16,
+            vec![
+                ("visited_cells".into(), 0),
+                ("active_cells".into(), 4),
+                ("vertices".into(), 8),
+                ("triangles".into(), 12),
             ],
         )
     );
