@@ -182,6 +182,7 @@ helio-asset-compat = { workspace = true }
 helio-pass-taa = { workspace = true }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-corona = { workspace = true }
+helio-pass-decal = { path = "../helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../helio-pass-postprocess" }

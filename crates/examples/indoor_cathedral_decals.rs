@@ -37,7 +37,7 @@ fn decal_xform(pos: [f32; 3], normal: [f32; 3], half: [f32; 3]) -> [f32; 16] {
         * glam::Mat4::from_quat(r) * glam::Mat4::from_translation(-p)).to_cols_array()
 }
 
-fn make_decal(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
+fn make_decal_tex(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
               blend: DecalBlendMode, dtype: DecalType, adapt: bool) -> GpuDecal {
     GpuDecal {
         transform: decal_xform(pos, normal, half), color,
@@ -47,6 +47,13 @@ fn make_decal(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
         fade_time: 0.0, fade_start_delay: 0.0, age: 0.0,
         normal_adapt: if adapt { 1 } else { 0 }, _pad0: 0.0, _pad1: 0.0,
     }
+}
+
+fn make_decal_tex(pos: [f32; 3], normal: [f32; 3], half: [f32; 3], color: [f32; 4],
+                  blend: DecalBlendMode, dtype: DecalType, adapt: bool, tex_idx: u32) -> GpuDecal {
+    let mut d = make_decal_tex(pos, normal, half, color, blend, dtype, adapt);
+    d.albedo_texture_index = tex_idx;
+    d
 }
 
 // ── Scene data ────────────────────────────────────────────────────────────────
@@ -248,6 +255,16 @@ impl ApplicationHandler for App {
             config, scene, graph, debug_state, debug_camera_buf, cull_stats_buf,
         );
         renderer.set_editor_mode(true);
+
+        // Load decal texture into the DecalPass
+        if let Some(pass) = renderer.find_pass_mut::<helio_pass_decal::DecalPass>() {
+            if let Ok(img) = image::load_from_memory(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../grafiti.png"))) {
+                let rgba = img.to_rgba8();
+                let (gw, gh) = rgba.dimensions();
+                pass.load_decal_texture(&device, &queue, rgba.as_raw(), gw, gh);
+                println!("[decals] Loaded grafiti.png ({}x{})", gw, gh);
+            }
+        }
 
         let mat = renderer.scene_mut().insert_material(make_material(
             [0.75, 0.72, 0.68, 1.0],
@@ -540,37 +557,36 @@ impl ApplicationHandler for App {
         // run full tiled PCF every frame even though they're fixed.
         renderer.auto_bake(BakeConfig::fast("indoor_cathedral"));
 
-        // Decals
         for z in (-24..24).step_by(4) {
-            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
-                [0.0, 0.02, z as f32], [0.0, 1.0, 0.0], [1.8, 0.02, 1.2],
-                [0.25, 0.18, 0.12, 0.35], DecalBlendMode::Multiply, DecalType::AlbedoNormal, false,
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
+                [0.0, 0.0, z as f32], [0.0, 1.0, 0.0], [1.8, 1.2, 0.02],
+                [0.0, 0.0, 1.0, 0.8], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false,
             )));
         }
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
-            [-5.5, 5.0, -6.0], [1.0, 0.0, 0.0], [0.08, 2.5, 0.3],
-            [0.5, 0.5, 0.5, 0.8], DecalBlendMode::Translucent, DecalType::NormalOnly, true,
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
+            [-3.0, 0.0, -6.0], [0.0, 1.0, 0.0], [0.8, 0.4, 0.02],
+            [1.0, 1.0, 0.0, 0.9], DecalBlendMode::Translucent, DecalType::NormalOnly, false,
         )));
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
-            [-10.95, 4.0, 10.0], [1.0, 0.0, 0.0], [1.0, 1.0, 0.05],
-            [0.0, 0.8, 0.8, 0.6], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, true,
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
+            [3.0, 0.0, 22.0], [0.0, 1.0, 0.0], [1.5, 1.5, 0.02],
+            [1.0, 1.0, 1.0, 1.0], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false, 0,
         )));
         for i in 0..6 {
-            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
-                [10.9, 2.0 + i as f32 * 0.7, 22.0 - i as f32 * 1.3],
-                [-1.0, 0.0, 0.0], [0.04, 0.04, 0.04],
-                [0.1, 0.1, 0.1, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, true,
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
+                [-3.0 + i as f32 * 1.2, 0.0, 18.0 - i as f32 * 2.0],
+                [0.0, 1.0, 0.0], [0.3, 0.3, 0.02],
+                [1.0, 0.0, 1.0, 0.9], DecalBlendMode::AlphaBlend, DecalType::AlbedoNormal, false,
             )));
         }
         for &z in CHANDELIER_Z {
-            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
-                [0.0, 20.98, z], [0.0, -1.0, 0.0], [1.8, 0.02, 1.8],
-                [0.02, 0.02, 0.02, 0.5], DecalBlendMode::Translucent, DecalType::AlbedoNormal, false,
+            let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
+                [5.0, 0.0, z], [0.0, 1.0, 0.0], [1.2, 1.2, 0.02],
+                [0.0, 0.0, 1.0, 0.7], DecalBlendMode::Translucent, DecalType::AlbedoNormal, false,
             )));
         }
-        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal(
-            [0.0, 0.90, -25.5], [0.0, 1.0, 0.0], [0.6, 0.02, 0.4],
-            [0.0, 1.5, 0.3, 0.8], DecalBlendMode::Additive, DecalType::Emissive, false,
+        let _ = renderer.scene_mut().insert_actor(helio::SceneActor::decal(make_decal_tex(
+            [0.0, 0.90, -25.5], [0.0, 1.0, 0.0], [0.6, 0.4, 0.02],
+            [1.0, 0.5, 0.0, 1.0], DecalBlendMode::Additive, DecalType::Emissive, false,
         )));
 
         let renderer = Arc::new(Mutex::new(renderer));
