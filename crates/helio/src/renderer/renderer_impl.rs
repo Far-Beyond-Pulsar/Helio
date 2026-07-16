@@ -493,6 +493,10 @@ impl Renderer {
     }
 
     /// Snapshot the renderer settings needed to build a replacement graph.
+    pub fn queue(&self) -> &Arc<wgpu::Queue> {
+        &self.queue
+    }
+
     pub fn renderer_config(&self) -> RendererConfig {
         RendererConfig {
             width: self.output_width,

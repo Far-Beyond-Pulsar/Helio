@@ -90,7 +90,7 @@ impl ApplicationHandler for App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
-            apply_limit_buckets: false,
+            apply_limit_buckets: true,
         }))
         .expect("no adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -119,7 +119,7 @@ impl ApplicationHandler for App {
                 height: size.height,
                 present_mode: wgpu::PresentMode::Fifo,
                 alpha_mode: caps.alpha_modes[0],
-                color_space: wgpu::SurfaceColorSpace::default(),
+                color_space: wgpu::SurfaceColorSpace::Auto,
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
             },
@@ -409,7 +409,7 @@ impl ApplicationHandler for App {
                         height: h,
                         present_mode: wgpu::PresentMode::Fifo,
                         alpha_mode: caps.alpha_modes[0],
-                        color_space: wgpu::SurfaceColorSpace::default(),
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
                     },
@@ -536,14 +536,17 @@ impl ApplicationHandler for App {
                 let output = match state.surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(t) => t,
                     wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-                    _ => return,
+                    _ => {
+                        log::warn!("surface acquire failed");
+                        return;
+                    }
                 };
                 let view = output.texture.create_view(&Default::default());
 
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("Render: {:?}", e);
                 }
-                state.queue.present(output);
+                state.renderer.queue().present(output);
             }
             _ => {}
         }

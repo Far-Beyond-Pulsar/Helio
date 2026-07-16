@@ -152,6 +152,7 @@ impl ApplicationHandler for App {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: true,
         }))
         .expect("no adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -182,6 +183,7 @@ impl ApplicationHandler for App {
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
 
@@ -261,6 +263,7 @@ impl ApplicationHandler for App {
                         alpha_mode: wgpu::CompositeAlphaMode::Opaque,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                     },
                 );
                 state.renderer.set_render_size(size.width, size.height);
@@ -311,9 +314,10 @@ impl ApplicationHandler for App {
                 let camera = state.camera(size.width, size.height);
 
                 let output = match state.surface.get_current_texture() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        log::warn!("surface error: {:?}", e);
+                    wgpu::CurrentSurfaceTexture::Success(t) => t,
+                    wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    _ => {
+                        log::warn!("surface acquire failed");
                         return;
                     }
                 };
@@ -323,7 +327,7 @@ impl ApplicationHandler for App {
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
-                output.present();
+                state.renderer.queue().present(output);
             }
 
             _ => {}

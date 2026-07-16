@@ -88,7 +88,7 @@ impl ApplicationHandler for App {
             compatible_surface: Some(&surface),
             power_preference: wgpu::PowerPreference::HighPerformance,
             force_fallback_adapter: false,
-            apply_limit_buckets: false,
+            apply_limit_buckets: true,
         }))
         .expect("No suitable GPU adapter");
 
@@ -730,9 +730,12 @@ impl ApplicationHandler for App {
                     .update_material_class_params(state.aniso_mat_id, [0.9, t * 0.3, 0.0, 0.0]);
 
                 let output = match state.surface.get_current_texture() {
-                    wgpu::CurrentSurfaceTexture::Success(t)
-                    | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-                    _ => return,
+                    wgpu::CurrentSurfaceTexture::Success(t) => t,
+                    wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+                    _ => {
+                        log::warn!("surface acquire failed");
+                        return;
+                    }
                 };
                 let view = output
                     .texture
@@ -740,7 +743,7 @@ impl ApplicationHandler for App {
                 if let Err(e) = state.renderer.render(&camera, &view) {
                     log::error!("render error: {:?}", e);
                 }
-                state.queue.present(output);
+                state.renderer.queue().present(output);
                 state.window.request_redraw();
             }
             _ => {}

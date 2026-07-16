@@ -98,9 +98,9 @@ impl ApplicationHandler for App {
 
         let window = Arc::new(event_loop.create_window(Window::default_attributes().with_title("Helio — Shape Battle Royale").with_inner_size(winit::dpi::LogicalSize::new(1280u32, 720u32))).expect("window"));
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), flags: wgpu::InstanceFlags::empty(), ..Default::default() });
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor { backends: wgpu::Backends::all(), flags: wgpu::InstanceFlags::empty(), ..wgpu::InstanceDescriptor::new_without_display_handle() });
         let surface = instance.create_surface(window.clone()).expect("surface");
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false })).expect("adapter");
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, compatible_surface: Some(&surface), force_fallback_adapter: false, apply_limit_buckets: true })).expect("adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { required_features: required_wgpu_features(adapter.features()), required_limits: required_wgpu_limits(adapter.limits()), ..Default::default() })).expect("device");
         device.on_uncaptured_error(Arc::new(|e: wgpu::Error| { panic!("[GPU] {:?}", e) }));
         let device = Arc::new(device);
@@ -109,7 +109,7 @@ impl ApplicationHandler for App {
         let caps = surface.get_capabilities(&adapter);
         let fmt = caps.formats.iter().copied().find(|f| f.is_srgb()).unwrap_or(caps.formats[0]);
         let size = window.inner_size();
-        surface.configure(&device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt, width: size.width, height: size.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: caps.alpha_modes[0], view_formats: vec![], desired_maximum_frame_latency: 1 });
+        surface.configure(&device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: fmt, width: size.width, height: size.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: caps.alpha_modes[0], view_formats: vec![], desired_maximum_frame_latency: 1, color_space: wgpu::SurfaceColorSpace::Auto });
 
         let config = RendererConfig::new(size.width, size.height, fmt);
         let scene = Scene::new(device.clone(), queue.clone());
@@ -239,7 +239,7 @@ impl ApplicationHandler for App {
                 }
             }
             WindowEvent::Resized(s) if s.width > 0 && s.height > 0 => {
-                state.surface.configure(&state.device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: state.surface_format, width: s.width, height: s.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: wgpu::CompositeAlphaMode::Auto, view_formats: vec![], desired_maximum_frame_latency: 1, });
+                state.surface.configure(&state.device, &wgpu::SurfaceConfiguration { usage: wgpu::TextureUsages::RENDER_ATTACHMENT, format: state.surface_format, width: s.width, height: s.height, present_mode: wgpu::PresentMode::Fifo, alpha_mode: wgpu::CompositeAlphaMode::Auto, view_formats: vec![], desired_maximum_frame_latency: 1, color_space: wgpu::SurfaceColorSpace::Auto, });
                 state.renderer.set_render_size(s.width, s.height);
             }
             WindowEvent::RedrawRequested => {
@@ -546,13 +546,17 @@ impl AppState {
         self.update_battle_state();
 
         let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(e) => { log::warn!("Surface error: {:?}", e); return; }
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => {
+                log::warn!("surface acquire failed");
+                return;
+            }
         };
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         if let Err(e) = self.renderer.render(&camera, &view) { log::error!("Render error: {:?}", e); }
-        output.present();
+        self.renderer.queue().present(output);
 
         self.time_render_end = Some(Instant::now());
         self.frame_count += 1;

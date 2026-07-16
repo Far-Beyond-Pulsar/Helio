@@ -223,13 +223,14 @@ impl ApplicationHandler for App {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             flags: wgpu::InstanceFlags::empty(),
-            ..Default::default()
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
         let surface = instance.create_surface(window.clone()).expect("surface");
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            apply_limit_buckets: true,
         }))
         .expect("adapter");
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -264,6 +265,7 @@ impl ApplicationHandler for App {
                 alpha_mode: caps.alpha_modes[0],
                 view_formats: vec![],
                 desired_maximum_frame_latency: 2,
+                color_space: wgpu::SurfaceColorSpace::Auto,
             },
         );
 
@@ -900,6 +902,7 @@ impl ApplicationHandler for App {
                         alpha_mode: wgpu::CompositeAlphaMode::Auto,
                         view_formats: vec![],
                         desired_maximum_frame_latency: 2,
+                        color_space: wgpu::SurfaceColorSpace::Auto,
                     },
                 );
                 if let Ok(mut renderer) = state.renderer.lock() {
@@ -1083,9 +1086,10 @@ impl AppState {
         // ---------------------------------------------------------------------
 
         let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(e) => {
-                log::warn!("Surface: {:?}", e);
+            wgpu::CurrentSurfaceTexture::Success(t) => t,
+            wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            _ => {
+                log::warn!("surface acquire failed");
                 return;
             }
         };
@@ -1094,7 +1098,7 @@ impl AppState {
         if let Err(e) = renderer.render(&camera, &view) {
             log::error!("Render: {:?}", e);
         }
-        output.present();
+        renderer.queue().present(output);
     }
 }
 

@@ -977,6 +977,8 @@ impl RenderPass for VirtualGeometryPass {
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.gbuffer.read("VirtualGeometry")?;
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("VirtualGeometry")?;
+        let sss = resources.gbuffer_sss.read("VirtualGeometry")?;
+        let extra = resources.gbuffer_extra.read("VirtualGeometry")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
@@ -1017,6 +1019,24 @@ impl RenderPass for VirtualGeometryPass {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: lightmap_uv,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: sss,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: extra,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {

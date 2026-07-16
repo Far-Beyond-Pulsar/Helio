@@ -93,13 +93,14 @@ async fn run() {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: benchmark_backends(),
         flags: wgpu::InstanceFlags::empty(),
-        ..Default::default()
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false,
+            apply_limit_buckets: true,
         })
         .await
         .expect("no GPU adapter available");
@@ -798,7 +799,7 @@ fn read_mapped<T: Pod + Copy>(device: &wgpu::Device, buffer: &wgpu::Buffer, coun
     });
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     rx.recv().expect("map callback dropped").expect("readback mapping failed");
-    let data = slice.get_mapped_range();
+    let data = slice.get_mapped_range().unwrap();
     let values = bytemuck::cast_slice::<u8, T>(&data)[..count].to_vec();
     drop(data);
     buffer.unmap();
