@@ -1,28 +1,41 @@
-//! Screen-space reflections.
+//! Hybrid screen-space reflections.
 //!
-//! A single compute dispatch: one deterministic mirror ray per pixel, marched
-//! against the `hiz_min` pyramid built by `HiZBuildPass`, writing colour +
-//! confidence into `ssr_trace` for `DeferredLightPass` to composite over its
-//! cubemap fallback.
+//! A single compute dispatch with two execution paths:
 //!
-//! There is deliberately no temporal pass and no denoiser. Those belong to
-//! *stochastic* SSR, where rough reflections are importance-sampled and the
-//! Monte Carlo noise has to be resolved over time. This traces one exact
-//! `reflect(-V, N)` per pixel, so its output is already stable frame to frame —
-//! there is no noise to denoise and nothing to accumulate. Reference
-//! implementations of non-stochastic SSR are likewise single-pass.
+//! **Default path** (no RT): Deterministic Hi-Z ray march against the `hiz_min`
+//! pyramid. One mirror ray per pixel, stable frame to frame. This is the
+//! original SSR behaviour.
+//!
+//! **RT path** (EXPERIMENTAL_RAY_QUERY available): The Hi-Z march is augmented
+//! with hardware ray queries from the TLAS. When the Hi-Z march finds no hit or
+//! returns low confidence, a ray query is issued against the scene TLAS. The two
+//! results are blended by confidence. Additionally, when radiance cascade data
+//! is available (`rc_cascades`), the shader can fall back to RC-based irradiance
+//! for rough surfaces where SSR + RT lack enough samples.
+//!
+//! Writes Rgba16Float at full resolution: RGB = colour, A = hit confidence.
 
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, RenderPass, Result as HelioResult};
 
 pub struct SsrPass {
-    pipeline: wgpu::ComputePipeline,
+    // Default (Hi-Z only) pipeline
+    default_pipeline: wgpu::ComputePipeline,
+    // RT pipeline (Hi-Z + ray query + RC fallback)
+    rt_pipeline: Option<wgpu::ComputePipeline>,
+
     bgl_1: wgpu::BindGroupLayout,
+    // Optional BGL2 for RT resources (TLAS + RC texture)
+    bgl_2: Option<wgpu::BindGroupLayout>,
+
     bg_0: wgpu::BindGroup,
     bg_1: Option<wgpu::BindGroup>,
     bg_1_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bg_2: Option<wgpu::BindGroup>,
+    bg_2_key: Option<(usize, usize)>,
 
     linear_sampler: wgpu::Sampler,
+    use_rt: bool,
 
     width: u32,
     height: u32,
@@ -46,6 +59,10 @@ impl SsrPass {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
+
+        let use_rt = device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
 
         let shader = helio_core::shader::module(
             device,
@@ -74,19 +91,63 @@ impl SsrPass {
             ],
         });
 
-        let pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        // Optional BGL2: TLAS + RC cascade texture (for RT path)
+        let bgl_2 = use_rt.then(|| {
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("SSR BGL2 (RT)"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::AccelerationStructure {
+                            vertex_return: false,
+                        },
+                        count: None,
+                    },
+                    // RC cascade texture for reflection fallback (optional).
+                    // Bound as unfiltered float to match Rgba16Float storage format.
+                    texture_unfiltered_entry(1),
+                ],
+            })
+        });
+
+        // ── Default pipeline (Hi-Z only) ────────────────────────────────
+        let default_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("SSR PL"),
             bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1)],
             immediate_size: 0,
         });
 
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        let default_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("SSR Trace Pipeline"),
-            layout: Some(&pl),
+            layout: Some(&default_pl),
             module: &shader,
             entry_point: Some("main"),
             compilation_options: Default::default(),
             cache: None,
+        });
+
+        // ── RT pipeline (Hi-Z + ray query) ──────────────────────────────
+        let rt_pipeline = use_rt.then(|| {
+            let rt_shader = helio_core::shader::module(
+                device,
+                "SSR RT Trace Shader",
+                include_str!("../shaders/ssr_trace_rt.wgsl"),
+            );
+
+            let rt_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("SSR RT PL"),
+                bind_group_layouts: &[Some(&bgl_0), Some(&bgl_1), Some(bgl_2.as_ref().unwrap())],
+                immediate_size: 0,
+            });
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("SSR Hybrid Trace Pipeline"),
+                layout: Some(&rt_pl),
+                module: &rt_shader,
+                entry_point: Some("cs_rt"),
+                compilation_options: Default::default(),
+                cache: None,
+            })
         });
 
         let bg_0 = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -99,12 +160,17 @@ impl SsrPass {
         });
 
         Self {
-            pipeline,
+            default_pipeline,
+            rt_pipeline,
             bgl_1,
+            bgl_2,
             bg_0,
             bg_1: None,
             bg_1_key: None,
+            bg_2: None,
+            bg_2_key: None,
             linear_sampler,
+            use_rt,
             width,
             height,
         }
@@ -130,7 +196,9 @@ impl RenderPass for SsrPass {
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
-        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
+        builder.with_extra_usage(
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+        );
     }
 
     fn render_pass_descriptor<'a>(
@@ -147,6 +215,8 @@ impl RenderPass for SsrPass {
         self.height = height;
         self.bg_1 = None;
         self.bg_1_key = None;
+        self.bg_2 = None;
+        self.bg_2_key = None;
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
@@ -160,8 +230,6 @@ impl RenderPass for SsrPass {
             Some(v) => v,
             None => return Ok(()),
         };
-        // Built by HiZBuildPass. A default (all-mip) view: the trace selects the
-        // level itself via textureLoad, so it needs the whole chain, not one mip.
         let hiz_min_view = match ctx.resource_pool.get_view("hiz_min") {
             Some(v) => v,
             None => return Ok(()),
@@ -171,6 +239,7 @@ impl RenderPass for SsrPass {
             None => return Ok(()),
         };
 
+        // ── BG1: always bound ───────────────────────────────────────────
         let key = (
             gbuffer.normal as *const _ as usize,
             gbuffer.orm as *const _ as usize,
@@ -206,12 +275,64 @@ impl RenderPass for SsrPass {
             self.bg_1_key = Some(key);
         }
 
+        // ── Decide between default and RT path ──────────────────────────
+        if self.use_rt {
+            let main_scene = ctx.resources.main_scene.read("SsrPass");
+            let tlas = main_scene.and_then(|ms| ms.tlas);
+
+            if let Some(tlas_binding) = tlas {
+                let rc_view = ctx.resources.rc_view.get().copied();
+
+                let rt_key = (
+                    tlas_binding as *const _ as usize,
+                    rc_view.map_or(0, |v| v as *const _ as usize),
+                );
+
+                if self.bg_2_key != Some(rt_key) {
+                    // RC cascade texture (or scene_color as a dummy fallback — the
+                    // shader checks texture dimensions before sampling RC data).
+                    let rc_tex = rc_view.unwrap_or(pre_aa_view);
+
+                    self.bg_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("SSR BG2 (RT)"),
+                        layout: self.bgl_2.as_ref().unwrap(),
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: tlas_binding.as_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(rc_tex),
+                            },
+                        ],
+                    }));
+                    self.bg_2_key = Some(rt_key);
+                }
+
+                // RT path
+                let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
+                let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("SSR Hybrid Trace"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(self.rt_pipeline.as_ref().unwrap());
+                pass.set_bind_group(0, &self.bg_0, &[]);
+                pass.set_bind_group(1, self.bg_1.as_ref().unwrap(), &[]);
+                pass.set_bind_group(2, self.bg_2.as_ref().unwrap(), &[]);
+                pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);
+
+                return Ok(());
+            }
+        }
+
+        // ── Default: Hi-Z only ──────────────────────────────────────────
         let cpass = unsafe { &mut *ctx.compute_encoder_ptr };
         let mut pass = cpass.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("SSR Trace"),
             timestamp_writes: None,
         });
-        pass.set_pipeline(&self.pipeline);
+        pass.set_pipeline(&self.default_pipeline);
         pass.set_bind_group(0, &self.bg_0, &[]);
         pass.set_bind_group(1, self.bg_1.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(self.width.div_ceil(8), self.height.div_ceil(8), 1);

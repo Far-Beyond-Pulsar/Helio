@@ -336,6 +336,14 @@ pub struct FrameResources<'a> {
     /// RGB = reflected colour, A = hit confidence (0 = no hit, 1 = confident).
     /// Written by SsrPass, read by DeferredLightPass.
     pub ssr_trace: Tracked<&'a wgpu::TextureView>,
+
+    /// Planar reflection texture (Rgba16Float, full resolution).
+    /// RGB = reflected colour from the nearest planar reflector, A = confidence.
+    /// Written by PlanarReflectionPass, read by DeferredLightPass.
+    pub planar_reflection: Tracked<&'a wgpu::TextureView>,
+
+    /// Sampler for planar_reflection.
+    pub planar_reflection_sampler: Tracked<&'a wgpu::Sampler>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -449,6 +457,8 @@ impl<'a> FrameResources<'a> {
             reflection_captures: Tracked::empty(),
             reflection_capture_count: 0,
             ssr_trace: Tracked::empty(),
+            planar_reflection: Tracked::empty(),
+            planar_reflection_sampler: Tracked::empty(),
         }
     }
 
@@ -511,6 +521,8 @@ impl<'a> FrameResources<'a> {
             reset_field!(postprocess_uniforms);
             reset_field!(reflection_captures);
             reset_field!(ssr_trace);
+            reset_field!(planar_reflection);
+            reset_field!(planar_reflection_sampler);
         }
     }
 }

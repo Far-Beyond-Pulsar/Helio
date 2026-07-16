@@ -154,6 +154,9 @@ struct ShadowConfig {
 @group(2) @binding(13) var baked_lightmap_sampler: sampler;
 // SSR accum texture (Rgba16Float, half resolution) — screen-space reflections
 @group(2) @binding(14) var ssr_tex: texture_2d<f32>;
+// Planar reflection texture (Rgba16Float, full resolution)
+@group(2) @binding(16) var planar_tex: texture_2d<f32>;
+@group(2) @binding(17) var planar_sampler: sampler;
 
 // Reflection captures, uploaded sorted by influence volume, largest first.
 // The blend below runs front-to-back and saturates, so ordering is what lets a
@@ -916,6 +919,72 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
     return mix(c0, c1, frc.x) * volume_weight;
 }
 
+/// Sample RC irradiance as a rough-specular reflection fallback.
+///
+/// For rough surfaces (roughness > 0.6), a single SSR ray or RT ray query
+/// cannot converge the wide GGX lobe. We re-use the RC probe grid's irradiance
+/// data as a broad directional colour wash, weighted by the reflection
+/// direction vs the probe's directional bins.
+///
+/// This is deliberately *not* a physically correct glossy evaluation — it is
+/// a plausible stand-in that keeps rough reflections from going black when
+/// SSR and RT both miss.
+fn sample_rc_specular(
+    world_pos: vec3<f32>,
+    R: vec3<f32>,
+    roughness: f32,
+    normal: vec3<f32>,
+) -> vec3<f32> {
+    if globals.has_rc_gi == 0u { return vec3<f32>(0.0); }
+
+    let world_min = globals.rc_world_min.xyz;
+    let world_max = globals.rc_world_max.xyz;
+    let world_size = world_max - world_min;
+    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    // Weight the reflection direction by roughness — rougher = more diffuse.
+    let lookup_dir = normalize(mix(R, normal, roughness * 0.5));
+
+    let t = (world_pos - world_min) / world_size;
+    let fade_margin = 0.05;
+    let fade = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
+             * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
+    let volume_weight = fade.x * fade.y * fade.z;
+    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
+
+    // Compute cosine weights for the reflection direction against each probe bin.
+    var cos_weights: array<f32, 16>;
+    var idx = 0u;
+    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
+        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
+            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
+            cos_weights[idx] = max(0.0, dot(lookup_dir, rc_oct_decode(dir_uv)));
+            idx++;
+        }
+    }
+
+    let cell_size = world_size / f32(RC_PROBE_DIM);
+    let probe_f   = (world_pos - world_min) / cell_size - 0.5;
+    let pf        = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(f32(RC_PROBE_DIM) - 1.0));
+    let pi        = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
+    let frc       = fract(pf);
+
+    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
+    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
+    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
+    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
+    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
+    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
+    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
+    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
+
+    let c0 = mix(mix(c000, c001, frc.z), mix(c010, c011, frc.z), frc.y);
+    let c1 = mix(mix(c100, c101, frc.z), mix(c110, c111, frc.z), frc.y);
+    return mix(c0, c1, frc.x) * volume_weight;
+}
+
 // ── Tonemapping & bloom ───────────────────────────────────────────────────────
 // Handled by PostProcessPass (helio-pass-postprocess). This pass writes raw HDR
 // linear light to pre_aa — no tonemapping or bloom here.
@@ -1144,23 +1213,43 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let env_brdf    = env_brdf_approx(NdV, roughness);
     var spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
 
-    // SSR composite — blend screen-space reflections over the cubemap fallback,
-    // weighted by the trace's confidence.
+    // ── SSR composite ────────────────────────────────────────────────────
+    // Blend screen-space reflections over the cubemap fallback, weighted by
+    // the trace's confidence.
     //
-    // Full resolution, so this is a 1:1 read (it used to be a half-res pix / 2).
-    //
-    // Alpha IS the blend weight. SsrPass folds every validity term into it — edge,
-    // viewer-facing, back-face, ray distance, and roughness — precisely so this
-    // composite can dissolve an untrustworthy reflection back into the probe.
-    // Treating alpha as a mere >0 gate and blending on roughness instead (as this
-    // did) threw all of that away: a 0.01-confidence hit composited exactly as
-    // strongly as a certain one, which is what makes bad hits show up at full
-    // intensity rather than fading out. It also applied roughness twice, since the
-    // trace already folds it in.
+    // Alpha IS the blend weight. SsrPass folds every validity term into it —
+    // edge, viewer-facing, back-face, ray distance, and roughness — precisely
+    // so this composite can dissolve an untrustworthy reflection back into
+    // the probe.
     let ssr_hit      = textureLoad(ssr_tex, pix, 0);
     if ssr_hit.a > 0.0 {
         let ssr_sample = ssr_hit.rgb * F_ibl;
         spec_ind = mix(spec_ind, ssr_sample, ssr_hit.a);
+    }
+
+    // ── Planar reflection composite ──────────────────────────────────────
+    // Planar reflections are more accurate on their native surfaces (floors,
+    // mirrors, water) than SSR or the cubemap. They are blended on top of
+    // whatever SSR found, with their own confidence weighting.
+    //
+    // The planar trace runs *before* deferred lighting (like SSR), so its
+    // output is unlit scene colour — multiply by F_ibl to match the IBL
+    // fallback's energy level, exactly as SSR does above.
+    let planar_hit    = textureLoad(planar_tex, pix, 0);
+    if planar_hit.a > 0.0 {
+        let planar_sample = planar_hit.rgb * F_ibl;
+        spec_ind = mix(spec_ind, planar_sample, planar_hit.a);
+    }
+
+    // ── RC-enhanced specular (rough surfaces) ────────────────────────────
+    // Radiance cascades store irradiance from the scene's GI. For rough
+    // surfaces (roughness > 0.6), a single SSR trace or ray query cannot
+    // converge the full glossy lobe, so we fall back to the RC irradiance
+    // as a broad directional wash.  This prevents rough reflections from
+    // going black when SSR misses.
+    if globals.has_rc_gi > 0u && roughness > 0.6 {
+        let rc_spec = sample_rc_specular(world_pos, R, roughness, N);
+        spec_ind = mix(spec_ind, rc_spec, smoothstep(0.6, 0.9, roughness) * 0.4);
     }
 
     // ── INDIRECT LIGHTING ────────────────────────────────────────────────────

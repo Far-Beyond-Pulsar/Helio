@@ -419,6 +419,15 @@ fn build_default_graph_internal(
         ih,
     )));
 
+    // Planar reflection pass — reflects the scene across world-space planes.
+    // Runs before deferred lighting so DeferredLightPass can composite its
+    // output alongside SSR (planar_reflection texture) in a single draw call.
+    graph.add_pass(Box::new(PlanarReflectionPass::new(
+        device,
+        camera_buf,
+        config.surface_format,
+    )));
+
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
@@ -437,12 +446,6 @@ fn build_default_graph_internal(
     )));
 
     add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
-
-    graph.add_pass(Box::new(PlanarReflectionPass::new(
-        device,
-        camera_buf,
-        config.surface_format,
-    )));
 
     // Before AA, at internal resolution: fog accumulates against internal-res
     // depth, and the AA pass then resolves it with the rest of the frame.
@@ -592,6 +595,12 @@ fn build_fxaa_graph_internal(
         camera_buf,
         iw,
         ih,
+    )));
+
+    graph.add_pass(Box::new(PlanarReflectionPass::new(
+        device,
+        camera_buf,
+        config.surface_format,
     )));
 
     let mut deferred_light_pass =
