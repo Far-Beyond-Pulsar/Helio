@@ -53,6 +53,7 @@ libhelio = { path = "crates/libhelio" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-voxel-core = { path = "crates/helio-voxel-core" }
 helio-planet-voxel-core = { path = "crates/helio-planet-voxel-core" }
+helio-pass-planetary-voxel = { path = "crates/helio-pass-planetary-voxel" }
 helio-pass-corona = { path = "crates/helio-pass-corona" }
 helio-pass-sdf = { path = "crates/helio-pass-sdf" }
 helio-pass-voxel-mesh = { path = "crates/helio-pass-voxel-mesh" }

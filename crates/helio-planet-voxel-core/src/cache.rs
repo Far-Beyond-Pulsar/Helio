@@ -168,6 +168,12 @@ impl ResidentPageCache {
         self.pages.get(&key)
     }
 
+    pub fn resident_pages(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (PlanetPageKey, &ResidentPage)> + '_ {
+        self.pages.iter().map(|(key, page)| (*key, page))
+    }
+
     pub fn eviction_watermark(&self, key: PlanetPageKey) -> Option<u64> {
         self.eviction_watermarks.get(&key).copied()
     }
