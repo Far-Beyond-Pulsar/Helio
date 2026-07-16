@@ -182,6 +182,34 @@ fn helio_shadow_project(light_view_proj: mat4x4<f32>, world_pos: vec3<f32>) -> H
     return s;
 }
 
+// ── Froxel grid ─────────────────────────────────────────────────────────────
+// The volumetric fog grid is a view-space 3D texture with exponentially spaced
+// depth slices — dense near the camera, sparse far away, which is where the
+// detail actually matters.
+//
+// Two shaders must agree on this mapping exactly: the fog pass writes froxels by
+// slice index, and the post-process composite reads them back by pixel depth. A
+// mismatch does not error, it just samples the wrong slice and puts the fog at
+// the wrong distance. Hence: here, once, rather than once per shader.
+
+/// Near plane of the froxel grid.
+///
+/// Deliberately not the camera near plane. Exponential spacing from 0.1 would
+/// spend most of the 64 slices within a couple of metres of the camera and leave
+/// almost none for the distance the fog is actually read at.
+const HELIO_FROXEL_NEAR: f32 = 0.5;
+
+/// View depth (not radial distance) → normalized slice coordinate in [0,1].
+fn helio_froxel_slice_from_view_depth(view_depth: f32, far: f32) -> f32 {
+    let d = max(view_depth, HELIO_FROXEL_NEAR);
+    return log(d / HELIO_FROXEL_NEAR) / log(max(far, HELIO_FROXEL_NEAR * 2.0) / HELIO_FROXEL_NEAR);
+}
+
+/// Normalized slice coordinate in [0,1] → view depth. Inverse of the above.
+fn helio_froxel_view_depth_from_slice(slice_norm: f32, far: f32) -> f32 {
+    return HELIO_FROXEL_NEAR * pow(max(far, HELIO_FROXEL_NEAR * 2.0) / HELIO_FROXEL_NEAR, slice_norm);
+}
+
 // ── Volumetric scattering ───────────────────────────────────────────────────
 
 const HELIO_PI: f32 = 3.14159265359;

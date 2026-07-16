@@ -1,4 +1,9 @@
+//!use helio_prelude
 // ── Helio Post-Processing Pipeline ─────────────────────────────────────────────
+//
+// Opts into the prelude for the froxel depth<->slice mapping, which the fog
+// composite must perform *identically* to the fog pass that fills the grid. The
+// prelude's `Camera` is unused here — this file keeps its own `CameraUniforms`.
 //
 // Bind groups:
 //   @group(0) — main: uniforms, samplers, hdr/depth inputs, bloom sampled, avg_lum,
@@ -168,10 +173,11 @@ struct GpuPostProcessVolume {
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
 @group(0) @binding(15) var<storage, read>      pp_volumes:   array<GpuPostProcessVolume>;
 @group(0) @binding(16) var<storage, read_write> blend_output: GpuPostProcessUniforms;
-// Volumetric fog accumulation (fs_uber only).
-// rgb = in-scattered radiance, a = transmittance. Bound to a 1x1 (0,0,0,1)
+// Volumetric fog froxel grid (fs_uber only) — a view-space 3D texture, not a
+// screen-space buffer. rgb = accumulated in-scattering, a = transmittance, both
+// integrated from the camera to that froxel's depth. Bound to a 1x1x1 (0,0,0,1)
 // fallback when no fog pass is in the graph, which composites to a no-op.
-@group(0) @binding(17) var                     fog_input:    texture_2d<f32>;
+@group(0) @binding(17) var                     fog_input:    texture_3d<f32>;
 
 // ── Group 1: per-dispatch bloom compute src/dst ────────────────────────────────
 
@@ -665,10 +671,23 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
     // display-referred space — unresponsive to exposure, washed out, and invisible
     // to bloom, so bright shafts could never bloom.
     //
+    // One trilinear fetch into the froxel grid at this pixel's depth. The filter
+    // runs across x, y *and* depth, which is what makes a 160x90x64 grid resolve
+    // smoothly at any screen resolution — there is no upsample step to alias.
+    //
     // fog.rgb is already premultiplied by the transmittance in front of it, so this
     // is a straight over: attenuate the scene, add what scattered in.
     if postprocess.fog_enabled != 0u {
-        let fog = textureSampleLevel(fog_input, linear_samp, uv, 0.0);
+        let fog_d = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
+        // Slices are planes of constant view depth, so convert the buffer value
+        // rather than using radial distance.
+        let view_depth = helio_view_depth(fog_d, camera.position_near.w, camera.forward_far.w);
+        let slice = clamp(
+            helio_froxel_slice_from_view_depth(view_depth, postprocess.fog_max_distance),
+            0.0,
+            1.0,
+        );
+        let fog = textureSampleLevel(fog_input, linear_samp, vec3<f32>(uv, slice), 0.0);
         color = color * fog.a + fog.rgb;
     }
 

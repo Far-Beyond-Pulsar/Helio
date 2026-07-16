@@ -29,12 +29,13 @@ pub struct PostProcessVolumeBlendPass {
 
 impl PostProcessVolumeBlendPass {
     pub fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("PostProcess Volume Blend Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/postprocess.wgsl").into(),
-            ),
-        });
+        // Same source as PostProcessPass, and it now opts into the prelude, so it
+        // has to be resolved the same way or the shared symbols are missing.
+        let shader = helio_core::shader::module(
+            device,
+            "PostProcess Volume Blend Shader",
+            include_str!("../shaders/postprocess.wgsl"),
+        );
 
         let cv = wgpu::ShaderStages::COMPUTE;
         let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {

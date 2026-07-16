@@ -146,7 +146,7 @@ impl PostProcessPass {
         let initial_src = Self::build_shader_source(&initial_entries);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(initial_src.clone().into()),
+            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&initial_src).into_owned().into()),
         });
 
         let avg_luminance_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -276,7 +276,17 @@ impl PostProcessPass {
                 sampled_tex_entry(12, fv, false),
                 sampler_entry(13, fv, false),
                 storage_ro_entry(14, fv),
-                sampled_tex_entry(17, fv, false),
+                // Fog is a froxel grid, not a screen-space buffer.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 17,
+                    visibility: fv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -415,16 +425,17 @@ impl PostProcessPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
-        // Stand-in for fog_accum when no VolumetricFogPass is in the graph. The
+        // Stand-in for the fog grid when no VolumetricFogPass is in the graph. The
         // composite is `color * fog.a + fog.rgb`, so (0,0,0,1) is exactly the
         // identity — the uber shader needs no branch for the fog-less case.
+        // 1x1x1 D3 to match the real grid's binding type.
         // Rgba16Float texels are halfs: 0.0 = 0x0000, 1.0 = 0x3C00, little-endian.
         let fallback_fog_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("PostProcess Fog Fallback"),
             size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
+            dimension: wgpu::TextureDimension::D3,
             format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
@@ -435,7 +446,10 @@ impl PostProcessPass {
             wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(8), rows_per_image: Some(1) },
             wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
         );
-        let fallback_fog_view = fallback_fog_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let fallback_fog_view = fallback_fog_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
 
         let custom_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Custom Params"),
@@ -554,7 +568,7 @@ impl PostProcessPass {
         }
         let shader_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(source.clone().into()),
+            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&source).into_owned().into()),
         });
         self.uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("PostProcess Uber"),
