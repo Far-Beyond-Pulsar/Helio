@@ -1,0 +1,12 @@
+[package]
+name = "helio-planet-voxel-core"
+version = "0.1.0"
+edition = "2021"
+description = "Bounded renderer-facing contracts for Helio planetary voxels"
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+wgpu = { workspace = true }
