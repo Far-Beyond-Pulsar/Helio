@@ -218,7 +218,7 @@ pub struct FrameResources<'a> {
     pub sky_lut_sampler: Tracked<&'a wgpu::Sampler>,
     /// SSAO result texture
     pub ssao: Tracked<&'a wgpu::TextureView>,
-    /// Volumetric fog accumulation, quarter internal resolution.
+    /// Volumetric fog accumulation, internal resolution (or a divisor of it).
     /// rgb = in-scattered radiance, a = transmittance to the surface.
     pub fog_accum: Tracked<&'a wgpu::TextureView>,
     /// Pre-AA HDR color buffer (input to TAA/FXAA/SMAA)

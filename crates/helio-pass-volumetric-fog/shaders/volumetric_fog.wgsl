@@ -3,8 +3,8 @@
 // Volumetric fog accumulation.
 //
 // Ray-marches from the camera to the depth-buffer surface, accumulating
-// in-scattered light and Beer-Lambert extinction into a quarter-resolution
-// target. The post-process uber shader composites the result:
+// in-scattered light and Beer-Lambert extinction. The post-process uber shader
+// composites the result:
 //
 //     color = color * fog.a + fog.rgb
 //
@@ -106,9 +106,8 @@ fn density_at(p: vec3<f32>) -> f32 {
 /// Fraction of `light_idx` reaching `p`. 1.0 = fully lit.
 ///
 /// A single comparison tap, not the PCF/PCSS kernel deferred lighting uses: this
-/// runs once per light per march step, and the result is integrated over ~64 steps
-/// and then bilinearly upscaled 4x, which smooths the aliasing that a single tap
-/// would show on a surface.
+/// runs once per light per march step, and the result is integrated over ~64 steps,
+/// which smooths most of the aliasing a single tap would show on a surface.
 fn shaft_visibility(light_idx: u32, p: vec3<f32>) -> f32 {
     let light = lights[light_idx];
     if light.shadow_index == NO_SHADOW { return 1.0; }
@@ -212,10 +211,8 @@ fn cs_fog(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     let uv = (vec2<f32>(gid.xy) + 0.5) / vec2<f32>(dims);
 
-    // depth_tex is full internal resolution while this target is a quarter of it,
-    // so sample by UV rather than reusing gid. This takes one depth per fog texel;
-    // a texel straddling a silhouette picks one side of it, which the upscale then
-    // feathers.
+    // Sample depth by UV rather than reusing gid: at divisor 1 this is a 1:1 map,
+    // but the target may be smaller, and then one depth stands for several pixels.
     let depth_dims = textureDimensions(depth_tex);
     let depth_coord = vec2<i32>(clamp(
         uv * vec2<f32>(depth_dims),

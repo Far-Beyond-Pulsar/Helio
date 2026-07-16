@@ -168,7 +168,7 @@ struct GpuPostProcessVolume {
 @group(0) @binding(14) var<storage, read>      pp_custom:    array<vec4<f32>>;
 @group(0) @binding(15) var<storage, read>      pp_volumes:   array<GpuPostProcessVolume>;
 @group(0) @binding(16) var<storage, read_write> blend_output: GpuPostProcessUniforms;
-// Volumetric fog accumulation at quarter internal resolution (fs_uber only).
+// Volumetric fog accumulation (fs_uber only).
 // rgb = in-scattered radiance, a = transmittance. Bound to a 1x1 (0,0,0,1)
 // fallback when no fog pass is in the graph, which composites to a no-op.
 @group(0) @binding(17) var                     fog_input:    texture_2d<f32>;

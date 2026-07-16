@@ -1,8 +1,9 @@
 //! Volumetric fog accumulation.
 //!
 //! Ray-marches the camera rays against the depth buffer, accumulating in-scattered
-//! light and Beer-Lambert extinction into a quarter-resolution `fog_accum` target
-//! that the post-process uber shader composites.
+//! light and Beer-Lambert extinction into a `fog_accum` target that the post-process
+//! uber shader composites. Full internal resolution by default — see
+//! [`VolumetricFogPass::with_resolution_divisor`].
 //!
 //! # Placement
 //!
@@ -26,14 +27,23 @@ use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult}
 
 /// Ray-march steps per pixel.
 ///
-/// 64 at quarter resolution is the spec'd budget. Steps are the dominant cost:
-/// each one does a shadow tap per in-scattering light.
+/// Steps are the dominant cost: each one does a shadow tap per in-scattering light,
+/// and the pass now runs at full resolution, so this is the first dial to turn down
+/// if the pass gets expensive.
 const DEFAULT_STEPS: u32 = 64;
 
 const WG_SIZE: u32 = 8;
 
-/// Divisor applied to the internal resolution for the fog target.
-const FOG_DIVISOR: u32 = 4;
+/// Default divisor applied to the internal resolution for the fog target.
+///
+/// 1 = full internal resolution. The spec called for a quarter, but the composite
+/// multiplies the scene by the fog transmittance — so a reduced-resolution fog
+/// buffer does not merely make the *fog* coarse, it drags the geometry behind it
+/// down to the fog's resolution, which reads as pixelated edges wherever fog is
+/// present. Fixing that properly at reduced resolution needs a depth-aware
+/// (bilateral) upsample; until then, full resolution is the honest default and
+/// `with_resolution_divisor` is there when the cost matters.
+const DEFAULT_FOG_DIVISOR: u32 = 1;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -56,6 +66,7 @@ pub struct VolumetricFogPass {
     bind_group_key: Option<[usize; 4]>,
     steps: u32,
     frame: u32,
+    resolution_divisor: u32,
 }
 
 impl VolumetricFogPass {
@@ -214,7 +225,20 @@ impl VolumetricFogPass {
             bind_group_key: None,
             steps: DEFAULT_STEPS,
             frame: 0,
+            resolution_divisor: DEFAULT_FOG_DIVISOR,
         }
+    }
+
+    /// Render fog at `1/divisor` of the internal resolution. 1 = full res (default).
+    ///
+    /// Cost scales with the pixel count, so 2 is a 4x saving. Be aware that the
+    /// composite multiplies scene colour by fog transmittance, so anything above 1
+    /// coarsens the geometry seen *through* the fog, not just the fog itself.
+    /// Must be called before the pass is added to the graph — `declare_resources`
+    /// reads it to size the target.
+    pub fn with_resolution_divisor(mut self, divisor: u32) -> Self {
+        self.resolution_divisor = divisor.max(1);
+        self
     }
 
     /// Override the ray-march step count. Cost scales linearly.
@@ -240,12 +264,13 @@ impl RenderPass for VolumetricFogPass {
         builder.read("depth");
         // ScaledInternal, not Scaled: this pairs with internal-resolution depth,
         // and Scaled divides the *output* resolution, which differs whenever
-        // render_scale != 1.
+        // render_scale != 1. At divisor 1 this is the internal resolution exactly,
+        // so the fog texel grid lines up 1:1 with depth and there is no upsample.
         builder.write_color(
             "fog_accum",
             ResourceFormat::Rgba16Float,
             ResourceSize::ScaledInternal {
-                divisor: FOG_DIVISOR,
+                divisor: self.resolution_divisor,
             },
         );
         // The graph creates this texture; a compute shader writes it, so it needs
@@ -366,7 +391,10 @@ impl RenderPass for VolumetricFogPass {
             libhelio::GpuPostProcessUniforms::FOG_BLOCK_SIZE,
         );
 
-        let (w, h) = (ctx.width / FOG_DIVISOR, ctx.height / FOG_DIVISOR);
+        let (w, h) = (
+            ctx.width / self.resolution_divisor,
+            ctx.height / self.resolution_divisor,
+        );
         let groups_x = (w.max(1) + WG_SIZE - 1) / WG_SIZE;
         let groups_y = (h.max(1) + WG_SIZE - 1) / WG_SIZE;
 
