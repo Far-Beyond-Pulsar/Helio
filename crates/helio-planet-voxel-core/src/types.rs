@@ -14,6 +14,58 @@ pub const MICROBRICK_COUNT: usize =
 pub const MAX_ADDRESSABLE_LOD: u8 = 57;
 pub const TRANSITION_FACE_MASK: u8 = 0b00_111111;
 
+/// Stable bit order used by visibility, extraction, and shaders.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum TransitionFace {
+    #[default]
+    NegativeX = 0,
+    PositiveX = 1,
+    NegativeY = 2,
+    PositiveY = 3,
+    NegativeZ = 4,
+    PositiveZ = 5,
+}
+
+impl TransitionFace {
+    pub const ALL: [Self; 6] = [
+        Self::NegativeX,
+        Self::PositiveX,
+        Self::NegativeY,
+        Self::PositiveY,
+        Self::NegativeZ,
+        Self::PositiveZ,
+    ];
+
+    pub const fn index(self) -> u8 {
+        self as u8
+    }
+
+    pub const fn bit(self) -> u8 {
+        1 << self.index()
+    }
+
+    pub const fn axis(self) -> usize {
+        (self.index() / 2) as usize
+    }
+
+    pub const fn is_positive(self) -> bool {
+        self.index() & 1 != 0
+    }
+
+    pub const fn from_index(index: u8) -> Option<Self> {
+        Some(match index {
+            0 => Self::NegativeX,
+            1 => Self::PositiveX,
+            2 => Self::NegativeY,
+            3 => Self::PositiveY,
+            4 => Self::NegativeZ,
+            5 => Self::PositiveZ,
+            _ => return None,
+        })
+    }
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct PlanetId(pub [u8; 16]);
@@ -156,6 +208,20 @@ pub enum AddressError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transition_face_bits_are_stable_and_exhaust_the_mask() {
+        let mut mask = 0_u8;
+        for (index, face) in TransitionFace::ALL.into_iter().enumerate() {
+            assert_eq!(face.index(), index as u8);
+            assert_eq!(TransitionFace::from_index(index as u8), Some(face));
+            assert_eq!(face.axis(), index / 2);
+            assert_eq!(face.is_positive(), index & 1 != 0);
+            mask |= face.bit();
+        }
+        assert_eq!(mask, TRANSITION_FACE_MASK);
+        assert_eq!(TransitionFace::from_index(6), None);
+    }
 
     #[test]
     fn cell_word_matches_the_authoritative_four_byte_layout() {
