@@ -15,6 +15,39 @@ pub const TRANSITION_CASE_COUNT: usize = 512;
 pub const REGULAR_CORNER_COUNT: u8 = 8;
 pub const TRANSITION_CORNER_COUNT: u8 = 13;
 
+/// Case-bit weights from Figure 4.17 of Lengyel's dissertation. They are
+/// intentionally not row-major after sample 2.
+pub const TRANSVOXEL_TRANSITION_CASE_WEIGHTS: [u16; 9] = [
+    0x001, 0x002, 0x004, 0x080, 0x100, 0x008, 0x040, 0x020, 0x010,
+];
+
+/// Maps the four half-resolution corner samples to their identical samples on
+/// the full-resolution face: 9=0, A=2, B=6, C=8.
+pub const TRANSVOXEL_TRANSITION_DUPLICATE_CORNERS: [u8; 4] = [0, 2, 6, 8];
+
+pub const fn transition_case_from_solidity(full_resolution_solid: [bool; 9]) -> u16 {
+    let mut case_index = 0_u16;
+    let mut sample = 0;
+    while sample < full_resolution_solid.len() {
+        if full_resolution_solid[sample] {
+            case_index |= TRANSVOXEL_TRANSITION_CASE_WEIGHTS[sample];
+        }
+        sample += 1;
+    }
+    case_index
+}
+
+pub const fn transition_corner_is_solid(case_index: u16, corner: u8) -> Option<bool> {
+    let full_corner = if corner < 9 {
+        corner
+    } else if corner < TRANSITION_CORNER_COUNT {
+        TRANSVOXEL_TRANSITION_DUPLICATE_CORNERS[(corner - 9) as usize]
+    } else {
+        return None;
+    };
+    Some(case_index & TRANSVOXEL_TRANSITION_CASE_WEIGHTS[full_corner as usize] != 0)
+}
+
 /// Corner coordinates used by Lengyel's regular-cell tables. The fixture
 /// module intentionally uses the conventional cyclic Marching Cubes order, so
 /// callers must use [`fixture_case_to_regular_case`] at that boundary.
@@ -270,6 +303,20 @@ pub fn validate_transvoxel_tables() -> Result<TransvoxelTableAudit, TransvoxelTa
             )
         })?;
         validate_topology(topology)?;
+        for vertex in topology.vertex_codes {
+            let [first, second] = TransvoxelVertexCode::from_raw(*vertex).endpoints();
+            let first_inside = transition_corner_is_solid(case_index as u16, first)
+                .expect("table validation already checked transition corner bounds");
+            let second_inside = transition_corner_is_solid(case_index as u16, second)
+                .expect("table validation already checked transition corner bounds");
+            if first_inside == second_inside {
+                return Err(TransvoxelTableError::new(
+                    TransvoxelCellKind::Transition,
+                    case_index as u16,
+                    "vertex edge does not cross the transition-cell surface",
+                ));
+            }
+        }
         audit.transition_vertices += topology.vertex_count() as u32;
         audit.transition_triangles += topology.triangle_count() as u32;
         audit.max_transition_vertices = audit
@@ -410,6 +457,131 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn transition_case_mapping_matches_the_dissertation_figure() {
+        for sample in 0..9 {
+            let mut solid = [false; 9];
+            solid[sample] = true;
+            assert_eq!(
+                transition_case_from_solidity(solid),
+                TRANSVOXEL_TRANSITION_CASE_WEIGHTS[sample]
+            );
+        }
+        assert_eq!(transition_case_from_solidity([true; 9]), 0x1ff);
+        for (half_corner, full_corner) in TRANSVOXEL_TRANSITION_DUPLICATE_CORNERS
+            .into_iter()
+            .enumerate()
+        {
+            for case_index in 0..TRANSITION_CASE_COUNT as u16 {
+                assert_eq!(
+                    transition_corner_is_solid(case_index, 9 + half_corner as u8),
+                    transition_corner_is_solid(case_index, full_corner)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transition_table_boundary_vertices_match_both_lod_face_contours() {
+        const FULL_EDGES: [[u8; 2]; 12] = [
+            [0, 1],
+            [1, 2],
+            [3, 4],
+            [4, 5],
+            [6, 7],
+            [7, 8],
+            [0, 3],
+            [3, 6],
+            [1, 4],
+            [4, 7],
+            [2, 5],
+            [5, 8],
+        ];
+        const HALF_EDGES: [[u8; 2]; 4] = [[9, 10], [10, 12], [12, 11], [11, 9]];
+
+        for case_index in 0..TRANSITION_CASE_COUNT as u16 {
+            let topology = transition_case(case_index).unwrap();
+            let actual = (0..topology.vertex_count())
+                .map(|vertex| sorted_edge(topology.vertex(vertex).unwrap().endpoints()))
+                .collect::<std::collections::BTreeSet<_>>();
+            let expected_full = FULL_EDGES
+                .into_iter()
+                .filter(|[first, second]| {
+                    transition_corner_is_solid(case_index, *first)
+                        != transition_corner_is_solid(case_index, *second)
+                })
+                .map(sorted_edge)
+                .collect::<std::collections::BTreeSet<_>>();
+            let expected_half = HALF_EDGES
+                .into_iter()
+                .filter(|[first, second]| {
+                    transition_corner_is_solid(case_index, *first)
+                        != transition_corner_is_solid(case_index, *second)
+                })
+                .map(sorted_edge)
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(
+                actual
+                    .intersection(&FULL_EDGES.map(sorted_edge).into_iter().collect())
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected_full,
+                "full-resolution boundary case {case_index}"
+            );
+            assert_eq!(
+                actual
+                    .intersection(&HALF_EDGES.map(sorted_edge).into_iter().collect())
+                    .copied()
+                    .collect::<std::collections::BTreeSet<_>>(),
+                expected_half,
+                "half-resolution boundary case {case_index}"
+            );
+        }
+    }
+
+    fn sorted_edge([first, second]: [u8; 2]) -> [u8; 2] {
+        if first < second {
+            [first, second]
+        } else {
+            [second, first]
+        }
+    }
+
+    #[test]
+    fn regular_table_winding_matches_negative_solid_density_gradient() {
+        // x=0 is solid and x=1 is air, so the outward density gradient is +X.
+        let topology = regular_case(0x55);
+        let mut positions = Vec::with_capacity(topology.vertex_count());
+        for vertex in 0..topology.vertex_count() {
+            let [first, second] = topology.vertex(vertex).unwrap().endpoints();
+            let first = TRANSVOXEL_REGULAR_CORNERS[usize::from(first)].map(f32::from);
+            let second = TRANSVOXEL_REGULAR_CORNERS[usize::from(second)].map(f32::from);
+            positions.push([
+                (first[0] + second[0]) * 0.5,
+                (first[1] + second[1]) * 0.5,
+                (first[2] + second[2]) * 0.5,
+            ]);
+        }
+        for triangle in 0..topology.triangle_count() {
+            let [a, b, c] = topology.triangle(triangle).unwrap().map(usize::from);
+            let ab = subtract(positions[b], positions[a]);
+            let ac = subtract(positions[c], positions[a]);
+            assert!(cross(ab, ac)[0] > 0.0);
+        }
+    }
+
+    fn subtract(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+        [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+    }
+
+    fn cross(left: [f32; 3], right: [f32; 3]) -> [f32; 3] {
+        [
+            left[1] * right[2] - left[2] * right[1],
+            left[2] * right[0] - left[0] * right[2],
+            left[0] * right[1] - left[1] * right[0],
+        ]
     }
 
     #[test]

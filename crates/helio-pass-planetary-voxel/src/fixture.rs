@@ -36,7 +36,7 @@ impl ExtractionFixtureKind {
         }
     }
 
-    fn sample(self, position: [i64; 3]) -> CellWord {
+    pub(crate) fn sample_canonical(self, position: [i64; 3]) -> CellWord {
         let [x, y, z] = position;
         let density = match self {
             Self::Plane | Self::MaterialSeam => y.saturating_add(1),
@@ -105,7 +105,7 @@ impl ExtractionFixture {
                             .checked_add(i64::from(local[axis]).saturating_mul(scale))
                             .ok_or(FixtureError::Address(AddressError::CoordinateOverflow))?;
                     }
-                    samples.push(kind.sample(position));
+                    samples.push(kind.sample_canonical(position));
                 }
             }
         }
