@@ -101,7 +101,9 @@ impl super::super::Scene {
     /// Update an object's material reference.
     ///
     /// Changes which material an object uses. Decrements the old material's reference
-    /// count and increments the new material's reference count.
+    /// count and increments the new material's reference count. Since a material change
+    /// may break instancing groups (objects are batched by mesh+material), the scene
+    /// is marked for a full optimized rebuild on the next flush.
     ///
     /// # Parameters
     /// - `id`: Object handle
@@ -114,27 +116,8 @@ impl super::super::Scene {
     /// `Ok(())` if the material was successfully updated.
     ///
     /// # Performance
-    ///
-    /// **Persistent mode:**
-    /// - CPU cost: O(1) - updates CPU record and GPU slot
-    /// - GPU cost: O(1) - writes to single GPU buffer slot
-    ///
-    /// **Optimized mode:**
-    /// - CPU cost: O(1) + invalidates optimization (marks dirty)
-    /// - GPU cost: Deferred to next `flush()` when rebuild occurs
-    /// - Trade-off: Material change breaks instancing groups, triggers rebuild
-    ///
-    /// # Mode Behavior
-    ///
-    /// **Persistent mode:**
-    /// - Updates material reference and slot index
-    /// - Writes directly to GPU instance buffer slot
-    /// - No rebuild needed
-    ///
-    /// **Optimized mode:**
-    /// - Invalidates optimization (sets `objects_layout_optimized = false`)
-    /// - Marks scene dirty for rebuild on next `flush()`
-    /// - Material change breaks instancing groups (mesh+material batching)
+    /// - CPU cost: O(1) - updates CPU record
+    /// - GPU cost: Full optimized rebuild deferred to next `flush()`
     ///
     /// # Reference Counting
     ///
@@ -169,15 +152,8 @@ impl super::super::Scene {
             old_material.ref_count = old_material.ref_count.saturating_sub(1);
         }
 
-        if self.objects_layout_optimized {
-            // Material change breaks instancing groups - invalidate
-            self.objects_layout_optimized = false;
-            self.objects_dirty = true;
-        } else {
-            // Persistent mode - update in place
-            let slot = record.gpu_slot as usize;
-            self.gpu_scene.instances.update(slot, record.instance);
-        }
+        // Material change may break instancing groups — mark for full rebuild.
+        self.objects_dirty = true;
 
         Ok(())
     }

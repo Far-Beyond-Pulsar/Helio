@@ -79,11 +79,6 @@ pub struct Scene {
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     pub(in crate::scene) objects_dirty: bool,
 
-    /// True when the scene layout has been optimized (sorted by mesh+material for instancing).
-    /// When false, objects use persistent slots (1 draw per object, O(1) add/remove).
-    /// When true, objects are sorted for cache coherency (instanced batching).
-    pub(in crate::scene) objects_layout_optimized: bool,
-
     /// True when a Static or Stationary object has been added or removed since the last
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
     pub(in crate::scene) static_objects_dirty: bool,
@@ -92,11 +87,6 @@ pub struct Scene {
     /// When this is true and a bake was previously configured, the user must explicitly
     /// call auto_bake() again to rebake the scene with the new static content.
     pub(in crate::scene) bake_invalidated: bool,
-
-    /// True when objects have been added or removed via persistent-mode delta operations.
-    /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
-    /// indirect buffers must be explicitly rebuilt on the next flush.
-    pub(in crate::scene) shadow_partition_dirty: bool,
 
     /// Previous frame's view-projection matrix (for temporal effects)
     pub(in crate::scene) prev_view_proj: glam::Mat4,
@@ -231,8 +221,7 @@ impl Scene {
     ///
     /// # Initial State
     /// - All resource pools are empty
-    /// - Scene is in persistent mode (`objects_layout_optimized = false`)
-    /// - First `flush()` will rebuild GPU buffers
+    /// - First `flush()` will rebuild GPU buffers with automatic instancing
     ///
     /// # Performance
     /// - CPU cost: O(1) struct initialization
@@ -302,10 +291,8 @@ impl Scene {
             lights: DenseArena::new(),
             objects: DenseArena::new(),
             objects_dirty: true,             // rebuild on first flush
-            objects_layout_optimized: false, // start in persistent mode
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
             bake_invalidated: false,         // no bake configured yet
-            shadow_partition_dirty: false,   // full rebuild on first flush handles this
             prev_view_proj: glam::Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
             movable_objects_generation: 0,

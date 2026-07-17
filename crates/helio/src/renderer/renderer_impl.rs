@@ -446,10 +446,6 @@ impl Renderer {
         self.graph_rebuilder = Some(rebuilder);
     }
 
-    pub fn optimize_scene_layout(&mut self) {
-        self.scene.optimize_scene_layout();
-    }
-
     #[cfg(feature = "bake")]
     pub fn configure_bake(&mut self, mut request: helio_bake::BakeRequest) {
         self.sync_reflection_capture_probes(&mut request.config);
