@@ -179,6 +179,10 @@ path = "radiant_demo.rs"
 name = "planar_reflection_demo"
 path = "planar_reflection_demo.rs"
 
+[[bin]]
+name = "one_million_cubes"
+path = "one_million_cubes.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
