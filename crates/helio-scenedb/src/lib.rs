@@ -18,10 +18,12 @@
 
 pub mod wgsl;
 
-use pulsar_scenedb::gpu::{ClusterBuffer, MeshRegistry, MeshletBuffer, SceneGpuStore};
+use pulsar_scenedb::gpu::{
+    ClusterBuffer, MaterialRegistry, MeshRegistry, MeshletBuffer, SceneGpuStore,
+};
 
 /// The Helio-side handle to every SceneDB-owned GPU buffer, bound read-only
-/// into one bind group at bindings 0-7 ([`wgsl::SCENE_BINDINGS_WGSL`]):
+/// into one bind group at bindings 0-8 ([`wgsl::SCENE_BINDINGS_WGSL`]):
 ///
 /// | binding | contents            | source accessor                                          |
 /// |---------|----------------------|-----------------------------------------------------------|
@@ -33,13 +35,28 @@ use pulsar_scenedb::gpu::{ClusterBuffer, MeshRegistry, MeshletBuffer, SceneGpuSt
 /// | 5       | cluster DAG          | `ClusterBuffer::buffer`                                    |
 /// | 6       | meshlets             | `MeshletBuffer::buffer`                                    |
 /// | 7       | cell metadata        | `SceneGpuStore::cell_metadata_buffer`                      |
+/// | 8       | material registry    | `MaterialRegistry::buffer`                                 |
 ///
 /// Geometry (vertex/index) buffers bind at draw time, not here (they vary
 /// per draw call); textures bind through Helio's own bindless array. Every
 /// entry above is a read-only storage buffer -- SceneDB owns the write path
 /// (`write_transform`/`write_instance_info`/the frame-boundary drivers,
-/// `MeshRegistry::register`, `StreamingGrid::write_cell_metadata`); Helio
-/// only ever reads.
+/// `MeshRegistry::register`, `MaterialRegistry::register`,
+/// `StreamingGrid::write_cell_metadata`); Helio only ever reads.
+///
+/// ## Storage-budget note (M3-a T11, Rev 2.4 R8)
+///
+/// This bind group now carries **9** storage-buffer entries -- ONE MORE than
+/// the entire WebGPU default per-stage storage-buffer budget
+/// (`Limits::default().max_storage_buffers_per_shader_stage == 8`, the same
+/// limit `new`'s `entry` closure already warns about below). M3-a's own
+/// `tests/seam_smoke.rs` sidesteps this by requesting `adapter.limits()`
+/// instead of `wgpu::Limits::default()`. **M3-b MUST NOT rely on that same
+/// workaround implicitly**: any M3-b pass binding this group alongside even
+/// one more compute-stage storage buffer (e.g. an indirect-draw output
+/// buffer) needs the adapter's actual limits requested explicitly, or this
+/// bind group split across multiple `@group` indices. Raise limits or split
+/// -- the default-limits path no longer works at 8 entries, let alone 9.
 pub struct SceneDbBinding {
     pub layout: wgpu::BindGroupLayout,
     pub bind_group: wgpu::BindGroup,
@@ -72,6 +89,7 @@ impl SceneDbBinding {
         meshes: &MeshRegistry,
         clusters: &ClusterBuffer,
         meshlets: &MeshletBuffer,
+        materials: &MaterialRegistry,
     ) -> Self {
         let entry = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
@@ -82,17 +100,19 @@ impl SceneDbBinding {
             // seam touches, so it was corrected here (M3-a T9 review minor,
             // folded into T10) to the exact narrowed set.
             //
-            // Load-bearing warning: this bind group has 8 storage-buffer
-            // entries, which is the ENTIRE WebGPU default per-stage storage-
+            // Load-bearing warning: this bind group has 9 storage-buffer
+            // entries (M3-a T11 added binding 8, the material registry) —
+            // ONE MORE than the ENTIRE WebGPU default per-stage storage-
             // buffer budget (`Limits::default().max_storage_buffers_per_
-            // shader_stage == 8`). Any M3-b pass that binds even ONE more
-            // storage buffer into the compute stage alongside this group
-            // (e.g. an indirect-draw output buffer) exceeds that default
-            // budget. M3-b passes must either request the adapter's actual
-            // limits (`adapter.limits()`, not `wgpu::Limits::default()`) or
-            // split this bind group across multiple groups — do not assume
-            // the default-limits path just works once compute-stage
-            // consumers add their own buffers.
+            // shader_stage == 8`; see this struct's doc comment above for
+            // the full M3-b guidance). Any M3-b pass that binds even one
+            // more storage buffer into the compute stage alongside this
+            // group (e.g. an indirect-draw output buffer) exceeds that
+            // default budget further still. M3-b passes must either request
+            // the adapter's actual limits (`adapter.limits()`, not
+            // `wgpu::Limits::default()`) or split this bind group across
+            // multiple groups — do not assume the default-limits path just
+            // works once compute-stage consumers add their own buffers.
             visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -112,6 +132,7 @@ impl SceneDbBinding {
                 entry(5),
                 entry(6),
                 entry(7),
+                entry(8),
             ],
         });
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -149,6 +170,10 @@ impl SceneDbBinding {
                 wgpu::BindGroupEntry {
                     binding: 7,
                     resource: store.cell_metadata_buffer().as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: materials.buffer().as_entire_binding(),
                 },
             ],
         });

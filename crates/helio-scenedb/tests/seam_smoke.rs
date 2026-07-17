@@ -30,8 +30,8 @@
 
 use helio_scenedb::{wgsl::SCENE_BINDINGS_WGSL, SceneDbBinding};
 use pulsar_scenedb::gpu::{
-    CellSlot, ClusterBuffer, EngineGpuContext, FrameDriver, MeshRegistry, MeshletBuffer,
-    RegionClassConfig, SceneGpuConfig, SceneGpuStore,
+    CellSlot, ClusterBuffer, EngineGpuContext, FrameDriver, MaterialRegistry, MeshRegistry,
+    MeshletBuffer, RegionClassConfig, SceneGpuConfig, SceneGpuStore,
 };
 use pulsar_scenedb::{CellStorage, CellType, InstanceInfo, TypeToken};
 use std::sync::Arc;
@@ -45,20 +45,21 @@ use std::sync::Arc;
 ///
 /// One deliberate difference from the `pulsar_scenedb`-side helper: this
 /// test requests `adapter.limits()` instead of `wgpu::Limits::default()`.
-/// `SceneDbBinding`'s 8-entry bind group is visible to `VERTEX_FRAGMENT |
-/// COMPUTE` (`src/lib.rs`, narrowed from `ShaderStages::all()` in the M3-a
-/// T9 review / T10 fold — see that file's doc comment for the full budget
-/// warning) — COMPUTE is still in the narrowed set, so this test's compute
-/// pipeline still sees all 8 entries, and this test adds 2 more compute
-/// storage buffers of its own (`out_transform`/`out_info`) — 10 storage
-/// buffers bound into the COMPUTE stage in total, unchanged by the
-/// visibility narrowing. `Limits::default()` is the conservative WebGPU-
-/// portable baseline (`max_storage_buffers_per_shader_stage` = 8) meant for
+/// `SceneDbBinding`'s 9-entry bind group (M3-a T11 added binding 8, the
+/// material registry) is visible to `VERTEX_FRAGMENT | COMPUTE` (`src/
+/// lib.rs`, narrowed from `ShaderStages::all()` in the M3-a T9 review / T10
+/// fold — see that file's doc comment for the full budget warning) —
+/// COMPUTE is still in the narrowed set, so this test's compute pipeline
+/// still sees all 9 entries, and this test adds 2 more compute storage
+/// buffers of its own (`out_transform`/`out_info`) — 11 storage buffers
+/// bound into the COMPUTE stage in total, unchanged by the visibility
+/// narrowing. `Limits::default()` is the conservative WebGPU-portable
+/// baseline (`max_storage_buffers_per_shader_stage` = 8) meant for
 /// browser/downlevel targets, not a real constraint of the native hardware
 /// this GPU suite runs on; requesting the adapter's actual limits is the
 /// standard native-testing idiom (mirrors what a real renderer would do)
 /// and is well within any GPU this suite targets. The default-limits path
-/// still does NOT work here (10 > 8) — `adapter.limits()` stays required.
+/// still does NOT work here (11 > 8) — `adapter.limits()` stays required.
 fn test_context() -> EngineGpuContext {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -115,7 +116,6 @@ fn scene_cfg() -> SceneGpuConfig {
     SceneGpuConfig {
         classes: vec![RegionClassConfig { capacity: 64, max_resident_cells: 4 }],
         tombstone_headroom: 8,
-        max_materials: 16,
         max_cells_metadata: 16,
     }
 }
@@ -158,9 +158,10 @@ fn seam_smoke_shader_reads_scenedb_buffers_byte_exact() {
     let meshes = MeshRegistry::new(&ctx, 1);
     let clusters = ClusterBuffer::new(&ctx, 1);
     let meshlets = MeshletBuffer::new(&ctx, 1);
+    let materials = MaterialRegistry::new(&ctx, 1);
 
     // --- The seam itself. ---
-    let binding = SceneDbBinding::new(device, &store, &meshes, &clusters, &meshlets);
+    let binding = SceneDbBinding::new(device, &store, &meshes, &clusters, &meshlets, &materials);
 
     // --- A Helio-owned compute shader, built from the ACTUAL seam WGSL
     // (SCENE_BINDINGS_WGSL) plus a 4-line entry point copying instances[0]

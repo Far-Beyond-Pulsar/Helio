@@ -18,10 +18,20 @@ license = "MIT OR Apache-2.0"
 # SceneDB never depends on Helio; the edge runs the other way, here).
 pulsar_scenedb = { path = "../../../../core/pulsar_scenedb", features = ["gpu"] }
 # Helio's workspace wgpu = 30 (crates.io) -- MUST resolve to the same major
-# as `pulsar_scenedb`'s own `gpu`-feature wgpu dep (also crates.io 30). There
-# is no dependency-graph mechanism that enforces this (two separate Cargo.lock
-# entries, unified only by major-version coincidence); `tests/seam_smoke.rs`
-# IS the enforcement -- see that file's doc comment.
+# as `pulsar_scenedb`'s own `gpu`-feature wgpu dep (also crates.io 30). Both
+# requirements ("30" here, "30" in pulsar_scenedb/Cargo.toml) unify to ONE
+# Cargo.lock entry (wgpu 30.0.0, crates.io) when this workspace is resolved
+# as a whole -- verified against Pulsar-Native's root Cargo.lock, which
+# carries exactly one crates.io `wgpu 30.0.0` entry (plus an unrelated
+# `wgpu 28.0.0` git-forked entry other Pulsar crates pin, not touched by
+# this seam). Fixed a stale version of this comment (T9 final-review F3)
+# that claimed "two separate Cargo.lock entries" -- not how Cargo.lock
+# unification works for compatible semver requirements in one resolution.
+# What genuinely has no dependency-graph enforcement is the two requirements
+# staying compatible over time: nothing pins them together, so they could
+# drift to incompatible majors in a future edit and Cargo would happily
+# resolve two different `wgpu` versions. `tests/seam_smoke.rs` IS that
+# enforcement in practice -- see that file's doc comment.
 wgpu = { workspace = true }
 
 [dev-dependencies]

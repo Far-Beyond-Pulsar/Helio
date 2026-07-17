@@ -14,7 +14,7 @@
 //! adapter, no `pollster`. Safe to run anywhere `cargo test` runs.
 
 use helio_scenedb::wgsl::SCENE_BINDINGS_WGSL;
-use pulsar_scenedb::gpu::{ClusterNode, InstanceInfo, MeshMetadata, MeshletEntry};
+use pulsar_scenedb::gpu::{ClusterNode, InstanceInfo, MaterialRow, MeshMetadata, MeshletEntry};
 
 /// Reflect (size, [(member_name, offset)]) for a named struct in WGSL source.
 /// Ported verbatim from `pulsar_scenedb/tests/gpu_layout.rs::wgsl_struct_
@@ -137,6 +137,41 @@ fn meshlet_entry_struct_is_byte_exact() {
             ("data_offset".to_string(), 20),
             ("counts_packed".to_string(), 24),
             ("reserved".to_string(), 28),
+        ]
+    );
+}
+
+/// M3-a T11 (Rev 2.4 R8, approved 2026-07-16): host
+/// `pulsar_scenedb::gpu::MaterialRow` vs naga reflection of the ACTUAL seam
+/// WGSL's `MaterialRow` (binding 8), byte-exact -- Rust-twin
+/// `std::mem::size_of` cross-check mirrors every other struct test in this
+/// file. 16 scalar fields, all 16 offsets asserted.
+#[test]
+fn material_row_struct_is_byte_exact() {
+    let (size, members) = wgsl_struct_layout(SCENE_BINDINGS_WGSL, "MaterialRow");
+    // Host element: `pulsar_scenedb::gpu::MaterialRow`, 64 bytes (C5/§10.1,
+    // Rev 2.4 R8).
+    assert_eq!(size, 64, "WGSL MaterialRow size == size_of::<MaterialRow>()");
+    assert_eq!(size as usize, std::mem::size_of::<MaterialRow>());
+    assert_eq!(
+        members,
+        vec![
+            ("base_color".to_string(), 0),
+            ("metallic".to_string(), 4),
+            ("roughness".to_string(), 8),
+            ("normal_scale".to_string(), 12),
+            ("emissive_r".to_string(), 16),
+            ("emissive_g".to_string(), 20),
+            ("emissive_b".to_string(), 24),
+            ("emissive_intensity".to_string(), 28),
+            ("tex_albedo".to_string(), 32),
+            ("tex_normal".to_string(), 36),
+            ("tex_metallic_roughness".to_string(), 40),
+            ("tex_emissive".to_string(), 44),
+            ("radiant_graph_index".to_string(), 48),
+            ("flags".to_string(), 52),
+            ("alpha_cutoff".to_string(), 56),
+            ("reserved".to_string(), 60),
         ]
     );
 }

@@ -4,8 +4,9 @@
 //! Every struct text below is mirrored VERBATIM from `pulsar_scenedb`'s
 //! `tests/gpu_layout.rs` (Test 3's host-vs-naga byte-exact layout proof:
 //! `M2A_WGSL`'s `Instance`, `M2B_WGSL`'s `MeshMetadata`/`ClusterNode`,
-//! `M3A_WGSL`'s `InstanceInfo`, `M3A_MESHLET_WGSL`'s `MeshletEntry`) --
-//! field names, field order, and scalar-only shape are all load-bearing:
+//! `M3A_WGSL`'s `InstanceInfo`, `M3A_MESHLET_WGSL`'s `MeshletEntry`,
+//! `M3A_MATERIAL_WGSL`'s `MaterialRow`) -- field names, field order, and
+//! scalar-only shape are all load-bearing:
 //! naga's `Layouter` computes offsets purely from declaration order and
 //! scalar type, so any drift here (a reordered field, a renamed field, a
 //! vector type standing in for scalars) breaks the byte-exact guarantee
@@ -37,6 +38,17 @@
 //! | 5       | cluster DAG         | `ClusterNode`    |
 //! | 6       | meshlets            | `MeshletEntry`   |
 //! | 7       | cell metadata       | `CellMeta`       |
+//! | 8       | material registry   | `MaterialRow`    |
+//!
+//! `MaterialRow` (M3-a T11, Rev 2.4 R8 approved 2026-07-16): 64 bytes, 16
+//! scalar fields -- PBR params, four bindless texture slot indices
+//! (sentinel `0xFFFF_FFFF` = unbound), a Radiant shader-graph index
+//! (sentinel `0xFFFF_FFFF` = default PBR template), feature flags (bits 0-3
+//! defined, 4-31 reserved), and an alpha-test cutoff. See
+//! `pulsar_scenedb::gpu::MaterialRow`'s doc comment for the full field-by-
+//! field rationale; this struct text must stay byte-identical to that
+//! type's layout (this crate's own Test 3 harness,
+//! `crates/helio-scenedb/tests/binding_layout.rs`, asserts it).
 //!
 //! Geometry (vertex/index) buffers bind at draw time (they vary per draw
 //! call, unlike everything above which is one persistent SSBO per frame);
@@ -78,6 +90,17 @@ struct CellMeta {
     domain: u32,
 }
 
+struct MaterialRow {
+    base_color: u32,
+    metallic: f32, roughness: f32, normal_scale: f32,
+    emissive_r: f32, emissive_g: f32, emissive_b: f32, emissive_intensity: f32,
+    tex_albedo: u32, tex_normal: u32, tex_metallic_roughness: u32, tex_emissive: u32,
+    radiant_graph_index: u32,
+    flags: u32,
+    alpha_cutoff: f32,
+    reserved: u32,
+}
+
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
 @group(0) @binding(1) var<storage, read> instance_info: array<InstanceInfo>;
 @group(0) @binding(2) var<storage, read> slot_mirror: array<u32>;
@@ -86,4 +109,5 @@ struct CellMeta {
 @group(0) @binding(5) var<storage, read> clusters: array<ClusterNode>;
 @group(0) @binding(6) var<storage, read> meshlets: array<MeshletEntry>;
 @group(0) @binding(7) var<storage, read> cell_meta: array<CellMeta>;
+@group(0) @binding(8) var<storage, read> materials: array<MaterialRow>;
 "#;
