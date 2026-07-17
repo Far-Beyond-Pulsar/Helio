@@ -1,0 +1,28 @@
+[package]
+name = "helio-scenedb"
+version = "0.1.0"
+edition = "2021"
+description = "Helio <-> SceneDB binding seam: SceneDbBinding binds SceneDB-owned GPU buffers into Helio's bind-group model (M3-a T9, design Rev 2 S5)"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# `pulsar_scenedb` is NOT a crates.io or git dependency. This relative path
+# resolves ONLY when Helio is vendored as the Pulsar-Native submodule at
+# `crates/renderer/helio` (design Rev 2 S5 / M3-a T9) -- four levels up from
+# this crate (crates/helio-scenedb -> crates -> helio -> renderer -> crates)
+# lands on Pulsar-Native's own `crates/`, then down into `core/pulsar_scenedb`.
+# Outside that exact vendoring layout (Helio built standalone, or vendored at
+# a different path) this dependency does not resolve at all -- that is
+# intentional: `helio-scenedb` is the one crate in this workspace allowed to
+# depend on SceneDB, and only because of where it is vendored (CONTRACTS C0:
+# SceneDB never depends on Helio; the edge runs the other way, here).
+pulsar_scenedb = { path = "../../../../core/pulsar_scenedb", features = ["gpu"] }
+# Helio's workspace wgpu = 30 (crates.io) -- MUST resolve to the same major
+# as `pulsar_scenedb`'s own `gpu`-feature wgpu dep (also crates.io 30). There
+# is no dependency-graph mechanism that enforces this (two separate Cargo.lock
+# entries, unified only by major-version coincidence); `tests/seam_smoke.rs`
+# IS the enforcement -- see that file's doc comment.
+wgpu = { workspace = true }
+
+[dev-dependencies]
+pollster = { workspace = true }
