@@ -11,6 +11,7 @@ mod fixture;
 mod gpu;
 mod table;
 mod transvoxel;
+mod transvoxel_emit;
 mod transvoxel_gpu;
 
 pub use config::*;
@@ -19,8 +20,10 @@ pub use fixture::*;
 pub use gpu::*;
 pub use table::*;
 pub use transvoxel::*;
+pub use transvoxel_emit::*;
 pub use transvoxel_gpu::*;
 
 pub const EXTRACTION_LAYOUT_WGSL: &str = include_str!("extraction_layout.wgsl");
 pub const RESIDENCY_WGSL: &str = include_str!("residency.wgsl");
 pub const TRANSVOXEL_CLASSIFY_WGSL: &str = include_str!("transvoxel_classify.wgsl");
+pub const TRANSVOXEL_EMIT_WGSL: &str = include_str!("transvoxel_emit.wgsl");

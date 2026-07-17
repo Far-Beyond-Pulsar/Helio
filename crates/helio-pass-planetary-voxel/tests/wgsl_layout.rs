@@ -1,8 +1,10 @@
 use helio_pass_planetary_voxel::{
     GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest, GpuLookupQuery,
     GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
-    GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelClassifyCounters,
-    GpuTransvoxelDispatch, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL, TRANSVOXEL_CLASSIFY_WGSL,
+    GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelCellOffset,
+    GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch, GpuTransvoxelEmissionCounters,
+    GpuTransvoxelScanBlock, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL, TRANSVOXEL_CLASSIFY_WGSL,
+    TRANSVOXEL_EMIT_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
@@ -321,9 +323,9 @@ fn transvoxel_classifier_layouts_match_wgsl_exactly() {
                 ("generation_low".into(), 8),
                 ("generation_high".into(), 12),
                 ("cell_count".into(), 16),
-                ("_pad0".into(), 20),
-                ("_pad1".into(), 24),
-                ("_pad2".into(), 28),
+                ("max_vertices".into(), 20),
+                ("max_indices".into(), 24),
+                ("scan_block_count".into(), 28),
             ],
         )
     );
@@ -354,6 +356,76 @@ fn transvoxel_classifier_layouts_match_wgsl_exactly() {
                 ("active_cells".into(), 4),
                 ("vertices".into(), 8),
                 ("triangles".into(), 12),
+            ],
+        )
+    );
+}
+
+#[test]
+fn transvoxel_emission_layouts_match_wgsl_exactly() {
+    let module = wgsl::parse_str(TRANSVOXEL_EMIT_WGSL).expect("Transvoxel emission WGSL parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("Transvoxel emission WGSL validates");
+
+    assert_eq!(align_of::<GpuTransvoxelCellOffset>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelCellOffset>(), 16);
+    assert_eq!(
+        wgsl_struct_in(TRANSVOXEL_EMIT_WGSL, "GpuTransvoxelCellOffset"),
+        (
+            16,
+            vec![
+                ("first_vertex".into(), 0),
+                ("first_index".into(), 4),
+                ("generation_low".into(), 8),
+                ("generation_high".into(), 12),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTransvoxelScanBlock>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelScanBlock>(), 16);
+    assert_eq!(
+        wgsl_struct_in(TRANSVOXEL_EMIT_WGSL, "GpuTransvoxelScanBlock"),
+        (
+            16,
+            vec![
+                ("vertex_count".into(), 0),
+                ("index_count".into(), 4),
+                ("first_vertex".into(), 8),
+                ("first_index".into(), 12),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTransvoxelEmissionCounters>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelEmissionCounters>(), 32);
+    assert_eq!(
+        wgsl_struct_in(TRANSVOXEL_EMIT_WGSL, "GpuTransvoxelEmissionCounters"),
+        (
+            32,
+            vec![
+                ("required_vertices".into(), 0),
+                ("required_indices".into(), 4),
+                ("emitted_vertices".into(), 8),
+                ("emitted_indices".into(), 12),
+                ("vertex_overflow".into(), 16),
+                ("index_overflow".into(), 20),
+                ("completed".into(), 24),
+                ("_pad".into(), 28),
+            ],
+        )
+    );
+
+    assert_eq!(
+        wgsl_struct_in(TRANSVOXEL_EMIT_WGSL, "GpuTerrainVertex"),
+        (
+            size_of::<GpuTerrainVertex>() as u32,
+            vec![
+                ("position".into(), 0),
+                ("material".into(), 12),
+                ("normal".into(), 16),
+                ("flags".into(), 28),
             ],
         )
     );

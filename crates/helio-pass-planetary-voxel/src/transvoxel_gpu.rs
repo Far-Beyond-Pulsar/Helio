@@ -8,6 +8,9 @@ use wgpu::util::DeviceExt;
 pub const TRANSVOXEL_CLASSIFY_WORKGROUP_SIZE: u32 = 64;
 pub const TRANSVOXEL_CLASSIFY_WORKGROUPS: u32 =
     (PAGE_CELL_COUNT as u32).div_ceil(TRANSVOXEL_CLASSIFY_WORKGROUP_SIZE);
+pub const TRANSVOXEL_SCAN_WORKGROUP_SIZE: u32 = 256;
+pub const TRANSVOXEL_SCAN_BLOCKS: u32 =
+    (PAGE_CELL_COUNT as u32).div_ceil(TRANSVOXEL_SCAN_WORKGROUP_SIZE);
 
 #[repr(C, align(16))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Pod, Zeroable)]
@@ -17,22 +20,31 @@ pub struct GpuTransvoxelDispatch {
     pub generation_low: u32,
     pub generation_high: u32,
     pub cell_count: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
+    pub max_vertices: u32,
+    pub max_indices: u32,
+    pub scan_block_count: u32,
 }
 
 impl GpuTransvoxelDispatch {
     pub const fn new(generation: u64, dirty_microbricks: u64) -> Self {
+        Self::with_limits(generation, dirty_microbricks, u32::MAX, u32::MAX)
+    }
+
+    pub const fn with_limits(
+        generation: u64,
+        dirty_microbricks: u64,
+        max_vertices: u32,
+        max_indices: u32,
+    ) -> Self {
         Self {
             dirty_microbricks_low: dirty_microbricks as u32,
             dirty_microbricks_high: (dirty_microbricks >> 32) as u32,
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
             cell_count: PAGE_CELL_COUNT as u32,
-            _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
+            max_vertices,
+            max_indices,
+            scan_block_count: TRANSVOXEL_SCAN_BLOCKS,
         }
     }
 
@@ -244,6 +256,24 @@ impl TransvoxelGpuClassifier {
         generation: u64,
         dirty_microbricks: u64,
     ) -> Result<wgpu::SubmissionIndex, TransvoxelGpuError> {
+        self.prepare(
+            queue,
+            samples,
+            GpuTransvoxelDispatch::new(generation, dirty_microbricks),
+        )?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Planetary Transvoxel Classify Encoder"),
+        });
+        self.encode(&mut encoder);
+        Ok(queue.submit([encoder.finish()]))
+    }
+
+    pub(crate) fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        samples: &[CellWord],
+        dispatch: GpuTransvoxelDispatch,
+    ) -> Result<(), TransvoxelGpuError> {
         if samples.len() != EXTRACTION_SAMPLE_COUNT {
             return Err(TransvoxelGpuError::SampleCount {
                 actual: samples.len(),
@@ -251,15 +281,11 @@ impl TransvoxelGpuClassifier {
             });
         }
         queue.write_buffer(&self.sample_buffer, 0, bytemuck::cast_slice(samples));
-        queue.write_buffer(
-            &self.dispatch_buffer,
-            0,
-            bytemuck::bytes_of(&GpuTransvoxelDispatch::new(generation, dirty_microbricks)),
-        );
+        queue.write_buffer(&self.dispatch_buffer, 0, bytemuck::bytes_of(&dispatch));
+        Ok(())
+    }
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Planetary Transvoxel Classify Encoder"),
-        });
+    pub(crate) fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.clear_buffer(&self.counters_buffer, 0, None);
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -270,7 +296,14 @@ impl TransvoxelGpuClassifier {
             pass.set_bind_group(0, &self.bind_group, &[]);
             pass.dispatch_workgroups(TRANSVOXEL_CLASSIFY_WORKGROUPS, 1, 1);
         }
-        Ok(queue.submit([encoder.finish()]))
+    }
+
+    pub(crate) fn dispatch_buffer(&self) -> &wgpu::Buffer {
+        &self.dispatch_buffer
+    }
+
+    pub(crate) fn sample_buffer(&self) -> &wgpu::Buffer {
+        &self.sample_buffer
     }
 
     pub fn output_buffer(&self) -> &wgpu::Buffer {
@@ -380,6 +413,8 @@ const fn counters_buffer_bytes() -> u64 {
 pub enum TransvoxelGpuError {
     #[error("Transvoxel classification received {actual} samples; expected {expected}")]
     SampleCount { actual: usize, expected: usize },
+    #[error("Transvoxel extraction capacities must be nonzero (vertices={max_vertices}, indices={max_indices})")]
+    InvalidExtractionCapacity { max_vertices: u32, max_indices: u32 },
     #[error(
         "Transvoxel classification requires {required} {name}, but the device exposes {available}"
     )]
