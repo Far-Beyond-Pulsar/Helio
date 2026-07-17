@@ -75,10 +75,25 @@ impl SceneDbBinding {
     ) -> Self {
         let entry = |binding: u32| wgpu::BindGroupLayoutEntry {
             binding,
-            // Visible to every stage: cull/draw (M3-b) reads these from
-            // compute and vertex/fragment stages alike; there is no
-            // per-binding reason to narrow visibility at the seam.
-            visibility: wgpu::ShaderStages::all(),
+            // Visible to exactly M3-b's consumers: vertex fetch, fragment
+            // material reads, and cull compute. `ShaderStages::all()` on
+            // wgpu-30 is NOT "vertex + fragment + compute" — it also pulls
+            // in TASK/MESH/RAY_GENERATION/RAY_* stages that nothing in this
+            // seam touches, so it was corrected here (M3-a T9 review minor,
+            // folded into T10) to the exact narrowed set.
+            //
+            // Load-bearing warning: this bind group has 8 storage-buffer
+            // entries, which is the ENTIRE WebGPU default per-stage storage-
+            // buffer budget (`Limits::default().max_storage_buffers_per_
+            // shader_stage == 8`). Any M3-b pass that binds even ONE more
+            // storage buffer into the compute stage alongside this group
+            // (e.g. an indirect-draw output buffer) exceeds that default
+            // budget. M3-b passes must either request the adapter's actual
+            // limits (`adapter.limits()`, not `wgpu::Limits::default()`) or
+            // split this bind group across multiple groups — do not assume
+            // the default-limits path just works once compute-stage
+            // consumers add their own buffers.
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT | wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,

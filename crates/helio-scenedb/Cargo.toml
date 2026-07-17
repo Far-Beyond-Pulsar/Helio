@@ -26,3 +26,9 @@ wgpu = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+# naga tracks the same major as Helio's workspace wgpu (crates.io 30) — the
+# Test 3 reflection harness (`tests/binding_layout.rs`, M3-a T10) parses
+# `wgsl::SCENE_BINDINGS_WGSL` with naga's WGSL front end and reflects struct
+# layout via `naga::proc::Layouter`, mirroring `pulsar_scenedb/tests/
+# gpu_layout.rs`'s harness exactly (same naga major, same API forms).
+naga = { version = "30", features = ["wgsl-in"] }

@@ -3342,6 +3342,7 @@ dependencies = [
 name = "helio-scenedb"
 version = "0.1.0"
 dependencies = [
+ "naga 30.0.0",
  "pollster 0.4.0",
  "pulsar_scenedb",
  "wgpu 30.0.0",
