@@ -14,6 +14,7 @@ mod transvoxel;
 mod transvoxel_emit;
 mod transvoxel_gpu;
 mod transvoxel_transition;
+mod transvoxel_transition_gpu;
 
 pub use config::*;
 pub use extraction::*;
@@ -24,8 +25,10 @@ pub use transvoxel::*;
 pub use transvoxel_emit::*;
 pub use transvoxel_gpu::*;
 pub use transvoxel_transition::*;
+pub use transvoxel_transition_gpu::*;
 
 pub const EXTRACTION_LAYOUT_WGSL: &str = include_str!("extraction_layout.wgsl");
 pub const RESIDENCY_WGSL: &str = include_str!("residency.wgsl");
 pub const TRANSVOXEL_CLASSIFY_WGSL: &str = include_str!("transvoxel_classify.wgsl");
 pub const TRANSVOXEL_EMIT_WGSL: &str = include_str!("transvoxel_emit.wgsl");
+pub const TRANSVOXEL_TRANSITION_GPU_WGSL: &str = include_str!("transvoxel_transition_gpu.wgsl");

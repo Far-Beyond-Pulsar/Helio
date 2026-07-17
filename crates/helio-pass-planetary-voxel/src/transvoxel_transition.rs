@@ -17,6 +17,11 @@ pub const TRANSITION_FACE_CELL_EDGE: usize = PAGE_EDGE;
 pub const TRANSITION_FACE_SAMPLE_EDGE: usize = PAGE_EDGE * 2 + 1;
 pub const TRANSITION_FACE_SAMPLE_COUNT: usize =
     TRANSITION_FACE_SAMPLE_EDGE * TRANSITION_FACE_SAMPLE_EDGE;
+pub const TRANSITION_FACE_SLAB_EDGE: usize = TRANSITION_FACE_SAMPLE_EDGE + 2;
+pub const TRANSITION_FACE_SLAB_LAYERS: usize = 3;
+pub const TRANSITION_FACE_SLAB_SAMPLE_COUNT: usize =
+    TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_LAYERS;
+pub const TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT: usize = TRANSITION_FACE_SLAB_SAMPLE_COUNT * 6;
 pub const TRANSITION_CELL_WIDTH_COARSE_CELLS: f32 = 0.25;
 
 /// Row-major sample positions from Figure 4.16, in half-coarse-cell units.
@@ -315,11 +320,32 @@ impl TransvoxelTransitionFaceFixture {
         {
             return None;
         }
-        let position = self.canonical_position(face_sample);
+        let position =
+            self.canonical_position([i32::from(face_sample[0]), i32::from(face_sample[1])], 0);
         Some(TransvoxelTransitionSample {
             cell: self.kind.sample_canonical(position),
             gradient: self.gradient(position),
         })
+    }
+
+    /// Returns one face-local scalar slab in `(u, v, outward)` order. The
+    /// logical face grid occupies coordinates 1..=65 in u/v and layer 1;
+    /// the surrounding samples are the central-difference halo consumed by
+    /// the GPU transition extractor.
+    pub fn slab_samples(&self) -> Box<[CellWord]> {
+        let mut samples = Vec::with_capacity(TRANSITION_FACE_SLAB_SAMPLE_COUNT);
+        for outward in -1..=1 {
+            for v in -1..=TRANSITION_FACE_SAMPLE_EDGE as i32 {
+                for u in -1..=TRANSITION_FACE_SAMPLE_EDGE as i32 {
+                    samples.push(
+                        self.kind
+                            .sample_canonical(self.canonical_position([u, v], outward)),
+                    );
+                }
+            }
+        }
+        debug_assert_eq!(samples.len(), TRANSITION_FACE_SLAB_SAMPLE_COUNT);
+        samples.into_boxed_slice()
     }
 
     pub fn cell(&self, cell_uv: [u8; 2]) -> Option<TransvoxelTransitionCell> {
@@ -370,14 +396,15 @@ impl TransvoxelTransitionFaceFixture {
         mesh
     }
 
-    fn canonical_position(&self, face_sample: [u8; 2]) -> [i64; 3] {
+    fn canonical_position(&self, face_sample: [i32; 2], outward_layer: i32) -> [i64; 3] {
         let basis = transition_face_integer_basis(self.face);
         let page_span = self.coarse_scale * PAGE_EDGE as i64;
         let mut position = self.page_min;
         for (axis, coordinate) in position.iter_mut().enumerate() {
             *coordinate += i64::from(basis.origin[axis]) * page_span
                 + i64::from(basis.u_axis[axis]) * i64::from(face_sample[0]) * self.fine_scale
-                + i64::from(basis.v_axis[axis]) * i64::from(face_sample[1]) * self.fine_scale;
+                + i64::from(basis.v_axis[axis]) * i64::from(face_sample[1]) * self.fine_scale
+                + i64::from(basis.outward[axis]) * i64::from(outward_layer) * self.fine_scale;
         }
         position
     }
@@ -430,6 +457,7 @@ struct IntegerFaceBasis {
     origin: [i8; 3],
     u_axis: [i8; 3],
     v_axis: [i8; 3],
+    outward: [i8; 3],
 }
 
 const fn transition_face_integer_basis(face: TransitionFace) -> IntegerFaceBasis {
@@ -438,31 +466,37 @@ const fn transition_face_integer_basis(face: TransitionFace) -> IntegerFaceBasis
             origin: [0, 0, 1],
             u_axis: [0, 1, 0],
             v_axis: [0, 0, -1],
+            outward: [-1, 0, 0],
         },
         TransitionFace::PositiveX => IntegerFaceBasis {
             origin: [1, 0, 0],
             u_axis: [0, 1, 0],
             v_axis: [0, 0, 1],
+            outward: [1, 0, 0],
         },
         TransitionFace::NegativeY => IntegerFaceBasis {
             origin: [1, 0, 0],
             u_axis: [0, 0, 1],
             v_axis: [-1, 0, 0],
+            outward: [0, -1, 0],
         },
         TransitionFace::PositiveY => IntegerFaceBasis {
             origin: [0, 1, 0],
             u_axis: [0, 0, 1],
             v_axis: [1, 0, 0],
+            outward: [0, 1, 0],
         },
         TransitionFace::NegativeZ => IntegerFaceBasis {
             origin: [0, 1, 0],
             u_axis: [1, 0, 0],
             v_axis: [0, -1, 0],
+            outward: [0, 0, -1],
         },
         TransitionFace::PositiveZ => IntegerFaceBasis {
             origin: [0, 0, 1],
             u_axis: [1, 0, 0],
             v_axis: [0, 1, 0],
+            outward: [0, 0, 1],
         },
     }
 }
@@ -600,6 +634,19 @@ mod tests {
         assert!(fixture.full_resolution_sample([65, 0]).is_none());
         assert!(fixture.cell([31, 31]).is_some());
         assert!(fixture.cell([32, 0]).is_none());
+        let slab = fixture.slab_samples();
+        assert_eq!(slab.len(), TRANSITION_FACE_SLAB_SAMPLE_COUNT);
+        for v in 0..TRANSITION_FACE_SAMPLE_EDGE as u8 {
+            for u in 0..TRANSITION_FACE_SAMPLE_EDGE as u8 {
+                let slab_index = usize::from(u + 1)
+                    + usize::from(v + 1) * TRANSITION_FACE_SLAB_EDGE
+                    + TRANSITION_FACE_SLAB_EDGE * TRANSITION_FACE_SLAB_EDGE;
+                assert_eq!(
+                    slab[slab_index],
+                    fixture.full_resolution_sample([u, v]).unwrap().cell
+                );
+            }
+        }
 
         for v in 0..32_u8 {
             for u in 0..31_u8 {
