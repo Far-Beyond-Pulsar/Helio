@@ -3,8 +3,9 @@ use helio_pass_planetary_voxel::{
     GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
     GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelCellOffset,
     GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch, GpuTransvoxelEmissionCounters,
-    GpuTransvoxelScanBlock, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL, TRANSVOXEL_CLASSIFY_WGSL,
-    TRANSVOXEL_EMIT_WGSL,
+    GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell, GpuTransvoxelTransitionCounters,
+    GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL,
+    TRANSVOXEL_CLASSIFY_WGSL, TRANSVOXEL_EMIT_WGSL, TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
@@ -426,6 +427,79 @@ fn transvoxel_emission_layouts_match_wgsl_exactly() {
                 ("material".into(), 12),
                 ("normal".into(), 16),
                 ("flags".into(), 28),
+            ],
+        )
+    );
+}
+
+#[test]
+fn transvoxel_transition_gpu_layouts_match_wgsl_exactly() {
+    let module = wgsl::parse_str(TRANSVOXEL_TRANSITION_GPU_WGSL)
+        .expect("Transvoxel transition GPU WGSL parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("Transvoxel transition GPU WGSL validates");
+
+    assert_eq!(align_of::<GpuTransvoxelTransitionDispatch>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelTransitionDispatch>(), 32);
+    assert_eq!(
+        wgsl_struct_in(
+            TRANSVOXEL_TRANSITION_GPU_WGSL,
+            "GpuTransvoxelTransitionDispatch"
+        ),
+        (
+            32,
+            vec![
+                ("transition_mask".into(), 0),
+                ("generation_low".into(), 4),
+                ("generation_high".into(), 8),
+                ("cell_count".into(), 12),
+                ("max_vertices".into(), 16),
+                ("max_indices".into(), 20),
+                ("scan_block_count".into(), 24),
+                ("_pad".into(), 28),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTransvoxelTransitionCell>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelTransitionCell>(), 16);
+    assert_eq!(
+        wgsl_struct_in(
+            TRANSVOXEL_TRANSITION_GPU_WGSL,
+            "GpuTransvoxelTransitionCell"
+        ),
+        (
+            16,
+            vec![
+                ("packed_case_class_counts".into(), 0),
+                ("generation_low".into(), 4),
+                ("generation_high".into(), 8),
+                ("_pad".into(), 12),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTransvoxelTransitionCounters>(), 16);
+    assert_eq!(size_of::<GpuTransvoxelTransitionCounters>(), 48);
+    assert_eq!(
+        wgsl_struct_in(
+            TRANSVOXEL_TRANSITION_GPU_WGSL,
+            "GpuTransvoxelTransitionCounters"
+        ),
+        (
+            48,
+            vec![
+                ("active_cells".into(), 0),
+                ("active_faces".into(), 4),
+                ("required_vertices".into(), 8),
+                ("required_indices".into(), 12),
+                ("emitted_vertices".into(), 16),
+                ("emitted_indices".into(), 20),
+                ("vertex_overflow".into(), 24),
+                ("index_overflow".into(), 28),
+                ("completed".into(), 32),
+                ("_pad".into(), 36),
             ],
         )
     );
