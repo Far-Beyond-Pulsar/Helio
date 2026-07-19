@@ -1,11 +1,13 @@
 use helio_pass_planetary_voxel::{
     GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest, GpuLookupQuery,
-    GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
-    GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelCellOffset,
-    GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch, GpuTransvoxelEmissionCounters,
-    GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell, GpuTransvoxelTransitionCounters,
-    GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL,
-    TRANSVOXEL_CLASSIFY_WGSL, TRANSVOXEL_EMIT_WGSL, TRANSVOXEL_TRANSITION_GPU_WGSL,
+    GpuLookupResult, GpuManifoldDcCell, GpuManifoldDcCounters, GpuManifoldDcDispatch,
+    GpuManifoldDcOwner, GpuManifoldDcQuad, GpuPageTableEntry, GpuResidencyCounters,
+    GpuResidencyUniform, GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell,
+    GpuTransvoxelCellOffset, GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch,
+    GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell,
+    GpuTransvoxelTransitionCounters, GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL,
+    MANIFOLD_DUAL_CONTOURING_GPU_WGSL, RESIDENCY_WGSL, TRANSVOXEL_CLASSIFY_WGSL,
+    TRANSVOXEL_EMIT_WGSL, TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
@@ -500,6 +502,115 @@ fn transvoxel_transition_gpu_layouts_match_wgsl_exactly() {
                 ("index_overflow".into(), 28),
                 ("completed".into(), 32),
                 ("_pad".into(), 36),
+            ],
+        )
+    );
+}
+
+#[test]
+fn manifold_dual_contouring_gpu_layouts_match_wgsl_exactly() {
+    let module = wgsl::parse_str(MANIFOLD_DUAL_CONTOURING_GPU_WGSL)
+        .expect("manifold dual-contouring GPU WGSL parses");
+    Validator::new(ValidationFlags::all(), Capabilities::all())
+        .validate(&module)
+        .expect("manifold dual-contouring GPU WGSL validates");
+
+    assert_eq!(align_of::<GpuManifoldDcDispatch>(), 16);
+    assert_eq!(size_of::<GpuManifoldDcDispatch>(), 64);
+    assert_eq!(
+        wgsl_struct_in(MANIFOLD_DUAL_CONTOURING_GPU_WGSL, "GpuManifoldDcDispatch"),
+        (
+            64,
+            vec![
+                ("generation_low".into(), 0),
+                ("generation_high".into(), 4),
+                ("cell_count".into(), 8),
+                ("owner_count".into(), 12),
+                ("max_vertices".into(), 16),
+                ("max_indices".into(), 20),
+                ("cell_scan_blocks".into(), 24),
+                ("owner_scan_blocks".into(), 28),
+                ("position_quantization_steps".into(), 32),
+                ("_pad0".into(), 36),
+                ("_pad1".into(), 40),
+                ("_pad2".into(), 44),
+                ("_pad3".into(), 48),
+                ("_pad4".into(), 52),
+                ("_pad5".into(), 56),
+                ("_pad6".into(), 60),
+            ],
+        )
+    );
+
+    assert_eq!(size_of::<GpuManifoldDcCell>(), 32);
+    assert_eq!(size_of::<GpuManifoldDcOwner>(), 32);
+    assert_eq!(
+        wgsl_struct_in(MANIFOLD_DUAL_CONTOURING_GPU_WGSL, "GpuManifoldDcCell"),
+        (
+            32,
+            vec![
+                ("packed_case_component_fan_vertex_counts".into(), 0),
+                ("edge_fans_low".into(), 4),
+                ("edge_fans_high".into(), 8),
+                ("fan_material_counts_low".into(), 12),
+                ("fan_material_counts_high".into(), 16),
+                ("generation_low".into(), 20),
+                ("generation_high".into(), 24),
+                ("_pad".into(), 28),
+            ],
+        )
+    );
+    assert_eq!(
+        wgsl_struct_in(MANIFOLD_DUAL_CONTOURING_GPU_WGSL, "GpuManifoldDcOwner"),
+        (
+            32,
+            vec![
+                ("packed_active_materials".into(), 0),
+                ("topology_vertex_count".into(), 4),
+                ("generation_low".into(), 8),
+                ("generation_high".into(), 12),
+                ("_pad".into(), 16),
+            ],
+        )
+    );
+    assert_eq!(align_of::<GpuManifoldDcQuad>(), 16);
+    assert_eq!(size_of::<GpuManifoldDcQuad>(), 48);
+    assert_eq!(
+        wgsl_struct_in(MANIFOLD_DUAL_CONTOURING_GPU_WGSL, "GpuManifoldDcQuad"),
+        (
+            48,
+            vec![
+                ("qef_vertices".into(), 0),
+                ("midpoint_vertices".into(), 16),
+                ("center_vertex".into(), 32),
+                ("material".into(), 36),
+                ("generation_low".into(), 40),
+                ("generation_high".into(), 44),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuManifoldDcCounters>(), 16);
+    assert_eq!(size_of::<GpuManifoldDcCounters>(), 64);
+    assert_eq!(
+        wgsl_struct_in(MANIFOLD_DUAL_CONTOURING_GPU_WGSL, "GpuManifoldDcCounters"),
+        (
+            64,
+            vec![
+                ("active_cells".into(), 0),
+                ("active_components".into(), 4),
+                ("active_edges".into(), 8),
+                ("required_qef_vertices".into(), 12),
+                ("required_topology_vertices".into(), 16),
+                ("required_vertices".into(), 20),
+                ("required_indices".into(), 24),
+                ("emitted_vertices".into(), 28),
+                ("emitted_indices".into(), 32),
+                ("vertex_overflow".into(), 36),
+                ("index_overflow".into(), 40),
+                ("completed".into(), 44),
+                ("topology_error".into(), 48),
+                ("_pad".into(), 52),
             ],
         )
     );
