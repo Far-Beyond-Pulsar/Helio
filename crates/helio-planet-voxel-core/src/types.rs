@@ -4,6 +4,10 @@ pub type MaterialId = u8;
 
 pub const LOD0_CELL_SIZE_METERS: f64 = 0.1;
 pub const PAGE_EDGE_CELLS: i64 = 32;
+/// Largest camera-local distance at which an `f32` unit in the last place is
+/// no larger than one millimeter. Canonical positions never use this bound;
+/// it applies only to the bounded render/interaction bubble.
+pub const MILLIMETER_INTERACTION_RADIUS_METERS: f64 = 8_192.0;
 pub const PAGE_EDGE: usize = PAGE_EDGE_CELLS as usize;
 pub const PAGE_CELL_COUNT: usize = PAGE_EDGE * PAGE_EDGE * PAGE_EDGE;
 pub const PAGE_CELL_BYTES: usize = PAGE_CELL_COUNT * core::mem::size_of::<CellWord>();
@@ -69,6 +73,160 @@ impl TransitionFace {
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
 pub struct PlanetId(pub [u8; 16]);
+
+/// Canonical planet-space position.
+///
+/// The integer cell address is authoritative. The sub-cell remainder is
+/// normalized to `[0, LOD0_CELL_SIZE_METERS)` on every axis, including for
+/// negative positions. Absolute world positions therefore never depend on a
+/// large `f32` coordinate.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanetPosition {
+    lod0_cell: [i64; 3],
+    subcell_m: [f64; 3],
+}
+
+impl PlanetPosition {
+    pub fn new(lod0_cell: [i64; 3], mut subcell_m: [f64; 3]) -> Result<Self, PositionError> {
+        for value in &mut subcell_m {
+            if !value.is_finite() {
+                return Err(PositionError::NonFinite);
+            }
+            if !(0.0..LOD0_CELL_SIZE_METERS).contains(value) {
+                return Err(PositionError::SubcellOutOfRange);
+            }
+            if *value == -0.0 {
+                *value = 0.0;
+            }
+        }
+        Ok(Self {
+            lod0_cell,
+            subcell_m,
+        })
+    }
+
+    pub const fn from_lod0_cell(lod0_cell: [i64; 3]) -> Self {
+        Self {
+            lod0_cell,
+            subcell_m: [0.0; 3],
+        }
+    }
+
+    /// Convenience conversion for camera/input values. Persistent terrain
+    /// addresses should already arrive as integer cells plus a remainder.
+    pub fn from_meters(meters: [f64; 3]) -> Result<Self, PositionError> {
+        let mut cells = [0_i64; 3];
+        let mut subcell_m = [0.0_f64; 3];
+        for axis in 0..3 {
+            let value = meters[axis];
+            if !value.is_finite() {
+                return Err(PositionError::NonFinite);
+            }
+            let cell = (value / LOD0_CELL_SIZE_METERS).floor();
+            if cell < i64::MIN as f64 || cell >= -(i64::MIN as f64) {
+                return Err(PositionError::CoordinateOverflow);
+            }
+            cells[axis] = cell as i64;
+            let mut remainder = value - cell * LOD0_CELL_SIZE_METERS;
+            // Floating-point division can leave a value one rounding step
+            // outside the canonical interval at an exact cell boundary.
+            if remainder < 0.0 {
+                cells[axis] = cells[axis]
+                    .checked_sub(1)
+                    .ok_or(PositionError::CoordinateOverflow)?;
+                remainder += LOD0_CELL_SIZE_METERS;
+            } else if remainder >= LOD0_CELL_SIZE_METERS {
+                cells[axis] = cells[axis]
+                    .checked_add(1)
+                    .ok_or(PositionError::CoordinateOverflow)?;
+                remainder -= LOD0_CELL_SIZE_METERS;
+            }
+            if remainder == -0.0 {
+                remainder = 0.0;
+            }
+            subcell_m[axis] = remainder;
+        }
+        Self::new(cells, subcell_m)
+    }
+
+    pub const fn lod0_cell(self) -> [i64; 3] {
+        self.lod0_cell
+    }
+
+    pub const fn subcell_m(self) -> [f64; 3] {
+        self.subcell_m
+    }
+
+    /// Computes `self - origin` without first constructing a large absolute
+    /// floating-point coordinate.
+    pub fn relative_meters(self, origin: Self) -> Result<[f64; 3], PositionError> {
+        let mut relative = [0.0_f64; 3];
+        for (axis, output) in relative.iter_mut().enumerate() {
+            let cells = self.lod0_cell[axis]
+                .checked_sub(origin.lod0_cell[axis])
+                .ok_or(PositionError::CoordinateOverflow)?;
+            *output = cells as f64 * LOD0_CELL_SIZE_METERS
+                + (self.subcell_m[axis] - origin.subcell_m[axis]);
+        }
+        Ok(relative)
+    }
+
+    pub fn relative_to_lod0_cell(
+        self,
+        origin_lod0_cell: [i64; 3],
+    ) -> Result<[f64; 3], PositionError> {
+        self.relative_meters(Self::from_lod0_cell(origin_lod0_cell))
+    }
+}
+
+/// Page-snapped camera frame used to derive all bounded GPU coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlanetRenderFrame {
+    planet: PlanetId,
+    camera: PlanetPosition,
+    origin_lod0_cell: [i64; 3],
+    frame_index: u64,
+}
+
+impl PlanetRenderFrame {
+    pub fn new(planet: PlanetId, camera: PlanetPosition, frame_index: u64) -> Self {
+        let origin_lod0_cell = camera
+            .lod0_cell
+            .map(|axis| axis.div_euclid(PAGE_EDGE_CELLS) * PAGE_EDGE_CELLS);
+        Self {
+            planet,
+            camera,
+            origin_lod0_cell,
+            frame_index,
+        }
+    }
+
+    pub const fn planet(self) -> PlanetId {
+        self.planet
+    }
+
+    pub const fn camera(self) -> PlanetPosition {
+        self.camera
+    }
+
+    pub const fn origin_lod0_cell(self) -> [i64; 3] {
+        self.origin_lod0_cell
+    }
+
+    pub const fn frame_index(self) -> u64 {
+        self.frame_index
+    }
+
+    pub fn camera_relative_m(self) -> [f64; 3] {
+        self.camera
+            .relative_to_lod0_cell(self.origin_lod0_cell)
+            .expect("a page-snapped camera origin cannot overflow")
+    }
+
+    pub fn camera_local_meters(self, position: PlanetPosition) -> Result<[f64; 3], PositionError> {
+        position.relative_meters(self.camera)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct PageKey {
@@ -205,6 +363,16 @@ pub enum AddressError {
     OutsideRenderFrame,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PositionError {
+    #[error("planet position contains a non-finite value")]
+    NonFinite,
+    #[error("planet position sub-cell remainder must be in [0, 0.1) meters")]
+    SubcellOutOfRange,
+    #[error("planet position coordinate arithmetic overflowed")]
+    CoordinateOverflow,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,5 +432,69 @@ mod tests {
             PageKey::new(0, [i64::from(i32::MAX), 0, 0]).relative_lod0_cell_min([0; 3]),
             Err(AddressError::OutsideRenderFrame)
         );
+    }
+
+    #[test]
+    fn canonical_positions_normalize_negative_meter_coordinates() {
+        let position = PlanetPosition::from_meters([-0.001, -0.1, -3.201]).unwrap();
+        assert_eq!(position.lod0_cell(), [-1, -1, -33]);
+        let expected = [0.099, 0.0, 0.099];
+        for (actual, expected) in position.subcell_m().into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
+    }
+
+    #[test]
+    fn canonical_positions_reject_invalid_remainders_and_remove_negative_zero() {
+        assert_eq!(
+            PlanetPosition::new([0; 3], [0.1, 0.0, 0.0]),
+            Err(PositionError::SubcellOutOfRange)
+        );
+        assert_eq!(
+            PlanetPosition::new([0; 3], [f64::NAN, 0.0, 0.0]),
+            Err(PositionError::NonFinite)
+        );
+        let zero = PlanetPosition::new([0; 3], [-0.0, 0.0, 0.0]).unwrap();
+        assert_eq!(zero.subcell_m()[0].to_bits(), 0.0_f64.to_bits());
+    }
+
+    #[test]
+    fn render_frames_are_page_snapped_on_both_sides_of_zero() {
+        let positive = PlanetRenderFrame::new(
+            PlanetId::default(),
+            PlanetPosition::new([63_710_017, 5, 0], [0.025, 0.0, 0.0]).unwrap(),
+            7,
+        );
+        assert_eq!(positive.origin_lod0_cell(), [63_710_016, 0, 0]);
+        assert_eq!(positive.camera_relative_m(), [0.125, 0.5, 0.0]);
+
+        let negative = PlanetRenderFrame::new(
+            PlanetId::default(),
+            PlanetPosition::new([-63_710_017, -1, 0], [0.025, 0.05, 0.0]).unwrap(),
+            8,
+        );
+        assert_eq!(negative.origin_lod0_cell(), [-63_710_048, -32, 0]);
+        assert_eq!(negative.camera_relative_m(), [3.125, 3.15, 0.0]);
+    }
+
+    #[test]
+    fn earth_radius_and_orbit_offsets_do_not_use_absolute_f32() {
+        let ground =
+            PlanetPosition::new([63_710_000, -63_710_000, 0], [0.001, 0.099, 0.05]).unwrap();
+        let orbit =
+            PlanetPosition::new([67_710_000, -63_710_000, 0], [0.001, 0.099, 0.05]).unwrap();
+        assert_eq!(
+            orbit.relative_meters(ground).unwrap(),
+            [400_000.0, 0.0, 0.0]
+        );
+
+        let frame = PlanetRenderFrame::new(PlanetId([3; 16]), ground, 42);
+        let nearby =
+            PlanetPosition::new([63_710_007, -63_710_004, 0], [0.0015, 0.0985, 0.0505]).unwrap();
+        let local = frame.camera_local_meters(nearby).unwrap();
+        let expected = [0.7005, -0.4005, 0.0005];
+        for (actual, expected) in local.into_iter().zip(expected) {
+            assert!((actual - expected).abs() < 1.0e-12);
+        }
     }
 }

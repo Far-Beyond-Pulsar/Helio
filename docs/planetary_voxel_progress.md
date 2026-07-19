@@ -1,6 +1,6 @@
 # Production planetary voxel terrain progress
 
-Status: active umbrella tracker, 2026-07-16
+Status: active umbrella tracker, 2026-07-19
 
 This document tracks the cross-repository implementation of the architecture in
 [`planetary_voxel_renderer_plan.md`](planetary_voxel_renderer_plan.md) and
@@ -23,18 +23,20 @@ and `helio-voxel-core` remain unchanged regression baselines.
 - [x] Helio bounded renderer-facing residency contract: [Helio#62](https://github.com/Far-Beyond-Pulsar/Helio/pull/62)
 - [x] Helio bounded GPU residency atlas and page table: [Helio#65](https://github.com/Far-Beyond-Pulsar/Helio/pull/65)
 - [x] Pulsar bounded terrain runtime subsystem and component: [Pulsar-Native#327](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/327)
+- [x] Helio bounded GPU manifold candidate and parity oracle: [Helio#106](https://github.com/Far-Beyond-Pulsar/Helio/pull/106)
+- [x] Matched extraction bake-off and GPU Transvoxel promotion: [Helio#107](https://github.com/Far-Beyond-Pulsar/Helio/pull/107)
 
 ## Active milestones
 
-- [ ] GPU Transvoxel versus manifold dual-contouring extraction bake-off: [issue #96](https://github.com/Far-Beyond-Pulsar/Helio/issues/96)
+- [ ] Earth-radius camera-local coordinates and precision validation: [issue #108](https://github.com/Far-Beyond-Pulsar/Helio/issues/108)
 
 ## Implementation milestones
 
 - [x] Pulsar terrain component/subsystem and asynchronous work queues ([Pulsar-Native#327](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/327))
 - [x] Helio bounded GPU page atlas, hash table, upload, eviction, and device-loss recovery ([Helio#65](https://github.com/Far-Beyond-Pulsar/Helio/pull/65))
-- [ ] Earth-radius camera-local coordinates and precision validation
+- [x] Earth-radius camera-local coordinates and precision validation ([Helio#109](https://github.com/Far-Beyond-Pulsar/Helio/pull/109))
 - [ ] View-driven page demand, streaming, and strict CPU/GPU/VRAM budgets
-- [ ] GPU Transvoxel versus manifold dual-contouring extraction bake-off ([issue #96](https://github.com/Far-Beyond-Pulsar/Helio/issues/96))
+- [x] GPU Transvoxel versus manifold dual-contouring extraction bake-off ([Helio#107](https://github.com/Far-Beyond-Pulsar/Helio/pull/107))
 - [ ] Generation-safe bounded meshlet publication and indirect drawing
 - [ ] Crack-free LOD selection, transition topology, and horizon-scale coverage
 - [ ] Exact hierarchical destruction, compaction, snapshots, and recovery

@@ -6,8 +6,8 @@ use helio_pass_planetary_voxel::{
 };
 use helio_planet_voxel_core::{
     CellWord, EvictOutcome, GpuPageMeta, PageEvict, PageKey, PageUpload, PlanetFrameUniform,
-    PlanetId, PlanetPageKey, UploadOutcome, VisiblePage, VisiblePageSet, PAGE_CELL_BYTES,
-    PAGE_CELL_COUNT,
+    PlanetId, PlanetPageKey, PlanetPosition, UploadOutcome, VisiblePage, VisiblePageSet,
+    PAGE_CELL_BYTES, PAGE_CELL_COUNT,
 };
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
@@ -15,9 +15,7 @@ use wgpu::util::DeviceExt;
 #[test]
 fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
     pollster::block_on(async {
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_without_display_handle(),
-        );
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = request_test_adapter(&instance).await;
         let Some(adapter) = adapter else {
             eprintln!(
@@ -58,13 +56,21 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         residency
             .set_planet_frame(
                 &queue,
-                PlanetFrameUniform::new(planet_a, [0; 3], [0.25, -1.0, 2.0], 1).unwrap(),
+                PlanetFrameUniform::from_camera(
+                    planet_a,
+                    PlanetPosition::from_meters([0.25, 1.0, 2.0]).unwrap(),
+                    1,
+                ),
             )
             .unwrap();
         residency
             .set_planet_frame(
                 &queue,
-                PlanetFrameUniform::new(planet_b, [0; 3], [-2.0, 3.0, 1.0], 1).unwrap(),
+                PlanetFrameUniform::from_camera(
+                    planet_b,
+                    PlanetPosition::from_meters([2.0, 3.0, 1.0]).unwrap(),
+                    1,
+                ),
             )
             .unwrap();
 
@@ -133,7 +139,11 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         assert!(matches!(
             residency.set_planet_frame(
                 &queue,
-                PlanetFrameUniform::new(planet_a, [0; 3], [9.0, 0.0, 0.0], 1).unwrap(),
+                PlanetFrameUniform::from_camera(
+                    planet_a,
+                    PlanetPosition::from_meters([9.0, 0.0, 0.0]).unwrap(),
+                    1,
+                ),
             ),
             Ok(FrameUpdateOutcome::FrameConflict)
         ));
@@ -141,14 +151,22 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         assert!(matches!(
             residency.set_planet_frame(
                 &queue,
-                PlanetFrameUniform::new(planet_a, outside_origin, [0.0; 3], 2).unwrap(),
+                PlanetFrameUniform::from_camera(
+                    planet_a,
+                    PlanetPosition::from_lod0_cell(outside_origin),
+                    2,
+                ),
             ),
             Err(GpuResidencyError::Address(_))
         ));
         assert!(matches!(
             residency.set_planet_frame(
                 &queue,
-                PlanetFrameUniform::new(planet_a, [32, 0, 0], [0.0; 3], 2).unwrap(),
+                PlanetFrameUniform::from_camera(
+                    planet_a,
+                    PlanetPosition::from_lod0_cell([32, 0, 0]),
+                    2,
+                ),
             ),
             Ok(FrameUpdateOutcome::Applied {
                 previous_frame: Some(1)
@@ -319,7 +337,7 @@ fn validate_table_probe_backpressure(device: &wgpu::Device, queue: &wgpu::Queue,
     residency
         .set_planet_frame(
             queue,
-            PlanetFrameUniform::new(planet, [0; 3], [0.0; 3], 1).unwrap(),
+            PlanetFrameUniform::from_camera(planet, PlanetPosition::from_lod0_cell([0; 3]), 1),
         )
         .unwrap();
     let mut collisions = Vec::new();
