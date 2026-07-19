@@ -13,7 +13,8 @@
 //! Pure naga (WGSL front-end parse + `Layouter`) — no GPU device, no
 //! adapter, no `pollster`. Safe to run anywhere `cargo test` runs.
 
-use helio_scenedb::wgsl::SCENE_BINDINGS_WGSL;
+use helio_scenedb::cull::{CullRecord, CullUniforms, DrawCommand};
+use helio_scenedb::wgsl::{CULL_WGSL, SCENE_BINDINGS_WGSL};
 use pulsar_scenedb::gpu::{ClusterNode, InstanceInfo, MaterialRow, MeshMetadata, MeshletEntry};
 
 /// Reflect (size, [(member_name, offset)]) for a named struct in WGSL source.
@@ -143,7 +144,9 @@ fn meshlet_entry_struct_is_byte_exact() {
 
 /// M3-a T11 (Rev 2.4 R8, approved 2026-07-16): host
 /// `pulsar_scenedb::gpu::MaterialRow` vs naga reflection of the ACTUAL seam
-/// WGSL's `MaterialRow` (binding 8), byte-exact -- Rust-twin
+/// WGSL's `MaterialRow` (`@group(1) @binding(3)` post-M3-b-T4-split; was
+/// "binding 8" pre-split, in the original single-group layout), byte-exact
+/// -- Rust-twin
 /// `std::mem::size_of` cross-check mirrors every other struct test in this
 /// file. 16 scalar fields, all 16 offsets asserted.
 #[test]
@@ -192,5 +195,121 @@ fn cell_meta_struct_is_byte_exact() {
     assert_eq!(
         members,
         vec![("alpha".to_string(), 0), ("domain".to_string(), 4)]
+    );
+}
+
+/// M3-b T5: [`CULL_WGSL`]'s struct declarations reference nothing outside
+/// themselves EXCEPT `cull_main`'s body, which reads `SCENE_BINDINGS_WGSL`'s
+/// group(0) globals (`instances`/`instance_info`/`slot_mirror`/
+/// `generations`/`mesh_meta`) -- naga's WGSL front end validates a module's
+/// function bodies too, so parsing `CULL_WGSL` in isolation fails with
+/// "undefined identifier". This mirrors `CullPass::new`'s own
+/// `format!("{SCENE_BINDINGS_WGSL}\n{CULL_WGSL}")` concatenation exactly
+/// (the ACTUAL source the cull pipeline compiles), not an approximation.
+fn cull_wgsl_combined() -> String {
+    format!("{SCENE_BINDINGS_WGSL}\n{CULL_WGSL}")
+}
+
+/// M3-b T5: host [`DrawCommand`] (Helio-owned, no `pulsar_scenedb` twin --
+/// C0: SceneDB never touches draw commands) vs naga reflection of
+/// `CULL_WGSL`'s standalone `DrawCommand` struct -- the spec S14.1
+/// indexed-indirect wire format, byte-exact.
+#[test]
+fn draw_command_struct_is_byte_exact() {
+    let src = cull_wgsl_combined();
+    let (size, members) = wgsl_struct_layout(&src, "DrawCommand");
+    assert_eq!(size, 20, "WGSL DrawCommand size == size_of::<DrawCommand>() (spec S14.1)");
+    assert_eq!(size as usize, std::mem::size_of::<DrawCommand>());
+    assert_eq!(
+        members,
+        vec![
+            ("index_count".to_string(), 0),
+            ("instance_count".to_string(), 4),
+            ("first_index".to_string(), 8),
+            ("base_vertex".to_string(), 12),
+            ("first_instance".to_string(), 16),
+        ]
+    );
+}
+
+/// M3-b T5: host [`CullRecord`] vs naga reflection of `CULL_WGSL`'s
+/// `CullRecord` -- the combined per-command-slot output record
+/// (`wgsl::CULL_WGSL`'s module doc has the group(2) storage-budget
+/// rationale for why DrawCommand's 5 fields, `row`, and `flags` all live in
+/// ONE record type). First 5 offsets identical to `DrawCommand`'s own test
+/// above -- asserted again here directly against `CullRecord`'s OWN
+/// reflection (not inferred), so a future edit that broke that field-for-
+/// field promise would fail HERE, not just look consistent by construction.
+#[test]
+fn cull_record_struct_is_byte_exact() {
+    let src = cull_wgsl_combined();
+    let (size, members) = wgsl_struct_layout(&src, "CullRecord");
+    assert_eq!(size, 32, "WGSL CullRecord size == size_of::<CullRecord>()");
+    assert_eq!(size as usize, std::mem::size_of::<CullRecord>());
+    assert_eq!(
+        members,
+        vec![
+            ("index_count".to_string(), 0),
+            ("instance_count".to_string(), 4),
+            ("first_index".to_string(), 8),
+            ("base_vertex".to_string(), 12),
+            ("first_instance".to_string(), 16),
+            ("row".to_string(), 20),
+            ("flags".to_string(), 24),
+            ("reserved".to_string(), 28),
+        ]
+    );
+}
+
+/// M3-b T5: host [`CullUniforms`] vs naga reflection of `CULL_WGSL`'s
+/// `CullUniforms` -- the cull pass's per-dispatch uniform block (view-proj
+/// matrix, 6 frustum planes, and the three scalar guards).
+#[test]
+fn cull_uniforms_struct_is_byte_exact() {
+    let src = cull_wgsl_combined();
+    let (size, members) = wgsl_struct_layout(&src, "CullUniforms");
+    assert_eq!(size, 176, "WGSL CullUniforms size == size_of::<CullUniforms>()");
+    assert_eq!(size as usize, std::mem::size_of::<CullUniforms>());
+    assert_eq!(
+        members,
+        vec![
+            ("view_proj".to_string(), 0),
+            ("planes".to_string(), 64),
+            ("count".to_string(), 160),
+            ("mesh_count".to_string(), 164),
+            ("capacity".to_string(), 168),
+            ("reserved".to_string(), 172),
+        ]
+    );
+}
+
+/// M3-b T5: `CullOutput`'s header offsets (the 16-byte atomics header --
+/// `visible_count`/`stale_drops`/`oob_drops`/`frustum_drops` -- followed by
+/// `records` at offset 16). naga's `Layouter` reports the STRUCT's overall
+/// `size` as 48, not 16, for a trailing runtime array: its "minimum binding
+/// size" convention counts the fixed header PLUS exactly one array-element
+/// stride (16 + `CullRecord`'s own 32-byte stride,
+/// `cull_record_struct_is_byte_exact` above) -- not the true fixed-header
+/// size alone. Asserted here as 48 (not 16) so this test documents naga's
+/// real behavior rather than the WGSL-source-level intuition; the MEMBER
+/// OFFSETS (0/4/8/12/16) are what this test actually pins, and they are
+/// unaffected by the trailing-array size quirk.
+#[test]
+fn cull_output_header_is_byte_exact() {
+    let src = cull_wgsl_combined();
+    let (size, members) = wgsl_struct_layout(&src, "CullOutput");
+    assert_eq!(
+        size, 48,
+        "naga Layouter size for a struct with a trailing runtime array == fixed header (16) + ONE array-element stride (32, CullRecord) -- not the header alone"
+    );
+    assert_eq!(
+        members,
+        vec![
+            ("visible_count".to_string(), 0),
+            ("stale_drops".to_string(), 4),
+            ("oob_drops".to_string(), 8),
+            ("frustum_drops".to_string(), 12),
+            ("records".to_string(), 16),
+        ]
     );
 }

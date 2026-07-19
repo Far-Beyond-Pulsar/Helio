@@ -33,6 +33,11 @@ pulsar_scenedb = { path = "../../../../core/pulsar_scenedb", features = ["gpu"] 
 # resolve two different `wgpu` versions. `tests/seam_smoke.rs` IS that
 # enforcement in practice -- see that file's doc comment.
 wgpu = { workspace = true }
+# M3-b T5 (cull.rs): `bytemuck::{Pod, Zeroable}` for the Helio-owned derived
+# structs (`DrawCommand`/`CullRecord`/`CullUniforms`) written to/read from
+# the cull pass's own buffers -- same workspace dep every other Helio pass
+# crate already uses (`helio-pass-occlusion-cull`'s `CullParams`, etc.).
+bytemuck = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }

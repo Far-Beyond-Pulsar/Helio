@@ -17,6 +17,7 @@
 //! groups, a real shader, a Helio-owned output buffer, readback -- works
 //! byte-exact on the actual vendored wgpu-30 stack.
 
+pub mod cull;
 pub mod wgsl;
 
 use pulsar_scenedb::gpu::{
