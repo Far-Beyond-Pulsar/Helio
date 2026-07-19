@@ -1,11 +1,28 @@
-//! The seam proof (M3-a T9, design Rev 2 S5): build a real `SceneGpuStore` +
-//! one cell through SceneDB's public write/boundary API (mirrors
-//! `pulsar_scenedb/tests/gpu_store.rs`'s `test_context`/boundary-driving
-//! pattern), construct a `SceneDbBinding` over it, and run a small
-//! Helio-owned compute shader -- built from `SCENE_BINDINGS_WGSL` itself,
-//! the ACTUAL seam WGSL, not a stand-in -- that copies `instances[0]` and
-//! `instance_info[0]` into Helio-owned output buffers. Readback must equal
-//! the values written on the CPU side, byte-exact.
+//! The seam proof (M3-a T9, design Rev 2 S5; two-group split M3-b T4,
+//! contract #47): build a real `SceneGpuStore` + one cell through SceneDB's
+//! public write/boundary API (mirrors `pulsar_scenedb/tests/gpu_store.rs`'s
+//! `test_context`/boundary-driving pattern), construct a `SceneDbBinding`
+//! over it, and run a small Helio-owned compute shader -- built from
+//! `SCENE_BINDINGS_WGSL` itself, the ACTUAL seam WGSL, not a stand-in -- that
+//! copies `instances[0]` and `instance_info[0]` (both `@group(0)`, the
+//! cull-read set) into Helio-owned output buffers at `@group(2)`. Readback
+//! must equal the values written on the CPU side, byte-exact.
+//!
+//! ## This is the smoke test that #47 closes (M3-b T4)
+//!
+//! This test's own compute pipeline only ever reads `@group(0)` (`instances`
+//! / `instance_info`, both COMPUTE-visible, 5 entries total including the 3
+//! it doesn't touch) plus its own 2 output buffers at `@group(2)` -- **7
+//! COMPUTE-visible storage buffers, under the WebGPU default 8**. It also
+//! binds `@group(1)` (the draw/material set) at pipeline-layout index 1 so
+//! the shader module's `@group(1)` declarations (present because it embeds
+//! the FULL `SCENE_BINDINGS_WGSL`, not just the cull half) type-check and
+//! the pipeline layout is positionally valid -- but every `@group(1)` entry
+//! is `VERTEX_FRAGMENT`-only (see `SceneDbBinding`'s doc comment), so it
+//! contributes ZERO to the compute stage's count. The test therefore does
+//! NOT need to construct a vertex/fragment pipeline to prove #47's closure;
+//! it only needs the compute stage's arithmetic to fit, which it now does
+//! under `wgpu::Limits::default()` -- no `adapter.limits()` workaround.
 //!
 //! ## This test IS the wgpu-major version lock
 //!
@@ -43,23 +60,20 @@ use std::sync::Arc;
 /// that test helper across a crate boundary, so it is reproduced here
 /// rather than approximated.
 ///
-/// One deliberate difference from the `pulsar_scenedb`-side helper: this
-/// test requests `adapter.limits()` instead of `wgpu::Limits::default()`.
-/// `SceneDbBinding`'s 9-entry bind group (M3-a T11 added binding 8, the
-/// material registry) is visible to `VERTEX_FRAGMENT | COMPUTE` (`src/
-/// lib.rs`, narrowed from `ShaderStages::all()` in the M3-a T9 review / T10
-/// fold — see that file's doc comment for the full budget warning) —
-/// COMPUTE is still in the narrowed set, so this test's compute pipeline
-/// still sees all 9 entries, and this test adds 2 more compute storage
-/// buffers of its own (`out_transform`/`out_info`) — 11 storage buffers
-/// bound into the COMPUTE stage in total, unchanged by the visibility
-/// narrowing. `Limits::default()` is the conservative WebGPU-portable
-/// baseline (`max_storage_buffers_per_shader_stage` = 8) meant for
-/// browser/downlevel targets, not a real constraint of the native hardware
-/// this GPU suite runs on; requesting the adapter's actual limits is the
-/// standard native-testing idiom (mirrors what a real renderer would do)
-/// and is well within any GPU this suite targets. The default-limits path
-/// still does NOT work here (11 > 8) — `adapter.limits()` stays required.
+/// ## M3-b T4: `wgpu::Limits::default()`, not `adapter.limits()` (closes #47)
+///
+/// M3-a's version of this helper requested `adapter.limits()` because the
+/// single 9-entry `@group(0)` plus this test's own 2 output buffers put 11
+/// storage buffers into the COMPUTE stage — over the WebGPU default budget
+/// (`Limits::default().max_storage_buffers_per_shader_stage == 8`). After
+/// the M3-b T4 group split (`SceneDbBinding`'s doc comment has the full
+/// arithmetic), this test's compute pipeline only binds `@group(0)`'s 5
+/// COMPUTE-visible entries (`@group(1)`'s draw/material entries are
+/// `VERTEX_FRAGMENT`-only and don't count here) plus its own 2 output
+/// buffers — **7 ≤ 8**, so the conservative WebGPU-portable default now
+/// actually works, and the `adapter.limits()` workaround is gone. This
+/// assertion — that this test now runs under the SAME limits a browser
+/// target would enforce — is the literal content of #47's closure.
 fn test_context() -> EngineGpuContext {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -71,7 +85,7 @@ fn test_context() -> EngineGpuContext {
     .expect("no adapter — GPU tests need a local GPU");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("helio-scenedb-seam-smoke"),
-        required_limits: adapter.limits(),
+        required_limits: wgpu::Limits::default(),
         ..Default::default()
     }))
     .expect("device");
@@ -160,18 +174,20 @@ fn seam_smoke_shader_reads_scenedb_buffers_byte_exact() {
     let meshlets = MeshletBuffer::new(&ctx, 1);
     let materials = MaterialRegistry::new(&ctx, 1);
 
-    // --- The seam itself. ---
+    // --- The seam itself (two groups, M3-b T4). ---
     let binding = SceneDbBinding::new(device, &store, &meshes, &clusters, &meshlets, &materials);
 
     // --- A Helio-owned compute shader, built from the ACTUAL seam WGSL
-    // (SCENE_BINDINGS_WGSL) plus a 4-line entry point copying instances[0]
-    // and instance_info[0] into Helio-owned output storage buffers (group
-    // 1, kept separate from SceneDB's read-only group 0). ---
+    // (SCENE_BINDINGS_WGSL, both groups) plus a 4-line entry point copying
+    // instances[0] and instance_info[0] (@group(0), the cull-read set) into
+    // Helio-owned output storage buffers at @group(2) -- @group(1), the
+    // draw/material set, is declared by SCENE_BINDINGS_WGSL but untouched
+    // by main() below, per this file's module doc. ---
     let shader_src = format!(
         "{SCENE_BINDINGS_WGSL}\n{}",
         r#"
-@group(1) @binding(0) var<storage, read_write> out_transform: array<mat4x4<f32>>;
-@group(1) @binding(1) var<storage, read_write> out_info: array<InstanceInfo>;
+@group(2) @binding(0) var<storage, read_write> out_transform: array<mat4x4<f32>>;
+@group(2) @binding(1) var<storage, read_write> out_info: array<InstanceInfo>;
 
 @compute @workgroup_size(1)
 fn main() {
@@ -233,7 +249,16 @@ fn main() {
 
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("seam-smoke-pipeline-layout"),
-        bind_group_layouts: &[Some(&binding.layout), Some(&out_layout)],
+        // group 0 = cull-read set (what main() actually reads), group 1 =
+        // draw/material set (declared by SCENE_BINDINGS_WGSL, unused by
+        // main(), bound only so the pipeline layout is positionally valid
+        // -- contributes 0 storage buffers to the COMPUTE stage's count,
+        // see this file's module doc), group 2 = this test's own outputs.
+        bind_group_layouts: &[
+            Some(&binding.cull_layout),
+            Some(&binding.draw_layout),
+            Some(&out_layout),
+        ],
         immediate_size: 0,
     });
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -249,8 +274,9 @@ fn main() {
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
         pass.set_pipeline(&pipeline);
-        pass.set_bind_group(0, &binding.bind_group, &[]);
-        pass.set_bind_group(1, &out_bind_group, &[]);
+        pass.set_bind_group(0, &binding.cull_bind_group, &[]);
+        pass.set_bind_group(1, &binding.draw_bind_group, &[]);
+        pass.set_bind_group(2, &out_bind_group, &[]);
         pass.dispatch_workgroups(1, 1, 1);
     }
     ctx.queue().submit([encoder.finish()]);

@@ -1,5 +1,5 @@
 //! The renderer-side source of truth for the SceneDB<->Helio seam WGSL
-//! (M3-a T9, design Rev 2 S5).
+//! (M3-a T9, design Rev 2 S5; two-group split M3-b T4, contract #47).
 //!
 //! Every struct text below is mirrored VERBATIM from `pulsar_scenedb`'s
 //! `tests/gpu_layout.rs` (Test 3's host-vs-naga byte-exact layout proof:
@@ -21,24 +21,46 @@
 //! at offset 0, `u32 domain` at offset 4 (`Domain::Outer` = 0,
 //! `Domain::Margin` = 1, `Domain::Inner` = 2).
 //!
-//! ## Bindings (group 0), all `var<storage, read>`
+//! ## Bindings — two groups (M3-b T4, closes contract #47)
+//!
+//! M3-a shipped all 9 buffers in one `@group(0)`, one storage buffer over
+//! the WebGPU default per-stage limit
+//! (`Limits::default().max_storage_buffers_per_shader_stage == 8`) --
+//! flagged as a hard M3-b requirement on [`crate::SceneDbBinding`]'s doc
+//! comment since M3-a T9/T11 (perf-validation report contract #47, MISS).
+//! M3-b splits the seam along its actual consumer boundary instead of
+//! raising device limits:
+//!
+//! - **`@group(0)` -- the cull-read set.** Everything the β cull compute
+//!   pass's term list touches (design §4: transform fetch, `InstanceInfo.
+//!   mesh_index` bounds check, `generations[slot_mirror[row]]` validation,
+//!   `MeshMetadata` local-AABB lookup). 5 entries.
+//! - **`@group(1)` -- the draw/material set.** Everything the draw pass
+//!   consumes once M3-β/γ passes exist (cluster DAG + meshlets for VG
+//!   traversal, γ scope; materials for shading; cell metadata for
+//!   domain/alpha). 4 entries. The cull pass never binds this group.
+//! - **`@group(2)` is RESERVED, not declared here.** M3-β T1's per-view
+//!   `ViewTokenBuffers` (`tokens`, `expected_gens`) are destined for
+//!   `@group(2)` at M3-b T5 (the cull pass's own per-view inputs) -- T4
+//!   deliberately leaves that index untouched so T5 can claim it without
+//!   renumbering anything landed here.
+//!
+//! | group | binding | contents           | element type    |
+//! |-------|---------|---------------------|------------------|
+//! | 0     | 0       | instance transforms | `Instance`       |
+//! | 0     | 1       | instance info        | `InstanceInfo`   |
+//! | 0     | 2       | slot mirror          | `u32`            |
+//! | 0     | 3       | generations          | `u32`            |
+//! | 0     | 4       | mesh configurator    | `MeshMetadata`   |
+//! | 1     | 0       | cluster DAG          | `ClusterNode`    |
+//! | 1     | 1       | meshlets              | `MeshletEntry`   |
+//! | 1     | 2       | cell metadata         | `CellMeta`       |
+//! | 1     | 3       | material registry     | `MaterialRow`    |
 //!
 //! SceneDB owns every write path (`write_transform`/`write_instance_info`/
 //! the frame-boundary drivers, `MeshRegistry::register`,
 //! `StreamingGrid::write_cell_metadata`, ...); Helio only ever reads through
-//! this bind group:
-//!
-//! | binding | contents           | element type    |
-//! |---------|---------------------|------------------|
-//! | 0       | instance transforms | `Instance`       |
-//! | 1       | instance info       | `InstanceInfo`   |
-//! | 2       | slot mirror         | `u32`            |
-//! | 3       | generations         | `u32`            |
-//! | 4       | mesh configurator   | `MeshMetadata`   |
-//! | 5       | cluster DAG         | `ClusterNode`    |
-//! | 6       | meshlets            | `MeshletEntry`   |
-//! | 7       | cell metadata       | `CellMeta`       |
-//! | 8       | material registry   | `MaterialRow`    |
+//! this bind group pair.
 //!
 //! `MaterialRow` (M3-a T11, Rev 2.4 R8 approved 2026-07-16): 64 bytes, 16
 //! scalar fields -- PBR params, four bindless texture slot indices
@@ -52,8 +74,8 @@
 //!
 //! Geometry (vertex/index) buffers bind at draw time (they vary per draw
 //! call, unlike everything above which is one persistent SSBO per frame);
-//! textures bind through Helio's own bindless array. Neither lives in this
-//! bind group.
+//! textures bind through Helio's own bindless array. Neither lives in
+//! either group.
 pub const SCENE_BINDINGS_WGSL: &str = r#"
 struct Instance {
     transform: mat4x4<f32>,
@@ -101,13 +123,19 @@ struct MaterialRow {
     reserved: u32,
 }
 
+// group 0 -- cull-read set (5 entries; see this file's module doc for the
+// per-stage arithmetic and crate::SceneDbBinding for the visibility split).
 @group(0) @binding(0) var<storage, read> instances: array<Instance>;
 @group(0) @binding(1) var<storage, read> instance_info: array<InstanceInfo>;
 @group(0) @binding(2) var<storage, read> slot_mirror: array<u32>;
 @group(0) @binding(3) var<storage, read> generations: array<u32>;
 @group(0) @binding(4) var<storage, read> mesh_meta: array<MeshMetadata>;
-@group(0) @binding(5) var<storage, read> clusters: array<ClusterNode>;
-@group(0) @binding(6) var<storage, read> meshlets: array<MeshletEntry>;
-@group(0) @binding(7) var<storage, read> cell_meta: array<CellMeta>;
-@group(0) @binding(8) var<storage, read> materials: array<MaterialRow>;
+
+// group 1 -- draw/material set (4 entries). Cull never binds this group.
+// group 2 is RESERVED for M3-b T5's per-view ViewTokenBuffers -- not
+// declared here.
+@group(1) @binding(0) var<storage, read> clusters: array<ClusterNode>;
+@group(1) @binding(1) var<storage, read> meshlets: array<MeshletEntry>;
+@group(1) @binding(2) var<storage, read> cell_meta: array<CellMeta>;
+@group(1) @binding(3) var<storage, read> materials: array<MaterialRow>;
 "#;
