@@ -1,16 +1,14 @@
-// Shared bounded extraction layouts. Algorithm-specific compute shaders use
-// these exact structures so Transvoxel and manifold dual contouring are
-// measured against identical requests and output arenas.
+// Shared bounded production extraction layouts. GPU Transvoxel is the selected
+// extractor; requests intentionally carry no runtime algorithm selector.
 
 struct GpuExtractionRequest {
     page_slot: u32,
     generation_low: u32,
     generation_high: u32,
     transition_mask: u32,
-    algorithm: u32,
     dirty_microbricks_low: u32,
     dirty_microbricks_high: u32,
-    _pad: u32,
+    _pad: vec2<u32>,
 };
 
 struct GpuExtractionRange {
