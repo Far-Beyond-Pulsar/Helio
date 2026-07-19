@@ -238,6 +238,24 @@ impl TransvoxelGpuExtractor {
         generation: u64,
         dirty_microbricks: u64,
     ) -> Result<wgpu::SubmissionIndex, TransvoxelGpuError> {
+        self.prepare(queue, samples, generation, dirty_microbricks)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Planetary Transvoxel Extraction Encoder"),
+        });
+        self.encode(&mut encoder);
+        Ok(queue.submit([encoder.finish()]))
+    }
+
+    /// Uploads one page and its dispatch metadata without submitting work.
+    /// Callers that need graph integration or timestamp queries can pair this
+    /// with [`Self::encode`] in their own command encoder.
+    pub fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        samples: &[CellWord],
+        generation: u64,
+        dirty_microbricks: u64,
+    ) -> Result<(), TransvoxelGpuError> {
         self.classifier.prepare(
             queue,
             samples,
@@ -247,34 +265,35 @@ impl TransvoxelGpuExtractor {
                 self.config.max_vertices,
                 self.config.max_indices,
             ),
-        )?;
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Planetary Transvoxel Extraction Encoder"),
-        });
-        self.classifier.encode(&mut encoder);
+        )
+    }
+
+    /// Encodes the complete regular-cell extraction into a caller-owned
+    /// command encoder. [`Self::prepare`] must be called first.
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.classifier.encode(encoder);
         encoder.clear_buffer(&self.counters_buffer, 0, None);
         dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_cells_pipeline,
             &self.scan_cells_bind_group,
             TRANSVOXEL_SCAN_BLOCKS,
             "Planetary Transvoxel Cell Scan",
         );
         dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_blocks_pipeline,
             &self.scan_blocks_bind_group,
             1,
             "Planetary Transvoxel Block Scan",
         );
         dispatch(
-            &mut encoder,
+            encoder,
             &self.emit_pipeline,
             &self.emit_bind_group,
             TRANSVOXEL_CLASSIFY_WORKGROUPS,
             "Planetary Transvoxel Emission",
         );
-        Ok(queue.submit([encoder.finish()]))
     }
 
     pub fn vertices_buffer(&self) -> &wgpu::Buffer {

@@ -582,6 +582,23 @@ impl ManifoldDcGpuExtractor {
         samples: &[CellWord],
         generation: u64,
     ) -> Result<wgpu::SubmissionIndex, ManifoldDcGpuError> {
+        self.prepare(queue, samples, generation)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Planetary Manifold DC Extraction Encoder"),
+        });
+        self.encode(&mut encoder);
+        Ok(queue.submit([encoder.finish()]))
+    }
+
+    /// Uploads one page and its dispatch metadata without submitting work.
+    /// Callers that need graph integration or timestamp queries can pair this
+    /// with [`Self::encode`] in their own command encoder.
+    pub fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        samples: &[CellWord],
+        generation: u64,
+    ) -> Result<(), ManifoldDcGpuError> {
         if samples.len() != EXTRACTION_SAMPLE_COUNT {
             return Err(ManifoldDcGpuError::SampleCount {
                 actual: samples.len(),
@@ -591,88 +608,90 @@ impl ManifoldDcGpuExtractor {
         let dispatch = GpuManifoldDcDispatch::new(generation, self.config);
         queue.write_buffer(&self.sample_buffer, 0, bytemuck::cast_slice(samples));
         queue.write_buffer(&self.dispatch_buffer, 0, bytemuck::bytes_of(&dispatch));
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Planetary Manifold DC Extraction Encoder"),
-        });
+        Ok(())
+    }
+
+    /// Encodes the complete manifold extraction into a caller-owned command
+    /// encoder. [`Self::prepare`] must be called first.
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.clear_buffer(&self.counters_buffer, 0, None);
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.classify_cells_pipeline,
             &self.classify_cells_bind_group,
             MANIFOLD_DC_GPU_CELL_WORKGROUPS,
             "Planetary Manifold DC Cell Classification",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.classify_owners_pipeline,
             &self.classify_owners_bind_group,
             MANIFOLD_DC_GPU_OWNER_WORKGROUPS,
             "Planetary Manifold DC Edge Classification",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_cells_pipeline,
             &self.scan_cells_bind_group,
             MANIFOLD_DC_GPU_CELL_SCAN_BLOCKS,
             "Planetary Manifold DC Cell Scan",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_cell_blocks_pipeline,
             &self.scan_cell_blocks_bind_group,
             1,
             "Planetary Manifold DC Cell Block Scan",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_owners_pipeline,
             &self.scan_owners_bind_group,
             MANIFOLD_DC_GPU_OWNER_SCAN_BLOCKS,
             "Planetary Manifold DC Owner Scan",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_owner_blocks_pipeline,
             &self.scan_owner_blocks_bind_group,
             1,
             "Planetary Manifold DC Owner Block Scan",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.finalize_offsets_pipeline,
             &self.finalize_offsets_bind_group,
             MANIFOLD_DC_GPU_CELL_WORKGROUPS,
             "Planetary Manifold DC Offset Finalization",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.emit_vertices_pipeline,
             &self.emit_vertices_bind_group,
             MANIFOLD_DC_GPU_CELL_WORKGROUPS,
             "Planetary Manifold DC Vertex Emission",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.emit_topology_vertices_pipeline,
             &self.emit_topology_vertices_bind_group,
             MANIFOLD_DC_GPU_OWNER_WORKGROUPS,
             "Planetary Manifold DC Topology Vertex Emission",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.emit_quads_pipeline,
             &self.emit_quads_bind_group,
             MANIFOLD_DC_GPU_OWNER_WORKGROUPS,
             "Planetary Manifold DC Quad Resolution",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.emit_indices_pipeline,
             &self.emit_indices_bind_group,
             quad_workgroups(self.config),
             "Planetary Manifold DC Index Emission",
         );
-        Ok(queue.submit([encoder.finish()]))
     }
 
     pub fn cells_buffer(&self) -> &wgpu::Buffer {
