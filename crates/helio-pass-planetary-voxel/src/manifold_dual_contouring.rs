@@ -26,11 +26,14 @@ pub const MANIFOLD_DC_CELL_EDGE: usize = PAGE_EDGE + 1;
 pub const MANIFOLD_DC_CELL_COUNT: usize =
     MANIFOLD_DC_CELL_EDGE * MANIFOLD_DC_CELL_EDGE * MANIFOLD_DC_CELL_EDGE;
 pub const MANIFOLD_DC_OWNED_EDGE_COUNT: usize = PAGE_EDGE * PAGE_EDGE * PAGE_EDGE * 3;
-pub const MANIFOLD_DC_MAX_VERTICES: usize =
+pub const MANIFOLD_DC_MAX_QEF_VERTICES: usize =
     MANIFOLD_DC_CELL_COUNT * MANIFOLD_DC_MAX_COMPONENTS_PER_CELL;
 pub const MANIFOLD_DC_MAX_QUADS: usize = MANIFOLD_DC_OWNED_EDGE_COUNT;
-pub const MANIFOLD_DC_MAX_INDICES: usize = MANIFOLD_DC_MAX_QUADS * 6;
-pub const MANIFOLD_DC_MAX_GPU_VERTICES: usize = MANIFOLD_DC_MAX_QUADS * 4;
+pub const MANIFOLD_DC_INDICES_PER_QUAD: usize = 24;
+pub const MANIFOLD_DC_MAX_VERTICES: usize =
+    MANIFOLD_DC_MAX_QEF_VERTICES + MANIFOLD_DC_MAX_QUADS * 9;
+pub const MANIFOLD_DC_MAX_INDICES: usize = MANIFOLD_DC_MAX_QUADS * MANIFOLD_DC_INDICES_PER_QUAD;
+pub const MANIFOLD_DC_MAX_GPU_VERTICES: usize = MANIFOLD_DC_MAX_QUADS * 9;
 /// Cell-local QEF coordinates use an open dyadic fixed-point grid. This makes
 /// a halo-cell vertex and its owning-page copy bit-identical after integer
 /// page translation, and prevents distinct cell vertices from geometrically
@@ -100,12 +103,36 @@ pub fn manifold_dc_cell_topology(fixture_case: u8) -> ManifoldDcCellTopology {
             .expect("the audited regular table only references cube edges")
             as u8;
     }
-    for triangle in 0..topology.triangle_count() {
-        let [a, b, c] = topology
-            .triangle(triangle)
-            .expect("triangle index is bounded by the table count");
-        union(&mut parents, a as usize, b as usize);
-        union(&mut parents, a as usize, c as usize);
+    // Dual Marching Cubes vertices correspond to closed surface cycles on the
+    // cube boundary, not merely to triangle-connected components in the
+    // interior lookup. The latter can merge two distinct boundary cycles and
+    // create parallel dual edges which collapse into non-manifold indexed
+    // edges. Connect crossing edges only through the contour segment emitted
+    // on each cube face; every resulting component is one boundary cycle.
+    for axis in 0..3 {
+        for positive_face in [false, true] {
+            for triangle in 0..topology.triangle_count() {
+                let triangle = topology
+                    .triangle(triangle)
+                    .expect("triangle index is bounded by the table count");
+                let mut face_vertices = [usize::MAX; 3];
+                let mut count = 0;
+                for vertex in triangle {
+                    let vertex = usize::from(vertex);
+                    if cube_edge_lies_on_face(
+                        usize::from(vertex_edges[vertex]),
+                        axis,
+                        positive_face,
+                    ) {
+                        face_vertices[count] = vertex;
+                        count += 1;
+                    }
+                }
+                if count == 2 {
+                    union(&mut parents, face_vertices[0], face_vertices[1]);
+                }
+            }
+        }
     }
 
     let mut root_components = [INVALID_COMPONENT; MANIFOLD_DC_CUBE_EDGE_COUNT];
@@ -134,6 +161,13 @@ pub fn manifold_dc_cell_topology(fixture_case: u8) -> ManifoldDcCellTopology {
         component_count,
         edge_components,
     }
+}
+
+fn cube_edge_lies_on_face(edge: usize, axis: usize, positive_face: bool) -> bool {
+    let endpoints = MANIFOLD_DC_CUBE_EDGES[edge];
+    let face_coordinate = u8::from(positive_face);
+    TRANSVOXEL_REGULAR_CORNERS[usize::from(endpoints[0])][axis] == face_coordinate
+        && TRANSVOXEL_REGULAR_CORNERS[usize::from(endpoints[1])][axis] == face_coordinate
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -203,7 +237,10 @@ impl ManifoldDcMesh {
     /// seams. Vertices are welded by source QEF vertex and material, never by
     /// position alone.
     pub fn gpu_mesh(&self) -> Result<ManifoldDcGpuMesh, ManifoldDcError> {
-        let expected_indices = self.quads.len().saturating_mul(6);
+        let expected_indices = self
+            .quads
+            .len()
+            .saturating_mul(MANIFOLD_DC_INDICES_PER_QUAD);
         if self.indices.len() != expected_indices {
             return Err(ManifoldDcError::MeshIndexCount {
                 actual: self.indices.len(),
@@ -225,17 +262,32 @@ impl ManifoldDcMesh {
             vertices: Vec::with_capacity(self.vertices.len().min(MANIFOLD_DC_MAX_GPU_VERTICES)),
             indices: Vec::with_capacity(self.indices.len()),
         };
-        let mut remap = BTreeMap::new();
+        let mut materials_by_source = vec![BTreeSet::new(); self.vertices.len()];
         for (quad_index, quad) in self.quads.iter().enumerate() {
-            for source_index in &self.indices[quad_index * 6..quad_index * 6 + 6] {
+            let first_index = quad_index * MANIFOLD_DC_INDICES_PER_QUAD;
+            for &source_index in
+                &self.indices[first_index..first_index + MANIFOLD_DC_INDICES_PER_QUAD]
+            {
+                materials_by_source[source_index as usize].insert(quad.material);
+            }
+        }
+        let mut remap = BTreeMap::new();
+        for (source_index, materials) in materials_by_source.into_iter().enumerate() {
+            for material in materials {
+                let mut vertex = self.vertices[source_index].gpu;
+                vertex.material = u32::from(material);
+                let output_index = output.vertices.len() as u32;
+                output.vertices.push(vertex);
+                remap.insert((source_index as u32, material), output_index);
+            }
+        }
+        for (quad_index, quad) in self.quads.iter().enumerate() {
+            let first_index = quad_index * MANIFOLD_DC_INDICES_PER_QUAD;
+            for source_index in
+                &self.indices[first_index..first_index + MANIFOLD_DC_INDICES_PER_QUAD]
+            {
                 let key = (*source_index, quad.material);
-                let output_index = *remap.entry(key).or_insert_with(|| {
-                    let mut vertex = self.vertices[*source_index as usize].gpu;
-                    vertex.material = u32::from(quad.material);
-                    let index = output.vertices.len() as u32;
-                    output.vertices.push(vertex);
-                    index
-                });
+                let output_index = remap[&key];
                 output.indices.push(output_index);
             }
         }
@@ -367,6 +419,18 @@ pub enum ManifoldDcError {
     MeshIndex { index: u32, vertices: usize },
     #[error("manifold dual contouring could not resolve a component for owned edge {edge_min:?} axis {axis}")]
     MissingEdgeComponent { edge_min: [u8; 3], axis: u8 },
+    #[error("manifold dual contouring could not resolve the face contour paired with cube edge {edge} on axis {axis} ({positive_face})")]
+    MissingFacePairing {
+        edge: usize,
+        axis: usize,
+        positive_face: bool,
+    },
+    #[error("manifold dual contouring paired one face segment with inconsistent QEF endpoints {first:?} and {second:?}")]
+    FaceSegmentEndpointMismatch { first: [u32; 2], second: [u32; 2] },
+    #[error(
+        "manifold dual contouring produced an irreducible non-manifold link at vertex {vertex}"
+    )]
+    NonManifoldVertexLink { vertex: u32 },
 }
 
 pub fn extract_manifold_dc_page(samples: &[CellWord]) -> Result<ManifoldDcMesh, ManifoldDcError> {
@@ -417,6 +481,8 @@ pub fn extract_manifold_dc_page(samples: &[CellWord]) -> Result<ManifoldDcMesh, 
             }
         }
     }
+    triangulate_manifold_cell_complex(&cells, &mut mesh)?;
+    split_disconnected_vertex_links(&mut mesh)?;
     compact_mesh_vertices(&mut mesh);
     Ok(mesh)
 }
@@ -427,6 +493,9 @@ fn compact_mesh_vertices(mesh: &mut ManifoldDcMesh) {
         for vertex in quad.vertices {
             used[vertex as usize] = true;
         }
+    }
+    for &vertex in &mesh.indices {
+        used[vertex as usize] = true;
     }
     let mut remap = vec![u32::MAX; mesh.vertices.len()];
     let mut compacted = Vec::with_capacity(used.iter().filter(|is_used| **is_used).count());
@@ -509,21 +578,293 @@ fn emit_owned_edge(
         axis,
         edge_min,
     };
-    let [a, b, c, d] = vertices;
-    let diagonal_ac = squared_distance(
-        mesh.vertices[a as usize].gpu.position,
-        mesh.vertices[c as usize].gpu.position,
-    );
-    let diagonal_bd = squared_distance(
-        mesh.vertices[b as usize].gpu.position,
-        mesh.vertices[d as usize].gpu.position,
-    );
-    if diagonal_ac <= diagonal_bd {
-        mesh.indices.extend([a, b, c, a, c, d]);
-    } else {
-        mesh.indices.extend([a, b, d, b, c, d]);
-    }
     mesh.quads.push(quad);
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct GridEdgeKey {
+    min: [i32; 3],
+    axis: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DualEdgeKey {
+    first: GridEdgeKey,
+    second: GridEdgeKey,
+}
+
+/// Converts the manifold DMC polygonal cell complex into a simplicial mesh.
+/// A DMC surface can legitimately contain multiple topological edges between
+/// the same two QEF vertices. Directly triangulating its quads would collapse
+/// those parallel edges into one indexed edge with more than two incident
+/// triangles. Barycentric subdivision gives every face-contour segment one
+/// canonical midpoint and every dual quad one center, preserving each edge's
+/// identity in a conventional indexed triangle mesh.
+fn triangulate_manifold_cell_complex(
+    cells: &[CellRecord],
+    mesh: &mut ManifoldDcMesh,
+) -> Result<(), ManifoldDcError> {
+    let mut midpoint_by_edge = BTreeMap::<DualEdgeKey, (u32, [u32; 2])>::new();
+    let quads = mesh.quads.clone();
+    for quad in &quads {
+        let mut midpoints = [0_u32; 4];
+        for (side, midpoint) in midpoints.iter_mut().enumerate() {
+            let key = dual_edge_key(cells, &mesh.vertices, quad, side)?;
+            let mut endpoints = [quad.vertices[side], quad.vertices[(side + 1) % 4]];
+            endpoints.sort_unstable();
+            *midpoint = if let Some((index, existing)) = midpoint_by_edge.get(&key).copied() {
+                if existing != endpoints {
+                    return Err(ManifoldDcError::FaceSegmentEndpointMismatch {
+                        first: existing,
+                        second: endpoints,
+                    });
+                }
+                index
+            } else {
+                let first = quad.vertices[side];
+                let second = quad.vertices[(side + 1) % 4];
+                let index = mesh.vertices.len() as u32;
+                mesh.vertices
+                    .push(averaged_vertex([first, second].into_iter(), &mesh.vertices));
+                midpoint_by_edge.insert(key, (index, endpoints));
+                index
+            };
+        }
+        let center = mesh.vertices.len() as u32;
+        mesh.vertices
+            .push(averaged_vertex(quad.vertices.into_iter(), &mesh.vertices));
+        for (side, &midpoint) in midpoints.iter().enumerate() {
+            let first = quad.vertices[side];
+            let second = quad.vertices[(side + 1) % 4];
+            mesh.indices
+                .extend([first, midpoint, center, midpoint, second, center]);
+        }
+    }
+    Ok(())
+}
+
+fn dual_edge_key(
+    cells: &[CellRecord],
+    vertices: &[ManifoldDcVertex],
+    quad: &ManifoldDcQuad,
+    side: usize,
+) -> Result<DualEdgeKey, ManifoldDcError> {
+    let edge_min = quad.edge_min.map(i32::from);
+    let cell_min = vertices[quad.vertices[side] as usize].cell_min;
+    let neighbor = vertices[quad.vertices[(side + 1) % 4] as usize].cell_min;
+    let face_axis = (0..3)
+        .find(|axis| cell_min[*axis] != neighbor[*axis])
+        .expect("consecutive incident cells share one face");
+    let positive_face = neighbor[face_axis] > cell_min[face_axis];
+    let mut edge_max = edge_min;
+    edge_max[usize::from(quad.axis)] += 1;
+    let first_corner = regular_corner_index(subtract(edge_min, cell_min))
+        .expect("an incident cell contains the owned edge's first corner");
+    let second_corner = regular_corner_index(subtract(edge_max, cell_min))
+        .expect("an incident cell contains the owned edge's second corner");
+    let current_edge = cube_edge_index([first_corner, second_corner])
+        .expect("the owned edge is a cube edge in every incident cell");
+    let paired_edge = paired_cube_edge_on_face(
+        cells[cell_index(cell_min)].topology,
+        current_edge,
+        face_axis,
+        positive_face,
+    )
+    .ok_or(ManifoldDcError::MissingFacePairing {
+        edge: current_edge,
+        axis: face_axis,
+        positive_face,
+    })?;
+    let mut pair = [
+        grid_edge_key(cell_min, current_edge),
+        grid_edge_key(cell_min, paired_edge),
+    ];
+    pair.sort_unstable();
+    Ok(DualEdgeKey {
+        first: pair[0],
+        second: pair[1],
+    })
+}
+
+fn paired_cube_edge_on_face(
+    topology: ManifoldDcCellTopology,
+    current_edge: usize,
+    axis: usize,
+    positive_face: bool,
+) -> Option<usize> {
+    let regular = regular_case_from_fixture(topology.fixture_case());
+    for triangle_index in 0..regular.triangle_count() {
+        let triangle = regular.triangle(triangle_index)?;
+        let mut face_edges = [usize::MAX; 3];
+        let mut count = 0;
+        for vertex in triangle {
+            let endpoints = regular.vertex(usize::from(vertex))?.endpoints();
+            let edge = cube_edge_index(endpoints)?;
+            if cube_edge_lies_on_face(edge, axis, positive_face) {
+                face_edges[count] = edge;
+                count += 1;
+            }
+        }
+        if count == 2 {
+            if face_edges[0] == current_edge {
+                return Some(face_edges[1]);
+            }
+            if face_edges[1] == current_edge {
+                return Some(face_edges[0]);
+            }
+        }
+    }
+    None
+}
+
+fn grid_edge_key(cell_min: [i32; 3], cube_edge: usize) -> GridEdgeKey {
+    let endpoints = MANIFOLD_DC_CUBE_EDGES[cube_edge];
+    let first = TRANSVOXEL_REGULAR_CORNERS[usize::from(endpoints[0])];
+    let second = TRANSVOXEL_REGULAR_CORNERS[usize::from(endpoints[1])];
+    let mut min = [0_i32; 3];
+    let mut axis = 0_u8;
+    for coordinate in 0..3 {
+        min[coordinate] =
+            cell_min[coordinate] + i32::from(first[coordinate].min(second[coordinate]));
+        if first[coordinate] != second[coordinate] {
+            axis = coordinate as u8;
+        }
+    }
+    GridEdgeKey { min, axis }
+}
+
+fn averaged_vertex(
+    indices: impl Iterator<Item = u32> + Clone,
+    vertices: &[ManifoldDcVertex],
+) -> ManifoldDcVertex {
+    let count = indices.clone().count() as f64;
+    let first = vertices[indices
+        .clone()
+        .next()
+        .expect("an average has at least one vertex") as usize];
+    let mut position = [0.0_f64; 3];
+    let mut normal = [0.0_f64; 3];
+    let mut qef_error = 0.0_f64;
+    for index in indices {
+        let vertex = vertices[index as usize];
+        for axis in 0..3 {
+            position[axis] += f64::from(vertex.gpu.position[axis]);
+            normal[axis] += f64::from(vertex.gpu.normal[axis]);
+        }
+        qef_error += f64::from(vertex.qef_error);
+    }
+    for coordinate in &mut position {
+        *coordinate /= count;
+    }
+    let normal = normalize_or(normal, [0.0, 1.0, 0.0]);
+    ManifoldDcVertex {
+        gpu: GpuTerrainVertex {
+            position: position.map(|coordinate| coordinate as f32),
+            material: first.gpu.material,
+            normal: normal.map(|coordinate| coordinate as f32),
+            flags: first.gpu.flags,
+        },
+        qef_error: (qef_error / count) as f32,
+        cell_min: first.cell_min,
+        component: u8::MAX,
+        hermite_count: 0,
+    }
+}
+
+fn split_disconnected_vertex_links(mesh: &mut ManifoldDcMesh) -> Result<(), ManifoldDcError> {
+    let original_vertex_count = mesh.vertices.len();
+    let mut links: Vec<BTreeMap<u32, BTreeSet<u32>>> = vec![BTreeMap::new(); original_vertex_count];
+    for triangle in mesh.indices.chunks_exact(3) {
+        let [a, b, c] = [triangle[0], triangle[1], triangle[2]];
+        for (center, left, right) in [(a, b, c), (b, c, a), (c, a, b)] {
+            if center as usize >= original_vertex_count {
+                continue;
+            }
+            links[center as usize]
+                .entry(left)
+                .or_default()
+                .insert(right);
+            links[center as usize]
+                .entry(right)
+                .or_default()
+                .insert(left);
+        }
+    }
+
+    let mut component_vertices = vec![Vec::<u32>::new(); original_vertex_count];
+    let mut component_by_neighbor = vec![BTreeMap::<u32, usize>::new(); original_vertex_count];
+    for (vertex, link) in links.iter().enumerate() {
+        let mut remaining: BTreeSet<u32> = link.keys().copied().collect();
+        while let Some(start) = remaining.pop_first() {
+            let mut component = BTreeSet::new();
+            let mut stack = vec![start];
+            while let Some(current) = stack.pop() {
+                if component.insert(current) {
+                    remaining.remove(&current);
+                    stack.extend(link[&current].iter().copied());
+                }
+            }
+            let degree_one = component
+                .iter()
+                .filter(|node| {
+                    link[node]
+                        .iter()
+                        .filter(|next| component.contains(next))
+                        .count()
+                        == 1
+                })
+                .count();
+            let degrees_valid = component.iter().all(|node| {
+                matches!(
+                    link[node]
+                        .iter()
+                        .filter(|next| component.contains(next))
+                        .count(),
+                    1 | 2
+                )
+            });
+            let is_path = degree_one == 2;
+            let is_cycle = degree_one == 0
+                && component.iter().all(|node| {
+                    link[node]
+                        .iter()
+                        .filter(|next| component.contains(next))
+                        .count()
+                        == 2
+                });
+            if !degrees_valid || !(is_path || is_cycle) {
+                return Err(ManifoldDcError::NonManifoldVertexLink {
+                    vertex: vertex as u32,
+                });
+            }
+            let component_index = component_vertices[vertex].len();
+            let output_vertex = if component_index == 0 {
+                vertex as u32
+            } else {
+                let output = mesh.vertices.len() as u32;
+                mesh.vertices.push(mesh.vertices[vertex]);
+                output
+            };
+            component_vertices[vertex].push(output_vertex);
+            for neighbor in component {
+                component_by_neighbor[vertex].insert(neighbor, component_index);
+            }
+        }
+    }
+
+    for triangle in mesh.indices.chunks_exact_mut(3) {
+        let original = [triangle[0], triangle[1], triangle[2]];
+        for corner in 0..3 {
+            let vertex = original[corner] as usize;
+            if vertex >= original_vertex_count || component_vertices[vertex].len() <= 1 {
+                continue;
+            }
+            let neighbor = original[(corner + 1) % 3];
+            let component = component_by_neighbor[vertex][&neighbor];
+            triangle[corner] = component_vertices[vertex][component];
+        }
+    }
     Ok(())
 }
 
@@ -1029,10 +1370,6 @@ fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-fn squared_distance(a: [f32; 3], b: [f32; 3]) -> f32 {
-    (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)
-}
-
 fn triangle_area_squared(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> f32 {
     let cross = triangle_cross(a, b, c);
     cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]
@@ -1067,10 +1404,11 @@ mod tests {
         );
         assert_eq!(audit.face_pairing_mismatches, 0);
         assert_eq!(MANIFOLD_DC_CELL_COUNT, 35_937);
-        assert_eq!(MANIFOLD_DC_MAX_VERTICES, 143_748);
+        assert_eq!(MANIFOLD_DC_MAX_QEF_VERTICES, 143_748);
+        assert_eq!(MANIFOLD_DC_MAX_VERTICES, 1_028_484);
         assert_eq!(MANIFOLD_DC_MAX_QUADS, 98_304);
-        assert_eq!(MANIFOLD_DC_MAX_INDICES, 589_824);
-        assert_eq!(MANIFOLD_DC_MAX_GPU_VERTICES, 393_216);
+        assert_eq!(MANIFOLD_DC_MAX_INDICES, 2_359_296);
+        assert_eq!(MANIFOLD_DC_MAX_GPU_VERTICES, 884_736);
     }
 
     #[test]
@@ -1123,7 +1461,10 @@ mod tests {
             let second = extract_manifold_dc_page(fixture.samples()).unwrap();
             assert_eq!(first, second, "{} determinism", kind.name());
             assert!(!first.quads.is_empty(), "{} surface", kind.name());
-            assert_eq!(first.indices.len(), first.quads.len() * 6);
+            assert_eq!(
+                first.indices.len(),
+                first.quads.len() * MANIFOLD_DC_INDICES_PER_QUAD
+            );
             assert!(first.quads.len() <= MANIFOLD_DC_OWNED_EDGE_COUNT);
             let audit = audit_manifold_dc_mesh(&first);
             assert!(audit.is_two_manifold(), "{} {audit:?}", kind.name());
@@ -1145,6 +1486,9 @@ mod tests {
                 assert!(vertex.gpu.position.iter().all(|value| value.is_finite()));
                 assert!(vertex.gpu.normal.iter().all(|value| value.is_finite()));
                 assert!(vertex.qef_error.is_finite() && vertex.qef_error >= 0.0);
+                if vertex.component == u8::MAX {
+                    continue;
+                }
                 for axis in 0..3 {
                     let local = vertex.gpu.position[axis] - vertex.cell_min[axis] as f32;
                     assert!((-1.0e-5..=1.0 + 1.0e-5).contains(&local));
@@ -1181,6 +1525,19 @@ mod tests {
         let mut invalid_index = mesh;
         invalid_index.indices.extend([u32::MAX, 0, 1]);
         assert_eq!(audit_manifold_dc_mesh(&invalid_index).invalid_indices, 1);
+    }
+
+    #[test]
+    fn dense_ambiguous_field_remains_a_two_manifold() {
+        let samples = adversarial_samples(0xd1b5_4a32_d192_ed03);
+        let mesh = extract_manifold_dc_page(&samples).unwrap();
+        let audit = audit_manifold_dc_mesh(&mesh);
+        assert!(audit.is_two_manifold(), "{audit:?}");
+        assert!(audit.nonmanifold_edges == 0 && audit.nonmanifold_vertices == 0);
+        assert_eq!(
+            mesh.indices.len(),
+            mesh.quads.len() * MANIFOLD_DC_INDICES_PER_QUAD
+        );
     }
 
     #[test]
@@ -1321,6 +1678,27 @@ mod tests {
         samples
     }
 
+    fn adversarial_samples(seed: u64) -> Vec<CellWord> {
+        (0..EXTRACTION_SAMPLE_COUNT)
+            .map(|linear| {
+                let mut value = seed ^ linear as u64;
+                value ^= value >> 30;
+                value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+                value ^= value >> 27;
+                value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+                value ^= value >> 31;
+                let density = value as u16 as i16;
+                let density = if density == 0 { 1 } else { density };
+                let material = if density <= 0 {
+                    ((value >> 16) as u8 % 7) + 1
+                } else {
+                    0
+                };
+                CellWord::new(density, material, 0)
+            })
+            .collect()
+    }
+
     fn canonical_vertices(
         mesh: &ManifoldDcMesh,
         page: PageKey,
@@ -1329,6 +1707,7 @@ mod tests {
         mesh.vertices
             .iter()
             .copied()
+            .filter(|vertex| vertex.component != u8::MAX)
             .map(|mut vertex| {
                 let canonical_cell = [
                     page_min[0] + i64::from(vertex.cell_min[0]),
