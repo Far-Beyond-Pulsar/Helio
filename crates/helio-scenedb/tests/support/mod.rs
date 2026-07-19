@@ -354,9 +354,58 @@ pub fn cpu_cull_token(inputs: &CpuCullInputs, i: usize) -> (u32, CpuDecision) {
 
     let mesh = &inputs.mesh_table[mesh_index as usize];
     let m = &inputs.instances[row as usize];
-    let world_center = mat4_mul_point(m, mesh.local_aabb_center);
-    let r3 = mat4_upper3x3(m);
-    let world_extents = mat3_abs_mul_vec3(r3, mesh.local_aabb_extents);
+    // GROUND TRUTH, not the shader's shortcut (M3-β T6 review, defect 1):
+    // transform all eight local-AABB corners through the full instance
+    // matrix and take their bounds. The shader uses design §11's `|M₃ₓ₃|`
+    // abs-matrix identity instead — mathematically equivalent for affine
+    // transforms but a SHORTCUT, and a reference that reimplements the same
+    // shortcut can only prove the code agrees with itself. Deriving the
+    // world AABB the slow, obviously-correct way makes this an oracle: it
+    // would catch an error in the abs-matrix formula itself, which is
+    // exactly the class of bug the T5 review's transform-convention probe
+    // showed this codebase is capable of harboring undetected.
+    let (world_center, world_extents) = {
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for c in 0u32..8 {
+            let sx = if c & 1 != 0 { 1.0 } else { -1.0 };
+            let sy = if c & 2 != 0 { 1.0 } else { -1.0 };
+            let sz = if c & 4 != 0 { 1.0 } else { -1.0 };
+            let local = [
+                mesh.local_aabb_center[0] + sx * mesh.local_aabb_extents[0],
+                mesh.local_aabb_center[1] + sy * mesh.local_aabb_extents[1],
+                mesh.local_aabb_center[2] + sz * mesh.local_aabb_extents[2],
+            ];
+            let w = mat4_mul_point(m, local);
+            for k in 0..3 {
+                lo[k] = lo[k].min(w[k]);
+                hi[k] = hi[k].max(w[k]);
+            }
+        }
+        (
+            [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5, (lo[2] + hi[2]) * 0.5],
+            [(hi[0] - lo[0]) * 0.5, (hi[1] - lo[1]) * 0.5, (hi[2] - lo[2]) * 0.5],
+        )
+    };
+    // Cross-check the shader's §11 shortcut against the ground truth above.
+    // If these ever diverge, the abs-matrix identity (or the pinned
+    // column-major flattening it depends on) is wrong — fail loudly here
+    // rather than let the equality test silently compare two copies of the
+    // same mistake.
+    {
+        let shortcut = mat3_abs_mul_vec3(mat4_upper3x3(m), mesh.local_aabb_extents);
+        for k in 0..3 {
+            let tol = 1e-4 * world_extents[k].abs().max(1.0);
+            assert!(
+                (shortcut[k] - world_extents[k]).abs() <= tol,
+                "design §11 |M₃ₓ₃| shortcut disagrees with 8-corner ground truth on axis {k}: \
+                 shortcut {} vs truth {} (row {row}) — the abs-matrix identity or the \
+                 column-major flattening convention is wrong",
+                shortcut[k],
+                world_extents[k]
+            );
+        }
+    }
 
     let mut near_clip = false;
     for c in 0u32..8 {

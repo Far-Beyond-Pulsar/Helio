@@ -485,15 +485,47 @@ fn command_slot_order_determinism_probe() {
     let run_b = dispatch_once();
 
     let order_identical = run_a == run_b;
-    // Documented finding (M3-b T6 report), not a hard portability claim:
-    // this assert records what THIS run observed. If it ever starts
-    // failing on some other adapter/driver, that is itself the finding —
-    // update the report, do NOT weaken `run_equality_check`'s set-based
-    // comparison to compensate (order was never a contract).
-    assert!(
-        order_identical,
-        "command-slot order changed between two back-to-back dispatches of the identical input \
-         on this adapter — row->slot assignment is empirically NONDETERMINISTIC here; \
-         run_a={run_a:?} run_b={run_b:?}"
+    // RESOLVED (M3-b T6 review follow-up): slot assignment is genuinely
+    // NONDETERMINISTIC on this adapter — back-to-back dispatches of a
+    // byte-identical input hand out different slot ranges, because the
+    // §14.2 bounded `atomicAdd` hands slots out in workgroup-completion
+    // order and that order is a scheduling detail, not a guarantee. An
+    // earlier revision of this probe ASSERTED order stability on the
+    // strength of a lucky observation; that assert was flaky by
+    // construction and has been removed. What is asserted below is what
+    // the contract actually promises.
+    println!(
+        "[cull order probe] slot assignment {} between two identical dispatches \
+         (informational — order is NOT a contract; §14.2 promises only a valid bijection)",
+        if order_identical { "was stable" } else { "DIFFERED" }
     );
+
+    // The real invariants, order notwithstanding: both runs must emit the
+    // same SET of rows, and each run's slots must be a duplicate-free
+    // allocation within capacity (an atomic that handed the same slot to
+    // two threads, or a slot past capacity, would corrupt the command
+    // buffer — that IS a contract, and it is what this probe now pins).
+    let rows_of = |run: &Vec<(u32, u32)>| {
+        let mut v: Vec<u32> = run.iter().map(|&(_, row)| row).collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        rows_of(&run_a),
+        rows_of(&run_b),
+        "the same input must yield the same visible ROW set regardless of slot order"
+    );
+    for (label, run) in [("a", &run_a), ("b", &run_b)] {
+        let mut slots: Vec<u32> = run.iter().map(|&(slot, _)| slot).collect();
+        slots.sort_unstable();
+        let before = slots.len();
+        slots.dedup();
+        assert_eq!(before, slots.len(), "run {label}: a command slot was allocated twice");
+        // Same capacity the closure above constructs its output with.
+        let capacity = view_tokens.count() + 8;
+        assert!(
+            slots.iter().all(|&s| s < capacity),
+            "run {label}: a command slot landed outside the capacity bound ({capacity})"
+        );
+    }
 }
