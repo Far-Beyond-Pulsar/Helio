@@ -34,7 +34,7 @@ and `helio-voxel-core` remain unchanged regression baselines.
 
 - [x] Pulsar terrain component/subsystem and asynchronous work queues ([Pulsar-Native#327](https://github.com/Far-Beyond-Pulsar/Pulsar-Native/pull/327))
 - [x] Helio bounded GPU page atlas, hash table, upload, eviction, and device-loss recovery ([Helio#65](https://github.com/Far-Beyond-Pulsar/Helio/pull/65))
-- [ ] Earth-radius camera-local coordinates and precision validation ([issue #108](https://github.com/Far-Beyond-Pulsar/Helio/issues/108))
+- [x] Earth-radius camera-local coordinates and precision validation ([Helio#109](https://github.com/Far-Beyond-Pulsar/Helio/pull/109))
 - [ ] View-driven page demand, streaming, and strict CPU/GPU/VRAM budgets
 - [x] GPU Transvoxel versus manifold dual-contouring extraction bake-off ([Helio#107](https://github.com/Far-Beyond-Pulsar/Helio/pull/107))
 - [ ] Generation-safe bounded meshlet publication and indirect drawing
