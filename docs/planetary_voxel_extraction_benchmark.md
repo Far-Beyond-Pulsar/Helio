@@ -39,7 +39,8 @@ a crack-gate failure, not a benchmark omission. The selected path still needs
 render-graph/meshlet integration before end-to-end total frame time can be
 claimed; this harness reports the isolated extraction contribution.
 
-Run:
+The exact preregistered harness is retained in Git commit `869f29fb`. Check out
+that commit and run:
 
 ```text
 cargo run --release -p helio-pass-planetary-voxel --example extraction_benchmark

@@ -5,21 +5,6 @@ use std::collections::BTreeMap;
 pub const TERRAIN_MESHLET_MAX_VERTICES: u32 = 64;
 pub const TERRAIN_MESHLET_MAX_TRIANGLES: u32 = 96;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ExtractionAlgorithm {
-    Transvoxel,
-    ManifoldDualContouring,
-}
-
-impl ExtractionAlgorithm {
-    pub const fn gpu_value(self) -> u32 {
-        match self {
-            Self::Transvoxel => 0,
-            Self::ManifoldDualContouring => 1,
-        }
-    }
-}
-
 /// One bounded GPU extraction request. The page slot resolves through the
 /// residency metadata; generations make late extraction dispatches harmless.
 #[repr(C, align(16))]
@@ -29,10 +14,9 @@ pub struct GpuExtractionRequest {
     pub generation_low: u32,
     pub generation_high: u32,
     pub transition_mask: u32,
-    pub algorithm: u32,
     pub dirty_microbricks_low: u32,
     pub dirty_microbricks_high: u32,
-    pub _pad: u32,
+    pub _pad: [u32; 2],
 }
 
 impl GpuExtractionRequest {
@@ -40,7 +24,6 @@ impl GpuExtractionRequest {
         page_slot: u32,
         generation: u64,
         transition_mask: u8,
-        algorithm: ExtractionAlgorithm,
         dirty_microbricks: u64,
     ) -> Result<Self, ExtractionError> {
         if transition_mask & !TRANSITION_FACE_MASK != 0 {
@@ -51,10 +34,9 @@ impl GpuExtractionRequest {
             generation_low: generation as u32,
             generation_high: (generation >> 32) as u32,
             transition_mask: u32::from(transition_mask),
-            algorithm: algorithm.gpu_value(),
             dirty_microbricks_low: dirty_microbricks as u32,
             dirty_microbricks_high: (dirty_microbricks >> 32) as u32,
-            _pad: 0,
+            _pad: [0; 2],
         })
     }
 
@@ -748,19 +730,18 @@ mod tests {
 
     #[test]
     fn gpu_requests_preserve_full_generations_and_dirty_masks() {
+        assert_eq!(crate::PRODUCTION_EXTRACTION_ALGORITHM, "gpu_transvoxel");
         let request = GpuExtractionRequest::new(
             17,
             0xfedc_ba98_7654_3210,
             TRANSITION_FACE_MASK,
-            ExtractionAlgorithm::ManifoldDualContouring,
             0x8000_0000_0000_0001,
         )
         .unwrap();
         assert_eq!(request.generation(), 0xfedc_ba98_7654_3210);
         assert_eq!(request.dirty_microbricks(), 0x8000_0000_0000_0001);
-        assert_eq!(request.algorithm, 1);
         assert_eq!(
-            GpuExtractionRequest::new(0, 0, 0x80, ExtractionAlgorithm::Transvoxel, 0),
+            GpuExtractionRequest::new(0, 0, 0x80, 0),
             Err(ExtractionError::TransitionMask(0x80))
         );
     }
