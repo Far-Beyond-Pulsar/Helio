@@ -1,5 +1,6 @@
 use crate::{
-    AddressError, PageKey, PlanetId, LOD0_CELL_SIZE_METERS, PAGE_EDGE_CELLS, TRANSITION_FACE_MASK,
+    AddressError, PageKey, PlanetId, PlanetPosition, PlanetRenderFrame, LOD0_CELL_SIZE_METERS,
+    TRANSITION_FACE_MASK,
 };
 use bytemuck::{Pod, Zeroable};
 
@@ -21,33 +22,24 @@ pub struct PlanetFrameUniform {
 }
 
 impl PlanetFrameUniform {
-    pub fn new(
-        planet: PlanetId,
-        frame_origin_lod0_cell: [i64; 3],
-        camera_relative_m: [f32; 3],
-        frame_index: u64,
-    ) -> Result<Self, FrameError> {
-        if frame_origin_lod0_cell
-            .iter()
-            .any(|axis| axis.rem_euclid(PAGE_EDGE_CELLS) != 0)
-        {
-            return Err(FrameError::UnsnappedOrigin);
-        }
-        if camera_relative_m.iter().any(|value| !value.is_finite()) {
-            return Err(FrameError::NonFiniteCameraOffset);
-        }
-
-        Ok(Self {
-            planet_id: planet_words(planet),
+    pub fn from_render_frame(frame: PlanetRenderFrame) -> Self {
+        let frame_origin_lod0_cell = frame.origin_lod0_cell();
+        let camera_relative_m = frame.camera_relative_m().map(|value| value as f32);
+        Self {
+            planet_id: planet_words(frame.planet()),
             origin_x: split_i64(frame_origin_lod0_cell[0]),
             origin_y: split_i64(frame_origin_lod0_cell[1]),
             origin_z: split_i64(frame_origin_lod0_cell[2]),
-            frame_index: split_u64(frame_index),
+            frame_index: split_u64(frame.frame_index()),
             camera_relative_m,
             lod0_cell_size_m: LOD0_CELL_SIZE_METERS as f32,
-            page_edge_cells: PAGE_EDGE_CELLS as u32,
+            page_edge_cells: crate::PAGE_EDGE_CELLS as u32,
             _pad: [0; 3],
-        })
+        }
+    }
+
+    pub fn from_camera(planet: PlanetId, camera: PlanetPosition, frame_index: u64) -> Self {
+        Self::from_render_frame(PlanetRenderFrame::new(planet, camera, frame_index))
     }
 
     pub fn frame_origin_lod0_cell(self) -> [i64; 3] {
@@ -109,6 +101,22 @@ impl GpuPageMeta {
     pub const fn generation(self) -> u64 {
         (self.generation_low as u64) | ((self.generation_high as u64) << 32)
     }
+
+    /// CPU mirror of `planet_camera_local_position_m` in the shared WGSL.
+    pub fn camera_local_position_m(
+        self,
+        frame: PlanetFrameUniform,
+        local_lod0_cell: [f32; 3],
+    ) -> [f32; 3] {
+        [
+            (self.relative_lod0_cell_min[0] as f32 + local_lod0_cell[0]) * frame.lod0_cell_size_m
+                - frame.camera_relative_m[0],
+            (self.relative_lod0_cell_min[1] as f32 + local_lod0_cell[1]) * frame.lod0_cell_size_m
+                - frame.camera_relative_m[1],
+            (self.relative_lod0_cell_min[2] as f32 + local_lod0_cell[2]) * frame.lod0_cell_size_m
+                - frame.camera_relative_m[2],
+        ]
+    }
 }
 
 #[repr(C, align(16))]
@@ -116,14 +124,6 @@ impl GpuPageMeta {
 pub struct GpuVoxelMaterial {
     pub base_color_roughness: [f32; 4],
     pub emissive_metalness: [f32; 4],
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum FrameError {
-    #[error("planet frame origin must be snapped to an LOD0 page boundary")]
-    UnsnappedOrigin,
-    #[error("planet frame camera offset must contain only finite values")]
-    NonFiniteCameraOffset,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -160,23 +160,41 @@ mod tests {
 
     #[test]
     fn frame_round_trips_signed_canonical_origin() {
+        let camera =
+            PlanetPosition::new([-63_i64, 34, i64::from(i32::MAX) * 32 + 3], [0.0; 3]).unwrap();
+        let uniform = PlanetFrameUniform::from_camera(PlanetId([7; 16]), camera, 9);
         let origin = [-64_i64, 32, i64::from(i32::MAX) * 32];
-        let uniform =
-            PlanetFrameUniform::new(PlanetId([7; 16]), origin, [1.0, 2.0, 3.0], 9).unwrap();
         assert_eq!(uniform.frame_origin_lod0_cell(), origin);
         assert_eq!(uniform.frame_index, [9, 0]);
         assert_eq!(uniform.page_edge_cells, 32);
+        assert_eq!(uniform.camera_relative_m, [0.1, 0.2, 0.3]);
     }
 
     #[test]
-    fn frame_rejects_unsnapped_and_non_finite_values() {
+    fn page_boundary_reconstruction_is_identical_from_both_pages() {
+        let camera =
+            PlanetPosition::new([63_710_017, -63_710_017, 0], [0.025, 0.075, 0.0]).unwrap();
+        let frame = PlanetRenderFrame::new(PlanetId([9; 16]), camera, 4);
+        let uniform = PlanetFrameUniform::from_render_frame(frame);
+        let left = GpuPageMeta::new(
+            PageKey::new(0, [1_990_938, -1_990_940, 0]),
+            frame.origin_lod0_cell(),
+            0,
+            1,
+            0,
+        )
+        .unwrap();
+        let right = GpuPageMeta::new(
+            PageKey::new(0, [1_990_939, -1_990_940, 0]),
+            frame.origin_lod0_cell(),
+            1,
+            1,
+            0,
+        )
+        .unwrap();
         assert_eq!(
-            PlanetFrameUniform::new(PlanetId::default(), [1, 0, 0], [0.0; 3], 0),
-            Err(FrameError::UnsnappedOrigin)
-        );
-        assert_eq!(
-            PlanetFrameUniform::new(PlanetId::default(), [0; 3], [f32::INFINITY, 0.0, 0.0], 0,),
-            Err(FrameError::NonFiniteCameraOffset)
+            left.camera_local_position_m(uniform, [32.0, 7.5, 3.25]),
+            right.camera_local_position_m(uniform, [0.0, 7.5, 3.25])
         );
     }
 }

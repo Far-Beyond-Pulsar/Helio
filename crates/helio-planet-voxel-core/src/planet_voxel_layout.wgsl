@@ -40,3 +40,16 @@ fn cell_material(cell: CellWord) -> u32 {
 fn cell_flags(cell: CellWord) -> u32 {
     return cell >> 24u;
 }
+
+// Reconstruct a bounded camera-local position. Absolute planet coordinates
+// remain split integers on the CPU; shaders only convert the checked i32 page
+// delta and page-local coordinate to f32.
+fn planet_camera_local_position_m(
+    frame: PlanetFrameUniform,
+    page: GpuPageMeta,
+    local_lod0_cell: vec3<f32>,
+) -> vec3<f32> {
+    return (vec3<f32>(page.relative_lod0_cell_min) + local_lod0_cell)
+        * frame.lod0_cell_size_m
+        - frame.camera_relative_m;
+}
