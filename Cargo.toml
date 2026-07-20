@@ -21,7 +21,6 @@ exclude = [
 ]
 resolver = "2"
 
-[patch.crates-io]
 [workspace.dependencies]
 wgpu = { version = "30.0.0", default-features = true, features = ["vulkan", "metal", "dx12", "gles", "webgpu", "wgsl"] }
 blade-graphics = { git = "https://github.com/tristanpoland/blade", rev = "d85bd14a78ed7729abc298906e87332257674a02" }
