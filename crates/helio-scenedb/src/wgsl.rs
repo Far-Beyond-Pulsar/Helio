@@ -378,3 +378,146 @@ fn cull_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 }
 "#;
+
+/// The M3-b T7 minimal indirect-draw executor: `DrawExecutor::new`
+/// concatenates this AFTER [`SCENE_BINDINGS_WGSL`]
+/// (`format!("{SCENE_BINDINGS_WGSL}\n{DRAW_WGSL}")`, the same idiom
+/// [`CULL_WGSL`] established) to get `vs_main`/`fs_main`'s full source:
+/// `@group(0)` (`instances`, `instance_info` -- the only two of
+/// `SCENE_BINDINGS_WGSL`'s five group(0) entries this module's shader
+/// bodies actually reference) comes from `SCENE_BINDINGS_WGSL`; this module
+/// supplies `@group(2)` -- the draw pass's own per-view inputs (design
+/// S4/S14.1/S14.2: `first_instance` (== command slot) -> `visible_instance_
+/// ids[slot]` -> row -> `instances[row]`).
+///
+/// ## `@group(1)` is never bound (mirrors [`CULL_WGSL`]'s own choice)
+///
+/// `vs_main`/`fs_main` read `InstanceInfo.mesh_index` only to pick a flat
+/// output color -- they never touch `clusters`/`meshlets`/`cell_meta`/
+/// `materials`. `DrawExecutor::new` passes `bind_group_layouts: &[Some(cull_
+/// layout), None, Some(output_layout)]` to `create_pipeline_layout`, so
+/// `@group(1)` has no layout at pipeline-layout index 1 at all -- the plan's
+/// "prefer not binding it and say so" instruction, taken literally, for the
+/// exact reason [`CULL_WGSL`]'s module doc already established works
+/// (wgpu/naga's pipeline-layout validation checks bindings *reachable from
+/// the entry point*, not every module-scope declaration).
+///
+/// ## Why `@group(2)` re-declares `CullRecord`'s byte layout instead of
+/// reusing [`CULL_WGSL`]'s `CullOutput`/`CullRecord` types (M3-b T7)
+///
+/// `CullOutput`'s 16-byte atomics header (`visible_count`/etc, all
+/// `atomic<u32>`) forces its storage variable to be declared
+/// `var<storage, read_write>` (WGSL requires read_write access for a
+/// binding that contains atomic fields, regardless of whether the shader
+/// actually calls an atomic op on them). A `read_write` storage buffer
+/// bound to the VERTEX stage requires `wgpu::Features::
+/// VERTEX_WRITABLE_STORAGE` -- a NON-default feature this task's device
+/// (`wgpu::Limits::default()`, no extra `required_features`) does not
+/// request. So `vs_main` cannot bind `CullOutput` as-is. Instead this
+/// module declares `DrawRecord` (identical 8 scalar fields, same offsets,
+/// to [`CULL_WGSL`]'s `CullRecord` -- MUST stay byte-identical, see
+/// `crate::cull::CullRecord`'s doc) and `DrawCullOutput` (the same 16-byte
+/// header, as four plain non-atomic `u32` fields, followed by
+/// `records: array<DrawRecord>`) purely so the header+array CAN be bound
+/// `var<storage, read>` -- `read`-only access needs no feature request, and
+/// `vs_main` only ever READS `.records[iid].row`, never writes. Both
+/// declarations describe the EXACT SAME buffer bytes [`crate::cull::
+/// CullOutputBuffers`] already allocates (M3-b T5) -- this is a second,
+/// read-only WGSL *view* of that buffer, not a second buffer or a repack.
+///
+/// ## The indirect-draw mechanism (M3-b T7's required choice, documented
+/// again at the call site in `draw.rs`)
+///
+/// `DrawExecutor::record` issues a CPU-side loop of `RenderPass::
+/// draw_indexed_indirect` calls, one per command slot, each pointing
+/// directly at `CullOutputBuffers::HEADER_BYTES + slot * RECORD_BYTES` --
+/// NOT `multi_draw_indexed_indirect`. Both wgpu-30 methods gate on the same
+/// downlevel capability (`DownlevelFlags::INDIRECT_EXECUTION`, universally
+/// true on desktop Vulkan/DX12/Metal, not a `Features` flag at all), so
+/// availability was never the blocker; `multi_draw_indexed_indirect`'s own
+/// doc comment requires its indirect buffer's draw structs to be "tightly
+/// packed" (wgpu's `DrawIndexedIndirectArgs`, 20 bytes, no gaps) --
+/// `CullOutputBuffers`' `CullRecord` stride is 32 bytes (the S14.1 command
+/// fields plus `row`/`flags`/`reserved`, `crate::cull`'s module doc has the
+/// group(2) storage-budget reason those live in ONE record), so a single
+/// `multi_draw_indexed_indirect(..., count)` call cannot read it directly --
+/// it would require a repack pass into a second, tightly-packed
+/// `array<DrawCommand>` buffer first. The per-slot loop reads the EXACT
+/// same 32-byte-strided buffer the cull pass wrote (each `CullRecord`'s
+/// first 20 bytes are field-for-field a valid `DrawIndexedIndirectArgs`,
+/// `crate::cull::CullRecord`'s doc), so it needs no extra buffer, no extra
+/// pass, and no extra feature -- the right minimal choice for this
+/// deliberately-not-the-full-integration executor (M4 owns any real
+/// per-frame draw-call-count optimization).
+pub const DRAW_WGSL: &str = r#"
+struct DrawRecord {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+    row: u32,
+    flags: u32,
+    reserved: u32,
+}
+
+struct DrawCullOutput {
+    visible_count: u32,
+    stale_drops: u32,
+    oob_drops: u32,
+    frustum_drops: u32,
+    records: array<DrawRecord>,
+}
+
+struct DrawUniforms {
+    view_proj: mat4x4<f32>,
+}
+
+@group(2) @binding(0) var<storage, read> draw_cull_output: DrawCullOutput;
+@group(2) @binding(1) var<uniform> draw_uniforms: DrawUniforms;
+
+// Deterministic mesh_index -> flat RGBA color, so a test can identify WHICH
+// instance painted a given pixel from its color alone (house law:
+// self-verifying guards must prove the row->instance_info lookup, not just
+// that pixels exist). Arbitrary but fixed multipliers -- callers that need
+// the SAME mapping on the CPU side reproduce this exact formula (documented
+// in `draw.rs`'s Test 4).
+fn mesh_color(idx: u32) -> vec4<f32> {
+    let r = f32((idx * 37u + 17u) % 256u) / 255.0;
+    let g = f32((idx * 91u + 53u) % 256u) / 255.0;
+    let b = f32((idx * 131u + 7u) % 256u) / 255.0;
+    return vec4<f32>(r, g, b, 1.0);
+}
+
+struct VsOut {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) @interpolate(flat) mesh_index: u32,
+}
+
+// S14.1/S14.2: `first_instance` (== command slot, the bindless lookup key)
+// arrives here as the `instance_index` builtin -- WebGPU's indirect-draw
+// semantics set it to `first_instance + <local index within instance_
+// count>`, and every command this pass draws has `instance_count == 1`, so
+// `iid` is exactly the command slot the cull pass allocated. That slot
+// indexes `draw_cull_output.records[iid].row` -- the row-valued lookup the
+// design calls `visible_instance_ids[command_slot] = row` (co-located in
+// this buffer rather than a standalone array, `crate::wgsl`'s CULL_WGSL doc
+// has the group(2) storage-budget reason) -- which in turn indexes
+// `instances`/`instance_info` (SCENE_BINDINGS_WGSL's group(0), the pinned
+// column-major transform convention, no transpose).
+@vertex
+fn vs_main(@location(0) local_pos: vec3<f32>, @builtin(instance_index) iid: u32) -> VsOut {
+    let row = draw_cull_output.records[iid].row;
+    let m = instances[row].transform;
+    let world = m * vec4<f32>(local_pos, 1.0);
+    var out: VsOut;
+    out.clip_pos = draw_uniforms.view_proj * world;
+    out.mesh_index = instance_info[row].mesh_index;
+    return out;
+}
+
+@fragment
+fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    return mesh_color(in.mesh_index);
+}
+"#;

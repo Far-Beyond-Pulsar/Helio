@@ -108,6 +108,17 @@ impl CullOutputBuffers {
     /// Allocates a zero-initialized (WebGPU-guaranteed, per spec -- wgpu
     /// conforms) `CullOutput` buffer sized for `capacity` records. `label`
     /// names the underlying `wgpu::Buffer` for GPU-debugger identification.
+    ///
+    /// `usage` carries [`wgpu::BufferUsages::INDIRECT`] alongside `STORAGE`/
+    /// `COPY_DST`/`COPY_SRC` (M3-b T7 addition) -- `draw::DrawExecutor`
+    /// issues `draw_indexed_indirect` calls that read a `CullRecord`'s first
+    /// 20 bytes directly out of THIS buffer (see [`CullRecord`]'s doc: those
+    /// 20 bytes are field-for-field identical to `DrawCommand`, i.e. wgpu's
+    /// `DrawIndexedIndirectArgs`), which requires the source buffer to carry
+    /// `INDIRECT` usage or wgpu's validation rejects the call. Added here
+    /// (not a separate buffer) because T5/T6 already established this is
+    /// the ONE buffer indirect draws read from -- no repacking, see
+    /// `draw.rs`'s module doc for the full indirect-mechanism rationale.
     #[must_use]
     pub fn new(device: &wgpu::Device, label: &str, capacity: u32) -> Self {
         let size = Self::HEADER_BYTES + capacity as u64 * Self::RECORD_BYTES;
@@ -116,7 +127,8 @@ impl CullOutputBuffers {
             size,
             usage: wgpu::BufferUsages::STORAGE
                 | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC,
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::INDIRECT,
             mapped_at_creation: false,
         });
         Self { buffer, capacity }

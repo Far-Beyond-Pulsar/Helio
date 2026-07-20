@@ -14,7 +14,8 @@
 //! adapter, no `pollster`. Safe to run anywhere `cargo test` runs.
 
 use helio_scenedb::cull::{CullRecord, CullUniforms, DrawCommand};
-use helio_scenedb::wgsl::{CULL_WGSL, SCENE_BINDINGS_WGSL};
+use helio_scenedb::draw::DrawUniforms;
+use helio_scenedb::wgsl::{CULL_WGSL, DRAW_WGSL, SCENE_BINDINGS_WGSL};
 use pulsar_scenedb::gpu::{ClusterNode, InstanceInfo, MaterialRow, MeshMetadata, MeshletEntry};
 
 /// Reflect (size, [(member_name, offset)]) for a named struct in WGSL source.
@@ -301,6 +302,83 @@ fn cull_output_header_is_byte_exact() {
     assert_eq!(
         size, 48,
         "naga Layouter size for a struct with a trailing runtime array == fixed header (16) + ONE array-element stride (32, CullRecord) -- not the header alone"
+    );
+    assert_eq!(
+        members,
+        vec![
+            ("visible_count".to_string(), 0),
+            ("stale_drops".to_string(), 4),
+            ("oob_drops".to_string(), 8),
+            ("frustum_drops".to_string(), 12),
+            ("records".to_string(), 16),
+        ]
+    );
+}
+
+/// M3-b T7: [`DRAW_WGSL`]'s struct declarations reference `SCENE_BINDINGS_
+/// WGSL`'s group(0) globals (`instances`/`instance_info`) from `vs_main`'s
+/// body -- same reason `cull_wgsl_combined` above exists, mirroring
+/// `DrawExecutor::new`'s ACTUAL `format!("{SCENE_BINDINGS_WGSL}\n{DRAW_
+/// WGSL}")` concatenation.
+fn draw_wgsl_combined() -> String {
+    format!("{SCENE_BINDINGS_WGSL}\n{DRAW_WGSL}")
+}
+
+/// M3-b T7: host [`DrawUniforms`] vs naga reflection of `DRAW_WGSL`'s
+/// `DrawUniforms` -- the draw pass's per-dispatch uniform block (just the
+/// view-proj matrix; no frustum planes or bounds, those are cull-only).
+#[test]
+fn draw_uniforms_struct_is_byte_exact() {
+    let src = draw_wgsl_combined();
+    let (size, members) = wgsl_struct_layout(&src, "DrawUniforms");
+    assert_eq!(size, 64, "WGSL DrawUniforms size == size_of::<DrawUniforms>()");
+    assert_eq!(size as usize, std::mem::size_of::<DrawUniforms>());
+    assert_eq!(members, vec![("view_proj".to_string(), 0)]);
+}
+
+/// M3-b T7: [`DRAW_WGSL`]'s `DrawRecord` MUST stay byte-identical to
+/// `CULL_WGSL`'s `CullRecord` (`crate::wgsl::DRAW_WGSL`'s module doc has the
+/// full rationale for why this is a second, independently-declared WGSL
+/// struct rather than a reused type: `VERTEX_WRITABLE_STORAGE` is a
+/// non-default feature, so the draw pass's `@group(2)` binding must be
+/// `read`-only, which rules out reusing `CullOutput`'s atomic-bearing
+/// declaration). Asserted directly against `DrawRecord`'s OWN reflection
+/// (not inferred from `CullRecord`'s), so a future edit that broke the
+/// field-for-field promise fails HERE.
+#[test]
+fn draw_record_struct_is_byte_exact() {
+    let src = draw_wgsl_combined();
+    let (size, members) = wgsl_struct_layout(&src, "DrawRecord");
+    assert_eq!(size, 32, "WGSL DrawRecord size == CullRecord's size (32 bytes) -- must stay byte-identical");
+    assert_eq!(size as usize, std::mem::size_of::<CullRecord>());
+    assert_eq!(
+        members,
+        vec![
+            ("index_count".to_string(), 0),
+            ("instance_count".to_string(), 4),
+            ("first_index".to_string(), 8),
+            ("base_vertex".to_string(), 12),
+            ("first_instance".to_string(), 16),
+            ("row".to_string(), 20),
+            ("flags".to_string(), 24),
+            ("reserved".to_string(), 28),
+        ]
+    );
+}
+
+/// M3-b T7: `DrawCullOutput`'s header offsets MUST stay byte-identical to
+/// `CULL_WGSL`'s `CullOutput` (same 16-byte header, same `records` offset)
+/// -- both are WGSL views of the SAME `CullOutputBuffers` buffer bytes (see
+/// `DRAW_WGSL`'s module doc). Mirrors `cull_output_header_is_byte_exact`'s
+/// own naga trailing-runtime-array size quirk (48 = 16-byte header + ONE
+/// `DrawRecord` stride, not the header alone).
+#[test]
+fn draw_cull_output_header_is_byte_exact() {
+    let src = draw_wgsl_combined();
+    let (size, members) = wgsl_struct_layout(&src, "DrawCullOutput");
+    assert_eq!(
+        size, 48,
+        "naga Layouter size for a struct with a trailing runtime array == fixed header (16) + ONE array-element stride (32, DrawRecord) -- not the header alone"
     );
     assert_eq!(
         members,

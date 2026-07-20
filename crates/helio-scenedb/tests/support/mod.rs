@@ -55,6 +55,50 @@ pub fn test_context() -> EngineGpuContext {
     EngineGpuContext::new(std::sync::Arc::new(device), std::sync::Arc::new(queue))
 }
 
+/// [`test_context`] plus `wgpu::Features::INDIRECT_FIRST_INSTANCE` (M3-b T7
+/// finding, `draw.rs`'s module doc + the M3-b T7 report have the full
+/// story): per wgpu-types 30's own doc on `DrawIndexedIndirectArgs::
+/// first_instance`, "Has to be 0, unless `Features::INDIRECT_FIRST_
+/// INSTANCE` is enabled" -- WITHOUT it, a nonzero `first_instance` in an
+/// indirect draw call is backend-defined behavior, and this stack's actual
+/// observed behavior (both the Vulkan and the platform-default backend,
+/// empirically) is to execute the draw AS IF `first_instance` were zero
+/// (silently, no validation error) -- which breaks design S14.1's
+/// `first_instance == command slot` bindless-lookup-key contract outright
+/// (every indirect draw's `@builtin(instance_index)` would read record 0,
+/// no matter which slot the draw call's args actually named). This is
+/// WIDELY supported on desktop GPUs (Vulkan/DX12/Metal all expose the
+/// underlying capability; the WebGPU spec merely gates it behind an opt-in
+/// feature) -- kept as a SEPARATE context constructor from [`test_context`]
+/// (rather than folding into it) so the cull-only suites keep proving the
+/// seam fits under the true baseline `wgpu::Limits::default()`-plus-
+/// zero-extra-features envelope T4 established, while T7's draw tests
+/// request exactly the one additional capability their own S14.1 usage
+/// genuinely requires -- and no more (`wgpu::Limits::default()` unchanged).
+pub fn test_context_indirect_first_instance() -> EngineGpuContext {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+        apply_limit_buckets: false,
+    }))
+    .expect("no adapter — GPU tests need a local GPU");
+    assert!(
+        adapter.features().contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
+        "this adapter does not support Features::INDIRECT_FIRST_INSTANCE -- the M3-b T7 draw \
+         executor's S14.1 first_instance-as-slot-key contract needs it; see this function's doc"
+    );
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("helio-scenedb-draw-support-test"),
+        required_features: wgpu::Features::INDIRECT_FIRST_INSTANCE,
+        required_limits: wgpu::Limits::default(),
+        ..Default::default()
+    }))
+    .expect("device");
+    EngineGpuContext::new(std::sync::Arc::new(device), std::sync::Arc::new(queue))
+}
+
 pub fn readback(ctx: &EngineGpuContext, buf: &wgpu::Buffer, bytes: u64) -> Vec<u8> {
     let staging = ctx.device().create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),

@@ -18,6 +18,7 @@
 //! byte-exact on the actual vendored wgpu-30 stack.
 
 pub mod cull;
+pub mod draw;
 pub mod wgsl;
 
 use pulsar_scenedb::gpu::{
