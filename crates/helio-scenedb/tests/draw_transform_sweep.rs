@@ -2,10 +2,17 @@
 //! instance's transform across six frames (>= 5 positions, INCLUDING a
 //! rotated pose -- the column-major transform convention is pinned
 //! (`page.rs`'s `Pod for [f32; 16]` doc comment) and the T5/T6 review's
-//! rotation regression pin lives cull-side (`cull_pass.rs` row 3); this
-//! test gives the DRAW path its own rotation pose so a transposed-matrix
-//! regression in the vertex shader's `instances[row].transform` read would
-//! be caught here too, not only in the cull shader's AABB math): each frame
+//! rotation regression pin lives cull-side (`cull_pass.rs` row 3). SCOPE,
+//! corrected per the M3-b T7 review: this test's rotated pose proves a
+//! NON-IDENTITY rotation reached the vertex shader's
+//! `instances[row].transform` read (asserted on painted-footprint size,
+//! after the sweep loop) -- it does NOT catch a transposed-matrix read,
+//! because R(45deg) and R(-45deg) map this centered symmetric quad to the
+//! identical point set. Transpose detection lives cull-side, where row 3
+//! uses a deliberately non-symmetric two-axis rotation. A draw-side
+//! transpose pin would need an off-center or asymmetric quad so rotation
+//! DIRECTION moves the centroid -- known gap, recorded not overclaimed):
+//! each frame
 //! `write_transform` -> boundary -> a REAL `CullPass` dispatch -> a REAL
 //! `DrawExecutor` indirect draw over that dispatch's own command buffer ->
 //! offscreen-target readback. Every frame re-derives its own expected
@@ -269,6 +276,9 @@ fn transform_sweep_tracks_projected_position_across_frames() {
     assert_ne!(move_color, decoy_color, "guard: mesh_index 0/1 colors must differ");
 
     let mut observed_columns = Vec::new();
+    /// `(was_rotated, painted_pixel_count)` per frame — feeds the
+    /// rotation-reached-the-shader assertion after the loop.
+    let mut mover_footprints: Vec<(bool, usize)> = Vec::new();
 
     for (step_i, step) in steps.iter().enumerate() {
         // --- Per-frame transform write + boundary (no re-harvest, matching
@@ -360,6 +370,42 @@ fn transform_sweep_tracks_projected_position_across_frames() {
             step.rot.is_some()
         );
         observed_columns.push(observed_col);
+        mover_footprints.push((step.rot.is_some(), mover_px.len()));
+    }
+
+    // The rotated pose must actually CHANGE the rendered footprint (M3-β T7
+    // review, defect 1). A centered square quad's centroid is invariant
+    // under rotation, so the column assertions above cannot see a rotation
+    // at all; without this, the rotated frame would be pure decoration.
+    // Comparing painted-pixel COUNT against the unrotated frames' does see
+    // it: the same quad rotated 45° covers a different pixel set.
+    //
+    // Scope, stated honestly: this proves a NON-IDENTITY rotation reached
+    // the vertex shader's `instances[row]` read — it does NOT discriminate
+    // M from Mᵀ, because R(45°) and R(-45°) map a symmetric square to the
+    // same point set (reviewer verified numerically). The column-major
+    // convention itself is pinned cull-side by `cull_pass.rs` row 3, which
+    // uses a deliberately non-symmetric two-axis rotation for exactly that
+    // reason. Pinning a *vertex-shader* transpose specifically would need
+    // an off-center or asymmetric quad so rotation direction moves the
+    // centroid — recorded as a known gap rather than overclaimed here.
+    let unrotated: Vec<usize> =
+        mover_footprints.iter().filter(|(r, _)| !r).map(|&(_, n)| n).collect();
+    let rotated: Vec<usize> =
+        mover_footprints.iter().filter(|(r, _)| *r).map(|&(_, n)| n).collect();
+    assert!(!rotated.is_empty(), "guard: the sweep must contain a rotated pose");
+    let baseline = unrotated[0];
+    assert!(
+        unrotated.iter().all(|&n| n == baseline),
+        "guard: the unrotated poses must all paint the same footprint size (got {unrotated:?}) — \
+         otherwise the rotated-vs-unrotated comparison below is meaningless"
+    );
+    for &n in &rotated {
+        assert_ne!(
+            n, baseline,
+            "the rotated pose painted the same {n}-pixel footprint as the unrotated baseline — \
+             the rotation did not reach the vertex shader's transform read"
+        );
     }
 
     // --- The deliverable-gate assertion (house law): the footprint must
