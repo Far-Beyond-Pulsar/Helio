@@ -336,4 +336,71 @@ impl DrawExecutor {
             pass.draw_indexed_indirect(output.buffer(), offset);
         }
     }
+
+    /// The strongest no-readback alternative to [`Self::record`]'s CPU-side
+    /// per-slot loop (M3-b T9 review, defect 1): ONE
+    /// `RenderPass::multi_draw_indexed_indirect` call issuing `count`
+    /// GPU-side indirect draws, instead of `count` individual
+    /// `draw_indexed_indirect` CPU calls. Gated only by
+    /// `DownlevelFlags::INDIRECT_EXECUTION` (universal on desktop Vulkan/
+    /// DX12/Metal, verified against `wgpu-30.0.0/src/api/render_pass.rs` --
+    /// NOT behind `Features::MULTI_DRAW_INDIRECT_COUNT`, which gates only
+    /// the separate `_count` variant), so this needs no extra
+    /// `wgpu::Features` beyond what [`Self::record`] already requires.
+    ///
+    /// `multi_draw_indexed_indirect`'s own doc requires its indirect
+    /// buffer's records to be TIGHTLY PACKED 20-byte
+    /// `DrawIndexedIndirectArgs` -- [`crate::cull::CullOutputBuffers`]'s
+    /// `CullRecord` stride is 32 bytes (this crate's own module docs have
+    /// the group(2) storage-budget reason those extra 12 bytes exist), so
+    /// this method does NOT read `output`'s indirect args directly (unlike
+    /// [`Self::record`]) -- callers pass a SEPARATE, already tightly-packed
+    /// `indirect_buffer` (a repack pass's output; see the M3-b T9 pass-
+    /// timing bench for a worked compute-shader repack) as the args
+    /// source. `output_bind_group` is STILL `output`'s own group(2) bind
+    /// group, unchanged from [`Self::record`] -- the vertex shader's row
+    /// lookup (`draw_cull_output.records[iid].row`, `wgsl.rs`'s
+    /// `DRAW_WGSL` doc) reads the ORIGINAL 32-byte-strided `CullRecord`
+    /// buffer, which the tightly-packed indirect-args buffer does not
+    /// carry (no `row` field); only the indirect draw ARGS come from the
+    /// packed buffer, not the row-lookup data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_multi_indirect(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        scene_cull_bind_group: &wgpu::BindGroup,
+        output_bind_group: &wgpu::BindGroup,
+        indirect_buffer: &wgpu::Buffer,
+        indirect_offset: wgpu::BufferAddress,
+        count: u32,
+        vertex_buffer: &wgpu::Buffer,
+        index_buffer: &wgpu::Buffer,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("helio-scenedb-draw-pass-multi-indirect"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        if count == 0 {
+            return;
+        }
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, scene_cull_bind_group, &[]);
+        pass.set_bind_group(2, output_bind_group, &[]);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+        pass.multi_draw_indexed_indirect(indirect_buffer, indirect_offset, count);
+    }
 }

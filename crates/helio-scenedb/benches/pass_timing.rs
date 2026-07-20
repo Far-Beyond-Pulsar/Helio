@@ -222,8 +222,207 @@ fn stats(mut samples: Vec<f64>) -> (f64, f64) {
     (mean, samples[p95_idx])
 }
 
+/// min / mean / p95 -- used for the §14.2 wall-clock series (M3-b T9
+/// review: report a RANGE, not a point). The min/max spread WITHIN one
+/// process run is a floor on the true cross-process variance (T9 review
+/// defect 2 found run-to-run swings this bench's own single-process stats
+/// cannot see at all) -- both are reported, neither substitutes the other.
+fn stats3(mut samples: Vec<f64>) -> (f64, f64, f64) {
+    samples.sort_by(|a, b| a.total_cmp(b));
+    let n = samples.len();
+    let min = samples[0];
+    let mean = samples.iter().copied().sum::<f64>() / n as f64;
+    let p95_idx = (((n - 1) as f64) * 0.95).round() as usize;
+    (min, mean, samples[p95_idx])
+}
+
 fn draw_repeats(command_count: u32) -> u32 {
     (DRAW_TARGET_TOTAL / command_count.max(1)).clamp(1, DRAW_REPEATS_CAP)
+}
+
+// ======================================================================
+// M3-b T9 review (defect 1) fix: strategy (b') -- the STRONGEST no-
+// readback realization of "conservative max-count" available in wgpu 30
+// without any extra `wgpu::Features`. `RenderPass::multi_draw_indexed_
+// indirect` (`draw.rs`'s new `DrawExecutor::record_multi_indirect`) issues
+// `count` GPU-side draws from ONE CPU call, gated only by
+// `DownlevelFlags::INDIRECT_EXECUTION` (universal on desktop backends,
+// verified against `wgpu-30.0.0/src/api/render_pass.rs:346-389` -- NOT
+// `Features::MULTI_DRAW_INDIRECT_COUNT`, which gates only the separate
+// `_count` variant). Its own doc requires a TIGHTLY PACKED 20-byte
+// `DrawIndexedIndirectArgs` array; `CullOutputBuffers`' `CullRecord`
+// stride is 32 bytes (`cull.rs`'s module doc has the group(2) storage-
+// budget reason), so this repack pass exists purely to bridge that gap --
+// ONE GPU-side compute dispatch, no CPU readback, no CPU stall: reads each
+// `CullRecord`'s first 20 bytes and writes them densely to a separate
+// buffer. Bench-local (not added to the shipped crate) because it is a
+// stopgap for TODAY's 32-byte layout, not a capability worth shipping on
+// its own -- a real dense (non-compacting) cull-shader variant would write
+// the packed format directly and never need a repack pass at all (that is
+// M3-γ/M4 scope, not measured here).
+// ======================================================================
+// Binds the WHOLE `CullOutputBuffers` buffer at offset 0 (like `wgsl.rs`'s
+// own `DrawCullOutput` does for the exact same buffer, `draw.rs`'s module
+// doc has the full rationale) rather than a byte-offset view starting at
+// the records array (offset 16) -- a storage-buffer bind offset must
+// respect `min_storage_buffer_offset_alignment` (this host's default
+// limit is 256, `cull.rs::CullOutputBuffers::HEADER_BYTES` is 16, so an
+// offset-16 binding is rejected by wgpu validation; binding the whole
+// buffer and indexing `input.records[i]` inside WGSL sidesteps the
+// alignment requirement entirely, same trick the shipped `DRAW_WGSL`
+// already uses).
+const REPACK_WGSL: &str = r#"
+struct CullRecord {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+    row: u32,
+    flags: u32,
+    reserved: u32,
+}
+struct RepackInput {
+    visible_count: u32,
+    stale_drops: u32,
+    oob_drops: u32,
+    frustum_drops: u32,
+    records: array<CullRecord>,
+}
+struct PackedArgs {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+}
+struct RepackUniforms {
+    capacity: u32,
+    reserved0: u32,
+    reserved1: u32,
+    reserved2: u32,
+}
+@group(0) @binding(0) var<storage, read> input: RepackInput;
+@group(0) @binding(1) var<storage, read_write> packed: array<PackedArgs>;
+@group(0) @binding(2) var<uniform> u: RepackUniforms;
+
+@compute @workgroup_size(64)
+fn repack_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= u.capacity) {
+        return;
+    }
+    let r = input.records[i];
+    packed[i] = PackedArgs(r.index_count, r.instance_count, r.first_index, r.base_vertex, r.first_instance);
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RepackUniforms {
+    capacity: u32,
+    _reserved: [u32; 3],
+}
+unsafe impl bytemuck::Zeroable for RepackUniforms {}
+unsafe impl bytemuck::Pod for RepackUniforms {}
+
+struct RepackPass {
+    pipeline: wgpu::ComputePipeline,
+    layout: wgpu::BindGroupLayout,
+    uniform_buf: wgpu::Buffer,
+}
+
+impl RepackPass {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pass-timing-repack-shader"),
+            source: wgpu::ShaderSource::Wgsl(REPACK_WGSL.into()),
+        });
+        let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pass-timing-repack-layout"),
+            entries: &[
+                storage_entry(0, true),
+                storage_entry(1, false),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pass-timing-repack-pipeline-layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("pass-timing-repack-pipeline"),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some("repack_main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pass-timing-repack-uniforms"),
+            size: std::mem::size_of::<RepackUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, layout, uniform_buf }
+    }
+
+    fn write_capacity(&self, queue: &wgpu::Queue, capacity: u32) {
+        queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&RepackUniforms { capacity, _reserved: [0; 3] }));
+    }
+
+    fn build_bind_group(&self, device: &wgpu::Device, cull_output: &CullOutputBuffers, packed_buf: &wgpu::Buffer) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pass-timing-repack-bind-group"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: cull_output.buffer().as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: packed_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buf.as_entire_binding() },
+            ],
+        })
+    }
+
+    fn record(&self, encoder: &mut wgpu::CommandEncoder, bind_group: &wgpu::BindGroup, capacity: u32) {
+        if capacity == 0 {
+            return;
+        }
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("pass-timing-repack-pass"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.dispatch_workgroups(capacity.div_ceil(64), 1, 1);
+    }
+}
+
+/// Tightly-packed (20 B/record) `DrawIndexedIndirectArgs`-shaped buffer --
+/// [`RepackPass`]'s output, [`multi_draw_indexed_indirect`]'s required
+/// input shape.
+fn packed_indirect_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("pass-timing-repacked-indirect"),
+        size: capacity.max(1) as u64 * 20,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+        mapped_at_creation: false,
+    })
 }
 
 /// One fully-built, real (non-synthetic) scene fixture: `n` tokens spread
@@ -648,8 +847,8 @@ fn main() {
             a_stall_ns.push((t_stall_end - t_stall_start).as_nanos() as f64);
         }
     }
-    let (a_frame_mean, a_frame_p95) = stats(a_frame_ns);
-    let (a_stall_mean, a_stall_p95) = stats(a_stall_ns);
+    let (a_frame_min, a_frame_mean, a_frame_p95) = stats3(a_frame_ns);
+    let (a_stall_min, a_stall_mean, a_stall_p95) = stats3(a_stall_ns);
 
     // --- Strategy (b): conservative max-count. A SEPARATE output buffer,
     // capacity == n (10,000), whose tail is pre-filled ONCE (untimed) with
@@ -705,14 +904,91 @@ fn main() {
             b_frame_ns.push((t_frame_end - t_frame_start).as_nanos() as f64);
         }
     }
-    let (b_frame_mean, b_frame_p95) = stats(b_frame_ns);
+    let (b_frame_min, b_frame_mean, b_frame_p95) = stats3(b_frame_ns);
+
+    // --- Strategy (b'): conservative max-count, STRONGEST no-readback
+    // realization (M3-b T9 review defect 1 fix -- see the RepackPass /
+    // `record_multi_indirect` doc comments for the full mechanism). Reuses
+    // `output_b` verbatim (same pre-fill, same real per-frame cull
+    // dispatch, same no-readback design as (b)) -- the ONLY difference is
+    // the draw-issue mechanism: a GPU-side repack pass turns output_b's
+    // 32-byte `CullRecord`s into a tightly-packed 20-byte indirect-args
+    // buffer, then ONE `multi_draw_indexed_indirect` call issues all
+    // `capacity` draws, instead of (b)'s CPU loop of `capacity` individual
+    // `draw_indexed_indirect` calls. All three passes (cull, repack, draw)
+    // batch into ONE encoder / ONE submit per frame -- matching how a real
+    // engine would build one frame's command buffer, and giving (b') the
+    // fewest possible CPU-side submit calls. ---
+    let repack_pass = RepackPass::new(device2);
+    repack_pass.write_capacity(queue, output_b.capacity());
+    let packed_buf = packed_indirect_buffer(device2, output_b.capacity());
+    let repack_bind_group = repack_pass.build_bind_group(device2, &output_b, &packed_buf);
+
+    // The repack pass's OWN GPU cost, charged honestly (not modeled away):
+    // one real cull dispatch primes output_b with real data (untimed
+    // setup), then the repack pass alone is bracketed with the SAME
+    // GpuTimer/amplification approach used for cull/draw pass timing above.
+    {
+        let mut encoder = device2.create_command_encoder(&Default::default());
+        fixture.cull_pass.record(&mut encoder, &fixture.scene_binding.cull_bind_group, &output_bind_group_b, fixture.view_tokens.count());
+        queue.submit([encoder.finish()]);
+    }
+    let repack_reps = draw_repeats(output_b.capacity().max(1));
+    let mut repack_samples = Vec::with_capacity(ITERS_PASS);
+    for it in 0..(WARMUP_PASS + ITERS_PASS) {
+        let ns = timer.measure_ns(&ctx, || {
+            let mut encoder = device2.create_command_encoder(&Default::default());
+            for _ in 0..repack_reps {
+                repack_pass.record(&mut encoder, &repack_bind_group, output_b.capacity());
+            }
+            queue.submit([encoder.finish()]);
+        });
+        if it >= WARMUP_PASS {
+            repack_samples.push(ns as f64 / repack_reps as f64);
+        }
+    }
+    let (repack_mean, repack_p95) = stats(repack_samples);
+    println!();
+    println!("repack_pass_ns (GPU, amortized, mean/p95) = {repack_mean:.1}/{repack_p95:.1} (capacity={} records, charged honestly as (b')'s own GPU cost, not modeled away)", output_b.capacity());
+
+    let bp_target = throwaway_target(device2);
+    let mut bp_frame_ns = Vec::with_capacity(ITERS_WALL);
+    for it in 0..(WARMUP_WALL + ITERS_WALL) {
+        output_b.clear_counters(queue);
+        let t_frame_start = Instant::now();
+        {
+            let mut encoder = device2.create_command_encoder(&Default::default());
+            fixture.cull_pass.record(&mut encoder, &fixture.scene_binding.cull_bind_group, &output_bind_group_b, fixture.view_tokens.count());
+            repack_pass.record(&mut encoder, &repack_bind_group, output_b.capacity());
+            fixture.draw_executor.record_multi_indirect(
+                &mut encoder,
+                &bp_target,
+                &fixture.scene_binding.cull_bind_group,
+                &draw_output_bind_group_b,
+                &packed_buf,
+                0,
+                output_b.capacity(),
+                arena.vertex_buffer(),
+                arena.index_buffer(),
+            );
+            queue.submit([encoder.finish()]);
+        }
+        let t_frame_end = Instant::now();
+        if it >= WARMUP_WALL {
+            bp_frame_ns.push((t_frame_end - t_frame_start).as_nanos() as f64);
+        }
+    }
+    let (bp_frame_min, bp_frame_mean, bp_frame_p95) = stats3(bp_frame_ns);
 
     println!();
-    println!("=== S14.2 DECISION (N=10000, 10% visible, visible_count={}) ===", fixture.visible_count);
-    println!("(a) readback-then-clamp: frame_ns(mean/p95) = {a_frame_mean:.1}/{a_frame_p95:.1}  stall_ns(mean/p95) = {a_stall_mean:.1}/{a_stall_p95:.1}");
-    println!("(b) conservative max-count: frame_ns(mean/p95) = {b_frame_mean:.1}/{b_frame_p95:.1}  wasted_draws = {}", fixture.n - fixture.visible_count);
-    let winner = if a_frame_mean <= b_frame_mean { "(a) readback-then-clamp" } else { "(b) conservative max-count" };
-    println!("winner at this scale: {winner} (delta {:.1} ns, {:.2}x)", (a_frame_mean - b_frame_mean).abs(), a_frame_mean.max(b_frame_mean) / a_frame_mean.min(b_frame_mean));
+    println!("=== S14.2 DECISION (N=10000, 10% visible, visible_count={}) -- WITHIN-RUN samples (see report for the ACROSS-RUN range, this process's numbers are one data point) ===", fixture.visible_count);
+    println!("(a)  readback-then-clamp:      frame_ns(min/mean/p95) = {a_frame_min:.1}/{a_frame_mean:.1}/{a_frame_p95:.1}  stall_ns(min/mean/p95) = {a_stall_min:.1}/{a_stall_mean:.1}/{a_stall_p95:.1}");
+    println!("(b)  conservative max-count:    frame_ns(min/mean/p95) = {b_frame_min:.1}/{b_frame_mean:.1}/{b_frame_p95:.1}  wasted_draws = {}  (per-slot draw_indexed_indirect CPU loop)", fixture.n - fixture.visible_count);
+    println!("(b') conservative max-count':   frame_ns(min/mean/p95) = {bp_frame_min:.1}/{bp_frame_mean:.1}/{bp_frame_p95:.1}  wasted_draws = {}  (repack + ONE multi_draw_indexed_indirect call)", fixture.n - fixture.visible_count);
+    let mut ranked = [("(a) readback-then-clamp", a_frame_mean), ("(b) conservative max-count (loop)", b_frame_mean), ("(b') conservative max-count (multi-indirect)", bp_frame_mean)];
+    ranked.sort_by(|x, y| x.1.total_cmp(&y.1));
+    println!("winner at this scale (this run): {} (fastest mean frame_ns = {:.1})", ranked[0].0, ranked[0].1);
+    println!("full ranking (this run): {} < {} < {}", ranked[0].0, ranked[1].0, ranked[2].0);
 
     // ==================================================================
     // Report: full matrix.
@@ -772,39 +1048,39 @@ fn main() {
         cull_100k_100.cull_mean
     );
 
-    // Cull time rises with N (physics: more threads dispatched -> more GPU
-    // work), holding frac fixed at 100% for an apples-to-apples N-only
-    // comparison (dispatch_count == n regardless of frac -- see module doc).
-    //
-    // HONEST FINDING (not a harness defect): on this host, cull dispatch
-    // cost across 1k-100k tokens is dominated by a roughly CONSTANT
-    // per-dispatch-call floor (~9.5-14 us amortized, every N -- see the
-    // printed matrix), not by thread count. Two independent runs both
-    // showed N=1,000's amortized mean sitting AT OR ABOVE N=10,000's (never
-    // the reverse of what "more work" would predict) -- i.e. the true
-    // per-thread compute cost the cull term list pays (generation check +
-    // bounds check + AABB transform + up to 8-corner near-clip test + 6
-    // frustum planes) is small enough, at these token counts, that it does
-    // not clear this host's own dispatch-to-dispatch scheduling jitter
-    // until N reaches ~100k. This is the SAME shape as the perf-validation
-    // report's T7 finding (§3.3: "compute/overhead-bound, not memory-bound,
-    // at every scale tested") applied to a dispatch-call boundary instead
-    // of a memory-bandwidth one. TREND_SLACK_NS is sized to this finding's
-    // actual scale (see its own doc comment), not to paper over a broken
-    // gate.
+    // Cull time vs. N -- REPORT-AND-OBSERVE, NOT an assert (M3-b T9 review
+    // defect 3 fix, same pattern M3-b T6's order probe adopted for a
+    // property the host cannot actually guarantee). An earlier version of
+    // this gate asserted `cull(1k) <= cull(10k) + 5us <= cull(100k) +
+    // 10us`; independent review reproduction (6 separate `cargo bench`
+    // process invocations, same commit/host) tripped it in 3 of 6 runs --
+    // this host's own empty-bracket noise floor swings from ~4us to ~207us
+    // (p95) ACROSS PROCESSES, an order of magnitude wider than the 5us
+    // fixed slack the first version used, and wider than the within-run
+    // floor this file measures for itself. A fixed slack cannot be sized
+    // correctly against a host property that swings by that much between
+    // runs without either (a) being loose enough to stop catching a real
+    // inversion, or (b) firing on ordinary noise roughly half the time, as
+    // it did. Rather than pick an arbitrarily wide constant to make the
+    // assert stop firing (which is exactly what T3's "gate must be provably
+    // capable of failing, not tuned to pass" law warns against from the
+    // other direction), this gate now REPORTS the observed ordering and
+    // deltas without failing the run on them -- the payload-visibility gate
+    // above (which compares the SAME run's own raw N=100k total against the
+    // SAME run's own floor, not against a fixed constant across runs) is
+    // the actual defense against a dead/misplaced cull bracket; N-vs-N
+    // ordering at this token-count range is a genuine, twice-independently-
+    // observed HOST PROPERTY (dispatch-call overhead dominates the real
+    // per-thread cull cost at 1k-100k on this host -- the same shape as the
+    // perf-validation report's T7 "compute/overhead-bound" finding), not
+    // something this harness can promise to always order correctly.
     let cull_1k_100 = results.iter().find(|r| r.n == 1_000 && (r.frac - 1.0).abs() < 1e-6).unwrap();
     let cull_10k_100 = results.iter().find(|r| r.n == 10_000 && (r.frac - 1.0).abs() < 1e-6).unwrap();
-    assert!(
-        cull_1k_100.cull_mean <= cull_10k_100.cull_mean + TREND_SLACK_NS,
-        "monotonicity broken: cull(N=1k) {:.1} ns > cull(N=10k) {:.1} ns + {TREND_SLACK_NS} ns",
-        cull_1k_100.cull_mean,
-        cull_10k_100.cull_mean
-    );
-    assert!(
-        cull_10k_100.cull_mean <= cull_100k_100.cull_mean + TREND_SLACK_NS,
-        "monotonicity broken: cull(N=10k) {:.1} ns > cull(N=100k) {:.1} ns + {TREND_SLACK_NS} ns",
-        cull_10k_100.cull_mean,
-        cull_100k_100.cull_mean
+    let cull_order_1k_10k = if cull_1k_100.cull_mean <= cull_10k_100.cull_mean { "monotonic" } else { "INVERTED (expected on this host at this scale, see comment above)" };
+    let cull_order_10k_100k = if cull_10k_100.cull_mean <= cull_100k_100.cull_mean { "monotonic" } else { "INVERTED (expected on this host at this scale, see comment above)" };
+    println!(
+        "observed (report-and-observe, not asserted): cull(1k)={:.1} ns cull(10k)={:.1} ns cull(100k)={:.1} ns -- 1k->10k {cull_order_1k_10k}, 10k->100k {cull_order_10k_100k}",
+        cull_1k_100.cull_mean, cull_10k_100.cull_mean, cull_100k_100.cull_mean
     );
 
     // Draw time rises with visible (command) count (physics: more indirect
@@ -835,7 +1111,12 @@ fn main() {
     );
 
     println!();
-    println!("self-check OK: floor visible, cull/draw monotonic in N/V (fixed {TREND_SLACK_NS} ns slack), S14.2 stall is real work");
+    println!(
+        "self-check OK: N=100k cull payload visible over its own run's floor, draw monotonic in V \
+         (fixed {TREND_SLACK_NS} ns slack), S14.2 stall is real work. Cull N-vs-N ordering is \
+         report-and-observe (see line above), not asserted -- see this run's printed line for \
+         which way it landed."
+    );
 }
 
 /// A throwaway 64x64 Rgba8Unorm render target -- draw timing doesn't care
