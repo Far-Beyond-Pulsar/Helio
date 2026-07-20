@@ -19,6 +19,7 @@
 
 pub mod cull;
 pub mod draw;
+pub mod repack;
 pub mod wgsl;
 
 use pulsar_scenedb::gpu::{

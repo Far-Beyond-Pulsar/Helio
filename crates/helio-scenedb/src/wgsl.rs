@@ -521,3 +521,124 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     return mesh_color(in.mesh_index);
 }
 "#;
+
+/// The M3-b T9-followup repack pass: `crate::repack::RepackPass::new`
+/// concatenates NOTHING before this (unlike [`CULL_WGSL`]/[`DRAW_WGSL`],
+/// this module's ONE entry point (`repack_main`) never touches
+/// `SCENE_BINDINGS_WGSL`'s `@group(0)` at all -- it only reads
+/// [`crate::cull::CullOutputBuffers`]'s own buffer and writes a second,
+/// tightly-packed one, so it needs no scene bindings). Promoted (M3-b T9
+/// review, defect 2) out of `benches/pass_timing.rs`'s bench-local
+/// `REPACK_WGSL`/`RepackPass` into this crate proper, so
+/// `DrawExecutor::record_multi_indirect` (`draw.rs`, strategy (b') -- the
+/// T9-recommended default for M3-γ/M4) has a real library-shipped source of
+/// the tightly-packed indirect-args buffer it requires, not just a
+/// throwaway bench probe.
+///
+/// ## The 32 -> 20 byte contract (read this before touching either side)
+///
+/// [`crate::cull::CullRecord`] (32 bytes, `cull.rs`'s doc) and
+/// `PackedArgs`/[`crate::cull::DrawCommand`] (20 bytes, wgpu's
+/// `DrawIndexedIndirectArgs` shape) share the SAME first 5 fields, in the
+/// SAME order, at the SAME offsets -- `crate::cull::CullRecord`'s own doc
+/// states this explicitly ("First 5 fields are field-for-field identical to
+/// `DrawCommand`"). `repack_main` below does exactly that: read one
+/// `CullRecord`, write its first 5 fields verbatim, drop the trailing 3
+/// (`row`, `flags`, `reserved` -- cull-internal bookkeeping the packed
+/// indirect-args buffer has no room for and no use for: `multi_draw_indexed_
+/// indirect` never reads past byte 20 of each record).
+///
+/// | `CullRecord` field (offset) | -> | `PackedArgs` field (offset) | kept? |
+/// |------------------------------|----|-------------------------------|-------|
+/// | `index_count`   (0)          | -> | `index_count`   (0)           | yes   |
+/// | `instance_count` (4)         | -> | `instance_count` (4)          | yes   |
+/// | `first_index`   (8)          | -> | `first_index`   (8)           | yes   |
+/// | `base_vertex`   (12, i32)    | -> | `base_vertex`   (12, i32)     | yes   |
+/// | `first_instance` (16)        | -> | `first_instance` (16)         | yes -- **MUST survive unchanged** |
+/// | `row`           (20)         | -> | (none)                        | dropped |
+/// | `flags`         (24)         | -> | (none)                        | dropped |
+/// | `reserved`      (28)         | -> | (none)                        | dropped |
+///
+/// **`first_instance` is the one field a repack bug can get away with
+/// scrambling without an obviously-broken draw** (unlike e.g. swapping
+/// `index_count`/`first_index`, which paints garbage geometry immediately).
+/// `DRAW_WGSL`'s own module doc pins why: every packed record has
+/// `instance_count == 1u` (cull_main's own construction, `CULL_WGSL`), so
+/// WebGPU's indirect-draw semantics set `@builtin(instance_index)` to
+/// EXACTLY the packed record's `first_instance` value, and `vs_main` uses
+/// that as `iid` to index `draw_cull_output.records[iid].row` -- the SAME
+/// 32-byte-strided `CullOutputBuffers` buffer this repack pass read FROM,
+/// unchanged, side-by-side with the packed buffer `multi_draw_indexed_
+/// indirect` reads its args from. Since cull_main allocates output slots
+/// with a monotonic `atomicAdd(&cull_output.visible_count, 1u)` and stamps
+/// each record's `first_instance` with that SAME `out_slot`, a `CullRecord`
+/// at buffer position `i` always has `first_instance == i` in this design --
+/// so `packed[i].first_instance` staying `== i` is what lets `records[iid]`
+/// resolve back to the CORRECT row (S14.1's "`first_instance` == command
+/// slot" bindless key, `cull.rs`/`draw.rs`'s own docs). A repack that
+/// dropped, zeroed, or shifted `first_instance` would still produce a
+/// visually plausible frame (draws still fire, geometry still valid) but
+/// with WRONG per-instance row/color/transform lookups -- exactly the class
+/// of bug `tests/draw_multi_indirect_equivalence.rs`'s byte-identical
+/// comparison against strategy (a) exists to catch.
+///
+/// ## Binding layout note (mirrors `DRAW_WGSL`'s own group(2) trick)
+///
+/// `input` binds the WHOLE `CullOutputBuffers` buffer at offset 0 (not a
+/// byte-offset view starting at the records array, offset
+/// [`crate::cull::CullOutputBuffers::HEADER_BYTES`]) -- a storage-buffer
+/// bind offset must respect `min_storage_buffer_offset_alignment` (this
+/// crate's default-limits test hosts report 256; `HEADER_BYTES` is 16, so
+/// an offset-16 binding is rejected by wgpu validation). Binding the whole
+/// buffer and indexing `input.records[i]` inside WGSL sidesteps the
+/// alignment requirement entirely -- the same trick [`DRAW_WGSL`] already
+/// uses for its own `@group(2)` view of this same buffer.
+pub const REPACK_WGSL: &str = r#"
+struct CullRecord {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+    row: u32,
+    flags: u32,
+    reserved: u32,
+}
+
+struct RepackInput {
+    visible_count: u32,
+    stale_drops: u32,
+    oob_drops: u32,
+    frustum_drops: u32,
+    records: array<CullRecord>,
+}
+
+struct PackedArgs {
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+}
+
+struct RepackUniforms {
+    capacity: u32,
+    reserved0: u32,
+    reserved1: u32,
+    reserved2: u32,
+}
+
+@group(0) @binding(0) var<storage, read> input: RepackInput;
+@group(0) @binding(1) var<storage, read_write> packed: array<PackedArgs>;
+@group(0) @binding(2) var<uniform> u: RepackUniforms;
+
+@compute @workgroup_size(64)
+fn repack_main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    if (i >= u.capacity) {
+        return;
+    }
+    let r = input.records[i];
+    packed[i] = PackedArgs(r.index_count, r.instance_count, r.first_index, r.base_vertex, r.first_instance);
+}
+"#;

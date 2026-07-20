@@ -86,6 +86,7 @@ mod support;
 
 use helio_scenedb::cull::{CullOutputBuffers, CullPass, CullRecord, CullUniforms};
 use helio_scenedb::draw::{DrawExecutor, DrawUniforms};
+use helio_scenedb::repack::{packed_indirect_buffer, RepackPass};
 use helio_scenedb::SceneDbBinding;
 use pulsar_scenedb::gpu::{
     CellId, CellSlot, ClusterBuffer, EngineGpuContext, FrameDriver, GeometryArena, HarvestPipeline,
@@ -244,7 +245,7 @@ fn draw_repeats(command_count: u32) -> u32 {
 // M3-b T9 review (defect 1) fix: strategy (b') -- the STRONGEST no-
 // readback realization of "conservative max-count" available in wgpu 30
 // without any extra `wgpu::Features`. `RenderPass::multi_draw_indexed_
-// indirect` (`draw.rs`'s new `DrawExecutor::record_multi_indirect`) issues
+// indirect` (`draw.rs`'s `DrawExecutor::record_multi_indirect`) issues
 // `count` GPU-side draws from ONE CPU call, gated only by
 // `DownlevelFlags::INDIRECT_EXECUTION` (universal on desktop backends,
 // verified against `wgpu-30.0.0/src/api/render_pass.rs:346-389` -- NOT
@@ -252,178 +253,21 @@ fn draw_repeats(command_count: u32) -> u32 {
 // `_count` variant). Its own doc requires a TIGHTLY PACKED 20-byte
 // `DrawIndexedIndirectArgs` array; `CullOutputBuffers`' `CullRecord`
 // stride is 32 bytes (`cull.rs`'s module doc has the group(2) storage-
-// budget reason), so this repack pass exists purely to bridge that gap --
-// ONE GPU-side compute dispatch, no CPU readback, no CPU stall: reads each
+// budget reason), so a repack pass bridges that gap -- ONE GPU-side
+// compute dispatch, no CPU readback, no CPU stall: reads each
 // `CullRecord`'s first 20 bytes and writes them densely to a separate
-// buffer. Bench-local (not added to the shipped crate) because it is a
-// stopgap for TODAY's 32-byte layout, not a capability worth shipping on
-// its own -- a real dense (non-compacting) cull-shader variant would write
-// the packed format directly and never need a repack pass at all (that is
-// M3-γ/M4 scope, not measured here).
+// buffer.
+//
+// M3-b T9-followup (review defect 2): this repack used to be a bench-local
+// copy (`REPACK_WGSL`/`RepackPass`/`packed_indirect_buffer`, defined right
+// here). It is now `helio_scenedb::repack::{RepackPass, packed_
+// indirect_buffer}` -- a real library capability
+// `DrawExecutor::record_multi_indirect` callers outside this bench can
+// actually use (see `src/repack.rs`'s module doc and `src/wgsl.rs`'s
+// `REPACK_WGSL` doc for the full 32->20 byte field contract). This bench
+// now CALLS the promoted capability rather than keeping its own copy --
+// a duplicated repack is exactly how the two would drift.
 // ======================================================================
-// Binds the WHOLE `CullOutputBuffers` buffer at offset 0 (like `wgsl.rs`'s
-// own `DrawCullOutput` does for the exact same buffer, `draw.rs`'s module
-// doc has the full rationale) rather than a byte-offset view starting at
-// the records array (offset 16) -- a storage-buffer bind offset must
-// respect `min_storage_buffer_offset_alignment` (this host's default
-// limit is 256, `cull.rs::CullOutputBuffers::HEADER_BYTES` is 16, so an
-// offset-16 binding is rejected by wgpu validation; binding the whole
-// buffer and indexing `input.records[i]` inside WGSL sidesteps the
-// alignment requirement entirely, same trick the shipped `DRAW_WGSL`
-// already uses).
-const REPACK_WGSL: &str = r#"
-struct CullRecord {
-    index_count: u32,
-    instance_count: u32,
-    first_index: u32,
-    base_vertex: i32,
-    first_instance: u32,
-    row: u32,
-    flags: u32,
-    reserved: u32,
-}
-struct RepackInput {
-    visible_count: u32,
-    stale_drops: u32,
-    oob_drops: u32,
-    frustum_drops: u32,
-    records: array<CullRecord>,
-}
-struct PackedArgs {
-    index_count: u32,
-    instance_count: u32,
-    first_index: u32,
-    base_vertex: i32,
-    first_instance: u32,
-}
-struct RepackUniforms {
-    capacity: u32,
-    reserved0: u32,
-    reserved1: u32,
-    reserved2: u32,
-}
-@group(0) @binding(0) var<storage, read> input: RepackInput;
-@group(0) @binding(1) var<storage, read_write> packed: array<PackedArgs>;
-@group(0) @binding(2) var<uniform> u: RepackUniforms;
-
-@compute @workgroup_size(64)
-fn repack_main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    if (i >= u.capacity) {
-        return;
-    }
-    let r = input.records[i];
-    packed[i] = PackedArgs(r.index_count, r.instance_count, r.first_index, r.base_vertex, r.first_instance);
-}
-"#;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RepackUniforms {
-    capacity: u32,
-    _reserved: [u32; 3],
-}
-unsafe impl bytemuck::Zeroable for RepackUniforms {}
-unsafe impl bytemuck::Pod for RepackUniforms {}
-
-struct RepackPass {
-    pipeline: wgpu::ComputePipeline,
-    layout: wgpu::BindGroupLayout,
-    uniform_buf: wgpu::Buffer,
-}
-
-impl RepackPass {
-    fn new(device: &wgpu::Device) -> Self {
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pass-timing-repack-shader"),
-            source: wgpu::ShaderSource::Wgsl(REPACK_WGSL.into()),
-        });
-        let storage_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
-            binding,
-            visibility: wgpu::ShaderStages::COMPUTE,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only },
-                has_dynamic_offset: false,
-                min_binding_size: None,
-            },
-            count: None,
-        };
-        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("pass-timing-repack-layout"),
-            entries: &[
-                storage_entry(0, true),
-                storage_entry(1, false),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
-                    count: None,
-                },
-            ],
-        });
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("pass-timing-repack-pipeline-layout"),
-            bind_group_layouts: &[Some(&layout)],
-            immediate_size: 0,
-        });
-        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("pass-timing-repack-pipeline"),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some("repack_main"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("pass-timing-repack-uniforms"),
-            size: std::mem::size_of::<RepackUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        Self { pipeline, layout, uniform_buf }
-    }
-
-    fn write_capacity(&self, queue: &wgpu::Queue, capacity: u32) {
-        queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&RepackUniforms { capacity, _reserved: [0; 3] }));
-    }
-
-    fn build_bind_group(&self, device: &wgpu::Device, cull_output: &CullOutputBuffers, packed_buf: &wgpu::Buffer) -> wgpu::BindGroup {
-        device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("pass-timing-repack-bind-group"),
-            layout: &self.layout,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: cull_output.buffer().as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: packed_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.uniform_buf.as_entire_binding() },
-            ],
-        })
-    }
-
-    fn record(&self, encoder: &mut wgpu::CommandEncoder, bind_group: &wgpu::BindGroup, capacity: u32) {
-        if capacity == 0 {
-            return;
-        }
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("pass-timing-repack-pass"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipeline);
-        pass.set_bind_group(0, bind_group, &[]);
-        pass.dispatch_workgroups(capacity.div_ceil(64), 1, 1);
-    }
-}
-
-/// Tightly-packed (20 B/record) `DrawIndexedIndirectArgs`-shaped buffer --
-/// [`RepackPass`]'s output, [`multi_draw_indexed_indirect`]'s required
-/// input shape.
-fn packed_indirect_buffer(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("pass-timing-repacked-indirect"),
-        size: capacity.max(1) as u64 * 20,
-        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
-        mapped_at_creation: false,
-    })
-}
 
 /// One fully-built, real (non-synthetic) scene fixture: `n` tokens spread
 /// across `ceil(n/1024)` cells, `round(n*visible_fraction)` of them

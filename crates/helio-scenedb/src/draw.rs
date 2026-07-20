@@ -355,9 +355,12 @@ impl DrawExecutor {
     /// the group(2) storage-budget reason those extra 12 bytes exist), so
     /// this method does NOT read `output`'s indirect args directly (unlike
     /// [`Self::record`]) -- callers pass a SEPARATE, already tightly-packed
-    /// `indirect_buffer` (a repack pass's output; see the M3-b T9 pass-
-    /// timing bench for a worked compute-shader repack) as the args
-    /// source. `output_bind_group` is STILL `output`'s own group(2) bind
+    /// `indirect_buffer` as the args source, produced by
+    /// [`crate::repack::RepackPass`] (M3-b T9-followup: promoted out of the
+    /// bench-local prototype into a real library capability -- see that
+    /// module's doc and [`crate::wgsl::REPACK_WGSL`]'s doc for the full
+    /// 32->20 byte field contract, including why `first_instance` MUST
+    /// survive the repack unchanged). `output_bind_group` is STILL `output`'s own group(2) bind
     /// group, unchanged from [`Self::record`] -- the vertex shader's row
     /// lookup (`draw_cull_output.records[iid].row`, `wgsl.rs`'s
     /// `DRAW_WGSL` doc) reads the ORIGINAL 32-byte-strided `CullRecord`
