@@ -47,3 +47,12 @@ pollster = { workspace = true }
 # layout via `naga::proc::Layouter`, mirroring `pulsar_scenedb/tests/
 # gpu_layout.rs`'s harness exactly (same naga major, same API forms).
 naga = { version = "30", features = ["wgsl-in"] }
+
+# M3-b T9: cull/draw pass timing + the S14.2 readback-latency decision.
+# `harness = false` (matches `pulsar_scenedb/benches/gpu_timing.rs`'s own
+# choice, same task lineage): TIMESTAMP_QUERY brackets make each iteration
+# self-measuring, so this is a plain `main()` doing its own warm-up/sample-
+# size/statistics and printing a table, not a criterion harness.
+[[bench]]
+name = "pass_timing"
+harness = false
