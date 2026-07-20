@@ -57,7 +57,12 @@ struct GpuMaterial {
 
 const FLAG_HAS_NORMAL_MAP: u32 = 1u << 3u;
 const FLAG_HAS_CLEAR_COAT: u32 = 1u << 4u;
+const FLAG_HAS_SUBSURFACE: u32 = 1u << 5u;
 const FLAG_HAS_ANISOTROPY: u32 = 1u << 6u;
+
+const SURFACE_FLAG_SUBSURFACE: u32 = 1u << 0u;
+const SURFACE_FLAG_ANISOTROPIC: u32 = 1u << 1u;
+const SURFACE_FLAG_LOW_SPECULAR: u32 = 1u << 2u;
 
 /// Per-material texture metadata (224 bytes, matches helio::GpuMaterialTextures)
 struct MaterialTextureSlot {
@@ -214,19 +219,27 @@ struct GBufferOutput {
     @location(2) orm:         vec4<f32>,
     @location(3) emissive:    vec4<f32>,
     @location(4) lightmap_uv: vec2<f32>,
+    @location(5) sss:         vec4<f32>,
+    @location(6) extra:       vec4<f32>,
 }
 
 // ── Surface data passed to GBuffer packing ──────────────────────────────────
 
 struct SurfaceData {
-    albedo:      vec4<f32>,
-    normal:      vec3<f32>,
-    ao:          f32,
-    roughness:   f32,
-    metallic:    f32,
-    specular_f0: vec3<f32>,
-    emissive:    vec3<f32>,
-    alpha:       f32,
+    albedo:              vec4<f32>,
+    normal:              vec3<f32>,
+    ao:                  f32,
+    roughness:           f32,
+    metallic:            f32,
+    specular_f0:         vec3<f32>,
+    emissive:            vec3<f32>,
+    alpha:               f32,
+    flags:               u32,
+    subsurface_color:    vec3<f32>,
+    subsurface_radius:   f32,
+    roughness_aniso_x:   f32,
+    roughness_aniso_y:   f32,
+    aniso_rotation:      f32,
 }
 
 const NO_TEXTURE: u32 = 0xffffffffu;
@@ -278,9 +291,9 @@ fn resolve_specular_f0(
     );
 }
 
-// ── Default PBR material evaluation (uber-template) ──────────────────────────
+// ── Default PBR material evaluation ──────────────────────────────────────────
 
-fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData, input: VertexOutput) -> SurfaceData {
+fn default_pbr_surface(material: GpuMaterial, material_tex: MaterialTextureData, input: VertexOutput) -> SurfaceData {
     let uv = input.tex_coords;
     let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
     let albedo = material.base_color * base_sample;
@@ -288,7 +301,6 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
 
     let N_geom = normalize(input.world_normal);
 
-    // Warp-uniform feature branch: normal mapping (gated by flag + texture)
     var N: vec3<f32>;
     if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
         let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
@@ -310,9 +322,35 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     var specular_f0: vec3<f32> = resolve_specular_f0(material, material_tex, albedo.rgb, metallic, uv);
     var emissive: vec3<f32> = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
 
-    // class_params are material-class-specific parameters set by external tools.
-    // The default PBR template ignores them; graph overrides and custom templates
-    // can interpret them freely (e.g. clear coat strength in .x, clear coat roughness in .y).
+    return SurfaceData(albedo, N, ao, roughness, metallic, specular_f0, emissive, alpha,
+                       0u, vec3<f32>(0.0), 0.0, 0.0, 0.0, 0.0);
+}
+
+// ── Radiant surface evaluation (tier-2 template entry point) ─────────────────
+//
+// NOTE: Individual local variables are kept in scope here (not `s.field`)
+// for backward compatibility with graph-generated WGSL snippets that
+// reference `emissive`, `roughness`, etc. as bare identifiers.
+// Template overrides use `default_pbr_surface()` + `s.field` access.
+
+fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData, input: VertexOutput) -> SurfaceData {
+    var s = default_pbr_surface(material, material_tex, input);
+
+    // Unpack for graph snippet access (local vars visible in the override block)
+    var albedo: vec4<f32> = s.albedo;
+    var N: vec3<f32> = s.normal;
+    var ao: f32 = s.ao;
+    var roughness: f32 = s.roughness;
+    var metallic: f32 = s.metallic;
+    var specular_f0: vec3<f32> = s.specular_f0;
+    var emissive: vec3<f32> = s.emissive;
+    var alpha: f32 = s.alpha;
+    var surface_flags: u32 = s.flags;
+    var subsurface_color: vec3<f32> = s.subsurface_color;
+    var subsurface_radius: f32 = s.subsurface_radius;
+    var roughness_aniso_x: f32 = s.roughness_aniso_x;
+    var roughness_aniso_y: f32 = s.roughness_aniso_y;
+    var aniso_rotation: f32 = s.aniso_rotation;
 
     // Radiant override point: graph-generated WGSL replaces this section to
     // override any SurfaceData field. When no graph is present the passthrough
@@ -320,7 +358,23 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     // RADIANT_OVERRIDE_SURFACE
     // RADIANT_OVERRIDE_END
 
-    return SurfaceData(albedo, N, ao, roughness, metallic, specular_f0, emissive, alpha);
+    // Repack — fields that were not touched by the graph keep their default values.
+    s.albedo = albedo;
+    s.normal = N;
+    s.ao = ao;
+    s.roughness = roughness;
+    s.metallic = metallic;
+    s.specular_f0 = specular_f0;
+    s.emissive = emissive;
+    s.alpha = alpha;
+    s.flags = surface_flags;
+    s.subsurface_color = subsurface_color;
+    s.subsurface_radius = subsurface_radius;
+    s.roughness_aniso_x = roughness_aniso_x;
+    s.roughness_aniso_y = roughness_aniso_y;
+    s.aniso_rotation = aniso_rotation;
+
+    return s;
 }
 
 @fragment
@@ -336,7 +390,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0)
+            vec2<f32>(0.0),
+            vec4<f32>(0.0),
+            vec4<f32>(0.0)
         );
     }
 
@@ -348,7 +404,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0)
+            vec2<f32>(0.0),
+            vec4<f32>(0.0),
+            vec4<f32>(0.0)
         );
     }
 
@@ -366,7 +424,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(N_geom, 0.0),
             vec4<f32>(1.0, roughness, metallic, 0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0)
+            vec2<f32>(0.0),
+            vec4<f32>(0.0),
+            vec4<f32>(0.0)
         );
     }
 
@@ -382,5 +442,8 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.orm = vec4<f32>(surface.ao, surface.roughness, surface.metallic, surface.specular_f0.g);
     out.emissive = vec4<f32>(surface.emissive, surface.specular_f0.b);
     out.lightmap_uv = input.lightmap_uv;
+    out.sss = vec4<f32>(surface.subsurface_color, surface.subsurface_radius);
+    out.extra = vec4<f32>(surface.roughness_aniso_x, surface.roughness_aniso_y,
+                          surface.aniso_rotation, bitcast<f32>(surface.flags));
     return out;
 }

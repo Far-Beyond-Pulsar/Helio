@@ -1,11 +1,8 @@
 enable wgpu_binding_array;
 
-// Radiant template: iridescent thin-film surface (class 1).
-// Demonstrates a custom surface archetype using class_params for
-// frequency and intensity control.
-//
-// Based on the default PBR template with a modified radiant_eval_surface
-// that adds thin-film interference to the specular F0.
+// Radiant template: iridescent thin-film surface.
+// Based on the default PBR template with thin-film interference added to F0.
+// class_params.x = thin-film frequency, class_params.y = thin-film intensity.
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -88,14 +85,14 @@ struct LightmapAtlasRegion {
 }
 
 @group(0) @binding(0) var<uniform>          camera:                 Camera;
-@group(0) @binding(1) var<uniform>          globals:                Globals;
-@group(0) @binding(2) var<storage, read>    instance_data:          array<GpuInstanceData>;
+@group(0) @binding(1) var<uniform>          globals:               Globals;
+@group(0) @binding(2) var<storage, read>    instance_data:         array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
 
-@group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
-@group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
-@group(1) @binding(2) var                   scene_textures:     binding_array<texture_2d<f32>, 256>;
-@group(1) @binding(3) var                   scene_samplers:     binding_array<sampler, 256>;
+@group(1) @binding(0) var<storage, read>    materials:         array<GpuMaterial>;
+@group(1) @binding(1) var<storage, read>    material_textures: array<MaterialTextureData>;
+@group(1) @binding(2) var                   scene_textures:    binding_array<texture_2d<f32>, 256>;
+@group(1) @binding(3) var                   scene_samplers:    binding_array<sampler, 256>;
 
 struct Vertex {
     @location(0) position:       vec3<f32>,
@@ -113,7 +110,7 @@ struct VertexOutput {
     @location(2) tex_coords:     vec2<f32>,
     @location(3) world_tangent:  vec3<f32>,
     @location(4) bitangent_sign: f32,
-    @location(5) @interpolate(flat) material_id:    u32,
+    @location(5) @interpolate(flat) material_id: u32,
     @location(6) lightmap_uv:    vec2<f32>,
 }
 
@@ -125,21 +122,13 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     let inst       = instance_data[slot];
     let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
-    let normal_mat = mat3x3<f32>(
-        inst.normal_mat_0.xyz,
-        inst.normal_mat_1.xyz,
-        inst.normal_mat_2.xyz,
-    );
-    let model_mat3 = mat3x3<f32>(
-        inst.transform[0].xyz,
-        inst.transform[1].xyz,
-        inst.transform[2].xyz,
-    );
+    let normal_mat = mat3x3<f32>(inst.normal_mat_0.xyz, inst.normal_mat_1.xyz, inst.normal_mat_2.xyz);
+    let model_mat3 = mat3x3<f32>(inst.transform[0].xyz, inst.transform[1].xyz, inst.transform[2].xyz);
     var out: VertexOutput;
     out.clip_position  = camera.view_proj * world_pos;
     out.world_position = world_pos.xyz;
-    out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
-    out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
+    out.world_normal   = normalize(normal_mat * decode_snorm8x4(v.normal));
+    out.world_tangent  = normalize(model_mat3 * decode_snorm8x4(v.tangent));
     out.bitangent_sign = v.bitangent_sign;
     out.tex_coords     = v.tex_coords;
     out.material_id    = inst.material_id;
@@ -147,11 +136,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
     if lightmap_idx != 0xFFFFFFFFu {
         let region = lightmap_atlas_regions[lightmap_idx];
         let use_uv1 = any(abs(v.lightmap_uv) > vec2<f32>(0.001));
-        let lm_input = select(
-            clamp(v.tex_coords, vec2<f32>(0.0), vec2<f32>(1.0)),
-            v.lightmap_uv,
-            use_uv1,
-        );
+        let lm_input = select(clamp(v.tex_coords, vec2<f32>(0.0), vec2<f32>(1.0)), v.lightmap_uv, use_uv1);
         let raw_uv = region.uv_offset + lm_input * region.uv_scale;
         out.lightmap_uv = clamp(raw_uv, region.uv_clamp_min, region.uv_clamp_max);
     } else {
@@ -168,46 +153,47 @@ struct GBufferOutput {
     @location(2) orm:         vec4<f32>,
     @location(3) emissive:    vec4<f32>,
     @location(4) lightmap_uv: vec2<f32>,
+    @location(5) sss:         vec4<f32>,
+    @location(6) extra:       vec4<f32>,
 }
 
 struct SurfaceData {
-    albedo:      vec4<f32>,
-    normal:      vec3<f32>,
-    ao:          f32,
-    roughness:   f32,
-    metallic:    f32,
-    specular_f0: vec3<f32>,
-    emissive:    vec3<f32>,
-    alpha:       f32,
+    albedo:              vec4<f32>,
+    normal:              vec3<f32>,
+    ao:                  f32,
+    roughness:           f32,
+    metallic:            f32,
+    specular_f0:         vec3<f32>,
+    emissive:            vec3<f32>,
+    alpha:               f32,
+    flags:               u32,
+    subsurface_color:    vec3<f32>,
+    subsurface_radius:   f32,
+    roughness_aniso_x:   f32,
+    roughness_aniso_y:   f32,
+    aniso_rotation:      f32,
 }
 
 const NO_TEXTURE: u32 = 0xffffffffu;
 const MATERIAL_WORKFLOW_METALLIC: u32 = 0u;
 const MATERIAL_WORKFLOW_SPECULAR: u32 = 1u;
+const FLAG_HAS_NORMAL_MAP: u32 = 1u << 3u;
 
 fn select_uv(slot: MaterialTextureSlot, base_uv: vec2<f32>) -> vec2<f32> {
     let scaled = base_uv * slot.offset_scale.zw;
     let s = slot.rotation.x;
     let c = slot.rotation.y;
-    let rotated = vec2<f32>(
-        scaled.x * c - scaled.y * s,
-        scaled.x * s + scaled.y * c,
-    );
+    let rotated = vec2<f32>(scaled.x * c - scaled.y * s, scaled.x * s + scaled.y * c);
     return rotated + slot.offset_scale.xy;
 }
 
 fn sample_texture(slot: MaterialTextureSlot, base_uv: vec2<f32>, fallback: vec4<f32>) -> vec4<f32> {
-    if slot.texture_index == NO_TEXTURE {
-        return fallback;
-    }
+    if slot.texture_index == NO_TEXTURE { return fallback; }
     let uv = select_uv(slot, base_uv);
     return textureSample(scene_textures[slot.texture_index], scene_samplers[slot.texture_index], uv);
 }
 
-fn resolve_specular_f0(
-    material: GpuMaterial, material_tex: MaterialTextureData,
-    albedo: vec3<f32>, metallic: f32, uv: vec2<f32>,
-) -> vec3<f32> {
+fn resolve_specular_f0(material: GpuMaterial, material_tex: MaterialTextureData, albedo: vec3<f32>, metallic: f32, uv: vec2<f32>) -> vec3<f32> {
     if material.workflow == MATERIAL_WORKFLOW_SPECULAR {
         let specular_color = sample_texture(material_tex.specular_color, uv, vec4<f32>(1.0)).rgb;
         let specular_weight = sample_texture(material_tex.specular_weight, uv, vec4<f32>(1.0)).a;
@@ -218,19 +204,12 @@ fn resolve_specular_f0(
     return clamp(mix(vec3<f32>(0.04), albedo, metallic), vec3<f32>(0.0), vec3<f32>(0.999));
 }
 
-// ── Iridescent surface evaluation ────────────────────────────────────────────
-// class_params.x = thin-film frequency (higher = tighter bands)
-// class_params.y = thin-film intensity (0.0 = off, 1.0 = max)
-
 fn thin_film_color(cos_theta: f32, frequency: f32, intensity: f32) -> vec3<f32> {
     let path_diff = 2.0 * cos_theta;
-    let phase_r = path_diff * frequency * 1.0;
-    let phase_g = path_diff * frequency * 1.1;
-    let phase_b = path_diff * frequency * 1.2;
     return vec3<f32>(
-        sin(phase_r) * 0.5 + 0.5,
-        sin(phase_g) * 0.5 + 0.5,
-        sin(phase_b) * 0.5 + 0.5,
+        sin(path_diff * frequency * 1.0) * 0.5 + 0.5,
+        sin(path_diff * frequency * 1.1) * 0.5 + 0.5,
+        sin(path_diff * frequency * 1.2) * 0.5 + 0.5,
     ) * intensity + (1.0 - intensity);
 }
 
@@ -242,7 +221,7 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     let N_geom = normalize(input.world_normal);
 
     var N: vec3<f32>;
-    if material_tex.normal.texture_index != NO_TEXTURE {
+    if (material.flags & FLAG_HAS_NORMAL_MAP) != 0u && material_tex.normal.texture_index != NO_TEXTURE {
         let T = normalize(input.world_tangent - dot(input.world_tangent, N_geom) * N_geom);
         let B = cross(N_geom, T) * input.bitangent_sign;
         var norm_ts = sample_texture(material_tex.normal, uv, vec4<f32>(0.5, 0.5, 1.0, 1.0)).rgb * 2.0 - 1.0;
@@ -261,8 +240,6 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     var metallic: f32 = clamp(material.roughness_metallic.y * orm_sample.b, 0.0, 1.0);
     var emissive: vec3<f32> = material.emissive.rgb * material.emissive.w * emissive_sample.rgb;
 
-    // Iridescent F0: thin-film interference on dielectric base, then mixed with
-    // metallic F0 based on metallic value.
     let V = normalize(camera.position_near.xyz - input.world_position);
     let NdotV = max(dot(N, V), 0.0);
     let film_freq = material.class_params.x;
@@ -275,7 +252,8 @@ fn radiant_eval_surface(material: GpuMaterial, material_tex: MaterialTextureData
     // RADIANT_OVERRIDE_SURFACE
     // RADIANT_OVERRIDE_END
 
-    return SurfaceData(albedo, N, ao, roughness, metallic, specular_f0, emissive, alpha);
+    return SurfaceData(albedo, N, ao, roughness, metallic, specular_f0, emissive, alpha,
+                       0u, vec3<f32>(0.0), 0.0, 0.0, 0.0, 0.0);
 }
 
 @fragment
@@ -290,7 +268,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0)
+            vec2<f32>(0.0),
+            vec4<f32>(0.0),
+            vec4<f32>(0.0)
         );
     }
 
@@ -301,7 +281,9 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0)
+            vec2<f32>(0.0),
+            vec4<f32>(0.0),
+            vec4<f32>(0.0)
         );
     }
 
@@ -315,5 +297,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.orm = vec4<f32>(surface.ao, surface.roughness, surface.metallic, surface.specular_f0.g);
     out.emissive = vec4<f32>(surface.emissive, surface.specular_f0.b);
     out.lightmap_uv = input.lightmap_uv;
+    out.sss = vec4<f32>(surface.subsurface_color, surface.subsurface_radius);
+    out.extra = vec4<f32>(surface.roughness_aniso_x, surface.roughness_aniso_y, surface.aniso_rotation, bitcast<f32>(surface.flags));
     return out;
 }

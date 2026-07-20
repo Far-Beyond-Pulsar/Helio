@@ -60,7 +60,18 @@ pub enum ResourceSize {
     /// Match the full output/display resolution
     Output,
     Absolute { width: u32, height: u32 },
+    /// Output resolution divided by `divisor`.
+    ///
+    /// Note this divides the *output* resolution, not the internal one. An effect
+    /// buffer that gets sampled alongside `depth` or the gbuffer almost certainly
+    /// wants [`ScaledInternal`](Self::ScaledInternal) instead — those live at the
+    /// internal resolution, which differs from output whenever render_scale != 1.
     Scaled { divisor: u32 },
+    /// Internal render resolution divided by `divisor`.
+    ///
+    /// The right choice for reduced-resolution effect buffers that pair with
+    /// internal-resolution inputs (depth, gbuffer), since it scales with them.
+    ScaledInternal { divisor: u32 },
 }
 
 /// Resource access mode.

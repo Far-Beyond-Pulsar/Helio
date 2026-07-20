@@ -143,57 +143,35 @@ fn sphere_near_depth(center: vec3<f32>, radius: f32) -> f32 {
 // Main kernel  (64 threads × 1 × 1 workgroup)
 // ──────────────────────────────────────────────────────────────────────────────
 
-@compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
-    if idx >= params.draw_count {
-        return;
-    }
-
-    // Get representative instance for this draw call (same as frustum cull pass).
-    let dc = draw_calls[idx];
-    let inst = instances[dc.first_instance];
+/// Test a single instance against the Hi-Z pyramid.
+fn instance_hiz_occluded(inst: GpuInstanceData) -> bool {
     let center = inst.bounds.xyz;
     let radius = inst.bounds.w;
     if radius <= 0.0 {
-        // No bounds — likely a placeholder; skip (keep whatever frustum cull wrote).
-        return;
+        return false;
     }
 
-    // ── Compute screen-space bounds ──────────────────────────────────────────
     let clip = camera.view_proj * vec4<f32>(center, 1.0);
     if clip.w <= 0.0 {
-        // Center behind camera — cannot occlude (leave existing instance_count alone).
-        // The frustum cull pass already set this correctly.
-        return;
+        return false;
     }
 
-    let ndc = clip.xyz / clip.w;
-    let uv = ndc_to_uv(ndc.xy);
-
-    // Check that the sphere's screen-space footprint is within the viewport.
-    // If the entire screen-space footprint is outside the viewport, the object
-    // was frustum-culled and we shouldn't touch it.
     let ndc_r = max(
         abs(radius * camera.proj[0][0] / clip.w),
         abs(radius * camera.proj[1][1] / clip.w),
     );
+    let ndc = clip.xyz / clip.w;
+    let uv = ndc_to_uv(ndc.xy);
+
     if ndc.x + ndc_r < -1.0 || ndc.x - ndc_r > 1.0 ||
        ndc.y + ndc_r < -1.0 || ndc.y - ndc_r > 1.0 {
-        // Entirely outside viewport (should have been frustum-culled). Skip.
-        return;
+        return false;
     }
 
-    // ── Conservative near depth ──────────────────────────────────────────────
     let near_z = sphere_near_depth(center, radius);
-
-    // ── Choose Hi-Z mip level ────────────────────────────────────────────────
     let r_px = screen_radius_px(radius, clip.w);
-    let mip  = pick_mip(r_px);
+    let mip = pick_mip(r_px);
 
-    // ── Conservative 4-tap Hi-Z occlusion test ──────────────────────────────
-    // Sample Hi-Z (MAX pyramid) at 4 corners of sphere's bounding rectangle.
-    // Take the farthest of the 4 samples — most conservative.
     let uv_half = ndc_r * 0.5;
     let uv_00 = clamp(uv - vec2<f32>(uv_half, uv_half), vec2<f32>(0.0), vec2<f32>(1.0));
     let uv_11 = clamp(uv + vec2<f32>(uv_half, uv_half), vec2<f32>(0.0), vec2<f32>(1.0));
@@ -205,56 +183,80 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let hiz_depth = max(max(hiz_00, hiz_01), max(hiz_10, hiz_11));
 
     let depth_bias = 1.0 / 65536.0;
-    if near_z > hiz_depth + depth_bias {
-        // Only count as occlusion-culled if the frustum pass left it visible
-        // (instance_count > 0). Frustum-culled draws already have instance_count=0.
-        let was_visible = indirect[idx * 5u + 1u] != 0u;
-        indirect[idx * 5u + 1u] = 0u;
-        if was_visible {
-            atomicAdd(&stats[4u], 1u);
-            if (inst.flags & 1u) != 0u {
-                atomicAdd(&stats[7u], 1u);
-            }
+    return near_z > hiz_depth + depth_bias;
+}
+
+/// Test a single instance against the static pre-baked PVS.
+fn instance_pvs_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
+    let center = inst.bounds.xyz;
+    let cam_to_obj = center - cam_pos;
+    let cam_dist = length(cam_to_obj);
+    if cam_dist <= 0.001 {
+        return false;
+    }
+    let view_dir = cam_to_obj / cam_dist;
+    let abs_dir = abs(view_dir);
+    var layer: u32 = 0u;
+    if abs_dir.x >= abs_dir.y && abs_dir.x >= abs_dir.z {
+        layer = select(0u, 1u, view_dir.x < 0.0);
+    } else if abs_dir.y >= abs_dir.z {
+        layer = select(2u, 3u, view_dir.y < 0.0);
+    } else {
+        layer = select(4u, 5u, view_dir.z < 0.0);
+    }
+    let grid_min = vec3<f32>(f32(params.world_bounds_min_x), f32(params.world_bounds_min_y), f32(params.world_bounds_min_z));
+    let grid_max = vec3<f32>(f32(params.world_bounds_max_x), f32(params.world_bounds_max_y), f32(params.world_bounds_max_z));
+    let grid_size = grid_max - grid_min;
+    let uvw = (center - grid_min) / grid_size;
+    let clamped_uvw = clamp(uvw, vec3<f32>(0.0), vec3<f32>(1.0));
+    let w = (clamped_uvw.z + f32(layer)) / 6.0;
+    let occlusion_dist = textureSampleLevel(static_hiz_tex, static_hiz_samp, vec3<f32>(clamped_uvw.x, clamped_uvw.y, w), 0.0).r;
+    return cam_dist > occlusion_dist + 0.1;
+}
+
+/// Returns true when an instance is occluded by either Hi-Z or static PVS.
+/// Matches original logic: occluded if (HiZ occluded) OR (PVS occluded when available).
+fn instance_is_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
+    if instance_hiz_occluded(inst) {
+        return true;
+    }
+    if params.static_hiz_available != 0u {
+        if instance_pvs_occluded(inst, cam_pos) {
+            return true;
         }
+    }
+    return false;
+}
+
+@compute @workgroup_size(64, 1, 1)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let idx = gid.x;
+    if idx >= params.draw_count {
         return;
     }
 
-    // ── Static HiZ (pre-baked PVS) ──────────────────────────────────────────
-    // Camera-independent occlusion test using the pre-baked voxel grid.
-    // Samples the 3D texture at the sphere center, selecting the directional
-    // layer based on the camera-to-object view direction.
-    if params.static_hiz_available != 0u {
-        let cam_pos = camera.position_near.xyz;
-        let cam_to_obj = center - cam_pos;
-        let cam_dist = length(cam_to_obj);
-        if cam_dist > 0.001 {
-            let view_dir = cam_to_obj / cam_dist;
-            let abs_dir = abs(view_dir);
-            var layer: u32 = 0u;
-            if abs_dir.x >= abs_dir.y && abs_dir.x >= abs_dir.z {
-                layer = select(0u, 1u, view_dir.x < 0.0);
-            } else if abs_dir.y >= abs_dir.z {
-                layer = select(2u, 3u, view_dir.y < 0.0);
-            } else {
-                layer = select(4u, 5u, view_dir.z < 0.0);
-            }
-            let grid_min = vec3<f32>(f32(params.world_bounds_min_x), f32(params.world_bounds_min_y), f32(params.world_bounds_min_z));
-            let grid_max = vec3<f32>(f32(params.world_bounds_max_x), f32(params.world_bounds_max_y), f32(params.world_bounds_max_z));
-            let grid_size = grid_max - grid_min;
-            let uvw = (center - grid_min) / grid_size;
-            let clamped_uvw = clamp(uvw, vec3<f32>(0.0), vec3<f32>(1.0));
-            let w = (clamped_uvw.z + f32(layer)) / 6.0;
-            let occlusion_dist = textureSampleLevel(static_hiz_tex, static_hiz_samp, vec3<f32>(clamped_uvw.x, clamped_uvw.y, w), 0.0).r;
-            if cam_dist > occlusion_dist + 0.1 {
-                let was_visible = indirect[idx * 5u + 1u] != 0u;
-                indirect[idx * 5u + 1u] = 0u;
-                if was_visible {
-                    atomicAdd(&stats[4u], 1u);
-                    if (inst.flags & 1u) != 0u {
-                        atomicAdd(&stats[7u], 1u);
-                    }
-                }
-            }
+    // Check if frustum cull left this batch visible at all.
+    if indirect[idx * 5u + 1u] == 0u {
+        return;
+    }
+
+    let dc = draw_calls[idx];
+    let cam_pos = camera.position_near.xyz;
+
+    // Iterate all instances in the batch. Only occlude the entire batch if
+    // EVERY instance is occluded. This prevents flickering when the
+    // representative (first) instance is occluded but others are not.
+    var all_occluded = true;
+    for (var i = 0u; i < dc.instance_count; i++) {
+        let inst = instances[dc.first_instance + i];
+        if !instance_is_occluded(inst, cam_pos) {
+            all_occluded = false;
+            break;
         }
+    }
+
+    if all_occluded {
+        indirect[idx * 5u + 1u] = 0u;
+        atomicAdd(&stats[4u], 1u);
     }
 }

@@ -18,11 +18,53 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
         | wgpu::Features::INDIRECT_FIRST_INSTANCE;
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
-    let optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
+    let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer
         wgpu::Features::TIMESTAMP_QUERY | // GPU profiling timestamp queries
         wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS | // GPU profiling timestamps via encoder
         wgpu::Features::VERTEX_WRITABLE_STORAGE;
+    // Request ray tracing if available (native only, requires Vulkan)
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        if adapter_features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            optional |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        }
+    }
     required | (adapter_features & optional)
+}
+
+/// Acknowledgement token for the experimental features [`required_wgpu_features`] asks for.
+///
+/// wgpu gates every `EXPERIMENTAL_*` feature behind this second opt-in: naming one in
+/// `required_features` without also passing an enabled token fails device creation with
+/// `ExperimentalFeaturesNotEnabled`, no matter what the adapter supports. The two must
+/// therefore travel together, which is why this is derived from `required_wgpu_features`
+/// rather than hardcoded — it stays correct if that function starts requesting a
+/// different experimental feature.
+///
+/// Pass it alongside the features:
+///
+/// ```ignore
+/// adapter.request_device(&wgpu::DeviceDescriptor {
+///     required_features: required_wgpu_features(adapter.features()),
+///     required_limits: required_wgpu_limits(adapter.limits()),
+///     experimental_features: required_experimental_features(adapter.features()),
+///     ..Default::default()
+/// })
+/// ```
+///
+/// Returns a disabled token when nothing experimental is requested, so a device that
+/// does not need them is not opted in.
+pub fn required_experimental_features(adapter_features: wgpu::Features) -> wgpu::ExperimentalFeatures {
+    let requested = required_wgpu_features(adapter_features);
+    if requested.intersects(wgpu::Features::all_experimental_mask()) {
+        // SAFETY: wgpu asks callers to acknowledge that experimental features may
+        // contain soundness bugs reachable from otherwise-safe code, and to report
+        // any found. The only experimental feature requested here is
+        // EXPERIMENTAL_RAY_QUERY, and only when the adapter reports support for it.
+        unsafe { wgpu::ExperimentalFeatures::enabled() }
+    } else {
+        wgpu::ExperimentalFeatures::disabled()
+    }
 }
 
 #[cfg(test)]

@@ -56,6 +56,19 @@ pub struct HiZBuildPass {
     copy_bind_group: Option<wgpu::BindGroup>,
     copy_bind_group_key: Option<usize>,
 
+    // ── Min pyramid ("hiz_min") ─────────────────────────────────────────────
+    // Same policy and same dimensions as the max chain above, opposite reduction.
+    // Shares this pass so pyramid sizing/mip-count/resize logic lives in exactly
+    // one place; a consumer that needs min-depth reads the resource rather than
+    // growing its own builder. Mip 0 is identical to the max chain's (a plain
+    // depth copy — min and max of one texel are the same), so it reuses
+    // `copy_pipeline`; only levels 1+ diverge.
+    min_mip_pipeline: wgpu::ComputePipeline,
+    min_mip_bind_groups: Vec<wgpu::BindGroup>,
+    min_mip_views: Vec<wgpu::TextureView>,
+    min_copy_bind_group: Option<wgpu::BindGroup>,
+    min_copy_bind_group_key: Option<usize>,
+
     // HiZ sampler (always owned by this pass)
     pub hiz_sampler: Arc<wgpu::Sampler>,
     // Per-mip views created from graph-owned texture; rebuilt on resize
@@ -142,7 +155,17 @@ impl HiZBuildPass {
             label: Some("HiZ Mip Pipeline"),
             layout: Some(&mip_pl),
             module: &mip_shader,
-            entry_point: Some("main"),
+            entry_point: Some("main_max"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Same module and layout as the max chain — only the reduction differs.
+        let min_mip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("HiZ Min Mip Pipeline"),
+            layout: Some(&mip_pl),
+            module: &mip_shader,
+            entry_point: Some("main_min"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -198,31 +221,9 @@ impl HiZBuildPass {
 
         // Mip uniforms and bind groups are built lazily from the graph-owned texture.
         // Mip uniforms and dispatch groups are built once here (width/height-dependent).
-        let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
-        let mut mip_uniforms = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
-        let mut mip_dispatch_groups = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
-        for mip in 0..(mip_count.saturating_sub(1)) {
-            let src_w = (width >> mip).max(1);
-            let src_h = (height >> mip).max(1);
-            let dst_w = (width >> (mip + 1)).max(1);
-            let dst_h = (height >> (mip + 1)).max(1);
-            let uniforms = HiZUniforms {
-                src_size: [src_w, src_h],
-                dst_size: [dst_w, dst_h],
-            };
-            // `create_buffer_init` uses mappedAtCreation on WebGPU. Dawn can
-            // reject that synchronous mapping under browser resource pressure,
-            // so initialize through the queue instead.
-            let ub = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("HiZ Mip Uniform"),
-                size: std::mem::size_of::<HiZUniforms>() as u64,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&ub, 0, bytemuck::bytes_of(&uniforms));
-            mip_uniforms.push(ub);
-            mip_dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
-        }
+        // Both chains are the same size, so both share these.
+        let (mip_uniforms, mip_dispatch_groups) =
+            build_mip_uniforms(device, queue, width, height, "HiZ Mip Uniform");
 
         // mip_views and mip_bind_groups need the wgpu::Texture handle which is
         // available via ctx.resource_pool in execute().
@@ -236,6 +237,11 @@ impl HiZBuildPass {
             copy_bgl,
             copy_bind_group: None,
             copy_bind_group_key: None,
+            min_mip_pipeline,
+            min_mip_bind_groups: Vec::new(),
+            min_mip_views: Vec::new(),
+            min_copy_bind_group: None,
+            min_copy_bind_group_key: None,
             hiz_sampler,
             mip_views: Vec::new(),
             width,
@@ -253,6 +259,66 @@ impl HiZBuildPass {
     /// static HiZ data has been loaded.
     pub fn static_hiz_metadata(&self) -> Option<&StaticHizMetadata> {
         self.static_hiz_metadata.as_ref()
+    }
+
+    /// Seeds and builds the min-depth pyramid consumed by SsrPass.
+    ///
+    /// Assumes `min_mip_views` / `min_mip_bind_groups` are already populated.
+    fn build_min_pyramid(&mut self, ctx: &mut PassContext) {
+        let depth_key = ctx.depth as *const _ as usize;
+        if self.min_copy_bind_group_key != Some(depth_key) {
+            self.min_copy_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HiZ Min Copy BG"),
+                    layout: &self.copy_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(ctx.depth),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(&self.min_mip_views[0]),
+                        },
+                    ],
+                }));
+            self.min_copy_bind_group_key = Some(depth_key);
+        }
+
+        let encoder = unsafe { &mut *ctx.encoder_ptr };
+
+        // Seed mip 0. Same shader as the max chain: at 1:1 there is nothing to
+        // reduce, so the two pyramids only diverge from level 1 on.
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("HiZ Min Seed"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.copy_pipeline);
+            pass.set_bind_group(0, self.min_copy_bind_group.as_ref().unwrap(), &[]);
+            pass.dispatch_workgroups(
+                self.width.div_ceil(WORKGROUP_SIZE),
+                self.height.div_ceil(WORKGROUP_SIZE),
+                1,
+            );
+        }
+
+        // Remaining levels via MIN-reduction.
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("HiZ Min MipChain"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.min_mip_pipeline);
+            for (bg, &(wg_x, wg_y)) in self
+                .min_mip_bind_groups
+                .iter()
+                .zip(self.mip_dispatch_groups.iter())
+            {
+                pass.set_bind_group(0, bg, &[]);
+                pass.dispatch_workgroups(wg_x, wg_y, 1);
+            }
+        }
     }
 
     /// Load pre-baked static HiZ data from Nebula baker.
@@ -378,6 +444,45 @@ fn mip_levels(w: u32, h: u32) -> u32 {
     (u32::BITS - max_dim.leading_zeros()).max(1)
 }
 
+/// Per-level src/dst sizes and dispatch extents for a pyramid of `width`x`height`.
+fn build_mip_uniforms(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    width: u32,
+    height: u32,
+    label: &str,
+) -> (Vec<wgpu::Buffer>, Vec<(u32, u32)>) {
+    let mip_count = mip_levels(width, height).min(MAX_MIP_LEVELS);
+    let levels = mip_count.saturating_sub(1);
+    let mut uniforms = Vec::with_capacity(levels as usize);
+    let mut dispatch_groups = Vec::with_capacity(levels as usize);
+
+    for mip in 0..levels {
+        let src_w = (width >> mip).max(1);
+        let src_h = (height >> mip).max(1);
+        let dst_w = (width >> (mip + 1)).max(1);
+        let dst_h = (height >> (mip + 1)).max(1);
+        let u = HiZUniforms {
+            src_size: [src_w, src_h],
+            dst_size: [dst_w, dst_h],
+        };
+        // `create_buffer_init` uses mappedAtCreation on WebGPU. Dawn can
+        // reject that synchronous mapping under browser resource pressure,
+        // so initialize through the queue instead.
+        let ub = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: std::mem::size_of::<HiZUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&ub, 0, bytemuck::bytes_of(&u));
+        uniforms.push(ub);
+        dispatch_groups.push((dst_w.div_ceil(WORKGROUP_SIZE), dst_h.div_ceil(WORKGROUP_SIZE)));
+    }
+
+    (uniforms, dispatch_groups)
+}
+
 impl RenderPass for HiZBuildPass {
     fn name(&self) -> &'static str {
         "HiZBuild"
@@ -388,11 +493,16 @@ impl RenderPass for HiZBuildPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["hiz", "hiz_sampler", "static_hiz", "static_hiz_sampler"]
+        &["hiz", "hiz_min", "hiz_sampler", "static_hiz", "static_hiz_sampler"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
+        // Both are R32Float, which the resource pool automatically gives a full
+        // mip chain (see graph::resource_lifetime).
         builder.write_color_raw("hiz", wgpu::TextureFormat::R32Float, ResourceSize::MatchSurface);
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
+        builder.write_color_raw("hiz_min", wgpu::TextureFormat::R32Float, ResourceSize::MatchSurface);
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
     }
 
     fn on_resize(&mut self, _device: &wgpu::Device, _width: u32, _height: u32) {
@@ -402,6 +512,10 @@ impl RenderPass for HiZBuildPass {
         self.mip_bind_groups.clear();
         self.copy_bind_group = None;
         self.copy_bind_group_key = None;
+        self.min_mip_views.clear();
+        self.min_mip_bind_groups.clear();
+        self.min_copy_bind_group = None;
+        self.min_copy_bind_group_key = None;
         self.first_frame = true;
     }
 
@@ -468,6 +582,62 @@ impl RenderPass for HiZBuildPass {
             }
             self.mip_bind_groups = mip_bind_groups;
         }
+
+        // ── Lazy init: min pyramid views + bind groups ───────────────────────
+        if self.min_mip_views.is_empty() {
+            let tex = ctx.resource_pool.get_texture("hiz_min")
+                .expect("HiZ texture 'hiz_min' must be declared as a graph resource");
+            let mip_count = mip_levels(self.width, self.height).min(MAX_MIP_LEVELS);
+
+            let mut views = Vec::with_capacity(mip_count as usize);
+            for mip in 0..mip_count {
+                views.push(tex.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("HiZ Min Mip View"),
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                }));
+            }
+            self.min_mip_views = views;
+
+            let mut bgs = Vec::with_capacity((mip_count.saturating_sub(1)) as usize);
+            for mip in 0..(mip_count.saturating_sub(1)) {
+                bgs.push(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("HiZ Min Mip BG"),
+                    layout: &self.mip_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            // Same dimensions as the max chain, so the same
+                            // per-level src/dst sizes apply.
+                            binding: 0,
+                            resource: self.mip_uniforms[mip as usize].as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.min_mip_views[mip as usize],
+                            ),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(
+                                &self.min_mip_views[(mip + 1) as usize],
+                            ),
+                        },
+                    ],
+                }));
+            }
+            self.min_mip_bind_groups = bgs;
+        }
+
+        // ── Min pyramid: rebuilt every frame ─────────────────────────────────
+        // Deliberately outside the camera-static early-out below. That optimization
+        // is sound for the max chain because its consumer (occlusion culling) is
+        // temporal by design and tolerates a frame-stale pyramid. SSR is not: it
+        // reflects the *current* frame, and a static camera does not imply static
+        // depth — anything that moves while the camera holds still would otherwise
+        // reflect a frozen pyramid.
+        self.build_min_pyramid(ctx);
 
         // ── HiZ Reuse optimization: skip rebuild if camera static ─────────────
         let camera_gen = ctx.scene.camera_generation;
