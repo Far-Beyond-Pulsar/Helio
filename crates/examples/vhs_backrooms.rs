@@ -20,9 +20,9 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, GroupMask, HelioAction,
-    HelioCommandBridge, LightId, MaterialId, MeshId, Movability, ObjectDescriptor, Renderer,
-    RendererConfig, Scene,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera,
+    DebugDrawState, GroupMask, HelioAction, HelioCommandBridge, LightId, MaterialId, MeshId,
+    Movability, ObjectDescriptor, Renderer, RendererConfig, Scene,
 };
 use helio_default_graphs::build_default_graph_with_user_effects;
 use helio_pass_postprocess::PostProcessPass;
@@ -1024,6 +1024,7 @@ impl ApplicationHandler for App {
             label: Some("Device"),
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("device");
