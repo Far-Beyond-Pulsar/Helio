@@ -14,10 +14,15 @@ path = "src/bin/web.rs"
 
 [workspace]
 members = [
-    "crates/*"
+    "crates/*",
+    "crates_other/*"
 ]
 exclude = [
     "vendor/nebula",
+    # Bake output, not a crate. Lands here when a demo is run with `crates/` as
+    # the working directory, and the `crates/*` member glob would otherwise try
+    # to read it as a workspace member and fail.
+    "crates/bake_cache",
 ]
 resolver = "2"
 
@@ -47,11 +52,13 @@ helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
 helio-pass-taa = { path = "crates/helio-pass-taa" }
 helio-pass-postprocess = { path = "crates/helio-pass-postprocess" }
+helio-pass-volumetric-fog = { path = "crates/helio-pass-volumetric-fog" }
 helio = { path = "crates/helio" }
 libhelio = { path = "crates/libhelio" }
 helio-asset-compat = { path = "crates/helio-asset-compat" }
 helio-voxel-core = { path = "crates/helio-voxel-core" }
 helio-pass-corona = { path = "crates/helio-pass-corona" }
+helio-pass-decal = { path = "crates/helio-pass-decal" }
 helio-pass-sdf = { path = "crates/helio-pass-sdf" }
 helio-pass-voxel-mesh = { path = "crates/helio-pass-voxel-mesh" }
 helio-pass-fxaa = { path = "crates/helio-pass-fxaa" }

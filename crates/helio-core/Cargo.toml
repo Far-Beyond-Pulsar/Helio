@@ -16,6 +16,9 @@ helio-voxel-core = { workspace = true }
 
 [dev-dependencies]
 pollster = { workspace = true }
+# Matches the naga inside wgpu 30, so tests/wgsl_validation.rs validates shaders
+# exactly as create_shader_module would at runtime.
+naga = { version = "30.0.0", features = ["wgsl-in"] }
 
 [features]
 default = ["profiling"]

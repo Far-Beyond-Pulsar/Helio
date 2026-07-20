@@ -83,7 +83,13 @@ pub fn run_bake_blocking(
         );
 
         pollster::block_on(async {
-            let ctx = BakeContext::new().await?;
+            let ctx = BakeContext::from_wgpu(
+                helio_device.clone(),
+                helio_queue.clone(),
+                "helio-device".to_string(),
+                0x10DE, // NVIDIA vendor ID placeholder
+                helio_device.limits(),
+            );
 
             // AO
             if need_ao {

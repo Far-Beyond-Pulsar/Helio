@@ -29,11 +29,11 @@ pub struct VoxelVolumeDescriptor {
 ///
 /// Objects are the primary renderable entities in Helio. Each object references
 /// a mesh and material, has a world-space transform, and can be assigned to
-/// visibility groups.
+/// visibility groups. Objects sharing the same mesh and material are automatically
+/// batched into instanced draw calls.
 ///
 /// # Performance
-/// - `insert_object()` is O(1) in persistent mode (default)
-/// - Call `optimize_scene_layout()` after bulk loading for optimal GPU batching
+/// - `insert_object()` is O(1) CPU — GPU rebuild deferred to flush
 ///
 /// # Example
 /// ```ignore
@@ -181,8 +181,7 @@ pub(crate) struct ObjectRecord {
 
     /// Cached GPU buffer slot for O(1) transform updates.
     ///
-    /// - In persistent mode: equals dense array index
-    /// - In optimized mode: set by `rebuild_instance_buffers_optimized()`
+    /// Set by `rebuild_instance_buffers()` during each GPU buffer rebuild.
     pub gpu_slot: u32,
 }
 
@@ -284,4 +283,18 @@ pub(crate) struct WaterHitboxRecord {
 pub(crate) struct PostProcessVolumeRecord {
     /// GPU post-process volume descriptor with bounds, priority, and settings.
     pub gpu: GpuPostProcessVolume,
+}
+
+/// Internal record for a decal.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DecalRecord {
+    pub gpu: libhelio::GpuDecal,
+    pub movability: libhelio::Movability,
+    pub user_tag: u64,
+}
+
+/// Internal record for a reflection capture.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReflectionCaptureRecord {
+    pub gpu: libhelio::GpuReflectionCapture,
 }

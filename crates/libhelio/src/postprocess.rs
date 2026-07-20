@@ -115,10 +115,99 @@ pub struct GpuPostProcessUniforms {
     pub blend_weight_grain: f32,
     pub blend_weight_exposure: f32,
     pub pad_bw: f32,
+
+    // ── Volumetric Fog (64 bytes) ──
+    // Consumed by helio-pass-volumetric-fog (accumulation) and by fs_uber (composite).
+    //
+    // Field order is deliberate: the two vec3s sit at offsets 336 and 352, both
+    // multiples of 16. WGSL aligns vec3<f32> to 16 bytes, so a vec3 placed at a
+    // non-multiple-of-16 offset is silently pushed forward on the GPU while
+    // #[repr(C)] keeps it put — skewing every field after it. The scalars are
+    // grouped ahead of the vectors to pad the block out naturally.
+    pub fog_enabled: u32,               // 304
+    pub fog_mode: u32,                  // 308 — FogMode discriminant
+    pub fog_density: f32,               // 312
+    pub fog_height_falloff: f32,        // 316 — exponential decay for height fog
+    pub fog_start_distance: f32,        // 320 — distance from camera where fog begins
+    pub fog_max_distance: f32,          // 324 — distance at which fog reaches full opacity
+    pub fog_height: f32,                // 328 — base world height for height fog
+    pub fog_scattering_anisotropy: f32, // 332 — Henyey-Greenstein g, (-1, 1)
+    pub fog_color: [f32; 3],            // 336 ← 16-aligned
+    pub pad_fog_color: f32,             // 348
+    pub fog_emissive: [f32; 3],         // 352 ← 16-aligned
+    pub pad_fog_emissive: f32,          // 364
 }
 
-// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 = 304 bytes
-// WGSL uniform buffer rule: must be multiple of 16 → 304 / 16 = 19 slots. ✓
+// Total: 16 + 32 + 80 + 16 + 16 + 32 + 16 + 16 + 32 + 16 + 32 + 64 = 368 bytes
+// WGSL uniform buffer rule: must be multiple of 16 → 368 / 16 = 23 slots. ✓
+//
+// This struct is mirrored by hand in helio-pass-postprocess/shaders/postprocess.wgsl
+// and is embedded in GpuPostProcessVolume, which cs_volume_blend reads as a storage
+// array. A field added here without updating that mirror misreads the buffer silently.
+const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() == 368);
+const _: () = assert!(std::mem::size_of::<GpuPostProcessUniforms>() % 16 == 0);
+
+// ── GpuFogUniforms ─────────────────────────────────────────────────────────────
+
+/// The fog block of [`GpuPostProcessUniforms`], standalone.
+///
+/// The volumetric fog pass binds this instead of mirroring all 368 bytes of
+/// `GpuPostProcessUniforms` in WGSL: it needs 64 of them, and a third hand-written
+/// mirror of the full struct is a third thing to keep in sync. The pass copies the
+/// block out of the post-process uniform buffer at [`GpuPostProcessUniforms::FOG_BLOCK_OFFSET`],
+/// so the settings still have exactly one source of truth.
+///
+/// Field order must stay byte-identical to the fog block — the asserts below check
+/// the size and that the block is the struct's tail, but nothing can check the order.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Pod, Zeroable)]
+pub struct GpuFogUniforms {
+    pub fog_enabled: u32,
+    pub fog_mode: u32,
+    pub fog_density: f32,
+    pub fog_height_falloff: f32,
+    pub fog_start_distance: f32,
+    pub fog_max_distance: f32,
+    pub fog_height: f32,
+    pub fog_scattering_anisotropy: f32,
+    pub fog_color: [f32; 3],
+    pub pad_fog_color: f32,
+    pub fog_emissive: [f32; 3],
+    pub pad_fog_emissive: f32,
+}
+
+impl GpuPostProcessUniforms {
+    /// Byte offset of the fog block, for passes that bind only [`GpuFogUniforms`].
+    pub const FOG_BLOCK_OFFSET: u64 = std::mem::offset_of!(GpuPostProcessUniforms, fog_enabled) as u64;
+    /// Byte length of the fog block.
+    pub const FOG_BLOCK_SIZE: u64 = std::mem::size_of::<GpuFogUniforms>() as u64;
+}
+
+const _: () = assert!(std::mem::size_of::<GpuFogUniforms>() == 64);
+// wgpu requires copy offsets to be 4-byte aligned; the fog pass copies from this offset.
+const _: () = assert!(GpuPostProcessUniforms::FOG_BLOCK_OFFSET % 4 == 0);
+// The block must be the tail of GpuPostProcessUniforms for a single flat copy to
+// capture it. A field appended after the fog block would break this.
+const _: () = assert!(
+    std::mem::size_of::<GpuPostProcessUniforms>()
+        == GpuPostProcessUniforms::FOG_BLOCK_OFFSET as usize + std::mem::size_of::<GpuFogUniforms>()
+);
+
+// ── Fog mode ───────────────────────────────────────────────────────────────────
+
+/// How fog density is evaluated at a ray-march sample point.
+///
+/// The spec'd `VolumeTexture` (3D-texture-driven density) mode is deliberately absent:
+/// nothing samples a density texture yet, and a discriminant the shader silently treats
+/// as `Uniform` is worse than no discriminant at all.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FogMode {
+    /// Constant density everywhere inside the fog region.
+    Uniform = 0,
+    /// Density decays exponentially with world height above `fog_height`.
+    HeightBased = 1,
+}
 
 // ── Defaults ───────────────────────────────────────────────────────────────────
 
@@ -197,6 +286,19 @@ impl Default for GpuPostProcessUniforms {
             blend_weight_grain: 1.0,
             blend_weight_exposure: 1.0,
             pad_bw: 0.0,
+
+            fog_enabled: 0,
+            fog_mode: FogMode::Uniform as u32,
+            fog_density: 0.02,
+            fog_height_falloff: 0.05,
+            fog_start_distance: 0.0,
+            fog_max_distance: 1000.0,
+            fog_height: 0.0,
+            fog_scattering_anisotropy: 0.0,
+            fog_color: [0.5, 0.6, 0.7],
+            pad_fog_color: 0.0,
+            fog_emissive: [0.0, 0.0, 0.0],
+            pad_fog_emissive: 0.0,
         }
     }
 }
@@ -282,6 +384,22 @@ pub struct PostProcessSettings {
     pub blend_weight_ca: f32,
     pub blend_weight_grain: f32,
     pub blend_weight_exposure: f32,
+
+    // Volumetric Fog
+    pub fog_enabled: bool,
+    pub fog_mode: FogMode,
+    pub fog_density: f32,
+    pub fog_height_falloff: f32,
+    pub fog_start_distance: f32,
+    pub fog_max_distance: f32,
+    pub fog_height: f32,
+    /// Henyey-Greenstein g. 0 = isotropic, >0 forward-scattering (sun haze),
+    /// <0 back-scattering. Clamped to (-1, 1) on upload — |g| = 1 is a
+    /// singularity in the phase function.
+    pub fog_scattering_anisotropy: f32,
+    pub fog_color: [f32; 3],
+    /// Self-illumination, added independently of any light (lava glow, etc.).
+    pub fog_emissive: [f32; 3],
 }
 
 impl PostProcessSettings {
@@ -360,6 +478,20 @@ impl PostProcessSettings {
             blend_weight_grain: self.blend_weight_grain,
             blend_weight_exposure: self.blend_weight_exposure,
             pad_bw: 0.0,
+
+            fog_enabled: self.fog_enabled as u32,
+            fog_mode: self.fog_mode as u32,
+            fog_density: self.fog_density.max(0.0),
+            fog_height_falloff: self.fog_height_falloff,
+            fog_start_distance: self.fog_start_distance.max(0.0),
+            fog_max_distance: self.fog_max_distance,
+            fog_height: self.fog_height,
+            // |g| = 1 makes the Henyey-Greenstein denominator collapse to zero.
+            fog_scattering_anisotropy: self.fog_scattering_anisotropy.clamp(-0.99, 0.99),
+            fog_color: self.fog_color,
+            pad_fog_color: 0.0,
+            fog_emissive: self.fog_emissive,
+            pad_fog_emissive: 0.0,
         }
     }
 }
@@ -430,6 +562,17 @@ impl Default for PostProcessSettings {
             blend_weight_ca: 1.0,
             blend_weight_grain: 1.0,
             blend_weight_exposure: 1.0,
+
+            fog_enabled: false,
+            fog_mode: FogMode::Uniform,
+            fog_density: 0.02,
+            fog_height_falloff: 0.05,
+            fog_start_distance: 0.0,
+            fog_max_distance: 1000.0,
+            fog_height: 0.0,
+            fog_scattering_anisotropy: 0.0,
+            fog_color: [0.5, 0.6, 0.7],
+            fog_emissive: [0.0, 0.0, 0.0],
         }
     }
 }
@@ -448,9 +591,21 @@ pub struct GpuPostProcessVolume {
     pub blend_radius: f32,
     pub blend_weight: f32,         // 0-1, global volume opacity
     pub unbound: u32,              // 0 = bounded, 1 = applies everywhere
-    pub _pad: [f32; 2],
+    // 16 bytes, not 8. `settings` contains vec3s, so WGSL gives it 16-byte
+    // alignment and places it at offset 64 — while #[repr(C)] would happily put
+    // it at 56 after an 8-byte pad. That 8-byte skew made the GPU read every
+    // volume's settings shifted (and stride 424 against WGSL's 432, so each
+    // successive volume drifted further). Padding to 64 here makes both sides
+    // agree; the asserts below keep them that way.
+    pub _pad: [f32; 4],
     pub settings: GpuPostProcessUniforms,
 }
+
+// WGSL places `settings` at 64 because GpuPostProcessUniforms aligns to 16.
+const _: () = assert!(std::mem::offset_of!(GpuPostProcessVolume, settings) == 64);
+// Storage-buffer array stride must match WGSL's, which rounds to the 16-byte alignment.
+const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() == 432);
+const _: () = assert!(std::mem::size_of::<GpuPostProcessVolume>() % 16 == 0);
 
 // ── PostProcessVolume descriptor (CPU-side) ────────────────────────────────────
 
@@ -488,7 +643,7 @@ impl PostProcessVolumeDescriptor {
             blend_radius: self.blend_radius,
             blend_weight: self.blend_weight,
             unbound: self.unbound as u32,
-            _pad: [0.0; 2],
+            _pad: [0.0; 4],
             settings: self.settings.to_gpu(),
         }
     }
@@ -637,6 +792,17 @@ impl PostProcessBlender {
             blend_weight_ca: lerp(a.blend_weight_ca, b.blend_weight_ca, t),
             blend_weight_grain: lerp(a.blend_weight_grain, b.blend_weight_grain, t),
             blend_weight_exposure: lerp(a.blend_weight_exposure, b.blend_weight_exposure, t),
+
+            fog_enabled: if t > 0.5 { b.fog_enabled } else { a.fog_enabled },
+            fog_mode: if t > 0.5 { b.fog_mode } else { a.fog_mode },
+            fog_density: lerp(a.fog_density, b.fog_density, t),
+            fog_height_falloff: lerp(a.fog_height_falloff, b.fog_height_falloff, t),
+            fog_start_distance: lerp(a.fog_start_distance, b.fog_start_distance, t),
+            fog_max_distance: lerp(a.fog_max_distance, b.fog_max_distance, t),
+            fog_height: lerp(a.fog_height, b.fog_height, t),
+            fog_scattering_anisotropy: lerp(a.fog_scattering_anisotropy, b.fog_scattering_anisotropy, t),
+            fog_color: lerp3(a.fog_color, b.fog_color, t),
+            fog_emissive: lerp3(a.fog_emissive, b.fog_emissive, t),
         }
     }
 }
@@ -718,5 +884,19 @@ fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
         blend_weight_ca: gpu.blend_weight_ca,
         blend_weight_grain: gpu.blend_weight_grain,
         blend_weight_exposure: gpu.blend_weight_exposure,
+
+        fog_enabled: gpu.fog_enabled != 0,
+        fog_mode: match gpu.fog_mode {
+            1 => FogMode::HeightBased,
+            _ => FogMode::Uniform,
+        },
+        fog_density: gpu.fog_density,
+        fog_height_falloff: gpu.fog_height_falloff,
+        fog_start_distance: gpu.fog_start_distance,
+        fog_max_distance: gpu.fog_max_distance,
+        fog_height: gpu.fog_height,
+        fog_scattering_anisotropy: gpu.fog_scattering_anisotropy,
+        fog_color: gpu.fog_color,
+        fog_emissive: gpu.fog_emissive,
     }
 }

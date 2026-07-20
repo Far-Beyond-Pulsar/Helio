@@ -1,5 +1,10 @@
 use std::collections::HashMap;
 
+use libhelio::{
+    MATERIAL_CLASS_ANISOTROPIC, MATERIAL_CLASS_CLEAR_COAT, MATERIAL_CLASS_SKIN,
+    MATERIAL_CLASS_SUBSURFACE,
+};
+
 pub struct RadiantTemplate {
     pub name: &'static str,
     /// Base WGSL source with `// RADIANT_OVERRIDE_SURFACE` markers
@@ -72,6 +77,51 @@ pub struct RadiantTemplateRegistry {
     next_id: u32,
 }
 
+/// The base gbuffer.wgsl source, embedded at compile time.
+fn base_gbuffer_source() -> &'static str {
+    include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../helio-pass-gbuffer/shaders/gbuffer.wgsl"
+    ))
+}
+
+/// Replace the `radiant_eval_surface` function in the base gbuffer.wgsl with a
+/// custom override. This allows template files to contain ONLY the surface
+/// function body, avoiding full-file duplication.
+fn compose_radiant_eval_override(base: &str, override_fn: &str) -> String {
+    // Find the default `fn radiant_eval_surface(...) -> SurfaceData {`
+    // and replace everything from that line until the closing brace of the function
+    // with the override function.
+    //
+    // Strategy: find `fn radiant_eval_surface` and then find the matching `}`
+    // that closes the function, and replace everything between.
+    let marker = "fn radiant_eval_surface";
+    if let Some(start) = base.find(marker) {
+        // Find the opening brace of the function
+        if let Some(body_start) = base[start..].find('{') {
+            let body_start_abs = start + body_start;
+            // Track brace depth to find the closing brace
+            let mut depth = 1u32;
+            let mut i = body_start_abs + 1;
+            let bytes = base.as_bytes();
+            while i < bytes.len() && depth > 0 {
+                match bytes[i] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                i += 1;
+            }
+            let body_end = i; // Position after the closing '}'
+            let before = &base[..start];
+            let after = &base[body_end..];
+            return format!("{}{}\n{}", before, override_fn, after);
+        }
+    }
+    // Fallback: just use the override as-is (it may be a complete file)
+    override_fn.to_string()
+}
+
 impl RadiantTemplateRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
@@ -88,7 +138,30 @@ impl RadiantTemplateRegistry {
                 )),
             },
         );
+        reg.register_default_templates();
         reg
+    }
+
+    /// Register the built-in tier-2 surface templates shipped with the engine.
+    /// Each template is registered with its predefined `MATERIAL_CLASS_*` ID
+    /// so users can reference them by the constants from `libhelio`.
+    fn register_default_templates(&mut self) {
+        self.register_partial_str_with_id(
+            MATERIAL_CLASS_CLEAR_COAT, "clear_coat",
+            include_str!("../../templates/clear_coat.wgsl").to_string(),
+        );
+        self.register_partial_str_with_id(
+            MATERIAL_CLASS_SUBSURFACE, "subsurface",
+            include_str!("../../templates/subsurface.wgsl").to_string(),
+        );
+        self.register_partial_str_with_id(
+            MATERIAL_CLASS_ANISOTROPIC, "anisotropic",
+            include_str!("../../templates/anisotropic.wgsl").to_string(),
+        );
+        self.register_partial_str_with_id(
+            MATERIAL_CLASS_SKIN, "skin",
+            include_str!("../../templates/skin.wgsl").to_string(),
+        );
     }
 
     pub fn get(&self, class: u32) -> Option<&RadiantTemplate> {
@@ -124,6 +197,30 @@ impl RadiantTemplateRegistry {
             },
         );
         id
+    }
+
+    /// Register a partial template — a WGSL snippet containing ONLY the
+    /// `radiant_eval_surface()` function body. The snippet is composed with
+    /// the base gbuffer.wgsl at registration time.
+    pub fn register_partial_str(&mut self, name: &str, override_fn: String) -> u32 {
+        let base = base_gbuffer_source();
+        let composed = compose_radiant_eval_override(base, &override_fn);
+        self.register_str(name, composed)
+    }
+
+    /// Register a partial template with a specific class ID (instead of auto-assigning).
+    /// Used internally by `register_default_templates()` to map templates to the
+    /// predefined `MATERIAL_CLASS_*` constants.
+    fn register_partial_str_with_id(&mut self, id: u32, name: &str, override_fn: String) {
+        let base = base_gbuffer_source();
+        let composed = compose_radiant_eval_override(base, &override_fn);
+        self.templates.insert(
+            id,
+            RadiantTemplate {
+                name: Box::leak(format!("Radiant:{}", name).into_boxed_str()),
+                wgsl_source: Box::leak(composed.into_boxed_str()),
+            },
+        );
     }
 
     pub fn len(&self) -> usize {

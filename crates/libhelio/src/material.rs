@@ -28,6 +28,7 @@ pub const MATERIAL_CLASS_DEFAULT: u32 = 0;
 pub const MATERIAL_CLASS_CLEAR_COAT: u32 = 1;
 pub const MATERIAL_CLASS_SUBSURFACE: u32 = 2;
 pub const MATERIAL_CLASS_ANISOTROPIC: u32 = 3;
+pub const MATERIAL_CLASS_SKIN: u32 = 4;
 pub const MATERIAL_CLASS_CUSTOM: u32 = 0xFFFF;
 
 /// GPU material data. 112 bytes.
