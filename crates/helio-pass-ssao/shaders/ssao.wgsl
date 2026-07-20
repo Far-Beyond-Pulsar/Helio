@@ -1,15 +1,10 @@
 // SSAO (Screen-Space Ambient Occlusion) fragment shader
 //
 // Samples the G-buffer to compute ambient occlusion in screen space.
-
-struct CameraUniform {
-    view: mat4x4<f32>,
-    proj: mat4x4<f32>,
-    view_proj: mat4x4<f32>,
-    inv_view_proj: mat4x4<f32>,
-    position: vec3<f32>,
-    _pad0: f32,
-}
+//
+// Works in VIEW space throughout: the sample kernel is oriented by a view-space
+// TBN, projected with camera.proj, and the occlusion test compares view-space z.
+//!use helio_prelude
 
 struct Globals {
     frame: u32,
@@ -22,7 +17,7 @@ struct Globals {
     csm_splits: vec4<f32>,
 }
 
-@group(0) @binding(0) var<uniform> camera: CameraUniform;
+@group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var<uniform> globals: Globals;
 
 // G-buffer textures (group 1)
@@ -63,11 +58,16 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {
     return out;
 }
 
-// Reconstruct view-space position from depth
+// Reconstruct view-space position from depth.
+//
+// view_proj_inv lands in WORLD space, so this has to step into view space
+// explicitly. Everything downstream — `camera.proj * offset_pos`, and the `.z`
+// comparisons in the occlusion test — assumes view space, so returning world
+// here (as this function used to, despite its name) silently fed a world
+// position into a projection expecting view coordinates.
 fn reconstruct_view_pos(uv: vec2<f32>, depth: f32) -> vec3<f32> {
-    let ndc = vec4<f32>(uv * 2.0 - 1.0, depth, 1.0);
-    let view_pos = camera.inv_view_proj * ndc;
-    return view_pos.xyz / view_pos.w;
+    let world = helio_world_from_depth(camera.view_proj_inv, uv, depth);
+    return (camera.view * vec4<f32>(world, 1.0)).xyz;
 }
 
 @fragment
@@ -83,9 +83,9 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
         return 1.0;
     }
     
-    // Sample normal (stored in view space in G-buffer)
-    let normal_sample = textureLoad(gbuf_normal, texel, 0);
-    let normal = normalize(normal_sample.xyz * 2.0 - 1.0);
+    // The kernel below is view-space, so rotate the world normal into it.
+    let normal_world = helio_gbuffer_normal(textureLoad(gbuf_normal, texel, 0).xyz);
+    let normal = normalize((camera.view * vec4<f32>(normal_world, 0.0)).xyz);
     
     // Reconstruct view-space position
     let frag_pos = reconstruct_view_pos(in.uv, depth);
@@ -109,8 +109,7 @@ fn fs_main(in: VertexOutput) -> @location(0) f32 {
         
         // Project sample position to screen space
         let offset_ndc = camera.proj * vec4<f32>(offset_pos, 1.0);
-        var offset_uv = offset_ndc.xy / offset_ndc.w;
-        offset_uv = offset_uv * 0.5 + 0.5;
+        let offset_uv = helio_ndc_to_uv(offset_ndc.xy / offset_ndc.w);
         
         // Sample depth at offset position
         let sample_depth = textureSample(gbuf_depth, noise_sampler, offset_uv);

@@ -70,12 +70,14 @@
 //! // let mesh_buffer = resources.meshes.buffer();   // &wgpu::Buffer
 //! ```
 
+use crate::acceleration::{BlasManager, TlasManager};
 use crate::component::ComponentRegistry;
 use crate::scene::managers::{
-    GpuAabbBuffer, GpuCameraBuffer, GpuDrawCallBuffer, GpuIndirectBuffer, GpuInstanceBuffer,
-    GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer, GpuVisibilityBuffer,
-    GpuVoxelVolumeBuffer, GpuVoxelEditRing,
+    GpuAabbBuffer, GpuCameraBuffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
+    GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing,
 };
+use crate::scene::managers::GrowableBuffer;
 use crate::scene::SceneResources;
 use std::sync::Arc;
 
@@ -178,6 +180,7 @@ pub struct GpuScene {
     pub aabbs: GpuAabbBuffer,
     pub draw_calls: GpuDrawCallBuffer,
     pub lights: GpuLightBuffer,
+    pub decals: GpuDecalBuffer,
     pub materials: GpuMaterialBuffer,
     pub shadow_matrices: GpuShadowMatrixBuffer,
     pub indirect: GpuIndirectBuffer,
@@ -245,6 +248,15 @@ pub struct GpuScene {
     /// Populated from Scene's [`RadiantGraphRegistry`](helio::radiant::RadiantGraphRegistry)
     /// during flush.  The GBuffer pass looks up WGSL by hash when building PSOs.
     pub graph_wgsl_snippets: std::collections::HashMap<u64, String>,
+
+    /// Reflection capture GPU storage buffer.
+    pub reflection_captures: GrowableBuffer<libhelio::GpuReflectionCapture>,
+
+    /// Bottom-Level Acceleration Structure manager (ray tracing).
+    pub blas_manager: BlasManager,
+
+    /// Top-Level Acceleration Structure manager (ray tracing, per-frame).
+    pub tlas_manager: TlasManager,
 }
 
 impl GpuScene {
@@ -280,6 +292,7 @@ impl GpuScene {
         let aabbs = GpuAabbBuffer::new(device.clone());
         let draw_calls = GpuDrawCallBuffer::new(device.clone());
         let lights = GpuLightBuffer::new(device.clone());
+        let decals = GpuDecalBuffer::new(device.clone());
         let materials = GpuMaterialBuffer::new(device.clone());
         let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
         let indirect = GpuIndirectBuffer::new(device.clone());
@@ -307,6 +320,15 @@ impl GpuScene {
             mapped_at_creation: false,
         });
 
+        let reflection_captures = GrowableBuffer::new(
+            device.clone(),
+            64,
+            wgpu::BufferUsages::STORAGE,
+            "ReflectionCapture Buffer",
+        );
+
+        let device_for_rt = Arc::clone(&device);
+
         Self {
             device,
             queue,
@@ -322,6 +344,7 @@ impl GpuScene {
             aabbs,
             draw_calls,
             lights,
+            decals,
             materials,
             shadow_matrices,
             indirect,
@@ -343,6 +366,9 @@ impl GpuScene {
             material_class_ranges: Vec::new(),
             material_graph_hashes: Vec::new(),
             graph_wgsl_snippets: std::collections::HashMap::new(),
+            reflection_captures,
+            blas_manager: BlasManager::new(device_for_rt.clone()),
+            tlas_manager: TlasManager::new(device_for_rt, 65536),
         }
     }
 
@@ -378,6 +404,8 @@ impl GpuScene {
             aabbs: self.aabbs.buffer(),
             draw_calls: self.draw_calls.buffer(),
             lights: self.lights.buffer(),
+            decals: self.decals.buffer(),
+            decal_count: self.decals.len() as u32,
             materials: self.materials.buffer(),
             shadow_matrices: self.shadow_matrices.buffer(),
             indirect: self.indirect.buffer(),
@@ -406,6 +434,9 @@ impl GpuScene {
             material_class_ranges: &self.material_class_ranges,
             material_graph_hashes: &self.material_graph_hashes,
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
+            reflection_captures: self.reflection_captures.buffer(),
+            reflection_capture_count: self.reflection_captures.len() as u32,
+            rt_available: self.tlas_manager.is_rt_available(),
         }
     }
 
@@ -463,6 +494,7 @@ impl GpuScene {
         self.aabbs.flush(queue);
         self.draw_calls.flush(queue);
         self.lights.flush(queue);
+        self.decals.flush(queue);
         self.materials.flush(queue);
         self.shadow_matrices.flush(queue);
         self.indirect.flush(queue);
@@ -471,9 +503,14 @@ impl GpuScene {
         self.shadow_movable_indirect.flush(queue);
         self.voxel_volumes.flush(queue);
         self.voxel_edit_ring.flush(queue);
+        self.reflection_captures.flush(queue);
     }
 
     pub fn components_mut(&mut self) -> &mut ComponentRegistry {
         &mut self.components
+    }
+
+    pub fn reflection_captures_buffer(&self) -> &wgpu::Buffer {
+        self.reflection_captures.buffer()
     }
 }

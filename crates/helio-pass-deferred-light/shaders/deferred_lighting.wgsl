@@ -47,7 +47,9 @@ struct Globals {
     // of its ~128 texture loads.
     has_rc_gi:         u32,
     num_tiles_x:       u32,
-    _pad2:             u32,
+    // Number of entries in reflection_captures. Zero skips capture blending
+    // entirely and falls through to the skylight cubemap (layer 0).
+    reflection_capture_count: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -59,6 +61,16 @@ struct GpuLight {
     light_type:      u32,        // LightType enum (0=directional, 1=point, 2=spot)
     inner_angle:     f32,        // spot inner cos angle
     _pad:            u32,
+    // Light shafts — consumed by helio-pass-volumetric-fog. Padding is three
+    // scalars, not vec3<u32>, to keep the struct at 96 bytes (vec3 aligns to 16).
+    god_rays_enabled:  u32,
+    god_rays_density:  f32,
+    god_rays_weight:   f32,
+    god_rays_decay:    f32,
+    god_rays_exposure: f32,
+    _pad2_0:           u32,
+    _pad2_1:           u32,
+    _pad2_2:           u32,
 }
 
 struct LightMatrix { mat: mat4x4<f32> }
@@ -116,13 +128,20 @@ struct ShadowConfig {
 @group(1) @binding(6) var screen_ao_samp: sampler;
 // Lightmap UVs from GBuffer (Rg16Float, contains atlas UV coordinates for lightmap lookup)
 @group(1) @binding(7) var gbuf_lightmap_uv: texture_2d<f32>;
+// SSS data (Rgba16Float): subsurface_color.rgb, subsurface_radius
+@group(1) @binding(8) var gbuf_sss: texture_2d<f32>;
+// Extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y, aniso_rotation, bitcast<f32>(surface_flags)
+@group(1) @binding(9) var gbuf_extra: texture_2d<f32>;
 
 // Group 2 – lights, shadows, environment (same as forward geometry pass)
 @group(2) @binding(0) var <storage, read> lights:          array<GpuLight>;
 @group(2) @binding(1)  var shadow_atlas:         texture_depth_2d_array;  // Dynamic (Movable objects)
 @group(2) @binding(11) var static_shadow_atlas:  texture_depth_2d_array;  // Static (cached forever)
 @group(2) @binding(2) var shadow_sampler: sampler_comparison;
-@group(2) @binding(3) var env_cube:       texture_cube<f32>;
+// Reflection cube array. Layer i is capture i's pre-filtered cubemap; mip m
+// corresponds to a GGX lobe of increasing roughness. Layer 0 doubles as the
+// skylight fallback for surfaces no capture reaches.
+@group(2) @binding(3) var env_cube:       texture_cube_array<f32>;
 @group(2) @binding(4) var <storage, read> shadow_matrices: array<LightMatrix>;
 @group(2) @binding(5) var rc_cascade0:    texture_2d<f32>;
 @group(2) @binding(6) var env_sampler:    sampler;
@@ -133,6 +152,31 @@ struct ShadowConfig {
 // Baked lightmap atlas (Rgba16Float, pre-baked indirect illumination for Static geometry)
 @group(2) @binding(12) var baked_lightmap: texture_2d<f32>;
 @group(2) @binding(13) var baked_lightmap_sampler: sampler;
+// SSR accum texture (Rgba16Float, half resolution) — screen-space reflections
+@group(2) @binding(14) var ssr_tex: texture_2d<f32>;
+// Planar reflection texture (Rgba16Float, full resolution)
+@group(2) @binding(16) var planar_tex: texture_2d<f32>;
+@group(2) @binding(17) var planar_sampler: sampler;
+
+// Reflection captures, uploaded sorted by influence volume, largest first.
+// The blend below runs front-to-back and saturates, so ordering is what lets a
+// small capture override the larger one it sits inside.
+struct GpuReflectionCapture {
+    position_radius:    vec4<f32>,   // xyz = world position, w = influence radius
+    extents_transition: vec4<f32>,   // xyz = local half-extents (box), w = transition distance
+    world_to_local:     mat4x4<f32>, // box parallax; identity for spheres
+    cubemap_index:      i32,         // cube array layer, -1 = no cubemap
+    shape:              u32,         // 0 = sphere, 1 = box
+    mobility:           u32,         // 0 = static, 1 = dynamic
+    brightness:         f32,
+}
+@group(2) @binding(15) var<storage, read> reflection_captures: array<GpuReflectionCapture>;
+
+const CAPTURE_SHAPE_SPHERE: u32 = 0u;
+const CAPTURE_SHAPE_BOX:    u32 = 1u;
+
+// Highest mip index in the pre-filtered chain. roughness 1.0 maps here.
+const ENV_MAX_LOD: f32 = 8.0;
 
 // Group 3 – tiled light culling results (written by LightCullPass each frame)
 const TILE_SIZE:          u32 = 16u;
@@ -496,6 +540,12 @@ fn shadow_factor(light_idx: u32, world_pos: vec3<f32>, N: vec3<f32>, frag_coord:
     }
 }
 
+// ── Surface flags (read from gbuf_extra.a) ──────────────────────────────────
+
+const SURFACE_FLAG_SUBSURFACE: u32 = 1u << 0u;
+const SURFACE_FLAG_ANISOTROPIC: u32 = 1u << 1u;
+const SURFACE_FLAG_LOW_SPECULAR: u32 = 1u << 2u;
+
 // ── BRDF helpers ─────────────────────────────────────────────────────────────
 
 const PI: f32 = 3.14159265359;
@@ -510,6 +560,17 @@ fn distribution_ggx(N: vec3<f32>, H: vec3<f32>, roughness: f32) -> f32 {
     return a2 / (PI * denom * denom + 0.0001);
 }
 
+fn distribution_ggx_anisotropic(NdotH: f32, ax: f32, ay: f32, phi_h: f32) -> f32 {
+    let cos2_h = NdotH * NdotH;
+    let sin2_h = 1.0 - cos2_h;
+    let ax2 = ax * ax;
+    let ay2 = ay * ay;
+    let cos_phi = cos(phi_h);
+    let sin_phi = sin(phi_h);
+    let denom = cos2_h + sin2_h * (cos_phi * cos_phi / ax2 + sin_phi * sin_phi / ay2);
+    return 1.0 / (PI * ax * ay * denom * denom + 0.0001);
+}
+
 fn geometry_schlick_ggx(NdotV: f32, roughness: f32) -> f32 {
     let r = roughness + 1.0;
     let k = (r * r) / 8.0;
@@ -522,6 +583,18 @@ fn geometry_smith(N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, roughness: f32) -> f
     return geometry_schlick_ggx(NdV, roughness) * geometry_schlick_ggx(NdL, roughness);
 }
 
+fn geometry_smith_anisotropic(NdotV: f32, NdotL: f32, ax: f32, ay: f32) -> f32 {
+    let Gv = NdotV / (NdotV + sqrt(ax*ax + (1.0 - ax*ax) * NdotV * NdotV) + 0.0001);
+    let Gl = NdotL / (NdotL + sqrt(ay*ay + (1.0 - ay*ay) * NdotL * NdotL) + 0.0001);
+    return Gv * Gl;
+}
+
+fn compute_phi_h(N: vec3<f32>, H: vec3<f32>, T: vec3<f32>, B: vec3<f32>) -> f32 {
+    let H_tangent = dot(H, T);
+    let H_bitangent = dot(H, B);
+    return atan2(H_bitangent, H_tangent);
+}
+
 fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
@@ -531,17 +604,142 @@ fn fresnel_schlick_roughness(cos_theta: f32, F0: vec3<f32>, roughness: f32) -> v
     return F0 + (max(one_minus_r, F0) - F0) * pow5(clamp(1.0 - cos_theta, 0.0, 1.0));
 }
 
+// Split-sum DFG term: the second half of Karis' split-sum approximation,
+// returning (scale, bias) so specular = F0 * scale + bias.
+//
+// This is Lazarov's analytic fit to the same integral a baked BRDF LUT would
+// store. It replaces an ad-hoc curve that was not the split-sum term at all and
+// left grazing-angle specular visibly wrong. A precomputed LUT texture would be
+// marginally more accurate; the fit avoids another binding for error well under
+// what the pre-filtered cubemap itself introduces.
 fn env_brdf_approx(NdotV: f32, roughness: f32) -> vec2<f32> {
-    let a    = roughness * roughness;
-    let a2   = a * a;
-    let ndv  = NdotV;
-    let bias = 1.0 - a2 * 0.5 / (a2 * 0.5 + 0.33) * ndv;
-    let scale = 1.0 - bias;
-    return vec2<f32>(scale, bias);
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r  = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    return vec2<f32>(-1.04, 1.04) * a004 + r.zw;
+}
+
+// ── Reflection captures ──────────────────────────────────────────────────────
+
+// Anchor the reflection ray to the capture's sphere so the cubemap reads as a
+// room at a real distance rather than an infinitely distant backdrop.
+fn parallax_sphere(P: vec3<f32>, R: vec3<f32>, center: vec3<f32>, radius: f32) -> vec3<f32> {
+    let oc = P - center;
+    let b  = dot(oc, R);
+    let c  = dot(oc, oc) - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return R;
+    }
+    let t = -b + sqrt(disc);  // far hit: the ray leaves the volume here
+    if t <= 0.0 {
+        return R;
+    }
+    return (P + R * t) - center;
+}
+
+// Box parallax against the capture's oriented box.
+//
+// The slab test runs in capture-local space, but the resulting ray parameter t
+// is invariant under the affine world→local transform, so the hit point can be
+// reconstructed in world space as P + R*t. That keeps this to a single stored
+// matrix — reconstructing the hit in local space instead would need the inverse
+// transform as well, just to rotate the direction back.
+fn parallax_box(P: vec3<f32>, R: vec3<f32>, cap: GpuReflectionCapture) -> vec3<f32> {
+    let pl = (cap.world_to_local * vec4<f32>(P, 1.0)).xyz;
+    let rl = (cap.world_to_local * vec4<f32>(R, 0.0)).xyz;
+    let e  = cap.extents_transition.xyz;
+
+    // Components of rl at zero produce infinities here; max() then discards
+    // them, which is the correct answer for a ray parallel to that slab.
+    let inv = 1.0 / rl;
+    let t1  = (-e - pl) * inv;
+    let t2  = (e - pl) * inv;
+    let tv  = max(t1, t2);
+    let t   = min(min(tv.x, tv.y), tv.z);
+    if t <= 0.0 || !(t < 3.402823e38) {
+        return R;
+    }
+    return (P + R * t) - cap.position_radius.xyz;
+}
+
+// How strongly a capture claims this point: 1 well inside, falling to 0 at the
+// volume boundary so neighbouring captures cross-fade instead of popping.
+fn capture_weight(P: vec3<f32>, cap: GpuReflectionCapture) -> f32 {
+    if cap.shape == CAPTURE_SHAPE_BOX {
+        let pl = (cap.world_to_local * vec4<f32>(P, 1.0)).xyz;
+        let e  = cap.extents_transition.xyz;
+        let d  = e - abs(pl);  // distance inside each pair of faces
+        if d.x < 0.0 || d.y < 0.0 || d.z < 0.0 {
+            return 0.0;
+        }
+        let transition = max(cap.extents_transition.w, 1e-4);
+        return clamp(min(min(d.x, d.y), d.z) / transition, 0.0, 1.0);
+    }
+    let radius = cap.position_radius.w;
+    let dist   = distance(P, cap.position_radius.xyz);
+    if dist > radius {
+        return 0.0;
+    }
+    // Fade across the outer 10% of the radius.
+    let fade = max(radius * 0.1, 1e-4);
+    return clamp((radius - dist) / fade, 0.0, 1.0);
+}
+
+// Blend every capture covering P, then let the skylight fill whatever coverage
+// is left over.
+//
+// Captures arrive sorted smallest-influence-first, so accumulating front-to-back
+// gives a small capture first claim on the pixel and lets the loop stop early
+// once coverage saturates.
+fn sample_reflection_environment(P: vec3<f32>, R: vec3<f32>, lod: f32) -> vec3<f32> {
+    var accum   = vec3<f32>(0.0);
+    var accum_a = 0.0;
+
+    let count = min(globals.reflection_capture_count, 64u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        if accum_a >= 0.999 {
+            break;
+        }
+        let cap = reflection_captures[i];
+        if cap.cubemap_index < 0 {
+            continue;  // no cubemap resident yet (unbaked, or awaiting capture)
+        }
+        let w = capture_weight(P, cap);
+        if w <= 0.0 {
+            continue;
+        }
+
+        var dir: vec3<f32>;
+        if cap.shape == CAPTURE_SHAPE_BOX {
+            dir = parallax_box(P, R, cap);
+        } else {
+            dir = parallax_sphere(P, R, cap.position_radius.xyz, cap.position_radius.w);
+        }
+
+        let s = textureSampleLevel(env_cube, env_sampler, dir, cap.cubemap_index, lod).rgb
+              * cap.brightness;
+        let contrib = w * (1.0 - accum_a);
+        accum   = accum + s * contrib;
+        accum_a = accum_a + contrib;
+    }
+
+    if accum_a < 0.999 {
+        // Layer 0 stands in as the skylight: an un-parallaxed lookup for points
+        // no capture reaches.
+        let sky = textureSampleLevel(env_cube, env_sampler, R, 0, lod).rgb;
+        accum = accum + sky * (1.0 - accum_a);
+    }
+    return accum;
 }
 
 // Evaluate one direct light with the full Cook-Torrance BRDF.
 // `sf` is the shadow factor (0=shadowed, 1=lit), computed at the call site.
+// When `is_anisotropic` is true, uses anisotropic GGX distribution with the
+// given tangent direction, ax/aniso roughness in X, ay/aniso roughness in Y.
+// For SSS surfaces (has_subsurface), applies wrap-diffuse lighting with
+// transmission through the subsurface, tinted by subsurface_color.
 fn pbr_direct_light(
     light:     GpuLight,
     world_pos: vec3<f32>,
@@ -552,6 +750,12 @@ fn pbr_direct_light(
     roughness: f32,
     metallic:  f32,
     sf:        f32,
+    is_anisotropic: bool,
+    T:         vec3<f32>,
+    ax:        f32,
+    ay:        f32,
+    has_subsurface: bool,
+    subsurface_color: vec3<f32>,
 ) -> vec3<f32> {
     var L:        vec3<f32>;
     var radiance: vec3<f32>;
@@ -579,14 +783,43 @@ fn pbr_direct_light(
 
     if all(radiance < vec3<f32>(0.002)) { return vec3<f32>(0.0); }
 
-    let H        = normalize(V + L);
-    let D        = distribution_ggx(N, H, roughness);
-    let G        = geometry_smith(N, V, L, roughness);
-    let F        = fresnel_schlick(max(dot(H, V), 0.0), F0);
-    let kD       = (1.0 - F) * (1.0 - metallic);
-    let specular = D * G * F / (4.0 * max(dot(N, V), 0.0) * NdL + 0.0001);
+    let H         = normalize(V + L);
+    let F         = fresnel_schlick(max(dot(H, V), 0.0), F0);
+    let kD        = (1.0 - F) * (1.0 - metallic);
+    let NdV       = max(dot(N, V), 0.0);
+    var specular: vec3<f32>;
 
-    return (kD * albedo / PI + specular) * radiance * NdL * sf;
+    if is_anisotropic {
+        let phi_h    = compute_phi_h(N, H, T, cross(N, T));
+        let D        = distribution_ggx_anisotropic(max(dot(N, H), 0.0), ax, ay, phi_h);
+        let G        = geometry_smith_anisotropic(NdV, NdL, ax, ay);
+        specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
+    } else {
+        let D        = distribution_ggx(N, H, roughness);
+        let G        = geometry_smith(N, V, L, roughness);
+        specular = D * G * F / (4.0 * NdV * NdL + 0.0001);
+    }
+
+    var diffuse_term = kD * albedo / PI;
+    var NdotL_effective = NdL;
+
+    // Subsurface scattering: wrap-diffuse + transmission approximation.
+    // Light penetrates the surface, scatters internally tinted by
+    // subsurface_color, and exits.  The wrap term extends the diffuse
+    // lobe into the back-facing hemisphere, mimicking internal scatter.
+    if has_subsurface {
+        let wrap = 0.2 + 0.4 * (1.0 - roughness); // tighter wrap for smoother surfaces
+        NdotL_effective = max((dot(N, L) + wrap) / (1.0 + wrap), 0.0);
+        // SSS diffuse: standard diffuse dimmed, plus a tinted wrap term
+        let sss_diffuse = (1.0 - F) * albedo / PI * (1.0 - metallic);
+        let sss_scatter = subsurface_color * (1.0 / PI);
+        diffuse_term = mix(sss_diffuse, sss_scatter, 0.5);
+        // Reduce shadow occlusion — SSS surfaces let light through
+        let sf_sss = mix(sf, 1.0, 0.3);
+        return (diffuse_term + specular) * radiance * NdotL_effective * sf_sss;
+    }
+
+    return (diffuse_term + specular) * radiance * NdotL_effective * sf;
 }
 
 // ── Radiance Cascades GI ──────────────────────────────────────────────────────
@@ -662,6 +895,72 @@ fn sample_rc_irradiance(world_pos: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
         for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
             let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
             cos_weights[idx] = max(0.0, dot(normal, rc_oct_decode(dir_uv)));
+            idx++;
+        }
+    }
+
+    let cell_size = world_size / f32(RC_PROBE_DIM);
+    let probe_f   = (world_pos - world_min) / cell_size - 0.5;
+    let pf        = clamp(probe_f, vec3<f32>(0.0), vec3<f32>(f32(RC_PROBE_DIM) - 1.0));
+    let pi        = vec3<u32>(u32(pf.x), u32(pf.y), u32(pf.z));
+    let frc       = fract(pf);
+
+    let c000 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z,      cos_weights);
+    let c001 = rc_corner_irradiance_precomp(pi.x,      pi.y,      pi.z + 1u, cos_weights);
+    let c010 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z,      cos_weights);
+    let c011 = rc_corner_irradiance_precomp(pi.x,      pi.y + 1u, pi.z + 1u, cos_weights);
+    let c100 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z,      cos_weights);
+    let c101 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y,      pi.z + 1u, cos_weights);
+    let c110 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z,      cos_weights);
+    let c111 = rc_corner_irradiance_precomp(pi.x + 1u, pi.y + 1u, pi.z + 1u, cos_weights);
+
+    let c0 = mix(mix(c000, c001, frc.z), mix(c010, c011, frc.z), frc.y);
+    let c1 = mix(mix(c100, c101, frc.z), mix(c110, c111, frc.z), frc.y);
+    return mix(c0, c1, frc.x) * volume_weight;
+}
+
+/// Sample RC irradiance as a rough-specular reflection fallback.
+///
+/// For rough surfaces (roughness > 0.6), a single SSR ray or RT ray query
+/// cannot converge the wide GGX lobe. We re-use the RC probe grid's irradiance
+/// data as a broad directional colour wash, weighted by the reflection
+/// direction vs the probe's directional bins.
+///
+/// This is deliberately *not* a physically correct glossy evaluation — it is
+/// a plausible stand-in that keeps rough reflections from going black when
+/// SSR and RT both miss.
+fn sample_rc_specular(
+    world_pos: vec3<f32>,
+    R: vec3<f32>,
+    roughness: f32,
+    normal: vec3<f32>,
+) -> vec3<f32> {
+    if globals.has_rc_gi == 0u { return vec3<f32>(0.0); }
+
+    let world_min = globals.rc_world_min.xyz;
+    let world_max = globals.rc_world_max.xyz;
+    let world_size = world_max - world_min;
+    if world_size.x <= 0.0 || world_size.y <= 0.0 || world_size.z <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    // Weight the reflection direction by roughness — rougher = more diffuse.
+    let lookup_dir = normalize(mix(R, normal, roughness * 0.5));
+
+    let t = (world_pos - world_min) / world_size;
+    let fade_margin = 0.05;
+    let fade = smoothstep(vec3<f32>(0.0), vec3<f32>(fade_margin), t)
+             * smoothstep(vec3<f32>(1.0), vec3<f32>(1.0 - fade_margin), t);
+    let volume_weight = fade.x * fade.y * fade.z;
+    if volume_weight <= 0.0 { return vec3<f32>(0.0); }
+
+    // Compute cosine weights for the reflection direction against each probe bin.
+    var cos_weights: array<f32, 16>;
+    var idx = 0u;
+    for (var ddx: u32 = 0u; ddx < RC_DIR_DIM; ddx++) {
+        for (var ddy: u32 = 0u; ddy < RC_DIR_DIM; ddy++) {
+            let dir_uv = (vec2<f32>(f32(ddx), f32(ddy)) + 0.5) / f32(RC_DIR_DIM);
+            cos_weights[idx] = max(0.0, dot(lookup_dir, rc_oct_decode(dir_uv)));
             idx++;
         }
     }
@@ -767,6 +1066,25 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
         return vec4<f32>(sf, sf, sf, 1.0);
     }
 
+    // ── Debug modes 30/31: SSR diagnosis ─────────────────────────────────────
+    // Use these as a PAIR. SsrPass writes (0,0,0,0) when the ray found nothing,
+    // and (colour, confidence) when it hit — so comparing the two separates the
+    // two very different reasons a reflection can be absent:
+    //
+    //   31 black  + 30 black  → the march found no hit (traversal/geometry).
+    //   31 colour + 30 black  → a hit was found and then faded away by a
+    //                           confidence term (back-face/facing/edge/distance).
+    //
+    // Without this pair the two are indistinguishable in the final image: both
+    // just look like missing reflection, and tuning is guesswork.
+    if globals.debug_mode == 30u {
+        let a = textureLoad(ssr_tex, pix, 0).a;
+        return vec4<f32>(a, a, a, 1.0);
+    }
+    if globals.debug_mode == 31u {
+        return vec4<f32>(textureLoad(ssr_tex, pix, 0).rgb, 1.0);
+    }
+
     // ── Debug mode 11: light-space projection for first light face 0 ─────────
     // Orange gradient = pixel is inside the light frustum, depth = ndc.z.
     // Dark blue = pixel is outside the frustum (w<=0 or uv out of [0,1]).
@@ -788,6 +1106,33 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let F0  = clamp(vec3<f32>(normal_r.w, orm_r.a, emissive_r.a), vec3<f32>(0.0), vec3<f32>(0.999));
     let V   = normalize(camera.position_near.xyz - world_pos);
     let NdV = max(dot(N, V), 0.0);
+
+    // ── SSS / Extra surface data ──────────────────────────────────────────────
+    let sss_r        = textureLoad(gbuf_sss, pix, 0);
+    let extra_r      = textureLoad(gbuf_extra, pix, 0);
+    let surface_flags = bitcast<u32>(extra_r.a);
+    let is_anisotropic = (surface_flags & SURFACE_FLAG_ANISOTROPIC) != 0u;
+    let has_subsurface = (surface_flags & SURFACE_FLAG_SUBSURFACE) != 0u;
+    let low_specular   = (surface_flags & SURFACE_FLAG_LOW_SPECULAR) != 0u;
+
+    // Anisotropic GGX parameters
+    let aniso_ax    = extra_r.r;
+    let aniso_ay    = extra_r.g;
+    let aniso_rot   = extra_r.b;
+
+    // Compute aniso tangent direction from world normal + rotation
+    var aniso_T = vec3<f32>(0.0);
+    if is_anisotropic {
+        let up_ref = vec3<f32>(0.0, 1.0, 0.0);
+        var T_ref = normalize(cross(cross(N, up_ref), N));
+        if length(T_ref) < 0.001 {
+            T_ref = normalize(cross(cross(N, vec3<f32>(1.0, 0.0, 0.0)), N));
+        }
+        let B = cross(N, T_ref);
+        let cos_a = cos(aniso_rot);
+        let sin_a = sin(aniso_rot);
+        aniso_T = T_ref * cos_a + B * sin_a;
+    }
 
     // ── Direct lighting ────────────────────────────────────────────────────────
     // GPU-driven: iterate all visible lights (already culled on CPU by distance).
@@ -817,15 +1162,27 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
             if !is_vg {
                 sf = shadow_factor(light_idx, world_pos, N, in.clip_pos.xy, globals.frame);
             }
-            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf);
+            let sss_color = sss_r.rgb;
+            Lo += pbr_direct_light(light, world_pos, N, V, F0, albedo, roughness, metallic, sf, is_anisotropic, aniso_T, aniso_ax, aniso_ay, has_subsurface, sss_color);
         }
+    }
+
+    // ── SSS transmission glow (rim-light approximation) ──────────────────────
+    // Light enters the surface near the silhouette, scatters internally tinted
+    // by subsurface_color, and exits.  Modelled as a view-angle-dependent glow
+    // that peaks at grazing angles (where the light path through the medium is
+    // shortest/dimmest physically, but the perceived scatter volume is largest).
+    var sss_transmission = vec3<f32>(0.0);
+    if has_subsurface {
+        let rim = pow(1.0 - NdV, 3.0);
+        sss_transmission = sss_r.rgb * rim * 1.2;
     }
 
     // ── RC indirect diffuse ───────────────────────────────────────────────────
     let rc_irr   = sample_rc_irradiance(world_pos, N);
     let F_ibl    = fresnel_schlick_roughness(NdV, F0, roughness);
     let kD_ibl   = (1.0 - F_ibl) * (1.0 - metallic);
-    let diff_ind = kD_ibl * rc_irr * albedo;
+    var diff_ind = kD_ibl * rc_irr * albedo;
     
     // ── Baked lightmap indirect diffuse ───────────────────────────────────────
     // For static geometry: pre-computed multi-bounce GI from offline baking.
@@ -846,12 +1203,54 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // so neither do we.  This convention matches Unreal Engine's lightmap pipeline.
     let lightmap_indirect = lightmap_sample * albedo;
 
-    // ── Indirect specular: environment cubemap ────────────────────────────────
+    // ── Indirect specular: SSR + environment cubemap ──────────────────────────
     let R            = reflect(-V, N);
-    let env_lod      = roughness * 8.0;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
-    let env_sample   = textureSampleLevel(env_cube, env_sampler, R, env_lod).rgb;
+    let env_lod      = roughness * ENV_MAX_LOD;  // approx mip from roughness (WebGPU: textureSample not allowed in non-uniform flow)
+    // Parallax-corrected, influence-blended captures, falling back to the
+    // skylight where none reach. Rougher surfaces pull from higher mips of the
+    // pre-filtered chain, so reflection blur tracks roughness.
+    let env_sample   = sample_reflection_environment(world_pos, R, env_lod);
     let env_brdf    = env_brdf_approx(NdV, roughness);
-    let spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
+    var spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
+
+    // ── SSR composite ────────────────────────────────────────────────────
+    // Blend screen-space reflections over the cubemap fallback, weighted by
+    // the trace's confidence.
+    //
+    // Alpha IS the blend weight. SsrPass folds every validity term into it —
+    // edge, viewer-facing, back-face, ray distance, and roughness — precisely
+    // so this composite can dissolve an untrustworthy reflection back into
+    // the probe.
+    let ssr_hit      = textureLoad(ssr_tex, pix, 0);
+    if ssr_hit.a > 0.0 {
+        let ssr_sample = ssr_hit.rgb * F_ibl;
+        spec_ind = mix(spec_ind, ssr_sample, ssr_hit.a);
+    }
+
+    // ── Planar reflection composite ──────────────────────────────────────
+    // Planar reflections are more accurate on their native surfaces (floors,
+    // mirrors, water) than SSR or the cubemap. They are blended on top of
+    // whatever SSR found, with their own confidence weighting.
+    //
+    // The planar trace runs *before* deferred lighting (like SSR), so its
+    // output is unlit scene colour — multiply by F_ibl to match the IBL
+    // fallback's energy level, exactly as SSR does above.
+    let planar_hit    = textureLoad(planar_tex, pix, 0);
+    if planar_hit.a > 0.0 {
+        let planar_sample = planar_hit.rgb * F_ibl;
+        spec_ind = mix(spec_ind, planar_sample, planar_hit.a);
+    }
+
+    // ── RC-enhanced specular (rough surfaces) ────────────────────────────
+    // Radiance cascades store irradiance from the scene's GI. For rough
+    // surfaces (roughness > 0.6), a single SSR trace or ray query cannot
+    // converge the full glossy lobe, so we fall back to the RC irradiance
+    // as a broad directional wash.  This prevents rough reflections from
+    // going black when SSR misses.
+    if globals.has_rc_gi > 0u && roughness > 0.6 {
+        let rc_spec = sample_rc_specular(world_pos, R, roughness, N);
+        spec_ind = mix(spec_ind, rc_spec, smoothstep(0.6, 0.9, roughness) * 0.4);
+    }
 
     // ── INDIRECT LIGHTING ────────────────────────────────────────────────────
     // Hemisphere ambient is shadow-INDEPENDENT.  Shadow maps only affect direct
@@ -897,6 +1296,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     let indirect      = select(indirect_dyn, indirect_bake, has_lightmap);
     var color         = lo_final + indirect;
     color        += emissive;               // emissive from G-buffer
+    color        += sss_transmission;       // SSS rim glow
 
     // ── Water caustics ────────────────────────────────────────────────────────
     // Add caustics to surfaces below water

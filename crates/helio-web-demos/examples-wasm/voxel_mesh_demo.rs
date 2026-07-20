@@ -164,6 +164,7 @@ impl HelioWasmApp for Demo {
                 light_type: LightType::Directional as u32,
                 inner_angle: 0.0,
                 _pad: 0,
+                ..Default::default()
             }));
             scene.insert_actor(SceneActor::light(GpuLight {
                 position_range: [0.0, 0.0, 0.0, f32::MAX],
@@ -173,6 +174,7 @@ impl HelioWasmApp for Demo {
                 light_type: LightType::Directional as u32,
                 inner_angle: 0.0,
                 _pad: 0,
+                ..Default::default()
             }));
             // Upward sky-fill so downward-facing faces aren't pitch black.
             scene.insert_actor(SceneActor::light(GpuLight {
@@ -183,6 +185,7 @@ impl HelioWasmApp for Demo {
                 light_type: LightType::Directional as u32,
                 inner_angle: 0.0,
                 _pad: 0,
+                ..Default::default()
             }));
         }
 

@@ -2331,6 +2331,7 @@ dependencies = [
  "helio-default-graphs",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
+ "helio-pass-decal",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
  "helio-pass-perf-overlay",
@@ -2934,6 +2935,7 @@ dependencies = [
  "glam 0.33.2",
  "helio-voxel-core",
  "libhelio",
+ "naga 30.0.0",
  "pollster 0.4.0",
  "thiserror 2.0.18",
  "wgpu 30.0.0",
@@ -2948,6 +2950,7 @@ dependencies = [
  "helio-pass-billboard",
  "helio-pass-corona",
  "helio-pass-debug-overlay",
+ "helio-pass-decal",
  "helio-pass-deferred-light",
  "helio-pass-fxaa",
  "helio-pass-gbuffer",
@@ -2957,7 +2960,9 @@ dependencies = [
  "helio-pass-light-cull",
  "helio-pass-occlusion-cull",
  "helio-pass-perf-overlay",
+ "helio-pass-planar-reflection",
  "helio-pass-postprocess",
+ "helio-pass-radiance-cascades",
  "helio-pass-shadow",
  "helio-pass-shadow-cull",
  "helio-pass-shadow-dirty",
@@ -2965,9 +2970,11 @@ dependencies = [
  "helio-pass-simple-cube",
  "helio-pass-sky",
  "helio-pass-sky-lut",
+ "helio-pass-ssr",
  "helio-pass-taa",
  "helio-pass-transparent",
  "helio-pass-virtual-geometry",
+ "helio-pass-volumetric-fog",
  "helio-pass-voxel-mesh",
  "helio-pass-water-sim",
  "image",
@@ -3011,6 +3018,17 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-decal"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 
@@ -3116,6 +3134,17 @@ dependencies = [
  "bytemuck",
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-planar-reflection"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 
@@ -3244,6 +3273,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-ssr"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
 name = "helio-pass-taa"
 version = "0.1.0"
 dependencies = [
@@ -3281,6 +3320,16 @@ dependencies = [
  "libhelio",
  "log",
  "naga 30.0.0",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-pass-volumetric-fog"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-core",
+ "libhelio",
  "wgpu 30.0.0",
 ]
 
@@ -3339,13 +3388,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-scenedb"
+name = "helio-snapshot"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "naga 30.0.0",
+ "env_logger",
+ "futures-channel",
+ "glam 0.33.2",
+ "helio",
+ "helio-asset-compat",
+ "helio-default-graphs",
+ "image",
+ "log",
  "pollster 0.4.0",
- "pulsar_scenedb",
+ "thiserror 2.0.18",
  "wgpu 30.0.0",
 ]
 

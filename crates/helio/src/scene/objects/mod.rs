@@ -4,24 +4,19 @@
 //! a mesh and material, has a world-space transform, and can be assigned to
 //! visibility groups.
 //!
-//! # Hybrid Slot Architecture
+//! # Automatic Instancing
 //!
-//! The scene uses a hybrid approach to balance add/remove speed with GPU rendering
-//! efficiency:
-//!
-//! - **Persistent mode (default):** O(1) add/remove with delta GPU uploads. Each object
-//!   gets its own draw call. Ideal for dynamic scenes.
-//!
-//! - **Optimized mode (explicit):** Call [`Scene::optimize_scene_layout`](crate::Scene::optimize_scene_layout)
-//!   to sort objects by (mesh, material) for optimal GPU cache coherency and automatic
-//!   instancing. Ideal for static scenes after bulk loading.
+//! Objects sharing the same mesh and material are automatically batched into
+//! instanced draw calls on every flush. No explicit optimization step is needed —
+//! the renderer always sorts and groups objects by `(mesh_id, material_id)` when
+//! rebuilding GPU buffers after topology changes.
 //!
 //! # Module Organization
 //!
-//! - [`insert`]: Object insertion (O(1) persistent mode)
-//! - [`update`]: Transform and material updates (O(1) in both modes)
-//! - [`remove`]: Object removal (O(1) persistent mode)
-//! - [`rebuild`]: GPU buffer rebuild for both persistent and optimized modes
+//! - [`insert`]: Object insertion
+//! - [`update`]: Transform and material updates
+//! - [`remove`]: Object removal
+//! - [`rebuild`]: GPU buffer rebuild with automatic instancing
 
 mod insert;
 mod rebuild;

@@ -11,6 +11,13 @@ pub struct DebugDrawState {
     pub user_lines_generation: u64,
     pub user_tris: Vec<DebugVertex>,
     pub user_tris_generation: u64,
+    /// Wireframe bounds of every scene volume, rebuilt by the renderer while
+    /// the editor overlay is on. Kept separate from `user_lines` because the
+    /// editor path deliberately ignores those.
+    pub editor_volume_lines: Vec<DebugVertex>,
+    /// Bumped whenever `editor_volume_lines` changes, so the pass can keep
+    /// caching its uploads instead of re-sending the set every frame.
+    pub editor_volume_generation: u64,
 }
 
 impl Default for DebugDrawState {
@@ -22,6 +29,8 @@ impl Default for DebugDrawState {
             user_lines_generation: 0,
             user_tris: Vec::new(),
             user_tris_generation: 0,
+            editor_volume_lines: Vec::new(),
+            editor_volume_generation: 0,
         }
     }
 }
@@ -44,6 +53,10 @@ pub struct DebugPass {
     tri_buf: wgpu::Buffer,
     pub tri_count: u32,
     depth_test_enabled: bool,
+    /// Test against the internal-res scene depth (and therefore draw into the
+    /// internal-res lit image) rather than the output-res dummy depth.
+    /// Required for real occlusion — see `render_pass_descriptor`.
+    use_scene_depth: bool,
 }
 
 impl DebugPass {
@@ -279,7 +292,14 @@ impl DebugPass {
             tri_buf,
             tri_count: 0,
             depth_test_enabled: depth_test,
+            use_scene_depth: false,
         }
+    }
+
+    /// Occlude against real scene geometry instead of drawing over everything.
+    /// Only meaningful with depth testing on.
+    pub fn set_use_scene_depth(&mut self, enabled: bool) {
+        self.use_scene_depth = enabled;
     }
 
     pub fn update_lines(&mut self, queue: &wgpu::Queue, verts: &[DebugVertex]) {
@@ -451,7 +471,16 @@ impl RenderPass for DebugPass {
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let depth_attachment = if self.depth_test_enabled {
-            let depth_view = if let Some(frd) = resources.full_res_depth.get() {
+            // `full_res_depth` is a dummy: it is allocated so that passes
+            // drawing at output resolution have a correctly-sized depth
+            // attachment, but no pass ever renders scene depth into it. Testing
+            // against it rejects every fragment. Real occlusion has to use the
+            // internal-res scene depth, which means drawing at internal res too
+            // — see `use_scene_depth` and BillboardPass::occluded_by_geometry,
+            // which makes the same trade.
+            let depth_view = if self.use_scene_depth {
+                depth
+            } else if let Some(frd) = resources.full_res_depth.get() {
                 frd
             } else {
                 depth
@@ -467,9 +496,16 @@ impl RenderPass for DebugPass {
         } else {
             None
         };
+        // Scene depth is internal-res, so the colour target must be too, or the
+        // attachments disagree in size.
+        let color_view = if self.use_scene_depth {
+            resources.pre_aa.get().unwrap_or(target)
+        } else {
+            target
+        };
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
-                view: target,
+                view: color_view,
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
@@ -512,6 +548,7 @@ pub struct DebugDrawPass {
     editor_marker_lines: [DebugVertex; 6],
     editor_last_key: Option<(bool, i32, i32, i32)>,
     editor_last_cam: Option<[f32; 3]>,
+    editor_last_volume_gen: Option<u64>,
 }
 
 impl DebugDrawPass {
@@ -523,8 +560,12 @@ impl DebugDrawPass {
         depth_test: bool,
         editor_mode: bool,
     ) -> Self {
+        let mut pass = DebugPass::new(device, camera_buf, surface_format, depth_test);
+        // The editor overlay is meant to sit inside the scene, so it occludes
+        // against real geometry rather than painting over it.
+        pass.set_use_scene_depth(editor_mode && depth_test);
         Self {
-            pass: DebugPass::new(device, camera_buf, surface_format, depth_test),
+            pass,
             state,
             editor_mode,
             cached_line_gen: u64::MAX,
@@ -537,6 +578,7 @@ impl DebugDrawPass {
             }; 6],
             editor_last_key: None,
             editor_last_cam: None,
+            editor_last_volume_gen: None,
         }
     }
 
@@ -688,7 +730,7 @@ impl RenderPass for DebugDrawPass {
         if self.editor_mode {
             let editor_enabled = state.editor_enabled;
             let cam = state.camera_position;
-            drop(state);
+            let volume_gen = state.editor_volume_generation;
 
             if !editor_enabled {
                 if self.cached_line_gen != 0 {
@@ -723,12 +765,20 @@ impl RenderPass for DebugDrawPass {
                 (center_x * 1000.0) as i32,
                 (center_z * 1000.0) as i32,
             );
+            // Grid and volume bounds both change rarely, so they share one
+            // cached prefix and the per-frame camera marker gets patched in
+            // after them.
             let mut grid_rebuilt = false;
-            if self.editor_last_key != Some(key) {
+            if self.editor_last_key != Some(key) || self.editor_last_volume_gen != Some(volume_gen)
+            {
                 self.rebuild_editor_grid_cache(center_x, center_z, grid_step);
+                self.editor_grid_cache
+                    .extend_from_slice(&state.editor_volume_lines);
                 self.editor_last_key = Some(key);
+                self.editor_last_volume_gen = Some(volume_gen);
                 grid_rebuilt = true;
             }
+            drop(state);
 
             let cam_arr = [cam.x, cam.y, cam.z];
             if self.editor_last_cam != Some(cam_arr)
@@ -781,20 +831,11 @@ impl RenderPass for DebugDrawPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        let target_view = if self.editor_mode {
-            ctx.resources.pre_aa.get().unwrap_or(ctx.target)
-        } else {
-            ctx.target
-        };
-
-        let previous_target = ctx.target;
-        ctx.target = target_view;
-
-        let res = self.pass.execute(ctx);
-
-        ctx.target = previous_target;
-
-        res
+        // No target override here: the graph has already begun the render pass
+        // from render_pass_descriptor() by this point, so reassigning
+        // ctx.target would change nothing. Where this draws is decided purely
+        // by where the pass sits in the graph.
+        self.pass.execute(ctx)
     }
 }
 

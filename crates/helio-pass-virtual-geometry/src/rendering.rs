@@ -408,6 +408,16 @@ impl VirtualGeometryPass {
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
+            Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba16Float,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            }),
         ];
         let draw_primitive = wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -963,6 +973,8 @@ impl RenderPass for VirtualGeometryPass {
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
         let gbuffer = resources.gbuffer.read("VirtualGeometry")?;
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("VirtualGeometry")?;
+        let sss = resources.gbuffer_sss.read("VirtualGeometry")?;
+        let extra = resources.gbuffer_extra.read("VirtualGeometry")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
@@ -1003,6 +1015,24 @@ impl RenderPass for VirtualGeometryPass {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: lightmap_uv,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: sss,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: extra,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -1216,7 +1246,7 @@ impl RenderPass for VirtualGeometryPass {
         &["gbuffer", "main_scene", "vg", "hiz"]
     }
     fn writes(&self) -> &'static [&'static str] {
-        &["gbuffer", "gbuffer_lightmap_uv"]
+        &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {

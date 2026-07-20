@@ -13,6 +13,7 @@
 
 pub mod camera;
 pub mod corona;
+pub mod decal;
 pub mod draw;
 pub mod frame;
 pub mod instance;
@@ -21,6 +22,7 @@ pub mod material;
 pub mod meshlet;
 pub mod movability;
 pub mod postprocess;
+pub mod reflection;
 pub mod shader;
 pub mod shadow;
 pub mod sky;
@@ -28,6 +30,7 @@ pub mod water;
 
 pub use camera::*;
 pub use corona::*;
+pub use decal::*;
 pub use draw::*;
 pub use frame::*;
 pub use instance::*;
@@ -36,6 +39,7 @@ pub use material::*;
 pub use meshlet::*;
 pub use movability::*;
 pub use postprocess::*;
+pub use reflection::*;
 pub use shadow::*;
 pub use sky::{SkyActor, VolumetricClouds};
 pub use water::*;

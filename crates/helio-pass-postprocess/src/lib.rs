@@ -1,7 +1,10 @@
 //! GPU-native post-processing pipeline for Helio.
 //!
+//! Volume blending lives in [`PostProcessVolumeBlendPass`] and is scheduled ahead
+//! of this pass, so that earlier readers of the post-process config (notably
+//! `VolumetricFogPass`) see the blended values rather than the camera defaults.
+//!
 //! Sub-stages (execution order in `execute()`):
-//!   0. `cs_volume_blend`       — blend active post-process volumes → output (compute)
 //!   1. `cs_exposure`           — luminance histogram → avg luminance (compute)
 //!   2. `cs_bloom_down_extract` — extract brights from HDR → bloom mip 0 (compute)
 //!   3. `cs_bloom_down`         — 2x downsample mip chain, 4 passes (compute)
@@ -19,6 +22,9 @@
 use bytemuck;
 use helio_core::graph::ResourceBuilder;
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
+
+mod volume_blend;
+pub use volume_blend::PostProcessVolumeBlendPass;
 
 const BASE_SHADER_SRC: &str = include_str!("../shaders/postprocess.wgsl");
 
@@ -56,25 +62,20 @@ pub struct PostProcessPass {
     bloom_extract_pipeline: wgpu::ComputePipeline,
     bloom_down_pipeline: wgpu::ComputePipeline,
     uber_pipeline: wgpu::RenderPipeline,
-    volume_blend_pipeline: wgpu::ComputePipeline,
 
     // Separate BGLs for compute vs render
     compute_main_bgl: wgpu::BindGroupLayout,
     render_main_bgl: wgpu::BindGroupLayout,
     bloom_compute_bgl: wgpu::BindGroupLayout,
-    blend_bgl: wgpu::BindGroupLayout,
 
     compute_main_bg: Option<wgpu::BindGroup>,
     render_main_bg: Option<wgpu::BindGroup>,
-    main_bg_key: Option<(usize, usize, usize, usize)>,
+    main_bg_key: Option<(usize, usize, usize, usize, usize)>,
 
     // Bloom BGs
     bloom_extract_bg: Option<(usize, wgpu::BindGroup)>,
     bloom_down_bgs: Vec<wgpu::BindGroup>,
 
-    // Volume blend BG
-    blend_bg: Option<wgpu::BindGroup>,
-    blend_bg_key: Option<(usize, usize)>,
 
     bloom_textures: Vec<wgpu::Texture>,
     bloom_sampled_views: Vec<wgpu::TextureView>,
@@ -89,8 +90,6 @@ pub struct PostProcessPass {
 
     first_frame: bool,
 
-    // ── GPU volume blending ────────────────────────────────────────────────
-    blend_output_buf: wgpu::Buffer,
 
     // ── Bloom gating ───────────────────────────────────────────────────────
     bloom_active: bool,
@@ -99,6 +98,8 @@ pub struct PostProcessPass {
     noise_texture: wgpu::Texture,
     noise_view: wgpu::TextureView,
     noise_sampler: wgpu::Sampler,
+    /// 1x1 (0,0,0,1) stand-in bound at b17 when the graph has no fog pass.
+    fallback_fog_view: wgpu::TextureView,
     custom_params_buf: wgpu::Buffer,
     custom_params: Vec<[f32; 4]>,
 
@@ -145,7 +146,7 @@ impl PostProcessPass {
         let initial_src = Self::build_shader_source(&initial_entries);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(initial_src.clone().into()),
+            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&initial_src).into_owned().into()),
         });
 
         let avg_luminance_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -174,14 +175,6 @@ impl PostProcessPass {
 
         let (bloom_textures, bloom_sampled_views, bloom_storage_views) =
             Self::create_bloom_mips(device, width, height);
-
-        // ── Blend output buffer (storage, written by cs_volume_blend) ───────
-        let blend_output_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("PostProcess Blend Output"),
-            size: std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
 
         // ── Shared BGL entry helpers ────────────────────────────────────────
 
@@ -261,8 +254,6 @@ impl PostProcessPass {
                 sampled_tex_entry(12, cfv, false),
                 sampler_entry(13, cfv, false),
                 storage_ro_entry(14, cfv),
-                storage_ro_entry(15, cfv),
-                storage_buf_entry(16, cfv),
             ],
         });
 
@@ -285,6 +276,17 @@ impl PostProcessPass {
                 sampled_tex_entry(12, fv, false),
                 sampler_entry(13, fv, false),
                 storage_ro_entry(14, fv),
+                // Fog is a froxel grid, not a screen-space buffer.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 17,
+                    visibility: fv,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -315,17 +317,6 @@ impl PostProcessPass {
             ],
         });
 
-        // ── blend_bgl: postprocess (b0), camera (b1), pp_volumes (b15), blend_output (b16) ──
-        let blend_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("PostProcess Volume Blend BGL"),
-            entries: &[
-                uniform_entry(0, cv),
-                uniform_entry(1, cv),
-                storage_ro_entry(15, cv),
-                storage_buf_entry(16, cv),
-            ],
-        });
-
         // Precompute bloom_down BGs
         let bloom_down_bgs = Self::make_bloom_down_bgs(
             device,
@@ -343,11 +334,6 @@ impl PostProcessPass {
         let bloom_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("PostProcess Bloom PL"),
             bind_group_layouts: &[Some(&compute_main_bgl), Some(&bloom_compute_bgl)],
-            immediate_size: 0,
-        });
-        let blend_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("PostProcess Volume Blend PL"),
-            bind_group_layouts: &[Some(&blend_bgl)],
             immediate_size: 0,
         });
         let render_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -368,7 +354,6 @@ impl PostProcessPass {
         };
 
         let exposure_pipeline = mk_compute("PostProcess Exposure", "cs_exposure", &exposure_pl);
-        let volume_blend_pipeline = mk_compute("PostProcess Volume Blend", "cs_volume_blend", &blend_pl);
         let bloom_extract_pipeline = mk_compute("PostProcess Bloom Extract", "cs_bloom_down_extract", &bloom_pl);
         let bloom_down_pipeline = mk_compute("PostProcess Bloom Down", "cs_bloom_down", &bloom_pl);
 
@@ -440,6 +425,32 @@ impl PostProcessPass {
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
+        // Stand-in for the fog grid when no VolumetricFogPass is in the graph. The
+        // composite is `color * fog.a + fog.rgb`, so (0,0,0,1) is exactly the
+        // identity — the uber shader needs no branch for the fog-less case.
+        // 1x1x1 D3 to match the real grid's binding type.
+        // Rgba16Float texels are halfs: 0.0 = 0x0000, 1.0 = 0x3C00, little-endian.
+        let fallback_fog_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("PostProcess Fog Fallback"),
+            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_fog_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3C],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(8), rows_per_image: Some(1) },
+            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+        );
+        let fallback_fog_view = fallback_fog_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+
         let custom_params_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Custom Params"),
             size: 64 * 16,
@@ -455,18 +466,14 @@ impl PostProcessPass {
             bloom_extract_pipeline,
             bloom_down_pipeline,
             uber_pipeline,
-            volume_blend_pipeline,
             compute_main_bgl,
             render_main_bgl,
             bloom_compute_bgl,
-            blend_bgl,
             compute_main_bg: None,
             render_main_bg: None,
             main_bg_key: None,
             bloom_extract_bg: None,
             bloom_down_bgs,
-            blend_bg: None,
-            blend_bg_key: None,
             bloom_textures,
             bloom_sampled_views,
             bloom_storage_views,
@@ -476,11 +483,11 @@ impl PostProcessPass {
             height,
             format,
             first_frame: true,
-            blend_output_buf,
             bloom_active: true,
             noise_texture,
             noise_view,
             noise_sampler,
+            fallback_fog_view,
             custom_params_buf,
             custom_params: Vec::new(),
             user_shader_snippet: stored_snippet,
@@ -561,7 +568,7 @@ impl PostProcessPass {
         }
         let shader_mod = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("PostProcess Shader"),
-            source: wgpu::ShaderSource::Wgsl(source.clone().into()),
+            source: wgpu::ShaderSource::Wgsl(helio_core::shader::resolve(&source).into_owned().into()),
         });
         self.uber_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("PostProcess Uber"),
@@ -701,8 +708,9 @@ impl PostProcessPass {
         pre_aa_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         camera_buf: &wgpu::Buffer,
-        pp_volumes_buf: &wgpu::Buffer,
+        fog_view: Option<&wgpu::TextureView>,
     ) {
+        let fog_view = fog_view.unwrap_or(&self.fallback_fog_view);
         self.compute_main_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("PostProcess Compute Main BG"),
             layout: &self.compute_main_bgl,
@@ -717,8 +725,6 @@ impl PostProcessPass {
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.noise_view) },
                 wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self.noise_sampler) },
                 wgpu::BindGroupEntry { binding: 14, resource: self.custom_params_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 15, resource: pp_volumes_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 16, resource: self.blend_output_buf.as_entire_binding() },
             ],
         }));
 
@@ -741,28 +747,11 @@ impl PostProcessPass {
                 wgpu::BindGroupEntry { binding: 12, resource: wgpu::BindingResource::TextureView(&self.noise_view) },
                 wgpu::BindGroupEntry { binding: 13, resource: wgpu::BindingResource::Sampler(&self.noise_sampler) },
                 wgpu::BindGroupEntry { binding: 14, resource: self.custom_params_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 17, resource: wgpu::BindingResource::TextureView(fog_view) },
             ],
         }));
     }
 
-    fn rebuild_blend_bg(
-        &mut self,
-        device: &wgpu::Device,
-        postprocess_buf: &wgpu::Buffer,
-        camera_buf: &wgpu::Buffer,
-        pp_volumes_buf: &wgpu::Buffer,
-    ) {
-        self.blend_bg = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("PostProcess Volume Blend BG"),
-            layout: &self.blend_bgl,
-            entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: postprocess_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 15, resource: pp_volumes_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 16, resource: self.blend_output_buf.as_entire_binding() },
-            ],
-        }));
-    }
 
     fn mip_dims(&self, mip: u32) -> (u32, u32) {
         ((self.width >> (mip + 1)).max(1), (self.height >> (mip + 1)).max(1))
@@ -775,7 +764,7 @@ impl RenderPass for PostProcessPass {
     }
 
     fn reads(&self) -> &'static [&'static str] {
-        &["pre_aa"]
+        &["pre_aa", "fog_accum"]
     }
 
     fn render_pass_descriptor<'a>(
@@ -789,6 +778,9 @@ impl RenderPass for PostProcessPass {
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
         builder.read("pre_aa");
+        // Optional: graphs without a VolumetricFogPass never publish this, and the
+        // uber shader falls back to a 1x1 no-op texture.
+        builder.read("fog_accum");
     }
 
     fn on_resize(&mut self, device: &wgpu::Device, width: u32, height: u32) {
@@ -805,8 +797,6 @@ impl RenderPass for PostProcessPass {
         self.render_main_bg = None;
         self.main_bg_key = None;
         self.bloom_extract_bg = None;
-        self.blend_bg = None;
-        self.blend_bg_key = None;
         self.first_frame = true;
     }
 
@@ -856,34 +846,26 @@ impl RenderPass for PostProcessPass {
             None => return Ok(()),
         };
 
-        // Volume buffer — may be empty, that's fine.
-        let pp_volumes_buf = ctx.resources.pp_volumes.get();
-        let pp_volume_count = ctx.resources.pp_volume_count;
-
         let camera_buf = ctx.scene.camera;
+
+        // None when no VolumetricFogPass is in the graph; rebuild_bind_groups then
+        // binds the 1x1 no-op fallback. Part of the key so that a fog pass being
+        // added, removed, or resized rebuilds the group instead of leaving b17
+        // pointing at a stale view.
+        let fog_view = ctx.resources.fog_accum.get();
 
         let bg_key = (
             pre_aa_view as *const _ as usize,
             ctx.depth as *const _ as usize,
             camera_buf as *const _ as usize,
             postprocess_buf as *const _ as usize,
+            fog_view.map_or(0, |v| v as *const _ as usize),
         );
         if self.main_bg_key != Some(bg_key) {
-            let vol_buf = pp_volumes_buf.unwrap_or(postprocess_buf); // fallback to any valid buf
-            self.rebuild_bind_groups(ctx.device, postprocess_buf, pre_aa_view, ctx.depth, camera_buf, vol_buf);
+            self.rebuild_bind_groups(ctx.device, postprocess_buf, pre_aa_view, ctx.depth, camera_buf, fog_view);
             self.main_bg_key = Some(bg_key);
         }
 
-        let vol_key = (
-            camera_buf as *const _ as usize,
-            pp_volumes_buf.map(|b| b as *const _ as usize).unwrap_or(0),
-        );
-        if self.blend_bg_key != Some(vol_key) {
-            if let Some(vol_buf) = pp_volumes_buf {
-                self.rebuild_blend_bg(ctx.device, postprocess_buf, camera_buf, vol_buf);
-            }
-            self.blend_bg_key = Some(vol_key);
-        }
 
         // Bloom extract BG
         let hdr_ptr = pre_aa_view as *const _ as usize;
@@ -904,26 +886,10 @@ impl RenderPass for PostProcessPass {
         let extract_bg = &self.bloom_extract_bg.as_ref().unwrap().1;
         let ce = ctx.compute_encoder_ptr;
 
-        // 0. GPU volume blending (if volumes are present)
-        if pp_volume_count > 0 {
-            if let Some(ref blend_bg) = self.blend_bg {
-                let mut cpass = unsafe { &mut *ce }.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("PostProcess Volume Blend"),
-                    timestamp_writes: None,
-                });
-                cpass.set_pipeline(&self.volume_blend_pipeline);
-                cpass.set_bind_group(0, blend_bg, &[]);
-                cpass.dispatch_workgroups(1, 1, 1);
-            }
-
-            // Copy blended result from storage buffer to uniform buffer
-            let postprocess_size = std::mem::size_of::<libhelio::GpuPostProcessUniforms>() as u64;
-            unsafe { &mut *ce }.copy_buffer_to_buffer(
-                &self.blend_output_buf, 0,
-                postprocess_buf, 0,
-                postprocess_size,
-            );
-        }
+        // 0. Volume blending now runs in PostProcessVolumeBlendPass, scheduled
+        //    ahead of this pass — see volume_blend.rs. It cannot happen here:
+        //    VolumetricFogPass reads the blended fog config earlier in the graph,
+        //    and would silently get the unblended camera defaults instead.
 
         // 1. Auto-exposure histogram
         {

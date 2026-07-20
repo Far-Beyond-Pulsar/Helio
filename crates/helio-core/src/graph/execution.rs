@@ -873,14 +873,19 @@ fn route_named_texture<'a>(name: &str, view: &'a wgpu::TextureView, frame: &mut 
     match name {
         "pre_aa" => frame.pre_aa.write(view, "Graph"),
         "ssao" => frame.ssao.write(view, "Graph"),
+        "fog_accum" => frame.fog_accum.write(view, "Graph"),
         "hiz" => frame.hiz.write(view, "Graph"),
         "sky_lut" => frame.sky_lut.write(view, "Graph"),
         "gbuffer_lightmap_uv" => frame.gbuffer_lightmap_uv.write(view, "Graph"),
+        "gbuffer_sss" => frame.gbuffer_sss.write(view, "Graph"),
+        "gbuffer_extra" => frame.gbuffer_extra.write(view, "Graph"),
         "water_sim_texture" => frame.water_sim_texture.write(view, "Graph"),
         "water_caustics" => frame.water_caustics.write(view, "Graph"),
         "rc_cascades" => frame.rc_view.write(view, "Graph"),
         "shadow_atlas" => frame.shadow_atlas.write(view, "Graph"),
         "static_shadow_atlas" => frame.static_shadow_atlas.write(view, "Graph"),
+        "ssr_trace" => frame.ssr_trace.write(view, "Graph"),
+        "planar_reflection" => frame.planar_reflection.write(view, "Graph"),
         "gbuffer_albedo" | "gbuffer_normal" | "gbuffer_orm" | "gbuffer_emissive" => {}
         _ => {}
     }

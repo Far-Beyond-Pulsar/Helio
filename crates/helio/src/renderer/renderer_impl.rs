@@ -58,7 +58,7 @@ pub struct DebugCameraUniform {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 pub struct DebugVertex {
     pub position: [f32; 3],
     pub _pad: f32,
@@ -446,13 +446,34 @@ impl Renderer {
         self.graph_rebuilder = Some(rebuilder);
     }
 
-    pub fn optimize_scene_layout(&mut self) {
-        self.scene.optimize_scene_layout();
+    #[cfg(feature = "bake")]
+    pub fn configure_bake(&mut self, mut request: helio_bake::BakeRequest) {
+        self.sync_reflection_capture_probes(&mut request.config);
+        self.bake_pending = Some(request);
     }
 
+    /// Point the probe bake at the scene's static reflection captures, and bind
+    /// each capture to the cube array layer its probe will land in.
+    ///
+    /// Both halves come from one ordered traversal, which is the whole point:
+    /// hand-authored probe positions and hand-set layer indices are two lists
+    /// that silently rot apart the moment a capture moves or is deleted.
     #[cfg(feature = "bake")]
-    pub fn configure_bake(&mut self, request: helio_bake::BakeRequest) {
-        self.bake_pending = Some(request);
+    fn sync_reflection_capture_probes(&mut self, config: &mut helio_bake::BakeConfig) {
+        let positions = self.scene.static_reflection_capture_positions();
+        if positions.is_empty() {
+            return;
+        }
+        match config.probes.as_mut() {
+            Some(spec) => spec.positions = positions,
+            None => {
+                config.probes = Some(helio_bake::ProbeSpec {
+                    positions,
+                    config: helio_bake::ProbeConfig::default(),
+                })
+            }
+        }
+        self.scene.assign_reflection_capture_layers();
     }
 
     #[cfg(feature = "bake")]
@@ -493,6 +514,10 @@ impl Renderer {
     }
 
     /// Snapshot the renderer settings needed to build a replacement graph.
+    pub fn queue(&self) -> &Arc<wgpu::Queue> {
+        &self.queue
+    }
+
     pub fn renderer_config(&self) -> RendererConfig {
         RendererConfig {
             width: self.output_width,

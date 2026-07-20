@@ -121,6 +121,8 @@ pub struct SceneResources<'a> {
     pub aabbs: &'a wgpu::Buffer,
     pub draw_calls: &'a wgpu::Buffer,
     pub lights: &'a wgpu::Buffer,
+    pub decals: &'a wgpu::Buffer,
+    pub decal_count: u32,
     pub materials: &'a wgpu::Buffer,
     pub shadow_matrices: &'a wgpu::Buffer,
     pub indirect: &'a wgpu::Buffer,
@@ -176,4 +178,12 @@ pub struct SceneResources<'a> {
 
     /// Compiled graph WGSL snippets keyed by hash. Populated during flush.
     pub graph_wgsl_snippets: &'a std::collections::HashMap<u64, String>,
+
+    /// Reflection capture storage buffer.
+    pub reflection_captures: &'a wgpu::Buffer,
+    /// Number of reflection captures in the buffer.
+    pub reflection_capture_count: u32,
+
+    /// Whether hardware ray tracing (TLAS + ray queries) is available.
+    pub rt_available: bool,
 }

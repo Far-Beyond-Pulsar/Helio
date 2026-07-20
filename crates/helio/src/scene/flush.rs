@@ -5,7 +5,7 @@
 //! with flush operations.
 
 use bytemuck::Zeroable;
-use libhelio::{GpuLight, GpuShadowMatrix};
+use libhelio::{GpuDecal, GpuLight, GpuShadowMatrix};
 
 use crate::scene::Scene;
 
@@ -234,22 +234,10 @@ impl Scene {
         let queue = self.gpu_scene.queue.clone();
         self.mesh_pool.flush(&queue);
         self.material_textures.flush(&queue);
-        // Rebuild instanced draw lists when the object set has changed.
+        // Rebuild GPU buffers with automatic instancing when objects change.
         if self.objects_dirty {
-            if self.objects_layout_optimized {
-                self.rebuild_instance_buffers_optimized();
-            } else {
-                self.rebuild_instance_buffers_persistent();
-            }
+            self.rebuild_instance_buffers();
             self.objects_dirty = false;
-            // Full rebuild already called rebuild_shadow_partition_buffers().
-            self.shadow_partition_dirty = false;
-        }
-        // Persistent-mode delta inserts/removes bypass the full rebuild, so shadow
-        // partition indirect buffers need an explicit rebuild here.
-        if self.shadow_partition_dirty {
-            self.rebuild_shadow_partition_buffers();
-            self.shadow_partition_dirty = false;
         }
         // Topology changes rebuild all mirrors. Transform-only changes publish
         // one bounded instance range without touching descriptors or work spans.
@@ -273,6 +261,22 @@ impl Scene {
             }
             if any_dirty {
                 self.gpu_scene.voxel_volumes_generation += 1;
+            }
+        }
+
+        // ── Decal flush ──────────────────────────────────────────────────────
+        {
+            if self.decals_dirty {
+                let count = self.decals.dense_len();
+                let mut decals: Vec<GpuDecal> = Vec::with_capacity(count);
+                for i in 0..count {
+                    if let Some(record) = self.decals.get_dense(i) {
+                        decals.push(record.gpu);
+                    }
+                }
+                self.gpu_scene.decals.set_data(decals);
+                self.decals_dirty = false;
+                self.decals_dirty_range = None;
             }
         }
 

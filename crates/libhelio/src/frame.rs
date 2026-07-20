@@ -75,6 +75,8 @@ pub struct MainSceneResources<'a> {
     /// RC active within these bounds, simpler ambient fallback outside.
     pub rc_world_min: [f32; 3],
     pub rc_world_max: [f32; 3],
+    /// Hardware ray tracing TLAS, if available. None on non-RT hardware or WASM.
+    pub tlas: Option<&'a wgpu::Tlas>,
 }
 
 /// Debug-tracked resource slot.
@@ -188,6 +190,13 @@ pub struct FrameResources<'a> {
     /// GBuffer lightmap UV texture (Rg16Float) populated by GBufferPass.
     /// Contains per-pixel lightmap atlas UVs for sampling baked_lightmap.
     pub gbuffer_lightmap_uv: Tracked<&'a wgpu::TextureView>,
+    /// GBuffer SSS data (Rgba16Float): subsurface_color.rgb, subsurface_radius.
+    /// Populated by GBufferPass, consumed by DeferredLightPass and SssBlurPass.
+    pub gbuffer_sss: Tracked<&'a wgpu::TextureView>,
+    /// GBuffer extra surface data (Rgba16Float): roughness_aniso_x, roughness_aniso_y,
+    /// aniso_rotation, bitcast<f32>(surface_flags).
+    /// Populated by GBufferPass, consumed by DeferredLightPass.
+    pub gbuffer_extra: Tracked<&'a wgpu::TextureView>,
     /// Shadow atlas (2D array texture view) — populated after ShadowPass (dynamic/Movable objects)
     pub shadow_atlas: Tracked<&'a wgpu::TextureView>,
     /// Static shadow atlas (2D array texture view) — cached until Static/Stationary topology changes.
@@ -209,6 +218,9 @@ pub struct FrameResources<'a> {
     pub sky_lut_sampler: Tracked<&'a wgpu::Sampler>,
     /// SSAO result texture
     pub ssao: Tracked<&'a wgpu::TextureView>,
+    /// Volumetric fog accumulation, internal resolution (or a divisor of it).
+    /// rgb = in-scattered radiance, a = transmittance to the surface.
+    pub fog_accum: Tracked<&'a wgpu::TextureView>,
     /// Pre-AA HDR color buffer (input to TAA/FXAA/SMAA)
     pub pre_aa: Tracked<&'a wgpu::TextureView>,
     /// Tiled light lists buffer (populated by LightCullPass, consumed by DeferredLightPass).
@@ -313,6 +325,25 @@ pub struct FrameResources<'a> {
     /// Post-process uniform buffer (written by the Renderer, read by PostProcessPass).
     /// Points to the pass's own `GpuPostProcessUniforms` buffer.
     pub postprocess_uniforms: Tracked<&'a wgpu::Buffer>,
+
+    /// Reflection capture storage buffer
+    pub reflection_captures: Tracked<&'a wgpu::Buffer>,
+
+    /// Number of reflection captures in the buffer
+    pub reflection_capture_count: u32,
+
+    /// SSR texture (Rgba16Float, full resolution) — SSR output.
+    /// RGB = reflected colour, A = hit confidence (0 = no hit, 1 = confident).
+    /// Written by SsrPass, read by DeferredLightPass.
+    pub ssr_trace: Tracked<&'a wgpu::TextureView>,
+
+    /// Planar reflection texture (Rgba16Float, full resolution).
+    /// RGB = reflected colour from the nearest planar reflector, A = confidence.
+    /// Written by PlanarReflectionPass, read by DeferredLightPass.
+    pub planar_reflection: Tracked<&'a wgpu::TextureView>,
+
+    /// Sampler for planar_reflection.
+    pub planar_reflection_sampler: Tracked<&'a wgpu::Sampler>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -380,6 +411,8 @@ impl<'a> FrameResources<'a> {
         Self {
             gbuffer: Tracked::empty(),
             gbuffer_lightmap_uv: Tracked::empty(),
+            gbuffer_sss: Tracked::empty(),
+            gbuffer_extra: Tracked::empty(),
             shadow_atlas: Tracked::empty(),
             static_shadow_atlas: Tracked::empty(),
             shadow_sampler: Tracked::empty(),
@@ -390,6 +423,7 @@ impl<'a> FrameResources<'a> {
             sky_lut: Tracked::empty(),
             sky_lut_sampler: Tracked::empty(),
             ssao: Tracked::empty(),
+            fog_accum: Tracked::empty(),
             pre_aa: Tracked::empty(),
             tile_light_lists: Tracked::empty(),
             tile_light_counts: Tracked::empty(),
@@ -420,6 +454,11 @@ impl<'a> FrameResources<'a> {
             baked_pvs: Tracked::empty(),
             corona_emitters: Tracked::empty(),
             postprocess_uniforms: Tracked::empty(),
+            reflection_captures: Tracked::empty(),
+            reflection_capture_count: 0,
+            ssr_trace: Tracked::empty(),
+            planar_reflection: Tracked::empty(),
+            planar_reflection_sampler: Tracked::empty(),
         }
     }
 
@@ -442,6 +481,8 @@ impl<'a> FrameResources<'a> {
             }
             reset_field!(gbuffer);
             reset_field!(gbuffer_lightmap_uv);
+            reset_field!(gbuffer_sss);
+            reset_field!(gbuffer_extra);
             reset_field!(shadow_atlas);
             reset_field!(static_shadow_atlas);
             reset_field!(shadow_sampler);
@@ -478,6 +519,10 @@ impl<'a> FrameResources<'a> {
             reset_field!(baked_pvs);
             reset_field!(corona_emitters);
             reset_field!(postprocess_uniforms);
+            reset_field!(reflection_captures);
+            reset_field!(ssr_trace);
+            reset_field!(planar_reflection);
+            reset_field!(planar_reflection_sampler);
         }
     }
 }

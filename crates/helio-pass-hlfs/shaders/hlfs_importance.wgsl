@@ -38,6 +38,16 @@ struct GpuLight {
     light_type:      u32,
     inner_angle:     f32,
     _pad:            u32,
+    // Light shafts — consumed by helio-pass-volumetric-fog. Padding is three
+    // scalars, not vec3<u32>, to keep the struct at 96 bytes (vec3 aligns to 16).
+    god_rays_enabled:  u32,
+    god_rays_density:  f32,
+    god_rays_weight:   f32,
+    god_rays_decay:    f32,
+    god_rays_exposure: f32,
+    _pad2_0:           u32,
+    _pad2_1:           u32,
+    _pad2_2:           u32,
 }
 
 struct LightSample {
@@ -65,10 +75,14 @@ fn hash13(p3: vec3<f32>) -> f32 {
 }
 
 fn reconstruct_world_pos(pixel_pos: vec2<u32>, depth: f32) -> vec3<f32> {
+    // Depth goes in as-is. wgpu NDC z is [0,1] (the engine builds its projection
+    // with glam Mat4::perspective_rh), so the OpenGL-style `depth * 2.0 - 1.0`
+    // remap this used to do pushed every reconstructed point toward the far
+    // plane. hlfs_shade.wgsl already passes depth through unmodified.
     let ndc = vec4<f32>(
         (f32(pixel_pos.x) + 0.5) / f32(globals.screen_width) * 2.0 - 1.0,
         1.0 - (f32(pixel_pos.y) + 0.5) / f32(globals.screen_height) * 2.0,
-        depth * 2.0 - 1.0,
+        depth,
         1.0,
     );
     let world_h = camera.view_proj_inv * ndc;
