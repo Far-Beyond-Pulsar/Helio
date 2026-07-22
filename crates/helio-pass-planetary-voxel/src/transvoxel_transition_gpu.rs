@@ -1,6 +1,6 @@
 use crate::{
-    transvoxel::generated, GpuTerrainVertex, GpuTransvoxelCellOffset, GpuTransvoxelScanBlock,
-    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSVOXEL_TRANSITION_GPU_WGSL,
+    GpuTerrainVertex, GpuTransvoxelCellOffset, GpuTransvoxelScanBlock,
+    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TRANSVOXEL_TRANSITION_GPU_WGSL, transvoxel::generated,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_planet_voxel_core::{CellWord, TRANSITION_FACE_MASK};
@@ -371,6 +371,23 @@ impl TransvoxelGpuTransitionExtractor {
         transition_mask: u8,
         generation: u64,
     ) -> Result<wgpu::SubmissionIndex, TransvoxelTransitionGpuError> {
+        self.prepare(queue, face_slabs, transition_mask, generation)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Planetary Transvoxel Transition Extraction Encoder"),
+        });
+        self.encode(&mut encoder);
+        Ok(queue.submit([encoder.finish()]))
+    }
+
+    /// Uploads transition slabs and dispatch metadata without submitting work.
+    /// This is the graph-integrated counterpart to [`Self::dispatch`].
+    pub fn prepare(
+        &self,
+        queue: &wgpu::Queue,
+        face_slabs: &[CellWord],
+        transition_mask: u8,
+        generation: u64,
+    ) -> Result<(), TransvoxelTransitionGpuError> {
         if face_slabs.len() != TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT {
             return Err(TransvoxelTransitionGpuError::SampleCount {
                 actual: face_slabs.len(),
@@ -386,39 +403,41 @@ impl TransvoxelGpuTransitionExtractor {
             GpuTransvoxelTransitionDispatch::new(transition_mask, generation, self.config);
         queue.write_buffer(&self.sample_buffer, 0, bytemuck::cast_slice(face_slabs));
         queue.write_buffer(&self.dispatch_buffer, 0, bytemuck::bytes_of(&dispatch));
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Planetary Transvoxel Transition Extraction Encoder"),
-        });
+        Ok(())
+    }
+
+    /// Encodes the complete transition extraction. [`Self::prepare`] must be
+    /// called first.
+    pub fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.clear_buffer(&self.counters_buffer, 0, None);
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.classify_pipeline,
             &self.classify_bind_group,
             TRANSVOXEL_TRANSITION_CLASSIFY_WORKGROUPS,
             "Planetary Transvoxel Transition Classification",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_cells_pipeline,
             &self.scan_cells_bind_group,
             TRANSVOXEL_TRANSITION_SCAN_BLOCKS,
             "Planetary Transvoxel Transition Cell Scan",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.scan_blocks_pipeline,
             &self.scan_blocks_bind_group,
             1,
             "Planetary Transvoxel Transition Block Scan",
         );
         encode_dispatch(
-            &mut encoder,
+            encoder,
             &self.emit_pipeline,
             &self.emit_bind_group,
             TRANSVOXEL_TRANSITION_CLASSIFY_WORKGROUPS,
             "Planetary Transvoxel Transition Emission",
         );
-        Ok(queue.submit([encoder.finish()]))
     }
 
     pub fn cells_buffer(&self) -> &wgpu::Buffer {
@@ -619,9 +638,13 @@ pub enum TransvoxelTransitionGpuError {
     SampleCount { actual: usize, expected: usize },
     #[error("transition mask {0:#010b} uses bits outside the six page faces")]
     TransitionMask(u8),
-    #[error("Transvoxel transition capacities must be nonzero (vertices={max_vertices}, indices={max_indices})")]
+    #[error(
+        "Transvoxel transition capacities must be nonzero (vertices={max_vertices}, indices={max_indices})"
+    )]
     InvalidExtractionCapacity { max_vertices: u32, max_indices: u32 },
-    #[error("Transvoxel transition extraction requires {required} {name}, but the device exposes {available}")]
+    #[error(
+        "Transvoxel transition extraction requires {required} {name}, but the device exposes {available}"
+    )]
     DeviceLimit {
         name: &'static str,
         required: u64,

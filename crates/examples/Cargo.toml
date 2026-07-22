@@ -172,6 +172,10 @@ name = "voxel_demo_raymarch"
 path = "voxel/raymarch_demo.rs"
 
 [[bin]]
+name = "planet_voxel_demo"
+path = "planet_voxel_demo.rs"
+
+[[bin]]
 name = "radiant_demo"
 path = "radiant_demo.rs"
 
@@ -196,9 +200,11 @@ helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../helio-pass-postprocess" }
 helio-pass-voxel-raymarch = { path = "../helio-pass-voxel-raymarch" }
 helio-pass-voxel-mesh = { path = "../helio-pass-voxel-mesh" }
+helio-pass-planetary-voxel = { workspace = true }
 helio-pass-gbuffer = { path = "../helio-pass-gbuffer" }
 helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-voxel-core = { path = "../helio-voxel-core" }
+helio-planet-voxel-core = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
 rapier3d = "0.24"
 rapier_testbed3d = "0.24"
