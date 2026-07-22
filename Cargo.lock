@@ -3035,6 +3035,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-pass-planetary-voxel"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "helio-planet-voxel-core",
+ "pollster 0.4.0",
+ "thiserror 2.0.18",
+ "wgpu 30.0.0",
+]
+
+[[package]]
 name = "helio-pass-postprocess"
 version = "0.1.0"
 dependencies = [
@@ -3270,6 +3281,16 @@ version = "0.1.0"
 dependencies = [
  "helio-core",
  "libhelio",
+ "wgpu 30.0.0",
+]
+
+[[package]]
+name = "helio-planet-voxel-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "pollster 0.4.0",
+ "thiserror 2.0.18",
  "wgpu 30.0.0",
 ]
 
