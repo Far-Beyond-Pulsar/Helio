@@ -3,17 +3,35 @@ use crate::{
 };
 use std::collections::BTreeSet;
 
+/// Authoritative source generation for one planetary page.
+///
+/// Planet generations order complete replacements that reuse a stable
+/// [`PlanetId`]. Page generations order rebuilds within that planet instance.
+/// Keeping both values prevents a late page from a retired instance from
+/// colliding with a replacement whose page counter restarted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourceGeneration {
+    pub planet: u64,
+    pub page: u64,
+}
+
+impl SourceGeneration {
+    pub const fn new(planet: u64, page: u64) -> Self {
+        Self { planet, page }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PageUpload {
     pub key: PlanetPageKey,
-    pub generation: u64,
+    pub generation: SourceGeneration,
     pub cells: Box<[CellWord]>,
 }
 
 impl PageUpload {
     pub fn new(
         key: PlanetPageKey,
-        generation: u64,
+        generation: SourceGeneration,
         cells: Vec<CellWord>,
     ) -> Result<Self, ContractError> {
         let upload = Self {
@@ -37,7 +55,7 @@ impl PageUpload {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PageEvict {
     pub key: PlanetPageKey,
-    pub generation: u64,
+    pub generation: SourceGeneration,
 }
 
 impl PageEvict {
@@ -50,7 +68,7 @@ impl PageEvict {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VisiblePage {
     pub key: PlanetPageKey,
-    pub generation: u64,
+    pub generation: SourceGeneration,
     pub transition_mask: u8,
 }
 
@@ -134,6 +152,8 @@ pub enum ContractError {
     PaletteRange,
     #[error("material palette delta contains a non-finite value")]
     NonFiniteMaterial,
+    #[error("planetary renderer-local publication generation overflowed")]
+    PublicationGenerationOverflow,
 }
 
 #[cfg(test)]
@@ -148,7 +168,7 @@ mod tests {
     #[test]
     fn page_upload_requires_one_complete_page() {
         assert_eq!(
-            PageUpload::new(key(0), 0, vec![CellWord::AIR; 3]),
+            PageUpload::new(key(0), SourceGeneration::new(1, 0), vec![CellWord::AIR; 3],),
             Err(ContractError::CellCount(3))
         );
     }
@@ -157,7 +177,7 @@ mod tests {
     fn visible_sets_reject_duplicate_keys_and_invalid_face_bits() {
         let page = VisiblePage {
             key: key(0),
-            generation: 1,
+            generation: SourceGeneration::new(1, 1),
             transition_mask: 0,
         };
         assert_eq!(
