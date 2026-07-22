@@ -4,8 +4,8 @@ use crate::{
 };
 use helio_planet_voxel_core::{
     AddressError, CellWord, ContractError, EvictOutcome, GpuPageMeta, GpuPageMetaError, PageEvict,
-    PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, ResidentPageCache, UploadOutcome,
-    VisibilityOutcome, VisiblePageSet, PAGE_CELL_BYTES, PAGE_CELL_COUNT,
+    PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, ResidentPageCache, SourceGeneration,
+    UploadOutcome, VisibilityOutcome, VisiblePageSet, PAGE_CELL_BYTES, PAGE_CELL_COUNT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -35,7 +35,7 @@ pub struct PlanetaryVoxelResidency {
     plan: GpuAllocationPlan,
     cache: ResidentPageCache,
     frames: BTreeMap<PlanetId, PlanetFrameUniform>,
-    visible: BTreeMap<PlanetPageKey, (u64, u8)>,
+    visible: BTreeMap<PlanetPageKey, (SourceGeneration, u8)>,
     table: PageTable,
     published_table: Vec<GpuPageTableEntry>,
     published_metadata: Vec<GpuPageMeta>,
@@ -203,7 +203,9 @@ impl PlanetaryVoxelResidency {
         for (upload, lookup_key) in uploads.into_iter().zip(lookup_keys) {
             let page_key = upload.key;
             let mut candidate_table = self.table.clone();
-            let placeholder = GpuPageTableEntry::occupied(lookup_key, 0, upload.generation);
+            // Capacity probing does not publish this placeholder. The real
+            // entry below receives the cache-assigned renderer-local token.
+            let placeholder = GpuPageTableEntry::occupied(lookup_key, 0, 0);
             if candidate_table.insert(placeholder).is_err() {
                 candidate_table.compact()?;
                 if candidate_table.insert(placeholder).is_err() {
@@ -228,7 +230,7 @@ impl PlanetaryVoxelResidency {
                         *slot,
                         self.cache
                             .resident(page_key)
-                            .map(|page| page.generation)
+                            .map(|page| page.publication_generation)
                             .ok_or(GpuResidencyError::ResidentPageMissing)?,
                     ))?;
                     dirty_slots.insert(*slot);
@@ -237,13 +239,16 @@ impl PlanetaryVoxelResidency {
                         self.counters.uploads_published.saturating_add(1);
                 }
                 UploadOutcome::Replaced { slot, .. } => {
-                    let generation = self
+                    let publication_generation = self
                         .cache
                         .resident(page_key)
-                        .map(|page| page.generation)
+                        .map(|page| page.publication_generation)
                         .ok_or(GpuResidencyError::ResidentPageMissing)?;
-                    candidate_table
-                        .insert(GpuPageTableEntry::occupied(lookup_key, *slot, generation))?;
+                    candidate_table.insert(GpuPageTableEntry::occupied(
+                        lookup_key,
+                        *slot,
+                        publication_generation,
+                    ))?;
                     dirty_slots.insert(*slot);
                     self.table = candidate_table;
                     self.counters.uploads_published =
@@ -351,7 +356,7 @@ impl PlanetaryVoxelResidency {
     pub fn retire_eviction_watermark(
         &mut self,
         key: PlanetPageKey,
-        through_generation: u64,
+        through_generation: SourceGeneration,
     ) -> bool {
         self.cache
             .retire_eviction_watermark(key, through_generation)
@@ -427,7 +432,7 @@ impl PlanetaryVoxelResidency {
             table.insert(GpuPageTableEntry::occupied(
                 lookup,
                 page.slot,
-                page.generation,
+                page.publication_generation,
             ))?;
         }
         Ok(table)
@@ -451,7 +456,7 @@ impl PlanetaryVoxelResidency {
                 key.page,
                 frame.frame_origin_lod0_cell(),
                 page.slot,
-                page.generation,
+                page.publication_generation,
                 transition_mask,
             )?;
         }

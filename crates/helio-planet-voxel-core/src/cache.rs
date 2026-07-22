@@ -1,5 +1,6 @@
 use crate::{
-    CellWord, ContractError, PageEvict, PageUpload, PlanetPageKey, VisiblePageSet, PAGE_CELL_BYTES,
+    CellWord, ContractError, PageEvict, PageUpload, PlanetPageKey, SourceGeneration,
+    VisiblePageSet, PAGE_CELL_BYTES,
 };
 use std::collections::BTreeMap;
 
@@ -51,7 +52,10 @@ pub enum ResidencyConfigError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResidentPage {
     pub slot: u32,
-    pub generation: u64,
+    pub generation: SourceGeneration,
+    /// Monotonic token local to this cache lifetime. GPU work uses this token
+    /// instead of attempting to pack the two authoritative source generations.
+    pub publication_generation: u64,
     pub cells: Box<[CellWord]>,
     last_access: u64,
 }
@@ -60,7 +64,8 @@ pub struct ResidentPage {
 pub struct EvictedPage {
     pub key: PlanetPageKey,
     pub slot: u32,
-    pub generation: u64,
+    pub generation: SourceGeneration,
+    pub publication_generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,13 +76,13 @@ pub enum UploadOutcome {
     },
     Replaced {
         slot: u32,
-        previous_generation: u64,
+        previous_generation: SourceGeneration,
     },
     Duplicate {
         slot: u32,
     },
     Stale {
-        newest_generation: u64,
+        newest_generation: SourceGeneration,
     },
     GenerationConflict {
         slot: u32,
@@ -95,7 +100,7 @@ pub enum BackpressureReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EvictOutcome {
     Recorded { removed: Option<EvictedPage> },
-    Stale { newest_generation: u64 },
+    Stale { newest_generation: SourceGeneration },
     Backpressure(BackpressureReason),
 }
 
@@ -135,10 +140,11 @@ pub struct ResidentPageCache {
     config: ResidencyConfig,
     occupied_slots: BTreeMap<u32, PlanetPageKey>,
     pages: BTreeMap<PlanetPageKey, ResidentPage>,
-    eviction_watermarks: BTreeMap<PlanetPageKey, u64>,
-    visible: BTreeMap<PlanetPageKey, (u64, u8)>,
+    eviction_watermarks: BTreeMap<PlanetPageKey, SourceGeneration>,
+    visible: BTreeMap<PlanetPageKey, (SourceGeneration, u8)>,
     last_visible_frame: Option<u64>,
     access_clock: u64,
+    publication_clock: u64,
     counters: ResidencyCounters,
 }
 
@@ -152,6 +158,7 @@ impl ResidentPageCache {
             visible: BTreeMap::new(),
             last_visible_frame: None,
             access_clock: 0,
+            publication_clock: 0,
             counters: ResidencyCounters::default(),
         }
     }
@@ -174,7 +181,7 @@ impl ResidentPageCache {
         self.pages.iter().map(|(key, page)| (*key, page))
     }
 
-    pub fn eviction_watermark(&self, key: PlanetPageKey) -> Option<u64> {
+    pub fn eviction_watermark(&self, key: PlanetPageKey) -> Option<SourceGeneration> {
         self.eviction_watermarks.get(&key).copied()
     }
 
@@ -210,6 +217,7 @@ impl ResidentPageCache {
                 return Ok(UploadOutcome::GenerationConflict { slot });
             }
 
+            let publication_generation = self.next_publication_generation()?;
             let access = self.next_access();
             let existing = self
                 .pages
@@ -218,6 +226,7 @@ impl ResidentPageCache {
             let previous_generation = existing.generation;
             let slot = existing.slot;
             existing.generation = upload.generation;
+            existing.publication_generation = publication_generation;
             existing.cells = upload.cells;
             existing.last_access = access;
             self.counters.uploads_replaced += 1;
@@ -262,6 +271,7 @@ impl ResidentPageCache {
             ));
         }
 
+        let publication_generation = self.next_publication_generation()?;
         let mut evicted = Vec::with_capacity(eviction_count);
         for (_, key) in candidates.into_iter().take(eviction_count) {
             evicted.push(self.remove_resident(key));
@@ -278,6 +288,7 @@ impl ResidentPageCache {
             ResidentPage {
                 slot,
                 generation: upload.generation,
+                publication_generation,
                 cells: upload.cells,
                 last_access: access,
             },
@@ -324,7 +335,7 @@ impl ResidentPageCache {
     pub fn retire_eviction_watermark(
         &mut self,
         key: PlanetPageKey,
-        through_generation: u64,
+        through_generation: SourceGeneration,
     ) -> bool {
         let can_retire = self
             .eviction_watermarks
@@ -387,7 +398,7 @@ impl ResidentPageCache {
         })
     }
 
-    fn is_visible(&self, key: PlanetPageKey, generation: u64) -> bool {
+    fn is_visible(&self, key: PlanetPageKey, generation: SourceGeneration) -> bool {
         self.visible
             .get(&key)
             .is_some_and(|(visible_generation, _)| *visible_generation == generation)
@@ -396,6 +407,14 @@ impl ResidentPageCache {
     fn next_access(&mut self) -> u64 {
         self.access_clock = self.access_clock.saturating_add(1);
         self.access_clock
+    }
+
+    fn next_publication_generation(&mut self) -> Result<u64, ContractError> {
+        self.publication_clock = self
+            .publication_clock
+            .checked_add(1)
+            .ok_or(ContractError::PublicationGenerationOverflow)?;
+        Ok(self.publication_clock)
     }
 
     fn remove_resident(&mut self, key: PlanetPageKey) -> EvictedPage {
@@ -409,6 +428,7 @@ impl ResidentPageCache {
             key,
             slot: page.slot,
             generation: page.generation,
+            publication_generation: page.publication_generation,
         }
     }
 
@@ -436,8 +456,17 @@ mod tests {
         PlanetPageKey::new(PlanetId([1; 16]), PageKey::new(0, [index, 0, 0]))
     }
 
+    const fn generation(page: u64) -> SourceGeneration {
+        SourceGeneration::new(1, page)
+    }
+
     fn upload(index: i64, generation: u64, cell: CellWord) -> PageUpload {
-        PageUpload::new(key(index), generation, vec![cell; crate::PAGE_CELL_COUNT]).unwrap()
+        PageUpload::new(
+            key(index),
+            self::generation(generation),
+            vec![cell; crate::PAGE_CELL_COUNT],
+        )
+        .unwrap()
     }
 
     fn cache(pages: usize, byte_pages: usize, watermarks: usize) -> ResidentPageCache {
@@ -478,7 +507,8 @@ mod tests {
                 evicted: vec![EvictedPage {
                     key: key(1),
                     slot: 0,
-                    generation: 1,
+                    generation: generation(1),
+                    publication_generation: 1,
                 }],
             }
         );
@@ -495,7 +525,7 @@ mod tests {
                 frame_index: 1,
                 pages: vec![VisiblePage {
                     key: key(1),
-                    generation: 4,
+                    generation: generation(4),
                     transition_mask: 0,
                 }],
             })
@@ -516,7 +546,7 @@ mod tests {
                     frame_index: 1,
                     pages: vec![VisiblePage {
                         key: key(1),
-                        generation: 4,
+                        generation: generation(4),
                         transition_mask: 0,
                     }],
                 })
@@ -559,13 +589,97 @@ mod tests {
     }
 
     #[test]
+    fn replacement_planet_generation_dominates_retired_page_counters() {
+        let mut cache = cache(1, 1, 2);
+        cache
+            .apply_upload(
+                PageUpload::new(
+                    key(0),
+                    SourceGeneration::new(1, u64::MAX),
+                    vec![CellWord::AIR; crate::PAGE_CELL_COUNT],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(cache.resident(key(0)).unwrap().publication_generation, 1);
+
+        assert!(matches!(
+            cache
+                .apply_upload(
+                    PageUpload::new(
+                        key(0),
+                        SourceGeneration::new(2, 0),
+                        vec![CellWord::new(-1, 7, 0); crate::PAGE_CELL_COUNT],
+                    )
+                    .unwrap()
+                )
+                .unwrap(),
+            UploadOutcome::Replaced { .. }
+        ));
+        let replacement = cache.resident(key(0)).unwrap();
+        assert_eq!(replacement.generation, SourceGeneration::new(2, 0));
+        assert_eq!(replacement.publication_generation, 2);
+
+        assert_eq!(
+            cache
+                .apply_upload(
+                    PageUpload::new(
+                        key(0),
+                        SourceGeneration::new(1, u64::MAX),
+                        vec![CellWord::AIR; crate::PAGE_CELL_COUNT],
+                    )
+                    .unwrap()
+                )
+                .unwrap(),
+            UploadOutcome::Stale {
+                newest_generation: SourceGeneration::new(2, 0),
+            }
+        );
+        assert_eq!(
+            cache
+                .apply_evict(PageEvict {
+                    key: key(0),
+                    generation: SourceGeneration::new(1, u64::MAX),
+                })
+                .unwrap(),
+            EvictOutcome::Recorded { removed: None }
+        );
+        assert_eq!(
+            cache.resident(key(0)).unwrap().generation,
+            SourceGeneration::new(2, 0)
+        );
+    }
+
+    #[test]
+    fn duplicates_reuse_and_changed_sources_advance_publication_generation() {
+        let mut cache = cache(1, 1, 1);
+        cache.apply_upload(upload(0, 1, CellWord::AIR)).unwrap();
+        let first = cache.resident(key(0)).unwrap().publication_generation;
+        assert!(matches!(
+            cache.apply_upload(upload(0, 1, CellWord::AIR)).unwrap(),
+            UploadOutcome::Duplicate { .. }
+        ));
+        assert_eq!(
+            cache.resident(key(0)).unwrap().publication_generation,
+            first
+        );
+        cache
+            .apply_upload(upload(0, 2, CellWord::new(-1, 1, 0)))
+            .unwrap();
+        assert_eq!(
+            cache.resident(key(0)).unwrap().publication_generation,
+            first + 1
+        );
+    }
+
+    #[test]
     fn eviction_before_upload_blocks_late_generation() {
         let mut cache = cache(1, 1, 1);
         assert_eq!(
             cache
                 .apply_evict(PageEvict {
                     key: key(7),
-                    generation: 9,
+                    generation: generation(9),
                 })
                 .unwrap(),
             EvictOutcome::Recorded { removed: None }
@@ -573,7 +687,7 @@ mod tests {
         assert_eq!(
             cache.apply_upload(upload(7, 9, CellWord::AIR)).unwrap(),
             UploadOutcome::Stale {
-                newest_generation: 9,
+                newest_generation: generation(9),
             }
         );
         assert!(matches!(
@@ -590,22 +704,22 @@ mod tests {
             cache
                 .apply_evict(PageEvict {
                     key: key(1),
-                    generation: 9,
+                    generation: generation(9),
                 })
                 .unwrap(),
             EvictOutcome::Recorded { removed: None }
         );
-        assert_eq!(cache.resident(key(1)).unwrap().generation, 10);
+        assert_eq!(cache.resident(key(1)).unwrap().generation, generation(10));
         assert!(matches!(
             cache
                 .apply_evict(PageEvict {
                     key: key(1),
-                    generation: 10,
+                    generation: generation(10),
                 })
                 .unwrap(),
             EvictOutcome::Recorded {
-                removed: Some(EvictedPage { generation: 10, .. })
-            }
+                removed: Some(EvictedPage { generation: value, .. })
+            } if value == generation(10)
         ));
         assert!(cache.resident(key(1)).is_none());
     }
@@ -628,25 +742,25 @@ mod tests {
         cache
             .apply_evict(PageEvict {
                 key: key(1),
-                generation: 2,
+                generation: generation(2),
             })
             .unwrap();
         assert_eq!(
             cache
                 .apply_evict(PageEvict {
                     key: key(2),
-                    generation: 1,
+                    generation: generation(1),
                 })
                 .unwrap(),
             EvictOutcome::Backpressure(BackpressureReason::EvictionWatermarkCapacity)
         );
-        assert!(!cache.retire_eviction_watermark(key(1), 1));
-        assert!(cache.retire_eviction_watermark(key(1), 2));
+        assert!(!cache.retire_eviction_watermark(key(1), generation(1)));
+        assert!(cache.retire_eviction_watermark(key(1), generation(2)));
         assert!(matches!(
             cache
                 .apply_evict(PageEvict {
                     key: key(2),
-                    generation: 1,
+                    generation: generation(1),
                 })
                 .unwrap(),
             EvictOutcome::Recorded { .. }
@@ -659,7 +773,7 @@ mod tests {
         let mut cache = cache(2, 2, 1);
         let page = VisiblePage {
             key: key(0),
-            generation: 1,
+            generation: generation(1),
             transition_mask: 0,
         };
         let set = VisiblePageSet {
