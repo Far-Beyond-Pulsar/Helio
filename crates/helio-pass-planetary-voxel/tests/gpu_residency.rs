@@ -6,8 +6,8 @@ use helio_pass_planetary_voxel::{
 };
 use helio_planet_voxel_core::{
     CellWord, EvictOutcome, GpuPageMeta, PageEvict, PageKey, PageUpload, PlanetFrameUniform,
-    PlanetId, PlanetPageKey, PlanetPosition, UploadOutcome, VisiblePage, VisiblePageSet,
-    PAGE_CELL_BYTES, PAGE_CELL_COUNT,
+    PlanetId, PlanetPageKey, PlanetPosition, SourceGeneration, UploadOutcome, VisiblePage,
+    VisiblePageSet, PAGE_CELL_BYTES, PAGE_CELL_COUNT,
 };
 use std::sync::mpsc;
 use wgpu::util::DeviceExt;
@@ -97,8 +97,8 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
                 .unwrap()
                 .as_slice(),
             [GpuUploadOutcome::Residency(UploadOutcome::Stale {
-                newest_generation: 9
-            })]
+                newest_generation
+            })] if *newest_generation == source(9)
         ));
         assert_eq!(
             residency
@@ -107,13 +107,16 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
                     &queue,
                     vec![PageEvict {
                         key: key_a,
-                        generation: 8,
+                        generation: source(8),
                     }],
                 )
                 .unwrap(),
             vec![EvictOutcome::Recorded { removed: None }]
         );
-        assert_eq!(residency.cache().resident(key_a).unwrap().generation, 9);
+        assert_eq!(
+            residency.cache().resident(key_a).unwrap().generation,
+            source(9)
+        );
 
         assert!(matches!(
             residency.apply_upload_batch(
@@ -179,7 +182,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
                     frame_index: 3,
                     pages: vec![VisiblePage {
                         key: key_a,
-                        generation: 9,
+                        generation: source(9),
                         transition_mask: 0b10_0101,
                     }],
                 },
@@ -202,10 +205,10 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         let results = dispatch_lookup(&device, &queue, &residency, &queries);
         assert!(results[0].found());
         assert_eq!(results[0].slot, 0);
-        assert_eq!(results[0].generation(), 9);
+        assert_eq!(results[0].generation(), 1);
         assert!(results[1].found());
         assert_eq!(results[1].slot, 1);
-        assert_eq!(results[1].generation(), 11);
+        assert_eq!(results[1].generation(), 2);
         assert!(!results[2].found());
 
         let first_cell: Vec<CellWord> = read_buffer_range(
@@ -224,7 +227,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
             size_of::<GpuPageMeta>() as u64,
         );
         assert_eq!(metadata[0].slot, 0);
-        assert_eq!(metadata[0].generation(), 9);
+        assert_eq!(metadata[0].generation(), 1);
         assert_eq!(metadata[0].relative_lod0_cell_min, [-96, 32, -96]);
         assert_eq!(metadata[0].transition_mask, 0b10_0101);
         let counters: Vec<GpuResidencyCounters> = read_buffer_range(
@@ -264,7 +267,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
                     &queue,
                     vec![PageEvict {
                         key: key_a,
-                        generation: 9,
+                        generation: source(9),
                     }],
                 )
                 .unwrap()
@@ -289,8 +292,8 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
                 .unwrap()
                 .as_slice(),
             [GpuUploadOutcome::Residency(UploadOutcome::Stale {
-                newest_generation: 9
-            })]
+                newest_generation
+            })] if *newest_generation == source(9)
         ));
         assert!(matches!(
             residency
@@ -313,7 +316,7 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
         ));
         let replacement_result = dispatch_lookup(&device, &queue, &residency, &queries[..1]);
         assert!(replacement_result[0].found());
-        assert_eq!(replacement_result[0].generation(), 10);
+        assert_eq!(replacement_result[0].generation(), 3);
         let replacement_cell: Vec<CellWord> = read_buffer_range(
             &device,
             &queue,
@@ -322,6 +325,53 @@ fn headless_residency_round_trips_cells_metadata_lookup_and_rebuild() {
             size_of::<CellWord>() as u64,
         );
         assert_eq!(replacement_cell, vec![replacement]);
+
+        let replacement_planet_cell = CellWord::new(-900, 44, 6);
+        assert!(matches!(
+            residency
+                .apply_upload_batch(
+                    &device,
+                    &queue,
+                    vec![PageUpload::new(
+                        key_a,
+                        SourceGeneration::new(2, 0),
+                        vec![replacement_planet_cell; PAGE_CELL_COUNT],
+                    )
+                    .unwrap()],
+                )
+                .unwrap()
+                .as_slice(),
+            [GpuUploadOutcome::Residency(UploadOutcome::Replaced { .. })]
+        ));
+        assert!(matches!(
+            residency
+                .apply_upload_batch(
+                    &device,
+                    &queue,
+                    vec![PageUpload::new(
+                        key_a,
+                        SourceGeneration::new(1, u64::MAX),
+                        vec![CellWord::AIR; PAGE_CELL_COUNT],
+                    )
+                    .unwrap()],
+                )
+                .unwrap()
+                .as_slice(),
+            [GpuUploadOutcome::Residency(UploadOutcome::Stale {
+                newest_generation
+            })] if *newest_generation == SourceGeneration::new(2, 0)
+        ));
+        let replacement_planet_result = dispatch_lookup(&device, &queue, &residency, &queries[..1]);
+        assert!(replacement_planet_result[0].found());
+        assert_eq!(replacement_planet_result[0].generation(), 4);
+        let replacement_planet_readback: Vec<CellWord> = read_buffer_range(
+            &device,
+            &queue,
+            residency.atlas_buffers().next().unwrap(),
+            0,
+            size_of::<CellWord>() as u64,
+        );
+        assert_eq!(replacement_planet_readback, vec![replacement_planet_cell]);
 
         validate_table_probe_backpressure(&device, &queue, planet_a);
     });
@@ -383,7 +433,11 @@ async fn request_test_adapter(instance: &wgpu::Instance) -> Option<wgpu::Adapter
 }
 
 fn upload(key: PlanetPageKey, generation: u64, cell: CellWord) -> PageUpload {
-    PageUpload::new(key, generation, vec![cell; PAGE_CELL_COUNT]).unwrap()
+    PageUpload::new(key, source(generation), vec![cell; PAGE_CELL_COUNT]).unwrap()
+}
+
+const fn source(page: u64) -> SourceGeneration {
+    SourceGeneration::new(1, page)
 }
 
 fn dispatch_lookup(
