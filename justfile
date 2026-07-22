@@ -1,4 +1,4 @@
-set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
+set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
 wasm-script := if os() == "windows" { ".\\build-wasm.ps1" } else { "./build-wasm.sh" }
 
@@ -131,6 +131,29 @@ wasm-demo-dev demo:
 
 serve-wasm port='8000':
     npx --yes http-server target/wasm-prebuilt --host 127.0.0.1 --port {{port}}
+
+# ── Android ──────────────────────────────────────────────────────────────────
+
+SdkRoot := "C:\\Users\\redst\\AppData\\Local\\Android\\Sdk"
+NdkVersion := "28.0.13004108"
+NdkRoot := SdkRoot + "\\ndk\\" + NdkVersion
+JavaHome := "C:\\Program Files\\Eclipse Adoptium\\jdk-21.0.11.10-hotspot"
+
+# Auto-install the NDK if missing, then build the editor_demo_mini APK.
+android-build demo='editor_demo_mini':
+    $ndk = "{{NdkRoot}}"; if (-not (Test-Path $ndk)) { just android-setup }; $env:JAVA_HOME = "{{JavaHome}}"; $env:ANDROID_HOME = "{{SdkRoot}}"; $env:ANDROID_NDK_ROOT = $ndk; cargo apk build --release -p helio-android-demos --features {{demo}} --target aarch64-linux-android
+
+# Auto-install the NDK if missing, then build + deploy to a connected device.
+android-run demo='editor_demo_mini':
+    $ndk = "{{NdkRoot}}"; if (-not (Test-Path $ndk)) { just android-setup }; $dev = & "{{SdkRoot}}\\platform-tools\\adb.exe" devices 2>&1 | Where-Object { $_ -match '^\S+\tdevice$' } | Select-Object -First 1 | ForEach-Object { $_ -replace '\tdevice$', '' }; $env:ANDROID_SERIAL = if ($dev) { $dev } else { $null }; $env:JAVA_HOME = "{{JavaHome}}"; $env:ANDROID_HOME = "{{SdkRoot}}"; $env:ANDROID_NDK_ROOT = $ndk; cargo apk run --release -p helio-android-demos --features {{demo}} --target aarch64-linux-android
+
+# One-time NDK download + install. Called automatically if NDK is missing.
+android-setup:
+    rustup target add aarch64-linux-android; $zip = "$env:TEMP\\ndk.zip"; $url = "https://dl.google.com/android/repository/android-ndk-r28-windows.zip"; $dst = "{{SdkRoot}}\\ndk"; Write-Host "Downloading Android NDK r28..."; Import-Module BitsTransfer -ErrorAction SilentlyContinue; if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) { Start-BitsTransfer -Source $url -Destination $zip -DisplayName "NDK r28" } else { [Net.ServicePointManager]::SecurityProtocol = 'tls12, tls11, tls'; (New-Object Net.WebClient).DownloadFile($url, $zip) }; Write-Host "Extracting..."; Expand-Archive -Path $zip -DestinationPath $dst -Force; Remove-Item $zip; $extracted = Get-ChildItem $dst -Directory | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($extracted.Name -ne "{{NdkVersion}}") { Rename-Item $extracted.FullName "{{NdkVersion}}" }; Write-Host "NDK {{NdkVersion}} installed at $dst\\{{NdkVersion}}"
+
+# Check compilation for the native host (no NDK needed).
+android-check demo='editor_demo_mini':
+    cargo check -p helio-android-demos --lib --features {{demo}}
 
 version package version:
     cargo set-version -p {{package}} {{version}}

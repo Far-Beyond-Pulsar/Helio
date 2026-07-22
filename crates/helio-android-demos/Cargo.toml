@@ -1,0 +1,37 @@
+[package]
+name = "helio-android-demos"
+version = "0.1.0"
+edition = "2021"
+description = "Helio demos compiled for Android — one feature per demo"
+
+[package.metadata.android]
+package = "com.helio.editor_demo_mini"
+label = "Helio Editor Demo Mini"
+icon = "@mipmap/ic_launcher"
+
+[package.metadata.android.signing.release]
+path = "C:\\Users\\redst\\.android\\debug.keystore"
+keystore_password = "android"
+keystore_alias = "androiddebugkey"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+editor_demo_mini = []
+
+[dependencies]
+helio               = { workspace = true }
+helio-wasm          = { path = "../helio-wasm" }
+helio-default-graphs = { workspace = true }
+wgpu                = { workspace = true }
+glam                = { workspace = true }
+log                 = { workspace = true }
+env_logger          = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+winit = { workspace = true }
+
+[target.'cfg(target_os = "android")'.dependencies]
+winit = { workspace = true, features = ["android-native-activity"] }

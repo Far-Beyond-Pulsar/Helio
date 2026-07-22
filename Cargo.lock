@@ -2825,6 +2825,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-android-demos"
+version = "0.1.0"
+dependencies = [
+ "env_logger",
+ "glam 0.33.2",
+ "helio",
+ "helio-default-graphs",
+ "helio-wasm",
+ "log",
+ "wgpu 30.0.0",
+ "winit",
+]
+
+[[package]]
 name = "helio-asset-compat"
 version = "0.1.0"
 dependencies = [

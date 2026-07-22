@@ -284,8 +284,13 @@ async fn init_wgpu<T: HelioWasmApp>(
         return;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    let backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
+    #[cfg(target_arch = "wasm32")]
+    let backends = wgpu::Backends::BROWSER_WEBGPU;
+
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::BROWSER_WEBGPU,
+        backends,
         flags: wgpu::InstanceFlags::empty(),
         ..wgpu::InstanceDescriptor::new_with_display_handle(Box::new(window.clone()))
     });
@@ -640,6 +645,26 @@ fn hide_loading_overlay() {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn hide_loading_overlay() {}
+
+/// Android entry: receive the `AndroidApp` from `android_main` and run.
+#[cfg(target_os = "android")]
+pub fn launch_android<T: HelioWasmApp>(app: winit::platform::android::activity::AndroidApp) {
+    use winit::platform::android::EventLoopBuilderExtAndroid;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    env_logger::try_init().ok();
+
+    let event_loop = winit::event_loop::EventLoop::builder()
+        .with_android_app(app)
+        .build()
+        .expect("helio-wasm: failed to create Android EventLoop");
+
+    event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
+    let mut runner = WasmRunner::<T>::new();
+    event_loop
+        .run_app(&mut runner)
+        .expect("helio-wasm: event loop error");
+}
 
 // ── Public launch function ────────────────────────────────────────────────────
 
