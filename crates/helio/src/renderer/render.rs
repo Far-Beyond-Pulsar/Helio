@@ -270,6 +270,21 @@ impl Renderer {
         let dynamic_mesh_buffers = self.scene.dynamic_mesh_buffers();
         if let Ok(mut state) = self.debug_state.lock() {
             state.camera_position = camera.position;
+            // Volume bounds track whatever the scene currently holds. The
+            // generation only moves when the geometry actually differs, so a
+            // static scene keeps the pass's cached upload instead of re-sending
+            // every frame while the camera moves.
+            if state.editor_enabled {
+                let lines = self.scene.editor_volume_debug_lines();
+                if lines != state.editor_volume_lines {
+                    state.editor_volume_lines = lines;
+                    state.editor_volume_generation =
+                        state.editor_volume_generation.wrapping_add(1);
+                }
+            } else if !state.editor_volume_lines.is_empty() {
+                state.editor_volume_lines = Vec::new();
+                state.editor_volume_generation = state.editor_volume_generation.wrapping_add(1);
+            }
         }
         let rc_radius = self.gi_config.rc_radius;
         let rc_min = [camera.position.x - rc_radius, camera.position.y - rc_radius, camera.position.z - rc_radius];
@@ -328,6 +343,7 @@ impl Renderer {
                 ambient_intensity: self.ambient_intensity,
                 rc_world_min: rc_min,
                 rc_world_max: rc_max,
+                tlas: self.scene.tlas(),
             },
             "Renderer",
         );

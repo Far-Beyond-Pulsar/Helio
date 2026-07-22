@@ -152,6 +152,14 @@ name = "indoor_cathedral_pp_volumes"
 path = "indoor_cathedral_pp_volumes.rs"
 
 [[bin]]
+name = "indoor_cathedral_decals"
+path = "indoor_cathedral_decals.rs"
+
+[[bin]]
+name = "volumetric_fog_demo"
+path = "volumetric_fog_demo.rs"
+
+[[bin]]
 name = "vhs_backrooms"
 path = "vhs_backrooms.rs"
 
@@ -167,6 +175,14 @@ path = "voxel/raymarch_demo.rs"
 name = "radiant_demo"
 path = "radiant_demo.rs"
 
+[[bin]]
+name = "planar_reflection_demo"
+path = "planar_reflection_demo.rs"
+
+[[bin]]
+name = "one_million_cubes"
+path = "one_million_cubes.rs"
+
 [dependencies]
 helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
@@ -174,6 +190,7 @@ helio-asset-compat = { workspace = true }
 helio-pass-taa = { workspace = true }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-corona = { workspace = true }
+helio-pass-decal = { path = "../helio-pass-decal" }
 helio-pass-debug-overlay = { path = "../helio-pass-debug-overlay" }
 helio-pass-perf-overlay = { path = "../helio-pass-perf-overlay" }
 helio-pass-postprocess = { path = "../helio-pass-postprocess" }

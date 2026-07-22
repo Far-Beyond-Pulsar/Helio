@@ -34,6 +34,16 @@ struct GpuLight {
     light_type:      u32,
     inner_angle:     f32,
     _pad:            u32,
+    // Light shafts — consumed by helio-pass-volumetric-fog. Padding is three
+    // scalars, not vec3<u32>, to keep the struct at 96 bytes (vec3 aligns to 16).
+    god_rays_enabled:  u32,
+    god_rays_density:  f32,
+    god_rays_weight:   f32,
+    god_rays_decay:    f32,
+    god_rays_exposure: f32,
+    _pad2_0:           u32,
+    _pad2_1:           u32,
+    _pad2_2:           u32,
 }
 
 struct MeshletParams {

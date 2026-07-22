@@ -34,6 +34,7 @@ fn convert_directional(light: &DirectionalLight) -> GpuLight {
         light_type: LightType::Directional as u32,
         inner_angle: 0.0,
         _pad: 0,
+        ..Default::default()
     }
 }
 
@@ -52,6 +53,7 @@ fn convert_point(light: &PointLight) -> GpuLight {
         light_type: LightType::Point as u32,
         inner_angle: 0.0,
         _pad: 0,
+        ..Default::default()
     }
 }
 
@@ -73,6 +75,7 @@ fn convert_spot(light: &SpotLight) -> GpuLight {
         light_type: LightType::Spot as u32,
         inner_angle: inner_angle.cos(),
         _pad: 0,
+        ..Default::default()
     }
 }
 
@@ -91,6 +94,7 @@ fn convert_area_as_point(light: &AreaLight) -> GpuLight {
         light_type: LightType::Point as u32,
         inner_angle: 0.0,
         _pad: 0,
+        ..Default::default()
     }
 }
 

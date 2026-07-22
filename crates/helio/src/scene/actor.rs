@@ -1,19 +1,25 @@
 use crate::handles::{
-    LightId, MeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId, VirtualObjectId,
-    WaterHitboxId, WaterVolumeId,
+    DecalId, LightId, MeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
+    SectionedInstanceId, VirtualObjectId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::MeshUpload;
 use crate::scene::types::ObjectDescriptor;
 use crate::vg::{VirtualMeshId, VirtualMeshUpload, VirtualObjectDescriptor};
+use glam::{Mat4, Vec3};
 use helio_core::{GpuLight, SkyContext};
-use libhelio::{GpuWaterVolume, PostProcessVolumeDescriptor, SkyActor};
+use libhelio::{
+    GpuWaterVolume, PostProcessVolumeDescriptor, ReflectionCaptureMobility,
+    ReflectionCaptureShape, SkyActor,
+};
 
 /// Result of inserting a typed scene actor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SceneActorId {
     None,
+    Decal(DecalId),
     Mesh(MeshId),
     Light(LightId),
+    ReflectionCapture(ReflectionCaptureId),
     VirtualMesh(VirtualMeshId),
     VirtualObject(VirtualObjectId),
     Object(ObjectId),
@@ -25,6 +31,14 @@ pub enum SceneActorId {
 }
 
 impl SceneActorId {
+    pub fn as_decal(self) -> Option<DecalId> {
+        if let SceneActorId::Decal(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
     pub fn as_mesh(self) -> Option<MeshId> {
         if let SceneActorId::Mesh(id) = self {
             Some(id)
@@ -35,6 +49,14 @@ impl SceneActorId {
 
     pub fn as_light(self) -> Option<LightId> {
         if let SceneActorId::Light(id) = self {
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_reflection_capture(self) -> Option<ReflectionCaptureId> {
+        if let SceneActorId::ReflectionCapture(id) = self {
             Some(id)
         } else {
             None
@@ -761,12 +783,199 @@ impl SceneActorTrait for PostProcessVolumeActor {
     }
 }
 
+// ── Decal Actor ──────────────────────────────────────────────────────────────────
+
+/// A decal actor (GPU decal descriptor + optional handle).
+#[derive(Debug, Clone, Copy)]
+pub struct DecalActor {
+    pub decal: libhelio::GpuDecal,
+    pub decal_id: Option<DecalId>,
+    pub movability: Option<libhelio::Movability>,
+    /// Application-defined tag.
+    pub user_tag: u64,
+}
+
+impl DecalActor {
+    pub fn new(decal: libhelio::GpuDecal) -> Self {
+        Self {
+            decal,
+            decal_id: None,
+            movability: None,
+            user_tag: 0,
+        }
+    }
+
+    pub fn new_with_tag(
+        decal: libhelio::GpuDecal,
+        user_tag: u64,
+        movability: Option<libhelio::Movability>,
+    ) -> Self {
+        Self {
+            decal,
+            decal_id: None,
+            movability,
+            user_tag,
+        }
+    }
+
+    pub fn id(&self) -> Option<DecalId> {
+        self.decal_id
+    }
+}
+
+impl SceneActorTrait for DecalActor {
+    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
+        if self.decal_id.is_none() {
+            self.decal_id = Some(scene.insert_decal_with_tag(
+                self.decal,
+                self.user_tag,
+                self.movability,
+            ));
+        }
+    }
+
+    fn inserted_id(&self) -> SceneActorId {
+        self.decal_id
+            .map(SceneActorId::Decal)
+            .unwrap_or(SceneActorId::None)
+    }
+}
+
+// ── Reflection Capture ──────────────────────────────────────────────────────────
+
+/// Where a reflection capture sits, how far it reaches, and how its cubemap
+/// is produced.
+///
+/// The cubemap layer is not part of this descriptor: the engine assigns it
+/// when captures are matched to baked probes, so the two cannot drift apart.
+#[derive(Debug, Clone)]
+pub struct ReflectionCaptureDescriptor {
+    pub shape: ReflectionCaptureShape,
+    pub mobility: ReflectionCaptureMobility,
+    /// World transform. Box captures take their rotation from here, so a box
+    /// capture can line up with a room that isn't axis-aligned. Sphere
+    /// captures use only the translation.
+    pub transform: Mat4,
+    /// Sphere influence radius, in world units.
+    pub influence_radius: f32,
+    /// Box half-extents, in capture-local space.
+    pub extents: [f32; 3],
+    /// Distance over which a box capture fades out at its faces. Sphere
+    /// captures fade over the outer 10% of `influence_radius` instead.
+    pub transition_distance: f32,
+    /// Linear multiplier on the sampled radiance.
+    pub brightness: f32,
+}
+
+impl Default for ReflectionCaptureDescriptor {
+    fn default() -> Self {
+        Self {
+            shape: ReflectionCaptureShape::Sphere,
+            mobility: ReflectionCaptureMobility::Static,
+            transform: Mat4::IDENTITY,
+            influence_radius: 10.0,
+            extents: [5.0; 3],
+            transition_distance: 1.0,
+            brightness: 1.0,
+        }
+    }
+}
+
+impl ReflectionCaptureDescriptor {
+    /// A sphere capture centred on `center` reaching `radius` world units.
+    pub fn sphere(center: [f32; 3], radius: f32) -> Self {
+        Self {
+            shape: ReflectionCaptureShape::Sphere,
+            transform: Mat4::from_translation(Vec3::from(center)),
+            influence_radius: radius,
+            ..Default::default()
+        }
+    }
+
+    /// A box capture filling `transform`'s volume out to `extents` half-extents.
+    pub fn boxed(transform: Mat4, extents: [f32; 3]) -> Self {
+        // Influence radius still bounds the box for the coarse distance
+        // rejection the shader does before the per-shape test.
+        let radius = (extents[0] * extents[0] + extents[1] * extents[1] + extents[2] * extents[2])
+            .sqrt();
+        Self {
+            shape: ReflectionCaptureShape::Box,
+            transform,
+            extents,
+            influence_radius: radius,
+            ..Default::default()
+        }
+    }
+
+    /// Mark this capture as realtime rather than baked.
+    ///
+    /// Inert today — see [`ReflectionCaptureMobility::Dynamic`] for what this
+    /// is intended to mean and why it contributes nothing yet.
+    pub fn dynamic(mut self) -> Self {
+        self.mobility = ReflectionCaptureMobility::Dynamic;
+        self
+    }
+
+    pub fn with_brightness(mut self, brightness: f32) -> Self {
+        self.brightness = brightness;
+        self
+    }
+
+    pub fn with_transition_distance(mut self, distance: f32) -> Self {
+        self.transition_distance = distance;
+        self
+    }
+
+    /// World-space position of the capture, which is where its probe is baked.
+    pub fn position(&self) -> [f32; 3] {
+        self.transform.w_axis.truncate().to_array()
+    }
+}
+
+/// A reflection capture actor (descriptor + optional handle).
+#[derive(Debug, Clone)]
+pub struct ReflectionCaptureActor {
+    pub descriptor: ReflectionCaptureDescriptor,
+    pub capture_id: Option<ReflectionCaptureId>,
+}
+
+impl ReflectionCaptureActor {
+    pub fn new(descriptor: ReflectionCaptureDescriptor) -> Self {
+        Self {
+            descriptor,
+            capture_id: None,
+        }
+    }
+
+    pub fn id(&self) -> Option<ReflectionCaptureId> {
+        self.capture_id
+    }
+}
+
+impl SceneActorTrait for ReflectionCaptureActor {
+    fn on_attach(&mut self, scene: &mut crate::scene::Scene) {
+        if self.capture_id.is_none() {
+            if let Ok(id) = scene.insert_reflection_capture(self.descriptor.clone()) {
+                self.capture_id = Some(id);
+            }
+        }
+    }
+
+    fn inserted_id(&self) -> SceneActorId {
+        self.capture_id
+            .map(SceneActorId::ReflectionCapture)
+            .unwrap_or(SceneActorId::None)
+    }
+}
+
 /// Unified scene actor type. Includes shading, geometry, and user custom logic.
 #[derive(Debug, Clone)]
 pub enum SceneActor {
     Sky(SkyActor),
+    Decal(DecalActor),
     Mesh(MeshActor),
     Light(LightActor),
+    ReflectionCapture(ReflectionCaptureActor),
     VirtualMesh(VirtualMeshActor),
     VirtualObject(VirtualObjectActor),
     Object(ObjectActor),
@@ -778,6 +987,18 @@ pub enum SceneActor {
 impl SceneActor {
     pub fn sky(sky: SkyActor) -> Self {
         SceneActor::Sky(sky)
+    }
+
+    pub fn decal(decal: libhelio::GpuDecal) -> Self {
+        SceneActor::Decal(DecalActor::new(decal))
+    }
+
+    pub fn decal_with_tag(
+        decal: libhelio::GpuDecal,
+        user_tag: u64,
+        movability: Option<libhelio::Movability>,
+    ) -> Self {
+        SceneActor::Decal(DecalActor::new_with_tag(decal, user_tag, movability))
     }
 
     pub fn mesh(upload: MeshUpload) -> Self {
@@ -797,6 +1018,10 @@ impl SceneActor {
         movability: Option<libhelio::Movability>,
     ) -> Self {
         SceneActor::Light(LightActor::new_with_movability(light, movability))
+    }
+
+    pub fn reflection_capture(descriptor: ReflectionCaptureDescriptor) -> Self {
+        SceneActor::ReflectionCapture(ReflectionCaptureActor::new(descriptor))
     }
 
     pub fn virtual_mesh(upload: VirtualMeshUpload) -> Self {
@@ -832,8 +1057,10 @@ impl SceneActorTrait for SceneActor {
     fn inserted_id(&self) -> SceneActorId {
         match self {
             SceneActor::Sky(_) => SceneActorId::None,
+            SceneActor::Decal(actor) => actor.inserted_id(),
             SceneActor::Mesh(actor) => actor.inserted_id(),
             SceneActor::Light(actor) => actor.inserted_id(),
+            SceneActor::ReflectionCapture(actor) => actor.inserted_id(),
             SceneActor::VirtualMesh(actor) => actor.inserted_id(),
             SceneActor::VirtualObject(actor) => actor.inserted_id(),
             SceneActor::Object(actor) => actor.inserted_id(),
@@ -848,8 +1075,10 @@ impl SceneActorTrait for SceneActor {
             SceneActor::Sky(_) => {
                 // No additional per-frame state. Scene will query context from actors.
             }
+            SceneActor::Decal(actor) => actor.on_attach(scene),
             SceneActor::Mesh(actor) => actor.on_attach(scene),
             SceneActor::Light(actor) => actor.on_attach(scene),
+            SceneActor::ReflectionCapture(actor) => actor.on_attach(scene),
             SceneActor::VirtualMesh(actor) => actor.on_attach(scene),
             SceneActor::VirtualObject(actor) => actor.on_attach(scene),
             SceneActor::Object(actor) => actor.on_attach(scene),
@@ -861,8 +1090,10 @@ impl SceneActorTrait for SceneActor {
 
     fn on_tick(&mut self, scene: &mut crate::scene::Scene) {
         match self {
+            SceneActor::Decal(actor) => actor.on_tick(scene),
             SceneActor::Mesh(actor) => actor.on_tick(scene),
             SceneActor::Light(actor) => actor.on_tick(scene),
+            SceneActor::ReflectionCapture(actor) => actor.on_tick(scene),
             SceneActor::VirtualMesh(actor) => actor.on_tick(scene),
             SceneActor::VirtualObject(actor) => actor.on_tick(scene),
             SceneActor::Object(actor) => actor.on_tick(scene),

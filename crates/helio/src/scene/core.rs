@@ -17,8 +17,8 @@ use super::voxel::VoxelVolumeRecord;
 use crate::arena::{DenseArena, SparsePool};
 use crate::groups::GroupMask;
 use crate::handles::{
-    LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, SectionedInstanceId,
-    TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    DecalId, LightId, MaterialId, MultiMeshId, ObjectId, PostProcessVolumeId, ReflectionCaptureId,
+    SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
 };
 use crate::mesh::{MeshPool, MultiMeshRecord};
 use crate::radiant::RadiantGraphRegistry;
@@ -28,8 +28,9 @@ use crate::vg::VirtualMeshId;
 
 use super::errors::{invalid, Result};
 use super::types::{
-    LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord, TextureRecord,
-    VirtualMeshRecord, VirtualObjectRecord, WaterHitboxRecord, WaterVolumeRecord,
+    DecalRecord, LightRecord, MaterialRecord, ObjectRecord, PostProcessVolumeRecord,
+    ReflectionCaptureRecord, TextureRecord, VirtualMeshRecord, VirtualObjectRecord,
+    WaterHitboxRecord, WaterVolumeRecord,
 };
 
 /// High-level scene management with persistent GPU-driven state.
@@ -64,6 +65,11 @@ pub struct Scene {
     pub(in crate::scene) materials: SparsePool<MaterialRecord, MaterialId>,
 
     /// Light pool (dense array)
+    /// Decal pool (dense array)
+    pub(in crate::scene) decals: DenseArena<DecalRecord, DecalId>,
+    pub(in crate::scene) decals_dirty: bool,
+    pub(in crate::scene) decals_dirty_range: Option<(usize, usize)>,
+
     pub(in crate::scene) lights: DenseArena<LightRecord, LightId>,
 
     /// Object pool (dense array)
@@ -73,11 +79,6 @@ pub struct Scene {
     /// buffers need to be rebuilt from scratch (sorted by mesh+material for instancing).
     pub(in crate::scene) objects_dirty: bool,
 
-    /// True when the scene layout has been optimized (sorted by mesh+material for instancing).
-    /// When false, objects use persistent slots (1 draw per object, O(1) add/remove).
-    /// When true, objects are sorted for cache coherency (instanced batching).
-    pub(in crate::scene) objects_layout_optimized: bool,
-
     /// True when a Static or Stationary object has been added or removed since the last
     /// shadow atlas render. Triggers a re-render of the static shadow atlas.
     pub(in crate::scene) static_objects_dirty: bool,
@@ -86,11 +87,6 @@ pub struct Scene {
     /// When this is true and a bake was previously configured, the user must explicitly
     /// call auto_bake() again to rebake the scene with the new static content.
     pub(in crate::scene) bake_invalidated: bool,
-
-    /// True when objects have been added or removed via persistent-mode delta operations.
-    /// In persistent mode, insert/remove bypass the full rebuild, so shadow partition
-    /// indirect buffers must be explicitly rebuilt on the next flush.
-    pub(in crate::scene) shadow_partition_dirty: bool,
 
     /// Previous frame's view-projection matrix (for temporal effects)
     pub(in crate::scene) prev_view_proj: glam::Mat4,
@@ -204,6 +200,10 @@ pub struct Scene {
     // ── Voxel volumes ──────────────────────────────────────────────────────────
     /// Voxel volumes (dense array)
     pub(in crate::scene) voxel_volumes: DenseArena<VoxelVolumeRecord, VoxelVolumeId>,
+
+    // ── Reflection captures ─────────────────────────────────────────────────────
+    pub(in crate::scene) reflection_captures:
+        DenseArena<ReflectionCaptureRecord, ReflectionCaptureId>,
 }
 
 impl Scene {
@@ -221,8 +221,7 @@ impl Scene {
     ///
     /// # Initial State
     /// - All resource pools are empty
-    /// - Scene is in persistent mode (`objects_layout_optimized = false`)
-    /// - First `flush()` will rebuild GPU buffers
+    /// - First `flush()` will rebuild GPU buffers with automatic instancing
     ///
     /// # Performance
     /// - CPU cost: O(1) struct initialization
@@ -286,13 +285,14 @@ impl Scene {
             placeholder_view,
             placeholder_sampler,
             materials: SparsePool::new(),
+            decals: DenseArena::new(),
+            decals_dirty: false,
+            decals_dirty_range: None,
             lights: DenseArena::new(),
             objects: DenseArena::new(),
             objects_dirty: true,             // rebuild on first flush
-            objects_layout_optimized: false, // start in persistent mode
             static_objects_dirty: true,      // rebuild static shadow atlas on first flush
             bake_invalidated: false,         // no bake configured yet
-            shadow_partition_dirty: false,   // full rebuild on first flush handles this
             prev_view_proj: glam::Mat4::IDENTITY,
             group_hidden: GroupMask::NONE,
             movable_objects_generation: 0,
@@ -326,6 +326,7 @@ impl Scene {
             sectioned_instances: SparsePool::new(),
             section_to_instance: HashMap::new(),
             voxel_volumes: DenseArena::new(),
+            reflection_captures: DenseArena::new(),
         }
     }
 
@@ -407,5 +408,71 @@ impl Scene {
 
     pub fn voxel_volume(&self, id: VoxelVolumeId) -> Option<&VoxelVolumeRecord> {
         self.voxel_volumes.get(id)
+    }
+
+    pub fn insert_decal(&mut self, decal: libhelio::GpuDecal) -> DecalId {
+        let (id, slot) = self.decals.insert(DecalRecord {
+            gpu: decal,
+            movability: libhelio::Movability::Movable,
+            user_tag: 0,
+        });
+        self.gpu_scene.decals.push(decal);
+        self.decals_dirty = true;
+        self.decals_dirty_range = match self.decals_dirty_range {
+            Some((start, end)) => Some((start.min(slot), end.max(slot + 1))),
+            None => Some((slot, slot + 1)),
+        };
+        id
+    }
+
+    pub fn insert_decal_with_tag(
+        &mut self,
+        decal: libhelio::GpuDecal,
+        user_tag: u64,
+        movability: Option<libhelio::Movability>,
+    ) -> DecalId {
+        let (id, slot) = self.decals.insert(DecalRecord {
+            gpu: decal,
+            movability: movability.unwrap_or(libhelio::Movability::Movable),
+            user_tag,
+        });
+        self.gpu_scene.decals.push(decal);
+        self.decals_dirty = true;
+        self.decals_dirty_range = match self.decals_dirty_range {
+            Some((start, end)) => Some((start.min(slot), end.max(slot + 1))),
+            None => Some((slot, slot + 1)),
+        };
+        id
+    }
+
+    pub fn remove_decal(&mut self, id: DecalId) -> bool {
+        let removed = self.decals.remove(id);
+        if removed.is_some() {
+            self.decals_dirty = true;
+            self.decals_dirty_range = None; // full rebuild on remove for simplicity
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn update_decal(&mut self, id: DecalId, decal: libhelio::GpuDecal) -> bool {
+        if let Some((slot, record)) = self.decals.get_mut_with_index(id) {
+            record.gpu = decal;
+            self.gpu_scene.decals.update(slot, decal);
+            return true;
+        }
+        false
+    }
+
+    pub fn decal_count(&self) -> usize {
+        self.decals.dense_len()
+    }
+
+    /// Returns a reference to the TLAS (Top-Level Acceleration Structure) for
+    /// hardware ray tracing, if available. Returns `None` on non-RT hardware
+    /// or when the TLAS has not been built yet.
+    pub fn tlas(&self) -> Option<&wgpu::Tlas> {
+        self.gpu_scene.tlas_manager.tlas()
     }
 }

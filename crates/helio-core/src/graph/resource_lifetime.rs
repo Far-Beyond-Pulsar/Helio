@@ -77,6 +77,10 @@ impl RenderGraph {
                 crate::graph::ResourceSize::Scaled { divisor } => {
                     (self.output_w / divisor.max(1), self.output_h / divisor.max(1))
                 }
+                crate::graph::ResourceSize::ScaledInternal { divisor } => (
+                    (self.internal_w / divisor.max(1)).max(1),
+                    (self.internal_h / divisor.max(1)).max(1),
+                ),
             };
             let fmt = w.format.unwrap_or(wgpu::TextureFormat::Rgba16Float);
 

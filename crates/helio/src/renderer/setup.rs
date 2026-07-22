@@ -114,7 +114,11 @@ impl Renderer {
         let postprocess_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("PostProcess Uniforms Buffer"),
             size: postprocess_buf_size,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            // COPY_SRC: VolumetricFogPass copies the fog block out of this buffer
+            // rather than mirroring the whole 368-byte struct in its shader.
+            usage: wgpu::BufferUsages::UNIFORM
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
             mapped_at_creation: false,
         });
 

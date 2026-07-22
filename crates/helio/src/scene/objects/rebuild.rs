@@ -1,202 +1,21 @@
-//! GPU buffer rebuild operations for both persistent and optimized modes.
+//! GPU buffer rebuild for automatic instancing.
 //!
 //! This module contains the core logic for reconstructing GPU instance, AABB, draw call,
-//! indirect, and visibility buffers from the CPU-side object arena.
+//! indirect, and visibility buffers from the CPU-side object arena, automatically grouping
+//! objects with the same mesh + material into instanced draw calls.
 
 use helio_core::{DrawIndexedIndirectArgs, GpuDrawCall, GpuInstanceAabb, GpuInstanceData};
 
 use super::super::helpers::object_is_visible;
 
 impl super::super::Scene {
-    /// Optimizes the scene layout for cache coherency and GPU instancing.
+    /// Rebuilds GPU buffers with automatic instancing.
     ///
-    /// Sorts objects by (mesh, material) and groups consecutive objects with
-    /// the same key into instanced draw calls. This significantly improves
-    /// rendering performance but disables O(1) add/remove operations until
-    /// the next topology change.
+    /// Sorts objects by (mesh_id, material_id) and groups consecutive objects with
+    /// the same key into instanced draw calls. This reduces draw call count and improves
+    /// GPU cache hit rates — all automatically, no user input required.
     ///
-    /// # When to Call
-    ///
-    /// Call this after bulk object insertion (e.g., level load, loading screen)
-    /// when you want maximum rendering performance.
-    ///
-    /// # Performance
-    ///
-    /// - **Cost:** O(N log N) sort + O(N) buffer rebuild (one-time)
-    /// - **Benefit:** Reduced draw calls (instanced batching), better GPU cache utilization
-    /// - **Trade-off:** Next add/remove will revert to persistent mode
-    ///
-    /// # Example
-    ///
-    /// ```ignore
-    /// // Load level objects
-    /// for object_desc in level.objects {
-    ///     scene.insert_object(object_desc)?;
-    /// }
-    ///
-    /// // Optimize layout once before gameplay
-    /// scene.optimize_scene_layout();
-    ///
-    /// // Now render loop benefits from optimal batching
-    /// loop {
-    ///     scene.render(...);
-    /// }
-    /// ```
-    pub fn optimize_scene_layout(&mut self) {
-        if self.objects.dense_len() == 0 {
-            return;
-        }
-
-        self.rebuild_instance_buffers_optimized();
-        self.objects_layout_optimized = true;
-        self.objects_dirty = false;
-
-        log::info!(
-            "Scene layout optimized: {} objects",
-            self.objects.dense_len()
-        );
-    }
-
-    /// Persistent slot path: rebuilds GPU buffers without sorting.
-    ///
-    /// Each object gets one draw call (instance_count = 1).
-    /// GPU slot = dense_index for O(1) add/remove operations.
-    ///
-    /// Called from `flush()` when `objects_dirty` is true and `objects_layout_optimized` is false.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Allocate vectors for N objects (where N = dense_len)
-    /// 2. Linear iteration: for each dense index i:
-    ///    - Push instance data at slot i
-    ///    - Push AABB at slot i
-    ///    - Create draw call: `first_instance = i, instance_count = 1`
-    ///    - Create indirect args with same parameters
-    /// 3. Build visibility buffer: 1 if visible, 0 if hidden
-    /// 4. Update ObjectRecords with GPU slot = dense_index
-    /// 5. Upload all buffers to GPU
-    ///
-    /// # Performance
-    ///
-    /// - CPU cost: O(N) linear iteration + O(N) allocations
-    /// - GPU cost: O(N) buffer uploads (5 buffers: instances, aabbs, draws, indirect, visibility)
-    /// - Memory: O(N) temporary vectors
-    ///
-    /// # Draw Calls
-    ///
-    /// Generates N draw calls (one per object). This is acceptable because:
-    /// - GPU-driven indirect rendering handles many small draws efficiently
-    /// - Frustum culling happens on GPU (only visible draws are executed)
-    /// - Users can call `optimize_scene_layout()` for batching when needed
-    pub(in crate::scene) fn rebuild_instance_buffers_persistent(&mut self) {
-        let n = self.objects.dense_len();
-        if n == 0 {
-            self.gpu_scene.instances.set_data(Vec::new());
-            self.gpu_scene.aabbs.set_data(Vec::new());
-            self.gpu_scene.draw_calls.set_data(Vec::new());
-            self.gpu_scene.indirect.set_data(Vec::new());
-            self.gpu_scene.visibility.set_data(Vec::new());
-            self.gpu_scene.material_class_ranges.clear();
-            return;
-        }
-
-        let group_hidden = self.group_hidden;
-
-        // Build sort order by (material_class, graph_hash) so contiguous
-        // ranges are uniform in both fields, letting each range share a single PSO.
-        let mut indexed: Vec<(u32, u64, usize)> = (0..n)
-            .map(|i| {
-                let r = self.objects.get_dense(i).unwrap();
-                let (class, graph_hash) = self
-                    .materials
-                    .get(r.material)
-                    .map(|m| (m.gpu.material_class, m.graph_hash))
-                    .unwrap_or((0, 0));
-                (class, graph_hash, i)
-            })
-            .collect();
-        indexed.sort_by_key(|&(class, gh, _)| (class, gh));
-
-        let mut instances = Vec::with_capacity(n);
-        let mut aabbs = Vec::with_capacity(n);
-        let mut draw_calls = Vec::with_capacity(n);
-        let mut indirect = Vec::with_capacity(n);
-        let mut visibility = Vec::with_capacity(n);
-
-        for &(_, _, dense_idx) in &indexed {
-            let r = self.objects.get_dense(dense_idx).unwrap();
-            let slot = instances.len() as u32;
-            instances.push(r.instance);
-            aabbs.push(r.aabb);
-
-            draw_calls.push(GpuDrawCall {
-                index_count: r.draw.index_count,
-                first_index: r.draw.first_index,
-                vertex_offset: r.draw.vertex_offset,
-                first_instance: slot,
-                instance_count: 1,
-            });
-
-            indirect.push(DrawIndexedIndirectArgs {
-                index_count: r.draw.index_count,
-                instance_count: 1,
-                first_index: r.draw.first_index,
-                base_vertex: r.draw.vertex_offset,
-                first_instance: slot,
-            });
-
-            visibility.push(if object_is_visible(r.groups, group_hidden) {
-                1u32
-            } else {
-                0u32
-            });
-        }
-
-        // Build material class ranges (contiguous runs of the same class + graph_hash)
-        let mut ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
-        let mut ri = 0;
-        while ri < indexed.len() {
-            let class = indexed[ri].0;
-            let graph_hash = indexed[ri].1;
-            let start = ri as u32;
-            let mut count = 0u32;
-            while ri < indexed.len() && indexed[ri].0 == class && indexed[ri].1 == graph_hash {
-                count += 1;
-                ri += 1;
-            }
-            ranges.push((class, graph_hash, start, count));
-        }
-        self.gpu_scene.material_class_ranges = ranges;
-
-        // Update ObjectRecords with their new sorted GPU slots
-        for (sorted_idx, &(_, _, dense_idx)) in indexed.iter().enumerate() {
-            if let Some(r) = self.objects.get_dense_mut(dense_idx) {
-                r.gpu_slot = sorted_idx as u32;
-                r.draw.first_instance = sorted_idx as u32;
-            }
-        }
-
-        self.gpu_scene.instances.set_data(instances);
-        self.gpu_scene.aabbs.set_data(aabbs);
-        self.gpu_scene.draw_calls.set_data(draw_calls);
-        self.gpu_scene.indirect.set_data(indirect);
-        self.gpu_scene.visibility.set_data(visibility);
-
-        log::debug!(
-            "rebuild_instance_buffers_persistent: {} objects → {} draws",
-            n,
-            n
-        );
-        self.rebuild_shadow_partition_buffers();
-    }
-
-    /// Optimized path: sorts objects by (mesh_id, material_id) for cache coherency.
-    ///
-    /// Groups consecutive objects with the same (mesh, material) into instanced draw calls
-    /// with `instance_count > 1`. This reduces draw call count and improves GPU cache hit rates.
-    ///
-    /// Called from `flush()` when `objects_dirty` is true and `objects_layout_optimized` is true,
-    /// or when explicitly invoked via `optimize_scene_layout()`.
+    /// Called from `flush()` when `objects_dirty` is true.
     ///
     /// # Algorithm
     ///
@@ -222,8 +41,7 @@ impl super::super::Scene {
     /// - 50 unique meshes
     /// - 100 unique materials
     ///
-    /// This could reduce draw calls from 10,000 (persistent) to ~500 (optimized),
-    /// depending on mesh/material distribution.
+    /// This could reduce draw calls from 10,000 to ~500, depending on mesh/material distribution.
     ///
     /// # GPU Cache Coherency
     ///
@@ -231,7 +49,7 @@ impl super::super::Scene {
     /// - Objects using the same mesh are drawn consecutively (vertex cache hits)
     /// - Objects using the same material are drawn consecutively (texture cache hits)
     /// - GPU can efficiently batch vertex fetches and texture samples
-    pub(in crate::scene) fn rebuild_instance_buffers_optimized(&mut self) {
+    pub(in crate::scene) fn rebuild_instance_buffers(&mut self) {
         let n = self.objects.dense_len();
         if n == 0 {
             self.gpu_scene.instances.set_data(Vec::new());
@@ -347,9 +165,10 @@ impl super::super::Scene {
         }
 
         log::debug!(
-            "rebuild_instance_buffers_optimized: {} objects → {} draw groups",
+            "rebuild_instance_buffers: {} objects → {} draw groups ({} instanced)",
             n,
-            draw_calls.len()
+            draw_calls.len(),
+            n - draw_calls.len()
         );
 
         self.gpu_scene.instances.set_data(instances);

@@ -97,51 +97,50 @@ fn aabb_in_frustum(min: vec3<f32>, max: vec3<f32>) -> bool {
     return true;
 }
 
+fn test_instance(inst: GpuInstance, aabb: GpuAabb) -> bool {
+    let aabb_visible = aabb_in_frustum(aabb.min, aabb.max);
+    let aabb_degenerate = all(aabb.min == aabb.max);
+    let sphere_visible = sphere_in_frustum(inst.bounds.xyz, inst.bounds.w);
+    return select(sphere_visible, aabb_visible, !aabb_degenerate);
+}
+
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     if idx >= cull.draw_count { return; }
 
-    let dc   = draw_calls[idx];
-    // Test the first instance of the group for frustum culling (group-level cull).
-    // If the representative passes, all instances in the batch are drawn.
-    let inst = instances[dc.first_instance];
-    let aabb = aabbs[dc.first_instance];
+    let dc = draw_calls[idx];
 
-    // AABB-based frustum culling (tighter than sphere for elongated objects).
-    // Fall back to sphere if AABB is degenerate (min == max).
-    let aabb_visible = aabb_in_frustum(aabb.min, aabb.max);
-    let aabb_degenerate = all(aabb.min == aabb.max);
-
-    // bounds.xyz is the world-space bounding sphere center (pre-computed by CPU).
-    // bounds.w is the world-space radius.  Do NOT apply the model matrix here —
-    // that would double-transform an already-world-space value.
-    let world_center = inst.bounds.xyz;
-    let world_radius = inst.bounds.w;
-
-    let sphere_visible = sphere_in_frustum(world_center, world_radius);
-
-    let visible = select(sphere_visible, aabb_visible, !aabb_degenerate);
-
-    // Sub-pixel culling: skip objects projecting to < 1 pixel.
-    var should_draw = visible;
-    if visible {
-        let clip_pos = camera.view_proj * vec4<f32>(world_center, 1.0);
-        if clip_pos.w > 0.0 {
-            // r_ndc ~ world_radius * cot(fov/2) / clip_w
-            let r_ndc = abs(world_radius * camera.proj[1][1] / clip_pos.w);
-            if r_ndc < 0.001 {
-                should_draw = false;
+    // Iterate all instances in the batch. Cull the entire batch only if
+    // EVERY instance is out of view. This prevents flickering when the
+    // representative (first) instance is behind the camera but others are visible.
+    var any_visible = false;
+    var batch_has_shadow_caster = false;
+    var subpixel_only = true;
+    for (var i = 0u; i < dc.instance_count; i++) {
+        let inst = instances[dc.first_instance + i];
+        let aabb = aabbs[dc.first_instance + i];
+        if test_instance(inst, aabb) {
+            any_visible = true;
+            // Sub-pixel test: check if this instance projects to ≥ 1 pixel.
+            let clip_pos = camera.view_proj * vec4<f32>(inst.bounds.xyz, 1.0);
+            if clip_pos.w > 0.0 {
+                let r_ndc = abs(inst.bounds.w * camera.proj[1][1] / clip_pos.w);
+                if r_ndc >= 0.001 {
+                    subpixel_only = false;
+                }
+            }
+            if (inst.flags & 1u) != 0u {
+                batch_has_shadow_caster = true;
             }
         }
     }
 
-    let is_shadow_caster = (inst.flags & 1u) != 0u;
-    if is_shadow_caster {
+    if batch_has_shadow_caster {
         atomicAdd(&stats[5u], 1u);
     }
 
-    if should_draw {
+    if any_visible && !subpixel_only {
         indirect[idx] = DrawIndexedIndirect(
             dc.index_count,
             dc.instance_count,
@@ -150,18 +149,9 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             dc.first_instance,
         );
         atomicAdd(&stats[3u], 1u);
-        if is_shadow_caster {
+        if batch_has_shadow_caster {
             atomicAdd(&stats[6u], 1u);
         }
-    } else if !visible {
-        indirect[idx] = DrawIndexedIndirect(
-            dc.index_count,
-            0u,
-            dc.first_index,
-            dc.vertex_offset,
-            dc.first_instance,
-        );
-        atomicAdd(&stats[1u], 1u);
     } else {
         indirect[idx] = DrawIndexedIndirect(
             dc.index_count,
@@ -170,7 +160,11 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             dc.vertex_offset,
             dc.first_instance,
         );
-        atomicAdd(&stats[2u], 1u);
+        if !any_visible {
+            atomicAdd(&stats[1u], 1u);
+        } else {
+            atomicAdd(&stats[2u], 1u);
+        }
     }
     atomicAdd(&stats[0u], 1u);
 }
