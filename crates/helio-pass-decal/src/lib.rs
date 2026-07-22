@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 /// Size of the scene's bindless texture table. Must match `helio::material::MAX_TEXTURES`,
 /// which the renderer uses to size the per-frame view/sampler arrays.
-/// Capped at 16 on wasm32 and Apple native Metal; 256 on other desktop backends.
-#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios")))]
+/// Capped at 16 on wasm32, Apple native Metal, and Android; 256 on other desktop backends.
+#[cfg(not(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android")))]
 const MAX_TEXTURES: usize = 256;
-#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios"))]
+#[cfg(any(target_arch = "wasm32", target_os = "macos", target_os = "ios", target_os = "android"))]
 const MAX_TEXTURES: usize = 16;
 
 #[repr(C)]

@@ -330,7 +330,9 @@ async fn init_wgpu<T: HelioWasmApp>(
             label: Some("helio-wasm device"),
             required_features: helio::required_wgpu_features(adapter.features()),
             required_limits: helio::required_wgpu_limits(adapter.limits()),
-            ..Default::default()
+            experimental_features: helio::required_experimental_features(adapter.features()),
+            memory_hints: wgpu::MemoryHints::Performance,
+            trace: wgpu::Trace::Off,
         })
         .await
     {
