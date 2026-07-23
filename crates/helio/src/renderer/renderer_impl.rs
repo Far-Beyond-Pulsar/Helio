@@ -394,6 +394,12 @@ impl Renderer {
         self.scene.gpu_scene().camera.buffer()
     }
 
+    /// Latest frame timing state. Reading it performs no GPU polling,
+    /// synchronization, or allocation.
+    pub fn timing_snapshot(&self) -> &helio_core::RenderTimingSnapshot {
+        self.graph.profiler().timing_snapshot()
+    }
+
     pub fn mesh_buffers(&self) -> MeshBuffers<'_> {
         self.scene.mesh_buffers()
     }

@@ -61,7 +61,8 @@ pub use helio_bake::{
 pub use helio_core::{
     Actor, Component, ComponentRegistry, ComponentSlot, ComponentVec, DebugViewDescriptor,
     DrawIndexedIndirectArgs, Entity, Error, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
-    GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
+    GpuInstanceData, GpuLight, GpuMaterial, GpuScene, GpuTimingAvailability, RenderGraph,
+    RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
 pub use libhelio::{LightType, Movability, ShadowQuality, SkyActor, VolumetricClouds};
 
