@@ -10,11 +10,11 @@ helio = { workspace = true }
 libhelio = { workspace = true }
 
 # SolidRS - 3D asset loading
-solid-rs.workspace = true
-solid-gltf.workspace = true
-solid-fbx.workspace = true
-solid-obj.workspace = true
-solid-usd.workspace = true
+solid-rs = { workspace = true, features = ["configurator"] }
+solid-gltf = { workspace = true, features = ["configurator"] }
+solid-fbx = { workspace = true, features = ["configurator"] }
+solid-obj = { workspace = true, features = ["configurator"] }
+solid-usd = { workspace = true, features = ["configurator"] }
 
 # Math and utilities
 glam.workspace = true
