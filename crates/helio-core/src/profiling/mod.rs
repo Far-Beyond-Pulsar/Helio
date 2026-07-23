@@ -140,6 +140,7 @@ pub struct Profiler {
     cpu: CpuProfiler,
     gpu: GpuProfiler,
     enabled: bool,
+    snapshot: RenderTimingSnapshot,
 }
 
 impl Profiler {
@@ -160,6 +161,7 @@ impl Profiler {
             cpu: CpuProfiler::new(),
             gpu: GpuProfiler::new(device, queue),
             enabled: cfg!(feature = "profiling"),
+            snapshot: RenderTimingSnapshot::default(),
         }
     }
 
@@ -228,10 +230,9 @@ impl Profiler {
     }
 
     /// Resolve GPU timestamp queries to buffer (call after submitting command buffer)
-    pub fn resolve_gpu_queries(&mut self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn resolve_gpu_queries(&mut self, encoder: &mut wgpu::CommandEncoder, frame_index: u64) {
         if self.enabled {
-            self.gpu.resolve_queries(encoder);
-            self.gpu.copy_to_resolve_buffer(encoder);
+            self.gpu.resolve_queries(encoder, frame_index);
         }
     }
 
@@ -273,6 +274,71 @@ impl Profiler {
     /// Clear CPU timings for new frame
     pub fn clear_cpu_timings(&mut self) {
         self.cpu.clear();
+    }
+
+    /// Updates the reusable host-facing snapshot after a frame has submitted.
+    pub fn update_snapshot(
+        &mut self,
+        cpu_frame_index: u64,
+        pass_names: impl Iterator<Item = &'static str>,
+    ) {
+        self.snapshot.generation = self.snapshot.generation.saturating_add(1);
+        self.snapshot.cpu_frame_index = cpu_frame_index;
+        self.snapshot.gpu_frame_index = self.gpu.last_completed_frame();
+        self.snapshot.gpu_lag_frames = self
+            .snapshot
+            .gpu_frame_index
+            .map(|gpu_frame| cpu_frame_index.saturating_sub(gpu_frame));
+        self.snapshot.readback_drops = self.gpu.dropped_readbacks();
+        self.snapshot.query_overflows = self.gpu.query_overflows();
+        self.snapshot.gpu_availability = if !self.enabled {
+            GpuTimingAvailability::Disabled
+        } else if !self.gpu.supported() {
+            GpuTimingAvailability::Unsupported
+        } else if self.snapshot.gpu_frame_index.is_some() {
+            GpuTimingAvailability::Available
+        } else if self.snapshot.readback_drops != 0 {
+            GpuTimingAvailability::Backpressured
+        } else {
+            GpuTimingAvailability::Pending
+        };
+
+        self.snapshot.passes.clear();
+        let mut total_cpu_ms = 0.0_f32;
+        let mut has_cpu = false;
+        let mut total_gpu_ms = 0.0_f32;
+        let mut has_gpu = false;
+        for name in pass_names {
+            let cpu_ms = self.cpu.get_timings().get(name).map(|duration| {
+                has_cpu = true;
+                let milliseconds = duration.as_secs_f64() as f32 * 1_000.0;
+                total_cpu_ms += milliseconds;
+                milliseconds
+            });
+            let gpu_ms = self
+                .gpu
+                .get_last_timings()
+                .iter()
+                .find(|timing| timing.name == name)
+                .map(|timing| {
+                    has_gpu = true;
+                    let milliseconds = timing.duration_ns as f32 / 1_000_000.0;
+                    total_gpu_ms += milliseconds;
+                    milliseconds
+                });
+            self.snapshot.passes.push(RenderPassTiming {
+                name,
+                cpu_ms,
+                gpu_ms,
+            });
+        }
+        self.snapshot.total_cpu_ms = has_cpu.then_some(total_cpu_ms);
+        self.snapshot.total_gpu_ms = has_gpu.then_some(total_gpu_ms);
+    }
+
+    /// Returns the latest snapshot without allocation or synchronization.
+    pub const fn timing_snapshot(&self) -> &RenderTimingSnapshot {
+        &self.snapshot
     }
 
     /// Print profiling results to console (blocking - use for debugging only!)
@@ -354,7 +420,7 @@ impl Profiler {
         let mut gpu_map = std::collections::HashMap::new();
         for ts in self.gpu.get_last_timings() {
             let ms = ts.duration_ns as f64 / 1_000_000.0;
-            gpu_map.insert(ts.name.as_str(), ms as f32);
+            gpu_map.insert(ts.name, ms as f32);
             total_gpu_ms += ms as f32;
         }
 
@@ -377,7 +443,7 @@ impl Profiler {
             if !pass_timings.iter().any(|pt| pt.name == ts.name) {
                 let ms = ts.duration_ns as f64 / 1_000_000.0;
                 pass_timings.push(PassTiming {
-                    name: ts.name.clone(),
+                    name: ts.name.to_string(),
                     cpu_ms: 0.0,
                     gpu_ms: ms as f32,
                 });
@@ -394,4 +460,47 @@ pub struct PassTiming {
     pub name: String,
     pub cpu_ms: f32,
     pub gpu_ms: f32,
+}
+
+/// State of non-blocking GPU timing readback for the current snapshot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuTimingAvailability {
+    /// The `profiling` feature is disabled.
+    Disabled,
+    /// The adapter does not expose the required timestamp-query features.
+    Unsupported,
+    /// Timestamp data has been submitted but no host-driven poll has completed it yet.
+    #[default]
+    Pending,
+    /// At least one completed GPU frame is available.
+    Available,
+    /// All bounded readback slots were occupied before the first result completed.
+    Backpressured,
+}
+
+/// One pass in a host-facing timing snapshot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RenderPassTiming {
+    pub name: &'static str,
+    pub cpu_ms: Option<f32>,
+    pub gpu_ms: Option<f32>,
+}
+
+/// Reusable read-only timing state exposed by `Renderer`.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RenderTimingSnapshot {
+    /// Monotonic snapshot revision, incremented after every submitted frame.
+    pub generation: u64,
+    /// Frame whose CPU pass timings are represented.
+    pub cpu_frame_index: u64,
+    /// Most recent GPU frame whose asynchronous readback completed.
+    pub gpu_frame_index: Option<u64>,
+    /// Difference between `cpu_frame_index` and `gpu_frame_index`.
+    pub gpu_lag_frames: Option<u64>,
+    pub gpu_availability: GpuTimingAvailability,
+    pub total_cpu_ms: Option<f32>,
+    pub total_gpu_ms: Option<f32>,
+    pub readback_drops: u64,
+    pub query_overflows: u64,
+    pub passes: Vec<RenderPassTiming>,
 }
