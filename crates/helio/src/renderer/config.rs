@@ -156,19 +156,6 @@ pub struct RendererConfig {
     /// reserves six consecutive faces. A capacity of 32 supports five lights
     /// while keeping the two 1024px browser atlases to 256 MiB total.
     pub shadow_face_capacity: u32,
-    /// Enable the screen-space reflection pass. Default `false`.
-    ///
-    /// SSR traces the Hi-Z buffer per pixel and is one of the most expensive
-    /// passes in the graph, particularly on Metal. `DeferredLightPass` binds a
-    /// 1×1 black fallback when the pass is absent, so disabling it costs only
-    /// the reflection contribution.
-    pub enable_ssr: bool,
-    /// Enable the planar reflection pass. Default `false`.
-    ///
-    /// Planar reflections re-render the scene mirrored across each reflection
-    /// plane, so cost scales with scene complexity times plane count. As with
-    /// SSR, `DeferredLightPass` falls back to a 1×1 black texture.
-    pub enable_planar_reflections: bool,
 }
 
 impl RendererConfig {
@@ -184,21 +171,7 @@ impl RendererConfig {
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
-            enable_ssr: false,
-            enable_planar_reflections: false,
         }
-    }
-
-    /// Enable/disable the screen-space reflection pass.
-    pub fn with_ssr(mut self, enabled: bool) -> Self {
-        self.enable_ssr = enabled;
-        self
-    }
-
-    /// Enable/disable the planar reflection pass.
-    pub fn with_planar_reflections(mut self, enabled: bool) -> Self {
-        self.enable_planar_reflections = enabled;
-        self
     }
 
     pub fn with_gi_config(mut self, gi_config: GiConfig) -> Self {
