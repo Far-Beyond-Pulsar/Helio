@@ -63,6 +63,11 @@ impl GroupId {
     /// Logical debug visualisers (AABBs, nav-mesh overlays, etc.).
     pub const DEBUG: GroupId = GroupId(7);
 
+    /// User-hidden objects (toggled invisible in the editor hierarchy panel).
+    /// These objects still exist in the scene for gizmo rendering and selection
+    /// but are not rendered visually.
+    pub const HIDDEN: GroupId = GroupId(8);
+
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Create a group from a raw bit index in `0..=63`.
