@@ -344,6 +344,16 @@ pub struct FrameResources<'a> {
 
     /// Sampler for planar_reflection.
     pub planar_reflection_sampler: Tracked<&'a wgpu::Sampler>,
+
+    // ── HLFS resources (populated by HLFS pass) ──
+
+    /// Clip-stack read views for the shade pass (4 levels of 128³ RGBA16F).
+    ///
+    /// Populated by `HlfsPass::publish()` after the clip-stack buffer swap.
+    pub hlfs_clip_stack: Option<[&'a wgpu::TextureView; 4]>,
+
+    /// HLFS-specific globals uniform buffer (HlfsGlobals layout).
+    pub hlfs_globals: Option<&'a wgpu::Buffer>,
 }
 
 // ── PVS CPU reference ──────────────────────────────────────────────────────────
@@ -459,6 +469,8 @@ impl<'a> FrameResources<'a> {
             ssr_trace: Tracked::empty(),
             planar_reflection: Tracked::empty(),
             planar_reflection_sampler: Tracked::empty(),
+            hlfs_clip_stack: None,
+            hlfs_globals: None,
         }
     }
 
