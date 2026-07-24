@@ -18,6 +18,9 @@ pub struct DebugDrawState {
     /// Bumped whenever `editor_volume_lines` changes, so the pass can keep
     /// caching its uploads instead of re-sending the set every frame.
     pub editor_volume_generation: u64,
+    /// Color-blind mode for axis/gizmo colors:
+    /// 0=None, 1=Protanopia, 2=Deuteranopia, 3=Tritanopia, 4=Achromatopsia
+    pub color_blind_mode: u8,
 }
 
 impl Default for DebugDrawState {
@@ -31,6 +34,7 @@ impl Default for DebugDrawState {
             user_tris_generation: 0,
             editor_volume_lines: Vec::new(),
             editor_volume_generation: 0,
+            color_blind_mode: 0,
         }
     }
 }
@@ -586,13 +590,33 @@ impl DebugDrawPass {
         self.pass.set_depth_test(enabled);
     }
 
-    fn rebuild_editor_grid_cache(&mut self, center_x: f32, center_z: f32, grid_step: f32) {
+    fn rebuild_editor_grid_cache(&mut self, center_x: f32, center_z: f32, grid_step: f32, color_blind_mode: u8) {
         self.editor_grid_cache.clear();
 
         let minor_color: [f32; 4] = [0.25, 0.25, 0.25, 1.0];
         let major_color: [f32; 4] = [0.5, 0.5, 0.5, 1.0];
-        let axis_color_x: [f32; 4] = [1.0, 0.2, 0.2, 1.0];
-        let axis_color_z: [f32; 4] = [0.2, 1.0, 0.2, 1.0];
+        let (axis_color_x, axis_color_z, origin_color) = match color_blind_mode {
+            1 | 2 => (
+                [1.0, 0.6, 0.0, 1.0],
+                [0.0, 0.5, 1.0, 1.0],
+                [1.0, 1.0, 0.0, 1.0],
+            ),
+            3 => (
+                [1.0, 0.2, 0.2, 1.0],
+                [0.0, 0.7, 0.3, 1.0],
+                [1.0, 0.5, 0.0, 1.0],
+            ),
+            4 => (
+                [0.0, 0.0, 0.0, 1.0],
+                [0.5, 0.5, 0.5, 1.0],
+                [1.0, 1.0, 1.0, 1.0],
+            ),
+            _ => (
+                [1.0, 0.2, 0.2, 1.0],
+                [0.2, 1.0, 0.2, 1.0],
+                [1.0, 1.0, 0.0, 1.0],
+            ),
+        };
 
         let range: f32 = 40.0;
         let count = (range / grid_step).ceil() as i32;
@@ -649,7 +673,6 @@ impl DebugDrawPass {
             });
         }
 
-        let origin_color = [1.0, 1.0, 0.0, 1.0];
         self.editor_grid_cache.push(DebugVertex {
             position: [-3.0, 0.0, 0.0],
             _pad: 0.0,
@@ -771,7 +794,7 @@ impl RenderPass for DebugDrawPass {
             let mut grid_rebuilt = false;
             if self.editor_last_key != Some(key) || self.editor_last_volume_gen != Some(volume_gen)
             {
-                self.rebuild_editor_grid_cache(center_x, center_z, grid_step);
+                self.rebuild_editor_grid_cache(center_x, center_z, grid_step, state.color_blind_mode);
                 self.editor_grid_cache
                     .extend_from_slice(&state.editor_volume_lines);
                 self.editor_last_key = Some(key);
