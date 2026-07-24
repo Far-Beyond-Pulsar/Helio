@@ -169,13 +169,17 @@ pub struct RendererConfig {
     /// plane, so cost scales with scene complexity times plane count. As with
     /// SSR, `DeferredLightPass` falls back to a 1×1 black texture.
     pub enable_planar_reflections: bool,
-    /// Enable environment-cubemap indirect specular. Default `false`.
+    /// Enable environment-cubemap indirect specular. Default `true`.
     ///
     /// This is the *base* reflection layer in deferred lighting — SSR and planar
-    /// reflections only composite on top of it. Disabling SSR/planar alone does
-    /// not remove reflections from the image; this does. Turning it off is a
-    /// visible look change: metals and glossy surfaces lose their environment
-    /// response and read flat.
+    /// reflections only composite on top of it, so gating those two does not
+    /// remove reflections from the image; this flag does.
+    ///
+    /// Defaults ON because turning it off is not a mild change: metals have no
+    /// diffuse term at all (`kD = (1 - F)(1 - metallic)` is zero at
+    /// `metallic = 1`), so the cubemap is their *only* light source and they go
+    /// pure black without it. It is also a poor performance lever — one cubemap
+    /// sample per pixel, versus SSR's per-pixel Hi-Z trace.
     pub enable_environment_reflections: bool,
 }
 
@@ -194,7 +198,7 @@ impl RendererConfig {
             shadow_face_capacity: 32,
             enable_ssr: false,
             enable_planar_reflections: false,
-            enable_environment_reflections: false,
+            enable_environment_reflections: true,
         }
     }
 
