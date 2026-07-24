@@ -332,7 +332,7 @@ impl RenderGraph {
         scene: &GpuScene,
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
-    ) -> Result<()> {
+    ) -> Result<wgpu::SubmissionIndex> {
         let frame_resources = libhelio::FrameResources::empty();
         self.execute_with_frame_resources(scene, target, depth, &frame_resources)
     }
@@ -343,7 +343,7 @@ impl RenderGraph {
         target: &wgpu::TextureView,
         depth: &wgpu::TextureView,
         frame_resources: &libhelio::FrameResources<'_>,
-    ) -> Result<()> {
+    ) -> Result<wgpu::SubmissionIndex> {
         assert!(self.locked, "RenderGraph::execute() requires lock() to be called first");
 
         self.profiler.clear_cpu_timings();
@@ -604,7 +604,7 @@ impl RenderGraph {
         }
 
         self.profiler.resolve_gpu_queries(&mut compute_encoder);
-        scene.queue.submit([compute_encoder.finish(), encoder.finish()]);
+        let submission_index = scene.queue.submit([compute_encoder.finish(), encoder.finish()]);
         crate::upload::finish_frame();
 
         if self.owns_device {
@@ -615,7 +615,7 @@ impl RenderGraph {
 
         self.frame_count += 1;
 
-        Ok(())
+        Ok(submission_index)
     }
 
     /// Finalize the graph after all passes have been added.
