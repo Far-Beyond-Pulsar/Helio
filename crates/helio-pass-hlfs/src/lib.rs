@@ -14,21 +14,26 @@ use bytemuck::{Pod, Zeroable};
 use helio_core::graph::{ResourceBuilder, ResourceSize};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
 
-const CLIP_STACK_LEVELS: usize = 4;
-const VOXEL_RESOLUTION: u32 = 128; // 128^3 per level
+mod clip_stack;
+mod globals;
+use clip_stack::{ClipStack, HLFS_LEVELS, HLFS_RES, HLFS_NEAR_FIELD, HLFS_CASCADE_SCALE};
+use globals::HlfsGlobals;
+
+const CLIP_STACK_LEVELS: usize = HLFS_LEVELS as usize;
+const VOXEL_RESOLUTION: u32 = HLFS_RES; // 128^3 per level
 const SAMPLES_PER_PIXEL: u32 = 8; // K samples for importance sampling
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
-struct HlfsGlobals {
+struct LegacyGlobals {
     frame: u32,
     sample_count: u32,
     light_count: u32,
     screen_width: u32,
     screen_height: u32,
-    near_field_size: f32, // Level 0 world-space size (meters)
-    cascade_scale: f32,   // Scale multiplier per level (e.g., 2.0)
-    temporal_blend: f32,  // Temporal accumulation weight
+    near_field_size: f32,
+    cascade_scale: f32,
+    temporal_blend: f32,
     camera_position: [f32; 3],
     _pad0: u32,
     camera_forward: [f32; 3],
@@ -48,8 +53,11 @@ pub struct HlfsPass {
     fallback_shadow_sampler: wgpu::Sampler,
 
     // Clip-stack: 4 levels of 3D textures (128^3 RGBA16F each)
-    clip_stack_views: Vec<wgpu::TextureView>,
+    clip_stack: ClipStack,
     clip_stack_sampler: wgpu::Sampler,
+
+    // HLFS-specific globals uniform (new layout with clip_origins, voxel_sizes, etc.)
+    hlfs_globals_buf: wgpu::Buffer,
 
     // Intermediate buffers
     sample_buffer: wgpu::Buffer, // Stores K samples per pixel
@@ -117,29 +125,16 @@ impl HlfsPass {
             mapped_at_creation: false,
         });
 
-        // Create clip-stack textures (4 levels of 128^3 RGBA16F)
-        let mut clip_stack_textures = Vec::new();
-        let mut clip_stack_views = Vec::new();
+        // Create clip-stack (double-buffered, 4 levels of 128^3 RGBA16F 3D textures)
+        let clip_stack = ClipStack::new(device, wgpu::TextureFormat::Rgba16Float);
 
-        for level in 0..CLIP_STACK_LEVELS {
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(&format!("HLFS Clip-Stack Level {}", level)),
-                size: wgpu::Extent3d {
-                    width: VOXEL_RESOLUTION,
-                    height: VOXEL_RESOLUTION,
-                    depth_or_array_layers: VOXEL_RESOLUTION,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D3,
-                format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            clip_stack_textures.push(texture);
-            clip_stack_views.push(view);
-        }
+        // HLFS-specific globals uniform buffer (new layout with clip_origins, voxel_sizes, etc.)
+        let hlfs_globals_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("HLFS Globals (New)"),
+            size: std::mem::size_of::<HlfsGlobals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         // Sample buffer: stores K samples per pixel (position, direction, radiance)
         let sample_count = (width * height * SAMPLES_PER_PIXEL) as u64;
@@ -957,8 +952,9 @@ impl HlfsPass {
             hierarchical_propagate_pipeline,
             final_shade_pipeline,
             globals_buf,
+            hlfs_globals_buf,
             fallback_shadow_sampler,
-            clip_stack_views,
+            clip_stack,
             clip_stack_sampler,
             sample_buffer,
             bgl_compute_importance,
@@ -1031,10 +1027,21 @@ impl RenderPass for HlfsPass {
     fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
         // Publish output as pre_aa for downstream passes (always overwrite)
         frame.pre_aa.write(&self.output_view, "HLFS");
+
+        // Publish clip-stack read views so the shade pass can sample the accumulated field
+        frame.hlfs_clip_stack = Some([
+            &self.clip_stack.read[0],
+            &self.clip_stack.read[1],
+            &self.clip_stack.read[2],
+            &self.clip_stack.read[3],
+        ]);
+
+        // Publish HLFS globals buffer for downstream passes
+        frame.hlfs_globals = Some(&self.hlfs_globals_buf);
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["pre_aa"]
+        &["pre_aa", "hlfs_clip_stack", "hlfs_globals"]
     }
 
     fn declare_resources(&self, builder: &mut ResourceBuilder) {
@@ -1043,24 +1050,49 @@ impl RenderPass for HlfsPass {
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
         let camera_pos = ctx.scene.camera.position();
-        let cam_forward = [0.0_f32, 0.0_f32, -1.0_f32];
 
-        let globals = HlfsGlobals {
+        // Write legacy globals for existing shaders
+        let legacy = LegacyGlobals {
             frame: ctx.frame_num as u32,
             sample_count: SAMPLES_PER_PIXEL,
-            light_count: ctx.scene.movable_light_count, // Only movable lights (static/stationary are baked)
+            light_count: ctx.scene.movable_light_count,
             screen_width: self.width,
             screen_height: self.height,
-            near_field_size: 50.0, // 50m near field
-            cascade_scale: 2.0,    // Double size per level
-            temporal_blend: 0.95,  // 95% history, 5% new
+            near_field_size: 50.0,
+            cascade_scale: 2.0,
+            temporal_blend: 0.95,
             camera_position: camera_pos,
             _pad0: 0,
-            camera_forward: cam_forward,
+            camera_forward: [0.0_f32, 0.0_f32, -1.0_f32],
             _pad1: 0,
             csm_splits: libhelio::CSM_SPLITS,
         };
-        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+        ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&legacy));
+
+        // Write new HLFS globals with clip-stack state
+        let hlfs = HlfsGlobals {
+            clip_origins: [
+                [self.clip_stack.levels[0].origin[0], self.clip_stack.levels[0].origin[1], self.clip_stack.levels[0].origin[2], 0],
+                [self.clip_stack.levels[1].origin[0], self.clip_stack.levels[1].origin[1], self.clip_stack.levels[1].origin[2], 0],
+                [self.clip_stack.levels[2].origin[0], self.clip_stack.levels[2].origin[1], self.clip_stack.levels[2].origin[2], 0],
+                [self.clip_stack.levels[3].origin[0], self.clip_stack.levels[3].origin[1], self.clip_stack.levels[3].origin[2], 0],
+            ],
+            voxel_sizes: [
+                self.clip_stack.levels[0].voxel_size,
+                self.clip_stack.levels[1].voxel_size,
+                self.clip_stack.levels[2].voxel_size,
+                self.clip_stack.levels[3].voxel_size,
+            ],
+            frame_time: ctx.delta_time,
+            temporal_decay: [0.95; 4],
+            near_field_size: HLFS_NEAR_FIELD,
+            cascade_scale: HLFS_CASCADE_SCALE,
+            screen_size: [self.width, self.height],
+            sample_count: SAMPLES_PER_PIXEL,
+            light_count: ctx.scene.movable_light_count,
+            dissipation_mode: 0,
+        };
+        ctx.write_buffer(&self.hlfs_globals_buf, 0, bytemuck::bytes_of(&hlfs));
 
         let shadow_config = libhelio::ShadowConfig::from_quality(self.shadow_quality);
         ctx.write_buffer(
@@ -1104,19 +1136,19 @@ impl RenderPass for HlfsPass {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[1]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[1]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[2]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[2]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 3,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[3]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[3]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
@@ -1184,19 +1216,19 @@ impl RenderPass for HlfsPass {
                             entries: &[
                                 wgpu::BindGroupEntry {
                                     binding: 0,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 1,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[1]),
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[1]),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 2,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[2]),
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[2]),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 3,
-                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[3]),
+                                    resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[3]),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 4,
@@ -1324,7 +1356,7 @@ impl RenderPass for HlfsPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 5,
@@ -1362,19 +1394,19 @@ impl RenderPass for HlfsPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 8,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[0]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 9,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[1]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[1]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 10,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[2]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[2]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 11,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[3]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[3]),
                         },
                     ],
                 }));
@@ -1392,25 +1424,35 @@ impl RenderPass for HlfsPass {
                         },
                         wgpu::BindGroupEntry {
                             binding: 4,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[0]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.read[0]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 8,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[1]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[1]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 9,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[2]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[2]),
                         },
                         wgpu::BindGroupEntry {
                             binding: 10,
-                            resource: wgpu::BindingResource::TextureView(&self.clip_stack_views[3]),
+                            resource: wgpu::BindingResource::TextureView(&self.clip_stack.write[3]),
                         },
                     ],
                 }));
         }
 
-        // Step 1: Importance sampling (compute)
+        // Step 1: Toroidal shift — update clip-stack origins and recycle voxels
+        {
+            let mut pass =
+                unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("HLFS Toroidal Shift"),
+                    timestamp_writes: None,
+                });
+            // Phase 1: no-op dispatch (placeholder for compute-based ring-buffer update)
+        }
+
+        // Step 2: Importance sampling (compute)
         let workgroups_x = self.width.div_ceil(8);
         let workgroups_y = self.height.div_ceil(8);
 
@@ -1488,6 +1530,15 @@ impl RenderPass for HlfsPass {
             pass.set_bind_group(1, self.bind_group_shade1.as_ref().unwrap(), &[]);
             pass.draw(0..3, 0..1);
         }
+
+        // Step 5: Swap clip-stack read/write buffers for next frame
+        self.clip_stack.swap_buffers();
+
+        // Invalidate compute bind groups after buffer swap (they hold references to
+        // clip-stack read/write views that become stale).
+        self.bind_group_compute_importance = None;
+        self.bind_group_compute_inject = None;
+        self.bind_group_compute_propagate = None;
 
         Ok(())
     }
