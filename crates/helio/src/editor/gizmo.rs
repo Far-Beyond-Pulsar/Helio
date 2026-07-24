@@ -16,6 +16,9 @@ const BLUE:  [f32; 4] = [0.15, 0.35, 1.00, 1.0];
 /// Bright gold-yellow used for hovered/active handles (Blender convention).
 const HOVER: [f32; 4] = [1.0, 0.85, 0.05, 1.0];
 
+/// Semi-transparent black used for drop-shadow geometry behind gizmo handles.
+const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
+
 /// Solid color for a handle, switching to HOVER when hovered.
 fn line_col(base: [f32; 4], hovered: bool) -> [f32; 4] {
     if hovered { HOVER } else { base }
@@ -34,12 +37,21 @@ fn fill_col(base: [f32; 4], hovered: bool) -> [f32; 4] {
 // Gizmo drawing helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// World-space offset of ~2 screen pixels at the gizmo center's depth,
+/// projected along the camera's right+up vectors.
+pub(super) fn shadow_offset(center: Vec3, camera: &Camera, viewport_height: f32) -> Vec3 {
+    let pixel_world = gizmo_world_size(center, camera, viewport_height) / GIZMO_PIXELS;
+    let off = pixel_world * 2.0;
+    camera.view.x_axis.truncate() * off + camera.view.y_axis.truncate() * off
+}
+
 pub(super) fn draw_translate_gizmo(
     renderer: &mut DebugBatch<'_>,
     center: Vec3,
     size: f32,
     hovered: Option<GizmoAxis>,
     local_axes: [Vec3; 3],
+    off: Vec3,
 ) {
     let shaft  = size * 0.75;
     let cone_h = size * 0.22;
@@ -54,6 +66,10 @@ pub(super) fn draw_translate_gizmo(
         let lc     = line_col(base, is_hov);
         let fc     = fill_col(base, is_hov);
 
+        renderer.line((center + off).to_array(), (tip + off).to_array(), SHADOW);
+        renderer.filled_cone((apex + off).to_array(), (-h).to_array(), cone_h, cone_r, SHADOW, SEGS);
+        renderer.cone       ((apex + off).to_array(), (-h).to_array(), cone_h, cone_r, SHADOW, SEGS);
+
         renderer.line(center.to_array(), tip.to_array(), lc);
         renderer.filled_cone(apex.to_array(), (-h).to_array(), cone_h, cone_r, fc, SEGS);
         renderer.cone       (apex.to_array(), (-h).to_array(), cone_h, cone_r, lc, SEGS);
@@ -66,6 +82,7 @@ pub(super) fn draw_rotate_gizmo(
     size: f32,
     hovered: Option<GizmoAxis>,
     local_axes: [Vec3; 3],
+    off: Vec3,
 ) {
     const SEGS: u32 = 64;
     const BAND: f32 = 0.055; // annulus half-width as fraction of gizmo size
@@ -76,11 +93,13 @@ pub(super) fn draw_rotate_gizmo(
         let lc           = line_col(base, is_hov);
         let fc           = fill_col(base, is_hov);
 
-        draw_ring(renderer, center, tan, bitan, size, lc, SEGS);
-
+        draw_ring(renderer, center, tan, bitan, size, SHADOW, SEGS, off);
         let inner = size * (1.0 - BAND);
         let outer = size * (1.0 + BAND);
-        draw_annulus(renderer, center, tan, bitan, inner, outer, fc, SEGS);
+        draw_annulus(renderer, center, tan, bitan, inner, outer, SHADOW, SEGS, off);
+
+        draw_ring(renderer, center, tan, bitan, size, lc, SEGS, Vec3::ZERO);
+        draw_annulus(renderer, center, tan, bitan, inner, outer, fc, SEGS, Vec3::ZERO);
     }
 }
 
@@ -90,6 +109,7 @@ pub(super) fn draw_scale_gizmo(
     size: f32,
     hovered: Option<GizmoAxis>,
     local_axes: [Vec3; 3],
+    off: Vec3,
 ) {
     let shaft    = size * 0.82;
     let box_half = size * 0.07;
@@ -101,14 +121,19 @@ pub(super) fn draw_scale_gizmo(
         let lc     = line_col(base, is_hov);
         let fc     = fill_col(base, is_hov);
 
+        renderer.line((center + off).to_array(), (tip + off).to_array(), SHADOW);
+        renderer.filled_box((tip + off).to_array(), box_half, SHADOW);
+        draw_box_wire(renderer, tip + off, box_half, SHADOW, Vec3::ZERO);
+
         renderer.line(center.to_array(), tip.to_array(), lc);
         renderer.filled_box(tip.to_array(), box_half, fc);
-        draw_box_wire(renderer, tip, box_half, lc);
+        draw_box_wire(renderer, tip, box_half, lc, Vec3::ZERO);
     }
 }
 
 // ── Ring / annulus helpers ───────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn draw_ring(
     renderer: &mut DebugBatch<'_>,
     center: Vec3,
@@ -117,18 +142,20 @@ fn draw_ring(
     radius: f32,
     color: [f32; 4],
     segs: u32,
+    offset: Vec3,
 ) {
     let step = std::f32::consts::TAU / segs as f32;
-    let mut prev = center + tangent * radius;
+    let mut prev = center + tangent * radius + offset;
     for i in 1..=segs {
         let theta = i as f32 * step;
-        let next  = center + (tangent * theta.cos() + bitangent * theta.sin()) * radius;
+        let next  = center + (tangent * theta.cos() + bitangent * theta.sin()) * radius + offset;
         renderer.line(prev.to_array(), next.to_array(), color);
         prev = next;
     }
 }
 
 /// Filled flat annulus (ring band) using triangle quads per sector.
+#[allow(clippy::too_many_arguments)]
 fn draw_annulus(
     renderer: &mut DebugBatch<'_>,
     center: Vec3,
@@ -138,15 +165,16 @@ fn draw_annulus(
     outer: f32,
     color: [f32; 4],
     segs: u32,
+    offset: Vec3,
 ) {
     let step = std::f32::consts::TAU / segs as f32;
-    let mut pi = center + tangent * inner;
-    let mut po = center + tangent * outer;
+    let mut pi = center + tangent * inner + offset;
+    let mut po = center + tangent * outer + offset;
     for i in 1..=segs {
         let theta = i as f32 * step;
         let dir   = tangent * theta.cos() + bitangent * theta.sin();
-        let ci    = center + dir * inner;
-        let co    = center + dir * outer;
+        let ci    = center + dir * inner + offset;
+        let co    = center + dir * outer + offset;
         renderer.tri(po.to_array(), pi.to_array(), ci.to_array(), color);
         renderer.tri(po.to_array(), ci.to_array(), co.to_array(), color);
         pi = ci;
@@ -157,16 +185,16 @@ fn draw_annulus(
 // ── Box helpers ──────────────────────────────────────────────────────────────
 
 /// 12-edge wireframe cube.
-fn draw_box_wire(renderer: &mut DebugBatch<'_>, center: Vec3, half: f32, color: [f32; 4]) {
+fn draw_box_wire(renderer: &mut DebugBatch<'_>, center: Vec3, half: f32, color: [f32; 4], offset: Vec3) {
     let c = [
-        center + Vec3::new(-half, -half, -half),
-        center + Vec3::new( half, -half, -half),
-        center + Vec3::new( half,  half, -half),
-        center + Vec3::new(-half,  half, -half),
-        center + Vec3::new(-half, -half,  half),
-        center + Vec3::new( half, -half,  half),
-        center + Vec3::new( half,  half,  half),
-        center + Vec3::new(-half,  half,  half),
+        center + Vec3::new(-half, -half, -half) + offset,
+        center + Vec3::new( half, -half, -half) + offset,
+        center + Vec3::new( half,  half, -half) + offset,
+        center + Vec3::new(-half,  half, -half) + offset,
+        center + Vec3::new(-half, -half,  half) + offset,
+        center + Vec3::new( half, -half,  half) + offset,
+        center + Vec3::new( half,  half,  half) + offset,
+        center + Vec3::new(-half,  half,  half) + offset,
     ];
     for i in 0..4 {
         renderer.line(c[i].to_array(),     c[(i + 1) % 4].to_array(),     color);

@@ -4,7 +4,7 @@ use super::{ring_frame, GizmoAxis, GizmoMode};
 use super::gizmo::{
     draw_rotate_gizmo, draw_scale_gizmo, draw_translate_gizmo, gizmo_world_size,
     hit_gizmo, object_gizmo_info, ray_plane_hit, ray_sphere_intersect, ray_to_axis_t,
-    sectioned_gizmo_info,
+    sectioned_gizmo_info, shadow_offset,
 };
 use crate::handles::ObjectId;
 use crate::renderer::Renderer;
@@ -506,12 +506,13 @@ impl EditorState {
                 let sphere_radius = world_size * 0.5;
                 let hov = self.hovered_axis;
                 let mode = self.gizmo_mode;
+                let off = shadow_offset(center, gizmo_camera, viewport_height);
                 renderer.debug_batch(|dbg| {
                     dbg.sphere(center.to_array(), sphere_radius, [1.0, 0.95, 0.0, 1.0], 24);
                     match mode {
-                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, world_size, hov, local_axes),
-                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, world_size, hov, local_axes),
-                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, world_size, hov, local_axes),
+                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, world_size, hov, local_axes, off),
+                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, world_size, hov, local_axes, off),
+                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, world_size, hov, local_axes, off),
                     }
                 });
             }
@@ -522,12 +523,13 @@ impl EditorState {
                 let sphere_radius = world_size * 0.5;
                 let hov  = self.hovered_axis;
                 let mode = self.gizmo_mode;
+                let off = shadow_offset(center, gizmo_camera, viewport_height);
                 renderer.debug_batch(|dbg| {
                     dbg.sphere(center.to_array(), sphere_radius, [1.0, 0.95, 0.0, 1.0], 24);
                     match mode {
-                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, world_size, hov, local_axes),
-                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, world_size, hov, local_axes),
-                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, world_size, hov, local_axes),
+                        GizmoMode::Translate => draw_translate_gizmo(dbg, center, world_size, hov, local_axes, off),
+                        GizmoMode::Rotate    => draw_rotate_gizmo   (dbg, center, world_size, hov, local_axes, off),
+                        GizmoMode::Scale     => draw_scale_gizmo    (dbg, center, world_size, hov, local_axes, off),
                     }
                 });
             }
@@ -541,9 +543,10 @@ impl EditorState {
                 let world_size = gizmo_world_size(center, gizmo_camera, viewport_height);
                 let local_axes = [Vec3::X, Vec3::Y, Vec3::Z];
                 let hovered_axis = self.hovered_axis;
+                let off = shadow_offset(center, gizmo_camera, viewport_height);
                 renderer.debug_batch(|dbg| {
                     dbg.sphere(center.to_array(), world_size * 0.5, [1.0, 0.95, 0.0, 1.0], 24);
-                    draw_translate_gizmo(dbg, center, world_size, hovered_axis, local_axes);
+                    draw_translate_gizmo(dbg, center, world_size, hovered_axis, local_axes, off);
                 });
             }
             _ => {}
