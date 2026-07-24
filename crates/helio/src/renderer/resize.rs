@@ -62,6 +62,7 @@ impl Renderer {
                 shadow_face_capacity: self.shadow_face_capacity,
                 enable_ssr: self.enable_ssr,
                 enable_planar_reflections: self.enable_planar_reflections,
+                enable_environment_reflections: self.enable_environment_reflections,
             };
             self.graph = rebuilder(
                 &self.device,

@@ -104,6 +104,7 @@ pub struct Renderer {
     /// Preserved across graph rebuilds (resize) so an opt-in is not silently lost.
     pub(crate) enable_ssr: bool,
     pub(crate) enable_planar_reflections: bool,
+    pub(crate) enable_environment_reflections: bool,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
@@ -535,6 +536,7 @@ impl Renderer {
             shadow_face_capacity: self.shadow_face_capacity,
             enable_ssr: self.enable_ssr,
             enable_planar_reflections: self.enable_planar_reflections,
+            enable_environment_reflections: self.enable_environment_reflections,
         }
     }
 }
