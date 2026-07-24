@@ -160,6 +160,8 @@ impl Renderer {
             shadow_quality: config.shadow_quality,
             shadow_atlas_size: config.shadow_atlas_size,
             shadow_face_capacity: config.shadow_face_capacity,
+            enable_ssr: config.enable_ssr,
+            enable_planar_reflections: config.enable_planar_reflections,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
