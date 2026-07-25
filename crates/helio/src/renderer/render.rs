@@ -347,6 +347,12 @@ impl Renderer {
             },
             "Renderer",
         );
+        #[cfg(feature = "scenedb")]
+        if let Some(source) = self.scene_db_source.as_ref() {
+            frame_resources
+                .scene_db
+                .write(source.frame_resources(), "Renderer");
+        }
         if !self.billboard_scratch.is_empty() {
             frame_resources.billboards.write(
                 libhelio::BillboardFrameData {

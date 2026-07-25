@@ -22,6 +22,7 @@ pollster = { workspace = true }
 quark.workspace = true
 helio-voxel-core = { workspace = true }
 helio-bake = { path = "../helio-bake", optional = true }
+helio-scenedb = { workspace = true, optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 meshopt = "0.6.2"
 
@@ -29,6 +30,7 @@ meshopt = "0.6.2"
 default = ["profiling"]
 profiling = ["helio-core/profiling"]
 bake = ["helio-bake", "uuid"]
+scenedb = ["dep:helio-scenedb"]
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-time = "1"

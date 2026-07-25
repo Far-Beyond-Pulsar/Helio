@@ -79,6 +79,23 @@ pub struct MainSceneResources<'a> {
     pub tlas: Option<&'a wgpu::Tlas>,
 }
 
+/// SceneDB-owned GPU state published by the high-level renderer.
+///
+/// The buffers and bind groups remain owned by SceneDB and the Helio-side
+/// adapter. Render-graph passes borrow them for one frame, avoiding a CPU
+/// snapshot or a second set of scene buffers.
+#[derive(Clone, Copy)]
+pub struct SceneDbFrameResources<'a> {
+    /// Read-only instance, generation, and mesh metadata used by GPU culling.
+    pub cull_bind_group: &'a wgpu::BindGroup,
+    /// Read-only cluster, meshlet, cell, and material metadata used by drawing.
+    pub draw_bind_group: &'a wgpu::BindGroup,
+    /// Global SceneDB geometry vertex arena.
+    pub vertex_buffer: &'a wgpu::Buffer,
+    /// Global SceneDB geometry index arena.
+    pub index_buffer: &'a wgpu::Buffer,
+}
+
 /// Debug-tracked resource slot.
 ///
 /// In debug builds, records which pass wrote the value so we can detect
@@ -238,6 +255,12 @@ pub struct FrameResources<'a> {
     pub full_res_depth_texture: Tracked<&'a wgpu::Texture>,
     /// High-level Helio scene resources used by wrapper-owned passes.
     pub main_scene: Tracked<MainSceneResources<'a>>,
+    /// Authoritative SceneDB GPU resources, when the renderer has a source attached.
+    ///
+    /// This is intentionally optional while Helio's existing passes migrate one
+    /// at a time. Consumers must use [`Tracked::get`] until their graph declares
+    /// SceneDB as a required input.
+    pub scene_db: Tracked<SceneDbFrameResources<'a>>,
     /// Sky context (has_sky, state_changed, sky_color)
     pub sky: crate::sky::SkyContext,
     /// Billboards to render this frame (uploaded by the high-level Renderer).
@@ -430,6 +453,7 @@ impl<'a> FrameResources<'a> {
             full_res_depth: Tracked::empty(),
             full_res_depth_texture: Tracked::empty(),
             main_scene: Tracked::empty(),
+            scene_db: Tracked::empty(),
             sky: crate::sky::SkyContext::default(),
             billboards: Tracked::empty(),
             vg: Tracked::empty(),
@@ -499,6 +523,7 @@ impl<'a> FrameResources<'a> {
             reset_field!(full_res_depth);
             reset_field!(full_res_depth_texture);
             reset_field!(main_scene);
+            reset_field!(scene_db);
             reset_field!(billboards);
             reset_field!(vg);
             reset_field!(water_caustics);
@@ -559,4 +584,3 @@ pub struct VgFrameData<'a> {
     /// Number of dirty instances; zero when `buffer_version` owns the update.
     pub instance_dirty_count: u32,
 }
-

@@ -84,6 +84,8 @@ pub struct Renderer {
     pub(crate) queue: Arc<wgpu::Queue>,
     pub(crate) graph: RenderGraph,
     pub(crate) scene: Scene,
+    #[cfg(feature = "scenedb")]
+    pub(crate) scene_db_source: Option<helio_scenedb::SceneDbRenderSource>,
     pub(crate) depth_texture: wgpu::Texture,
     pub(crate) depth_view: wgpu::TextureView,
     pub(crate) output_width: u32,
@@ -320,6 +322,28 @@ impl<'a> DebugBatch<'a> {
 }
 
 impl Renderer {
+    /// Attaches SceneDB-owned GPU state to the live render graph.
+    ///
+    /// Existing `Scene` rendering remains active while passes migrate. Attaching
+    /// a source only publishes the authoritative SceneDB buffers through
+    /// `FrameResources`; it does not copy or mirror their contents.
+    #[cfg(feature = "scenedb")]
+    pub fn attach_scene_db_source(&mut self, source: helio_scenedb::SceneDbRenderSource) {
+        self.scene_db_source = Some(source);
+    }
+
+    /// Detaches and returns the current SceneDB render source.
+    #[cfg(feature = "scenedb")]
+    pub fn detach_scene_db_source(&mut self) -> Option<helio_scenedb::SceneDbRenderSource> {
+        self.scene_db_source.take()
+    }
+
+    /// Returns whether SceneDB resources will be published to the next frame.
+    #[cfg(feature = "scenedb")]
+    pub fn has_scene_db_source(&self) -> bool {
+        self.scene_db_source.is_some()
+    }
+
     pub fn set_gi_config(&mut self, gi_config: GiConfig) {
         self.gi_config = gi_config;
     }

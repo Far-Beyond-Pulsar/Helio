@@ -144,6 +144,8 @@ impl Renderer {
             queue,
             graph,
             scene,
+            #[cfg(feature = "scenedb")]
+            scene_db_source: None,
             depth_texture,
             depth_view,
             output_width: width,

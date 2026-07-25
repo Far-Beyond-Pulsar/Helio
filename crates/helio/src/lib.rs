@@ -66,6 +66,9 @@ pub use helio_core::{
 };
 pub use libhelio::{LightType, Movability, ShadowQuality, SkyActor, VolumetricClouds};
 
+#[cfg(feature = "scenedb")]
+pub use helio_scenedb::{SceneDbBinding, SceneDbRenderSource};
+
 /// Convert a [`MeshUpload`] with a world-space transform into a [`BakeMesh`] for use
 /// in a [`BakeRequest`].
 ///
