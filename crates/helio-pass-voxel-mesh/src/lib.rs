@@ -573,6 +573,8 @@ impl VoxelMeshPass {
             );
             return;
         }
+        self.dirty_bricks
+            .retain(|dirty| dirty.brick_slot != brick_slot);
 
         const ZERO: DrawIndexedIndirectArgs = DrawIndexedIndirectArgs {
             index_count: 0,
@@ -608,6 +610,9 @@ impl RenderPass for VoxelMeshPass {
             let bytes = bytemuck::cast_slice(&self.dirty_bricks);
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
             log::debug!("VoxelMeshPass: {} dirty bricks", self.dirty_bricks.len());
+        }
+        if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
+            return Ok(());
         }
         let params = MeshletParams {
             light_count: ctx.scene.lights.len() as u32,
