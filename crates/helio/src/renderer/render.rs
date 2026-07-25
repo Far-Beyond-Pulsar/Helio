@@ -416,39 +416,36 @@ impl Renderer {
             frame_resources.baked_pvs.write(pvs, "Renderer");
         }
 
-        if self.clear_target_next_frame {
-            let clear = wgpu::Color {
-                r: self.clear_color[0] as f64,
-                g: self.clear_color[1] as f64,
-                b: self.clear_color[2] as f64,
-                a: self.clear_color[3] as f64,
-            };
-            let mut clear_encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Renderer Resize Target Clear"),
-                });
-            {
-                let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Renderer Resize Target Clear Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-            }
-            self.queue.submit(std::iter::once(clear_encoder.finish()));
-            self.clear_target_next_frame = false;
+        let clear = wgpu::Color {
+            r: self.clear_color[0] as f64,
+            g: self.clear_color[1] as f64,
+            b: self.clear_color[2] as f64,
+            a: self.clear_color[3] as f64,
+        };
+        let mut clear_encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Renderer Target Clear"),
+            });
+        {
+            let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Renderer Target Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
         }
+        self.queue.submit(std::iter::once(clear_encoder.finish()));
 
         {
             let mut clear_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
