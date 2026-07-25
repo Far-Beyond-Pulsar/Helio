@@ -308,6 +308,8 @@ impl Profiler {
         let mut has_cpu = false;
         let mut total_gpu_ms = 0.0_f32;
         let mut has_gpu = false;
+        let gpu_timings = self.gpu.get_last_timings();
+        let mut gpu_cursor = 0;
         for name in pass_names {
             let cpu_ms = self.cpu.get_timings().get(name).map(|duration| {
                 has_cpu = true;
@@ -315,17 +317,26 @@ impl Profiler {
                 total_cpu_ms += milliseconds;
                 milliseconds
             });
-            let gpu_ms = self
-                .gpu
-                .get_last_timings()
-                .iter()
-                .find(|timing| timing.name == name)
-                .map(|timing| {
-                    has_gpu = true;
-                    let milliseconds = timing.duration_ns as f32 / 1_000_000.0;
-                    total_gpu_ms += milliseconds;
-                    milliseconds
-                });
+            let gpu_timing = match gpu_timings.get(gpu_cursor) {
+                Some(timing) if timing.name == name => {
+                    gpu_cursor += 1;
+                    Some(timing)
+                }
+                _ => gpu_timings
+                    .iter()
+                    .enumerate()
+                    .find(|(_, timing)| timing.name == name)
+                    .map(|(index, timing)| {
+                        gpu_cursor = gpu_cursor.max(index + 1);
+                        timing
+                    }),
+            };
+            let gpu_ms = gpu_timing.map(|timing| {
+                has_gpu = true;
+                let milliseconds = timing.duration_ns as f32 / 1_000_000.0;
+                total_gpu_ms += milliseconds;
+                milliseconds
+            });
             self.snapshot.passes.push(RenderPassTiming {
                 name,
                 cpu_ms,
