@@ -417,22 +417,28 @@ fn build_default_graph_internal(
 
     // SSR pass — screen-space reflections for glossy/metallic surfaces.
     // Runs after GBuffer (needs normals + depth + Hi-Z), before deferred lighting.
-    graph.add_pass(Box::new(SsrPass::new(
-        device,
-        queue,
-        camera_buf,
-        iw,
-        ih,
-    )));
-
+    //
     // Planar reflection pass — reflects the scene across world-space planes.
     // Runs before deferred lighting so DeferredLightPass can composite its
     // output alongside SSR (planar_reflection texture) in a single draw call.
-    graph.add_pass(Box::new(PlanarReflectionPass::new(
-        device,
-        camera_buf,
-        config.surface_format,
-    )));
+    //
+    // Both are skipped where REFLECTIONS_SUPPORTED is false; DeferredLightPass
+    // then reads its 1×1 black fallbacks, whose zero alpha drops the composites.
+    if helio_core::REFLECTIONS_SUPPORTED {
+        graph.add_pass(Box::new(SsrPass::new(
+            device,
+            queue,
+            camera_buf,
+            iw,
+            ih,
+        )));
+
+        graph.add_pass(Box::new(PlanarReflectionPass::new(
+            device,
+            camera_buf,
+            config.surface_format,
+        )));
+    }
 
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
@@ -600,19 +606,22 @@ fn build_fxaa_graph_internal(
         ih,
     )));
 
-    graph.add_pass(Box::new(SsrPass::new(
-        device,
-        queue,
-        camera_buf,
-        iw,
-        ih,
-    )));
+    // Skipped where REFLECTIONS_SUPPORTED is false — see build_default_graph_internal.
+    if helio_core::REFLECTIONS_SUPPORTED {
+        graph.add_pass(Box::new(SsrPass::new(
+            device,
+            queue,
+            camera_buf,
+            iw,
+            ih,
+        )));
 
-    graph.add_pass(Box::new(PlanarReflectionPass::new(
-        device,
-        camera_buf,
-        config.surface_format,
-    )));
+        graph.add_pass(Box::new(PlanarReflectionPass::new(
+            device,
+            camera_buf,
+            config.surface_format,
+        )));
+    }
 
     let mut deferred_light_pass =
         DeferredLightPass::new(device, queue, camera_buf, config.surface_format);

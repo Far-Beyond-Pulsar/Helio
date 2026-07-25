@@ -50,6 +50,16 @@ struct Globals {
     // Number of entries in reflection_captures. Zero skips capture blending
     // entirely and falls through to the skylight cubemap (layer 0).
     reflection_capture_count: u32,
+    // 0 where the target does not support reflections (Apple platforms). The
+    // cube array, SSR and planar composites are all skipped, leaving indirect
+    // specular at zero — direct light, ambient and RC GI still apply. SsrPass
+    // and PlanarReflectionPass are not in the graph at all on those targets.
+    // Scalars, not vec3<u32>: a vec3 would align the tail to 16 and desync the
+    // struct from its Rust mirror.
+    enable_reflections: u32,
+    _pad_0: u32,
+    _pad_1: u32,
+    _pad_2: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -697,6 +707,12 @@ fn sample_reflection_environment(P: vec3<f32>, R: vec3<f32>, lod: f32) -> vec3<f
     var accum   = vec3<f32>(0.0);
     var accum_a = 0.0;
 
+    // Reflections compiled out for this target: no capture blend, and no
+    // skylight fallback either — the skylight is layer 0 of the same cube array.
+    if globals.enable_reflections == 0u {
+        return accum;
+    }
+
     let count = min(globals.reflection_capture_count, 64u);
     for (var i = 0u; i < count; i = i + 1u) {
         if accum_a >= 0.999 {
@@ -1221,8 +1237,11 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // edge, viewer-facing, back-face, ray distance, and roughness — precisely
     // so this composite can dissolve an untrustworthy reflection back into
     // the probe.
+    // On targets without reflection support SsrPass never ran, so ssr_tex is
+    // the 1×1 black fallback; the flag makes that explicit rather than relying
+    // on the fallback's alpha.
     let ssr_hit      = textureLoad(ssr_tex, pix, 0);
-    if ssr_hit.a > 0.0 {
+    if globals.enable_reflections != 0u && ssr_hit.a > 0.0 {
         let ssr_sample = ssr_hit.rgb * F_ibl;
         spec_ind = mix(spec_ind, ssr_sample, ssr_hit.a);
     }
@@ -1236,7 +1255,7 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // output is unlit scene colour — multiply by F_ibl to match the IBL
     // fallback's energy level, exactly as SSR does above.
     let planar_hit    = textureLoad(planar_tex, pix, 0);
-    if planar_hit.a > 0.0 {
+    if globals.enable_reflections != 0u && planar_hit.a > 0.0 {
         let planar_sample = planar_hit.rgb * F_ibl;
         spec_ind = mix(spec_ind, planar_sample, planar_hit.a);
     }
