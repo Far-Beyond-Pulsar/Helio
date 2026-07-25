@@ -530,6 +530,8 @@ impl Renderer {
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: self.shadow_atlas_size,
             shadow_face_capacity: self.shadow_face_capacity,
+            enable_ssr: true,
+            enable_planar_reflections: false,
         }
     }
 }
