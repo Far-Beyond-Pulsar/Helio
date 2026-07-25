@@ -5,8 +5,8 @@ use helio::GraphRebuilder;
 use helio::RendererConfig;
 use helio_pass_billboard::BillboardPass;
 use helio_pass_corona::CoronaPass;
-use helio_pass_decal::DecalPass;
 use helio_pass_debug_overlay::{DebugOverlayPass, DebugOverlayState};
+use helio_pass_decal::DecalPass;
 use helio_pass_deferred_light::DeferredLightPass;
 use helio_pass_fxaa::FxaaPass;
 use helio_pass_gbuffer::GBufferPass;
@@ -19,8 +19,8 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
-use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
+use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_shadow::ShadowPass;
 use helio_pass_shadow_cull::ShadowCullPass;
 use helio_pass_shadow_dirty::ShadowDirtyPass;
@@ -30,8 +30,8 @@ use helio_pass_sky::SkyPass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_ssr::SsrPass;
 use helio_pass_taa::TaaPass;
-use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
+use helio_pass_volumetric_fog::VolumetricFogPass;
 use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
 
@@ -184,21 +184,21 @@ fn add_late_passes(
 ) {
     let camera_buf = scene.gpu_scene().camera.buffer();
 
-    let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
-        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-        .into_rgba8();
-    let (sw, sh) = spotlight.dimensions();
-    let mut billboard_pass = BillboardPass::new_with_sprite_rgba(
-        device,
-        queue,
-        camera_buf,
-        config.surface_format,
-        spotlight.as_raw(),
-        sw,
-        sh,
-    );
-    billboard_pass.set_occluded_by_geometry(true);
-    graph.add_pass(Box::new(billboard_pass));
+    // let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
+    //     .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+    //     .into_rgba8();
+    // let (sw, sh) = spotlight.dimensions();
+    //    let mut billboard_pass = BillboardPass::new_with_sprite_rgba(
+    //        device,
+    //        queue,
+    //        camera_buf,
+    //        config.surface_format,
+    //        spotlight.as_raw(),
+    //        sw,
+    //        sh,
+    //    );
+    //    billboard_pass.set_occluded_by_geometry(true);
+    //    graph.add_pass(Box::new(billboard_pass));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
     graph.add_pass(Box::new(CoronaPass::new(
@@ -407,12 +407,7 @@ fn build_default_graph_internal(
     // Runs as a compute pass between GBuffer and deferred lighting.
     let decal_buf = scene.gpu_scene().decals.buffer();
     graph.add_pass(Box::new(DecalPass::new(
-        device,
-        queue,
-        decal_buf,
-        camera_buf,
-        iw,
-        ih,
+        device, queue, decal_buf, camera_buf, iw, ih,
     )));
 
     // SSR pass — screen-space reflections for glossy/metallic surfaces.
@@ -422,13 +417,7 @@ fn build_default_graph_internal(
     // is absent DeferredLightPass binds its 1×1 black fallback for `ssr_trace`,
     // so the only loss is the reflection contribution.
     if config.enable_ssr {
-        graph.add_pass(Box::new(SsrPass::new(
-            device,
-            queue,
-            camera_buf,
-            iw,
-            ih,
-        )));
+        graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, iw, ih)));
     }
 
     // Planar reflection pass — reflects the scene across world-space planes.
@@ -462,7 +451,18 @@ fn build_default_graph_internal(
         config.surface_format,
     )));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
+    add_late_passes(
+        &mut graph,
+        device,
+        queue,
+        scene,
+        &config,
+        &perf,
+        debug_state.clone(),
+        debug_camera_buf,
+        iw,
+        ih,
+    );
 
     // Before AA, at internal resolution: fog accumulates against internal-res
     // depth, and the AA pass then resolves it with the rest of the frame.
@@ -603,24 +603,13 @@ fn build_fxaa_graph_internal(
     // Decal pass
     let decal_buf = scene.gpu_scene().decals.buffer();
     graph.add_pass(Box::new(DecalPass::new(
-        device,
-        queue,
-        decal_buf,
-        camera_buf,
-        iw,
-        ih,
+        device, queue, decal_buf, camera_buf, iw, ih,
     )));
 
     // Both off by default; see the notes in the primary graph builder above.
     // DeferredLightPass binds 1×1 black fallbacks when either pass is absent.
     if config.enable_ssr {
-        graph.add_pass(Box::new(SsrPass::new(
-            device,
-            queue,
-            camera_buf,
-            iw,
-            ih,
-        )));
+        graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, iw, ih)));
     }
 
     if config.enable_planar_reflections {
@@ -641,7 +630,18 @@ fn build_fxaa_graph_internal(
     ))));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(&perf))));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
+    add_late_passes(
+        &mut graph,
+        device,
+        queue,
+        scene,
+        &config,
+        &perf,
+        debug_state.clone(),
+        debug_camera_buf,
+        iw,
+        ih,
+    );
 
     // Before TAA, at internal resolution. Fog accumulates in the same space as the
     // depth it reads, and TAA then resolves it along with everything else — which
@@ -735,19 +735,25 @@ fn build_hlfs_graph_internal(
     // Decal pass
     let decal_buf = scene.gpu_scene().decals.buffer();
     graph.add_pass(Box::new(DecalPass::new(
-        device,
-        queue,
-        decal_buf,
-        camera_buf,
-        iw,
-        ih,
+        device, queue, decal_buf, camera_buf, iw, ih,
     )));
 
     let mut hlfs_pass = HlfsPass::new(device, queue, iw, ih, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, iw, ih);
+    add_late_passes(
+        &mut graph,
+        device,
+        queue,
+        scene,
+        &config,
+        &perf,
+        debug_state.clone(),
+        debug_camera_buf,
+        iw,
+        ih,
+    );
 
     // Before TAA, at internal resolution. Fog accumulates in the same space as the
     // depth it reads, and TAA then resolves it along with everything else — which
@@ -910,19 +916,25 @@ fn build_fxaa_hlfs_graph_internal(
     // Decal pass
     let decal_buf = scene.gpu_scene().decals.buffer();
     graph.add_pass(Box::new(DecalPass::new(
-        device,
-        queue,
-        decal_buf,
-        camera_buf,
-        w,
-        h,
+        device, queue, decal_buf, camera_buf, w, h,
     )));
 
     let mut hlfs_pass = HlfsPass::new(device, queue, w, h, config.surface_format);
     hlfs_pass.set_shadow_quality(config.shadow_quality, queue);
     graph.add_pass(Box::new(hlfs_pass));
 
-    add_late_passes(&mut graph, device, queue, scene, &config, &perf, debug_state.clone(), debug_camera_buf, w, h);
+    add_late_passes(
+        &mut graph,
+        device,
+        queue,
+        scene,
+        &config,
+        &perf,
+        debug_state.clone(),
+        debug_camera_buf,
+        w,
+        h,
+    );
 
     // Before AA, at internal resolution: fog accumulates against internal-res
     // depth, and the AA pass then resolves it with the rest of the frame.
