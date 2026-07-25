@@ -14,7 +14,6 @@ mod texture_loader;
 
 use helio::MeshId;
 use helio::{LightId, MaterialId, MultiMeshId, ObjectId, Renderer, SectionedMeshUpload, TextureId};
-use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -500,4 +499,34 @@ pub struct SceneAsset {
     pub skin_ids: Vec<SkinId>,
     /// Available animation clip names
     pub animation_names: Vec<String>,
+}
+
+#[cfg(test)]
+mod configurator_tests {
+    use super::{options_schema_for_extension, LoadConfig, OptionValue, OptionValues};
+    use solid_rs::configurator::keys;
+
+    #[test]
+    fn bundled_loaders_expose_configurator_schemas() {
+        for extension in ["fbx", "gltf", "obj", "usd"] {
+            let schema = options_schema_for_extension(extension)
+                .unwrap_or_else(|| panic!("missing schema for .{extension}"));
+            assert!(
+                schema.fields.iter().any(|field| field.key == keys::FLIP_UV_V),
+                ".{extension} schema omitted the shared UV option"
+            );
+        }
+    }
+
+    #[test]
+    fn configurator_values_map_to_conversion_config() {
+        let mut values = OptionValues::new();
+        values.set(keys::FLIP_UV_V, OptionValue::Bool(true));
+        values.set("import_scale", OptionValue::Float(0.01));
+
+        let config = LoadConfig::from_option_values(&values);
+
+        assert!(config.flip_uv_y);
+        assert_eq!(config.import_scale, glam::Vec3::splat(0.01));
+    }
 }
