@@ -346,6 +346,12 @@ impl RenderGraph {
     ) -> Result<()> {
         assert!(self.locked, "RenderGraph::execute() requires lock() to be called first");
 
+        // External device owners drive wgpu polling. Consume callbacks from
+        // that host cadence before reserving a bounded readback slot for this
+        // frame; this never polls or waits.
+        if !self.owns_device {
+            self.profiler.read_gpu_timestamps_deferred();
+        }
         self.profiler.clear_cpu_timings();
 
         let mut encoder = scene
@@ -603,7 +609,8 @@ impl RenderGraph {
             pass.publish(&mut visible_frame_resources);
         }
 
-        self.profiler.resolve_gpu_queries(&mut compute_encoder);
+        self.profiler
+            .resolve_gpu_queries(&mut compute_encoder, self.frame_count);
         scene.queue.submit([compute_encoder.finish(), encoder.finish()]);
         crate::upload::finish_frame();
 
@@ -612,6 +619,10 @@ impl RenderGraph {
         } else {
             self.profiler.read_gpu_timestamps_deferred();
         }
+        self.profiler.update_snapshot(
+            self.frame_count,
+            self.passes.iter().map(|pass| pass.name()),
+        );
 
         self.frame_count += 1;
 
