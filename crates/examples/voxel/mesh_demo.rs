@@ -173,8 +173,8 @@ impl AppState {
         if let Some(range) = world.paint_sphere(center_grid, radius_grid, material, add) {
             let (meta_buf, data_buf) = (mesh_pass.brick_meta_buf().clone(), mesh_pass.voxel_data_buf().clone());
             let touched = world.upload_range_mesh(queue, &meta_buf, &data_buf, VOXEL_SIZE, range);
-            for (brick_idx, origin) in touched {
-                mesh_pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+            for (brick_idx, origin, occupied) in touched {
+                mesh_pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
             }
         }
     }
@@ -341,8 +341,8 @@ impl ApplicationHandler for App {
             let pass = renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
             let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
             let touched = world.upload_all_mesh(&queue, &meta_buf, &data_buf, VOXEL_SIZE);
-            for (brick_idx, origin) in touched {
-                pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+            for (brick_idx, origin, occupied) in touched {
+                pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
             }
         }
 
@@ -422,8 +422,8 @@ impl ApplicationHandler for App {
                         let pass = state.renderer.find_pass_mut::<VoxelMeshPass>().expect("VoxelMeshPass missing from graph");
                         let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
                         let touched = state.world.upload_all_mesh(&state.queue, &meta_buf, &data_buf, VOXEL_SIZE);
-                        for (brick_idx, origin) in touched {
-                            pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+                        for (brick_idx, origin, occupied) in touched {
+                            pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
                         }
                     }
                     _ => {}
