@@ -24,7 +24,7 @@ pub(crate) struct GeneratedLodMesh {
 
 /// Opaque handle to a virtual mesh uploaded to the scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct VirtualMeshId(pub(crate) u32);
+pub struct VirtualMeshId(pub u32);
 
 // ─── Upload / descriptor types ──────────────────────────────────────────────
 

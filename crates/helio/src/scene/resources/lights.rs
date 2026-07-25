@@ -47,12 +47,12 @@ impl super::super::Scene {
     ///     ..Default::default()
     /// });
     /// ```
-    pub(in crate::scene) fn insert_light(&mut self, light: GpuLight) -> LightId {
+    pub fn insert_light(&mut self, light: GpuLight) -> LightId {
         self.insert_light_with_movability(light, None, 0)
     }
 
     /// Insert a light into the scene with explicit movability and user tag.
-    pub(in crate::scene) fn insert_light_with_movability(
+    pub fn insert_light_with_movability(
         &mut self,
         light: GpuLight,
         movability: Option<libhelio::Movability>,
