@@ -270,8 +270,8 @@ impl VoxelTerrain {
     }
 
     /// Re-bakes and uploads the bricks touched by a `BrickRange` into
-    /// `VoxelMeshPass`'s buffers. Returns `(brick_idx, origin)` for every
-    /// touched brick (occupied or not) — the caller must `mark_dirty()` each
+    /// `VoxelMeshPass`'s buffers. Returns `(brick_idx, origin, occupied)` for
+    /// every touched brick — the caller must `mark_dirty()` each
     /// one so the extract pass re-runs (an emptied brick needs to re-extract
     /// to zero triangles too, not just a newly-filled one).
     pub fn upload_range_mesh(
@@ -281,7 +281,7 @@ impl VoxelTerrain {
         voxel_data_buf: &wgpu::Buffer,
         voxel_size: f32,
         range: BrickRange,
-    ) -> Vec<(u32, [f32; 3])> {
+    ) -> Vec<(u32, [f32; 3], bool)> {
         let mut touched = Vec::new();
         for bz in range.min[2]..=range.max[2] {
             for by in range.min[1]..=range.max[1] {
@@ -308,7 +308,11 @@ impl VoxelTerrain {
                         bytemuck::cast_slice(&brick_words),
                     );
 
-                    touched.push((brick_idx, Self::brick_origin(bx, by, bz, voxel_size)));
+                    touched.push((
+                        brick_idx,
+                        Self::brick_origin(bx, by, bz, voxel_size),
+                        occupied,
+                    ));
                 }
             }
         }
@@ -322,7 +326,7 @@ impl VoxelTerrain {
         brick_meta_buf: &wgpu::Buffer,
         voxel_data_buf: &wgpu::Buffer,
         voxel_size: f32,
-    ) -> Vec<(u32, [f32; 3])> {
+    ) -> Vec<(u32, [f32; 3], bool)> {
         self.upload_range_mesh(
             queue,
             brick_meta_buf,
