@@ -156,6 +156,8 @@ pub struct RendererConfig {
     /// reserves six consecutive faces. A capacity of 32 supports five lights
     /// while keeping the two 1024px browser atlases to 256 MiB total.
     pub shadow_face_capacity: u32,
+    pub enable_ssr: bool,
+    pub enable_planar_reflections: bool,
 }
 
 impl RendererConfig {
@@ -171,6 +173,8 @@ impl RendererConfig {
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: 1024,
             shadow_face_capacity: 32,
+            enable_ssr: true,
+            enable_planar_reflections: false,
         }
     }
 

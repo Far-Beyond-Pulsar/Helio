@@ -2868,20 +2868,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "helio-ffi"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "glam 0.33.2",
- "helio",
- "helio-core",
- "libhelio",
- "log",
- "pollster 0.4.0",
- "wgpu 30.0.0",
-]
-
-[[package]]
 name = "helio-pass-billboard"
 version = "0.1.0"
 dependencies = [
