@@ -73,23 +73,30 @@
 /// ```
 use std::{
     collections::VecDeque,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
 };
 
 const QUERY_CAPACITY: u32 = 256;
 const READBACK_SLOT_COUNT: usize = 3;
+const MAP_PENDING: u8 = 0;
+const MAP_SUCCEEDED: u8 = 1;
+const MAP_FAILED: u8 = 2;
 
 type QueryRange = (&'static str, u32, u32);
 
 enum ReadbackState {
     Idle,
     CopySubmitted,
-    Mapping(Arc<Mutex<Option<Result<(), wgpu::BufferAsyncError>>>>),
+    Mapping,
 }
 
 struct ReadbackSlot {
     buffer: wgpu::Buffer,
     state: ReadbackState,
+    map_completion: Arc<AtomicU8>,
     queries: Vec<QueryRange>,
     frame_index: u64,
 }
@@ -167,6 +174,7 @@ impl GpuProfiler {
                         mapped_at_creation: false,
                     }),
                     state: ReadbackState::Idle,
+                    map_completion: Arc::new(AtomicU8::new(MAP_PENDING)),
                     queries: Vec::with_capacity((QUERY_CAPACITY / 2) as usize),
                     frame_index: 0,
                 })
@@ -344,16 +352,19 @@ impl GpuProfiler {
             if !matches!(slot.state, ReadbackState::CopySubmitted) {
                 continue;
             }
-            let completion = Arc::new(Mutex::new(None));
-            let callback_completion = Arc::clone(&completion);
+            slot.map_completion.store(MAP_PENDING, Ordering::Relaxed);
+            let callback_completion = Arc::clone(&slot.map_completion);
             slot.buffer
                 .slice(..)
                 .map_async(wgpu::MapMode::Read, move |result| {
-                    if let Ok(mut completion) = callback_completion.lock() {
-                        *completion = Some(result);
-                    }
+                    let completion = if result.is_ok() {
+                        MAP_SUCCEEDED
+                    } else {
+                        MAP_FAILED
+                    };
+                    callback_completion.store(completion, Ordering::Release);
                 });
-            slot.state = ReadbackState::Mapping(completion);
+            slot.state = ReadbackState::Mapping;
         }
     }
 
@@ -364,12 +375,10 @@ impl GpuProfiler {
                 .iter()
                 .enumerate()
                 .filter(|(_, slot)| {
-                    let ReadbackState::Mapping(completion) = &slot.state else {
+                    if !matches!(slot.state, ReadbackState::Mapping) {
                         return false;
-                    };
-                    completion
-                        .lock()
-                        .is_ok_and(|completion| completion.is_some())
+                    }
+                    slot.map_completion.load(Ordering::Acquire) != MAP_PENDING
                 })
                 .min_by_key(|(_, slot)| slot.frame_index)
                 .map(|(index, _)| index);
@@ -377,16 +386,11 @@ impl GpuProfiler {
                 break;
             };
             let frame_index = self.readback_slots[index].frame_index;
-            let result = match &self.readback_slots[index].state {
-                ReadbackState::Mapping(completion) => completion
-                    .lock()
-                    .expect("GPU timestamp completion mutex is not poisoned")
-                    .take()
-                    .expect("completed GPU timestamp mapping has a result"),
-                _ => unreachable!("selected GPU timestamp slot must be mapping"),
-            };
+            let completion = self.readback_slots[index]
+                .map_completion
+                .load(Ordering::Acquire);
             let slot = &mut self.readback_slots[index];
-            if result.is_ok() {
+            if completion == MAP_SUCCEEDED {
                 let data = slot
                     .buffer
                     .slice(..)
@@ -409,6 +413,7 @@ impl GpuProfiler {
                 self.last_completed_frame = Some(frame_index);
                 drop(data);
             } else {
+                debug_assert_eq!(completion, MAP_FAILED);
                 self.dropped_readbacks = self.dropped_readbacks.saturating_add(1);
             }
             slot.buffer.unmap();
