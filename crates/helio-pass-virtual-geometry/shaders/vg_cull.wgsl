@@ -58,9 +58,12 @@ struct InstanceData {
 struct InstanceCullData {
     max_scale:          f32,
     min_scale:          f32,
-    cone_cull_enabled:  u32,
+    cull_flags:         u32,
     valid_transform:    u32,
 }
+
+const CULL_FLAG_CONE_CULL: u32 = 1u;
+const CULL_FLAG_OPAQUE:    u32 = 2u;
 
 /// Mirrors wgpu::util::DrawIndexedIndirectArgs (20 bytes).
 struct DrawIndexedIndirect {
@@ -168,7 +171,7 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
     let guard_radius = world_radius * 1.5;
     if cam_dist_sq > guard_radius * guard_radius
         && m.cone_cutoff <= 1.0
-        && inst_cull.cone_cull_enabled != 0u
+        && (inst_cull.cull_flags & CULL_FLAG_CONE_CULL) != 0u
     {
         let normal_mat = mat3x3<f32>(
             inst.normal_mat_0.xyz,
@@ -247,28 +250,42 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
         }
     }
 
+    let is_opaque = (inst_cull.cull_flags & CULL_FLAG_OPAQUE) != 0u;
+    let capacity = min(
+        cull_uni.draw_capacity,
+        min(arrayLength(&indirect), arrayLength(&draw_metadata)),
+    );
+    let half_capacity = capacity / 2u;
+
+    var slot: u32;
+    if is_opaque {
+        slot = atomicAdd(&draw_counters[0u], 1u);
+        if slot >= half_capacity {
+            atomicAdd(&draw_counters[2u], 1u);
+            return;
+        }
+    } else {
+        let alpha_slot = atomicAdd(&draw_counters[1u], 1u);
+        if alpha_slot >= half_capacity {
+            atomicAdd(&draw_counters[2u], 1u);
+            return;
+        }
+        slot = half_capacity + alpha_slot;
+    }
+
     var command: DrawIndexedIndirect;
     command.index_count = m.index_count;
     command.instance_count = 1u;
     command.first_index = m.first_index;
     command.base_vertex = m.vertex_offset;
-    let slot = atomicAdd(&draw_counters[0], 1u);
-    let capacity = min(
-        cull_uni.draw_capacity,
-        min(arrayLength(&indirect), arrayLength(&draw_metadata)),
+    command.first_instance = slot;
+    indirect[slot] = command;
+    draw_metadata[slot] = VgDrawMetadata(
+        instance_index,
+        meshlet_index,
+        lod_level,
+        0u,
     );
-    if slot < capacity {
-        command.first_instance = slot;
-        indirect[slot] = command;
-        draw_metadata[slot] = VgDrawMetadata(
-            instance_index,
-            meshlet_index,
-            lod_level,
-            0u,
-        );
-    } else {
-        atomicAdd(&draw_counters[1], 1u);
-    }
 }
 
 fn publish_frustum_planes() {
@@ -344,14 +361,15 @@ fn cs_select_objects(
                     }
                 }
                 selected_lod_plus_one = selected_lod + 1u;
-                // The first two counters remain the indirect draw count and
-                // publication-overflow count. Larger production buffers also
-                // expose a selected-object histogram and the deepest LOD that
-                // the visible assets actually contain. The length guard keeps
-                // the same shader compatible with minimal benchmark buffers.
-                if arrayLength(&draw_counters) >= 11u {
-                    atomicAdd(&draw_counters[2u + selected_lod], 1u);
-                    atomicMax(&draw_counters[10], lod_count - 1u);
+                // Counters 0/1 are the opaque/alpha indirect draw counts,
+                // counter 2 is the publication-overflow count. Larger
+                // production buffers also expose a selected-object histogram
+                // and the deepest LOD that the visible assets contain. The
+                // length guard keeps the same shader compatible with minimal
+                // benchmark buffers.
+                if arrayLength(&draw_counters) >= 12u {
+                    atomicAdd(&draw_counters[3u + selected_lod], 1u);
+                    atomicMax(&draw_counters[11], lod_count - 1u);
                 }
             }
         }

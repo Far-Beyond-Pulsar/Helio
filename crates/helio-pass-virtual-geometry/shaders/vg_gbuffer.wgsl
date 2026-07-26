@@ -8,6 +8,10 @@ enable wgpu_binding_array;
 //
 // This shader is compiled into `helio-pass-virtual-geometry` and draws only
 // VG meshlets that survived the cull compute shader.
+//
+// Pipeline override: when `has_alpha_test` is false the discard branches
+// are statically eliminated, enabling early-Z on all GPU architectures.
+override has_alpha_test: bool = false;
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -217,8 +221,10 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     let albedo      = material.base_color * base_sample;
     let alpha       = albedo.a;
 
-    if alpha <= 0.001         { discard; }
-    if alpha < material_tex.params.z { discard; }
+    if has_alpha_test {
+        if alpha <= 0.001         { discard; }
+        if alpha < material_tex.params.z { discard; }
+    }
 
     let N_geom = normalize(input.world_normal);
     var N: vec3<f32>;

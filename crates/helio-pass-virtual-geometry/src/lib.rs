@@ -20,11 +20,12 @@ pub const LOD_LEVEL_COUNT: u32 = 8;
 
 /// Draw publication counters written by the GPU cull stages.
 ///
-/// Slot 0 is the attempted visible-meshlet count used for indirect drawing,
-/// slot 1 is the capacity-rejection count, slots 2..10 form the selected-LOD
-/// object histogram, and slot 10 stores the largest LOD available among
-/// visible objects.
-pub(crate) const DRAW_COUNTER_COUNT: u64 = 11;
+/// Slot 0 is the opaque meshlet draw count consumed by the first
+/// indirect-count draw call, slot 1 is the alpha-test draw count consumed
+/// by the second draw call, slot 2 is the capacity-rejection overflow
+/// count, slots 3..10 form the selected-LOD object histogram, and slot 11
+/// stores the largest LOD available among visible objects.
+pub(crate) const DRAW_COUNTER_COUNT: u64 = 12;
 pub(crate) const DRAW_COUNTER_BYTES: u64 = DRAW_COUNTER_COUNT * 4;
 
 /// Latest non-blocking GPU readback from the virtual-geometry cull pass.
@@ -56,12 +57,12 @@ impl VirtualGeometryDebugStats {
         }
 
         let mut lod_object_counts = [0; LOD_LEVEL_COUNT as usize];
-        lod_object_counts.copy_from_slice(&counters[2..10]);
+        lod_object_counts.copy_from_slice(&counters[3..11]);
         Some(Self {
-            visible_meshlets: counters[0],
-            rejected_meshlets: counters[1],
+            visible_meshlets: counters[0] + counters[1],
+            rejected_meshlets: counters[2],
             lod_object_counts,
-            max_available_lod: counters[10].min(LOD_LEVEL_COUNT - 1),
+            max_available_lod: counters[11].min(LOD_LEVEL_COUNT - 1),
         })
     }
 }
@@ -139,17 +140,25 @@ impl Default for VirtualGeometryBudget {
 /// Per-instance values used by meshlet culling. Kept separate from
 /// `GpuInstanceData` so the cull shader does not recompute matrix norms for
 /// every meshlet in an instance.
+///
+/// `cull_flags` bit layout:
+///   bit 0 — cone culling enabled (angle-preserving, non-reflected transform)
+///   bit 1 — opaque material (no alpha test)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub(crate) struct InstanceCullData {
     pub max_scale: f32,
     pub min_scale: f32,
-    pub cone_cull_enabled: u32,
+    pub cull_flags: u32,
     pub valid_transform: u32,
 }
 
 impl InstanceCullData {
-    pub(crate) fn from_instance(instance: &GpuInstanceData) -> Self {
+    const CULL_FLAG_CONE_CULL: u32 = 1 << 0;
+    const CULL_FLAG_OPAQUE: u32 = 1 << 1;
+
+    pub(crate) fn from_instance(instance: &GpuInstanceData, material_flags: u32) -> Self {
+        const FLAG_ALPHA_TEST: u32 = 1 << 2; // libhelio::FLAG_ALPHA_TEST
         let model = &instance.model;
         let scale_x = (model[0] * model[0] + model[1] * model[1] + model[2] * model[2]).sqrt();
         let scale_y = (model[4] * model[4] + model[5] * model[5] + model[6] * model[6]).sqrt();
@@ -176,12 +185,14 @@ impl InstanceCullData {
             && dot_xy.abs() <= orthogonal_tolerance
             && dot_xz.abs() <= orthogonal_tolerance
             && dot_yz.abs() <= orthogonal_tolerance;
-        let cone_cull_enabled = valid && angle_preserving && determinant > 0.0;
+        let cone_cull = valid && angle_preserving && determinant > 0.0;
+        let opaque = (material_flags & FLAG_ALPHA_TEST) == 0;
 
         Self {
             max_scale: if valid { max_scale } else { 0.0 },
             min_scale: if valid { min_scale } else { 0.0 },
-            cone_cull_enabled: u32::from(cone_cull_enabled),
+            cull_flags: (u32::from(cone_cull) * Self::CULL_FLAG_CONE_CULL)
+                | (u32::from(opaque) * Self::CULL_FLAG_OPAQUE),
             valid_transform: u32::from(valid),
         }
     }
@@ -328,7 +339,7 @@ mod tests {
     fn default_publication_budget_is_144_mib_plus_counters() {
         let budget = VirtualGeometryBudget::default();
         assert_eq!(budget.max_published_meshlets(), DEFAULT_MAX_PUBLISHED_MESHLETS);
-        assert_eq!(budget.publication_bytes(), 144 * 1024 * 1024 + 44);
+        assert_eq!(budget.publication_bytes(), 144 * 1024 * 1024 + 48);
         assert_eq!(budget.clamp_draw_count(65_536), 65_536);
         assert_eq!(budget.clamp_draw_count(u32::MAX), DEFAULT_MAX_PUBLISHED_MESHLETS);
     }
@@ -344,10 +355,11 @@ mod tests {
         let instance = instance_with_model([
             2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 4.0, 5.0, 6.0, 1.0,
         ]);
-        let cull = InstanceCullData::from_instance(&instance);
+        let cull = InstanceCullData::from_instance(&instance, 0);
 
         assert_eq!(cull.valid_transform, 1);
-        assert_eq!(cull.cone_cull_enabled, 1);
+        assert_eq!(cull.cull_flags & 1, 1);
+        assert_eq!(cull.cull_flags >> 1 & 1, 1);
         assert_eq!(cull.max_scale, 2.0);
         assert_eq!(cull.min_scale, 2.0);
     }
@@ -357,19 +369,31 @@ mod tests {
         let instance = instance_with_model([
             4.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]);
-        let cull = InstanceCullData::from_instance(&instance);
+        let cull = InstanceCullData::from_instance(&instance, 0);
 
         assert_eq!(cull.valid_transform, 1);
-        assert_eq!(cull.cone_cull_enabled, 0);
+        assert_eq!(cull.cull_flags & 1, 0);
         assert_eq!(cull.max_scale, 4.0);
         assert_eq!(cull.min_scale, 1.0);
+    }
+
+    #[test]
+    fn alpha_test_material_clears_opaque_bit() {
+        let instance = instance_with_model([
+            2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 4.0, 5.0, 6.0, 1.0,
+        ]);
+        let cull = InstanceCullData::from_instance(&instance, 0);
+        assert_eq!(cull.cull_flags >> 1 & 1, 1, "no flags = opaque");
+
+        let cull_alpha = InstanceCullData::from_instance(&instance, 1 << 2);
+        assert_eq!(cull_alpha.cull_flags >> 1 & 1, 0, "FLAG_ALPHA_TEST clears opaque");
     }
 
     #[test]
     fn singular_or_non_finite_transform_is_rejected() {
         let singular = instance_with_model([0.0; 16]);
         assert_eq!(
-            InstanceCullData::from_instance(&singular).valid_transform,
+            InstanceCullData::from_instance(&singular, 0).valid_transform,
             0
         );
 
@@ -377,7 +401,7 @@ mod tests {
         non_finite_model[0] = f32::NAN;
         let non_finite = instance_with_model(non_finite_model);
         assert_eq!(
-            InstanceCullData::from_instance(&non_finite).valid_transform,
+            InstanceCullData::from_instance(&non_finite, 0).valid_transform,
             0
         );
     }
@@ -387,13 +411,13 @@ mod tests {
         let shear = instance_with_model([
             1.0, 0.0, 0.0, 0.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]);
-        assert_eq!(InstanceCullData::from_instance(&shear).cone_cull_enabled, 0);
+        assert_eq!(InstanceCullData::from_instance(&shear, 0).cull_flags & 1, 0);
 
         let reflection = instance_with_model([
             -1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
         ]);
         assert_eq!(
-            InstanceCullData::from_instance(&reflection).cone_cull_enabled,
+            InstanceCullData::from_instance(&reflection, 0).cull_flags & 1,
             0
         );
     }
@@ -417,7 +441,7 @@ mod tests {
     #[test]
     fn debug_stats_decode_the_gpu_counter_layout() {
         let stats = VirtualGeometryDebugStats::from_counters(&[
-            123, 4, 0, 2, 5, 0, 0, 1, 0, 0, 6,
+            100, 23, 4, 0, 2, 5, 0, 0, 1, 0, 0, 6,
         ])
         .expect("complete counter layout");
 
@@ -426,6 +450,6 @@ mod tests {
         assert_eq!(stats.visible_objects(), 8);
         assert_eq!(stats.selected_lod_range(), Some((1, 5)));
         assert_eq!(stats.max_available_lod, 6);
-        assert!(VirtualGeometryDebugStats::from_counters(&[0; 10]).is_none());
+        assert!(VirtualGeometryDebugStats::from_counters(&[0; 11]).is_none());
     }
 }

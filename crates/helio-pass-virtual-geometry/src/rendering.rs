@@ -30,7 +30,8 @@ pub struct VirtualGeometryPass {
     pub(crate) cull_bind_group: Option<wgpu::BindGroup>,
     pub(crate) cull_bind_group_hiz_key: Option<(usize, usize)>,
     pub(crate) cull_buf: wgpu::Buffer,
-    pub(crate) draw_pipeline: wgpu::RenderPipeline,
+    pub(crate) opaque_draw_pipeline: wgpu::RenderPipeline,
+    pub(crate) alpha_draw_pipeline: wgpu::RenderPipeline,
     pub(crate) debug_draw_pipeline: wgpu::RenderPipeline,
     pub(crate) lod_debug_pipeline: wgpu::RenderPipeline,
     pub(crate) draw_bgl_0: wgpu::BindGroupLayout,
@@ -79,22 +80,23 @@ impl VirtualGeometryPass {
             label: Some("VG Cull Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_cull.wgsl").into()),
         });
+        let draw_shader_source = {
+            let s = include_str!("../shaders/vg_gbuffer.wgsl")
+                .replace(
+                    "binding_array<texture_2d<f32>, 256>",
+                    &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+                )
+                .replace(
+                    "binding_array<sampler, 256>",
+                    &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+                );
+            #[cfg(target_arch = "wasm32")]
+            let s = libhelio::shader::apply_webgpu_material_bindings(&s, MAX_TEXTURES);
+            s
+        };
         let draw_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("VG GBuffer Shader"),
-            source: wgpu::ShaderSource::Wgsl({
-                let s = include_str!("../shaders/vg_gbuffer.wgsl")
-                    .replace(
-                        "binding_array<texture_2d<f32>, 256>",
-                        &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
-                    )
-                    .replace(
-                        "binding_array<sampler, 256>",
-                        &format!("binding_array<sampler, {MAX_TEXTURES}>"),
-                    );
-                #[cfg(target_arch = "wasm32")]
-                let s = libhelio::shader::apply_webgpu_material_bindings(&s, MAX_TEXTURES);
-                s.into()
-            }),
+            source: wgpu::ShaderSource::Wgsl(draw_shader_source.clone().into()),
         });
 
         let meshlet_buf = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
@@ -432,27 +434,40 @@ impl VirtualGeometryPass {
             bias: wgpu::DepthBiasState::default(),
         });
 
-        let draw_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("VG Draw Pipeline"),
-            layout: Some(&draw_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &draw_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: vg_vertex_buffers,
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &draw_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: gbuffer_targets,
-            }),
-            primitive: draw_primitive,
-            depth_stencil: draw_depth.clone(),
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
+        let make_draw_pipeline = |label: &'static str, constants: &[(&str, f64)]| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&draw_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &draw_shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                    buffers: vg_vertex_buffers,
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &draw_shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants,
+                        ..Default::default()
+                    },
+                    targets: gbuffer_targets,
+                }),
+                primitive: draw_primitive,
+                depth_stencil: draw_depth.clone(),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let opaque_draw_pipeline = make_draw_pipeline("VG Opaque Draw Pipeline", &[]);
+        let alpha_draw_pipeline = make_draw_pipeline(
+            "VG Alpha Draw Pipeline",
+            &[("has_alpha_test", 1.0)],
+        );
+
+
 
         let debug_draw_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("VG Debug Pipeline"),
@@ -505,7 +520,8 @@ impl VirtualGeometryPass {
             cull_bind_group: None,
             cull_bind_group_hiz_key: None,
             cull_buf,
-            draw_pipeline,
+            opaque_draw_pipeline,
+            alpha_draw_pipeline,
             debug_draw_pipeline,
             lod_debug_pipeline,
             draw_bgl_0,
@@ -779,9 +795,15 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.work_item_buf, 0, vg.work_items);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
+            let materials = ctx.scene.materials.as_slice();
             self.instance_cull_scratch.clear();
-            self.instance_cull_scratch
-                .extend(instances.iter().map(InstanceCullData::from_instance));
+            self.instance_cull_scratch.extend(instances.iter().map(|inst| {
+                let mat_flags = materials
+                    .get(inst.material_id as usize)
+                    .map(|m| m.flags)
+                    .unwrap_or(0);
+                InstanceCullData::from_instance(inst, mat_flags)
+            }));
             ctx.write_buffer(
                 &self.instance_cull_buf,
                 0,
@@ -813,11 +835,18 @@ impl RenderPass for VirtualGeometryPass {
                 bytemuck::cast_slice(&instances[start..end]),
             );
 
+            let materials = ctx.scene.materials.as_slice();
             self.instance_cull_scratch.clear();
             self.instance_cull_scratch.extend(
                 instances[start..end]
                     .iter()
-                    .map(InstanceCullData::from_instance),
+                    .map(|inst| {
+                        let mat_flags = materials
+                            .get(inst.material_id as usize)
+                            .map(|m| m.flags)
+                            .unwrap_or(0);
+                        InstanceCullData::from_instance(inst, mat_flags)
+                    }),
             );
             let cull_offset = start as u64 * std::mem::size_of::<InstanceCullData>() as u64;
             ctx.write_buffer(
@@ -1208,12 +1237,6 @@ impl RenderPass for VirtualGeometryPass {
         {
             let rpass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
 
-            let active_pipeline = match self.debug_mode {
-                20 => &self.debug_draw_pipeline,
-                21 => &self.lod_debug_pipeline,
-                _ => &self.draw_pipeline,
-            };
-            rpass.set_pipeline(active_pipeline);
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
             rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
@@ -1221,20 +1244,46 @@ impl RenderPass for VirtualGeometryPass {
                 main_scene.mesh_buffers.indices.slice(..),
                 wgpu::IndexFormat::Uint32,
             );
-            if self.use_count_indirect {
-                rpass.multi_draw_indexed_indirect_count(
-                    &self.indirect_buf,
-                    0,
-                    &self.draw_count_buf,
-                    0,
-                    max_draw_count,
-                );
-            } else {
-                #[cfg(not(target_arch = "wasm32"))]
-                rpass.multi_draw_indexed_indirect(&self.indirect_buf, 0, max_draw_count);
-                #[cfg(target_arch = "wasm32")]
-                for i in 0..max_draw_count {
-                    rpass.draw_indexed_indirect(&self.indirect_buf, i as u64 * 20);
+
+            let opaque_capacity = max_draw_count / 2;
+
+            let draw_region = |rpass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline, first_slot: u32, count: u32, counter_byte: u64| {
+                rpass.set_pipeline(pipeline);
+                if self.use_count_indirect {
+                    rpass.multi_draw_indexed_indirect_count(
+                        &self.indirect_buf,
+                        first_slot as u64 * 20,
+                        &self.draw_count_buf,
+                        counter_byte,
+                        count,
+                    );
+                } else {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    rpass.multi_draw_indexed_indirect(
+                        &self.indirect_buf,
+                        first_slot as u64 * 20,
+                        count,
+                    );
+                    #[cfg(target_arch = "wasm32")]
+                    for i in first_slot..first_slot + count {
+                        rpass.draw_indexed_indirect(&self.indirect_buf, i as u64 * 20);
+                    }
+                }
+            };
+
+            match self.debug_mode {
+                20 | 21 => {
+                    let pipeline = if self.debug_mode == 20 {
+                        &self.debug_draw_pipeline
+                    } else {
+                        &self.lod_debug_pipeline
+                    };
+                    draw_region(rpass, pipeline, 0, opaque_capacity, 0);
+                    draw_region(rpass, pipeline, opaque_capacity, max_draw_count - opaque_capacity, 4);
+                }
+                _ => {
+                    draw_region(rpass, &self.opaque_draw_pipeline, 0, opaque_capacity, 0);
+                    draw_region(rpass, &self.alpha_draw_pipeline, opaque_capacity, max_draw_count - opaque_capacity, 4);
                 }
             }
         }
