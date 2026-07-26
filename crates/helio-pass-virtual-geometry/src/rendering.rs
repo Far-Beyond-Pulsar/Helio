@@ -856,10 +856,13 @@ impl RenderPass for VirtualGeometryPass {
             self.last_instance_version = vg.instance_version;
         }
 
-        // Per-frame: sort work items by instance camera distance so the cull
-        // shader processes near meshlets first — draws are emitted in indirect
-        // buffer order, giving approximate front-to-back execution and
-        // maximising early-Z kills.
+        // Per-frame: sort work items by the nearest point on each object's
+        // world-space bounding sphere so the cull shader processes near
+        // meshlets first — draws are emitted in indirect buffer order, giving
+        // approximate front-to-back execution and maximising early-Z kills.
+        // Using the instance's stored world-space bounds (not the translation)
+        // correctly handles large objects whose bounding sphere may be close
+        // to the camera even when the instance centre is far away.
         {
             let cam_pos = ctx.scene.camera.position();
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
@@ -874,17 +877,21 @@ impl RenderPass for VirtualGeometryPass {
                     let obj_b = &objects[b.object_index as usize];
                     let inst_b = &instances[obj_b.instance_index as usize];
 
-                    let dx_a = inst_a.model[12] - cam_pos[0];
-                    let dy_a = inst_a.model[13] - cam_pos[1];
-                    let dz_a = inst_a.model[14] - cam_pos[2];
-                    let da = dx_a * dx_a + dy_a * dy_a + dz_a * dz_a;
+                    let dx_a = inst_a.bounds[0] - cam_pos[0];
+                    let dy_a = inst_a.bounds[1] - cam_pos[1];
+                    let dz_a = inst_a.bounds[2] - cam_pos[2];
+                    let dist_a = (dx_a * dx_a + dy_a * dy_a + dz_a * dz_a).sqrt();
+                    let near_a = (dist_a - inst_a.bounds[3]).max(0.0);
 
-                    let dx_b = inst_b.model[12] - cam_pos[0];
-                    let dy_b = inst_b.model[13] - cam_pos[1];
-                    let dz_b = inst_b.model[14] - cam_pos[2];
-                    let db = dx_b * dx_b + dy_b * dy_b + dz_b * dz_b;
+                    let dx_b = inst_b.bounds[0] - cam_pos[0];
+                    let dy_b = inst_b.bounds[1] - cam_pos[1];
+                    let dz_b = inst_b.bounds[2] - cam_pos[2];
+                    let dist_b = (dx_b * dx_b + dy_b * dy_b + dz_b * dz_b).sqrt();
+                    let near_b = (dist_b - inst_b.bounds[3]).max(0.0);
 
-                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                    near_a
+                        .partial_cmp(&near_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 });
                 ctx.write_buffer(
                     &self.work_item_buf,
