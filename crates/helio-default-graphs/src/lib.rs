@@ -415,8 +415,9 @@ fn build_default_graph_internal(
     //
     // Off by default: this is one of the graph's most expensive passes. When it
     // is absent DeferredLightPass binds its 1×1 black fallback for `ssr_trace`,
-    // so the only loss is the reflection contribution.
-    if config.enable_ssr {
+    // so the only loss is the reflection contribution. Also compiled out on
+    // Apple targets entirely (REFLECTIONS_SUPPORTED), which render it incorrectly.
+    if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
         graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, iw, ih)));
     }
 
@@ -426,7 +427,8 @@ fn build_default_graph_internal(
     //
     // Off by default: cost scales with scene complexity times reflection-plane
     // count. DeferredLightPass falls back to a 1×1 black `planar_reflection`.
-    if config.enable_planar_reflections {
+    // Also compiled out on Apple targets (REFLECTIONS_SUPPORTED) — see SSR above.
+    if config.enable_planar_reflections && helio_core::REFLECTIONS_SUPPORTED {
         graph.add_pass(Box::new(PlanarReflectionPass::new(
             device,
             camera_buf,
@@ -608,11 +610,12 @@ fn build_fxaa_graph_internal(
 
     // Both off by default; see the notes in the primary graph builder above.
     // DeferredLightPass binds 1×1 black fallbacks when either pass is absent.
-    if config.enable_ssr {
+    // Also compiled out on Apple targets (REFLECTIONS_SUPPORTED).
+    if config.enable_ssr && helio_core::REFLECTIONS_SUPPORTED {
         graph.add_pass(Box::new(SsrPass::new(device, queue, camera_buf, iw, ih)));
     }
 
-    if config.enable_planar_reflections {
+    if config.enable_planar_reflections && helio_core::REFLECTIONS_SUPPORTED {
         graph.add_pass(Box::new(PlanarReflectionPass::new(
             device,
             camera_buf,
