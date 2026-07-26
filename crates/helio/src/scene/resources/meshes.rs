@@ -32,7 +32,7 @@ impl super::super::Scene {
     ///     indices: vec![/* index data */],
     /// });
     /// ```
-    pub(in crate::scene) fn insert_mesh(&mut self, mesh: MeshUpload) -> MeshId {
+    pub fn insert_mesh(&mut self, mesh: MeshUpload) -> MeshId {
         self.mesh_pool.insert(mesh)
     }
 

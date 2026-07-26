@@ -65,8 +65,8 @@ impl Demo {
         if let Some(pass) = renderer.find_pass_mut::<VoxelMeshPass>() {
             let (meta_buf, data_buf) = (pass.brick_meta_buf().clone(), pass.voxel_data_buf().clone());
             let touched = world.upload_all_mesh(queue, &meta_buf, &data_buf, VOXEL_SIZE);
-            for (brick_idx, origin) in touched {
-                pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+            for (brick_idx, origin, occupied) in touched {
+                pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
             }
         }
     }
@@ -88,8 +88,8 @@ impl Demo {
                 let touched =
                     self.world
                         .upload_range_mesh(&self.queue, &meta_buf, &data_buf, VOXEL_SIZE, range);
-                for (brick_idx, origin) in touched {
-                    pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE);
+                for (brick_idx, origin, occupied) in touched {
+                    pass.mark_dirty(brick_idx, 0, origin, VOXEL_SIZE, occupied);
                 }
             }
         }

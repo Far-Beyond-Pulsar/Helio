@@ -370,6 +370,20 @@
 //! - [`PassContext`] - Zero-copy context passed to `execute()`
 //! - [`Profiler`] - Automatic CPU/GPU profiling system
 
+/// Whether reflection features (screen-space, planar, and cubemap-capture
+/// reflections) are available on this target.
+///
+/// Apple targets render them incorrectly, so the whole reflection group is
+/// compiled out there: `SsrPass` and `PlanarReflectionPass` are left out of the
+/// graph, and `DeferredLightPass` tells its shader to skip both composites and
+/// the reflection-capture cube array. Everything else in deferred lighting —
+/// direct light, ambient, RC GI — is untouched.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+pub const REFLECTIONS_SUPPORTED: bool = false;
+/// See the macOS/iOS variant above.
+#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+pub const REFLECTIONS_SUPPORTED: bool = true;
+
 pub mod acceleration;
 pub mod actor;
 pub mod component;
@@ -400,6 +414,6 @@ pub use context::{PassContext, PrepareContext};
 pub use entity::Entity;
 pub use error::{Error, Result};
 pub use graph::{DebugPassInfo, DebugResourceInfo, FrameDebugData, RenderGraph};
-pub use profiling::Profiler;
+pub use profiling::{GpuTimingAvailability, Profiler, RenderPassTiming, RenderTimingSnapshot};
 pub use scene::{GpuScene, SceneResources};
 pub use traits::{AsAny, DebugViewDescriptor, MaybeSend, MaybeSync, RenderPass};

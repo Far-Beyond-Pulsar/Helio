@@ -87,6 +87,20 @@ struct GpuDrawCall {
 @group(0) @binding(6) var<storage, read_write> indirect: array<u32>;
 @group(0) @binding(9) var<storage, read_write> stats:   array<atomic<u32>>;
 
+// Per-group compacted original instance slots surviving frustum culling
+// (written by IndirectDispatchPass) and, after this pass, surviving BOTH
+// frustum AND Hi-Z occlusion. Draw-consuming passes must read
+// `compacted_indices_2`, not `compacted_indices` (frustum-only intermediate).
+@group(0) @binding(10) var<storage, read>       compacted_indices:   array<u32>;
+@group(0) @binding(11) var<storage, read_write> compacted_indices_2: array<u32>;
+
+// One workgroup handles one draw-call group, cooperatively Hi-Z-testing only
+// the instances that already survived frustum culling and re-compacting the
+// survivors — mirrors IndirectDispatchPass's per-instance compaction so a
+// group's final `instance_count` reflects real per-instance occlusion instead
+// of an all-or-nothing "is the whole batch occluded" test.
+var<workgroup> wg_counter: atomic<u32>;
+
 // Stats layout (shared with IndirectDispatchPass):
 // 4: occlusion_culled  (we only write to slot 4)
 // 7: shadow_occlusion_culled
@@ -229,34 +243,46 @@ fn instance_is_occluded(inst: GpuInstanceData, cam_pos: vec3<f32>) -> bool {
 }
 
 @compute @workgroup_size(64, 1, 1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let idx = gid.x;
+fn main(
+    @builtin(workgroup_id) wg_id: vec3<u32>,
+    @builtin(local_invocation_id) lid: vec3<u32>,
+) {
+    let idx = wg_id.x;
     if idx >= params.draw_count {
         return;
     }
 
     // Check if frustum cull left this batch visible at all.
-    if indirect[idx * 5u + 1u] == 0u {
+    let visible_count = indirect[idx * 5u + 1u];
+    if visible_count == 0u {
         return;
     }
 
     let dc = draw_calls[idx];
     let cam_pos = camera.position_near.xyz;
 
-    // Iterate all instances in the batch. Only occlude the entire batch if
-    // EVERY instance is occluded. This prevents flickering when the
-    // representative (first) instance is occluded but others are not.
-    var all_occluded = true;
-    for (var i = 0u; i < dc.instance_count; i++) {
-        let inst = instances[dc.first_instance + i];
+    // Cooperatively Hi-Z-test only the instances that already survived
+    // frustum culling (`visible_count` of them, packed in `compacted_indices`
+    // starting at `dc.first_instance`), compacting survivors into
+    // `compacted_indices_2` via a workgroup-shared atomic counter.
+    for (var i = lid.x; i < visible_count; i += 64u) {
+        let original_idx = compacted_indices[dc.first_instance + i];
+        let inst = instances[original_idx];
         if !instance_is_occluded(inst, cam_pos) {
-            all_occluded = false;
-            break;
+            let slot = atomicAdd(&wg_counter, 1u);
+            compacted_indices_2[dc.first_instance + slot] = original_idx;
         }
     }
 
-    if all_occluded {
-        indirect[idx * 5u + 1u] = 0u;
+    workgroupBarrier();
+
+    if lid.x != 0u {
+        return;
+    }
+
+    let final_count = atomicLoad(&wg_counter);
+    indirect[idx * 5u + 1u] = final_count;
+    if final_count == 0u {
         atomicAdd(&stats[4u], 1u);
     }
 }

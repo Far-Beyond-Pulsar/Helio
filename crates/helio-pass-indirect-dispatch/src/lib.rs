@@ -2,16 +2,18 @@
 //!
 //! This pass runs a compute shader that:
 //! 1. Tests each instance's bounding sphere against the 6 frustum planes
-//! 2. Writes DrawIndexedIndirect commands (instance_count=1 for visible, 0 for culled)
-//! 3. Is O(1) CPU cost — single compute dispatch regardless of scene size
+//! 2. Compacts surviving instances into `compacted_indices`, per draw-call group
+//! 3. Writes each group's real visible instance count into its DrawIndexedIndirect
+//! 4. Is O(1) CPU cost — single compute dispatch regardless of scene size
 //!
-//! Non-compacting design: culled draws get instance_count=0.
-//! This means the indirect buffer stays the same size as the draw call list.
+//! One workgroup (64 lanes) handles one draw-call group, cooperatively testing
+//! every instance in that group and packing survivors via workgroup-shared
+//! atomics. Consumers drawing through the shared `instances`/`indirect` pair
+//! (e.g. `GBufferPass`) must index `instances` through `compacted_indices`
+//! rather than directly by `instance_index` — see `helio-pass-gbuffer`.
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-
-const WORKGROUP_SIZE: u32 = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -30,7 +32,7 @@ pub struct IndirectDispatchPass {
     /// (GrowableBuffers reallocate on resize, invalidating old bind groups).
     bind_group: Option<wgpu::BindGroup>,
     /// Tuple of raw buffer pointers used as a staleness key.
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize)>,
     /// Draw count uploaded in `prepare()`, used in `execute()`.
     draw_count: u32,
 }
@@ -131,6 +133,17 @@ impl IndirectDispatchPass {
                     },
                     count: None,
                 },
+                // binding 7: compacted instance indices (read_write, GPU-written)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 7,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -204,6 +217,7 @@ impl RenderPass for IndirectDispatchPass {
             ctx.scene.aabbs as *const wgpu::Buffer as usize,
             ctx.scene.indirect as *const wgpu::Buffer as usize,
             &self.cull_stats_buf as *const wgpu::Buffer as usize,
+            ctx.scene.compacted_indices as *const wgpu::Buffer as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -238,13 +252,18 @@ impl RenderPass for IndirectDispatchPass {
                         binding: 6,
                         resource: self.cull_stats_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 7,
+                        resource: ctx.scene.compacted_indices.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
         }
 
-        // O(1) CPU: one dispatch, GPU culls all draw calls in parallel.
-        let workgroups = draw_count.div_ceil(WORKGROUP_SIZE);
+        // O(1) CPU: one dispatch, GPU culls all draw calls in parallel. One
+        // workgroup per draw-call group — its 64 lanes cooperatively compact
+        // that group's surviving instances (see indirect_dispatch.wgsl).
         let mut pass = unsafe { &mut *ctx.encoder_ptr }
             .begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("IndirectDispatch"),
@@ -252,7 +271,7 @@ impl RenderPass for IndirectDispatchPass {
             });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.dispatch_workgroups(workgroups, 1, 1);
+        pass.dispatch_workgroups(draw_count, 1, 1);
         Ok(())
     }
 }

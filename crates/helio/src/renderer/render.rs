@@ -416,47 +416,41 @@ impl Renderer {
             frame_resources.baked_pvs.write(pvs, "Renderer");
         }
 
-        if self.clear_target_next_frame {
-            let clear = wgpu::Color {
-                r: self.clear_color[0] as f64,
-                g: self.clear_color[1] as f64,
-                b: self.clear_color[2] as f64,
-                a: self.clear_color[3] as f64,
-            };
-            let mut clear_encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Renderer Resize Target Clear"),
-                });
-            {
-                let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("Renderer Resize Target Clear Pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: target,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(clear),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                    multiview_mask: None,
-                });
-            }
-            self.queue.submit(std::iter::once(clear_encoder.finish()));
-            self.clear_target_next_frame = false;
-        }
-
-        {
-            let mut clear_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("CullStats Clear"),
+        // Target clear + cull-stats clear are batched into a single command
+        // buffer/submit. Each `queue.submit()` is a real driver sync point
+        // (validation, fence work) — issuing two of them back-to-back for a
+        // full-screen clear and a 32-byte buffer clear was pure overhead.
+        let clear = wgpu::Color {
+            r: self.clear_color[0] as f64,
+            g: self.clear_color[1] as f64,
+            b: self.clear_color[2] as f64,
+            a: self.clear_color[3] as f64,
+        };
+        let mut clear_encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Renderer Target Clear"),
             });
-            clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
-            self.queue.submit(std::iter::once(clear_encoder.finish()));
+        {
+            let _pass = clear_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Renderer Target Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
         }
+        clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
+        self.queue.submit(std::iter::once(clear_encoder.finish()));
 
         let _graph_start = Instant::now();
         self.graph.execute_with_frame_resources(

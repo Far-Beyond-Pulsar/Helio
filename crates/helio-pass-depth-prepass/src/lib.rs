@@ -14,7 +14,7 @@ pub struct DepthPrepassPass {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: Option<wgpu::BindGroup>,
-    bind_group_key: Option<(usize, usize)>,
+    bind_group_key: Option<(usize, usize, usize)>,
 }
 
 impl DepthPrepassPass {
@@ -44,6 +44,18 @@ impl DepthPrepassPass {
                 // binding 1: per-instance transforms (VERTEX, read-only storage)
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // binding 2: compacted_indices (VERTEX, read-only storage) — per-group
+                // surviving instance slots written by IndirectDispatchPass.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -172,7 +184,8 @@ impl RenderPass for DepthPrepassPass {
         // Extract before the mutable encoder borrow.
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let key = (camera_ptr, instances_ptr);
+        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
+        let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
         if self.bind_group_key != Some(key) {
             log::debug!("DepthPrepass: rebuilding bind group (buffer pointers changed)");
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -186,6 +199,10 @@ impl RenderPass for DepthPrepassPass {
                     wgpu::BindGroupEntry {
                         binding: 1,
                         resource: ctx.scene.instances.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
                     },
                 ],
             }));

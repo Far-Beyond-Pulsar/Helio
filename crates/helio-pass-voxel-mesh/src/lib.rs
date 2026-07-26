@@ -73,12 +73,52 @@ struct MeshletParams {
     _pad2: u32,
 }
 
+#[derive(Debug)]
+struct ActiveBrickRange {
+    slots: Vec<bool>,
+    draw_count: u32,
+}
+
+impl ActiveBrickRange {
+    fn new(capacity: u32) -> Self {
+        Self {
+            slots: vec![false; capacity as usize],
+            draw_count: 0,
+        }
+    }
+
+    fn set(&mut self, brick_slot: u32, active: bool) -> bool {
+        let Some(slot) = self.slots.get_mut(brick_slot as usize) else {
+            return false;
+        };
+
+        *slot = active;
+        if active {
+            self.draw_count = self.draw_count.max(brick_slot + 1);
+        } else if brick_slot + 1 == self.draw_count {
+            self.draw_count = self
+                .slots
+                .iter()
+                .rposition(|occupied| *occupied)
+                .map_or(0, |index| index as u32 + 1);
+        }
+        true
+    }
+
+    fn draw_count(&self) -> u32 {
+        self.draw_count
+    }
+}
+
+fn needs_render_pass(attachment_mode: AttachmentMode, draw_count: u32) -> bool {
+    attachment_mode == AttachmentMode::Standalone || draw_count > 0
+}
+
 // ── Pass ──────────────────────────────────────────────────────────────────────
 
 pub struct VoxelMeshPass {
     // Pipelines
     extract_pipeline: wgpu::ComputePipeline,
-    extract_bgl: wgpu::BindGroupLayout,
     extract_bind_group: wgpu::BindGroup,
 
     render_pipeline: wgpu::RenderPipeline,
@@ -92,13 +132,12 @@ pub struct VoxelMeshPass {
     voxel_data_buf: wgpu::Buffer,
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
-    descriptor_buf: wgpu::Buffer,
     indirect_buf: wgpu::Buffer,
     dirty_brick_buf: wgpu::Buffer,
 
-
     // CPU-side dirty list (uploaded each frame, cleared after compute dispatch)
     dirty_bricks: Vec<DirtyBrick>,
+    active_bricks: ActiveBrickRange,
 
     normal_buf: wgpu::Buffer,
     surface_format: wgpu::TextureFormat,
@@ -459,7 +498,6 @@ impl VoxelMeshPass {
 
         Self {
             extract_pipeline,
-            extract_bgl,
             extract_bind_group,
             render_pipeline,
             render_bgl,
@@ -470,10 +508,10 @@ impl VoxelMeshPass {
             voxel_data_buf,
             vertex_buf,
             index_buf,
-            descriptor_buf,
             indirect_buf,
             dirty_brick_buf,
             dirty_bricks: Vec::new(),
+            active_bricks: ActiveBrickRange::new(VOXEL_MESH_MAX_BRICKS),
             normal_buf,
             surface_format,
             attachment_mode,
@@ -490,14 +528,24 @@ impl VoxelMeshPass {
         &self.voxel_data_buf
     }
 
-    /// Mark a brick for re-extraction on the next frame.
+    /// Mark a brick for re-extraction on the next frame. `occupied` must match
+    /// the voxel data uploaded for this slot.
     pub fn mark_dirty(
         &mut self,
         brick_slot: u32,
         volume_id: u32,
         origin: [f32; 3],
         voxel_size: f32,
+        occupied: bool,
     ) {
+        if brick_slot >= VOXEL_MESH_MAX_BRICKS {
+            log::warn!(
+                "VoxelMeshPass: brick slot {brick_slot} exceeds capacity {}",
+                VOXEL_MESH_MAX_BRICKS
+            );
+            return;
+        }
+
         if self.dirty_bricks.len() < VOXEL_MESH_MAX_DIRTY as usize {
             self.dirty_bricks.push(DirtyBrick {
                 brick_slot,
@@ -505,6 +553,7 @@ impl VoxelMeshPass {
                 _pad: [0u32; 2],
                 origin_size: [origin[0], origin[1], origin[2], voxel_size],
             });
+            let _ = self.active_bricks.set(brick_slot, occupied);
         } else {
             log::warn!("VoxelMeshPass: dirty brick list overflow (dropping slot {brick_slot})");
         }
@@ -513,10 +562,20 @@ impl VoxelMeshPass {
     /// Zero out the indirect draw for a brick slot so it stops being rendered.
     /// Call this when a brick is deallocated.
     pub fn clear_brick_slot(
-        &self,
+        &mut self,
         queue: &wgpu::Queue,
         brick_slot: u32,
     ) {
+        if !self.active_bricks.set(brick_slot, false) {
+            log::warn!(
+                "VoxelMeshPass: cannot clear brick slot {brick_slot}; capacity is {}",
+                VOXEL_MESH_MAX_BRICKS
+            );
+            return;
+        }
+        self.dirty_bricks
+            .retain(|dirty| dirty.brick_slot != brick_slot);
+
         const ZERO: DrawIndexedIndirectArgs = DrawIndexedIndirectArgs {
             index_count: 0,
             instance_count: 0,
@@ -552,6 +611,9 @@ impl RenderPass for VoxelMeshPass {
             ctx.write_buffer(&self.dirty_brick_buf, 0, bytes);
             log::debug!("VoxelMeshPass: {} dirty bricks", self.dirty_bricks.len());
         }
+        if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
+            return Ok(());
+        }
         let params = MeshletParams {
             light_count: ctx.scene.lights.len() as u32,
             _pad0: 0,
@@ -564,6 +626,7 @@ impl RenderPass for VoxelMeshPass {
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let dirty_count = self.dirty_bricks.len() as u32;
+        let draw_count = self.active_bricks.draw_count();
 
         // ── Step 1: Compute — surface extraction on all dirty bricks ─────────
         if dirty_count > 0 {
@@ -576,7 +639,15 @@ impl RenderPass for VoxelMeshPass {
             cpass.dispatch_workgroups(dirty_count, 1, 1);
         }
 
-        // ── Step 2: Render — draw all bricks via indirect multi-draw ─────────
+        // A composited pass with no occupied bricks intentionally has no active
+        // render pass. Dirty empty bricks still reach the compute step above so
+        // stale indirect arguments are cleared.
+        if !needs_render_pass(self.attachment_mode, draw_count) {
+            self.dirty_bricks.clear();
+            return Ok(());
+        }
+
+        // ── Step 2: Render — draw the resident brick range indirectly ───────
         // Rebuild the bind group when the camera or lights buffer pointer changes
         // (the lights buffer can be reallocated by GrowableBuffer as it grows).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
@@ -610,11 +681,12 @@ impl RenderPass for VoxelMeshPass {
         rp.set_vertex_buffer(1, self.normal_buf.slice(..));
         rp.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint32);
 
-        // Draw all bricks — entries with index/instance count == 0 are no-ops.
+        // Slots below draw_count may still contain zero-count entries. The CPU
+        // bound only removes the unused capacity after the final active slot.
         #[cfg(not(target_arch = "wasm32"))]
-        rp.multi_draw_indexed_indirect(&self.indirect_buf, 0, VOXEL_MESH_MAX_BRICKS);
+        rp.multi_draw_indexed_indirect(&self.indirect_buf, 0, draw_count);
         #[cfg(target_arch = "wasm32")]
-        for i in 0..VOXEL_MESH_MAX_BRICKS {
+        for i in 0..draw_count {
             let off = i as u64 * std::mem::size_of::<DrawIndexedIndirectArgs>() as u64;
             rp.draw_indexed_indirect(&self.indirect_buf, off);
         }
@@ -631,6 +703,10 @@ impl RenderPass for VoxelMeshPass {
         depth: &'a wgpu::TextureView,
         resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+        if !needs_render_pass(self.attachment_mode, self.active_bricks.draw_count()) {
+            return None;
+        }
+
         let pre_aa_view = resources.pre_aa.read("VoxelMesh")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([Some(wgpu::RenderPassColorAttachment {
@@ -662,7 +738,7 @@ impl RenderPass for VoxelMeshPass {
 
 #[cfg(test)]
 mod tests {
-    use super::AttachmentMode;
+    use super::{needs_render_pass, ActiveBrickRange, AttachmentMode};
 
     #[test]
     fn standalone_mode_initializes_color_and_depth() {
@@ -686,5 +762,48 @@ mod tests {
             AttachmentMode::Composited.depth_load(),
             wgpu::LoadOp::Load
         ));
+    }
+
+    #[test]
+    fn active_brick_range_starts_empty() {
+        let range = ActiveBrickRange::new(8);
+        assert_eq!(range.draw_count(), 0);
+    }
+
+    #[test]
+    fn active_brick_range_tracks_highest_slot() {
+        let mut range = ActiveBrickRange::new(8);
+        assert!(range.set(2, true));
+        assert!(range.set(6, true));
+        assert_eq!(range.draw_count(), 7);
+
+        assert!(range.set(6, false));
+        assert_eq!(range.draw_count(), 3);
+    }
+
+    #[test]
+    fn active_brick_range_disables_after_final_slot_is_cleared() {
+        let mut range = ActiveBrickRange::new(8);
+        assert!(range.set(4, true));
+        assert!(range.set(4, false));
+        assert_eq!(range.draw_count(), 0);
+    }
+
+    #[test]
+    fn active_brick_range_rejects_out_of_bounds_slots() {
+        let mut range = ActiveBrickRange::new(8);
+        assert!(!range.set(8, true));
+        assert_eq!(range.draw_count(), 0);
+    }
+
+    #[test]
+    fn empty_composited_pass_is_skipped() {
+        assert!(!needs_render_pass(AttachmentMode::Composited, 0));
+        assert!(needs_render_pass(AttachmentMode::Composited, 1));
+    }
+
+    #[test]
+    fn empty_standalone_pass_still_initializes_attachments() {
+        assert!(needs_render_pass(AttachmentMode::Standalone, 0));
     }
 }

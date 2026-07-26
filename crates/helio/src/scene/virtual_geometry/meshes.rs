@@ -50,7 +50,7 @@ impl super::super::Scene {
     /// up to 8 distinct LOD levels and decomposes each into spatially coherent
     /// meshlets with tight bounding spheres and backface cones. Small or rigid
     /// assets may expose fewer levels rather than duplicated placeholder LODs.
-    pub(in crate::scene) fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
+    pub fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
         let local_bounds = referenced_bounds(&upload.vertices, &upload.indices).unwrap_or([0.0; 4]);
 
         // Generate the asset's distinct LOD chain via meshopt simplification.

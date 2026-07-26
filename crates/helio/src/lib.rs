@@ -29,8 +29,9 @@ mod wasm_cpp_alloc;
 pub use editor::{EditorState, GizmoAxis, GizmoMode};
 pub use groups::{GroupId, GroupMask};
 pub use handles::{
-    DecalId, LightId, MaterialId, MeshId, MultiMeshId, ObjectId, SectionedInstanceId, TextureId,
-    VirtualObjectId, VoxelVolumeId, WaterHitboxId, WaterVolumeId,
+    DecalId, LightId, MaterialId, MeshId, MultiMeshId, ObjectId, PostProcessVolumeId,
+    ReflectionCaptureId, SectionedInstanceId, TextureId, VirtualObjectId, VoxelVolumeId,
+    WaterHitboxId, WaterVolumeId,
 };
 pub use material::{
     MaterialAsset, MaterialTextureRef, MaterialTextures, TextureSamplerDesc, TextureTransform,
@@ -61,7 +62,8 @@ pub use helio_bake::{
 pub use helio_core::{
     Actor, Component, ComponentRegistry, ComponentSlot, ComponentVec, DebugViewDescriptor,
     DrawIndexedIndirectArgs, Entity, Error, GpuCameraUniforms, GpuDrawCall, GpuInstanceAabb,
-    GpuInstanceData, GpuLight, GpuMaterial, GpuScene, RenderGraph, RenderPass, Result,
+    GpuInstanceData, GpuLight, GpuMaterial, GpuScene, GpuTimingAvailability, RenderGraph,
+    RenderPass, RenderPassTiming, RenderTimingSnapshot, Result,
 };
 pub use libhelio::{LightType, Movability, ShadowQuality, SkyActor, VolumetricClouds};
 

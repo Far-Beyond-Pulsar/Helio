@@ -324,6 +324,17 @@ pub struct GpuShadowMatrixBuffer(pub GrowableBuffer<GpuShadowMatrix>);
 pub struct GpuIndirectBuffer(pub GrowableBuffer<DrawIndexedIndirectArgs>);
 /// Storage buffer for per-instance visibility bitmask (u32 per instance, 1=visible).
 pub struct GpuVisibilityBuffer(pub GrowableBuffer<u32>);
+/// GPU-written scratch buffer: for each draw-call group, the original instance
+/// slots that survived per-instance frustum culling, packed contiguously
+/// starting at that group's `first_instance` offset. Written by
+/// `IndirectDispatchPass`, read by `GBufferPass` (and any other pass drawing
+/// through the same grouped indirect buffer) in place of `instances[instance_index]`.
+pub struct GpuCompactedIndicesBuffer(pub GrowableBuffer<u32>);
+/// Second-stage compacted indices: surviving instance slots after BOTH
+/// frustum culling (IndirectDispatchPass) and Hi-Z occlusion culling
+/// (OcclusionCullPass). This is the buffer draw-consuming passes should
+/// actually read — it reflects the final, fully-culled instance set.
+pub struct GpuCompactedIndices2Buffer(pub GrowableBuffer<u32>);
 
 impl GpuInstanceBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
@@ -504,6 +515,54 @@ impl std::ops::Deref for GpuVisibilityBuffer {
     }
 }
 impl std::ops::DerefMut for GpuVisibilityBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl GpuCompactedIndicesBuffer {
+    pub fn new(device: Arc<wgpu::Device>) -> Self {
+        Self(GrowableBuffer::new(
+            device,
+            4096,
+            // COPY_SRC: OcclusionCullPass copies this straight through to
+            // compacted_indices_2 on frame 0, when no Hi-Z pyramid exists yet.
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            "Compacted Instance Indices Buffer",
+        ))
+    }
+}
+
+impl std::ops::Deref for GpuCompactedIndicesBuffer {
+    type Target = GrowableBuffer<u32>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for GpuCompactedIndicesBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl GpuCompactedIndices2Buffer {
+    pub fn new(device: Arc<wgpu::Device>) -> Self {
+        Self(GrowableBuffer::new(
+            device,
+            4096,
+            wgpu::BufferUsages::STORAGE,
+            "Compacted Instance Indices Buffer 2",
+        ))
+    }
+}
+
+impl std::ops::Deref for GpuCompactedIndices2Buffer {
+    type Target = GrowableBuffer<u32>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for GpuCompactedIndices2Buffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

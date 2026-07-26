@@ -64,7 +64,7 @@ impl super::super::Scene {
     ///     groups: GroupMask::NONE,       // Always visible
     /// })?;
     /// ```
-    pub(in crate::scene) fn insert_virtual_object(
+    pub fn insert_virtual_object(
         &mut self,
         desc: VirtualObjectDescriptor,
     ) -> Result<VirtualObjectId> {

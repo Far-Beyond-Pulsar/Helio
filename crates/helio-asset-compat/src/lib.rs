@@ -14,7 +14,6 @@ mod texture_loader;
 
 use helio::MeshId;
 use helio::{LightId, MaterialId, MultiMeshId, ObjectId, Renderer, SectionedMeshUpload, TextureId};
-use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
 
@@ -31,6 +30,12 @@ pub use scene_converter::{
 use std::path::Path;
 
 /// Configuration for asset loading
+/// Re-exports of the Solid3D configurator types, so hosts can build import
+/// configurator UIs and value sets without depending on `solid-rs` directly.
+pub use solid_rs::configurator::{
+    OptionField, OptionKind, OptionValue, OptionValues, OptionsSchema,
+};
+
 #[derive(Debug, Clone)]
 pub struct LoadConfig {
     /// Flip UV Y-axis (1.0 - v)
@@ -71,6 +76,23 @@ impl LoadConfig {
     pub fn with_import_scale(mut self, scale: glam::Vec3) -> Self {
         self.import_scale = scale;
         self
+    }
+
+    /// Derive a `LoadConfig` from configurator [`OptionValues`], honouring the
+    /// keys this conversion layer understands (`flip_uv_v`, and `import_scale`
+    /// or `unit_scale`). Remaining keys are handled by the loader itself.
+    pub fn from_option_values(values: &solid_rs::configurator::OptionValues) -> Self {
+        use solid_rs::configurator::keys;
+        let scale = values
+            .get("import_scale")
+            .or_else(|| values.get("unit_scale"))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0) as f32;
+        Self {
+            flip_uv_y: values.bool_or(keys::FLIP_UV_V, false),
+            merge_meshes: false,
+            import_scale: glam::Vec3::splat(scale),
+        }
     }
 }
 
@@ -137,6 +159,68 @@ pub fn load_scene_file_with_config<P: AsRef<Path>>(
         .unwrap_or_else(|| PathBuf::from("."));
 
     // Convert to Helio structures
+    convert_scene(&solid_scene, &base_dir, &config)
+}
+
+/// Build the loader registry used for asset import (shared by the configured and
+/// unconfigured load paths).
+fn import_registry() -> solid_rs::registry::Registry {
+    let mut registry = solid_rs::registry::Registry::new();
+    registry.register_loader(solid_fbx::FbxLoader);
+    registry.register_loader(solid_gltf::GltfLoader);
+    registry.register_loader(solid_obj::ObjLoader);
+    registry.register_loader(solid_usd::UsdLoader); // supports usda/usdc/usdz
+    registry
+}
+
+/// Returns the import-options [`OptionsSchema`] advertised by the loader for the
+/// file extension `ext` (without leading dot), for driving a configurator UI.
+/// Returns `None` if no bundled loader handles that extension.
+pub fn options_schema_for_extension(ext: &str) -> Option<OptionsSchema> {
+    import_registry().options_schema_for_extension(ext)
+}
+
+/// Load a 3D scene file using configurator [`OptionValues`] and convert it to
+/// Helio structures. Mirrors [`load_scene_file_with_config`] but sources its
+/// options from a configurator value set (see [`options_schema_for_extension`]).
+pub fn load_scene_file_with_values<P: AsRef<Path>>(
+    path: P,
+    values: &OptionValues,
+) -> Result<ConvertedScene> {
+    let path = path.as_ref();
+
+    let extension = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .ok_or_else(|| AssetError::UnsupportedFormat("File has no extension".to_string()))?;
+
+    log::info!(
+        "Loading 3D model with configurator values: {} (.{})",
+        path.display(),
+        extension
+    );
+
+    let registry = import_registry();
+    let solid_scene = registry
+        .load_file_configured(path, values)
+        .map_err(AssetError::Solid)?;
+
+    log::info!(
+        "Loaded SolidRS scene '{}' - {} meshes, {} materials, {} lights",
+        solid_scene.name,
+        solid_scene.meshes.len(),
+        solid_scene.materials.len(),
+        solid_scene.lights.len()
+    );
+
+    let base_dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Honour the conversion-layer keys (uv flip, scale) during conversion; the
+    // loader has already honoured the ones it understands.
+    let config = LoadConfig::from_option_values(values);
     convert_scene(&solid_scene, &base_dir, &config)
 }
 
@@ -415,4 +499,34 @@ pub struct SceneAsset {
     pub skin_ids: Vec<SkinId>,
     /// Available animation clip names
     pub animation_names: Vec<String>,
+}
+
+#[cfg(test)]
+mod configurator_tests {
+    use super::{options_schema_for_extension, LoadConfig, OptionValue, OptionValues};
+    use solid_rs::configurator::keys;
+
+    #[test]
+    fn bundled_loaders_expose_configurator_schemas() {
+        for extension in ["fbx", "gltf", "obj", "usd"] {
+            let schema = options_schema_for_extension(extension)
+                .unwrap_or_else(|| panic!("missing schema for .{extension}"));
+            assert!(
+                schema.fields.iter().any(|field| field.key == keys::FLIP_UV_V),
+                ".{extension} schema omitted the shared UV option"
+            );
+        }
+    }
+
+    #[test]
+    fn configurator_values_map_to_conversion_config() {
+        let mut values = OptionValues::new();
+        values.set(keys::FLIP_UV_V, OptionValue::Bool(true));
+        values.set("import_scale", OptionValue::Float(0.01));
+
+        let config = LoadConfig::from_option_values(&values);
+
+        assert!(config.flip_uv_y);
+        assert_eq!(config.import_scale, glam::Vec3::splat(0.01));
+    }
 }

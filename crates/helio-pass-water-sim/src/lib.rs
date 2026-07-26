@@ -548,6 +548,12 @@ impl RenderPass for WaterSimPass {
             self.front = !self.front;
         }
 
+        // ---- 3 & 4. Wave propagation + normal recomputation ------------------
+        // Both steps only feed the caustics projection (step 5) and surface
+        // rendering (step 7), which are already gated on water presence below
+        // — with zero water volumes/hitboxes in the scene, nothing ever reads
+        // the heightfield these steps produce, so simulating it is pure waste.
+        if ctx.resources.water_volume_count > 0 || ctx.resources.water_hitbox_count > 0 {
         // ---- 3. Wave propagation (2 steps per frame) ------------------------
         for i in 0..2u32 {
             let src: &wgpu::TextureView = if self.front {
@@ -677,6 +683,7 @@ impl RenderPass for WaterSimPass {
             pass.draw(0..6, 0..1);
             drop(pass);
             self.front = !self.front;
+        }
         }
 
         // ---- 5. Caustics projection ------------------------------------------
