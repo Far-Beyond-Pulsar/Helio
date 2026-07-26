@@ -11,7 +11,7 @@ use helio_core::{
     DebugViewDescriptor, GpuInstanceData, PassContext, PrepareContext, RenderPass,
     Result as HelioResult,
 };
-use libhelio::VG_CULL_MESHLETS_PER_WORK_ITEM;
+use libhelio::{GpuVgObject, GpuVgWorkItem, VG_CULL_MESHLETS_PER_WORK_ITEM};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // VirtualGeometryPass
@@ -792,7 +792,6 @@ impl RenderPass for VirtualGeometryPass {
             ctx.write_buffer(&self.meshlet_buf, 0, vg.meshlets);
             ctx.write_buffer(&self.object_buf, 0, vg.objects);
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
-            ctx.write_buffer(&self.work_item_buf, 0, vg.work_items);
 
             let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
             let materials = ctx.scene.materials.as_slice();
@@ -855,6 +854,44 @@ impl RenderPass for VirtualGeometryPass {
                 bytemuck::cast_slice(&self.instance_cull_scratch),
             );
             self.last_instance_version = vg.instance_version;
+        }
+
+        // Per-frame: sort work items by instance camera distance so the cull
+        // shader processes near meshlets first — draws are emitted in indirect
+        // buffer order, giving approximate front-to-back execution and
+        // maximising early-Z kills.
+        {
+            let cam_pos = ctx.scene.camera.position();
+            let instances: &[GpuInstanceData] = bytemuck::cast_slice(vg.instances);
+            let objects: &[GpuVgObject] = bytemuck::cast_slice(vg.objects);
+            let work_items: &[GpuVgWorkItem] = bytemuck::cast_slice(vg.work_items);
+
+            if !work_items.is_empty() && !objects.is_empty() && !instances.is_empty() {
+                let mut sorted_work_items: Vec<GpuVgWorkItem> = work_items.to_vec();
+                sorted_work_items.sort_by(|a, b| {
+                    let obj_a = &objects[a.object_index as usize];
+                    let inst_a = &instances[obj_a.instance_index as usize];
+                    let obj_b = &objects[b.object_index as usize];
+                    let inst_b = &instances[obj_b.instance_index as usize];
+
+                    let dx_a = inst_a.model[12] - cam_pos[0];
+                    let dy_a = inst_a.model[13] - cam_pos[1];
+                    let dz_a = inst_a.model[14] - cam_pos[2];
+                    let da = dx_a * dx_a + dy_a * dy_a + dz_a * dz_a;
+
+                    let dx_b = inst_b.model[12] - cam_pos[0];
+                    let dy_b = inst_b.model[13] - cam_pos[1];
+                    let dz_b = inst_b.model[14] - cam_pos[2];
+                    let db = dx_b * dx_b + dy_b * dy_b + dz_b * dz_b;
+
+                    da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                });
+                ctx.write_buffer(
+                    &self.work_item_buf,
+                    0,
+                    bytemuck::cast_slice(&sorted_work_items),
+                );
+            }
         }
 
         if self.last_object_count == 0
