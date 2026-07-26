@@ -34,6 +34,7 @@
 //!
 //! ```rust,no_run
 //! # use helio_core::profiling::GpuProfiler;
+//! # fn example(device: &wgpu::Device, queue: &wgpu::Queue, mut encoder: &mut wgpu::CommandEncoder) {
 //! let mut profiler = GpuProfiler::new(&device, &queue);
 //!
 //! // Write start timestamp
@@ -43,6 +44,7 @@
 //!
 //! // Write end timestamp
 //! profiler.end_pass(&mut encoder, "ShadowPass");
+//! # }
 //! ```
 
 /// GPU profiler using timestamp queries.
@@ -65,11 +67,13 @@
 ///
 /// ```rust,no_run
 /// # use helio_core::profiling::GpuProfiler;
+/// # fn example(device: &wgpu::Device, queue: &wgpu::Queue, mut encoder: &mut wgpu::CommandEncoder) {
 /// let mut profiler = GpuProfiler::new(&device, &queue);
 ///
 /// profiler.begin_pass(&mut encoder, "ShadowPass");
 /// // GPU commands...
 /// profiler.end_pass(&mut encoder, "ShadowPass");
+/// # }
 /// ```
 use std::{
     collections::VecDeque,
@@ -132,7 +136,9 @@ impl GpuProfiler {
     ///
     /// ```rust,no_run
     /// # use helio_core::profiling::GpuProfiler;
+    /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// let profiler = GpuProfiler::new(&device, &queue);
+    /// # }
     /// ```
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
         // write_timestamp on a command encoder requires BOTH TIMESTAMP_QUERY and
@@ -218,9 +224,11 @@ impl GpuProfiler {
     ///
     /// ```rust,no_run
     /// # use helio_core::profiling::GpuProfiler;
+    /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// # let mut profiler = GpuProfiler::new(&device, &queue);
     /// # let mut encoder = device.create_command_encoder(&Default::default());
     /// profiler.begin_pass(&mut encoder, "ShadowPass");
+    /// # }
     /// ```
     pub fn begin_pass(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         if let Some(ref query_set) = self.query_set {
@@ -254,9 +262,11 @@ impl GpuProfiler {
     ///
     /// ```rust,no_run
     /// # use helio_core::profiling::GpuProfiler;
+    /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// # let mut profiler = GpuProfiler::new(&device, &queue);
     /// # let mut encoder = device.create_command_encoder(&Default::default());
     /// profiler.end_pass(&mut encoder, "ShadowPass");
+    /// # }
     /// ```
     pub fn end_pass(&mut self, encoder: &mut wgpu::CommandEncoder, _name: &'static str) {
         if let Some(ref query_set) = self.query_set {

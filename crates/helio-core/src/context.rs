@@ -48,6 +48,15 @@
 //!         "MyPass"
 //!     }
 //!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
+//!
 //!     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 //!         // Access render target and depth buffer
 //!         let target = ctx.target;
@@ -58,16 +67,18 @@
 //!         // let mesh_buffer = ctx.scene.meshes.buffer();
 //!
 //!         // Record GPU commands with automatic profiling
-//!         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-//!             label: Some("MyPass"),
-//!             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+//!         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
 //!                 view: target,
 //!                 resolve_target: None,
+//!                 depth_slice: None,
 //!                 ops: wgpu::Operations {
 //!                     load: wgpu::LoadOp::Load,
 //!                     store: wgpu::StoreOp::Store,
 //!                 },
-//!             })],
+//!             })];
+//!         let descriptor = wgpu::RenderPassDescriptor {
+//!             label: Some("MyPass"),
+//!             color_attachments: &color_attachments,
 //!             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
 //!                 view: depth,
 //!                 depth_ops: Some(wgpu::Operations {
@@ -78,7 +89,9 @@
 //!             }),
 //!             timestamp_writes: None,
 //!             occlusion_query_set: None,
-//!         });
+//!             multiview_mask: None,
+//!         };
+//!         let mut pass = ctx.begin_render_pass(&descriptor);
 //!
 //!         pass.set_pipeline(&self.pipeline);
 //!         pass.draw(0..3, 0..1);
@@ -131,6 +144,15 @@ use crate::{Profiler, SceneResources};
 ///         "MyPass"
 ///     }
 ///
+///     fn render_pass_descriptor<'a>(
+///         &'a self,
+///         _: &'a wgpu::TextureView,
+///         _: &'a wgpu::TextureView,
+///         _: &'a helio_core::FrameResources<'a>,
+///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+///         None
+///     }
+///
 ///     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 ///         // Access render targets
 ///         let target = ctx.target;
@@ -141,20 +163,24 @@ use crate::{Profiler, SceneResources};
 ///         let (width, height) = (ctx.width, ctx.height);
 ///
 ///         // Record GPU commands (automatic profiling)
-///         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-///             label: Some("MyPass"),
-///             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+///         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
 ///                 view: target,
 ///                 resolve_target: None,
+///                 depth_slice: None,
 ///                 ops: wgpu::Operations {
 ///                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
 ///                     store: wgpu::StoreOp::Store,
 ///                 },
-///             })],
+///             })];
+///         let descriptor = wgpu::RenderPassDescriptor {
+///             label: Some("MyPass"),
+///             color_attachments: &color_attachments,
 ///             depth_stencil_attachment: None,
 ///             timestamp_writes: None,
 ///             occlusion_query_set: None,
-///         });
+///             multiview_mask: None,
+///         };
+///         let mut pass = ctx.begin_render_pass(&descriptor);
 ///
 ///         pass.set_pipeline(&self.pipeline);
 ///         pass.draw(0..3, 0..1);
@@ -267,17 +293,15 @@ impl<'a> PassContext<'a> {
 }
 
 impl<'a> PassContext<'a> {
-    /// Begins a render pass with automatic GPU profiling.
+    /// Begins a self-managed render pass.
     ///
-    /// This is a wrapper around `encoder.begin_render_pass()` that automatically
-    /// injects GPU timestamp queries for profiling. **Always use this instead of
-    /// calling `encoder.begin_render_pass()` directly.**
+    /// This is the fallback path for a pass whose
+    /// [`RenderPass::render_pass_descriptor`](crate::RenderPass::render_pass_descriptor)
+    /// returns `None`. Preferred graphics passes return a descriptor and record
+    /// into the executor-provided active render pass instead.
     ///
-    /// # Profiling
-    ///
-    /// - GPU timestamps are written at the start and end of the pass
-    /// - Results are available for external telemetry systems
-    /// - Zero overhead when `profiling` feature is disabled
+    /// The graph still records the pass-level profiling scope; this helper only
+    /// opens the underlying wgpu render pass.
     ///
     /// # Example
     ///
@@ -286,21 +310,31 @@ impl<'a> PassContext<'a> {
     /// # struct MyPass;
     /// # impl RenderPass for MyPass {
     /// #     fn name(&self) -> &'static str { "MyPass" }
+    /// #     fn render_pass_descriptor<'a>(
+    /// #         &'a self,
+    /// #         _: &'a wgpu::TextureView,
+    /// #         _: &'a wgpu::TextureView,
+    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-    ///     let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-    ///         label: Some("MyPass"),
-    ///         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+    ///     let color_attachments = [Some(wgpu::RenderPassColorAttachment {
     ///             view: ctx.target,
     ///             resolve_target: None,
+    ///             depth_slice: None,
     ///             ops: wgpu::Operations {
     ///                 load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
     ///                 store: wgpu::StoreOp::Store,
     ///             },
-    ///         })],
+    ///         })];
+    ///     let descriptor = wgpu::RenderPassDescriptor {
+    ///         label: Some("MyPass"),
+    ///         color_attachments: &color_attachments,
     ///         depth_stencil_attachment: None,
     ///         timestamp_writes: None,
     ///         occlusion_query_set: None,
-    ///     });
+    ///         multiview_mask: None,
+    ///     };
+    ///     let mut pass = ctx.begin_render_pass(&descriptor);
     ///
     ///     // Record GPU commands
     ///     // pass.set_pipeline(&self.pipeline);
@@ -345,6 +379,12 @@ impl<'a> PassContext<'a> {
     /// # struct MyComputePass { pipeline: wgpu::ComputePipeline }
     /// # impl RenderPass for MyComputePass {
     /// #     fn name(&self) -> &'static str { "MyComputePass" }
+    /// #     fn render_pass_descriptor<'a>(
+    /// #         &'a self,
+    /// #         _: &'a wgpu::TextureView,
+    /// #         _: &'a wgpu::TextureView,
+    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
     ///     let mut pass = ctx.begin_compute_pass(&wgpu::ComputePassDescriptor {
     ///         label: Some("MyComputePass"),
@@ -407,10 +447,19 @@ impl<'a> PassContext<'a> {
 ///         "MyPass"
 ///     }
 ///
+///     fn render_pass_descriptor<'a>(
+///         &'a self,
+///         _: &'a wgpu::TextureView,
+///         _: &'a wgpu::TextureView,
+///         _: &'a helio_core::FrameResources<'a>,
+///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+///         None
+///     }
+///
 ///     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
 ///         // Upload per-frame uniforms
 ///         let uniforms = MyUniforms {
-///             time: ctx.frame as f32,
+///             time: ctx.frame_num as f32,
 ///             resolution: [1920, 1080],
 ///         };
 ///         ctx.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -419,20 +468,24 @@ impl<'a> PassContext<'a> {
 ///
 ///     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 ///         // Use uploaded uniforms
-///         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-///             label: Some("MyPass"),
-///             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+///         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
 ///                 view: ctx.target,
 ///                 resolve_target: None,
+///                 depth_slice: None,
 ///                 ops: wgpu::Operations {
 ///                     load: wgpu::LoadOp::Load,
 ///                     store: wgpu::StoreOp::Store,
 ///                 },
-///             })],
+///             })];
+///         let descriptor = wgpu::RenderPassDescriptor {
+///             label: Some("MyPass"),
+///             color_attachments: &color_attachments,
 ///             depth_stencil_attachment: None,
 ///             timestamp_writes: None,
 ///             occlusion_query_set: None,
-///         });
+///             multiview_mask: None,
+///         };
+///         let mut pass = ctx.begin_render_pass(&descriptor);
 ///
 ///         pass.set_pipeline(&self.pipeline);
 ///         // pass.set_bind_group(0, &self.bind_group, &[]);

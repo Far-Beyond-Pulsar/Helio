@@ -87,22 +87,35 @@
 //!         "MyPass"
 //!     }
 //!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
+//!
 //!     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 //!         // PassContext provides zero-copy access to scene resources
-//!         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-//!             label: Some("MyPass"),
-//!             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+//!         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
 //!                 view: ctx.target,
 //!                 resolve_target: None,
+//!                 depth_slice: None,
 //!                 ops: wgpu::Operations {
 //!                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
 //!                     store: wgpu::StoreOp::Store,
 //!                 },
-//!             })],
+//!             })];
+//!         let descriptor = wgpu::RenderPassDescriptor {
+//!             label: Some("MyPass"),
+//!             color_attachments: &color_attachments,
 //!             depth_stencil_attachment: None,
 //!             timestamp_writes: None,
 //!             occlusion_query_set: None,
-//!         });
+//!             multiview_mask: None,
+//!         };
+//!         let mut pass = ctx.begin_render_pass(&descriptor);
 //!
 //!         pass.set_pipeline(&self.pipeline);
 //!         // Access scene resources via ctx.scene
@@ -147,6 +160,15 @@
 //!         "MyPass" // Used for profiling labels
 //!     }
 //!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
+//!
 //!     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
 //!         // Optional: Upload per-frame uniforms (called before execute)
 //!         // ctx.queue.write_buffer(&self.uniform_buffer, 0, data);
@@ -175,6 +197,7 @@
 //! use helio_core::GpuScene;
 //! use std::sync::Arc;
 //!
+//! # fn example(device: wgpu::Device, queue: wgpu::Queue) {
 //! let mut scene = GpuScene::new(
 //!     Arc::new(device),
 //!     Arc::new(queue),
@@ -192,6 +215,7 @@
 //! let resources = scene.resources();
 //! // resources.lights.buffer() -> &wgpu::Buffer
 //! // resources.meshes.buffer() -> &wgpu::Buffer
+//! # }
 //! ```
 //!
 //! **Key Points:**
@@ -207,23 +231,36 @@
 //! ```rust,no_run
 //! use helio_core::{RenderPass, PassContext, Result};
 //!
-//! struct MyPass;
+//! struct MyPass {
+//!     pipeline: wgpu::RenderPipeline,
+//! }
 //!
 //! impl RenderPass for MyPass {
 //!     fn name(&self) -> &'static str { "MyPass" }
+//!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
 //!
 //!     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 //!         // CPU profiling: Automatic scope created by RenderGraph
 //!         // GPU profiling: Automatic timestamps via begin_render_pass
 //!
-//!         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
+//!         let descriptor = wgpu::RenderPassDescriptor {
 //!             label: Some("MyPass"), // Used for GPU timestamp label
 //!             // ...
 //! #            color_attachments: &[],
 //! #            depth_stencil_attachment: None,
 //! #            timestamp_writes: None,
 //! #            occlusion_query_set: None,
-//!         });
+//! #            multiview_mask: None,
+//!         };
+//!         let mut pass = ctx.begin_render_pass(&descriptor);
 //!
 //!         // GPU timestamps automatically inserted at begin/end
 //!         pass.set_pipeline(&self.pipeline);
@@ -231,12 +268,7 @@
 //!
 //!         Ok(())
 //!     }
-//! #    pipeline: wgpu::RenderPipeline,
 //! }
-//! #
-//! # impl MyPass {
-//! #     fn new(pipeline: wgpu::RenderPipeline) -> Self { Self { pipeline } }
-//! # }
 //! ```
 //!
 //! **Key Points:**
@@ -271,12 +303,14 @@
 //! use helio_core::{RenderGraph, GpuScene};
 //! use std::sync::Arc;
 //!
+//! # fn example(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) {
 //! let mut graph = RenderGraph::new(&device, &queue);
-//! let mut scene = GpuScene::new(Arc::new(device), Arc::new(queue));
+//! let mut scene = GpuScene::new(device.clone(), queue.clone());
 //!
 //! // scene.lights.add(light);
 //! scene.flush(); // Upload changes
 //! // graph.execute(&scene, &target, &depth);
+//! # }
 //! ```
 //!
 //! ## Feature Flags
@@ -308,6 +342,15 @@
 //! impl RenderPass for MyPass {
 //!     fn name(&self) -> &'static str { "MyPass" }
 //!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
+//!
 //!     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 //!         // Zero-copy: borrow GPU buffers from scene
 //!         // let light_buffer = ctx.scene.lights.buffer(); // &wgpu::Buffer
@@ -329,6 +372,7 @@
 //! use helio_core::GpuScene;
 //! use std::sync::Arc;
 //!
+//! # fn example(device: wgpu::Device, queue: wgpu::Queue) {
 //! let mut scene = GpuScene::new(Arc::new(device), Arc::new(queue));
 //!
 //! // Frame 1: Add lights (dirty = true)
@@ -342,6 +386,7 @@
 //! // Frame 3: Update one light (dirty = true)
 //! // scene.lights.update(light1_id, new_light);
 //! scene.flush(); // Uploads only changed data
+//! # }
 //! ```
 //!
 //! ### Automatic Profiling Pattern

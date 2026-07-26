@@ -47,6 +47,15 @@
 //!         "MyPass" // Used for profiling labels
 //!     }
 //!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
+//!
 //!     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 //!         // CPU scope created automatically by RenderGraph
 //!         // GPU timestamps injected automatically by begin_render_pass
@@ -58,6 +67,7 @@
 //! #            depth_stencil_attachment: None,
 //! #            timestamp_writes: None,
 //! #            occlusion_query_set: None,
+//! #            multiview_mask: None,
 //!         });
 //!
 //!         // GPU commands are automatically profiled
@@ -123,6 +133,7 @@ pub use gpu::{GpuProfiler, GpuTimestamp};
 /// ```rust,no_run
 /// use helio_core::Profiler;
 ///
+/// # fn example(device: &wgpu::Device, queue: &wgpu::Queue, mut encoder: &mut wgpu::CommandEncoder) {
 /// let mut profiler = Profiler::new(&device, &queue);
 ///
 /// // CPU profiling (RAII scope)
@@ -135,6 +146,7 @@ pub use gpu::{GpuProfiler, GpuTimestamp};
 /// profiler.begin_gpu_pass(&mut encoder, "GBufferPass");
 /// // ... GPU commands ...
 /// profiler.end_gpu_pass(&mut encoder, "GBufferPass");
+/// # }
 /// ```
 pub struct Profiler {
     cpu: CpuProfiler,
@@ -179,11 +191,13 @@ impl Profiler {
     ///
     /// ```rust,no_run
     /// # use helio_core::Profiler;
+    /// # fn example(device: &wgpu::Device, queue: &wgpu::Queue) {
     /// # let mut profiler = Profiler::new(&device, &queue);
     /// {
     ///     let _scope = profiler.scope("MyPass");
     ///     // ... CPU work ...
     /// } // ScopeGuard drops, timing recorded
+    /// # }
     /// ```
     pub fn scope(&mut self, name: &'static str) -> ScopeGuard {
         self.cpu.scope(name)
@@ -412,11 +426,14 @@ impl Profiler {
     ///
     /// ```rust,no_run
     /// # use helio_core::RenderGraph;
+    /// # use std::sync::Arc;
+    /// # fn example(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) {
     /// # let graph = RenderGraph::new(&device, &queue);
     /// let (pass_timings, total_cpu_ms, total_gpu_ms) = graph.profiler().export_timings();
     ///
     /// // Forward to custom telemetry system
     /// // for timing in &pass_timings { ... }
+    /// # }
     /// ```
     pub fn export_timings(&self) -> (Vec<PassTiming>, f32, f32) {
         if !self.enabled {

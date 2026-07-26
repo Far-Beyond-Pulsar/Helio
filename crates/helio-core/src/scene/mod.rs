@@ -30,6 +30,7 @@
 //! use helio_core::GpuScene;
 //! use std::sync::Arc;
 //!
+//! # fn example(device: wgpu::Device, queue: wgpu::Queue) {
 //! let mut scene = GpuScene::new(
 //!     Arc::new(device),
 //!     Arc::new(queue),
@@ -45,6 +46,7 @@
 //! // Passes receive zero-copy references
 //! let resources = scene.resources();
 //! // let light_buffer = resources.lights.buffer(); // &wgpu::Buffer
+//! # }
 //! ```
 
 mod gpu_scene;

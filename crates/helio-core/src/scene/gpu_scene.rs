@@ -51,6 +51,7 @@
 //! use helio_core::GpuScene;
 //! use std::sync::Arc;
 //!
+//! # fn example(device: wgpu::Device, queue: wgpu::Queue) {
 //! let mut scene = GpuScene::new(
 //!     Arc::new(device),
 //!     Arc::new(queue),
@@ -68,6 +69,7 @@
 //! let resources = scene.resources();
 //! // let light_buffer = resources.lights.buffer(); // &wgpu::Buffer
 //! // let mesh_buffer = resources.meshes.buffer();   // &wgpu::Buffer
+//! # }
 //! ```
 
 use crate::acceleration::{BlasManager, TlasManager};
@@ -125,6 +127,7 @@ use std::sync::Arc;
 /// use helio_core::GpuScene;
 /// use std::sync::Arc;
 ///
+/// # fn example(device: wgpu::Device, queue: wgpu::Queue) {
 /// let mut scene = GpuScene::new(
 ///     Arc::new(device),
 ///     Arc::new(queue),
@@ -141,6 +144,7 @@ use std::sync::Arc;
 /// // Frame 3: Update one light (dirty = true)
 /// // scene.lights.update(light_id, PointLight { position: [1.0, 5.0, 0.0], color: [1.0, 0.0, 0.0] });
 /// scene.flush(); // Uploads only changed data
+/// # }
 /// ```
 pub struct GpuScene {
     /// GPU device (shared across scene).
@@ -289,10 +293,12 @@ impl GpuScene {
     /// use helio_core::GpuScene;
     /// use std::sync::Arc;
     ///
+    /// # fn example(device: wgpu::Device, queue: wgpu::Queue) {
     /// let scene = GpuScene::new(
     ///     Arc::new(device),
     ///     Arc::new(queue),
     /// );
+    /// # }
     /// ```
     pub fn new(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
         let camera = GpuCameraBuffer::new(&device);
@@ -404,10 +410,12 @@ impl GpuScene {
     /// ```rust,no_run
     /// # use helio_core::GpuScene;
     /// # use std::sync::Arc;
+    /// # fn example(device: wgpu::Device, queue: wgpu::Queue) {
     /// # let scene = GpuScene::new(Arc::new(device), Arc::new(queue));
     /// let resources = scene.resources();
     /// // let light_buffer = resources.lights.buffer(); // &wgpu::Buffer
     /// // let mesh_buffer = resources.meshes.buffer();   // &wgpu::Buffer
+    /// # }
     /// ```
     pub fn resources(&self) -> SceneResources<'_> {
         SceneResources {
@@ -472,7 +480,13 @@ impl GpuScene {
     /// ```rust,no_run
     /// # use helio_core::{GpuScene, RenderGraph};
     /// # use std::sync::Arc;
-    /// # let mut scene = GpuScene::new(Arc::new(device), Arc::new(queue));
+    /// # fn example(
+    /// #     device: Arc<wgpu::Device>,
+    /// #     queue: Arc<wgpu::Queue>,
+    /// #     view: wgpu::TextureView,
+    /// #     depth_view: wgpu::TextureView,
+    /// # ) {
+    /// # let mut scene = GpuScene::new(device.clone(), queue.clone());
     /// # let mut graph = RenderGraph::new(&device, &queue);
     /// # let target = &view;
     /// # let depth = &depth_view;
@@ -485,6 +499,7 @@ impl GpuScene {
     ///
     /// // Execute render graph (passes read GPU buffers)
     /// // graph.execute(&scene, target, depth);
+    /// # }
     /// ```
     ///
     /// # Example: Dirty Tracking
