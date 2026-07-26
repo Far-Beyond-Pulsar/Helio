@@ -1,17 +1,18 @@
 use helio_pass_planetary_voxel::{
-    EXTRACTION_LAYOUT_WGSL, GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest,
-    GpuLookupQuery, GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
-    GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelCellOffset,
-    GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch, GpuTransvoxelEmissionCounters,
-    GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell, GpuTransvoxelTransitionCounters,
-    GpuTransvoxelTransitionDispatch, RESIDENCY_WGSL, SURFACE_DRAW_WGSL, SURFACE_PUBLISH_WGSL,
+    GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest, GpuLookupQuery,
+    GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform, GpuTerrainDraw,
+    GpuTerrainMeshlet, GpuTerrainMeshletBounds, GpuTerrainVertex, GpuTransvoxelCell,
+    GpuTransvoxelCellOffset, GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch,
+    GpuTransvoxelEmissionCounters, GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell,
+    GpuTransvoxelTransitionCounters, GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL,
+    RESIDENCY_WGSL, SURFACE_DRAW_WGSL, SURFACE_PUBLISH_WGSL, TERRAIN_MESHLET_BUILD_WGSL,
     TRANSVOXEL_CLASSIFY_WGSL, TRANSVOXEL_EMIT_WGSL, TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
-    TypeInner,
     front::wgsl,
     valid::{Capabilities, ValidationFlags, Validator},
+    TypeInner,
 };
 
 fn wgsl_struct(name: &str) -> (u32, Vec<(String, u32)>) {
@@ -59,6 +60,7 @@ fn planetary_surface_shaders_parse_and_validate() {
     for (name, source) in [
         ("surface publication", SURFACE_PUBLISH_WGSL),
         ("surface draw", SURFACE_DRAW_WGSL),
+        ("terrain meshlet build", TERRAIN_MESHLET_BUILD_WGSL),
     ] {
         let module = wgsl::parse_str(source)
             .unwrap_or_else(|error| panic!("planetary {name} WGSL must parse: {error}"));
@@ -84,8 +86,24 @@ fn planetary_surface_shaders_parse_and_validate() {
         )
     );
     assert_eq!(
-        wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuSurfaceState").0,
-        32
+        wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuSurfaceState"),
+        (
+            48,
+            vec![
+                ("generation_low".into(), 0),
+                ("generation_high".into(), 4),
+                ("active_bank".into(), 8),
+                ("valid".into(), 12),
+                ("regular_vertex_count".into(), 16),
+                ("regular_index_count".into(), 20),
+                ("transition_vertex_count".into(), 24),
+                ("transition_index_count".into(), 28),
+                ("regular_meshlet_count".into(), 32),
+                ("transition_meshlet_count".into(), 36),
+                ("_pad0".into(), 40),
+                ("_pad1".into(), 44),
+            ],
+        )
     );
     assert_eq!(wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuDrawPage").0, 48);
     assert_eq!(
@@ -166,6 +184,38 @@ fn extraction_outputs_and_counters_match_wgsl_exactly() {
                 ("generation_low".into(), 20),
                 ("generation_high".into(), 24),
                 ("_pad".into(), 28),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTerrainMeshletBounds>(), 16);
+    assert_eq!(size_of::<GpuTerrainMeshletBounds>(), 48);
+    assert_eq!(
+        wgsl_struct_in(EXTRACTION_LAYOUT_WGSL, "GpuTerrainMeshletBounds"),
+        (
+            48,
+            vec![
+                ("center".into(), 0),
+                ("radius".into(), 12),
+                ("cone_apex".into(), 16),
+                ("cone_cutoff".into(), 28),
+                ("cone_axis".into(), 32),
+                ("_pad".into(), 44),
+            ],
+        )
+    );
+
+    assert_eq!(align_of::<GpuTerrainDraw>(), 16);
+    assert_eq!(size_of::<GpuTerrainDraw>(), 16);
+    assert_eq!(
+        wgsl_struct_in(EXTRACTION_LAYOUT_WGSL, "GpuTerrainDraw"),
+        (
+            16,
+            vec![
+                ("page_slot".into(), 0),
+                ("meshlet_index".into(), 4),
+                ("surface_kind".into(), 8),
+                ("lod".into(), 12),
             ],
         )
     );

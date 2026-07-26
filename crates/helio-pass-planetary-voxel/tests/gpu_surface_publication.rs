@@ -19,6 +19,9 @@ struct GpuSurfaceJob {
     regular_max_indices: u32,
     transition_max_vertices: u32,
     transition_max_indices: u32,
+    regular_max_meshlets: u32,
+    transition_max_meshlets: u32,
+    _pad: [u32; 2],
 }
 
 #[repr(C, align(16))]
@@ -32,6 +35,9 @@ struct GpuSurfaceState {
     regular_index_count: u32,
     transition_vertex_count: u32,
     transition_index_count: u32,
+    regular_meshlet_count: u32,
+    transition_meshlet_count: u32,
+    _pad: [u32; 2],
 }
 
 #[repr(C, align(16))]
@@ -431,6 +437,8 @@ fn publication_is_atomic_generation_safe_and_visibility_gated() {
                 regular_index_count: 27,
                 transition_vertex_count: 13,
                 transition_index_count: 21,
+                regular_meshlet_count: 1,
+                transition_meshlet_count: 1,
                 ..Default::default()
             }
         );

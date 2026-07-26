@@ -1,24 +1,26 @@
 use crate::{
-    FrameUpdateOutcome, GpuResidencyError, GpuUploadOutcome, PlanetaryVoxelGpuConfig,
-    PlanetaryVoxelResidency, TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT, TransvoxelGpuError,
-    TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig, TransvoxelGpuTransitionExtractor,
-    TransvoxelGpuTransitionExtractorConfig, TransvoxelTransitionGpuError,
+    max_meshlets_for_indices, FrameUpdateOutcome, GpuResidencyError, GpuTerrainMeshlet,
+    GpuTerrainMeshletBounds, GpuUploadOutcome, PlanetaryVoxelGpuConfig, PlanetaryVoxelResidency,
+    TransvoxelGpuError, TransvoxelGpuExtractor, TransvoxelGpuExtractorConfig,
+    TransvoxelGpuTransitionExtractor, TransvoxelGpuTransitionExtractorConfig,
+    TransvoxelTransitionGpuError, TERRAIN_MESHLET_BUILD_WGSL,
+    TRANSITION_ALL_FACE_SLAB_SAMPLE_COUNT,
 };
 use bytemuck::{Pod, Zeroable};
 use helio_core::{
-    PassContext, PrepareContext, RenderPass, Result as HelioResult,
     graph::{ResourceBuilder, ResourceSize},
+    PassContext, PrepareContext, RenderPass, Result as HelioResult,
 };
 use helio_planet_voxel_core::{
     CellWord, ContractError, EvictOutcome, GpuPageMeta, PageEvict, PageUpload, PlanetFrameUniform,
-    PlanetId, PlanetPageKey, SourceGeneration, TRANSITION_FACE_MASK, UploadOutcome,
-    VisibilityOutcome, VisiblePageSet,
+    PlanetId, PlanetPageKey, SourceGeneration, UploadOutcome, VisibilityOutcome, VisiblePageSet,
+    TRANSITION_FACE_MASK,
 };
 use std::{
     collections::{BTreeSet, VecDeque},
     sync::{
-        Mutex,
         mpsc::{self, Receiver, TryRecvError},
+        Mutex,
     },
 };
 use wgpu::util::DeviceExt;
@@ -83,6 +85,32 @@ impl PlanetaryVoxelRenderConfig {
             u64::from(self.transition.max_indices),
             core::mem::size_of::<u32>() as u64,
         ])?;
+        let regular_meshlets = max_meshlets_for_indices(self.regular.max_indices);
+        let transition_meshlets = max_meshlets_for_indices(self.transition.max_indices);
+        let regular_meshlet_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(regular_meshlets),
+            core::mem::size_of::<GpuTerrainMeshlet>() as u64,
+        ])?;
+        let regular_meshlet_bounds_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(regular_meshlets),
+            core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
+        ])?;
+        let transition_meshlet_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(transition_meshlets),
+            core::mem::size_of::<GpuTerrainMeshlet>() as u64,
+        ])?;
+        let transition_meshlet_bounds_bytes = checked_product(&[
+            pages,
+            banks,
+            u64::from(transition_meshlets),
+            core::mem::size_of::<GpuTerrainMeshletBounds>() as u64,
+        ])?;
         let state_bytes = pages
             .checked_mul(core::mem::size_of::<GpuSurfaceState>() as u64)
             .ok_or(PlanetaryRenderError::ArithmeticOverflow)?;
@@ -106,6 +134,10 @@ impl PlanetaryVoxelRenderConfig {
             regular_index_bytes,
             transition_vertex_bytes,
             transition_index_bytes,
+            regular_meshlet_bytes,
+            regular_meshlet_bounds_bytes,
+            transition_meshlet_bytes,
+            transition_meshlet_bounds_bytes,
             state_bytes,
             draw_page_bytes,
             feedback_bytes,
@@ -130,6 +162,10 @@ impl PlanetaryVoxelRenderConfig {
             regular_index_bytes,
             transition_vertex_bytes,
             transition_index_bytes,
+            regular_meshlet_bytes,
+            regular_meshlet_bounds_bytes,
+            transition_meshlet_bytes,
+            transition_meshlet_bounds_bytes,
             state_bytes,
             draw_page_bytes,
             feedback_bytes,
@@ -150,6 +186,22 @@ impl PlanetaryVoxelRenderConfig {
                 true,
             ),
             ("transition index arena", plan.transition_index_bytes, true),
+            ("regular meshlet arena", plan.regular_meshlet_bytes, true),
+            (
+                "regular meshlet bounds",
+                plan.regular_meshlet_bounds_bytes,
+                true,
+            ),
+            (
+                "transition meshlet arena",
+                plan.transition_meshlet_bytes,
+                true,
+            ),
+            (
+                "transition meshlet bounds",
+                plan.transition_meshlet_bounds_bytes,
+                true,
+            ),
             ("surface state", plan.state_bytes, true),
             ("draw pages", plan.draw_page_bytes, true),
             ("surface feedback", plan.feedback_bytes, true),
@@ -184,6 +236,10 @@ pub struct PlanetarySurfaceAllocationPlan {
     pub regular_index_bytes: u64,
     pub transition_vertex_bytes: u64,
     pub transition_index_bytes: u64,
+    pub regular_meshlet_bytes: u64,
+    pub regular_meshlet_bounds_bytes: u64,
+    pub transition_meshlet_bytes: u64,
+    pub transition_meshlet_bounds_bytes: u64,
     pub state_bytes: u64,
     pub draw_page_bytes: u64,
     pub feedback_bytes: u64,
@@ -249,6 +305,8 @@ pub struct PlanetaryRenderDiagnostics {
     pub regular_indices: u64,
     pub transition_vertices: u64,
     pub transition_indices: u64,
+    pub regular_meshlets: u64,
+    pub transition_meshlets: u64,
     pub visible_regular_draws: u32,
     pub visible_transition_draws: u32,
     pub readback_failures: u64,
@@ -265,6 +323,9 @@ struct GpuSurfaceJob {
     regular_max_indices: u32,
     transition_max_vertices: u32,
     transition_max_indices: u32,
+    regular_max_meshlets: u32,
+    transition_max_meshlets: u32,
+    _pad: [u32; 2],
 }
 
 impl GpuSurfaceJob {
@@ -283,6 +344,9 @@ impl GpuSurfaceJob {
             regular_max_indices: config.regular.max_indices,
             transition_max_vertices: config.transition.max_vertices,
             transition_max_indices: config.transition.max_indices,
+            regular_max_meshlets: max_meshlets_for_indices(config.regular.max_indices),
+            transition_max_meshlets: max_meshlets_for_indices(config.transition.max_indices),
+            _pad: [0; 2],
         }
     }
 }
@@ -298,6 +362,9 @@ struct GpuSurfaceState {
     regular_index_count: u32,
     transition_vertex_count: u32,
     transition_index_count: u32,
+    regular_meshlet_count: u32,
+    transition_meshlet_count: u32,
+    _pad: [u32; 2],
 }
 
 #[repr(C, align(16))]
@@ -370,14 +437,22 @@ pub struct PlanetaryVoxelRenderPass {
     regular_index_arena: wgpu::Buffer,
     transition_vertex_arena: wgpu::Buffer,
     transition_index_arena: wgpu::Buffer,
+    regular_meshlet_arena: wgpu::Buffer,
+    regular_meshlet_bounds: wgpu::Buffer,
+    transition_meshlet_arena: wgpu::Buffer,
+    transition_meshlet_bounds: wgpu::Buffer,
     regular_indirect: wgpu::Buffer,
     transition_indirect: wgpu::Buffer,
     regular_copy_pipeline: wgpu::ComputePipeline,
     transition_copy_pipeline: wgpu::ComputePipeline,
+    regular_meshlet_build_pipeline: wgpu::ComputePipeline,
+    transition_meshlet_build_pipeline: wgpu::ComputePipeline,
     publish_pipeline: wgpu::ComputePipeline,
     visibility_pipeline: wgpu::ComputePipeline,
     regular_copy_bind_group: wgpu::BindGroup,
     transition_copy_bind_group: wgpu::BindGroup,
+    regular_meshlet_build_bind_group: wgpu::BindGroup,
+    transition_meshlet_build_bind_group: wgpu::BindGroup,
     publish_bind_group: wgpu::BindGroup,
     visibility_bind_group: wgpu::BindGroup,
     render_pipeline: wgpu::RenderPipeline,
@@ -485,6 +560,30 @@ impl PlanetaryVoxelRenderPass {
             plan.transition_index_bytes,
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDEX,
         );
+        let regular_meshlet_arena = create_buffer(
+            device,
+            "Planetary Regular Meshlet Arena",
+            plan.regular_meshlet_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let regular_meshlet_bounds = create_buffer(
+            device,
+            "Planetary Regular Meshlet Bounds",
+            plan.regular_meshlet_bounds_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let transition_meshlet_arena = create_buffer(
+            device,
+            "Planetary Transition Meshlet Arena",
+            plan.transition_meshlet_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let transition_meshlet_bounds = create_buffer(
+            device,
+            "Planetary Transition Meshlet Bounds",
+            plan.transition_meshlet_bounds_bytes,
+            wgpu::BufferUsages::STORAGE,
+        );
         let indirect_usage = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::INDIRECT
             | wgpu::BufferUsages::COPY_SRC
@@ -516,6 +615,14 @@ impl PlanetaryVoxelRenderPass {
             compute_pipeline(device, &publish_shader, "copy_regular_surface");
         let transition_copy_pipeline =
             compute_pipeline(device, &publish_shader, "copy_transition_surface");
+        let meshlet_build_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Planetary Terrain Meshlet Build Shader"),
+            source: wgpu::ShaderSource::Wgsl(TERRAIN_MESHLET_BUILD_WGSL.into()),
+        });
+        let regular_meshlet_build_pipeline =
+            compute_pipeline(device, &meshlet_build_shader, "build_regular");
+        let transition_meshlet_build_pipeline =
+            compute_pipeline(device, &meshlet_build_shader, "build_transition");
         let publish_pipeline = compute_pipeline(device, &publish_shader, "publish_surface");
         let visibility_pipeline = compute_pipeline(device, &publish_shader, "refresh_visibility");
         let regular_copy_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -546,6 +653,36 @@ impl PlanetaryVoxelRenderPass {
                 buffer_entry(12, &transition_index_arena),
             ],
         });
+        let regular_meshlet_build_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Planetary Regular Meshlet Build Bind Group"),
+                layout: &regular_meshlet_build_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, &job_buffer),
+                    buffer_entry(1, residency.metadata_buffer()),
+                    buffer_entry(2, &state_buffer),
+                    buffer_entry(3, regular_extractor.counters_buffer()),
+                    buffer_entry(4, &regular_vertex_arena),
+                    buffer_entry(5, &regular_index_arena),
+                    buffer_entry(6, &regular_meshlet_arena),
+                    buffer_entry(7, &regular_meshlet_bounds),
+                ],
+            });
+        let transition_meshlet_build_bind_group =
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Planetary Transition Meshlet Build Bind Group"),
+                layout: &transition_meshlet_build_pipeline.get_bind_group_layout(0),
+                entries: &[
+                    buffer_entry(0, &job_buffer),
+                    buffer_entry(1, residency.metadata_buffer()),
+                    buffer_entry(2, &state_buffer),
+                    buffer_entry(8, transition_extractor.counters_buffer()),
+                    buffer_entry(9, &transition_vertex_arena),
+                    buffer_entry(10, &transition_index_arena),
+                    buffer_entry(11, &transition_meshlet_arena),
+                    buffer_entry(12, &transition_meshlet_bounds),
+                ],
+            });
         let publish_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Planetary Surface Publish Bind Group"),
             layout: &publish_pipeline.get_bind_group_layout(0),
@@ -666,14 +803,22 @@ impl PlanetaryVoxelRenderPass {
             regular_index_arena,
             transition_vertex_arena,
             transition_index_arena,
+            regular_meshlet_arena,
+            regular_meshlet_bounds,
+            transition_meshlet_arena,
+            transition_meshlet_bounds,
             regular_indirect,
             transition_indirect,
             regular_copy_pipeline,
             transition_copy_pipeline,
+            regular_meshlet_build_pipeline,
+            transition_meshlet_build_pipeline,
             publish_pipeline,
             visibility_pipeline,
             regular_copy_bind_group,
             transition_copy_bind_group,
+            regular_meshlet_build_bind_group,
+            transition_meshlet_build_bind_group,
             publish_bind_group,
             visibility_bind_group,
             render_pipeline,
@@ -870,6 +1015,16 @@ impl PlanetaryVoxelRenderPass {
             .iter()
             .filter(|state| state.valid != 0)
             .map(|state| u64::from(state.transition_index_count))
+            .sum();
+        self.diagnostics_cache.regular_meshlets = states
+            .iter()
+            .filter(|state| state.valid != 0)
+            .map(|state| u64::from(state.regular_meshlet_count))
+            .sum();
+        self.diagnostics_cache.transition_meshlets = states
+            .iter()
+            .filter(|state| state.valid != 0)
+            .map(|state| u64::from(state.transition_meshlet_count))
             .sum();
         self.diagnostics_cache.visible_regular_draws = regular_draws
             .iter()
@@ -1166,6 +1321,22 @@ impl RenderPass for PlanetaryVoxelRenderPass {
                     .max(self.config.transition.max_indices)
                     .div_ceil(COPY_WORKGROUP_SIZE),
                 "Planetary Transition Surface Copy",
+            );
+            dispatch_compute(
+                compute,
+                &self.regular_meshlet_build_pipeline,
+                &self.regular_meshlet_build_bind_group,
+                max_meshlets_for_indices(self.config.regular.max_indices)
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Regular Meshlet Build",
+            );
+            dispatch_compute(
+                compute,
+                &self.transition_meshlet_build_pipeline,
+                &self.transition_meshlet_build_bind_group,
+                max_meshlets_for_indices(self.config.transition.max_indices)
+                    .div_ceil(COPY_WORKGROUP_SIZE),
+                "Planetary Transition Meshlet Build",
             );
             dispatch_compute(
                 compute,
