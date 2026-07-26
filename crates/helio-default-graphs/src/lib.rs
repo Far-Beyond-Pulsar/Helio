@@ -32,6 +32,7 @@ use helio_pass_ssr::SsrPass;
 use helio_pass_taa::TaaPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
+use helio_pass_voxel_mesh::VoxelMeshPass;
 use helio_pass_water_sim::WaterSimPass;
 
 use helio_core::RenderGraph;
