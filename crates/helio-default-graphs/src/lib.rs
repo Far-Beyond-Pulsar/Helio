@@ -440,6 +440,7 @@ fn build_default_graph_internal(
         DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
+    deferred_light_pass.set_env_reflections(config.enable_environment_reflections);
     graph.add_pass(Box::new(deferred_light_pass));
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(perf.clone())));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(perf.clone())));
@@ -627,6 +628,7 @@ fn build_fxaa_graph_internal(
         DeferredLightPass::new(device, queue, camera_buf, config.surface_format);
     deferred_light_pass.set_shadow_quality(config.shadow_quality, queue);
     deferred_light_pass.debug_mode = config.debug_mode;
+    deferred_light_pass.set_env_reflections(config.enable_environment_reflections);
     graph.add_pass(Box::new(deferred_light_pass));
     graph.add_pass(Box::new(PerfOverlayCostAnalyzerPass::new(Arc::clone(
         &perf,

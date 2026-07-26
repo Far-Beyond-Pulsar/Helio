@@ -54,12 +54,14 @@ struct Globals {
     // cube array, SSR and planar composites are all skipped, leaving indirect
     // specular at zero — direct light, ambient and RC GI still apply. SsrPass
     // and PlanarReflectionPass are not in the graph at all on those targets.
-    // Scalars, not vec3<u32>: a vec3 would align the tail to 16 and desync the
-    // struct from its Rust mirror.
     enable_reflections: u32,
+    // 0 disables the environment-cubemap indirect specular term specifically.
+    // The cubemap is the base reflection layer; SSR and planar only composite
+    // over it. Scalars, not vec3<u32>: a vec3 would align the tail to 16 and
+    // desync the struct from its Rust mirror.
+    enable_env_reflections: u32,
     _pad_0: u32,
     _pad_1: u32,
-    _pad_2: u32,
 }
 
 /// GpuLight (64 bytes, matches libhelio::GpuLight)
@@ -1225,9 +1227,12 @@ fn fs_main(in: VSOut) -> @location(0) vec4<f32> {
     // Parallax-corrected, influence-blended captures, falling back to the
     // skylight where none reach. Rougher surfaces pull from higher mips of the
     // pre-filtered chain, so reflection blur tracks roughness.
-    let env_sample   = sample_reflection_environment(world_pos, R, env_lod);
-    let env_brdf    = env_brdf_approx(NdV, roughness);
-    var spec_ind    = env_sample * (F0 * env_brdf.x + env_brdf.y);
+    var spec_ind = vec3<f32>(0.0);
+    if globals.enable_env_reflections != 0u {
+        let env_sample = sample_reflection_environment(world_pos, R, env_lod);
+        let env_brdf   = env_brdf_approx(NdV, roughness);
+        spec_ind = env_sample * (F0 * env_brdf.x + env_brdf.y);
+    }
 
     // ── SSR composite ────────────────────────────────────────────────────
     // Blend screen-space reflections over the cubemap fallback, weighted by

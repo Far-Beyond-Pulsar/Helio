@@ -31,8 +31,14 @@ struct DeferredGlobals {
     /// planar composites, so no reflection path contributes to indirect
     /// specular. Direct light, ambient and RC GI are unaffected.
     enable_reflections: u32,
+    /// 0 disables the environment-cubemap indirect specular term specifically.
+    ///
+    /// The cubemap is the *base* reflection layer — SSR and planar reflections
+    /// only composite on top of it — so gating those two passes does not remove
+    /// reflections from the image. This is the switch that does.
+    enable_env_reflections: u32,
     /// Pads the struct to a 16-byte multiple, as WGSL requires of a uniform.
-    _pad: [u32; 3],
+    _pad: [u32; 2],
 }
 
 pub struct DeferredLightPass {
@@ -79,6 +85,8 @@ pub struct DeferredLightPass {
     /// Linear clamp sampler for planar reflection blending.
     planar_sampler: wgpu::Sampler,
     pub debug_mode: u32,
+    /// Whether the environment cubemap contributes indirect specular.
+    pub enable_env_reflections: bool,
 }
 
 impl DeferredLightPass {
@@ -543,6 +551,7 @@ impl DeferredLightPass {
             fallback_planar_view,
             planar_sampler,
             debug_mode: 0,
+            enable_env_reflections: false,
         }
     }
 
@@ -550,6 +559,11 @@ impl DeferredLightPass {
     /// - 0  = normal PBR lighting
     /// - 10 = shadow factor greyscale (white=lit, black=shadowed)
     /// - 11 = raw shadow atlas depth slice 0 (unmipped, linear)
+    /// Enable/disable the environment-cubemap indirect specular term.
+    pub fn set_env_reflections(&mut self, enabled: bool) {
+        self.enable_env_reflections = enabled;
+    }
+
     pub fn set_debug_mode(&mut self, mode: u32) {
         self.debug_mode = mode;
     }
@@ -641,7 +655,8 @@ impl RenderPass for DeferredLightPass {
             num_tiles_x: ctx.width.div_ceil(16),
             reflection_capture_count: ctx.scene.reflection_captures.len() as u32,
             enable_reflections: helio_core::REFLECTIONS_SUPPORTED as u32,
-            _pad: [0; 3],
+            enable_env_reflections: self.enable_env_reflections as u32,
+            _pad: [0; 2],
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())

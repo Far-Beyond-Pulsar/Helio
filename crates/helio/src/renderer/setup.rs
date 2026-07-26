@@ -162,6 +162,7 @@ impl Renderer {
             shadow_face_capacity: config.shadow_face_capacity,
             enable_ssr: config.enable_ssr,
             enable_planar_reflections: config.enable_planar_reflections,
+            enable_environment_reflections: config.enable_environment_reflections,
             debug_mode: config.debug_mode,
             editor_mode: false,
             debug_state,
