@@ -1,17 +1,17 @@
 use helio_pass_planetary_voxel::{
-    GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest, GpuLookupQuery,
-    GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
+    EXTRACTION_LAYOUT_WGSL, GpuExtractionCounters, GpuExtractionRange, GpuExtractionRequest,
+    GpuLookupQuery, GpuLookupResult, GpuPageTableEntry, GpuResidencyCounters, GpuResidencyUniform,
     GpuTerrainMeshlet, GpuTerrainVertex, GpuTransvoxelCell, GpuTransvoxelCellOffset,
     GpuTransvoxelClassifyCounters, GpuTransvoxelDispatch, GpuTransvoxelEmissionCounters,
     GpuTransvoxelScanBlock, GpuTransvoxelTransitionCell, GpuTransvoxelTransitionCounters,
-    GpuTransvoxelTransitionDispatch, EXTRACTION_LAYOUT_WGSL, RESIDENCY_WGSL,
+    GpuTransvoxelTransitionDispatch, RESIDENCY_WGSL, SURFACE_DRAW_WGSL, SURFACE_PUBLISH_WGSL,
     TRANSVOXEL_CLASSIFY_WGSL, TRANSVOXEL_EMIT_WGSL, TRANSVOXEL_TRANSITION_GPU_WGSL,
 };
 use std::mem::{align_of, offset_of, size_of};
 use wgpu::naga::{
+    TypeInner,
     front::wgsl,
     valid::{Capabilities, ValidationFlags, Validator},
-    TypeInner,
 };
 
 fn wgsl_struct(name: &str) -> (u32, Vec<(String, u32)>) {
@@ -20,10 +20,10 @@ fn wgsl_struct(name: &str) -> (u32, Vec<(String, u32)>) {
 
 fn wgsl_struct_in(source: &str, name: &str) -> (u32, Vec<(String, u32)>) {
     let module = wgsl::parse_str(source)
-        .unwrap_or_else(|error| panic!("planetary residency WGSL must parse: {error}"));
+        .unwrap_or_else(|error| panic!("planetary WGSL contract must parse: {error}"));
     Validator::new(ValidationFlags::all(), Capabilities::all())
         .validate(&module)
-        .unwrap_or_else(|error| panic!("planetary residency WGSL must validate: {error}"));
+        .unwrap_or_else(|error| panic!("planetary WGSL contract must validate: {error}"));
     let (_, ty) = module
         .types
         .iter()
@@ -52,6 +52,46 @@ fn extraction_layout_parses_and_validates() {
     Validator::new(ValidationFlags::all(), Capabilities::all())
         .validate(&module)
         .expect("extraction WGSL validates");
+}
+
+#[test]
+fn planetary_surface_shaders_parse_and_validate() {
+    for (name, source) in [
+        ("surface publication", SURFACE_PUBLISH_WGSL),
+        ("surface draw", SURFACE_DRAW_WGSL),
+    ] {
+        let module = wgsl::parse_str(source)
+            .unwrap_or_else(|error| panic!("planetary {name} WGSL must parse: {error}"));
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("planetary {name} WGSL must validate: {error}"));
+    }
+
+    assert_eq!(
+        wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuSurfaceFeedback"),
+        (
+            32,
+            vec![
+                ("submitted_jobs".into(), 0),
+                ("published_jobs".into(), 4),
+                ("stale_rejections".into(), 8),
+                ("overflow_rejections".into(), 12),
+                ("incomplete_rejections".into(), 16),
+                ("_pad0".into(), 20),
+                ("_pad1".into(), 24),
+                ("_pad2".into(), 28),
+            ],
+        )
+    );
+    assert_eq!(
+        wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuSurfaceState").0,
+        32
+    );
+    assert_eq!(wgsl_struct_in(SURFACE_PUBLISH_WGSL, "GpuDrawPage").0, 48);
+    assert_eq!(
+        wgsl_struct_in(SURFACE_PUBLISH_WGSL, "DrawIndexedIndirectArgs").0,
+        20
+    );
 }
 
 #[test]

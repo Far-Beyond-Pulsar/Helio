@@ -6,9 +6,13 @@ description = "Bounded GPU residency and rendering path for Helio planetary voxe
 
 [dependencies]
 bytemuck = { workspace = true, features = ["derive"] }
+helio-core = { workspace = true }
 helio-planet-voxel-core = { workspace = true }
+libhelio = { workspace = true }
+log = { workspace = true }
 thiserror = { workspace = true }
 wgpu = { workspace = true }
 
 [dev-dependencies]
+glam = { workspace = true }
 pollster = { workspace = true }

@@ -3,9 +3,10 @@ use crate::{
     GpuResidencyUniform, PageTable, PageTableError, PlanetaryVoxelGpuConfig,
 };
 use helio_planet_voxel_core::{
-    AddressError, CellWord, ContractError, EvictOutcome, GpuPageMeta, GpuPageMetaError, PageEvict,
-    PageUpload, PlanetFrameUniform, PlanetId, PlanetPageKey, ResidentPageCache, SourceGeneration,
-    UploadOutcome, VisibilityOutcome, VisiblePageSet, PAGE_CELL_BYTES, PAGE_CELL_COUNT,
+    AddressError, CellWord, ContractError, EvictOutcome, GpuPageMeta, GpuPageMetaError,
+    PAGE_CELL_BYTES, PAGE_CELL_COUNT, PageEvict, PageUpload, PlanetFrameUniform, PlanetId,
+    PlanetPageKey, ResidentPageCache, SourceGeneration, UploadOutcome, VisibilityOutcome,
+    VisiblePageSet,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -93,6 +94,10 @@ impl PlanetaryVoxelResidency {
 
     pub fn planet_frame_count(&self) -> usize {
         self.frames.len()
+    }
+
+    pub fn planet_frame(&self, planet: PlanetId) -> Option<PlanetFrameUniform> {
+        self.frames.get(&planet).copied()
     }
 
     pub fn resource_stats(&self) -> GpuResourceStats {
