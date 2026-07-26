@@ -101,6 +101,9 @@ pub struct Renderer {
     pub(crate) shadow_quality: libhelio::ShadowQuality,
     pub(crate) shadow_atlas_size: u32,
     pub(crate) shadow_face_capacity: u32,
+    /// Preserved across graph rebuilds (resize) so an opt-in is not silently lost.
+    pub(crate) enable_ssr: bool,
+    pub(crate) enable_planar_reflections: bool,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
@@ -530,8 +533,8 @@ impl Renderer {
             perf_overlay_mode: PerfOverlayMode::Disabled,
             shadow_atlas_size: self.shadow_atlas_size,
             shadow_face_capacity: self.shadow_face_capacity,
-            enable_ssr: true,
-            enable_planar_reflections: false,
+            enable_ssr: self.enable_ssr,
+            enable_planar_reflections: self.enable_planar_reflections,
         }
     }
 }

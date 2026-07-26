@@ -37,6 +37,8 @@
 
 mod runner;
 pub use runner::launch;
+#[cfg(target_os = "android")]
+pub use runner::launch_android;
 
 use std::collections::HashSet;
 pub use winit::keyboard::KeyCode;
