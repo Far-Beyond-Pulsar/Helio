@@ -167,7 +167,7 @@ impl ApplicationHandler for App {
         );
 
         // ── Renderer ──────────────────────────────────────────────────────
-        let config = RendererConfig::new(sz.width, sz.height, format);
+        let config = RendererConfig::new(sz.width, sz.height, format).with_render_scale(1.0);
         let scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
