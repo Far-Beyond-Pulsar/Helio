@@ -863,7 +863,7 @@ impl RenderPass for VirtualGeometryPass {
             object_dispatch_width: self.object_dispatch_width,
             work_item_count: self.last_work_item_count,
             work_dispatch_width: self.work_dispatch_width,
-            _pad0: 0,
+            hiz_valid: (ctx.frame_num > 0) as u32,
             _pad1: 0,
             _pad2: 0,
         };

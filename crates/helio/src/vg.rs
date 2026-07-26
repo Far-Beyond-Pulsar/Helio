@@ -202,6 +202,22 @@ pub(crate) fn generate_lod_meshes(
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
 /// Weld byte-identical vertices without crossing any attribute discontinuity.
+///
+/// Walks `indices` rather than `vertices` so the output is compacted down to
+/// only the vertices this mesh actually references. This matters a lot when
+/// `vertices` is a large shared pool and `indices` addresses a small subset of
+/// it — e.g. a multi-section FBX import where every section's `VirtualMeshUpload`
+/// carries the *same* full shared vertex array but only its own slice of
+/// indices. Scanning `vertices` directly (the previous implementation) welded
+/// and kept the *entire* shared pool for every section regardless of how much
+/// of it that section used, which corrupted more than just memory: LOD1+
+/// simplification's accumulated error (`meshopt::simplify_scale_decoder`,
+/// called on this function's output) is computed from the vertex buffer's own
+/// extent, so a tiny section riding on a pool sized for the whole combined
+/// mesh got its error scaled against the wrong (much larger) extent — which
+/// then feeds directly into the GPU's screen-space LOD-selection threshold
+/// test, corrupting which LOD (if any) gets selected for that section on
+/// every instance, every frame.
 fn weld_exact_vertices(
     vertices: &[PackedVertex],
     indices: &[u32],
@@ -224,20 +240,20 @@ fn weld_exact_vertices(
     }
 
     let mut vertex_to_new: HashMap<[u32; 10], u32> = HashMap::new();
-    let mut remap = vec![0u32; vertices.len()];
     let mut welded_verts: Vec<PackedVertex> = Vec::new();
 
-    for (old_idx, v) in vertices.iter().enumerate() {
-        let key = vertex_key(v);
-        let new_idx = *vertex_to_new.entry(key).or_insert_with(|| {
-            let idx = welded_verts.len() as u32;
-            welded_verts.push(*v);
-            idx
-        });
-        remap[old_idx] = new_idx;
-    }
-
-    let welded_indices = indices.iter().map(|&i| remap[i as usize]).collect();
+    let welded_indices = indices
+        .iter()
+        .map(|&old_idx| {
+            let v = &vertices[old_idx as usize];
+            let key = vertex_key(v);
+            *vertex_to_new.entry(key).or_insert_with(|| {
+                let idx = welded_verts.len() as u32;
+                welded_verts.push(*v);
+                idx
+            })
+        })
+        .collect();
 
     (welded_verts, welded_indices)
 }
@@ -390,6 +406,47 @@ mod tests {
         assert_eq!(remapped[0], remapped[1]);
         assert_ne!(remapped[0], remapped[2]);
         assert_ne!(remapped[0], remapped[3]);
+    }
+
+    #[test]
+    fn weld_compacts_to_the_referenced_subset_of_a_shared_pool() {
+        // Mirrors a multi-section import: `vertices` is a large shared pool
+        // (as if it held every section of a combined mesh), but `indices`
+        // only addresses a tiny slice of it — one triangle's worth. The
+        // welded output must be sized to what's actually referenced, not to
+        // the whole incoming pool, or every downstream extent/scale
+        // computation (LOD error accumulation, in particular) gets corrupted
+        // by irrelevant geometry the caller never asked this mesh to include.
+        let mut vertices = Vec::new();
+        for i in 0..500u32 {
+            vertices.push(vertex(
+                [i as f32, 0.0, 0.0],
+                [0.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ));
+        }
+        // The one triangle this "section" actually uses, at the far end of
+        // the shared pool.
+        let tri = [497u32, 498, 499];
+
+        let (welded, remapped) = weld_exact_vertices(&vertices, &tri);
+
+        assert_eq!(
+            welded.len(),
+            3,
+            "welded output should contain only the 3 referenced vertices, \
+             not the full {}-vertex shared pool",
+            vertices.len()
+        );
+        assert_eq!(remapped.len(), 3);
+        // Positions must still be correct after compaction.
+        let positions: std::collections::HashSet<_> = welded
+            .iter()
+            .map(|v| v.position[0].to_bits())
+            .collect();
+        assert!(positions.contains(&497.0f32.to_bits()));
+        assert!(positions.contains(&498.0f32.to_bits()));
+        assert!(positions.contains(&499.0f32.to_bits()));
     }
 
     #[test]

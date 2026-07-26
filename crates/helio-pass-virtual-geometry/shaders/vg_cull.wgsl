@@ -95,7 +95,12 @@ struct CullUniforms {
     object_dispatch_width: u32,
     work_item_count:       u32,
     work_dispatch_width:   u32,
-    _pad0:                 u32,
+    // 0 on frame 0 (or right after a resize rebuilds the graph): the Hi-Z
+    // pyramid hasn't been built from any real depth yet, so its texture reads
+    // back as 0.0 — which this engine's near=0.0 depth convention would
+    // otherwise read as "everything is behind the (nonexistent) occluder",
+    // culling the whole visible scene for that one frame.
+    hiz_valid:             u32,
     _pad1:                 u32,
     _pad2:                 u32,
 }
@@ -183,9 +188,12 @@ fn cull_meshlet(meshlet_index: u32, instance_index: u32, lod_level: u32) {
 
     // Conservative max-depth Hi-Z test. Reject only when the complete
     // projected sphere is on-screen and all four footprint corners are behind
-    // existing depth at the chosen mip.
+    // existing depth at the chosen mip. Skipped entirely on the frame the
+    // pyramid isn't valid yet (see CullUniforms.hiz_valid) — otherwise an
+    // untouched depth texture reads back as 0.0 and every meshlet looks
+    // occluded.
     let cull_clip = camera.view_proj * vec4<f32>(center_ws, 1.0);
-    if cull_clip.w > 0.0 {
+    if cull_uni.hiz_valid != 0u && cull_clip.w > 0.0 {
         let cull_ndc = cull_clip.xyz / cull_clip.w;
         let cull_uv = vec2<f32>(cull_ndc.x * 0.5 + 0.5, cull_ndc.y * -0.5 + 0.5);
         let nearest_view_depth = cull_clip.w - world_radius;
