@@ -30,10 +30,19 @@
 //!         "MyCustomPass"
 //!     }
 //!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
+//!
 //!     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
 //!         // Upload per-frame uniforms (runs on CPU before GPU submission)
 //!         let uniforms = MyUniforms {
-//!             time: ctx.frame as f32,
+//!             time: ctx.frame_num as f32,
 //!         };
 //!         ctx.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 //!         Ok(())
@@ -41,20 +50,24 @@
 //!
 //!     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 //!         // Record GPU commands (profiling is automatic)
-//!         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-//!             label: Some("MyCustomPass"),
-//!             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+//!         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
 //!                 view: ctx.target,
 //!                 resolve_target: None,
+//!                 depth_slice: None,
 //!                 ops: wgpu::Operations {
 //!                     load: wgpu::LoadOp::Load,
 //!                     store: wgpu::StoreOp::Store,
 //!                 },
-//!             })],
+//!             })];
+//!         let descriptor = wgpu::RenderPassDescriptor {
+//!             label: Some("MyCustomPass"),
+//!             color_attachments: &color_attachments,
 //!             depth_stencil_attachment: None,
 //!             timestamp_writes: None,
 //!             occlusion_query_set: None,
-//!         });
+//!             multiview_mask: None,
+//!         };
+//!         let mut pass = ctx.begin_render_pass(&descriptor);
 //!
 //!         pass.set_pipeline(&self.pipeline);
 //!         // Access scene resources: ctx.scene.lights, ctx.scene.meshes, etc.
@@ -187,21 +200,34 @@ impl<T: std::any::Any> AsAny for T {
 ///         "SimplePass"
 ///     }
 ///
+///     fn render_pass_descriptor<'a>(
+///         &'a self,
+///         _: &'a wgpu::TextureView,
+///         _: &'a wgpu::TextureView,
+///         _: &'a helio_core::FrameResources<'a>,
+///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+///         None
+///     }
+///
 ///     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-///         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-///             label: Some("SimplePass"),
-///             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+///         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
 ///                 view: ctx.target,
 ///                 resolve_target: None,
+///                 depth_slice: None,
 ///                 ops: wgpu::Operations {
 ///                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
 ///                     store: wgpu::StoreOp::Store,
 ///                 },
-///             })],
+///             })];
+///         let descriptor = wgpu::RenderPassDescriptor {
+///             label: Some("SimplePass"),
+///             color_attachments: &color_attachments,
 ///             depth_stencil_attachment: None,
 ///             timestamp_writes: None,
 ///             occlusion_query_set: None,
-///         });
+///             multiview_mask: None,
+///         };
+///         let mut pass = ctx.begin_render_pass(&descriptor);
 ///
 ///         pass.set_pipeline(&self.pipeline);
 ///         pass.draw(0..3, 0..1);
@@ -227,6 +253,15 @@ impl<T: std::any::Any> AsAny for T {
 ///         "PassWithUniforms"
 ///     }
 ///
+///     fn render_pass_descriptor<'a>(
+///         &'a self,
+///         _: &'a wgpu::TextureView,
+///         _: &'a wgpu::TextureView,
+///         _: &'a helio_core::FrameResources<'a>,
+///     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+///         None
+///     }
+///
 ///     fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
 ///         // Upload per-frame data (called before execute)
 ///         let uniforms = MyUniforms {
@@ -237,20 +272,24 @@ impl<T: std::any::Any> AsAny for T {
 ///     }
 ///
 ///     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
-///         let mut pass = ctx.begin_render_pass(&wgpu::RenderPassDescriptor {
-///             label: Some("PassWithUniforms"),
-///             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+///         let color_attachments = [Some(wgpu::RenderPassColorAttachment {
 ///                 view: ctx.target,
 ///                 resolve_target: None,
+///                 depth_slice: None,
 ///                 ops: wgpu::Operations {
 ///                     load: wgpu::LoadOp::Load,
 ///                     store: wgpu::StoreOp::Store,
 ///                 },
-///             })],
+///             })];
+///         let descriptor = wgpu::RenderPassDescriptor {
+///             label: Some("PassWithUniforms"),
+///             color_attachments: &color_attachments,
 ///             depth_stencil_attachment: None,
 ///             timestamp_writes: None,
 ///             occlusion_query_set: None,
-///         });
+///             multiview_mask: None,
+///         };
+///         let mut pass = ctx.begin_render_pass(&descriptor);
 ///
 ///         pass.set_pipeline(&self.pipeline);
 ///         pass.set_bind_group(0, &self.bind_group, &[]);
@@ -307,10 +346,11 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
 
     /// Executes the pass by recording GPU commands.
     ///
-    /// This is the main entry point for rendering. Implementations should:
-    /// 1. Begin a render/compute pass using `ctx.begin_render_pass()` or `ctx.begin_compute_pass()`
-    /// 2. Set pipelines, bind groups, and issue draw/dispatch calls
-    /// 3. Access scene resources via `ctx.scene` (zero-copy)
+    /// This is the main entry point for recording work. Implementations should:
+    /// 1. Record into `ctx.active_render_pass_ptr()` when they return a render-pass descriptor,
+    ///    or begin their own render/compute pass for the fallback path.
+    /// 2. Set pipelines, bind groups, and issue draw/dispatch calls.
+    /// 3. Access scene resources via `ctx.scene` (zero-copy).
     ///
     /// # Parameters
     ///
@@ -354,11 +394,15 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
         None
     }
 
-    /// Declares the render pass this pass needs, or `None` if the pass only
-    /// performs compute dispatches.  Every pass **must** implement this —
-    /// there is no default.  Compute-only passes return `None`; render passes
-    /// return `Some(descriptor)` so the executor can manage the render pass
-    /// lifecycle (subpass chaining, store-op patching, tile-memory fusion).
+    /// Declares the render pass this pass needs. Every pass **must** implement
+    /// this — there is no default. Returning `Some(descriptor)` is the preferred
+    /// graphics path: the executor owns the render-pass lifetime and can apply
+    /// subpass chaining, store-op patching, and tile-memory fusion.
+    ///
+    /// Return `None` for compute-only passes and for legacy/self-managed graphics
+    /// passes that open their own pass through [`PassContext::begin_render_pass`].
+    /// The latter remains supported but cannot participate in executor-managed
+    /// render-pass chaining.
     fn render_pass_descriptor<'a>(
         &'a self,
         target: &'a wgpu::TextureView,
@@ -405,10 +449,16 @@ pub trait RenderPass: AsAny + MaybeSend + MaybeSync {
     /// # struct MyPass { uniform_buffer: wgpu::Buffer }
     /// # impl RenderPass for MyPass {
     /// #     fn name(&self) -> &'static str { "MyPass" }
+    /// #     fn render_pass_descriptor<'a>(
+    /// #         &'a self,
+    /// #         _: &'a wgpu::TextureView,
+    /// #         _: &'a wgpu::TextureView,
+    /// #         _: &'a helio_core::FrameResources<'a>,
+    /// #     ) -> Option<wgpu::RenderPassDescriptor<'a>> { None }
     /// #     fn execute(&mut self, _: &mut PassContext) -> Result<()> { Ok(()) }
     /// fn prepare(&mut self, ctx: &PrepareContext) -> Result<()> {
     ///     let uniforms = MyUniforms {
-    ///         time: ctx.frame as f32,
+    ///         time: ctx.frame_num as f32,
     ///     };
     ///     ctx.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     ///     Ok(())

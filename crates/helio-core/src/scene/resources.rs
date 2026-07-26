@@ -42,6 +42,15 @@
 //!         "MyPass"
 //!     }
 //!
+//!     fn render_pass_descriptor<'a>(
+//!         &'a self,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a wgpu::TextureView,
+//!         _: &'a helio_core::FrameResources<'a>,
+//!     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
+//!         None
+//!     }
+//!
 //!     fn execute(&mut self, ctx: &mut PassContext) -> Result<()> {
 //!         // Zero-copy access to scene resources
 //!         // let light_buffer = ctx.scene.lights.buffer();   // &wgpu::Buffer
@@ -93,6 +102,7 @@ use crate::component::ComponentRegistry;
 /// ```rust,no_run
 /// # use helio_core::{GpuScene, RenderPass, PassContext, Result};
 /// # use std::sync::Arc;
+/// # fn example(device: wgpu::Device, queue: wgpu::Queue) {
 /// # let scene = GpuScene::new(Arc::new(device), Arc::new(queue));
 /// // Get zero-copy references
 /// let resources = scene.resources();
@@ -101,6 +111,7 @@ use crate::component::ComponentRegistry;
 /// // let light_buffer = resources.lights.buffer();   // &wgpu::Buffer
 /// // let mesh_buffer = resources.meshes.buffer();    // &wgpu::Buffer
 /// // let material_buffer = resources.materials.buffer(); // &wgpu::Buffer
+/// # }
 /// ```
 ///
 /// # Future API
