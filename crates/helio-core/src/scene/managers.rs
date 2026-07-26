@@ -324,6 +324,12 @@ pub struct GpuShadowMatrixBuffer(pub GrowableBuffer<GpuShadowMatrix>);
 pub struct GpuIndirectBuffer(pub GrowableBuffer<DrawIndexedIndirectArgs>);
 /// Storage buffer for per-instance visibility bitmask (u32 per instance, 1=visible).
 pub struct GpuVisibilityBuffer(pub GrowableBuffer<u32>);
+/// GPU-written scratch buffer: for each draw-call group, the original instance
+/// slots that survived per-instance frustum culling, packed contiguously
+/// starting at that group's `first_instance` offset. Written by
+/// `IndirectDispatchPass`, read by `GBufferPass` (and any other pass drawing
+/// through the same grouped indirect buffer) in place of `instances[instance_index]`.
+pub struct GpuCompactedIndicesBuffer(pub GrowableBuffer<u32>);
 
 impl GpuInstanceBuffer {
     pub fn new(device: Arc<wgpu::Device>) -> Self {
@@ -504,6 +510,29 @@ impl std::ops::Deref for GpuVisibilityBuffer {
     }
 }
 impl std::ops::DerefMut for GpuVisibilityBuffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl GpuCompactedIndicesBuffer {
+    pub fn new(device: Arc<wgpu::Device>) -> Self {
+        Self(GrowableBuffer::new(
+            device,
+            4096,
+            wgpu::BufferUsages::STORAGE,
+            "Compacted Instance Indices Buffer",
+        ))
+    }
+}
+
+impl std::ops::Deref for GpuCompactedIndicesBuffer {
+    type Target = GrowableBuffer<u32>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for GpuCompactedIndicesBuffer {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }

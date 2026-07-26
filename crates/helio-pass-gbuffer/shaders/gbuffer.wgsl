@@ -113,6 +113,11 @@ struct LightmapAtlasRegion {
 @group(0) @binding(1) var<uniform>          globals:                Globals;
 @group(0) @binding(2) var<storage, read>    instance_data:          array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
+// Per-draw-call-group compacted original instance slots (see IndirectDispatchPass).
+// `instance_index` on an indirect draw ranges over the group's now-possibly-smaller
+// compacted count, so it must be redirected through this buffer before indexing
+// `instance_data` — it no longer equals the instance's real slot directly.
+@group(0) @binding(4) var<storage, read>    compacted_indices:      array<u32>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read>    material_textures:  array<MaterialTextureData>;
@@ -145,7 +150,7 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 
 @vertex
 fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
-    let inst       = instance_data[slot];
+    let inst       = instance_data[compacted_indices[slot]];
     let world_pos  = inst.transform * vec4<f32>(v.position, 1.0);
 
     // Normals transform by the inverse-transpose (stored in normal_mat).

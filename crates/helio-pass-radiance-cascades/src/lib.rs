@@ -45,6 +45,7 @@ pub struct RadianceCascadesPass {
     fb_bgl: wgpu::BindGroupLayout,
     rt_bgl: Option<wgpu::BindGroupLayout>,
     fb_bind_group: Option<wgpu::BindGroup>,
+    fb_bg_key: Option<(usize, usize, usize)>,
     uniform_buf: wgpu::Buffer,
     static_buf: Option<wgpu::Buffer>,
     use_rt: bool,
@@ -400,6 +401,7 @@ impl RadianceCascadesPass {
             fb_bgl,
             rt_bgl,
             fb_bind_group: None,
+            fb_bg_key: None,
             uniform_buf,
             static_buf,
             use_rt,
@@ -499,41 +501,52 @@ impl RadianceCascadesPass {
                     "RadianceCascades: missing rc_cascades texture".into(),
                 )
             })?;
-        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-
         let depth_view = ctx.depth;
         let pre_aa_view = match ctx.resources.pre_aa.get() {
             Some(v) => v,
             None => return Ok(()),
         };
 
-        self.fb_bind_group =
-            Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("RC Fallback BG"),
-                layout: &self.fb_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: self.uniform_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(depth_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::TextureView(pre_aa_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: ctx.scene.camera.as_entire_binding(),
-                    },
-                ],
-            }));
+        // `rc_cascades` is a persistent resource-pool texture that only
+        // changes on resize, and depth/pre_aa views are stable for the life
+        // of the frame graph — recreating the view + bind group every frame
+        // was pure CPU/driver overhead. Cache by resource identity instead.
+        let key = (
+            tex as *const wgpu::Texture as usize,
+            depth_view as *const wgpu::TextureView as usize,
+            pre_aa_view as *const wgpu::TextureView as usize,
+        );
+        if self.fb_bg_key != Some(key) {
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.fb_bind_group =
+                Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("RC Fallback BG"),
+                    layout: &self.fb_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: self.uniform_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(depth_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::TextureView(pre_aa_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: ctx.scene.camera.as_entire_binding(),
+                        },
+                    ],
+                }));
+            self.fb_bg_key = Some(key);
+        }
 
         let wg_x = ATLAS_W.div_ceil(WORKGROUP_SIZE_X);
         let wg_y = ATLAS_H.div_ceil(WORKGROUP_SIZE_Y);

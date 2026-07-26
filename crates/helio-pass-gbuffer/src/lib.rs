@@ -73,7 +73,7 @@ pub struct GBufferPass {
     bind_group_layout_1: wgpu::BindGroupLayout,
     /// Group 0: camera + globals + instance_data. Rebuilt when buffer pointers change.
     bind_group_0: Option<wgpu::BindGroup>,
-    bind_group_0_key: Option<(usize, usize)>,
+    bind_group_0_key: Option<(usize, usize, usize)>,
     /// Group 1: materials + material_textures + bindless texture arrays.
     bind_group_1: Option<wgpu::BindGroup>,
     bind_group_1_version: Option<u64>,
@@ -141,6 +141,18 @@ impl GBufferPass {
                     // binding 3: lightmap_atlas_regions (storage read, VERTEX)
                     wgpu::BindGroupLayoutEntry {
                         binding: 3,
+                        visibility: wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    // binding 4: compacted_indices (storage read, VERTEX) — per-group
+                    // surviving instance slots written by IndirectDispatchPass.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
                         visibility: wgpu::ShaderStages::VERTEX,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Storage { read_only: true },
@@ -395,7 +407,8 @@ impl RenderPass for GBufferPass {
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let key = (camera_ptr, instances_ptr);
+        let compacted_indices_ptr = ctx.scene.compacted_indices as *const _ as usize;
+        let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
         if self.bind_group_0_key != Some(key) {
             log::debug!("GBuffer: rebuilding bind group 0 (buffer pointers changed)");
             self.bind_group_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -417,6 +430,10 @@ impl RenderPass for GBufferPass {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: self.lightmap_atlas_regions_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: ctx.scene.compacted_indices.as_entire_binding(),
                     },
                 ],
             }));

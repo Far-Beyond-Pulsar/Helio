@@ -416,6 +416,10 @@ impl Renderer {
             frame_resources.baked_pvs.write(pvs, "Renderer");
         }
 
+        // Target clear + cull-stats clear are batched into a single command
+        // buffer/submit. Each `queue.submit()` is a real driver sync point
+        // (validation, fence work) — issuing two of them back-to-back for a
+        // full-screen clear and a 32-byte buffer clear was pure overhead.
         let clear = wgpu::Color {
             r: self.clear_color[0] as f64,
             g: self.clear_color[1] as f64,
@@ -445,15 +449,8 @@ impl Renderer {
                 multiview_mask: None,
             });
         }
+        clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
         self.queue.submit(std::iter::once(clear_encoder.finish()));
-
-        {
-            let mut clear_encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("CullStats Clear"),
-            });
-            clear_encoder.clear_buffer(&self.cull_stats_buffer, 0, Some(32));
-            self.queue.submit(std::iter::once(clear_encoder.finish()));
-        }
 
         let _graph_start = Instant::now();
         self.graph.execute_with_frame_resources(

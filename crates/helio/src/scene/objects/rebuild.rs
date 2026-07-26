@@ -57,6 +57,7 @@ impl super::super::Scene {
             self.gpu_scene.draw_calls.set_data(Vec::new());
             self.gpu_scene.indirect.set_data(Vec::new());
             self.gpu_scene.visibility.set_data(Vec::new());
+            self.gpu_scene.compacted_indices.set_data(Vec::new());
             self.gpu_scene.material_class_ranges.clear();
             return;
         }
@@ -171,11 +172,17 @@ impl super::super::Scene {
             n - draw_calls.len()
         );
 
+        // Sized only to keep the GPU buffer's capacity in step with `instances` —
+        // content is fully overwritten by IndirectDispatchPass every frame, so the
+        // zeros here are never read.
+        let compacted_indices_capacity = vec![0u32; instances.len()];
+
         self.gpu_scene.instances.set_data(instances);
         self.gpu_scene.aabbs.set_data(aabbs);
         self.gpu_scene.draw_calls.set_data(draw_calls);
         self.gpu_scene.indirect.set_data(indirect);
         self.gpu_scene.visibility.set_data(visibility);
+        self.gpu_scene.compacted_indices.set_data(compacted_indices_capacity);
         self.rebuild_shadow_partition_buffers();
     }
 

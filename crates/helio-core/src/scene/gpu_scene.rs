@@ -73,8 +73,8 @@
 use crate::acceleration::{BlasManager, TlasManager};
 use crate::component::ComponentRegistry;
 use crate::scene::managers::{
-    GpuAabbBuffer, GpuCameraBuffer, GpuDecalBuffer, GpuDrawCallBuffer, GpuIndirectBuffer,
-    GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
+    GpuAabbBuffer, GpuCameraBuffer, GpuCompactedIndicesBuffer, GpuDecalBuffer, GpuDrawCallBuffer,
+    GpuIndirectBuffer, GpuInstanceBuffer, GpuLightBuffer, GpuMaterialBuffer, GpuShadowMatrixBuffer,
     GpuVisibilityBuffer, GpuVoxelVolumeBuffer, GpuVoxelEditRing,
 };
 use crate::scene::managers::GrowableBuffer;
@@ -185,6 +185,10 @@ pub struct GpuScene {
     pub shadow_matrices: GpuShadowMatrixBuffer,
     pub indirect: GpuIndirectBuffer,
     pub visibility: GpuVisibilityBuffer,
+    /// Per-instance original-slot indices surviving GPU frustum culling, packed
+    /// per draw-call group. Written by IndirectDispatchPass, consumed by
+    /// GBufferPass in place of a direct `instances[instance_index]` lookup.
+    pub compacted_indices: GpuCompactedIndicesBuffer,
 
     // ── Shadow partition buffers (Unreal-style static/dynamic split) ──────────
     // NOTE: Both pass kinds use `instances` (the main transforms buffer) at binding 1.
@@ -297,6 +301,7 @@ impl GpuScene {
         let shadow_matrices = GpuShadowMatrixBuffer::new(device.clone());
         let indirect = GpuIndirectBuffer::new(device.clone());
         let visibility = GpuVisibilityBuffer::new(device.clone());
+        let compacted_indices = GpuCompactedIndicesBuffer::new(device.clone());
         let shadow_static_indirect = GpuIndirectBuffer::new(device.clone());
         let shadow_movable_indirect = GpuIndirectBuffer::new(device.clone());
         let voxel_volumes = GpuVoxelVolumeBuffer::new(device.clone());
@@ -349,6 +354,7 @@ impl GpuScene {
             shadow_matrices,
             indirect,
             visibility,
+            compacted_indices,
             shadow_static_indirect,
             shadow_movable_indirect,
             shadow_static_draw_count: 0,
@@ -410,6 +416,7 @@ impl GpuScene {
             shadow_matrices: self.shadow_matrices.buffer(),
             indirect: self.indirect.buffer(),
             visibility: self.visibility.buffer(),
+            compacted_indices: self.compacted_indices.buffer(),
             instance_count: self.instances.len() as u32,
             draw_count: self.draw_calls.len() as u32,
             light_count: self.lights.len() as u32,
@@ -499,6 +506,7 @@ impl GpuScene {
         self.shadow_matrices.flush(queue);
         self.indirect.flush(queue);
         self.visibility.flush(queue);
+        self.compacted_indices.flush(queue);
         self.shadow_static_indirect.flush(queue);
         self.shadow_movable_indirect.flush(queue);
         self.voxel_volumes.flush(queue);

@@ -127,6 +127,11 @@ pub struct SceneResources<'a> {
     pub shadow_matrices: &'a wgpu::Buffer,
     pub indirect: &'a wgpu::Buffer,
     pub visibility: &'a wgpu::Buffer,
+    /// Per-draw-call-group compacted original instance slots surviving GPU
+    /// frustum culling (see `IndirectDispatchPass`). Passes drawing through
+    /// `indirect`/`draw_calls` should index `instances` through this buffer
+    /// (`instances[compacted_indices[instance_index]]`) rather than directly.
+    pub compacted_indices: &'a wgpu::Buffer,
     pub instance_count: u32,
     pub draw_count: u32,
     pub light_count: u32,
