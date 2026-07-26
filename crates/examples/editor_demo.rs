@@ -961,6 +961,34 @@ impl ApplicationHandler for App {
                                 pass.set_enabled(state.debug_overlay_enabled);
                             }
                         }
+                        KeyCode::F3 => {
+                            let snap = state.renderer.timing_snapshot();
+                            eprintln!(
+                                "[timing] gen={} cpu_frame={} gpu_frame={:?} lag={:?} avail={:?} \
+                                 total_cpu={:?}ms total_gpu={:?}ms overflows={}",
+                                snap.generation,
+                                snap.cpu_frame_index,
+                                snap.gpu_frame_index,
+                                snap.gpu_lag_frames,
+                                snap.gpu_availability,
+                                snap.total_cpu_ms,
+                                snap.total_gpu_ms,
+                                snap.query_overflows,
+                            );
+                            let mut passes: Vec<_> = snap.passes.iter().collect();
+                            passes.sort_by(|a, b| {
+                                b.gpu_ms
+                                    .unwrap_or(0.0)
+                                    .partial_cmp(&a.gpu_ms.unwrap_or(0.0))
+                                    .unwrap()
+                            });
+                            for p in passes.iter().take(15) {
+                                eprintln!(
+                                    "  {:<28} cpu={:?}ms gpu={:?}ms",
+                                    p.name, p.cpu_ms, p.gpu_ms
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
