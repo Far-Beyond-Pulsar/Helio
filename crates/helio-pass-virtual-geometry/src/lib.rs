@@ -75,7 +75,27 @@ pub(crate) const INITIAL_INSTANCES: u64 = 256;
 /// At 36 bytes per slot (20-byte indirect command plus 16-byte draw metadata),
 /// this bounds the publication buffers to 9 MiB plus the two counters. Callers
 /// with a measured platform-specific budget can override it explicitly.
-pub const DEFAULT_MAX_PUBLISHED_MESHLETS: u32 = 262_144;
+/// Upper bound on how many meshlet draws a single frame can publish to the
+/// indirect/draw-metadata buffers. This is a genuine ceiling, not a
+/// pre-allocation size — `VirtualGeometryPass` starts small and grows these
+/// buffers toward this value only as scenes actually need it (see
+/// `prepare()` in `rendering.rs`), so raising it costs nothing for scenes
+/// that don't need the extra headroom.
+///
+/// 262_144 (the previous value) is nowhere near enough for any real scene
+/// with more than a couple hundred separate VG object instances: the budget
+/// is sized against `vg.max_draw_count`, the *worst-case* sum of every
+/// object's LOD0 meshlet count, which scales with instance count, not just
+/// unique mesh complexity. A scene with ~1200 instances of a ~90k-triangle,
+/// 7-section asset (the shipyard demo's shipping containers) needs
+/// ~2.5 million draw slots — once `cull_meshlet()`'s atomic slot counter
+/// (`vg_cull.wgsl`) exceeds the budget, every excess meshlet is silently
+/// rejected via the overflow counter, which looks exactly like the culling
+/// tests themselves are wrongly rejecting on-screen geometry: it isn't the
+/// visibility tests, it's the output buffer running out of room, and which
+/// meshlets lose that race is effectively fixed frame-to-frame for a static
+/// scene, so the drops look like a consistent, reproducible mis-cull.
+pub const DEFAULT_MAX_PUBLISHED_MESHLETS: u32 = 4_194_304;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VirtualGeometryBudget {
@@ -305,10 +325,10 @@ mod tests {
     }
 
     #[test]
-    fn default_publication_budget_is_nine_mib_plus_counters() {
+    fn default_publication_budget_is_144_mib_plus_counters() {
         let budget = VirtualGeometryBudget::default();
         assert_eq!(budget.max_published_meshlets(), DEFAULT_MAX_PUBLISHED_MESHLETS);
-        assert_eq!(budget.publication_bytes(), 9 * 1024 * 1024 + 44);
+        assert_eq!(budget.publication_bytes(), 144 * 1024 * 1024 + 44);
         assert_eq!(budget.clamp_draw_count(65_536), 65_536);
         assert_eq!(budget.clamp_draw_count(u32::MAX), DEFAULT_MAX_PUBLISHED_MESHLETS);
     }
