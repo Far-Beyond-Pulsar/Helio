@@ -146,6 +146,14 @@ pub(crate) fn generate_lod_meshes(
 
         // Build a progressive chain. Meshoptimizer recommends accumulating the
         // measured error when each level starts from the previous one.
+        //
+        // LockBorder pins vertices on the mesh's topological border (edges used
+        // by only one triangle) so they never move during simplification. Without
+        // it, non-closed/chunked assets (terrain tiles, modular pieces, anything
+        // meant to butt up against a neighbor) drift apart at their shared edges
+        // as soon as LOD1+ kicks in, opening visible gaps between what used to be
+        // flush geometry — the `locks` array above only handles manual per-vertex
+        // pins, it does nothing for border vertices on its own.
         let simplified_indices = meshopt::simplify_with_attributes_and_locks_decoder(
             &previous.indices,
             &previous.vertices,
@@ -155,7 +163,7 @@ pub(crate) fn generate_lod_meshes(
             &locks,
             target_indices,
             f32::MAX,
-            meshopt::SimplifyOptions::None,
+            meshopt::SimplifyOptions::LockBorder,
             Some(&mut relative_error),
         );
 
@@ -464,6 +472,65 @@ mod tests {
             assert!(pair[1].error >= pair[0].error);
             assert!(pair[1].indices.len() < pair[0].indices.len());
         }
+    }
+
+    #[test]
+    fn simplification_locks_border_vertices_so_chunks_stay_flush() {
+        // A perfectly flat, single-sided grid patch — every vertex has no back
+        // face, so the entire outer ring is on the mesh's topological border,
+        // and since the patch is flat, collapsing or sliding a border vertex
+        // along its (straight) edge costs zero measured error. That makes this
+        // the worst case for the bug: an *unlocked* simplifier has no reason
+        // not to remove border vertices first, since a flat rectangle's
+        // "ideal" zero-error simplification is just its two corner triangles.
+        // A convex-hull corner would incidentally survive that either way, so
+        // this checks a MID-EDGE border vertex instead — collinear along a
+        // straight boundary, contributing nothing to shape error, and exactly
+        // the kind of point a real terrain-tile/modular-piece boundary needs
+        // to keep in order to stay flush with whatever sits against that edge.
+        let side = 16usize;
+        let mut vertices = Vec::with_capacity(side * side);
+        for y in 0..side {
+            for x in 0..side {
+                vertices.push(vertex(
+                    [x as f32, y as f32, 0.0],
+                    [x as f32 / side as f32, y as f32 / side as f32],
+                    [0.0, 0.0, 1.0],
+                ));
+            }
+        }
+        let mut indices = Vec::new();
+        for y in 0..side - 1 {
+            for x in 0..side - 1 {
+                let i = (y * side + x) as u32;
+                indices.extend_from_slice(&[i, i + 1, i + side as u32 + 1]);
+                indices.extend_from_slice(&[i, i + side as u32 + 1, i + side as u32]);
+            }
+        }
+
+        // Midpoint of the y=0 edge: a straight-border vertex, not a corner.
+        let mid_edge = vertices[side / 2].position;
+
+        let lods = generate_lod_meshes(&vertices, &indices);
+        assert!(lods.len() >= 2, "test grid should yield more than one LOD");
+
+        let most_decimated = lods.last().expect("at least one LOD");
+        assert!(
+            most_decimated.indices.len() < indices.len(),
+            "most decimated LOD should actually be simplified"
+        );
+
+        let survives = most_decimated
+            .vertices
+            .iter()
+            .any(|v| v.position == mid_edge);
+        assert!(
+            survives,
+            "mid-edge border vertex {mid_edge:?} was moved/welded away by the \
+             most decimated LOD — border vertices are not being locked during \
+             simplification, which will crack this asset against any neighbor \
+             sharing that edge"
+        );
     }
 
     #[test]
