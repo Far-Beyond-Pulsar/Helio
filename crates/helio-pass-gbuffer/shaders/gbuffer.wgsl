@@ -113,10 +113,12 @@ struct LightmapAtlasRegion {
 @group(0) @binding(1) var<uniform>          globals:                Globals;
 @group(0) @binding(2) var<storage, read>    instance_data:          array<GpuInstanceData>;
 @group(0) @binding(3) var<storage, read>    lightmap_atlas_regions: array<LightmapAtlasRegion>;
-// Per-draw-call-group compacted original instance slots (see IndirectDispatchPass).
-// `instance_index` on an indirect draw ranges over the group's now-possibly-smaller
-// compacted count, so it must be redirected through this buffer before indexing
-// `instance_data` — it no longer equals the instance's real slot directly.
+// Per-draw-call-group compacted original instance slots, surviving both
+// frustum culling (IndirectDispatchPass) and Hi-Z occlusion culling
+// (OcclusionCullPass). `instance_index` on an indirect draw ranges over the
+// group's now-possibly-smaller compacted count, so it must be redirected
+// through this buffer before indexing `instance_data` — it no longer equals
+// the instance's real slot directly.
 @group(0) @binding(4) var<storage, read>    compacted_indices:      array<u32>;
 
 @group(1) @binding(0) var<storage, read>    materials:          array<GpuMaterial>;

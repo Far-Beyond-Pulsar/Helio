@@ -149,8 +149,9 @@ impl GBufferPass {
                         },
                         count: None,
                     },
-                    // binding 4: compacted_indices (storage read, VERTEX) — per-group
-                    // surviving instance slots written by IndirectDispatchPass.
+                    // binding 4: compacted_indices_2 (storage read, VERTEX) — per-group
+                    // surviving instance slots after frustum + Hi-Z occlusion culling
+                    // (IndirectDispatchPass, then OcclusionCullPass).
                     wgpu::BindGroupLayoutEntry {
                         binding: 4,
                         visibility: wgpu::ShaderStages::VERTEX,
@@ -407,7 +408,7 @@ impl RenderPass for GBufferPass {
         // Rebuild bind group 0 when camera or instances buffer pointers change (GrowableBuffer realloc).
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let compacted_indices_ptr = ctx.scene.compacted_indices as *const _ as usize;
+        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
         let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
         if self.bind_group_0_key != Some(key) {
             log::debug!("GBuffer: rebuilding bind group 0 (buffer pointers changed)");
@@ -433,7 +434,7 @@ impl RenderPass for GBufferPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: ctx.scene.compacted_indices.as_entire_binding(),
+                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
                     },
                 ],
             }));

@@ -1,19 +1,20 @@
 //! Hi-Z occlusion-culling pass.
 //!
 //! Runs AFTER IndirectDispatchPass (frustum cull) each frame, using the PREVIOUS
-//! frame's Hi-Z pyramid (temporal approach).  For each DRAW CALL the shader:
-//!  1. Tests the representative instance's bounding sphere against the Hi-Z buffer
-//!  2. Writes `indirect[slot * 5 + 1]` = 0 (occluded) or leaves the frustum-cull value
+//! frame's Hi-Z pyramid (temporal approach). One workgroup per draw-call group
+//! cooperatively Hi-Z-tests each instance that already survived frustum culling
+//! (read from `compacted_indices`) and compacts real survivors into
+//! `compacted_indices_2`, writing the final per-group visible count into
+//! `indirect[slot * 5 + 1]`. Downstream draws must read `compacted_indices_2`.
 //!
-//! Frame 0 is skipped since no Hi-Z pyramid exists yet.
+//! Frame 0 has no Hi-Z pyramid yet, so instead of testing anything it copies
+//! `compacted_indices` straight through to `compacted_indices_2` unchanged.
 //! Bind-group is rebuilt lazily when buffer pointers change (e.g. scene grows).
 
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 use helio_core::{PassContext, PrepareContext, RenderPass, Result as HelioResult};
-
-const WORKGROUP_SIZE: u32 = 64;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -52,8 +53,9 @@ pub struct OcclusionCullPass {
 
     /// Cached bind group, invalidated when buffer pointers change.
     bind_group:     Option<wgpu::BindGroup>,
-    /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view, static_hiz_sampler)
-    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize)>,
+    /// (camera, instances, draw_calls, indirect, hiz_view, static_hiz_view,
+    /// static_hiz_sampler, cull_stats_buf, compacted_indices, compacted_indices_2)
+    bind_group_key: Option<(usize, usize, usize, usize, usize, usize, usize, usize, usize, usize)>,
     screen_width:   u32,
     screen_height:  u32,
 }
@@ -221,6 +223,28 @@ impl OcclusionCullPass {
                     },
                     count: None,
                 },
+                // 10: compacted_indices (read-only) — frustum-stage survivors
+                wgpu::BindGroupLayoutEntry {
+                    binding:    10,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
+                // 11: compacted_indices_2 (read_write) — final surviving set
+                wgpu::BindGroupLayoutEntry {
+                    binding:    11,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty:                 wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size:   None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -317,13 +341,26 @@ impl RenderPass for OcclusionCullPass {
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
-        // Temporal Hi-Z: frame 0 has no valid pyramid yet — skip culling.
-        if ctx.frame_num == 0 {
+        let draw_count = ctx.scene.draw_count;
+        if draw_count == 0 {
             return Ok(());
         }
 
-        let draw_count = ctx.scene.draw_count;
-        if draw_count == 0 {
+        // Temporal Hi-Z: frame 0 has no valid pyramid yet — skip real occlusion
+        // testing, but downstream draws always read `compacted_indices_2`, so
+        // pass the frustum-culled list through unchanged instead of leaving it
+        // stale/uninitialized.
+        if ctx.frame_num == 0 {
+            let instance_count = ctx.scene.instance_count as u64;
+            if instance_count > 0 {
+                unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+                    ctx.scene.compacted_indices,
+                    0,
+                    ctx.scene.compacted_indices_2,
+                    0,
+                    instance_count * 4,
+                );
+            }
             return Ok(());
         }
 
@@ -347,6 +384,8 @@ impl RenderPass for OcclusionCullPass {
             static_hiz_view        as *const _ as usize,
             static_hiz_sampler     as *const _ as usize,
             &self.cull_stats_buf   as *const _ as usize,
+            ctx.scene.compacted_indices   as *const _ as usize,
+            ctx.scene.compacted_indices_2 as *const _ as usize,
         );
         if self.bind_group_key != Some(key) {
             self.bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -393,19 +432,28 @@ impl RenderPass for OcclusionCullPass {
                         binding:  9,
                         resource: self.cull_stats_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding:  10,
+                        resource: ctx.scene.compacted_indices.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding:  11,
+                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
+                    },
                 ],
             }));
             self.bind_group_key = Some(key);
         }
 
-        let wg = draw_count.div_ceil(WORKGROUP_SIZE);
+        // One workgroup per draw-call group — its 64 lanes cooperatively
+        // Hi-Z-test and compact that group's frustum survivors.
         let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label:            Some("OcclusionCull"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, self.bind_group.as_ref().unwrap(), &[]);
-        pass.dispatch_workgroups(wg, 1, 1);
+        pass.dispatch_workgroups(draw_count, 1, 1);
         Ok(())
     }
 }

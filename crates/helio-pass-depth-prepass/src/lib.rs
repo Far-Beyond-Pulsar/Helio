@@ -184,7 +184,7 @@ impl RenderPass for DepthPrepassPass {
         // Extract before the mutable encoder borrow.
         let camera_ptr = ctx.scene.camera as *const _ as usize;
         let instances_ptr = ctx.scene.instances as *const _ as usize;
-        let compacted_indices_ptr = ctx.scene.compacted_indices as *const _ as usize;
+        let compacted_indices_ptr = ctx.scene.compacted_indices_2 as *const _ as usize;
         let key = (camera_ptr, instances_ptr, compacted_indices_ptr);
         if self.bind_group_key != Some(key) {
             log::debug!("DepthPrepass: rebuilding bind group (buffer pointers changed)");
@@ -202,7 +202,7 @@ impl RenderPass for DepthPrepassPass {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: ctx.scene.compacted_indices.as_entire_binding(),
+                        resource: ctx.scene.compacted_indices_2.as_entire_binding(),
                     },
                 ],
             }));

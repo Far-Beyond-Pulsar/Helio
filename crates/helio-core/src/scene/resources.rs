@@ -132,6 +132,10 @@ pub struct SceneResources<'a> {
     /// `indirect`/`draw_calls` should index `instances` through this buffer
     /// (`instances[compacted_indices[instance_index]]`) rather than directly.
     pub compacted_indices: &'a wgpu::Buffer,
+    /// Final surviving instance slots after frustum + Hi-Z occlusion culling.
+    /// Consumers drawing through `indirect`/`draw_calls` should use this one,
+    /// not `compacted_indices` (which is frustum-only, an intermediate stage).
+    pub compacted_indices_2: &'a wgpu::Buffer,
     pub instance_count: u32,
     pub draw_count: u32,
     pub light_count: u32,
