@@ -403,22 +403,6 @@ impl WaterSimPass {
         let gbuffer_fallback_view =
             gbuffer_fallback_tex.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let depth_copy_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Water Depth Copy"),
-            size: wgpu::Extent3d {
-                width: internal_width.max(1),
-                height: internal_height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        let depth_copy_view = depth_copy_tex.create_view(&wgpu::TextureViewDescriptor::default());
-
         let blit_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water Blit BGL"),
             entries: &[
@@ -752,8 +736,6 @@ impl WaterSimPass {
             pre_aa_fallback_view,
             _gbuffer_fallback_tex: gbuffer_fallback_tex,
             gbuffer_fallback_view,
-            _depth_copy_tex: depth_copy_tex,
-            depth_copy_view,
             internal_width,
             internal_height,
             surface_format,

@@ -110,7 +110,7 @@ pub struct WaterSimPass {
     pub(crate) caustics_render_bgl: wgpu::BindGroupLayout,
     pub(crate) render_bgl: wgpu::BindGroupLayout,
     pub(crate) render_bg: Option<wgpu::BindGroup>,
-    pub(crate) render_bg_key: Option<(usize, usize, usize, usize)>,
+    pub(crate) render_bg_key: Option<(usize, usize, usize, usize, usize)>,
     pub(crate) normal_bg: Option<wgpu::BindGroup>,
     pub(crate) normal_bg_key: Option<usize>,
 
@@ -132,9 +132,6 @@ pub struct WaterSimPass {
 
     pub(crate) _gbuffer_fallback_tex: wgpu::Texture,
     pub(crate) gbuffer_fallback_view: wgpu::TextureView,
-
-    pub(crate) _depth_copy_tex: wgpu::Texture,
-    pub(crate) depth_copy_view: wgpu::TextureView,
 
     pub(crate) internal_width: u32,
     pub(crate) internal_height: u32,
@@ -203,23 +200,6 @@ impl WaterSimPass {
     }
 
     pub fn resize_internal(&mut self, device: &wgpu::Device, width: u32, height: u32) {
-        let depth_copy_tex = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Water Depth Copy"),
-            size: wgpu::Extent3d {
-                width: width.max(1),
-                height: height.max(1),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Depth32Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.depth_copy_view = depth_copy_tex.create_view(&wgpu::TextureViewDescriptor::default());
-        self._depth_copy_tex = depth_copy_tex;
-
         let tint_scratch_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Water Tint Scratch"),
             size: wgpu::Extent3d {
@@ -300,7 +280,6 @@ impl RenderPass for WaterSimPass {
             "gbuffer",
             "depth",
             "pre_aa",
-            "depth_texture",
             "water_hitbox_count",
             "water_hitboxes",
             "water_volume_count",
@@ -769,27 +748,18 @@ impl RenderPass for WaterSimPass {
                     &self.view_b
                 };
 
-                let src_depth_tex = ctx.resources.depth_texture.get().ok_or_else(|| {
-                    helio_core::Error::InvalidPassConfig(
-                        "Water SSR requires depth_texture in FrameResources".to_string(),
-                    )
-                })?;
-                unsafe { &mut *ctx.encoder_ptr }.copy_texture_to_texture(
-                    src_depth_tex.as_image_copy(),
-                    self._depth_copy_tex.as_image_copy(),
-                    wgpu::Extent3d {
-                        width: self.internal_width,
-                        height: self.internal_height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-
                 let gbuffer_normal_view = ctx
                     .resources
                     .gbuffer
                     .get()
                     .map(|gb| gb.normal)
                     .unwrap_or(&self.gbuffer_fallback_view);
+
+                // The scene depth buffer is bound directly and attached read-only
+                // (`depth_ops: None`), which is what lets the same texture be
+                // sampled and depth-tested against in one pass. The alternative
+                // was a full-resolution depth copy every frame.
+                let depth_view = ctx.depth;
 
                 let scene_key = scene_view as *const wgpu::TextureView as usize;
                 let gbuffer_key = gbuffer_normal_view as *const wgpu::TextureView as usize;
@@ -798,6 +768,7 @@ impl RenderPass for WaterSimPass {
                     sim_view as *const wgpu::TextureView as usize,
                     scene_key,
                     gbuffer_key,
+                    depth_view as *const wgpu::TextureView as usize,
                 );
                 if self.render_bg_key != Some(new_key) {
                     self.render_bg =
@@ -843,9 +814,7 @@ impl RenderPass for WaterSimPass {
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 8,
-                                    resource: wgpu::BindingResource::TextureView(
-                                        &self.depth_copy_view,
-                                    ),
+                                    resource: wgpu::BindingResource::TextureView(depth_view),
                                 },
                                 wgpu::BindGroupEntry {
                                     binding: 9,
@@ -863,7 +832,15 @@ impl RenderPass for WaterSimPass {
                 }
                 let render_bg = self.render_bg.as_ref().unwrap();
 
-                let depth_view = ctx.depth;
+                // Read-only depth: `depth_ops: None`. Both surface pipelines
+                // already have `depth_write_enabled: false`, so depth testing
+                // still works while the same texture stays sampleable in the
+                // bind group above.
+                let depth_attachment = wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: None,
+                    stencil_ops: None,
+                };
                 let color_attachments = [Some(wgpu::RenderPassColorAttachment {
                     view: water_output_view,
                     resolve_target: None,
@@ -885,16 +862,7 @@ impl RenderPass for WaterSimPass {
                         &wgpu::RenderPassDescriptor {
                             label: Some("Water Surface Above"),
                             color_attachments: &color_attachments,
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
+                            depth_stencil_attachment: Some(depth_attachment.clone()),
                             timestamp_writes: None,
                             occlusion_query_set: None,
                             multiview_mask: None,
@@ -913,16 +881,7 @@ impl RenderPass for WaterSimPass {
                         &wgpu::RenderPassDescriptor {
                             label: Some("Water Surface Under"),
                             color_attachments: &color_attachments,
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
+                            depth_stencil_attachment: Some(depth_attachment.clone()),
                             timestamp_writes: None,
                             occlusion_query_set: None,
                             multiview_mask: None,
