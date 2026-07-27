@@ -52,6 +52,9 @@ pub struct VirtualGeometryPass {
     pub(crate) instance_cull_buf: wgpu::Buffer,
     pub(crate) instance_cull_scratch: Vec<InstanceCullData>,
     pub(crate) work_item_buf: wgpu::Buffer,
+    /// Per-meshlet atomic emit claim flags (cleared each frame). Ensures each
+    /// meshlet is drawn at most once when multiple leaves fan in to one parent.
+    pub(crate) meshlet_emit_flags_buf: wgpu::Buffer,
     pub(crate) indirect_buf: wgpu::Buffer,
     pub(crate) draw_metadata_buf: wgpu::Buffer,
     pub(crate) draw_count_buf: wgpu::Buffer,
@@ -67,6 +70,7 @@ pub struct VirtualGeometryPass {
     pub(crate) last_meshlet_count: u32,
     pub(crate) last_object_count: u32,
     pub(crate) last_work_item_count: u32,
+    pub(crate) last_emit_flag_count: u32,
     pub(crate) object_dispatch_width: u32,
     pub(crate) work_dispatch_width: u32,
     // ── Software rasterizer (Phase 5) ─────────────────────────────────────
@@ -141,6 +145,7 @@ impl VirtualGeometryPass {
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
         let instance_cull_buf = Self::make_instance_cull_buf(device, INITIAL_INSTANCES);
         let work_item_buf = Self::make_work_item_buf(device, INITIAL_OBJECTS);
+        let meshlet_emit_flags_buf = Self::make_meshlet_emit_flags_buf(device, INITIAL_MESHLETS);
         let initial_publication_capacity =
             INITIAL_MESHLETS.min(u64::from(budget.max_published_meshlets()));
         let indirect_buf = Self::make_indirect_buf(device, initial_publication_capacity);
@@ -312,6 +317,17 @@ impl VirtualGeometryPass {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 14,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                // Per-meshlet global emit claim flags (atomic u32, cleared each frame).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 15,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
@@ -835,6 +851,7 @@ impl VirtualGeometryPass {
             instance_cull_buf,
             instance_cull_scratch: Vec::with_capacity(INITIAL_INSTANCES as usize),
             work_item_buf,
+            meshlet_emit_flags_buf,
             indirect_buf,
             draw_metadata_buf,
             draw_count_buf,
@@ -850,6 +867,7 @@ impl VirtualGeometryPass {
             last_meshlet_count: 0,
             last_object_count: 0,
             last_work_item_count: 0,
+            last_emit_flag_count: 0,
             object_dispatch_width: 1,
             work_dispatch_width: 1,
             // Software rasterizer fields
@@ -969,7 +987,7 @@ impl VirtualGeometryPass {
     fn make_object_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Object Buffer"),
-            size: capacity * 32,
+            size: capacity * std::mem::size_of::<GpuVgObject>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -988,6 +1006,15 @@ impl VirtualGeometryPass {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Work Item Buffer"),
             size: capacity * std::mem::size_of::<libhelio::GpuVgWorkItem>() as u64,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_meshlet_emit_flags_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Meshlet Emit Flags"),
+            size: capacity.max(1) * 4,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -1117,7 +1144,16 @@ impl RenderPass for VirtualGeometryPass {
 
             let meshlet_capacity = self.meshlet_buf.size() / 64;
             if (vg.meshlet_count as u64) > meshlet_capacity {
-                self.meshlet_buf = Self::make_meshlet_buf(ctx.device, vg.meshlet_count as u64 * 2);
+                let new_cap = vg.meshlet_count as u64 * 2;
+                self.meshlet_buf = Self::make_meshlet_buf(ctx.device, new_cap);
+                grew = true;
+            }
+            let emit_flags_capacity = self.meshlet_emit_flags_buf.size() / 4;
+            if (vg.emit_flag_count as u64) > emit_flags_capacity {
+                self.meshlet_emit_flags_buf = Self::make_meshlet_emit_flags_buf(
+                    ctx.device,
+                    (vg.emit_flag_count as u64 * 2).max(1),
+                );
                 grew = true;
             }
             let meshlet_vertex_capacity = self.meshlet_vertex_buf.size() / 48;
@@ -1136,7 +1172,8 @@ impl RenderPass for VirtualGeometryPass {
                 );
                 grew = true;
             }
-            let object_capacity = self.object_buf.size() / 32;
+            let object_stride = std::mem::size_of::<GpuVgObject>() as u64;
+            let object_capacity = self.object_buf.size() / object_stride;
             if (vg.object_count as u64) > object_capacity {
                 self.object_buf = Self::make_object_buf(ctx.device, vg.object_count as u64 * 2);
                 grew = true;
@@ -1194,6 +1231,7 @@ impl RenderPass for VirtualGeometryPass {
             self.last_meshlet_count = vg.meshlet_count;
             self.last_object_count = vg.object_count;
             self.last_work_item_count = vg.work_item_count;
+            self.last_emit_flag_count = vg.emit_flag_count;
         } else if vg.instance_version != self.last_instance_version {
             let start = vg.instance_dirty_start as usize;
             let count = vg.instance_dirty_count as usize;
@@ -1526,6 +1564,10 @@ impl RenderPass for VirtualGeometryPass {
                         binding: 14,
                         resource: self.visible_meshlet_count_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 15,
+                        resource: self.meshlet_emit_flags_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.cull_bind_group_hiz_key = Some(hiz_key);
@@ -1543,6 +1585,15 @@ impl RenderPass for VirtualGeometryPass {
         let max_draw_count = self.last_meshlet_count * 2;
 
         unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
+        // Clear per-object emit claim flags so each (object, meshlet) can be claimed once.
+        let emit_clear_bytes = (self.last_emit_flag_count as u64).saturating_mul(4);
+        if emit_clear_bytes > 0 {
+            unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(
+                &self.meshlet_emit_flags_buf,
+                0,
+                Some(emit_clear_bytes),
+            );
+        }
         if !self.use_count_indirect {
             unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.indirect_buf, 0, None);
         }

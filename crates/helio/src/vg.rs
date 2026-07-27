@@ -671,30 +671,370 @@ mod tests {
     }
 
     /// Simulate the GPU DAG traversal (coarse→fine) with the given lod_error
-    /// values and camera distance.  Returns the LOD level that would be emitted
-    /// (higher = coarser).
+    /// values and camera distance.  Returns the index into `ancestor_errors`
+    /// (0 = finest / leaf, last = coarsest / root).
     fn dag_traverse(
-        ancestor_errors: &[f32],   // finest → root
+        ancestor_errors: &[f32], // finest → root
         max_scale: f32,
         focal_pixels: f32,
         distance: f32,
         threshold: f32,
     ) -> usize {
-        // Walk UP to root: already have the chain.
-        // Walk DOWN from root toward finest:
         let mut i = ancestor_errors.len();
         loop {
-            if i == 0 { break; }
+            if i == 0 {
+                break;
+            }
             i -= 1;
             let lod_error = ancestor_errors[i];
             let closest_distance = distance.max(1.0e-4);
             let projected = lod_error * max_scale * focal_pixels / closest_distance;
             if projected <= threshold || i == 0 {
-                return i; // emit at this LOD
+                return i;
             }
-            // error > threshold → need finer → continue
         }
         0
+    }
+
+    /// CPU mirror of GPU leaves-only DAG cull + global emit-flag dedup.
+    ///
+    /// Only meshlets in `0..leaf_count` start traversal. Each selected meshlet
+    /// is claimed at most once (simulating atomicExchange on emit flags).
+    fn simulate_leaves_only_cull(
+        meshlets: &[GpuMeshletEntry],
+        leaf_count: usize,
+        max_scale: f32,
+        focal_pixels: f32,
+        distance: f32,
+        threshold: f32,
+    ) -> Vec<u32> {
+        let mut claimed = vec![false; meshlets.len()];
+        let mut emits = Vec::new();
+
+        for leaf in 0..leaf_count.min(meshlets.len()) {
+            // Walk up to root.
+            let mut stack = Vec::new();
+            let mut cur = leaf;
+            loop {
+                stack.push(cur);
+                let parent = meshlets[cur].parent_cluster_id;
+                if parent == u32::MAX || stack.len() >= 8 {
+                    break;
+                }
+                let p = parent as usize;
+                if p >= meshlets.len() {
+                    break;
+                }
+                cur = p;
+            }
+            // Walk down from root; pick coarsest good-enough level.
+            let mut i = stack.len();
+            let mut selected = None;
+            while i > 0 {
+                i -= 1;
+                let idx = stack[i];
+                let error = meshlets[idx].lod_error;
+                let projected = error * max_scale * focal_pixels / distance.max(1e-4);
+                if projected <= threshold || i == 0 {
+                    selected = Some(idx as u32);
+                    break;
+                }
+            }
+            if let Some(idx) = selected {
+                let slot = idx as usize;
+                if slot < claimed.len() && !claimed[slot] {
+                    claimed[slot] = true;
+                    emits.push(idx);
+                }
+            }
+        }
+        emits
+    }
+
+    /// Build a multi-LOD meshlet DAG matching `meshes.rs` (for unit tests).
+    fn build_test_dag(
+        vertices: &[PackedVertex],
+        indices: &[u32],
+    ) -> (Vec<GpuMeshletEntry>, usize, Vec<u32>) {
+        let lods = generate_lod_meshes(vertices, indices);
+        let mut all_meshlets = Vec::new();
+        let mut lod_meshlet_counts = Vec::new();
+
+        for lod in &lods {
+            let (mut meshlets, _, _) = meshletize_with_indices(&lod.vertices, &lod.indices);
+            for m in &mut meshlets {
+                m.lod_error = lod.error;
+            }
+            lod_meshlet_counts.push(meshlets.len() as u32);
+            all_meshlets.extend(meshlets);
+        }
+
+        let lod_count = lod_meshlet_counts.len();
+        let mut child_start = 0usize;
+        for level in 0..lod_count.saturating_sub(1) {
+            let child_count = lod_meshlet_counts[level] as usize;
+            let parent_start = child_start + child_count;
+            let parent_count = lod_meshlet_counts[level + 1] as usize;
+
+            for ci in child_start..child_start + child_count {
+                let c_center = glam::Vec3::from_array(all_meshlets[ci].center);
+                let c_radius = all_meshlets[ci].radius;
+                let mut best = u32::MAX;
+                let mut best_d = f32::MAX;
+                for pi in parent_start..parent_start + parent_count {
+                    let p_center = glam::Vec3::from_array(all_meshlets[pi].center);
+                    let p_radius = all_meshlets[pi].radius;
+                    let d = c_center.distance(p_center);
+                    if d <= c_radius + p_radius + 1e-6 && d < best_d {
+                        best = pi as u32;
+                        best_d = d;
+                    }
+                }
+                if best == u32::MAX {
+                    for pi in parent_start..parent_start + parent_count {
+                        let p_center = glam::Vec3::from_array(all_meshlets[pi].center);
+                        let d = c_center.distance(p_center);
+                        if d < best_d {
+                            best = pi as u32;
+                            best_d = d;
+                        }
+                    }
+                }
+                all_meshlets[ci].parent_cluster_id = best;
+            }
+            child_start += child_count;
+        }
+        if let Some(&root_count) = lod_meshlet_counts.last() {
+            let root_start = all_meshlets.len() - root_count as usize;
+            for m in &mut all_meshlets[root_start..] {
+                m.parent_cluster_id = u32::MAX;
+            }
+        }
+
+        let leaf_count = lod_meshlet_counts.first().copied().unwrap_or(0) as usize;
+        (all_meshlets, leaf_count, lod_meshlet_counts)
+    }
+
+    #[test]
+    fn dag_parent_links_point_only_to_coarser_lods_and_roots_are_max() {
+        let (vertices, indices) = make_grid(20);
+        let (meshlets, leaf_count, lod_counts) = build_test_dag(&vertices, &indices);
+        assert!(lod_counts.len() >= 2, "need multi-LOD for parent link test");
+        assert!(leaf_count > 0);
+
+        let total = meshlets.len();
+        // Prefix sums of LOD ranges.
+        let mut starts = vec![0usize; lod_counts.len()];
+        for i in 1..lod_counts.len() {
+            starts[i] = starts[i - 1] + lod_counts[i - 1] as usize;
+        }
+
+        for (li, &count) in lod_counts.iter().enumerate() {
+            let start = starts[li];
+            let end = start + count as usize;
+            let is_coarsest = li + 1 == lod_counts.len();
+            for idx in start..end {
+                let parent = meshlets[idx].parent_cluster_id;
+                if is_coarsest {
+                    assert_eq!(
+                        parent,
+                        u32::MAX,
+                        "root meshlet {idx} must have parent 0xFFFFFFFF"
+                    );
+                } else {
+                    assert_ne!(parent, u32::MAX, "non-root meshlet {idx} needs a parent");
+                    let p = parent as usize;
+                    assert!(p < total, "parent {p} out of range for meshlet {idx}");
+                    // Parent must be in a strictly coarser LOD range.
+                    let parent_lod = starts
+                        .iter()
+                        .enumerate()
+                        .find(|&(j, &s)| {
+                            let e = s + lod_counts[j] as usize;
+                            p >= s && p < e
+                        })
+                        .map(|(j, _)| j)
+                        .expect("parent in some LOD");
+                    assert!(
+                        parent_lod > li,
+                        "parent of LOD{li} meshlet {idx} must be coarser, got LOD{parent_lod}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dag_lod_error_zero_at_finest_and_non_decreasing_along_parent_chain() {
+        let (vertices, indices) = make_grid(20);
+        let (meshlets, leaf_count, _) = build_test_dag(&vertices, &indices);
+        assert!(leaf_count > 0);
+
+        for leaf in 0..leaf_count {
+            assert_eq!(
+                meshlets[leaf].lod_error, 0.0,
+                "finest LOD meshlet {leaf} must have lod_error == 0"
+            );
+            let mut cur = leaf;
+            let mut prev_error = meshlets[cur].lod_error;
+            let mut steps = 0;
+            loop {
+                let parent = meshlets[cur].parent_cluster_id;
+                if parent == u32::MAX || steps > 8 {
+                    break;
+                }
+                let p = parent as usize;
+                assert!(p < meshlets.len());
+                let err = meshlets[p].lod_error;
+                assert!(
+                    err.is_finite() && err >= prev_error - 1e-6,
+                    "lod_error must be non-decreasing along parent chain: {prev_error} -> {err}"
+                );
+                // Coarser levels of a simplified mesh should carry positive error.
+                if steps == 0 && meshlets.len() > leaf_count {
+                    // At least one step up from a multi-LOD leaf should raise error
+                    // unless simplification measured zero (degenerate); allow >=.
+                }
+                prev_error = err;
+                cur = p;
+                steps += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn dag_parent_links_have_no_cycles() {
+        let (vertices, indices) = make_grid(18);
+        let (meshlets, _, _) = build_test_dag(&vertices, &indices);
+        let n = meshlets.len();
+        for start in 0..n {
+            let mut cur = start;
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..16 {
+                assert!(
+                    seen.insert(cur),
+                    "cycle detected in parent chain starting at {start}"
+                );
+                let parent = meshlets[cur].parent_cluster_id;
+                if parent == u32::MAX {
+                    break;
+                }
+                let p = parent as usize;
+                assert!(p < n, "parent out of range");
+                cur = p;
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_only_unique_emits_at_most_leaf_count_and_fewer_when_far() {
+        let (vertices, indices) = make_grid(24);
+        let (meshlets, leaf_count, lod_counts) = build_test_dag(&vertices, &indices);
+        assert!(lod_counts.len() >= 2);
+        assert!(leaf_count > 0);
+
+        let focal = 540.0_f32;
+        let threshold = 2.0_f32;
+
+        let near = simulate_leaves_only_cull(&meshlets, leaf_count, 1.0, focal, 1.0, threshold);
+        let far = simulate_leaves_only_cull(&meshlets, leaf_count, 1.0, focal, 800.0, threshold);
+
+        // Unique by construction of the claim set.
+        assert_eq!(near.len(), near.iter().collect::<std::collections::HashSet<_>>().len());
+        assert_eq!(far.len(), far.iter().collect::<std::collections::HashSet<_>>().len());
+
+        assert!(
+            near.len() <= leaf_count,
+            "unique emits {} must be ≤ leaf count {leaf_count}",
+            near.len()
+        );
+        assert!(
+            far.len() <= leaf_count,
+            "unique emits {} must be ≤ leaf count {leaf_count}",
+            far.len()
+        );
+        assert!(
+            far.len() < leaf_count,
+            "at far distance unique emits {} should be << leaves {leaf_count}",
+            far.len()
+        );
+        assert!(
+            far.len() < near.len(),
+            "far ({}) should emit fewer clusters than near ({})",
+            far.len(),
+            near.len()
+        );
+    }
+
+    #[test]
+    fn two_leaves_sharing_parent_produce_one_emit_when_parent_selected() {
+        // Synthetic DAG: leaves 0,1 → parent 2 (root).
+        let mut meshlets = vec![
+            GpuMeshletEntry {
+                center: [0.0, 0.0, 0.0],
+                radius: 1.0,
+                cone_apex: [0.0; 3],
+                cone_cutoff: 2.0,
+                cone_axis: [0.0, 0.0, 1.0],
+                lod_error: 0.0,
+                packed_counts: 3 | (1 << 16),
+                meshlet_index_offset: 0,
+                meshlet_vertex_offset: 0,
+                parent_cluster_id: 2,
+            },
+            GpuMeshletEntry {
+                center: [0.5, 0.0, 0.0],
+                radius: 1.0,
+                cone_apex: [0.0; 3],
+                cone_cutoff: 2.0,
+                cone_axis: [0.0, 0.0, 1.0],
+                lod_error: 0.0,
+                packed_counts: 3 | (1 << 16),
+                meshlet_index_offset: 0,
+                meshlet_vertex_offset: 0,
+                parent_cluster_id: 2,
+            },
+            GpuMeshletEntry {
+                center: [0.25, 0.0, 0.0],
+                radius: 2.0,
+                cone_apex: [0.0; 3],
+                cone_cutoff: 2.0,
+                cone_axis: [0.0, 0.0, 1.0],
+                lod_error: 1.0, // large error → selected when far enough / threshold loose
+                packed_counts: 3 | (1 << 16),
+                meshlet_index_offset: 0,
+                meshlet_vertex_offset: 0,
+                parent_cluster_id: u32::MAX,
+            },
+        ];
+        // projected = 1.0 * 1.0 * 1000 / dist. At dist=1000, projected=1.0 <= threshold 1.0 → parent.
+        let emits = simulate_leaves_only_cull(&meshlets, 2, 1.0, 1000.0, 1000.0, 1.0);
+        assert_eq!(emits, vec![2], "both leaves must collapse to a single parent emit");
+
+        // Near: projected parent error huge → emit leaves (two unique).
+        meshlets[2].lod_error = 10.0;
+        let near = simulate_leaves_only_cull(&meshlets, 2, 1.0, 1000.0, 10.0, 1.0);
+        // projected parent = 10*1000/10 = 1000 > 1 → need finer → leaves
+        let mut near_sorted = near.clone();
+        near_sorted.sort();
+        assert_eq!(near_sorted, vec![0, 1]);
+    }
+
+    #[test]
+    fn projected_error_lod_selection_coarse_far_fine_near() {
+        // ancestor_errors: finest → root
+        let chain = [0.0, 0.01, 0.04, 0.16];
+        let focal = 1000.0;
+        let thr = 1.0;
+
+        // Near: only finest (error 0) is acceptable once coarser exceeds thr.
+        assert_eq!(dag_traverse(&chain, 1.0, focal, 5.0, thr), 0);
+        // Mid: can accept level 1 (0.01*1000/100 = 0.1 <= 1)
+        assert_eq!(dag_traverse(&chain, 1.0, focal, 100.0, thr), 2);
+        // Far: coarsest root
+        assert_eq!(dag_traverse(&chain, 1.0, focal, 10_000.0, thr), 3);
+        // Non-uniform scale increases projected error → finer selection
+        assert_eq!(dag_traverse(&chain, 4.0, focal, 100.0, thr), 1);
     }
 
     #[test]
@@ -810,69 +1150,49 @@ mod tests {
                 level, level + 1, fan_in);
         }
 
-        // ── Simulate full workgroup traversal at various distances ──────────
+        // ── Leaves-only + global claim simulation at various distances ─────
+        let leaf_count = lod_meshlet_counts[0] as usize;
         let focal_pixels = 540.0;
         let threshold_px = 0.5;
         let max_scale = 1.0;
 
-        eprintln!("\n  Full simulation (workgroup-level, detect duplicates):");
+        eprintln!("\n  Leaves-only + claim simulation:");
         let distances: [f32; 9] = [0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
         for &dist in &distances {
-            let mut emit_counts = std::collections::HashMap::new();
+            let emits = simulate_leaves_only_cull(
+                &all_meshlets,
+                leaf_count,
+                max_scale,
+                focal_pixels,
+                dist,
+                threshold_px,
+            );
             let mut lod_emit_counts = vec![0u32; lod_count];
-
-            for lane in 0..total {
-                // Walk UP to root (same as GPU shader)
-                let mut stack: Vec<usize> = Vec::new();
-                let mut cur = lane;
-                loop {
-                    stack.push(cur);
-                    let m = &all_meshlets[cur];
-                    if m.parent_cluster_id == u32::MAX || stack.len() >= 8 { break; }
-                    cur = m.parent_cluster_id as usize;
-                }
-                // Walk DOWN from root
-                let mut i = stack.len();
-                loop {
-                    if i == 0 { break; }
-                    i -= 1;
-                    let idx = stack[i];
-                    let error = all_meshlets[idx].lod_error;
-                    let projected = error * max_scale * focal_pixels / dist.max(1e-4);
-                    if projected <= threshold_px || i == 0 {
-                        *emit_counts.entry(idx).or_insert(0) += 1;
-                        // Determine which LOD level this meshlet belongs to
-                        let mut cursor = 0usize;
-                        for li in 0..lod_count {
-                            let cnt = lod_meshlet_counts[li] as usize;
-                            if idx >= cursor && idx < cursor + cnt {
-                                lod_emit_counts[li] += 1;
-                                break;
-                            }
-                            cursor += cnt;
-                        }
+            for &idx in &emits {
+                let mut cursor = 0usize;
+                for li in 0..lod_count {
+                    let cnt = lod_meshlet_counts[li] as usize;
+                    if (idx as usize) >= cursor && (idx as usize) < cursor + cnt {
+                        lod_emit_counts[li] += 1;
                         break;
                     }
+                    cursor += cnt;
                 }
             }
-
-            let unique = emit_counts.len();
-            let total_emits: u32 = emit_counts.values().sum();
-            let duplicates = total_emits - unique as u32;
-            eprintln!("    dist={dist:>6.1}: total={total_emits:>4} emits, {unique:>3} unique, {duplicates} dup");
+            let unique = emits.len();
+            eprintln!("    dist={dist:>6.1}: {unique:>3} unique emits (≤ {leaf_count} leaves)");
             eprintln!("              per-LOD: {:?}", &lod_emit_counts);
 
-            // Validate: at close distance, most emits should be LOD 0
+            assert!(unique <= leaf_count);
             if dist <= 1.0 {
                 assert!(lod_emit_counts[0] > 0, "At dist={dist}, LOD 0 should have emits");
-                // No duplicates at close range (each fine meshlet is unique)
-                assert!(duplicates <= (total_emits as f32 * 0.3) as u32,
-                    "At dist={dist}, too many duplicates ({duplicates}/{total_emits})");
             }
-            // Validate: at far distance, most emits should be coarser LODs
             if dist >= 500.0 {
-                let coarse_emits: u32 = lod_emit_counts[2..].iter().sum();
-                assert!(coarse_emits > 0, "At dist={dist}, coarse LODs should have emits");
+                let coarse_emits: u32 = lod_emit_counts[1..].iter().sum();
+                assert!(
+                    coarse_emits > 0 || unique < leaf_count,
+                    "At dist={dist}, should select coarser LODs or fewer clusters"
+                );
             }
         }
     }

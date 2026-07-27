@@ -90,25 +90,41 @@ pub struct GpuMeshletEntry {
     pub parent_cluster_id: u32,
 }
 
-/// GPU-side descriptor for one virtual-geometry object. Exactly 32 bytes.
+/// GPU-side descriptor for one virtual-geometry object. Exactly 48 bytes.
 ///
-/// The flat DAG scheme eliminates per-LOD arrays. A single `meshlet_count`
-/// covers all LODs; the cull shader iterates every meshlet and uses each
-/// meshlet's `parent_cluster_id` and `lod_error` to decide which ones to emit.
+/// The flat DAG scheme eliminates per-LOD arrays. `leaf_meshlet_count` is the
+/// number of **DAG leaves** (finest LOD), stored contiguously starting at
+/// `first_meshlet`. Coarser meshlets follow in the shared meshlet buffer and are
+/// reached only via `parent_cluster_id` walks — they are never cull entry points.
+///
+/// `emit_flag_base` indexes a per-object slice of the frame's emit-flag buffer
+/// so multiple instances sharing the same meshlet descriptors can each claim
+/// draws independently. Local flag index = `meshlet_index - first_meshlet`.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuVgObject {
     /// Slot in the VG `GpuInstanceData` and `InstanceCullData` arrays.
     pub instance_index: u32,
-    /// Total number of meshlets across all LODs for this object.
-    pub meshlet_count: u32,
-    /// Global offset into the flat meshlet buffer for this object's first meshlet.
+    /// Number of finest-LOD (DAG leaf) meshlets for this object.
+    /// Work items and the cull shader only iterate this range.
+    pub leaf_meshlet_count: u32,
+    /// Global offset into the flat meshlet buffer for this object's first leaf.
     pub first_meshlet: u32,
-    /// Reserved for future use.
-    pub reserved: u32,
+    /// Total meshlets across all LODs for this object's mesh (leaf + coarser).
+    /// Bounds the per-object emit-flag slice.
+    pub total_meshlet_count: u32,
 
     /// Conservative mesh-local bounding sphere `[center.xyz, radius]`.
     pub local_bounds: [f32; 4],
+
+    /// Base index into the per-frame `meshlet_emit_flags` buffer for this object.
+    /// Flag slot = `emit_flag_base + (meshlet_index - first_meshlet)`.
+    pub emit_flag_base: u32,
+    /// Per-frame object visibility written by `cs_select_objects`
+    /// (`0` = culled, non-zero = visible).
+    pub visible: u32,
+    pub _pad0: u32,
+    pub _pad1: u32,
 }
 
 /// Per-visible-draw metadata emitted beside each indirect command. Exactly 16 bytes.
@@ -127,9 +143,9 @@ pub struct GpuVgDraw {
 
 /// Work item for the second-stage meshlet cull. Exactly 8 bytes.
 ///
-/// Each record covers up to 64 meshlets across ALL LODs for one object.
-/// The cull shader iterates each meshlet independently and uses the flat DAG
-/// (`parent_cluster_id` + `lod_error`) to decide whether to emit it.
+/// Each record covers up to 64 **DAG leaf** meshlets for one object.
+/// Leaves walk the parent chain (`parent_cluster_id` + `lod_error`) and emit
+/// exactly one selected cluster. Coarser meshlets are never work-item entries.
 /// Using fixed spans keeps work bounded while allowing a very large object
 /// to occupy many GPU workgroups instead of serialising through one.
 #[repr(C)]
@@ -146,11 +162,11 @@ const _: () = {
     );
     assert!(
         std::mem::size_of::<GpuMeshletVertex>() == 48,
-        "GpuMeshletVertex must be exactly 40 bytes"
+        "GpuMeshletVertex must be exactly 48 bytes"
     );
     assert!(
-        std::mem::size_of::<GpuVgObject>() == 32,
-        "GpuVgObject must be exactly 32 bytes"
+        std::mem::size_of::<GpuVgObject>() == 48,
+        "GpuVgObject must be exactly 48 bytes"
     );
     assert!(
         std::mem::size_of::<GpuVgDraw>() == 16,
@@ -174,7 +190,7 @@ mod tests {
         assert_eq!(VG_LOD_LEVELS, 8);
         assert_eq!(std::mem::size_of::<GpuMeshletEntry>(), 64);
         assert_eq!(std::mem::size_of::<GpuMeshletVertex>(), 48);
-        assert_eq!(std::mem::size_of::<GpuVgObject>(), 32);
+        assert_eq!(std::mem::size_of::<GpuVgObject>(), 48);
         assert_eq!(std::mem::size_of::<GpuVgDraw>(), 16);
         assert_eq!(std::mem::size_of::<GpuVgWorkItem>(), 8);
         assert_eq!(std::mem::align_of::<GpuVgObject>(), 4);

@@ -163,6 +163,9 @@ impl super::super::Scene {
 
         let total_meshlet_count = u32::try_from(all_meshlets.len())
             .expect("virtual mesh exceeds the u32 descriptor address space");
+        // Finest LOD meshlets are stored first and are the only DAG entry points.
+        // Single-LOD meshes treat every meshlet as a leaf (all are roots).
+        let leaf_meshlet_count = lod_meshlet_counts.first().copied().unwrap_or(0);
 
         let id = VirtualMeshId(self.vg_next_mesh_id);
         self.vg_next_mesh_id += 1;
@@ -175,6 +178,7 @@ impl super::super::Scene {
                 local_bounds,
                 lod_count,
                 total_meshlet_count,
+                leaf_meshlet_count,
                 ref_count: 0,
             },
         );

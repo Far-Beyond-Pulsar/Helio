@@ -1,12 +1,11 @@
 // Virtual geometry culling compute shader (Flat Cluster DAG).
 //
-// Stage one (cs_select_objects): per-object frustum culling.  No LOD selection
-// happens here — every meshlet independently decides its own LOD.
+// Stage one (cs_select_objects): per-object frustum culling.
 //
-// Stage two (cs_cull_meshlets): iterates ALL meshlets for each object and uses
-// the per-meshlet DAG (parent_cluster_id + lod_error) to decide whether to
-// emit a draw command.  A single workgroup covers up to 64 meshlets from one
-// object (across all LODs).
+// Stage two (cs_cull_meshlets): each work item covers up to 64 DAG LEAVES
+// (finest-LOD meshlets) of one object. Each leaf walks the parent chain and
+// selects exactly one cluster. Global atomic emit flags ensure each meshlet
+// is drawn at most once per frame (cross-workgroup fan-in safe).
 
 struct Camera {
     view:           mat4x4<f32>,
@@ -33,13 +32,19 @@ struct MeshletEntry {
     parent_cluster_id:   u32,
 }
 
-/// Mirrors GpuVgObject (Rust, 32 bytes).
+/// Mirrors GpuVgObject (Rust, 48 bytes).
+/// leaf_meshlet_count = DAG leaves (finest LOD) starting at first_meshlet.
+/// emit_flag_base indexes a per-object slice of meshlet_emit_flags.
 struct VgObjectData {
-    instance_index:  u32,
-    meshlet_count:   u32,
-    first_meshlet:   u32,
-    _pad:            u32,
-    local_bounds:    vec4<f32>,
+    instance_index:       u32,
+    leaf_meshlet_count:   u32,
+    first_meshlet:        u32,
+    total_meshlet_count:  u32,
+    local_bounds:         vec4<f32>,
+    emit_flag_base:       u32,
+    visible:              u32,
+    _pad0:                u32,
+    _pad1:                u32,
 }
 
 /// Mirrors GpuInstanceData (Rust, 144 bytes).
@@ -118,14 +123,19 @@ struct CullUniforms {
 @group(0) @binding(12) var<storage, read_write> visible_meshlet_ids:   array<u32>;
 @group(0) @binding(13) var<storage, read_write> visible_instance_ids:  array<u32>;
 @group(0) @binding(14) var<storage, read_write> visible_meshlet_count: atomic<u32>;
+// Per-meshlet emit claim flags (cleared each frame). atomicExchange claims once.
+@group(0) @binding(15) var<storage, read_write> meshlet_emit_flags: array<atomic<u32>>;
 
 var<workgroup> wg_planes: array<vec4<f32>, 6>;
 var<workgroup> wg_first_meshlet: u32;
-var<workgroup> wg_meshlet_count: u32;
+var<workgroup> wg_leaf_count: u32;
+var<workgroup> wg_total_meshlet_count: u32;
+var<workgroup> wg_emit_flag_base: u32;
 var<workgroup> wg_instance_index: u32;
 var<workgroup> wg_local_meshlet_base: u32;
 var<workgroup> wg_object_visible: u32;
-// Workgroup dedup: each lane stores its selected meshlet (0xFFFFFFFF = skip).
+// Workgroup-local selected meshlet (0xFFFFFFFF = skip). Used for intra-wg
+// pre-filter before the per-object atomic claim.
 var<workgroup> wg_selected: array<u32, 64>;
 
 fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
@@ -137,11 +147,36 @@ fn sphere_visible(center: vec3<f32>, radius: f32) -> bool {
         && (dot(wg_planes[5].xyz, center) + wg_planes[5].w >= -radius);
 }
 
-fn emit_draw(meshlet_index: u32, instance_index: u32, lod_level: u32) {
+fn emit_draw(
+    meshlet_index: u32,
+    instance_index: u32,
+    lod_level: u32,
+    emit_flag_base: u32,
+    first_meshlet: u32,
+    total_meshlet_count: u32,
+) {
     if meshlet_index >= arrayLength(&meshlets)
         || instance_index >= arrayLength(&instances)
         || instance_index >= arrayLength(&instance_cull)
     {
+        return;
+    }
+
+    // Per-object claim: first lane across all workgroups for THIS object wins.
+    // Local index keeps shared meshlet descriptors independent per instance.
+    if meshlet_index < first_meshlet {
+        return;
+    }
+    let local = meshlet_index - first_meshlet;
+    if local >= total_meshlet_count {
+        return;
+    }
+    let flag_index = emit_flag_base + local;
+    if flag_index >= arrayLength(&meshlet_emit_flags) {
+        return;
+    }
+    let prior = atomicExchange(&meshlet_emit_flags[flag_index], 1u);
+    if prior != 0u {
         return;
     }
 
@@ -213,10 +248,7 @@ fn publish_frustum_planes() {
     wg_planes[5] = p5 / length(p5.xyz);
 }
 
-// ── Stage 1: object selection (simplified — frustum cull only) ───────────────
-//
-// Per-object frustum culling.  No per-LOD selection — every visible object
-// is fully processed by stage 2, which uses the flat DAG for per-meshlet LOD.
+// ── Stage 1: object selection (frustum cull only) ────────────────────────────
 
 @compute @workgroup_size(64)
 fn cs_select_objects(
@@ -255,18 +287,15 @@ fn cs_select_objects(
         }
     }
 
-    // Store visibility in the reserved/pad field so stage 2 can skip
-    // invisible objects without re-culling the instance bounds.
-    objects[object_index]._pad = visible;
+    // Store visibility so stage 2 can skip invisible objects.
+    objects[object_index].visible = visible;
 }
 
-// ── Stage 2: meshlet cull with flat DAG ─────────────────────────────────────
+// ── Stage 2: meshlet cull with flat DAG (leaves-only entry) ──────────────────
 //
-// Each work item covers up to 64 meshlets across ALL LODs for one object.
-// Each lane independently traverses its meshlet's parent chain:
-//   - If projected_error > threshold  → emit this meshlet
-//   - If projected_error <= threshold → follow parent to a coarser level
-//   - Arriving at a root (parent_cluster_id == 0xFFFFFFFF) always emits
+// Each work item covers up to 64 LEAF meshlets for one object.
+// Each lane walks its leaf's parent chain coarse→fine and emits the coarsest
+// level whose projected error is ≤ threshold. Global atomics dedup fan-in.
 
 @compute @workgroup_size(64)
 fn cs_cull_meshlets(
@@ -279,7 +308,9 @@ fn cs_cull_meshlets(
     if lane == 0u {
         publish_frustum_planes();
         wg_first_meshlet = 0u;
-        wg_meshlet_count = 0u;
+        wg_leaf_count = 0u;
+        wg_total_meshlet_count = 0u;
+        wg_emit_flag_base = 0u;
         wg_instance_index = 0u;
         wg_local_meshlet_base = 0u;
         wg_object_visible = 0u;
@@ -290,9 +321,12 @@ fn cs_cull_meshlets(
             let item = work_items[work_index];
             if item.object_index < arrayLength(&objects) {
                 let object = objects[item.object_index];
-                if object._pad != 0u && item.local_meshlet_base < object.meshlet_count {
+                // leaf_meshlet_count is the entry range; local_meshlet_base indexes leaves.
+                if object.visible != 0u && item.local_meshlet_base < object.leaf_meshlet_count {
                     wg_first_meshlet = object.first_meshlet;
-                    wg_meshlet_count = object.meshlet_count;
+                    wg_leaf_count = object.leaf_meshlet_count;
+                    wg_total_meshlet_count = object.total_meshlet_count;
+                    wg_emit_flag_base = object.emit_flag_base;
                     wg_instance_index = object.instance_index;
                     wg_local_meshlet_base = item.local_meshlet_base;
                     wg_object_visible = 1u;
@@ -307,7 +341,7 @@ fn cs_cull_meshlets(
     }
 
     let meshlet_index = wg_first_meshlet + wg_local_meshlet_base + lane;
-    if meshlet_index >= wg_first_meshlet + wg_meshlet_count {
+    if meshlet_index >= wg_first_meshlet + wg_leaf_count {
         return;
     }
 
@@ -322,12 +356,9 @@ fn cs_cull_meshlets(
 
     // ── DAG traversal (coarse→fine) ─────────────────────────────────────────
     //
-    // 1. Walk up from this meshlet to the root, recording each ancestor.
-    // 2. Walk DOWN from root toward the starting meshlet, checking projected
-    //    error at each level.  Emit the coarsest level whose cumulative error
-    //    is below threshold (good enough for this distance).
-    //
-    // This matches Nanite's approach: coarse for far, fine for near.
+    // 1. Walk up from this LEAF meshlet to the root, recording each ancestor.
+    // 2. Walk DOWN from root toward the leaf, checking projected error.
+    //    Emit the coarsest level whose cumulative error is below threshold.
     let model = inst.transform;
     let focal_pixels = abs(camera.proj[1][1]) * f32(cull_uni.screen_height) * 0.5;
 
@@ -342,14 +373,17 @@ fn cs_cull_meshlets(
         if m.parent_cluster_id == 0xFFFFFFFFu || depth >= 8u {
             break;
         }
+        // Guard against corrupt / out-of-range parent links.
+        if m.parent_cluster_id >= arrayLength(&meshlets) {
+            break;
+        }
         current = m.parent_cluster_id;
     }
 
-    // ── Walk DOWN from root toward the starting meshlet ────────────────────
-    // ancestor[0] = starting meshlet (finest), ancestor[depth-1] = root (coarsest).
-    // Start at root (index depth-1), walk toward 0.
-    // Use a flag (selected != 0xFFFFFFFF) so we can break to dedup barrier
-    // instead of returning early (which would skip the workgroupBarrier).
+    // ── Walk DOWN from root toward the starting leaf ───────────────────────
+    // ancestor[0] = leaf (finest), ancestor[depth-1] = root (coarsest).
+    // Use selected != 0xFFFFFFFF so we can break to the dedup barrier
+    // instead of returning early (which would skip workgroupBarrier).
     var selected: u32 = 0xFFFFFFFFu;
     var i: u32 = depth;
     loop {
@@ -366,7 +400,7 @@ fn cs_cull_meshlets(
             break; // culled — skip entire chain
         }
 
-        // Cone cull
+        // Cone cull (meshopt convention: reject when view·axis >= cutoff)
         let cam_to_center = center_ws - camera.position_near.xyz;
         let cam_dist_sq = dot(cam_to_center, cam_to_center);
         let guard_radius = world_radius * 1.5;
@@ -458,18 +492,26 @@ fn cs_cull_meshlets(
     // Store selection (0xFFFFFFFF if culled or no selection made).
     wg_selected[lane] = selected;
 
-    // ── Workgroup dedup and emit ──────────────────────────────────────────
-    // All lanes reach this barrier (no early returns above).
+    // ── Workgroup pre-dedup then global emit ───────────────────────────────
+    // All active lanes that reached here must hit this barrier.
     workgroupBarrier();
 
     let chosen = wg_selected[lane];
     if chosen == 0xFFFFFFFFu { return; }
 
-    // Check if any lane < this one already claimed the same meshlet.
+    // Intra-workgroup pre-filter: only the lowest lane claiming `chosen` proceeds.
+    // Global atomic in emit_draw still required for cross-workgroup fan-in.
     for (var other = 0u; other < lane; other++) {
         if wg_selected[other] == chosen {
-            return; // already emitted by a lower-index lane
+            return;
         }
     }
-    emit_draw(chosen, wg_instance_index, 0u);
+    emit_draw(
+        chosen,
+        wg_instance_index,
+        0u,
+        wg_emit_flag_base,
+        wg_first_meshlet,
+        wg_total_meshlet_count,
+    );
 }

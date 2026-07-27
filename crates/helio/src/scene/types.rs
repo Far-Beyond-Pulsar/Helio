@@ -231,6 +231,11 @@ pub(crate) struct VirtualMeshRecord {
     /// Total number of meshlets across all LODs.
     pub total_meshlet_count: u32,
 
+    /// Number of finest-LOD (DAG leaf) meshlets. Leaves are stored first in
+    /// `meshlets` (LOD0). Cull work items only cover this range; coarser
+    /// meshlets are reached exclusively via `parent_cluster_id` walks.
+    pub leaf_meshlet_count: u32,
+
     /// Number of virtual objects currently using this mesh.
     pub ref_count: u32,
 }

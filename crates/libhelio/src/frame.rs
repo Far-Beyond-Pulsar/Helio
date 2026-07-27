@@ -568,6 +568,9 @@ pub struct VgFrameData<'a> {
     pub object_count: u32,
     /// Number of second-stage 64-meshlet work spans.
     pub work_item_count: u32,
+    /// Total per-object emit-flag slots (`sum` of each object's `total_meshlet_count`).
+    /// Sized so instances sharing meshlet descriptors still get independent claims.
+    pub emit_flag_count: u32,
     /// Version counter incremented when meshlet, object, or work-item topology changes.
     pub buffer_version: u64,
     /// Version counter incremented when a transform-only dirty range is published.
