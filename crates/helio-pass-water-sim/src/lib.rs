@@ -121,7 +121,7 @@ pub struct WaterSimPass {
     pub(crate) update_bg: Option<wgpu::BindGroup>,
     pub(crate) update_bg_key: Option<usize>,
     pub(crate) underwater_tint_bg: Option<wgpu::BindGroup>,
-    pub(crate) underwater_tint_bg_key: Option<(usize, usize)>,
+    pub(crate) underwater_tint_bg_key: Option<(usize, usize, usize, usize)>,
 
     pub(crate) caustics_pipeline: wgpu::RenderPipeline,
     pub(crate) surface_above_pipeline: wgpu::RenderPipeline,
@@ -898,7 +898,12 @@ impl RenderPass for WaterSimPass {
                 {
                     let vols_key = vols_buf as *const wgpu::Buffer as usize;
                     let water_output_key = water_output_view as *const wgpu::TextureView as usize;
-                    let new_tint_key = (vols_key, water_output_key);
+                    let new_tint_key = (
+                        vols_key,
+                        water_output_key,
+                        depth_view as *const wgpu::TextureView as usize,
+                        sim_view as *const wgpu::TextureView as usize,
+                    );
                     if self.underwater_tint_bg_key != Some(new_tint_key) {
                         self.underwater_tint_bg =
                             Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -922,7 +927,27 @@ impl RenderPass for WaterSimPass {
                                     wgpu::BindGroupEntry {
                                         binding: 3,
                                         resource: wgpu::BindingResource::Sampler(
+                                            &self.output_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 4,
+                                        resource: wgpu::BindingResource::TextureView(depth_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 5,
+                                        resource: wgpu::BindingResource::Sampler(
                                             &self.depth_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 6,
+                                        resource: wgpu::BindingResource::TextureView(sim_view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 7,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            &self.output_sampler,
                                         ),
                                     },
                                 ],

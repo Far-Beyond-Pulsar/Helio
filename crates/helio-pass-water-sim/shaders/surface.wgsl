@@ -173,6 +173,65 @@ fn water_inscatter(view_dir: vec3f, sun_dir: vec3f, vol: WaterVolume) -> vec3f {
     return vol.water_color.rgb * clamp(phase, 0.4, 2.0);
 }
 
+// ── Foam ─────────────────────────────────────────────────────────────────────
+
+fn hash21(p: vec2f) -> f32 {
+    var h = fract(p * vec2f(0.1031, 0.1030));
+    h += dot(h, h.yx + 33.33);
+    return fract((h.x + h.y) * h.x);
+}
+
+fn value_noise(p: vec2f) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    return mix(
+        mix(hash21(i),                  hash21(i + vec2f(1.0, 0.0)), u.x),
+        mix(hash21(i + vec2f(0.0, 1.0)), hash21(i + vec2f(1.0, 1.0)), u.x),
+        u.y,
+    );
+}
+
+/// How much the water has softened into the shoreline: 0 at the contact line,
+/// 1 once there is a useful depth of water underneath.
+///
+/// The colour already resolves correctly on its own — at zero path length the
+/// transmittance is 1 and the medium returns the scene behind it untouched.
+/// What produced the hard line was the Fresnel *reflection*, which persisted at
+/// full strength right up to the contact. Fading it is what removes the edge,
+/// and it keeps the surface opaque so no alpha blending is needed.
+fn water_shore_factor(path: f32, vol: WaterVolume) -> f32 {
+    let fade = max(water_wave_amplitude(vol) * 3.0, 0.5);
+    return smoothstep(0.0, fade, path);
+}
+
+/// Foam coverage in [0,1] from two sources, driven by `foam_threshold`
+/// (`water_color.w`) and scaled by `foam_amount` (`extinction.w`).
+fn water_foam(path: f32, world_xz: vec2f, normal: vec3f, vol: WaterVolume) -> f32 {
+    let amp = max(water_wave_amplitude(vol), 1e-3);
+    let t   = camera.jitter_frame.z * 0.016;
+
+    // Two layers scrolling against each other, so the band churns rather than
+    // sitting still as a uniform ring.
+    let n = value_noise(world_xz * 0.35 + vec2f( t * 0.20, -t * 0.13)) * 0.65
+          + value_noise(world_xz * 1.10 + vec2f(-t * 0.31,  t * 0.17)) * 0.35;
+
+    // Contact foam. The band scales with wave size — a bigger swell washes
+    // further up the shore — and the noise makes its edge irregular.
+    let band       = max(amp * 2.5, 0.35);
+    let shore      = 1.0 - smoothstep(0.0, band, path);
+    let shore_foam = smoothstep(0.25, 0.85, shore * (0.55 + n * 0.75));
+
+    // Crest foam, from the horizontal slope magnitude. Note this stays subtle
+    // until the sim gains resolution (#148): at 0.78 m per texel the steepest
+    // representable slope is well below the default `foam_threshold`.
+    let threshold  = max(vol.water_color.w, 1e-3);
+    let steepness  = length(normal.xz) / max(normal.y, 1e-3);
+    let crest_foam = smoothstep(threshold, threshold * 1.6, steepness) * (0.5 + n * 0.5);
+
+    return clamp(max(shore_foam, crest_foam) * vol.extinction.w, 0.0, 1.0);
+}
+
 // ── Screen-space reflection ──────────────────────────────────────────────────
 // Interim: a linear world-space march with a linear-depth hit test. The
 // hierarchical Hi-Z traversal in helio-pass-ssr is the real answer — see #147,
@@ -353,8 +412,16 @@ fn fs_above(in: VertexOutput) -> @location(0) vec4f {
     let reflected_ray = reflect(view_dir, normal);
     let reflected     = water_reflection(in.world_pos, reflected_ray, light_dir, vol);
 
-    let fresnel = water_fresnel(normal, view_dir, vol);
-    return vec4f(mix(through_water, reflected, fresnel), 1.0);
+    // Fade the reflection into the shoreline, otherwise the contact with
+    // geometry reads as a hard analytic line.
+    let fresnel = water_fresnel(normal, view_dir, vol) * water_shore_factor(path, vol);
+    var color   = mix(through_water, reflected, fresnel);
+
+    // ── Foam ─────────────────────────────────────────────────────────────────
+    let foam = water_foam(path, in.world_pos.xz, normal, vol);
+    color = mix(color, vec3f(0.92, 0.96, 1.00), foam);
+
+    return vec4f(color, 1.0);
 }
 
 // ── Fragment: underwater ─────────────────────────────────────────────────────

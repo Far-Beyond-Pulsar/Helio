@@ -519,14 +519,49 @@ impl WaterSimPass {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Scene depth — the underwater medium is integrated per
+                    // pixel against the distance the view ray travels.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                    // Heightfield — the containment test runs against the
+                    // displaced surface, not the flat plane.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                 ],
             });
-        let underwater_tint_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Underwater Tint Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/underwater_fog.wgsl").into(),
-            ),
-        });
+        let underwater_tint_shader = helio_core::shader::module(
+            device,
+            "Water Underwater Tint Shader",
+            include_str!("../shaders/underwater_fog.wgsl"),
+        );
         let underwater_tint_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Water Underwater Tint PL"),
             bind_group_layouts: &[Some(&underwater_tint_bgl)],
