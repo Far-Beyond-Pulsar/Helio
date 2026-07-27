@@ -593,24 +593,15 @@ impl WaterSimPass {
             label: Some("Water Caustics Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/caustics.wgsl").into()),
         });
-        let surface_above_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Surface Above Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/surface_above.wgsl").into(),
-            ),
-        });
-        let surface_under_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Surface Under Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/surface_under.wgsl").into(),
-            ),
-        });
-        let volumetric_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Volumetric Shader"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/volumetric.wgsl").into(),
-            ),
-        });
+        // One module, two fragment entry points: `fs_above` and `fs_under` share
+        // the vertex stage and every helper, so the surface can only be shaded
+        // one way. They used to be separate files with the whole coordinate and
+        // SSR apparatus duplicated between them.
+        let surface_shader = helio_core::shader::module(
+            device,
+            "Water Surface Shader",
+            include_str!("../shaders/surface.wgsl"),
+        );
 
         let vbl = vec3_vbl();
 
@@ -656,14 +647,14 @@ impl WaterSimPass {
                 label: Some("Water Surface Above Pipeline"),
                 layout: Some(&render_pl_layout),
                 vertex: wgpu::VertexState {
-                    module: &surface_above_shader,
+                    module: &surface_shader,
                     entry_point: Some("vs_main"),
                     buffers: &[Some(vbl.clone())],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &surface_above_shader,
-                    entry_point: Some("fs_main"),
+                    module: &surface_shader,
+                    entry_point: Some("fs_above"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
@@ -693,14 +684,14 @@ impl WaterSimPass {
                 label: Some("Water Surface Under Pipeline"),
                 layout: Some(&render_pl_layout),
                 vertex: wgpu::VertexState {
-                    module: &surface_under_shader,
+                    module: &surface_shader,
                     entry_point: Some("vs_main"),
                     buffers: &[Some(vbl.clone())],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &surface_under_shader,
-                    entry_point: Some("fs_main"),
+                    module: &surface_shader,
+                    entry_point: Some("fs_under"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
@@ -711,49 +702,6 @@ impl WaterSimPass {
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
                     cull_mode: Some(wgpu::Face::Front),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-
-        let volumetric_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Water Volumetric Pipeline"),
-                layout: Some(&render_pl_layout),
-                vertex: wgpu::VertexState {
-                    module: &volumetric_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &volumetric_shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::SrcAlpha,
-                                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent::OVER,
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -800,7 +748,6 @@ impl WaterSimPass {
             caustics_pipeline,
             surface_above_pipeline,
             surface_under_pipeline,
-            volumetric_pipeline,
             _pre_aa_fallback_tex: pre_aa_fallback_tex,
             pre_aa_fallback_view,
             _gbuffer_fallback_tex: gbuffer_fallback_tex,

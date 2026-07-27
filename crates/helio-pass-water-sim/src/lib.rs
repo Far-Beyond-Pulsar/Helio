@@ -126,7 +126,6 @@ pub struct WaterSimPass {
     pub(crate) caustics_pipeline: wgpu::RenderPipeline,
     pub(crate) surface_above_pipeline: wgpu::RenderPipeline,
     pub(crate) surface_under_pipeline: wgpu::RenderPipeline,
-    pub(crate) volumetric_pipeline: wgpu::RenderPipeline,
 
     pub(crate) _pre_aa_fallback_tex: wgpu::Texture,
     pub(crate) pre_aa_fallback_view: wgpu::TextureView,
@@ -875,33 +874,12 @@ impl RenderPass for WaterSimPass {
                     },
                 })];
 
-                // 1. Volumetric water (screen-space raymarch, replaces old box mesh)
-                {
-                    let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
-                        &wgpu::RenderPassDescriptor {
-                            label: Some("Water Volumetric"),
-                            color_attachments: &color_attachments,
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                            multiview_mask: None,
-                        },
-                    );
-                    pass.set_pipeline(&self.volumetric_pipeline);
-                    pass.set_bind_group(0, render_bg, &[]);
-                    pass.draw(0..3, 0..1);
-                }
-
-                // 2. Water surface above
+                // 1. Water surface above.
+                //
+                // The surface shader integrates the medium analytically from the
+                // depth buffer, so there is no separate fullscreen raymarch: the
+                // march computed the same integral and was then overwritten by
+                // this opaque draw every frame.
                 {
                     let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
@@ -929,7 +907,7 @@ impl RenderPass for WaterSimPass {
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
                 }
 
-                // 3. Water surface under
+                // 2. Water surface under
                 {
                     let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
@@ -957,7 +935,7 @@ impl RenderPass for WaterSimPass {
                     pass.draw_indexed(0..self.surface_index_count, 0, 0..1);
                 }
 
-                // 4. Underwater effect
+                // 3. Underwater effect
                 {
                     let vols_key = vols_buf as *const wgpu::Buffer as usize;
                     let water_output_key = water_output_view as *const wgpu::TextureView as usize;
