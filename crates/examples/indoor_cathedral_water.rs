@@ -348,8 +348,12 @@ impl ApplicationHandler for App {
             fresnel_power: 5.0,         // Physically-based fresnel (water IOR ~1.333)
 
             // CAUSTICS
+            // Intensity is scaled up for this scene: at 0.035 m amplitude over a
+            // 12 m pool the surface is nearly flat, so it focuses light only
+            // weakly and the physical contribution alone would be invisible.
+            // The ball's ripples are what actually drive the pattern here.
             caustics_enabled: true,
-            caustics_intensity: 1.0,
+            caustics_intensity: 3.0,
             caustics_scale: 8.0,
             caustics_speed: 0.0,
 
