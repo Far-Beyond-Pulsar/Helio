@@ -340,20 +340,26 @@ impl ApplicationHandler for App {
 
             // REFLECTION & REFRACTION (physically accurate)
             reflection_strength: 0.65,  // Lowered reflectivity for a cleaner pool look
-            refraction_strength: 0.0,   // Disable heavy chromatic refraction
+            // Multiplier on the physically-derived displacement (IOR x surface
+            // tilt x path length). This was 0.0 to suppress the old constant
+            // screen-space offset, which distorted the shallow edges as hard as
+            // the deep centre; the current model scales with depth on its own.
+            refraction_strength: 1.0,
             fresnel_power: 5.0,         // Physically-based fresnel (water IOR ~1.333)
 
-            // CAUSTICS (disabled for lower shader cost)
-            caustics_enabled: false,
-            caustics_intensity: 0.0,
+            // CAUSTICS
+            caustics_enabled: true,
+            caustics_intensity: 1.0,
             caustics_scale: 8.0,
             caustics_speed: 0.0,
 
             // VOLUMETRIC EFFECTS
             fog_density: 0.0,
-            god_rays_intensity: 0.0,
-            ssr_enabled: false,
-            ssr_steps: 8,
+            god_rays_intensity: 0.5,
+            // Marches the shared hi-Z pyramid; `ssr_steps` is the iteration
+            // bound and `ssr_step_size` is unused by the hierarchical traversal.
+            ssr_enabled: true,
+            ssr_steps: 64,
             ssr_step_size: 0.05,
             ssr_thickness: 0.02,
             // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)

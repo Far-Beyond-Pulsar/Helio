@@ -51,6 +51,7 @@ struct WaterVolume {
 @group(0) @binding(5) var depth_samp:    sampler;
 @group(0) @binding(6) var water_sim:     texture_2d<f32>;
 @group(0) @binding(7) var water_samp:    sampler;
+@group(0) @binding(8) var caustics_tex:  texture_2d<f32>;
 
 /// Vertical distance over which entering the water ramps in, in metres. Without
 /// this the effect switches on the instant the camera crosses the plane, which
@@ -228,6 +229,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
     var dist: f32;
     var ray_dir: vec3f;
+    var lit = scene;
     if depth >= 1.0 {
         // Nothing there: the ray runs until the medium has fully absorbed it.
         ray_dir = normalize(helio_world_from_depth(camera.view_proj_inv, uv_g, 0.5) - cam_pos);
@@ -236,6 +238,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         let world_pos = helio_world_from_depth(camera.view_proj_inv, uv_g, depth);
         ray_dir = normalize(world_pos - cam_pos);
         dist    = distance(world_pos, cam_pos);
+
+        // Caustics on submerged geometry, seen directly rather than through
+        // the surface. Same projection the surface shader uses.
+        if vol.caustics_params.x > 0.5 {
+            let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
+            let cuv    = (world_pos.xz - vol.bounds_min.xz) / extent;
+            let below  = water_surface_at(world_pos.xz, vol) - world_pos.y;
+            if below > 0.0 && all(cuv >= vec2f(0.0)) && all(cuv <= vec2f(1.0)) {
+                let caustic = textureSampleLevel(caustics_tex, water_samp, cuv, 0.0).r;
+                lit += vec3f(caustic) * exp(-below * 0.12);
+            }
+        }
     }
 
     // A ray heading upward leaves the water at the surface; it should only
@@ -256,7 +270,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let inscatter = max(vol.water_color.rgb, vec3f(0.02, 0.10, 0.28))
                   * clamp(phase, 0.4, 2.0);
 
-    var color = scene * transmit + inscatter * (1.0 - transmit);
+    var color = lit * transmit + inscatter * (1.0 - transmit);
 
     // ── God rays ─────────────────────────────────────────────────────────────
     color += inscatter * god_rays(uv_g, vol);

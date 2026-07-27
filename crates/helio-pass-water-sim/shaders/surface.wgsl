@@ -1,4 +1,5 @@
 //!use helio_prelude
+//!use helio_hiz
 //
 // Water surface — above-water and underwater views.
 //
@@ -55,6 +56,7 @@ struct WaterVolume {
 @group(0) @binding(8) var depth_texture:  texture_depth_2d;
 @group(0) @binding(9) var depth_sampler:  sampler;
 @group(0) @binding(10) var gbuffer_normal: texture_2d<f32>;
+@group(0) @binding(11) var hiz_min:        texture_2d<f32>;
 
 const IOR_AIR: f32 = 1.0;
 
@@ -150,6 +152,49 @@ fn water_path_length(
     return clamp(min(t_scene, t_floor), 0.0, max_path);
 }
 
+/// Displaced surface height above an arbitrary world XZ (not just the shaded
+/// vertex), for working out how deep a submerged point sits.
+fn water_surface_at(world_xz: vec2f, vol: WaterVolume) -> f32 {
+    let uv = water_world_xz_to_sim_uv(world_xz, vol);
+    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) {
+        return vol.bounds_max.w;
+    }
+    let h = textureSampleLevel(water_sim, water_samp, uv, 0.0).r;
+    return water_surface_height(h, vol);
+}
+
+/// Caustic light landing on a submerged point.
+///
+/// The caustics pass rasterizes into the volume footprint, so the lookup is the
+/// same world-XZ-to-UV mapping used everywhere else. Attenuated by how deep the
+/// receiver sits (the pattern washes out as the column deepens) and by how much
+/// the receiving surface faces up.
+fn water_caustics(scene_pos: vec3f, vol: WaterVolume, screen_uv: vec2f) -> vec3f {
+    if vol.caustics_params.x <= 0.5 {
+        return vec3f(0.0);
+    }
+
+    let uv = water_world_xz_to_sim_uv(scene_pos.xz, vol);
+    if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) {
+        return vec3f(0.0);
+    }
+
+    // Receivers above the waterline get nothing.
+    let depth_below = water_surface_at(scene_pos.xz, vol) - scene_pos.y;
+    if depth_below <= 0.0 {
+        return vec3f(0.0);
+    }
+
+    // Intensity was already applied by the projection pass; this only shapes it.
+    let caustic = textureSampleLevel(caustics_tex, shared_samp, uv, 0.0).r;
+
+    let recv_n = helio_gbuffer_normal(
+        textureSampleLevel(gbuffer_normal, shared_samp, screen_uv, 0.0).xyz);
+    let facing = clamp(recv_n.y, 0.0, 1.0);
+
+    return vec3f(caustic) * facing * exp(-depth_below * 0.12);
+}
+
 /// Beer-Lambert transmittance over a path.
 fn water_transmittance(path: f32, vol: WaterVolume) -> vec3f {
     return exp(-max(vol.extinction.rgb, vec3f(1e-4)) * path);
@@ -233,59 +278,87 @@ fn water_foam(path: f32, world_xz: vec2f, normal: vec3f, vol: WaterVolume) -> f3
 }
 
 // ── Screen-space reflection ──────────────────────────────────────────────────
-// Interim: a linear world-space march with a linear-depth hit test. The
-// hierarchical Hi-Z traversal in helio-pass-ssr is the real answer — see #147,
-// which also covers sharing that code rather than keeping a copy here.
+// Marches the shared `hiz_min` pyramid via `helio_hiz_march` — the same
+// traversal helio-pass-ssr uses, rather than a second implementation living
+// here (#147).
+//
+// The pyramid is built from the opaque depth buffer, which does not contain the
+// water surface, so the ray cannot self-intersect and water does not reflect
+// water. That is the expected limitation of this approach.
+
+const SSR_MAX_DIST:    f32 = 100.0;
+const SSR_NORMAL_BIAS: f32 = 0.002;
+const SSR_START_LEVEL: i32 = 2;
+const SSR_MAX_LEVEL:   i32 = 8;
 
 struct SsrResult {
-    color: vec3f,
-    hit:   bool,
+    color:      vec3f,
+    confidence: f32,
 }
 
-fn trace_ssr(
-    ray_origin: vec3f,
-    ray_dir:    vec3f,
-    max_steps:  u32,
-    step_size:  f32,
-    thickness:  f32,
-) -> SsrResult {
+fn trace_ssr(origin: vec3f, dir: vec3f, normal: vec3f, vol: WaterVolume) -> SsrResult {
     var result: SsrResult;
-    result.color = vec3f(0.0);
-    result.hit   = false;
+    result.color      = vec3f(0.0);
+    result.confidence = 0.0;
 
     let near = camera.position_near.w;
     let far  = camera.forward_far.w;
-    // A hit window narrower than one step can never be entered.
-    let tolerance = max(thickness, step_size);
 
-    for (var i = 1u; i < max_steps; i++) {
-        let sample_world = ray_origin + ray_dir * (f32(i) * step_size);
+    // Build the ray in view space so it can be clipped against the near plane
+    // before projection — a ray crossing w = 0 projects to nonsense.
+    var start_view  = (camera.view * vec4f(origin, 1.0)).xyz;
+    let dir_view    = normalize((camera.view * vec4f(dir, 0.0)).xyz);
+    let normal_view = (camera.view * vec4f(normal, 0.0)).xyz;
+    start_view += normal_view * (-start_view.z * SSR_NORMAL_BIAS);
 
-        let clip = camera.view_proj * vec4f(sample_world, 1.0);
-        if clip.w <= 0.0 { break; }
-        let ndc = clip.xyz / clip.w;
-        let uv  = helio_ndc_to_uv(ndc.xy);
-        if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) { break; }
+    var ray_len = SSR_MAX_DIST;
+    if start_view.z + dir_view.z * ray_len > -near {
+        ray_len = (-near - start_view.z) / dir_view.z;
+    }
+    if ray_len <= 0.0 {
+        return result;
+    }
+    let end_view = start_view + dir_view * ray_len;
 
-        // Compare in linear view depth. The raw [0,1] buffer value is heavily
-        // non-linear — nearly the whole visible range sits above 0.9 — so a
-        // tolerance expressed in NDC units accepts essentially any sample.
-        let scene_depth = textureSampleLevel(depth_texture, depth_sampler, uv, 0);
-        let scene_z     = helio_view_depth(scene_depth, near, far);
-        let ray_z       = helio_view_depth(ndc.z, near, far);
+    let clip0 = camera.proj * vec4f(start_view, 1.0);
+    let clip1 = camera.proj * vec4f(end_view, 1.0);
+    if clip0.w <= 0.0 || clip1.w <= 0.0 {
+        return result;
+    }
+    let p0 = vec3f(helio_ndc_to_uv(clip0.xy / clip0.w), clip0.z / clip0.w);
+    let p1 = vec3f(helio_ndc_to_uv(clip1.xy / clip1.w), clip1.z / clip1.w);
 
-        let behind = ray_z - scene_z;
-        if behind > 0.0 && behind < tolerance {
-            result.color = textureSampleLevel(scene_color, shared_samp, uv, 0.0).rgb;
-            result.hit   = true;
-            // Fade out as the hit approaches the screen border, so reflections
-            // do not cut off along a hard edge.
-            let edge = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-            result.color = mix(vec3f(0.0), result.color, smoothstep(0.0, 0.08, edge));
-            break;
-        }
+    let march = helio_hiz_march(
+        hiz_min, p0, p1,
+        SSR_START_LEVEL, SSR_MAX_LEVEL,
+        u32(clamp(vol.ssr_params.y, 8.0, 128.0)),
+    );
+    if !march.hit {
+        return result;
     }
 
+    let hit_uv = march.pos.xy;
+
+    // Thickness: the pyramid says the ray reached this surface, but a hit far
+    // behind it is the ray having tunnelled past a thin object.
+    let thickness = max(vol.ssr_params.w, 1e-3);
+    let ray_z     = helio_view_depth(march.pos.z, near, far);
+    let scene_z   = helio_view_depth(
+        textureSampleLevel(depth_texture, depth_sampler, hit_uv, 0), near, far);
+    if ray_z > scene_z * (1.0 + thickness) {
+        return result;
+    }
+
+    // Fade at the screen border and as the ray runs out of its budget, so
+    // reflections dissolve instead of cutting off.
+    let border    = min(min(hit_uv.x, 1.0 - hit_uv.x), min(hit_uv.y, 1.0 - hit_uv.y));
+    let edge_fade = smoothstep(0.0, 0.1, border);
+
+    let travelled  = length(hit_uv - p0.xy) / max(length(p1.xy - p0.xy), 1e-6);
+    let dist_fade  = 1.0 - smoothstep(0.6, 1.0, travelled);
+
+    result.color      = textureSampleLevel(scene_color, shared_samp, hit_uv, 0.0).rgb;
+    result.confidence = clamp(edge_fade * dist_fade, 0.0, 1.0);
     return result;
 }
 
@@ -305,6 +378,7 @@ fn sky_color(ray: vec3f, light_dir: vec3f) -> vec3f {
 fn water_reflection(
     world_pos: vec3f,
     ray:       vec3f,
+    normal:    vec3f,
     light_dir: vec3f,
     vol:       WaterVolume,
 ) -> vec3f {
@@ -314,17 +388,10 @@ fn water_reflection(
         return sky;
     }
 
-    let hit = trace_ssr(
-        world_pos,
-        ray,
-        u32(max(vol.ssr_params.y, 1.0)),
-        max(vol.ssr_params.z, 1e-3),
-        vol.ssr_params.w,
-    );
-    if !hit.hit {
-        return sky;
-    }
-    return hit.color;
+    // Blend by confidence rather than switching, so a partial hit near the
+    // screen edge dissolves into sky instead of popping.
+    let hit = trace_ssr(world_pos, ray, normal, vol);
+    return mix(sky, hit.color, hit.confidence);
 }
 
 // ── Vertex ───────────────────────────────────────────────────────────────────
@@ -394,14 +461,23 @@ fn fs_above(in: VertexOutput) -> @location(0) vec4f {
     // object is in front of the water and must not be dragged into it.
     let refr_depth = textureSampleLevel(depth_texture, depth_sampler, refract_uv, 0);
     let refr_z     = helio_view_depth(refr_depth, camera.position_near.w, camera.forward_far.w);
-    var path       = path_direct;
+    var path        = path_direct;
+    var scene_depth = refr_depth;
     if refr_z < view_z {
-        refract_uv = screen_uv;
+        refract_uv  = screen_uv;
+        scene_depth = textureSampleLevel(depth_texture, depth_sampler, screen_uv, 0);
     } else {
         path = water_path_length(refract_uv, in.world_pos, view_dir, vol);
     }
 
-    let refracted = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
+    var refracted = textureSampleLevel(scene_color, shared_samp, refract_uv, 0.0).rgb;
+
+    // Caustics land on the submerged surface being looked at through the water,
+    // so they are added before absorption attenuates the whole lot.
+    if scene_depth < 1.0 {
+        let scene_pos = helio_world_from_depth(camera.view_proj_inv, refract_uv, scene_depth);
+        refracted += water_caustics(scene_pos, vol, refract_uv);
+    }
 
     // ── Medium ───────────────────────────────────────────────────────────────
     let transmittance = water_transmittance(path, vol);
@@ -410,7 +486,7 @@ fn fs_above(in: VertexOutput) -> @location(0) vec4f {
 
     // ── Reflection ───────────────────────────────────────────────────────────
     let reflected_ray = reflect(view_dir, normal);
-    let reflected     = water_reflection(in.world_pos, reflected_ray, light_dir, vol);
+    let reflected     = water_reflection(in.world_pos, reflected_ray, normal, light_dir, vol);
 
     // Fade the reflection into the shoreline, otherwise the contact with
     // geometry reads as a hard analytic line.
@@ -453,20 +529,13 @@ fn fs_under(in: VertexOutput) -> @location(0) vec4f {
     let reflected_ray = reflect(view_dir, normal);
     var below_color   = vec3f(0.0);
 
-    let ssr_enabled = vol.ssr_params.x > 0.5;
-    var got_hit = false;
-    if ssr_enabled {
-        let hit = trace_ssr(
-            in.world_pos,
-            reflected_ray,
-            u32(max(vol.ssr_params.y, 1.0)),
-            max(vol.ssr_params.z, 1e-3),
-            vol.ssr_params.w,
-        );
+    var confidence = 0.0;
+    if vol.ssr_params.x > 0.5 {
+        let hit = trace_ssr(in.world_pos, reflected_ray, normal, vol);
         below_color = hit.color;
-        got_hit     = hit.hit;
+        confidence  = hit.confidence;
     }
-    if !got_hit {
+    if confidence < 0.999 {
         // Screen-space approximation of the submerged scene. Distortion is in
         // view space for the same reason as the above-water path.
         let n_view = (camera.view * vec4f(normal, 0.0)).xyz;
@@ -475,7 +544,8 @@ fn fs_under(in: VertexOutput) -> @location(0) vec4f {
             vec2f(0.001),
             vec2f(0.999),
         );
-        below_color = textureSampleLevel(scene_color, shared_samp, reflect_uv, 0.0).rgb;
+        let fallback = textureSampleLevel(scene_color, shared_samp, reflect_uv, 0.0).rgb;
+        below_color = mix(fallback, below_color, confidence);
     }
 
     // The medium's own colour, from the descriptor rather than a hardcoded tint.

@@ -12,7 +12,11 @@
 // perspective correction or linearization.
 //
 // Writes Rgba16Float at full resolution: RGB = colour, A = confidence.
+//
+// The traversal itself lives in helio_core::shader::HIZ, shared with the water
+// pass — see #147.
 //!use helio_prelude
+//!use helio_hiz
 
 @group(0) @binding(0) var<uniform> camera:      Camera;
 @group(1) @binding(0) var gbuf_normal:          texture_2d<f32>;
@@ -33,35 +37,6 @@ const FADE_START:    f32 = 0.6;
 
 fn linearize_depth(d_01: f32) -> f32 {
     return helio_view_depth(d_01, camera.position_near.w, camera.forward_far.w);
-}
-
-fn level_size(level: i32) -> vec2<f32> {
-    return vec2<f32>(max(vec2<u32>(1u), textureDimensions(hiz_min) >> vec2<u32>(u32(level))));
-}
-
-fn cell_of(uv: vec2<f32>, size: vec2<f32>) -> vec2<f32> {
-    return floor(uv * size);
-}
-
-fn min_depth(cell: vec2<f32>, level: i32) -> f32 {
-    return textureLoad(hiz_min, vec2<i32>(cell), level).r;
-}
-
-fn at_depth(o: vec3<f32>, d: vec3<f32>, z: f32) -> vec3<f32> {
-    return o + d * ((z - o.z) / d.z);
-}
-
-fn exit_cell(
-    o: vec3<f32>,
-    d: vec3<f32>,
-    cell: vec2<f32>,
-    size: vec2<f32>,
-    cross_step: vec2<f32>,
-    cross_offset: vec2<f32>,
-) -> vec3<f32> {
-    let boundary = (cell + cross_step) / size + cross_offset;
-    let delta = (boundary - o.xy) / d.xy;
-    return o + d * min(delta.x, delta.y);
 }
 
 @compute @workgroup_size(8, 8)
@@ -116,68 +91,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let clip1 = camera.proj * vec4<f32>(end_view, 1.0);
     let p0 = vec3<f32>(helio_ndc_to_uv(clip0.xy / clip0.w), clip0.z / clip0.w);
     let p1 = vec3<f32>(helio_ndc_to_uv(clip1.xy / clip1.w), clip1.z / clip1.w);
-    var d = p1 - p0;
-
-    if abs(d.x) < 1e-7 && abs(d.y) < 1e-7 {
-        textureStore(ssr_output, px, vec4<f32>(0.0));
-        return;
-    }
-    d.x = select(d.x, 1e-7, abs(d.x) < 1e-7);
-    d.y = select(d.y, 1e-7, abs(d.y) < 1e-7);
-
-    let cross_step = vec2<f32>(select(0.0, 1.0, d.x >= 0.0), select(0.0, 1.0, d.y >= 0.0));
-    let cross_offset = (cross_step * 2.0 - 1.0) * 1e-6;
+    let d = p1 - p0;
 
     // ── Hi-Z traversal ──────────────────────────────────────────────────────
-    var level = START_LEVEL;
-    let max_level = min(MAX_LEVEL, i32(textureNumLevels(hiz_min)) - 1);
-    var ray = p0;
-    {
-        let size = level_size(level);
-        ray = exit_cell(p0, d, cell_of(p0.xy, size), size, cross_step, cross_offset);
-    }
-
-    var iter = 0u;
-    var hit = false;
-
-    while level >= 0 && iter < MAX_ITER {
-        iter += 1u;
-        if any(ray.xy < vec2<f32>(0.0)) || any(ray.xy > vec2<f32>(1.0)) { break; }
-        if ray.z > 1.0 { break; }
-
-        let size = level_size(level);
-        let old_cell = cell_of(ray.xy, size);
-        let tile_min = min_depth(old_cell, level);
-
-        var next = ray;
-        let in_front = ray.z < tile_min;
-        if in_front && d.z > 0.0 {
-            next = at_depth(p0, d, tile_min);
-        }
-
-        let new_cell = cell_of(next.xy, size);
-        let skip_tile = in_front && d.z <= 0.0;
-
-        if skip_tile || any(new_cell != old_cell) {
-            next = exit_cell(ray, d, old_cell, size, cross_step, cross_offset);
-            level = min(max_level, level + 1);
-        } else {
-            level -= 1;
-            if level < 0 { hit = true; }
-        }
-        ray = next;
-    }
-
-    if !hit {
+    let march = helio_hiz_march(hiz_min, p0, p1, START_LEVEL, MAX_LEVEL, MAX_ITER);
+    if !march.hit {
         textureStore(ssr_output, px, vec4<f32>(0.0));
         return;
     }
-
+    let ray = march.pos;
     let hit_uv = ray.xy;
-    if any(hit_uv < vec2<f32>(0.0)) || any(hit_uv > vec2<f32>(1.0)) {
-        textureStore(ssr_output, px, vec4<f32>(0.0));
-        return;
-    }
 
     // ── Thickness validation ────────────────────────────────────────────────
     let ray_depth = linearize_depth(ray.z);

@@ -357,6 +357,18 @@ impl WaterSimPass {
                     },
                     count: None,
                 },
+                // hiz_min — R32Float with a mip chain, read via textureLoad, so
+                // it is unfilterable and needs no sampler.
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -555,6 +567,18 @@ impl WaterSimPass {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    // Caustics, for submerged geometry seen directly rather
+                    // than through the surface.
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 8,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             });
         let underwater_tint_shader = helio_core::shader::module(
@@ -608,10 +632,11 @@ impl WaterSimPass {
             immediate_size: 0,
         });
 
-        let caustics_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Caustics Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/caustics.wgsl").into()),
-        });
+        let caustics_shader = helio_core::shader::module(
+            device,
+            "Water Caustics Shader",
+            include_str!("../shaders/caustics.wgsl"),
+        );
         // One module, two fragment entry points: `fs_above` and `fs_under` share
         // the vertex stage and every helper, so the surface can only be shaded
         // one way. They used to be separate files with the whole coordinate and

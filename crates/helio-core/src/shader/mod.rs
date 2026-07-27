@@ -47,15 +47,37 @@ pub const PRELUDE: &str = include_str!("prelude.wgsl");
 /// Marker opting a shader into the prelude. Must appear in the source.
 pub const MARKER: &str = "//!use helio_prelude";
 
-/// Lines the prelude adds ahead of a shader's own source, for offsetting
-/// diagnostics back to the original file.
-pub fn prelude_lines() -> usize {
-    PRELUDE.lines().count() + 1
-}
+/// Hi-Z screen-space ray marching, shared by SSR and water.
+///
+/// Separate from [`PRELUDE`] because it is only wanted by the two passes that
+/// march the pyramid, and prepending it everywhere would push every other
+/// shader's diagnostics further out of alignment for nothing.
+pub const HIZ: &str = include_str!("hiz_trace.wgsl");
+
+/// Marker opting a shader into the Hi-Z traversal. Must appear in the source.
+pub const HIZ_MARKER: &str = "//!use helio_hiz";
 
 /// Returns `true` if `source` opts into the prelude.
 pub fn uses_prelude(source: &str) -> bool {
     source.contains(MARKER)
+}
+
+/// Returns `true` if `source` opts into the Hi-Z traversal.
+pub fn uses_hiz(source: &str) -> bool {
+    source.contains(HIZ_MARKER)
+}
+
+/// Lines prepended ahead of `source`, for offsetting diagnostics back to the
+/// original file. Depends on which markers the source opts into.
+pub fn expanded_lines(source: &str) -> usize {
+    let mut lines = 0;
+    if uses_prelude(source) {
+        lines += PRELUDE.lines().count() + 1;
+    }
+    if uses_hiz(source) {
+        lines += HIZ.lines().count() + 1;
+    }
+    lines
 }
 
 /// Expands a shader source to what the GPU actually compiles.
@@ -64,11 +86,24 @@ pub fn uses_prelude(source: &str) -> bool {
 /// `wgsl_validation` test both go through here, so the test validates exactly
 /// what the runtime builds rather than an approximation of it.
 pub fn resolve(source: &str) -> Cow<'_, str> {
-    if uses_prelude(source) {
-        Cow::Owned(format!("{PRELUDE}\n{source}"))
-    } else {
-        Cow::Borrowed(source)
+    let prelude = uses_prelude(source);
+    let hiz = uses_hiz(source);
+    if !prelude && !hiz {
+        return Cow::Borrowed(source);
     }
+
+    let mut out = String::new();
+    if prelude {
+        out.push_str(PRELUDE);
+        out.push('\n');
+    }
+    // After the prelude, so the traversal may lean on it if it ever needs to.
+    if hiz {
+        out.push_str(HIZ);
+        out.push('\n');
+    }
+    out.push_str(source);
+    Cow::Owned(out)
 }
 
 /// Creates a shader module, expanding the prelude if the source opts in.
@@ -115,10 +150,34 @@ mod tests {
     }
 
     #[test]
-    fn prelude_line_count_matches_what_resolve_prepends() {
-        let src = "//!use helio_prelude\nfoo";
-        let resolved = resolve(src);
-        let offset = resolved.lines().count() - src.lines().count();
-        assert_eq!(offset, prelude_lines());
+    fn expanded_line_count_matches_what_resolve_prepends() {
+        // Both markers, independently and together — the reported offset is
+        // what maps a diagnostic back to the file the reader will open, so it
+        // has to track whatever `resolve` actually prepended.
+        for src in [
+            "//!use helio_prelude\nfoo",
+            "//!use helio_hiz\nfoo",
+            "//!use helio_prelude\n//!use helio_hiz\nfoo",
+        ] {
+            let resolved = resolve(src);
+            let offset = resolved.lines().count() - src.lines().count();
+            assert_eq!(offset, expanded_lines(src), "offset wrong for {src:?}");
+        }
+    }
+
+    #[test]
+    fn a_shader_opting_into_neither_is_passed_through() {
+        let src = "@compute @workgroup_size(1) fn main() {}";
+        assert!(matches!(resolve(src), Cow::Borrowed(_)));
+        assert_eq!(expanded_lines(src), 0);
+    }
+
+    #[test]
+    fn hiz_declares_the_shared_traversal() {
+        // Same reasoning as the prelude: renaming these breaks SSR and water at
+        // runtime, so pin them.
+        for symbol in ["struct HelioHizHit", "fn helio_hiz_march"] {
+            assert!(HIZ.contains(symbol), "hiz include is missing {symbol}");
+        }
     }
 }

@@ -285,6 +285,9 @@ impl RenderPass for WaterSimPass {
             "water_volume_count",
             "water_volumes",
             "water_caustics",
+            // Min-reduced depth pyramid, marched for water reflections. Built
+            // by HiZBuildPass from `depth` alone, so it is available here.
+            "hiz_min",
         ]
     }
     fn writes(&self) -> &'static [&'static str] {
@@ -761,6 +764,17 @@ impl RenderPass for WaterSimPass {
                 // was a full-resolution depth copy every frame.
                 let depth_view = ctx.depth;
 
+                let hiz_min_view = match ctx.resource_pool.get_view("hiz_min") {
+                    Some(v) => v.clone(),
+                    None => {
+                        return Err(helio_core::Error::InvalidPassConfig(
+                            "WaterSim reflections require hiz_min; HiZBuildPass must run \
+                             before WaterSim in the graph"
+                                .to_string(),
+                        ))
+                    }
+                };
+
                 let scene_key = scene_view as *const wgpu::TextureView as usize;
                 let gbuffer_key = gbuffer_normal_view as *const wgpu::TextureView as usize;
                 let new_key = (
@@ -825,6 +839,10 @@ impl RenderPass for WaterSimPass {
                                     resource: wgpu::BindingResource::TextureView(
                                         gbuffer_normal_view,
                                     ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 11,
+                                    resource: wgpu::BindingResource::TextureView(&hiz_min_view),
                                 },
                             ],
                         }));
@@ -948,6 +966,15 @@ impl RenderPass for WaterSimPass {
                                         binding: 7,
                                         resource: wgpu::BindingResource::Sampler(
                                             &self.output_sampler,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 8,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            ctx.resources
+                                                .water_caustics
+                                                .read("WaterSim")
+                                                .unwrap(),
                                         ),
                                     },
                                 ],
