@@ -2,8 +2,9 @@
 //!
 //! Handles meshletization, LOD generation, and virtual mesh lifecycle.
 
-use crate::handles::MeshId;
-use crate::mesh::MeshUpload;
+use glam::Vec3;
+use libhelio::GpuMeshletVertex;
+
 use crate::vg::{
     generate_lod_meshes, meshletize_with_indices, GeneratedLodMesh, VirtualMeshId,
     VirtualMeshUpload,
@@ -53,67 +54,127 @@ impl super::super::Scene {
     pub fn insert_virtual_mesh(&mut self, upload: VirtualMeshUpload) -> VirtualMeshId {
         let local_bounds = referenced_bounds(&upload.vertices, &upload.indices).unwrap_or([0.0; 4]);
 
-        // Generate the asset's distinct LOD chain via meshopt simplification.
         let lod_meshes = generate_lod_meshes(&upload.vertices, &upload.indices);
 
         let mut all_meshlets: Vec<libhelio::GpuMeshletEntry> = Vec::new();
-        let mut mesh_ids: Vec<MeshId> = Vec::new();
-        let mut lod_errors = [0.0; libhelio::VG_LOD_LEVELS];
-        let mut lod_first_meshlets = [0; libhelio::VG_LOD_LEVELS];
-        let mut lod_meshlet_counts = [0; libhelio::VG_LOD_LEVELS];
-        let mut max_meshlet_count = 0;
+        let mut all_meshlet_vertices: Vec<GpuMeshletVertex> = Vec::new();
+        let mut all_meshlet_indices: Vec<u16> = Vec::new();
+        // Per-LOD meshlet counts (needed for parent-link building).
+        let mut lod_meshlet_counts: Vec<u32> = Vec::new();
 
-        for (lod_level, lod_mesh) in lod_meshes.into_iter().enumerate() {
+        // Collect per-LOD errors from the simplification chain.
+        let mut lod_errors: Vec<f32> = Vec::new();
+
+        for lod_mesh in lod_meshes.into_iter() {
             let GeneratedLodMesh {
                 vertices: lod_verts,
                 indices: lod_indices,
                 error,
             } = lod_mesh;
-            let first_meshlet = u32::try_from(all_meshlets.len())
-                .expect("virtual mesh exceeds the u32 descriptor address space");
-            // Build meshlets with meshoptimizer — this produces a reordered
-            // index buffer that groups spatially coherent triangles.
-            let (mut meshlets, meshlet_indices) =
-                meshletize_with_indices(&lod_verts, &lod_indices, 0, 0);
 
-            // Upload the vertices + meshlet-reordered indices to the mega-buffer.
-            let mesh_id = self.mesh_pool.insert(MeshUpload {
-                vertices: lod_verts,
-                indices: meshlet_indices,
-            });
-            let slice = self.mesh_pool.get(mesh_id).unwrap().slice;
+            let vertex_base = all_meshlet_vertices.len() as u32;
+            let index_base = all_meshlet_indices.len() as u32;
 
+            let (mut meshlets, meshlet_verts, meshlet_idxs) =
+                meshletize_with_indices(&lod_verts, &lod_indices);
+
+            // Adjust offsets from per-LOD-local to per-mesh-global.
+            // lod_error is filled below — we need the NEXT coarser level's error.
             for m in &mut meshlets {
-                m.first_index += slice.first_index;
-                m.vertex_offset += slice.first_vertex as i32;
-                m.lod_error = error;
+                m.meshlet_vertex_offset += vertex_base;
+                m.meshlet_index_offset += index_base;
+                // parent_cluster_id filled in post-processing below.
             }
 
             let meshlet_count = u32::try_from(meshlets.len())
                 .expect("virtual-mesh LOD exceeds the u32 descriptor address space");
-            lod_errors[lod_level] = error;
-            lod_first_meshlets[lod_level] = first_meshlet;
-            lod_meshlet_counts[lod_level] = meshlet_count;
-            max_meshlet_count = max_meshlet_count.max(meshlet_count);
+            lod_errors.push(error);
+            lod_meshlet_counts.push(meshlet_count);
             all_meshlets.extend(meshlets);
-            mesh_ids.push(mesh_id);
+            all_meshlet_vertices.extend(meshlet_verts);
+            all_meshlet_indices.extend(meshlet_idxs);
         }
 
-        let lod_count = u32::try_from(mesh_ids.len()).expect("LOD count must fit in u32");
+        // ── Fix up lod_error ──────────────────────────────────────────────────
+        // Each meshlet carries the CUMULATIVE simplification error of its own
+        // LOD level vs the original mesh.  The DAG traversal starts at the
+        // root (coarsest, largest error) and walks toward finer levels:
+        // if error <= threshold → good enough, emit this level.
+        let lod_count = u32::try_from(lod_meshlet_counts.len()).expect("LOD count must fit in u32");
+        let mut meshlet_cursor = 0usize;
+        for level in 0..lod_count as usize {
+            let count = lod_meshlet_counts[level] as usize;
+            let cumulative_error = lod_errors[level];
+            for m in &mut all_meshlets[meshlet_cursor..meshlet_cursor + count] {
+                m.lod_error = cumulative_error;
+            }
+            meshlet_cursor += count;
+        }
+
+        // ── Build flat DAG parent links ──────────────────────────────────────
+        // For each LOD level `l` (child, finer), find the overlapping meshlet
+        // in LOD `l+1` (parent, coarser).  Use bounding-sphere overlap:
+        // a child belongs to the parent whose center the child's center is
+        // closest to, provided their spheres overlap.
+        //
+        // The coarsest LOD meshlets have no parent (u32::MAX).
+        for level in 0..lod_count.saturating_sub(1) as usize {
+            let child_start = lod_meshlet_counts[..level].iter().copied().sum::<u32>() as usize;
+            let child_count = lod_meshlet_counts[level] as usize;
+            let parent_start = child_start + child_count;
+            let parent_count = lod_meshlet_counts[level + 1] as usize;
+
+            for ci in child_start..child_start + child_count {
+                let child = &all_meshlets[ci];
+                let c_center = Vec3::from_array(child.center);
+                let c_radius = child.radius;
+
+                let mut best_parent = u32::MAX;
+                let mut best_dist = f32::MAX;
+
+                for pi in parent_start..parent_start + parent_count {
+                    let parent = &all_meshlets[pi];
+                    let p_center = Vec3::from_array(parent.center);
+                    let p_radius = parent.radius;
+
+                    let dist = c_center.distance(p_center);
+                    if dist <= c_radius + p_radius + 1e-6 && dist < best_dist {
+                        best_parent = pi as u32;
+                        best_dist = dist;
+                    }
+                }
+
+                // If no parent overlaps, find the closest parent by center distance.
+                if best_parent == u32::MAX {
+                    for pi in parent_start..parent_start + parent_count {
+                        let parent = &all_meshlets[pi];
+                        let p_center = Vec3::from_array(parent.center);
+                        let dist = c_center.distance(p_center);
+                        if dist < best_dist {
+                            best_parent = pi as u32;
+                            best_dist = dist;
+                        }
+                    }
+                }
+
+                all_meshlets[ci].parent_cluster_id = best_parent;
+            }
+        }
+
+        let total_meshlet_count = u32::try_from(all_meshlets.len())
+            .expect("virtual mesh exceeds the u32 descriptor address space");
 
         let id = VirtualMeshId(self.vg_next_mesh_id);
         self.vg_next_mesh_id += 1;
         self.vg_meshes.insert(
             id,
             VirtualMeshRecord {
-                mesh_ids,
                 meshlets: all_meshlets,
+                meshlet_vertices: all_meshlet_vertices,
+                meshlet_indices: all_meshlet_indices,
                 local_bounds,
                 lod_count,
-                lod_errors,
-                lod_first_meshlets,
-                lod_meshlet_counts,
-                max_meshlet_count,
+                total_meshlet_count,
                 ref_count: 0,
             },
         );
@@ -121,8 +182,6 @@ impl super::super::Scene {
     }
 
     /// Remove a virtual mesh.
-    ///
-    /// Also removes all underlying mesh data from the mesh pool for each LOD level.
     ///
     /// # Parameters
     /// - `id`: Virtual mesh handle
@@ -133,17 +192,6 @@ impl super::super::Scene {
     ///
     /// # Returns
     /// `Ok(())` if the mesh was successfully removed.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Remove all virtual objects using this mesh first
-    /// for obj_id in vg_objects_using_mesh {
-    ///     scene.remove_virtual_object(obj_id)?;
-    /// }
-    ///
-    /// // Now the mesh can be removed
-    /// scene.remove_virtual_mesh(vg_mesh_id)?;
-    /// ```
     pub fn remove_virtual_mesh(&mut self, id: VirtualMeshId) -> Result<()> {
         let ref_count = {
             let record = self
@@ -157,13 +205,7 @@ impl super::super::Scene {
                 resource: "virtual_mesh",
             });
         }
-        if let Some(record) = self.vg_meshes.remove(&id) {
-            for mesh_id in record.mesh_ids {
-                // Ignore the return value to avoid altering observable behavior if
-                // `remove_mesh` returns a Result or other value.
-                let _ = self.remove_mesh(mesh_id);
-            }
-        }
+        self.vg_meshes.remove(&id);
         Ok(())
     }
 }

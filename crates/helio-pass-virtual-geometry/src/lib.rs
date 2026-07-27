@@ -23,9 +23,8 @@ pub const LOD_LEVEL_COUNT: u32 = 8;
 /// Slot 0 is the opaque meshlet draw count consumed by the first
 /// indirect-count draw call, slot 1 is the alpha-test draw count consumed
 /// by the second draw call, slot 2 is the capacity-rejection overflow
-/// count, slots 3..10 form the selected-LOD object histogram, and slot 11
-/// stores the largest LOD available among visible objects.
-pub(crate) const DRAW_COUNTER_COUNT: u64 = 12;
+/// count.  With the flat DAG no per-LOD histogram is maintained.
+pub(crate) const DRAW_COUNTER_COUNT: u64 = 3;
 pub(crate) const DRAW_COUNTER_BYTES: u64 = DRAW_COUNTER_COUNT * 4;
 
 /// Latest non-blocking GPU readback from the virtual-geometry cull pass.
@@ -36,36 +35,24 @@ pub(crate) const DRAW_COUNTER_BYTES: u64 = DRAW_COUNTER_COUNT * 4;
 pub struct VirtualGeometryDebugStats {
     pub visible_meshlets: u32,
     pub rejected_meshlets: u32,
-    pub lod_object_counts: [u32; LOD_LEVEL_COUNT as usize],
-    pub max_available_lod: u32,
 }
 
 impl VirtualGeometryDebugStats {
-    pub fn visible_objects(self) -> u32 {
-        self.lod_object_counts.iter().copied().sum()
-    }
-
-    pub fn selected_lod_range(self) -> Option<(u32, u32)> {
-        let first = self.lod_object_counts.iter().position(|&count| count != 0)? as u32;
-        let last = self.lod_object_counts.iter().rposition(|&count| count != 0)? as u32;
-        Some((first, last))
-    }
-
     fn from_counters(counters: &[u32]) -> Option<Self> {
         if counters.len() < DRAW_COUNTER_COUNT as usize {
             return None;
         }
 
-        let mut lod_object_counts = [0; LOD_LEVEL_COUNT as usize];
-        lod_object_counts.copy_from_slice(&counters[3..11]);
         Some(Self {
             visible_meshlets: counters[0] + counters[1],
             rejected_meshlets: counters[2],
-            lod_object_counts,
-            max_available_lod: counters[11].min(LOD_LEVEL_COUNT - 1),
         })
     }
 }
+
+pub(crate) const TILE_SIZE_X: u32 = 8;
+pub(crate) const TILE_SIZE_Y: u32 = 8;
+pub(crate) const MAX_MESHLETS_PER_TILE: u32 = 64;
 
 pub(crate) const INITIAL_MESHLETS: u64 = 1024;
 pub(crate) const INITIAL_OBJECTS: u64 = 256;
@@ -76,26 +63,12 @@ pub(crate) const INITIAL_INSTANCES: u64 = 256;
 /// At 36 bytes per slot (20-byte indirect command plus 16-byte draw metadata),
 /// this bounds the publication buffers to 9 MiB plus the two counters. Callers
 /// with a measured platform-specific budget can override it explicitly.
-/// Upper bound on how many meshlet draws a single frame can publish to the
-/// indirect/draw-metadata buffers. This is a genuine ceiling, not a
-/// pre-allocation size — `VirtualGeometryPass` starts small and grows these
-/// buffers toward this value only as scenes actually need it (see
-/// `prepare()` in `rendering.rs`), so raising it costs nothing for scenes
-/// that don't need the extra headroom.
 ///
-/// 262_144 (the previous value) is nowhere near enough for any real scene
-/// with more than a couple hundred separate VG object instances: the budget
-/// is sized against `vg.max_draw_count`, the *worst-case* sum of every
-/// object's LOD0 meshlet count, which scales with instance count, not just
-/// unique mesh complexity. A scene with ~1200 instances of a ~90k-triangle,
-/// 7-section asset (the shipyard demo's shipping containers) needs
-/// ~2.5 million draw slots — once `cull_meshlet()`'s atomic slot counter
-/// (`vg_cull.wgsl`) exceeds the budget, every excess meshlet is silently
-/// rejected via the overflow counter, which looks exactly like the culling
-/// tests themselves are wrongly rejecting on-screen geometry: it isn't the
-/// visibility tests, it's the output buffer running out of room, and which
-/// meshlets lose that race is effectively fixed frame-to-frame for a static
-/// scene, so the drops look like a consistent, reproducible mis-cull.
+/// In Phase 3 the indirect buffer grows dynamically on demand — this budget is
+/// now a soft warning threshold, not a hard ceiling. If the needed capacity
+/// exceeds it, a warning is logged and the buffer continues to grow. The GPU
+/// cull shader's overflow guard silently drops excess draws when the buffer
+/// is full and the CPU grows it for subsequent frames.
 pub const DEFAULT_MAX_PUBLISHED_MESHLETS: u32 = 4_194_304;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,14 +93,6 @@ impl VirtualGeometryBudget {
 
     pub const fn max_published_meshlets(self) -> u32 {
         self.max_published_meshlets
-    }
-
-    pub const fn clamp_draw_count(self, worst_case_draw_count: u32) -> u32 {
-        if worst_case_draw_count < self.max_published_meshlets {
-            worst_case_draw_count
-        } else {
-            self.max_published_meshlets
-        }
     }
 }
 
@@ -339,9 +304,7 @@ mod tests {
     fn default_publication_budget_is_144_mib_plus_counters() {
         let budget = VirtualGeometryBudget::default();
         assert_eq!(budget.max_published_meshlets(), DEFAULT_MAX_PUBLISHED_MESHLETS);
-        assert_eq!(budget.publication_bytes(), 144 * 1024 * 1024 + 48);
-        assert_eq!(budget.clamp_draw_count(65_536), 65_536);
-        assert_eq!(budget.clamp_draw_count(u32::MAX), DEFAULT_MAX_PUBLISHED_MESHLETS);
+        assert_eq!(budget.publication_bytes(), 144 * 1024 * 1024 + 12);
     }
 
     #[test]
@@ -440,16 +403,11 @@ mod tests {
 
     #[test]
     fn debug_stats_decode_the_gpu_counter_layout() {
-        let stats = VirtualGeometryDebugStats::from_counters(&[
-            100, 23, 4, 0, 2, 5, 0, 0, 1, 0, 0, 6,
-        ])
-        .expect("complete counter layout");
+        let stats = VirtualGeometryDebugStats::from_counters(&[100, 23, 4])
+            .expect("complete counter layout");
 
         assert_eq!(stats.visible_meshlets, 123);
         assert_eq!(stats.rejected_meshlets, 4);
-        assert_eq!(stats.visible_objects(), 8);
-        assert_eq!(stats.selected_lod_range(), Some((1, 5)));
-        assert_eq!(stats.max_available_lod, 6);
-        assert!(VirtualGeometryDebugStats::from_counters(&[0; 11]).is_none());
+        assert!(VirtualGeometryDebugStats::from_counters(&[0; 2]).is_none());
     }
 }

@@ -143,6 +143,12 @@ pub struct Scene {
     /// Unique meshlet entries for virtual meshes referenced by the current VG layout.
     pub(in crate::scene) vg_cpu_meshlets: Vec<libhelio::GpuMeshletEntry>,
 
+    /// Flat per-meshlet vertex stream (all meshlets of all referenced virtual meshes).
+    pub(in crate::scene) vg_cpu_meshlet_vertices: Vec<libhelio::GpuMeshletVertex>,
+
+    /// Flat per-meshlet index stream (u16 meshlet-local vertex indices).
+    pub(in crate::scene) vg_cpu_meshlet_indices: Vec<u16>,
+
     /// Object-level LOD ranges and bounds (one entry per VG object).
     pub(in crate::scene) vg_cpu_objects: Vec<libhelio::GpuVgObject>,
 
@@ -151,9 +157,6 @@ pub struct Scene {
 
     /// Immutable 64-meshlet expansion spans for the second GPU cull stage.
     pub(in crate::scene) vg_cpu_work_items: Vec<libhelio::GpuVgWorkItem>,
-
-    /// Exact worst-case number of draws after choosing one LOD per object.
-    pub(in crate::scene) vg_max_draw_count: u32,
 
     // ── Water volumes ─────────────────────────────────────────────────────────
     /// Water volumes (dense array)
@@ -308,10 +311,11 @@ impl Scene {
             vg_published_instance_dirty_range: None,
             vg_instance_version: 0,
             vg_cpu_meshlets: Vec::new(),
+            vg_cpu_meshlet_vertices: Vec::new(),
+            vg_cpu_meshlet_indices: Vec::new(),
             vg_cpu_objects: Vec::new(),
             vg_cpu_instances: Vec::new(),
             vg_cpu_work_items: Vec::new(),
-            vg_max_draw_count: 0,
             radiant_graphs: RadiantGraphRegistry::new(),
             water_volumes: DenseArena::new(),
             water_volumes_dirty: false,

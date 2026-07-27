@@ -19,24 +19,44 @@ pub const VG_LOD_LEVELS: usize = 8;
 /// Number of meshlets processed cooperatively by one VG cull workgroup.
 pub const VG_CULL_MESHLETS_PER_WORK_ITEM: u32 = 64;
 
+/// Packed per-meshlet vertex format (48 bytes, matches WGSL `array<GpuMeshletVertex>` stride).
+///
+/// WGSL `vec3<f32>` has alignment 16, forcing the struct to round up to 48 bytes.
+/// Two u32 padding fields keep the Rust and WGSL layouts in sync.
+///
+/// Stored in a flat storage buffer (`meshlet_vertices`) indexed by
+/// `SV_VertexID` (= local index + `meshlet_vertex_offset`).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Pod, Zeroable)]
+pub struct GpuMeshletVertex {
+    pub position: [f32; 3],
+    pub bitangent_sign: f32,
+    pub tex_coords0: [f32; 2],
+    pub tex_coords1: [f32; 2],
+    pub normal: u32,
+    pub tangent: u32,
+    /// Padding to 48 bytes to match WGSL array stride (vec3 alignment = 16).
+    pub _pad: [u32; 2],
+}
+
 /// GPU-side descriptor for a single meshlet (a small cluster of triangles). Exactly 64 bytes.
 ///
-/// Stored once per virtual mesh in a tightly-packed storage buffer. Virtual
-/// objects refer to contiguous per-LOD ranges in this immutable descriptor
-/// array, so instances never duplicate meshlet metadata.
+/// Stored once per virtual mesh in a tightly-packed storage buffer. The flat
+/// DAG replaces per-LOD ranges; each meshlet independently determines its own
+/// LOD via `parent_cluster_id` and `lod_error`.
 ///
-/// # Layout (64 bytes, 16-byte aligned)
+/// # Layout (64 bytes)
 /// ```text
-///  0..12   center:          vec3<f32>  bounding sphere center (mesh local space)
-/// 12..16   radius:          f32        bounding sphere radius
-/// 16..28   cone_apex:       vec3<f32>  backface cone apex (mesh local space)
-/// 28..32   cone_cutoff:     f32        cos(half-angle); > 1.0 = disable cone cull
-/// 32..44   cone_axis:       vec3<f32>  normalised backface cone axis (mesh local)
-/// 44..48   lod_error:       f32        accumulated object-space simplification error
-/// 48..52   first_index:     u32        absolute offset into the global index buffer
-/// 52..56   index_count:     u32        number of indices (triangles × 3, ≤ 64 × 3)
-/// 56..60   vertex_offset:   i32        base_vertex added to every index by the GPU
-/// 60..64   instance_index:  u32        reserved; object ownership is stored separately
+///  0..12   center:             vec3<f32>  bounding sphere center (mesh local space)
+/// 12..16   radius:             f32        bounding sphere radius
+/// 16..28   cone_apex:          vec3<f32>  backface cone apex (mesh local space)
+/// 28..32   cone_cutoff:        f32        cos(half-angle); > 1.0 = disable cone cull
+/// 32..44   cone_axis:          vec3<f32>  normalised backface cone axis (mesh local)
+/// 44..48   lod_error:          f32        accumulated object-space simplification error
+/// 48..52   packed_counts:      u32        lo 16 = vertex_count, hi 16 = triangle_count
+/// 52..56   meshlet_index_offset: u32     offset in u16 elements into meshlet index stream
+/// 56..60   meshlet_vertex_offset: u32    offset in GpuMeshletVertex elements into vertex stream
+/// 60..64   parent_cluster_id:  u32        index of parent (coarser LOD) meshlet, or 0xFFFFFFFF for root
 /// ```
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
@@ -58,47 +78,37 @@ pub struct GpuMeshletEntry {
     /// Accumulated object-space simplification error for this meshlet's LOD.
     pub lod_error: f32,
 
-    /// Absolute byte-index offset into the global index mega-buffer
-    /// (= mesh.first_index + offset_within_mesh).
-    pub first_index: u32,
-    /// Number of indices in this meshlet (= triangles × 3, ≤ `MESHLET_MAX_TRIANGLES × 3`).
-    pub index_count: u32,
-    /// Base vertex added by the GPU to every index value when drawing.
-    /// Equals the mesh's `first_vertex` in the global vertex mega-buffer.
-    pub vertex_offset: i32,
-    /// Reserved for ABI stability. Object ownership is supplied by
-    /// [`GpuVgObject`] so descriptors can be shared by every instance.
-    pub instance_index: u32,
+    /// Packed vertex_count (lo 16 bits) and triangle_count (hi 16 bits).
+    /// vertex_count = packed_counts & 0xFFFF, triangle_count = packed_counts >> 16.
+    pub packed_counts: u32,
+    /// Offset in u16 elements into the flat meshlet index stream (= meshlet_index_stream).
+    pub meshlet_index_offset: u32,
+    /// Offset in GpuMeshletVertex elements into the flat meshlet vertex stream.
+    pub meshlet_vertex_offset: u32,
+    /// Index of the parent (coarser LOD) meshlet in the global flat meshlet buffer.
+    /// `0xFFFFFFFF` indicates a root meshlet (coarsest LOD) with no parent.
+    pub parent_cluster_id: u32,
 }
 
-/// GPU-side descriptor for one virtual-geometry object. Exactly 128 bytes.
+/// GPU-side descriptor for one virtual-geometry object. Exactly 32 bytes.
 ///
-/// The first compute stage assigns one lane to each object for conservative
-/// object culling and a single measured-error LOD decision. The second stage
-/// expands that selected LOD across immutable [`GpuVgWorkItem`] spans.
+/// The flat DAG scheme eliminates per-LOD arrays. A single `meshlet_count`
+/// covers all LODs; the cull shader iterates every meshlet and uses each
+/// meshlet's `parent_cluster_id` and `lod_error` to decide which ones to emit.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuVgObject {
     /// Slot in the VG `GpuInstanceData` and `InstanceCullData` arrays.
     pub instance_index: u32,
-    /// Number of valid entries in the LOD arrays (zero for invalid geometry).
-    pub lod_count: u32,
-    /// Largest meshlet count among the object's LODs. This object's exact
-    /// contribution to the worst-case indirect draw capacity.
-    pub max_meshlet_count: u32,
-    /// Per-frame GPU scratch containing selected LOD + 1; zero means culled.
-    /// CPU publishers must initialize this to zero. The object-selection stage
-    /// overwrites it before any meshlet span reads it.
+    /// Total number of meshlets across all LODs for this object.
+    pub meshlet_count: u32,
+    /// Global offset into the flat meshlet buffer for this object's first meshlet.
+    pub first_meshlet: u32,
+    /// Reserved for future use.
     pub reserved: u32,
 
     /// Conservative mesh-local bounding sphere `[center.xyz, radius]`.
     pub local_bounds: [f32; 4],
-    /// Accumulated object-space simplification error for each LOD.
-    pub lod_errors: [f32; VG_LOD_LEVELS],
-    /// First descriptor in the shared meshlet buffer for each LOD.
-    pub lod_first_meshlets: [u32; VG_LOD_LEVELS],
-    /// Number of descriptors in each LOD range.
-    pub lod_meshlet_counts: [u32; VG_LOD_LEVELS],
 }
 
 /// Per-visible-draw metadata emitted beside each indirect command. Exactly 16 bytes.
@@ -115,12 +125,13 @@ pub struct GpuVgDraw {
     pub reserved: u32,
 }
 
-/// Immutable expansion record for the second-stage meshlet cull. Exactly 8 bytes.
+/// Work item for the second-stage meshlet cull. Exactly 8 bytes.
 ///
-/// Records are built once with the object layout. Each record covers up to 64
-/// meshlets from whichever whole-object LOD the first GPU stage selects. Using
-/// fixed spans keeps work bounded while allowing a very large object to occupy
-/// many GPU workgroups instead of serialising through one workgroup.
+/// Each record covers up to 64 meshlets across ALL LODs for one object.
+/// The cull shader iterates each meshlet independently and uses the flat DAG
+/// (`parent_cluster_id` + `lod_error`) to decide whether to emit it.
+/// Using fixed spans keeps work bounded while allowing a very large object
+/// to occupy many GPU workgroups instead of serialising through one.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct GpuVgWorkItem {
@@ -134,8 +145,12 @@ const _: () = {
         "GpuMeshletEntry must be exactly 64 bytes"
     );
     assert!(
-        std::mem::size_of::<GpuVgObject>() == 128,
-        "GpuVgObject must be exactly 128 bytes"
+        std::mem::size_of::<GpuMeshletVertex>() == 48,
+        "GpuMeshletVertex must be exactly 40 bytes"
+    );
+    assert!(
+        std::mem::size_of::<GpuVgObject>() == 32,
+        "GpuVgObject must be exactly 32 bytes"
     );
     assert!(
         std::mem::size_of::<GpuVgDraw>() == 16,
@@ -150,7 +165,7 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::{
-        GpuMeshletEntry, GpuVgDraw, GpuVgObject, GpuVgWorkItem,
+        GpuMeshletEntry, GpuMeshletVertex, GpuVgDraw, GpuVgObject, GpuVgWorkItem,
         VG_CULL_MESHLETS_PER_WORK_ITEM, VG_LOD_LEVELS,
     };
 
@@ -158,7 +173,8 @@ mod tests {
     fn gpu_virtual_geometry_layouts_are_stable() {
         assert_eq!(VG_LOD_LEVELS, 8);
         assert_eq!(std::mem::size_of::<GpuMeshletEntry>(), 64);
-        assert_eq!(std::mem::size_of::<GpuVgObject>(), 128);
+        assert_eq!(std::mem::size_of::<GpuMeshletVertex>(), 48);
+        assert_eq!(std::mem::size_of::<GpuVgObject>(), 32);
         assert_eq!(std::mem::size_of::<GpuVgDraw>(), 16);
         assert_eq!(std::mem::size_of::<GpuVgWorkItem>(), 8);
         assert_eq!(std::mem::align_of::<GpuVgObject>(), 4);

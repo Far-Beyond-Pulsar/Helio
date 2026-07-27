@@ -49,7 +49,7 @@ struct CullUniforms {
     object_dispatch_width: u32,
     work_item_count: u32,
     work_dispatch_width: u32,
-    _pad0: u32,
+    hiz_valid: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -59,7 +59,7 @@ struct CullUniforms {
 struct InstanceCullData {
     max_scale: f32,
     min_scale: f32,
-    cone_cull_enabled: u32,
+    cull_flags: u32,
     valid_transform: u32,
 }
 
@@ -493,7 +493,7 @@ fn create_case_buffers(
     let instance_cull = vec![InstanceCullData {
         max_scale: 1.0,
         min_scale: 1.0,
-        cone_cull_enabled: 0,
+        cull_flags: 0,
         valid_transform: 1,
     }; case.object_count as usize];
     let meshlets = vec![GpuMeshletEntry {
@@ -503,24 +503,19 @@ fn create_case_buffers(
         cone_cutoff: 2.0,
         cone_axis: [0.0, 0.0, 1.0],
         lod_error: 0.0,
-        first_index: 0,
-        index_count: 3,
-        vertex_offset: 0,
-        instance_index: 0,
+        packed_counts: 3 | (1 << 16), // vertex_count=3, triangle_count=1
+        meshlet_index_offset: 0,
+        meshlet_vertex_offset: 0,
+        parent_cluster_id: u32::MAX,
     }; case.meshlets_per_object as usize];
     let objects: Vec<_> = (0..case.object_count)
         .map(|instance_index| {
-            let mut lod_meshlet_counts = [0; 8];
-            lod_meshlet_counts[0] = case.meshlets_per_object;
             GpuVgObject {
                 instance_index,
-                lod_count: 1,
-                max_meshlet_count: case.meshlets_per_object,
+                meshlet_count: case.meshlets_per_object,
+                first_meshlet: 0,
                 reserved: 0,
                 local_bounds: [0.0, 0.0, -10.0, 1.0],
-                lod_errors: [0.0; 8],
-                lod_first_meshlets: [0; 8],
-                lod_meshlet_counts,
             }
         })
         .collect();
@@ -555,7 +550,7 @@ fn create_case_buffers(
         object_dispatch_width,
         work_item_count,
         work_dispatch_width,
-        _pad0: 0,
+        hiz_valid: 0,
         _pad1: 0,
         _pad2: 0,
     };

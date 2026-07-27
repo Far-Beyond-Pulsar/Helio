@@ -72,18 +72,13 @@ impl super::super::Scene {
             .vg_meshes
             .get_mut(&desc.virtual_mesh)
             .ok_or_else(|| invalid("virtual_mesh"))?;
-        let mesh_id = record
-            .mesh_ids
-            .first()
-            .copied()
-            .ok_or_else(|| invalid("virtual_mesh_geometry"))?;
         record.ref_count += 1;
 
         let instance = GpuInstanceData {
             model: desc.transform.to_cols_array(),
             normal_mat: normal_matrix(desc.transform),
             bounds: desc.bounds,
-            mesh_id: mesh_id.slot(),
+            mesh_id: 0, // VG instances use meshlet vertex stream, not the mesh pool
             material_id: desc.material_id,
             flags: desc.flags,
             lightmap_index: 0xFFFFFFFF,  // Virtual geometry doesn't use lightmaps

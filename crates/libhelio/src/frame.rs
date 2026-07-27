@@ -548,6 +548,10 @@ impl<'a> FrameResources<'a> {
 pub struct VgFrameData<'a> {
     /// Raw bytes of a `GpuMeshletEntry` array.
     pub meshlets: &'a [u8],
+    /// Raw bytes of a `GpuMeshletVertex` array (flat per-meshlet vertex stream).
+    pub meshlet_vertices: &'a [u8],
+    /// Raw bytes of a `u16` array (flat per-meshlet index stream).
+    pub meshlet_indices: &'a [u8],
     /// Raw bytes of a `GpuVgObject` array (one entry per VG object).
     pub objects: &'a [u8],
     /// Raw bytes of a `GpuInstanceData` array (one entry per VG object).
@@ -556,12 +560,14 @@ pub struct VgFrameData<'a> {
     pub work_items: &'a [u8],
     /// Number of unique meshlet descriptors across all referenced virtual meshes.
     pub meshlet_count: u32,
+    /// Number of `GpuMeshletVertex` elements in the meshlet vertex stream.
+    pub meshlet_vertex_count: u32,
+    /// Number of `u16` index elements in the meshlet index stream.
+    pub meshlet_index_count: u32,
     /// Number of VG objects (and corresponding instance entries).
     pub object_count: u32,
     /// Number of second-stage 64-meshlet work spans.
     pub work_item_count: u32,
-    /// Exact worst-case number of indirect draws after selecting one LOD per object.
-    pub max_draw_count: u32,
     /// Version counter incremented when meshlet, object, or work-item topology changes.
     pub buffer_version: u64,
     /// Version counter incremented when a transform-only dirty range is published.

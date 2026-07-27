@@ -4,7 +4,7 @@ use std::num::NonZeroU32;
 use crate::{
     CullUniforms, InstanceCullData, LodQuality, VgGlobals, VirtualGeometryBudget,
     VirtualGeometryDebugStats, DRAW_COUNTER_BYTES, INITIAL_INSTANCES, INITIAL_MESHLETS,
-    INITIAL_OBJECTS, MAX_TEXTURES,
+    INITIAL_OBJECTS, MAX_TEXTURES, MAX_MESHLETS_PER_TILE, TILE_SIZE_X, TILE_SIZE_Y,
 };
 use helio_core::graph::ResourceBuilder;
 use helio_core::{
@@ -30,8 +30,12 @@ pub struct VirtualGeometryPass {
     pub(crate) cull_bind_group: Option<wgpu::BindGroup>,
     pub(crate) cull_bind_group_hiz_key: Option<(usize, usize)>,
     pub(crate) cull_buf: wgpu::Buffer,
-    pub(crate) opaque_draw_pipeline: wgpu::RenderPipeline,
-    pub(crate) alpha_draw_pipeline: wgpu::RenderPipeline,
+    // Visibility pass pipelines (depth-only, writes SV_Position, no color targets)
+    pub(crate) visibility_opaque_pipeline: wgpu::RenderPipeline,
+    pub(crate) visibility_alpha_pipeline: wgpu::RenderPipeline,
+    // Shading pass pipelines (full GBuffer, depth test Equal, depth write disabled)
+    pub(crate) shading_opaque_pipeline: wgpu::RenderPipeline,
+    pub(crate) shading_alpha_pipeline: wgpu::RenderPipeline,
     pub(crate) debug_draw_pipeline: wgpu::RenderPipeline,
     pub(crate) lod_debug_pipeline: wgpu::RenderPipeline,
     pub(crate) draw_bgl_0: wgpu::BindGroupLayout,
@@ -41,6 +45,8 @@ pub struct VirtualGeometryPass {
     pub(crate) bg1_version: Option<u64>,
     pub(crate) globals_buf: wgpu::Buffer,
     pub(crate) meshlet_buf: wgpu::Buffer,
+    pub(crate) meshlet_vertex_buf: wgpu::Buffer,
+    pub(crate) meshlet_index_buf: wgpu::Buffer,
     pub(crate) object_buf: wgpu::Buffer,
     pub(crate) instance_buf: wgpu::Buffer,
     pub(crate) instance_cull_buf: wgpu::Buffer,
@@ -61,9 +67,38 @@ pub struct VirtualGeometryPass {
     pub(crate) last_meshlet_count: u32,
     pub(crate) last_object_count: u32,
     pub(crate) last_work_item_count: u32,
-    pub(crate) last_max_draw_count: u32,
     pub(crate) object_dispatch_width: u32,
     pub(crate) work_dispatch_width: u32,
+    // ── Software rasterizer (Phase 5) ─────────────────────────────────────
+    pub use_sw_rasterizer: bool,
+    last_screen_width: u32,
+    last_screen_height: u32,
+    // Binning pass
+    binning_pipeline: wgpu::ComputePipeline,
+    binning_bgl: wgpu::BindGroupLayout,
+    binning_bg: Option<wgpu::BindGroup>,
+    // Rasterize pass
+    rasterize_pipeline: wgpu::ComputePipeline,
+    rasterize_bgl: wgpu::BindGroupLayout,
+    rasterize_bg: Option<wgpu::BindGroup>,
+    // Shade pass
+    shade_pipeline: wgpu::ComputePipeline,
+    shade_bgl_0: wgpu::BindGroupLayout,
+    shade_bgl_1: wgpu::BindGroupLayout,
+    shade_bgl_2: wgpu::BindGroupLayout,
+    shade_bg_0: Option<wgpu::BindGroup>,
+    shade_bg_1: Option<wgpu::BindGroup>,
+    shade_bg_2: Option<wgpu::BindGroup>,
+    // SW rasterizer buffers
+    visible_meshlet_ids_buf: wgpu::Buffer,
+    visible_instance_ids_buf: wgpu::Buffer,
+    visible_meshlet_count_buf: wgpu::Buffer,
+    tile_counts_buf: wgpu::Buffer,
+    tile_meshlet_ids_buf: wgpu::Buffer,
+    tile_instance_ids_buf: wgpu::Buffer,
+    visibility_depth_buf: wgpu::Buffer,
+    visibility_data_buf: wgpu::Buffer,
+    visibility_instance_buf: wgpu::Buffer,
 }
 
 impl VirtualGeometryPass {
@@ -100,6 +135,8 @@ impl VirtualGeometryPass {
         });
 
         let meshlet_buf = Self::make_meshlet_buf(device, INITIAL_MESHLETS);
+        let meshlet_vertex_buf = Self::make_meshlet_vertex_buf(device, INITIAL_MESHLETS * 64);
+        let meshlet_index_buf = Self::make_meshlet_index_buf(device, INITIAL_MESHLETS * 64 * 3);
         let object_buf = Self::make_object_buf(device, INITIAL_OBJECTS);
         let instance_buf = Self::make_instance_buf(device, INITIAL_INSTANCES);
         let instance_cull_buf = Self::make_instance_cull_buf(device, INITIAL_INSTANCES);
@@ -252,6 +289,37 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                // Visible meshlet output (SW rasterizer)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 13,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 14,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -320,6 +388,16 @@ impl VirtualGeometryPass {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -343,6 +421,10 @@ impl VirtualGeometryPass {
                     binding: 3,
                     resource: draw_metadata_buf.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: meshlet_vertex_buf.as_entire_binding(),
+                },
             ],
         }));
 
@@ -353,37 +435,8 @@ impl VirtualGeometryPass {
             bind_group_layouts: &[Some(&draw_bgl_0), Some(&draw_bgl_1)],
             immediate_size: 0,
         });
-        let vg_vertex_buffers = &[Some(wgpu::VertexBufferLayout {
-            array_stride: 40,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x3,
-                    offset: 0,
-                    shader_location: 0,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32,
-                    offset: 12,
-                    shader_location: 1,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Float32x2,
-                    offset: 16,
-                    shader_location: 2,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Uint32,
-                    offset: 32,
-                    shader_location: 3,
-                },
-                wgpu::VertexAttribute {
-                    format: wgpu::VertexFormat::Uint32,
-                    offset: 36,
-                    shader_location: 4,
-                },
-            ],
-        })];
+        // No vertex buffers — vertex data is read from the meshlet_vertices storage buffer.
+        let vg_vertex_buffers = &[];
         let gbuffer_targets = &[
             Some(wgpu::ColorTargetState {
                 format: wgpu::TextureFormat::Rgba8Unorm,
@@ -406,7 +459,7 @@ impl VirtualGeometryPass {
                 write_mask: wgpu::ColorWrites::ALL,
             }),
             Some(wgpu::ColorTargetState {
-                format: wgpu::TextureFormat::Rg16Float,
+                format: wgpu::TextureFormat::Rgba16Float,
                 blend: None,
                 write_mask: wgpu::ColorWrites::ALL,
             }),
@@ -434,7 +487,26 @@ impl VirtualGeometryPass {
             bias: wgpu::DepthBiasState::default(),
         });
 
-        let make_draw_pipeline = |label: &'static str, constants: &[(&str, f64)]| {
+        let visibility_depth = Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Less),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+        let shading_depth = Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: Some(false),
+            depth_compare: Some(wgpu::CompareFunction::Equal),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        });
+
+        let make_pipeline = |label: &'static str,
+                             entry: &'static str,
+                             constants: &[(&str, f64)],
+                             targets: &[Option<wgpu::ColorTargetState>],
+                             depth: &Option<wgpu::DepthStencilState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&draw_pipeline_layout),
@@ -446,25 +518,51 @@ impl VirtualGeometryPass {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &draw_shader,
-                    entry_point: Some("fs_main"),
+                    entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions {
                         constants,
                         ..Default::default()
                     },
-                    targets: gbuffer_targets,
+                    targets,
                 }),
                 primitive: draw_primitive,
-                depth_stencil: draw_depth.clone(),
+                depth_stencil: depth.clone(),
                 multisample: wgpu::MultisampleState::default(),
                 multiview_mask: None,
                 cache: None,
             })
         };
 
-        let opaque_draw_pipeline = make_draw_pipeline("VG Opaque Draw Pipeline", &[]);
-        let alpha_draw_pipeline = make_draw_pipeline(
-            "VG Alpha Draw Pipeline",
+        // Visibility pipelines: depth-only, no color targets
+        let visibility_opaque_pipeline = make_pipeline(
+            "VG Visibility Opaque Pipeline",
+            "fs_visibility",
+            &[],
+            &[],  // no color attachments
+            &visibility_depth,
+        );
+        let visibility_alpha_pipeline = make_pipeline(
+            "VG Visibility Alpha Pipeline",
+            "fs_visibility",
             &[("has_alpha_test", 1.0)],
+            &[],  // no color attachments
+            &visibility_depth,
+        );
+
+        // Shading pipelines: full GBuffer, depth test Equal
+        let shading_opaque_pipeline = make_pipeline(
+            "VG Shading Opaque Pipeline",
+            "fs_main",
+            &[],
+            gbuffer_targets,
+            &shading_depth,
+        );
+        let shading_alpha_pipeline = make_pipeline(
+            "VG Shading Alpha Pipeline",
+            "fs_main",
+            &[("has_alpha_test", 1.0)],
+            gbuffer_targets,
+            &shading_depth,
         );
 
 
@@ -513,6 +611,203 @@ impl VirtualGeometryPass {
             cache: None,
         });
 
+        // ── Software rasterizer compute pipelines (Phase 5) ─────────────
+        let binning_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("VG Binning Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_binning.wgsl").into()),
+        });
+        let rasterize_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("VG Rasterize Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/vg_rasterize.wgsl").into()),
+        });
+        let shade_shader_source = {
+            let s = include_str!("../shaders/vg_shade.wgsl")
+                .replace(
+                    "binding_array<texture_2d<f32>, 256>",
+                    &format!("binding_array<texture_2d<f32>, {MAX_TEXTURES}>"),
+                )
+                .replace(
+                    "binding_array<sampler, 256>",
+                    &format!("binding_array<sampler, {MAX_TEXTURES}>"),
+                );
+            #[cfg(target_arch = "wasm32")]
+            let s = libhelio::shader::apply_webgpu_material_bindings(&s, MAX_TEXTURES);
+            s
+        };
+        let shade_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("VG Shade Shader"),
+            source: wgpu::ShaderSource::Wgsl(shade_shader_source.clone().into()),
+        });
+
+        // Binning BGL
+        let binning_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("VG Binning BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        let binning_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("VG Binning PL"),
+            bind_group_layouts: &[Some(&binning_bgl)],
+            immediate_size: 0,
+        });
+        let binning_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("VG Binning Pipeline"),
+            layout: Some(&binning_pipeline_layout),
+            module: &binning_shader,
+            entry_point: Some("cs_binning"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Rasterize BGL
+        let rasterize_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("VG Rasterize BGL"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: false }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 9, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 10, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 11, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        let rasterize_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("VG Rasterize PL"),
+            bind_group_layouts: &[Some(&rasterize_bgl)],
+            immediate_size: 0,
+        });
+        let rasterize_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("VG Rasterize Pipeline"),
+            layout: Some(&rasterize_pipeline_layout),
+            module: &rasterize_shader,
+            entry_point: Some("cs_rasterize"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Shade BGL 0 (visibility + meshlet + camera data)
+        let shade_bgl_0 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("VG Shade BGL0"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 7, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 8, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Storage { read_only: true }, has_dynamic_offset: false, min_binding_size: None }, count: None },
+            ],
+        });
+        let shade_bgl_1 = create_material_bgl(device);
+        // Shade BGL 2 (GBuffer storage textures for write)
+        let shade_bgl_2 = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("VG Shade BGL2"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry { binding: 0, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba8Unorm, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba16Float, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 2, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba8Unorm, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 3, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba16Float, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 4, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba16Float, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 5, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba16Float, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+                wgpu::BindGroupLayoutEntry { binding: 6, visibility: wgpu::ShaderStages::COMPUTE, ty: wgpu::BindingType::StorageTexture { access: wgpu::StorageTextureAccess::WriteOnly, format: wgpu::TextureFormat::Rgba16Float, view_dimension: wgpu::TextureViewDimension::D2 }, count: None },
+            ],
+        });
+        let shade_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("VG Shade PL"),
+            bind_group_layouts: &[Some(&shade_bgl_0), Some(&shade_bgl_1), Some(&shade_bgl_2)],
+            immediate_size: 0,
+        });
+        let shade_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("VG Shade Pipeline"),
+            layout: Some(&shade_pipeline_layout),
+            module: &shade_shader,
+            entry_point: Some("cs_shade"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // ── SW rasterizer buffer sizing ─────────────────────────────────
+        let max_visible = (INITIAL_MESHLETS * 2) as u32;
+        let tile_grid_x = (1920u32 + TILE_SIZE_X - 1) / TILE_SIZE_X;
+        let tile_grid_y = (1080u32 + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
+        let tile_count = tile_grid_x * tile_grid_y;
+
+        let visible_meshlet_ids_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visible Meshlet IDs"),
+            size: max_visible as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let visible_instance_ids_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visible Instance IDs"),
+            size: max_visible as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let visible_meshlet_count_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visible Meshlet Count"),
+            size: 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+
+        let tile_counts_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Tile Counts"),
+            size: tile_count as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let tile_data_count = tile_count * MAX_MESHLETS_PER_TILE;
+        let tile_meshlet_ids_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Tile Meshlet IDs"),
+            size: tile_data_count as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+        let tile_instance_ids_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Tile Instance IDs"),
+            size: tile_data_count as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        let initial_pixels = 1920u32 * 1080u32;
+        let visibility_depth_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visibility Depth"),
+            size: initial_pixels as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let visibility_data_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visibility Data"),
+            size: initial_pixels as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let visibility_instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visibility Instance"),
+            size: initial_pixels as u64 * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             select_pipeline,
             cull_pipeline,
@@ -520,8 +815,10 @@ impl VirtualGeometryPass {
             cull_bind_group: None,
             cull_bind_group_hiz_key: None,
             cull_buf,
-            opaque_draw_pipeline,
-            alpha_draw_pipeline,
+            visibility_opaque_pipeline,
+            visibility_alpha_pipeline,
+            shading_opaque_pipeline,
+            shading_alpha_pipeline,
             debug_draw_pipeline,
             lod_debug_pipeline,
             draw_bgl_0,
@@ -531,6 +828,8 @@ impl VirtualGeometryPass {
             bg1_version: None,
             globals_buf,
             meshlet_buf,
+            meshlet_vertex_buf,
+            meshlet_index_buf,
             object_buf,
             instance_buf,
             instance_cull_buf,
@@ -551,9 +850,34 @@ impl VirtualGeometryPass {
             last_meshlet_count: 0,
             last_object_count: 0,
             last_work_item_count: 0,
-            last_max_draw_count: 0,
             object_dispatch_width: 1,
             work_dispatch_width: 1,
+            // Software rasterizer fields
+            use_sw_rasterizer: false,
+            last_screen_width: 0,
+            last_screen_height: 0,
+            binning_pipeline,
+            binning_bgl,
+            binning_bg: None,
+            rasterize_pipeline,
+            rasterize_bgl,
+            rasterize_bg: None,
+            shade_pipeline,
+            shade_bgl_0,
+            shade_bgl_1,
+            shade_bgl_2,
+            shade_bg_0: None,
+            shade_bg_1: None,
+            shade_bg_2: None,
+            visible_meshlet_ids_buf,
+            visible_instance_ids_buf,
+            visible_meshlet_count_buf,
+            tile_counts_buf,
+            tile_meshlet_ids_buf,
+            tile_instance_ids_buf,
+            visibility_depth_buf,
+            visibility_data_buf,
+            visibility_instance_buf,
         }
     }
 
@@ -615,6 +939,24 @@ impl VirtualGeometryPass {
         })
     }
 
+    fn make_meshlet_vertex_buf(device: &wgpu::Device, capacity_elements: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Meshlet Vertex Buffer"),
+            size: capacity_elements * 48,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_meshlet_index_buf(device: &wgpu::Device, capacity_elements: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Meshlet Index Buffer"),
+            size: capacity_elements * 2,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     fn make_instance_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Instance Buffer"),
@@ -627,7 +969,7 @@ impl VirtualGeometryPass {
     fn make_object_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Object Buffer"),
-            size: capacity * 128,
+            size: capacity * 32,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -695,6 +1037,24 @@ impl VirtualGeometryPass {
         })
     }
 
+    fn make_sized_vis_ids_buf(device: &wgpu::Device, capacity: u32) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visible Meshlet IDs"),
+            size: (capacity as u64) * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn make_sized_vis_buf(device: &wgpu::Device, pixel_count: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("VG Visibility Buffer"),
+            size: pixel_count * 4,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
     fn rebuild_owned_bind_groups(&mut self, device: &wgpu::Device, camera_buf: &wgpu::Buffer) {
         self.cull_bind_group = None;
         self.draw_bg_0 = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -716,6 +1076,10 @@ impl VirtualGeometryPass {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: self.draw_metadata_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.meshlet_vertex_buf.as_entire_binding(),
                 },
             ],
         }));
@@ -741,13 +1105,12 @@ impl RenderPass for VirtualGeometryPass {
         if vg.buffer_version != self.last_version {
             let camera_buf = ctx.scene.camera.buffer();
             let mut grew = false;
-            let bounded_max_draw_count = VirtualGeometryBudget::new(self.publication_limit)
-                .clamp_draw_count(vg.max_draw_count);
+            let needed_draws = vg.meshlet_count as u64 * 2;
 
-            if vg.max_draw_count > self.publication_limit {
+            if vg.meshlet_count * 2 > self.publication_limit {
                 log::warn!(
                     "virtual geometry worst-case draw count {} exceeds the publication budget {}; excess visible meshlets will be counted and rejected",
-                    vg.max_draw_count,
+                    vg.meshlet_count * 2,
                     self.publication_limit,
                 );
             }
@@ -757,7 +1120,23 @@ impl RenderPass for VirtualGeometryPass {
                 self.meshlet_buf = Self::make_meshlet_buf(ctx.device, vg.meshlet_count as u64 * 2);
                 grew = true;
             }
-            let object_capacity = self.object_buf.size() / 128;
+            let meshlet_vertex_capacity = self.meshlet_vertex_buf.size() / 48;
+            if (vg.meshlet_vertex_count as u64) > meshlet_vertex_capacity {
+                self.meshlet_vertex_buf = Self::make_meshlet_vertex_buf(
+                    ctx.device,
+                    (vg.meshlet_vertex_count as u64 * 2).max(64),
+                );
+                grew = true;
+            }
+            let meshlet_index_capacity = self.meshlet_index_buf.size() / 2;
+            if (vg.meshlet_index_count as u64) > meshlet_index_capacity {
+                self.meshlet_index_buf = Self::make_meshlet_index_buf(
+                    ctx.device,
+                    (vg.meshlet_index_count as u64 * 2).max(64),
+                );
+                grew = true;
+            }
+            let object_capacity = self.object_buf.size() / 32;
             if (vg.object_count as u64) > object_capacity {
                 self.object_buf = Self::make_object_buf(ctx.device, vg.object_count as u64 * 2);
                 grew = true;
@@ -777,9 +1156,8 @@ impl RenderPass for VirtualGeometryPass {
                 grew = true;
             }
             let indirect_capacity = self.indirect_buf.size() / 20;
-            if u64::from(bounded_max_draw_count) > indirect_capacity {
-                let new_capacity =
-                    (u64::from(bounded_max_draw_count) * 2).min(u64::from(self.publication_limit));
+            if needed_draws > indirect_capacity {
+                let new_capacity = (needed_draws * 2).max(65536);
                 self.indirect_buf = Self::make_indirect_buf(ctx.device, new_capacity);
                 self.draw_metadata_buf = Self::make_draw_metadata_buf(ctx.device, new_capacity);
                 grew = true;
@@ -790,6 +1168,8 @@ impl RenderPass for VirtualGeometryPass {
             }
 
             ctx.write_buffer(&self.meshlet_buf, 0, vg.meshlets);
+            ctx.write_buffer(&self.meshlet_vertex_buf, 0, vg.meshlet_vertices);
+            ctx.write_buffer(&self.meshlet_index_buf, 0, vg.meshlet_indices);
             ctx.write_buffer(&self.object_buf, 0, vg.objects);
             ctx.write_buffer(&self.instance_buf, 0, vg.instances);
 
@@ -814,7 +1194,6 @@ impl RenderPass for VirtualGeometryPass {
             self.last_meshlet_count = vg.meshlet_count;
             self.last_object_count = vg.object_count;
             self.last_work_item_count = vg.work_item_count;
-            self.last_max_draw_count = bounded_max_draw_count;
         } else if vg.instance_version != self.last_instance_version {
             let start = vg.instance_dirty_start as usize;
             let count = vg.instance_dirty_count as usize;
@@ -901,10 +1280,7 @@ impl RenderPass for VirtualGeometryPass {
             }
         }
 
-        if self.last_object_count == 0
-            || self.last_work_item_count == 0
-            || self.last_max_draw_count == 0
-        {
+        if self.last_object_count == 0 || self.last_work_item_count == 0 {
             return Ok(());
         }
 
@@ -931,7 +1307,7 @@ impl RenderPass for VirtualGeometryPass {
             screen_width: ctx.width,
             screen_height: ctx.height,
             hiz_mip_count,
-            draw_capacity: self.last_max_draw_count,
+            draw_capacity: self.last_meshlet_count * 2,
             lod_error_threshold_px: self.lod_quality.max_error_pixels(),
             object_dispatch_width: self.object_dispatch_width,
             work_item_count: self.last_work_item_count,
@@ -1001,6 +1377,12 @@ impl RenderPass for VirtualGeometryPass {
                 layout: &self.draw_bgl_1,
                 entries: &entries,
             }));
+            // Also update shade BG1 with the same materials
+            self.shade_bg_1 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("VG Shade BG1"),
+                layout: &self.shade_bgl_1,
+                entries: &entries,
+            }));
             self.bg1_version = Some(main_scene.material_textures.version);
         }
 
@@ -1041,100 +1423,17 @@ impl RenderPass for VirtualGeometryPass {
     fn render_pass_descriptor<'a>(
         &'a self,
         _target: &'a wgpu::TextureView,
-        depth: &'a wgpu::TextureView,
-        resources: &'a libhelio::FrameResources<'a>,
+        _depth: &'a wgpu::TextureView,
+        _resources: &'a libhelio::FrameResources<'a>,
     ) -> Option<wgpu::RenderPassDescriptor<'a>> {
-        let gbuffer = resources.gbuffer.read("VirtualGeometry")?;
-        let lightmap_uv = resources.gbuffer_lightmap_uv.read("VirtualGeometry")?;
-        let sss = resources.gbuffer_sss.read("VirtualGeometry")?;
-        let extra = resources.gbuffer_extra.read("VirtualGeometry")?;
-        let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
-            Box::leak(Box::new([
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.albedo,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.normal,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.orm,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: gbuffer.emissive,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: lightmap_uv,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: sss,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-                Some(wgpu::RenderPassColorAttachment {
-                    view: extra,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                }),
-            ]));
-        Some(wgpu::RenderPassDescriptor {
-            label: Some("VG GBuffer"),
-            color_attachments,
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: depth,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        })
+        // The VG pass manages its own render passes (visibility + shading)
+        // inside execute() via ctx.begin_render_pass().
+        None
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         if self.last_object_count == 0
             || self.last_work_item_count == 0
-            || self.last_max_draw_count == 0
             || ctx.resources.vg.is_none()
         {
             return Ok(());
@@ -1154,6 +1453,14 @@ impl RenderPass for VirtualGeometryPass {
             hiz_view as *const _ as usize,
             hiz_sampler as *const _ as usize,
         );
+        let new_vis_count_capacity = (self.last_meshlet_count * 2).max(1);
+        if self.visible_meshlet_ids_buf.size() < new_vis_count_capacity as u64 * 4
+            || self.visible_meshlet_count_buf.size() < 4
+        {
+            self.visible_meshlet_ids_buf = Self::make_sized_vis_ids_buf(ctx.device, new_vis_count_capacity);
+            self.visible_instance_ids_buf = Self::make_sized_vis_ids_buf(ctx.device, new_vis_count_capacity);
+        }
+
         if self.cull_bind_group.is_none() || self.cull_bind_group_hiz_key != Some(hiz_key) {
             self.cull_bind_group = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("VG Cull BG"),
@@ -1207,6 +1514,18 @@ impl RenderPass for VirtualGeometryPass {
                         binding: 11,
                         resource: self.work_item_buf.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: self.visible_meshlet_ids_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 13,
+                        resource: self.visible_instance_ids_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 14,
+                        resource: self.visible_meshlet_count_buf.as_entire_binding(),
+                    },
                 ],
             }));
             self.cull_bind_group_hiz_key = Some(hiz_key);
@@ -1221,11 +1540,7 @@ impl RenderPass for VirtualGeometryPass {
         let Some(draw_bg1) = self.draw_bg_1.as_ref() else {
             return Ok(());
         };
-        let Some(main_scene) = ctx.resources.main_scene.read("VirtualGeometry") else {
-            return Ok(());
-        };
-
-        let max_draw_count = self.last_max_draw_count;
+        let max_draw_count = self.last_meshlet_count * 2;
 
         unsafe { &mut *ctx.compute_encoder_ptr }.clear_buffer(&self.draw_count_buf, 0, None);
         if !self.use_count_indirect {
@@ -1267,6 +1582,193 @@ impl RenderPass for VirtualGeometryPass {
             );
         }
 
+        // ── Software rasterizer path ─────────────────────────────────────
+        if self.use_sw_rasterizer {
+            let encoder = unsafe { &mut *ctx.compute_encoder_ptr };
+            let sw_w = ctx.width;
+            let sw_h = ctx.height;
+
+            // Resize visibility buffers if screen dimensions changed
+            if sw_w != self.last_screen_width || sw_h != self.last_screen_height {
+                let pixels = sw_w as u64 * sw_h as u64;
+                self.visibility_depth_buf = Self::make_sized_vis_buf(ctx.device, pixels);
+                self.visibility_data_buf = Self::make_sized_vis_buf(ctx.device, pixels);
+                self.visibility_instance_buf = Self::make_sized_vis_buf(ctx.device, pixels);
+
+                let tile_grid_x = (sw_w + TILE_SIZE_X - 1) / TILE_SIZE_X;
+                let tile_grid_y = (sw_h + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
+                let tile_count = tile_grid_x * tile_grid_y;
+                self.tile_counts_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("VG Tile Counts"),
+                    size: tile_count as u64 * 4,
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                let tile_data_count = tile_count as u64 * MAX_MESHLETS_PER_TILE as u64;
+                self.tile_meshlet_ids_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("VG Tile Meshlet IDs"),
+                    size: tile_data_count * 4,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+                self.tile_instance_ids_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("VG Tile Instance IDs"),
+                    size: tile_data_count * 4,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                });
+
+                // Rebuild bind groups that reference these buffers
+                self.binning_bg = None;
+                self.rasterize_bg = None;
+                self.shade_bg_0 = None;
+
+                self.last_screen_width = sw_w;
+                self.last_screen_height = sw_h;
+            }
+
+            // Clear SW rasterizer buffers
+            encoder.clear_buffer(&self.visible_meshlet_count_buf, 0, None);
+            encoder.clear_buffer(&self.tile_counts_buf, 0, None);
+            encoder.clear_buffer(&self.visibility_depth_buf, 0, None);
+            encoder.clear_buffer(&self.visibility_data_buf, 0, None);
+            encoder.clear_buffer(&self.visibility_instance_buf, 0, None);
+
+            // Create bind groups if needed
+            if self.binning_bg.is_none() {
+                self.binning_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("VG Binning BG"),
+                    layout: &self.binning_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.visible_meshlet_ids_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.visible_instance_ids_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.instance_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: self.meshlet_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: ctx.scene.camera.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: self.cull_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: self.tile_counts_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.tile_meshlet_ids_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 8, resource: self.tile_instance_ids_buf.as_entire_binding() },
+                    ],
+                }));
+            }
+            if self.rasterize_bg.is_none() {
+                self.rasterize_bg = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("VG Rasterize BG"),
+                    layout: &self.rasterize_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.tile_counts_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.tile_meshlet_ids_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.tile_instance_ids_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: self.meshlet_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: self.meshlet_vertex_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: self.meshlet_index_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: self.visibility_depth_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.visibility_data_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 8, resource: self.visibility_instance_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 9, resource: ctx.scene.camera.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 10, resource: self.cull_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 11, resource: self.instance_buf.as_entire_binding() },
+                    ],
+                }));
+            }
+
+            // ── Pass A: Tile Binning ─────────────────────────────────────
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("VG Tile Binning"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.binning_pipeline);
+                if let Some(ref bg) = self.binning_bg {
+                    cpass.set_bind_group(0, bg, &[]);
+                }
+                let vis_count = self.visible_meshlet_ids_buf.size() / 4;
+                cpass.dispatch_workgroups((vis_count as u32 + 63) / 64, 1, 1);
+            }
+
+            // ── Pass B: Software Rasterize ────────────────────────────────
+            {
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("VG SW Rasterize"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.rasterize_pipeline);
+                if let Some(ref bg) = self.rasterize_bg {
+                    cpass.set_bind_group(0, bg, &[]);
+                }
+                let tile_grid_x = (sw_w + TILE_SIZE_X - 1) / TILE_SIZE_X;
+                let tile_grid_y = (sw_h + TILE_SIZE_Y - 1) / TILE_SIZE_Y;
+                cpass.dispatch_workgroups(tile_grid_x, tile_grid_y, 1);
+            }
+
+            // ── Pass C: Shade ─────────────────────────────────────────────
+            {
+                let Some(gbuffer) = ctx.resources.gbuffer.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+                let Some(lightmap_uv) = ctx.resources.gbuffer_lightmap_uv.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+                let Some(sss) = ctx.resources.gbuffer_sss.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+                let Some(extra) = ctx.resources.gbuffer_extra.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+
+                // Rebuild shade BG0 and BG2 each frame (visibility data and GBuffer views)
+                self.shade_bg_0 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("VG Shade BG0"),
+                    layout: &self.shade_bgl_0,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: self.visibility_depth_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 1, resource: self.visibility_data_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 2, resource: self.visibility_instance_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 3, resource: self.meshlet_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 4, resource: self.meshlet_vertex_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 5, resource: self.meshlet_index_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 6, resource: ctx.scene.camera.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 7, resource: self.globals_buf.as_entire_binding() },
+                        wgpu::BindGroupEntry { binding: 8, resource: self.instance_buf.as_entire_binding() },
+                    ],
+                }));
+                self.shade_bg_2 = Some(ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("VG Shade BG2"),
+                    layout: &self.shade_bgl_2,
+                    entries: &[
+                        wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(gbuffer.albedo) },
+                        wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(gbuffer.normal) },
+                        wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(gbuffer.orm) },
+                        wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(gbuffer.emissive) },
+                        wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(lightmap_uv) },
+                        wgpu::BindGroupEntry { binding: 5, resource: wgpu::BindingResource::TextureView(sss) },
+                        wgpu::BindGroupEntry { binding: 6, resource: wgpu::BindingResource::TextureView(extra) },
+                    ],
+                }));
+
+                let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("VG Shade"),
+                    timestamp_writes: None,
+                });
+                cpass.set_pipeline(&self.shade_pipeline);
+                if let Some(ref bg0) = self.shade_bg_0 {
+                    cpass.set_bind_group(0, bg0, &[]);
+                }
+                if let Some(ref bg1) = self.shade_bg_1 {
+                    cpass.set_bind_group(1, bg1, &[]);
+                }
+                if let Some(ref bg2) = self.shade_bg_2 {
+                    cpass.set_bind_group(2, bg2, &[]);
+                }
+                let dispatch_x = (sw_w + 7) / 8;
+                let dispatch_y = (sw_h + 7) / 8;
+                cpass.dispatch_workgroups(dispatch_x, dispatch_y, 1);
+            }
+
+            return Ok(());
+        }
+
         if self.debug_mode == 21 && matches!(self.debug_readback_state, DebugReadbackState::Idle) {
             unsafe { &mut *ctx.compute_encoder_ptr }.copy_buffer_to_buffer(
                 &self.draw_count_buf,
@@ -1278,56 +1780,199 @@ impl RenderPass for VirtualGeometryPass {
             self.debug_readback_state = DebugReadbackState::CopySubmitted;
         }
 
-        {
-            let rpass = unsafe { &mut *ctx.active_render_pass_ptr().unwrap() };
+        let opaque_capacity = max_draw_count / 2;
+        let alpha_count = max_draw_count - opaque_capacity;
 
+        let bind_and_draw = |rpass: &mut wgpu::RenderPass<'_>| {
             rpass.set_bind_group(0, draw_bg0, &[]);
             rpass.set_bind_group(1, draw_bg1, &[]);
-            rpass.set_vertex_buffer(0, main_scene.mesh_buffers.vertices.slice(..));
             rpass.set_index_buffer(
-                main_scene.mesh_buffers.indices.slice(..),
-                wgpu::IndexFormat::Uint32,
+                self.meshlet_index_buf.slice(..),
+                wgpu::IndexFormat::Uint16,
             );
+        };
 
-            let opaque_capacity = max_draw_count / 2;
+        let draw_region = |rpass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline, first_slot: u32, count: u32, counter_byte: u64| {
+            rpass.set_pipeline(pipeline);
+            if self.use_count_indirect {
+                rpass.multi_draw_indexed_indirect_count(
+                    &self.indirect_buf,
+                    first_slot as u64 * 20,
+                    &self.draw_count_buf,
+                    counter_byte,
+                    count,
+                );
+            } else {
+                #[cfg(not(target_arch = "wasm32"))]
+                rpass.multi_draw_indexed_indirect(
+                    &self.indirect_buf,
+                    first_slot as u64 * 20,
+                    count,
+                );
+                #[cfg(target_arch = "wasm32")]
+                for i in first_slot..first_slot + count {
+                    rpass.draw_indexed_indirect(&self.indirect_buf, i as u64 * 20);
+                }
+            }
+        };
 
-            let draw_region = |rpass: &mut wgpu::RenderPass<'_>, pipeline: &wgpu::RenderPipeline, first_slot: u32, count: u32, counter_byte: u64| {
-                rpass.set_pipeline(pipeline);
-                if self.use_count_indirect {
-                    rpass.multi_draw_indexed_indirect_count(
-                        &self.indirect_buf,
-                        first_slot as u64 * 20,
-                        &self.draw_count_buf,
-                        counter_byte,
-                        count,
-                    );
+        match self.debug_mode {
+            20 | 21 => {
+                // Debug modes: single render pass writing GBuffer (no two-pass)
+                let Some(gbuffer) = ctx.resources.gbuffer.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+                let Some(lightmap_uv) = ctx.resources.gbuffer_lightmap_uv.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+                let Some(sss) = ctx.resources.gbuffer_sss.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+                let Some(extra) = ctx.resources.gbuffer_extra.read("VirtualGeometry") else {
+                    return Ok(());
+                };
+                let dbg_atts = &[
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: gbuffer.albedo, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: gbuffer.normal, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: gbuffer.orm, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: gbuffer.emissive, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: lightmap_uv, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: sss, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    }),
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: extra, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                    }),
+                ];
+                let dbg_desc = wgpu::RenderPassDescriptor {
+                    label: Some("VG Debug"),
+                    color_attachments: dbg_atts,
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: ctx.depth,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                };
+                let mut rpass = ctx.begin_render_pass(&dbg_desc);
+                bind_and_draw(&mut rpass);
+                let pipeline = if self.debug_mode == 20 {
+                    &self.debug_draw_pipeline
                 } else {
-                    #[cfg(not(target_arch = "wasm32"))]
-                    rpass.multi_draw_indexed_indirect(
-                        &self.indirect_buf,
-                        first_slot as u64 * 20,
-                        count,
-                    );
-                    #[cfg(target_arch = "wasm32")]
-                    for i in first_slot..first_slot + count {
-                        rpass.draw_indexed_indirect(&self.indirect_buf, i as u64 * 20);
-                    }
-                }
-            };
-
-            match self.debug_mode {
-                20 | 21 => {
-                    let pipeline = if self.debug_mode == 20 {
-                        &self.debug_draw_pipeline
-                    } else {
-                        &self.lod_debug_pipeline
+                    &self.lod_debug_pipeline
+                };
+                draw_region(&mut rpass, pipeline, 0, opaque_capacity, 0);
+                draw_region(&mut rpass, pipeline, opaque_capacity, alpha_count, 4);
+            }
+            _ => {
+                // ── PASS 1: Visibility (depth-only) ────────────────────────
+                {
+                    let vis_desc = wgpu::RenderPassDescriptor {
+                        label: Some("VG Visibility"),
+                        color_attachments: &[],  // no color targets
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: ctx.depth,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(1.0),
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
                     };
-                    draw_region(rpass, pipeline, 0, opaque_capacity, 0);
-                    draw_region(rpass, pipeline, opaque_capacity, max_draw_count - opaque_capacity, 4);
+                    let mut rpass = ctx.begin_render_pass(&vis_desc);
+                    bind_and_draw(&mut rpass);
+                    draw_region(&mut rpass, &self.visibility_opaque_pipeline, 0, opaque_capacity, 0);
+                    draw_region(&mut rpass, &self.visibility_alpha_pipeline, opaque_capacity, alpha_count, 4);
                 }
-                _ => {
-                    draw_region(rpass, &self.opaque_draw_pipeline, 0, opaque_capacity, 0);
-                    draw_region(rpass, &self.alpha_draw_pipeline, opaque_capacity, max_draw_count - opaque_capacity, 4);
+
+                // ── PASS 2: Shading (depth equal, full GBuffer) ───────────
+                {
+                    let Some(gbuffer) = ctx.resources.gbuffer.read("VirtualGeometry") else {
+                        return Ok(());
+                    };
+                    let Some(lightmap_uv) = ctx.resources.gbuffer_lightmap_uv.read("VirtualGeometry") else {
+                        return Ok(());
+                    };
+                    let Some(sss) = ctx.resources.gbuffer_sss.read("VirtualGeometry") else {
+                        return Ok(());
+                    };
+                    let Some(extra) = ctx.resources.gbuffer_extra.read("VirtualGeometry") else {
+                        return Ok(());
+                    };
+                    let shade_atts = &[
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: gbuffer.albedo, resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: gbuffer.normal, resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: gbuffer.orm, resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: gbuffer.emissive, resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: lightmap_uv, resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: sss, resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: extra, resolve_target: None, depth_slice: None,
+                            ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                        }),
+                    ];
+                    let shade_desc = wgpu::RenderPassDescriptor {
+                        label: Some("VG Shading"),
+                        color_attachments: shade_atts,
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: ctx.depth,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    };
+                    let mut rpass = ctx.begin_render_pass(&shade_desc);
+                    bind_and_draw(&mut rpass);
+                    draw_region(&mut rpass, &self.shading_opaque_pipeline, 0, opaque_capacity, 0);
+                    draw_region(&mut rpass, &self.shading_alpha_pipeline, opaque_capacity, alpha_count, 4);
                 }
             }
         }
@@ -1374,12 +2019,13 @@ impl RenderPass for VirtualGeometryPass {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let vis = wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE;
     #[cfg(not(target_arch = "wasm32"))]
     let count = NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero");
     let mut entries = vec![
         wgpu::BindGroupLayoutEntry {
             binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: vis,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
@@ -1389,7 +2035,7 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         },
         wgpu::BindGroupLayoutEntry {
             binding: 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: vis,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: true },
                 has_dynamic_offset: false,
@@ -1402,7 +2048,7 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     {
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: vis,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -1412,7 +2058,7 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         });
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
+            visibility: vis,
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: Some(count),
         });
@@ -1422,7 +2068,7 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         for index in 0..MAX_TEXTURES {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 2 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: vis,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     view_dimension: wgpu::TextureViewDimension::D2,
@@ -1434,7 +2080,7 @@ fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
         for index in 0..MAX_TEXTURES {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 2 + MAX_TEXTURES as u32 + index as u32,
-                visibility: wgpu::ShaderStages::FRAGMENT,
+                visibility: vis,
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             });

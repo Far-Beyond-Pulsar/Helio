@@ -94,22 +94,24 @@ struct VgDrawMetadata {
     reserved:       u32,
 }
 
-@group(0) @binding(0) var<uniform>       camera:        Camera;
-@group(0) @binding(1) var<uniform>       globals:       Globals;
-@group(0) @binding(2) var<storage, read> instance_data: array<GpuInstanceData>;
-@group(0) @binding(3) var<storage, read> draw_metadata: array<VgDrawMetadata>;
+@group(0) @binding(0) var<uniform>       camera:           Camera;
+@group(0) @binding(1) var<uniform>       globals:          Globals;
+@group(0) @binding(2) var<storage, read> instance_data:    array<GpuInstanceData>;
+@group(0) @binding(3) var<storage, read> draw_metadata:    array<VgDrawMetadata>;
+@group(0) @binding(4) var<storage, read> meshlet_vertices: array<GpuMeshletVertex>;
 
 @group(1) @binding(0) var<storage, read> materials:          array<GpuMaterial>;
 @group(1) @binding(1) var<storage, read> material_textures:  array<MaterialTextureData>;
 @group(1) @binding(2) var                scene_textures:     binding_array<texture_2d<f32>, 256>;
 @group(1) @binding(3) var                scene_samplers:     binding_array<sampler, 256>;
 
-struct Vertex {
-    @location(0) position:       vec3<f32>,
-    @location(1) bitangent_sign: f32,
-    @location(2) tex_coords:     vec2<f32>,
-    @location(3) normal:         u32,
-    @location(4) tangent:        u32,
+struct GpuMeshletVertex {
+    position:       vec3<f32>,
+    bitangent_sign: f32,
+    tex_coords0:    vec2<f32>,
+    tex_coords1:    vec2<f32>,
+    normal:         u32,
+    tangent:        u32,
 }
 
 struct VertexOutput {
@@ -128,7 +130,8 @@ fn decode_snorm8x4(packed: u32) -> vec3<f32> {
 }
 
 @vertex
-fn vs_main(v: Vertex, @builtin(instance_index) draw_slot: u32) -> VertexOutput {
+fn vs_main(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) draw_slot: u32) -> VertexOutput {
+    let v         = meshlet_vertices[vertex_id];
     let draw      = draw_metadata[draw_slot];
     let inst      = instance_data[draw.instance_index];
     let world_pos = inst.transform * vec4<f32>(v.position, 1.0);
@@ -150,7 +153,7 @@ fn vs_main(v: Vertex, @builtin(instance_index) draw_slot: u32) -> VertexOutput {
     out.world_normal   = normalize(normal_mat  * decode_snorm8x4(v.normal));
     out.world_tangent  = normalize(model_mat3  * decode_snorm8x4(v.tangent));
     out.bitangent_sign = v.bitangent_sign;
-    out.tex_coords     = v.tex_coords;
+    out.tex_coords     = v.tex_coords0;
     out.material_id    = inst.material_id;
     out.meshlet_id     = draw.meshlet_index;
     return out;
@@ -161,7 +164,7 @@ struct GBufferOutput {
     @location(1) normal:    vec4<f32>,
     @location(2) orm:       vec4<f32>,
     @location(3) emissive:  vec4<f32>,
-    @location(4) vg_flag:   vec2<f32>,
+    @location(4) vg_flag:   vec4<f32>,
     @location(5) sss:       vec4<f32>,
     @location(6) extra:     vec4<f32>,
 }
@@ -210,6 +213,23 @@ fn resolve_specular_f0(
     );
 }
 
+// ── Visibility pass fragment: depth-only, no outputs ──────────────────────
+// Only performs alpha-test discard; writes nothing to color targets.
+@fragment
+fn fs_visibility(input: VertexOutput) {
+    let material = materials[input.material_id];
+    let material_tex = material_textures[input.material_id];
+    let uv = input.tex_coords;
+
+    let base_sample = sample_texture(material_tex.base_color, uv, vec4<f32>(1.0));
+    let alpha = material.base_color.a * base_sample.a;
+
+    if has_alpha_test {
+        if alpha <= 0.001 { discard; }
+        if alpha < material_tex.params.z { discard; }
+    }
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> GBufferOutput {
     // ── Normal rendering ──────────────────────────────────────────────────────
@@ -253,7 +273,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
     out.normal  = vec4<f32>(N, specular_f0.r);
     out.orm     = vec4<f32>(ao, roughness, metallic, specular_f0.g);
     out.emissive = vec4<f32>(emissive, specular_f0.b);
-    out.vg_flag = vec2<f32>(-2.0, -2.0);
+    out.vg_flag = vec4<f32>(-2.0, -2.0, 0.0, 0.0);
     out.sss     = vec4<f32>(0.0);
     out.extra   = vec4<f32>(0.0);
     return out;
@@ -289,7 +309,7 @@ fn fs_debug(input: VertexOutput) -> GBufferOutput {
     out.normal   = vec4<f32>(face_n, 0.0);
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(base_color, 0.0);
-    out.vg_flag  = vec2<f32>(-2.0, -2.0);
+    out.vg_flag  = vec4<f32>(-2.0, -2.0, 0.0, 0.0);
     out.sss      = vec4<f32>(0.0);
     out.extra    = vec4<f32>(0.0);
     return out;
@@ -302,7 +322,8 @@ struct LodVertexOutput {
 }
 
 @vertex
-fn vs_debug_lod(v: Vertex, @builtin(instance_index) draw_slot: u32) -> LodVertexOutput {
+fn vs_debug_lod(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) draw_slot: u32) -> LodVertexOutput {
+    let v         = meshlet_vertices[vertex_id];
     let draw      = draw_metadata[draw_slot];
     let lod_level = draw.lod_level;
     let inst      = instance_data[draw.instance_index];
@@ -334,7 +355,7 @@ fn fs_debug_lod(input: LodVertexOutput) -> GBufferOutput {
     out.normal   = vec4<f32>(face_n, 0.0);
     out.orm      = vec4<f32>(1.0, 1.0, 0.0, 0.0);
     out.emissive = vec4<f32>(lod_color, 0.0);
-    out.vg_flag  = vec2<f32>(-2.0, -2.0);
+    out.vg_flag  = vec4<f32>(-2.0, -2.0, 0.0, 0.0);
     out.sss      = vec4<f32>(0.0);
     out.extra    = vec4<f32>(0.0);
     return out;
