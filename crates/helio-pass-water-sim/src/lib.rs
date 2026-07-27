@@ -60,46 +60,6 @@ fn make_surface_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32)
     (vbuf, ibuf, indices.len() as u32)
 }
 
-fn make_volume_box_mesh(device: &wgpu::Device) -> (wgpu::Buffer, wgpu::Buffer, u32) {
-    let verts: Vec<[f32; 3]> = vec![
-        [-1.0, -1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, -1.0, 1.0],
-        [-1.0, -1.0, 1.0],
-        [-1.0, -1.0, -1.0],
-        [-1.0, 1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [1.0, -1.0, 1.0],
-        [1.0, 1.0, 1.0],
-        [-1.0, 1.0, 1.0],
-        [-1.0, -1.0, -1.0],
-        [-1.0, -1.0, 1.0],
-        [-1.0, 1.0, 1.0],
-        [-1.0, 1.0, -1.0],
-        [1.0, -1.0, -1.0],
-        [1.0, 1.0, -1.0],
-        [1.0, 1.0, 1.0],
-        [1.0, -1.0, 1.0],
-    ];
-    let indices: Vec<u32> = vec![
-        0, 1, 2, 0, 2, 3, 4, 5, 6, 4, 6, 7, 8, 9, 10, 8, 10, 11, 12, 13, 14, 12, 14, 15, 16, 17,
-        18, 16, 18, 19,
-    ];
-    let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Water Volume Box VB"),
-        contents: bytemuck::cast_slice(&verts),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
-    let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some("Water Volume Box IB"),
-        contents: bytemuck::cast_slice(&indices),
-        usage: wgpu::BufferUsages::INDEX,
-    });
-    (vbuf, ibuf, indices.len() as u32)
-}
-
 fn vec3_vbl() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
         array_stride: 12,
@@ -145,10 +105,6 @@ pub struct WaterSimPass {
     pub(crate) surface_ibuf: wgpu::Buffer,
     pub(crate) surface_index_count: u32,
 
-    pub(crate) volume_vbuf: wgpu::Buffer,
-    pub(crate) volume_ibuf: wgpu::Buffer,
-    pub(crate) volume_index_count: u32,
-
     pub(crate) caustics_sampler: wgpu::Sampler,
 
     pub(crate) caustics_render_bgl: wgpu::BindGroupLayout,
@@ -170,7 +126,7 @@ pub struct WaterSimPass {
     pub(crate) caustics_pipeline: wgpu::RenderPipeline,
     pub(crate) surface_above_pipeline: wgpu::RenderPipeline,
     pub(crate) surface_under_pipeline: wgpu::RenderPipeline,
-    pub(crate) volume_walls_pipeline: wgpu::RenderPipeline,
+    pub(crate) volumetric_pipeline: wgpu::RenderPipeline,
 
     pub(crate) _pre_aa_fallback_tex: wgpu::Texture,
     pub(crate) pre_aa_fallback_view: wgpu::TextureView,
@@ -919,11 +875,11 @@ impl RenderPass for WaterSimPass {
                     },
                 })];
 
-                // 1. Water volume walls
+                // 1. Volumetric water (screen-space raymarch, replaces old box mesh)
                 {
                     let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(
                         &wgpu::RenderPassDescriptor {
-                            label: Some("Water Volume Walls"),
+                            label: Some("Water Volumetric"),
                             color_attachments: &color_attachments,
                             depth_stencil_attachment: Some(
                                 wgpu::RenderPassDepthStencilAttachment {
@@ -940,11 +896,9 @@ impl RenderPass for WaterSimPass {
                             multiview_mask: None,
                         },
                     );
-                    pass.set_pipeline(&self.volume_walls_pipeline);
+                    pass.set_pipeline(&self.volumetric_pipeline);
                     pass.set_bind_group(0, render_bg, &[]);
-                    pass.set_vertex_buffer(0, self.volume_vbuf.slice(..));
-                    pass.set_index_buffer(self.volume_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..self.volume_index_count, 0, 0..1);
+                    pass.draw(0..3, 0..1);
                 }
 
                 // 2. Water surface above

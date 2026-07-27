@@ -1,8 +1,7 @@
 use wgpu::util::DeviceExt;
 use crate::simulation::{DeltaUniform, DropUniform, HitboxCountUniform};
 use crate::{
-    make_surface_mesh, make_volume_box_mesh, vec3_vbl, WaterSimPass, BLIT_WGSL, CAUSTICS_SIZE,
-    MAX_DROPS_BUFFERED, SIM_SIZE,
+    make_surface_mesh, vec3_vbl, WaterSimPass, BLIT_WGSL, SIM_SIZE,
 };
 
 impl WaterSimPass {
@@ -606,10 +605,10 @@ impl WaterSimPass {
                 include_str!("../shaders/surface_under.wgsl").into(),
             ),
         });
-        let volume_walls_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Water Volume Walls Shader"),
+        let volumetric_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Water Volumetric Shader"),
             source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/volume_walls.wgsl").into(),
+                include_str!("../shaders/volumetric.wgsl").into(),
             ),
         });
 
@@ -726,18 +725,18 @@ impl WaterSimPass {
                 cache: None,
             });
 
-        let volume_walls_pipeline =
+        let volumetric_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Water Volume Walls Pipeline"),
+                label: Some("Water Volumetric Pipeline"),
                 layout: Some(&render_pl_layout),
                 vertex: wgpu::VertexState {
-                    module: &volume_walls_shader,
+                    module: &volumetric_shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[Some(vbl.clone())],
+                    buffers: &[],
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
-                    module: &volume_walls_shader,
+                    module: &volumetric_shader,
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
@@ -755,12 +754,11 @@ impl WaterSimPass {
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Back),
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(true),
+                    depth_write_enabled: Some(false),
                     depth_compare: Some(wgpu::CompareFunction::LessEqual),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
@@ -771,7 +769,6 @@ impl WaterSimPass {
             });
 
         let (surface_vbuf, surface_ibuf, surface_index_count) = make_surface_mesh(device);
-        let (volume_vbuf, volume_ibuf, volume_index_count) = make_volume_box_mesh(device);
 
         Self {
             sim_bgl,
@@ -797,16 +794,13 @@ impl WaterSimPass {
             surface_vbuf,
             surface_ibuf,
             surface_index_count,
-            volume_vbuf,
-            volume_ibuf,
-            volume_index_count,
             caustics_sampler,
             caustics_render_bgl,
             render_bgl,
             caustics_pipeline,
             surface_above_pipeline,
             surface_under_pipeline,
-            volume_walls_pipeline,
+            volumetric_pipeline,
             _pre_aa_fallback_tex: pre_aa_fallback_tex,
             pre_aa_fallback_view,
             _gbuffer_fallback_tex: gbuffer_fallback_tex,

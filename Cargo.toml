@@ -42,6 +42,7 @@ solid-gltf = { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "b9eb
 solid-fbx =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6" }
 solid-obj =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6" }
 solid-usd =  { git = "https://github.com/Far-Beyond-Pulsar/Solid3D", rev = "b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6" }
+solid-unreal = { path = "C:/Users/redst/Documents/GitHub/Solid3D/crates/solid-unreal" }
 quark = { git = "https://github.com/Far-Beyond-Pulsar/Quark", package = "quark" }
 thiserror = "2.0"
 image = { version = "0.25", default-features = false, features = ["png"] }
