@@ -2881,7 +2881,7 @@ dependencies = [
  "solid-fbx",
  "solid-gltf",
  "solid-obj",
- "solid-rs 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6)",
+ "solid-rs",
  "solid-unreal",
  "solid-usd",
  "thiserror 2.0.18",
@@ -5994,47 +5994,39 @@ dependencies = [
 [[package]]
 name = "solid-fbx"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6#b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6"
+source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced"
 dependencies = [
  "flate2",
  "glam 0.27.0",
- "solid-rs 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6)",
+ "solid-rs",
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "solid-gltf"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6#b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6"
+source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced"
 dependencies = [
  "base64 0.22.1",
  "glam 0.27.0",
  "serde",
  "serde_json",
- "solid-rs 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6)",
+ "solid-rs",
 ]
 
 [[package]]
 name = "solid-obj"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6#b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6"
+source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced"
 dependencies = [
  "glam 0.27.0",
- "solid-rs 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6)",
+ "solid-rs",
 ]
 
 [[package]]
 name = "solid-rs"
 version = "0.1.0"
-dependencies = [
- "glam 0.27.0",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "solid-rs"
-version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6#b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6"
+source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced"
 dependencies = [
  "glam 0.27.0",
  "serde",
@@ -6044,12 +6036,13 @@ dependencies = [
 [[package]]
 name = "solid-unreal"
 version = "0.1.0"
+source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced"
 dependencies = [
  "bitflags 2.13.0",
  "flate2",
  "glam 0.27.0",
  "lz4_flex",
- "solid-rs 0.1.0",
+ "solid-rs",
  "thiserror 2.0.18",
  "uasset",
 ]
@@ -6057,11 +6050,11 @@ dependencies = [
 [[package]]
 name = "solid-usd"
 version = "0.1.0"
-source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6#b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6"
+source = "git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced#4724f4f32b28a8ef6fe9ca2b2b59ea87a8e85ced"
 dependencies = [
  "glam 0.27.0",
  "lz4_flex",
- "solid-rs 0.1.0 (git+https://github.com/Far-Beyond-Pulsar/Solid3D?rev=b9eb501f0d3b735d407c7b566a9de8ef2ab9ebf6)",
+ "solid-rs",
  "thiserror 2.0.18",
  "zip",
 ]
