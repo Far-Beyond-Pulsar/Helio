@@ -321,15 +321,15 @@ impl ApplicationHandler for App {
         // Realistic oceanographic parameters for stunning photorealistic water
         let pool = helio::WaterVolumeDescriptor {
             bounds_min: [-6.0, 0.3, -6.0],  // 12x12 meter pool, slightly raised
-            bounds_max: [6.0, 2.5, 6.0],    // 2.2m deep pool
-            surface_height: 1.8,  // Water surface at 1.8m above floor
+            bounds_max: [6.0, 3.0, 6.0],    // tall enough for 50cm waves above surface
+            surface_height: 2.2,  // Water surface higher in the pool for visibility
 
             // DRAMATIC WAVE PARAMETERS (big rolling swell with visible crests)
-            wave_amplitude: 0.35,      // 35cm waves — big enough to see motion clearly
-            wave_frequency: 0.6,       // Longer period for visible swell propagation
-            wave_speed: 5.0,           // Energetic wave motion across the pool
+            wave_amplitude: 0.5,       // 50cm waves — big, unmistakable motion
+            wave_frequency: 0.5,       // Longer period for visible swell propagation
+            wave_speed: 6.0,           // Fast, energetic wave motion
             wave_direction: [0.6, 0.3], // Diagonal travel for visual interest
-            wave_steepness: 0.5,       // Sharp crests that catch the light and trigger foam
+            wave_steepness: 0.6,       // Sharp crests that catch the light and trigger foam
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
             water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
