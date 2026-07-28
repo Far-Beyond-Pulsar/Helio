@@ -461,18 +461,15 @@ fn vs_main(@location(0) position: vec4f, @builtin(instance_index) instance_idx: 
         out.world_pos = world;
         out.sim_uv    = uv;
     } else {
-        // Side or bottom face — uniform AABB mapping.
-        // Top-edge side vertices (uv.y ≈ 1.0) follow the displaced water surface
-        // so the side walls match the wave height instead of the flat AABB cap.
+        // Side face — vertical wall from volume floor up to the displaced
+        // water surface.  Using bounds_max.y as the cap would poke above
+        // the surface if the AABB is taller than the wave crest, so the
+        // water surface height at this XZ is the upper bound for all vertices.
         let uv = position.xyz * 0.5 + 0.5;
         let xz = mix(vol.bounds_min.xz, vol.bounds_max.xz, uv.xz);
-        var world_y: f32;
-        if uv.y > 0.999 {
-            let h_sum = water_cascade_height_sum(xz, instance_idx);
-            world_y = water_surface_height(h_sum, vol);
-        } else {
-            world_y = mix(vol.bounds_min.y, vol.bounds_max.y, uv.y);
-        }
+        let h_sum = water_cascade_height_sum(xz, instance_idx);
+        let surface_y = water_surface_height(h_sum, vol);
+        let world_y = mix(vol.bounds_min.y, surface_y, uv.y);
         let world = vec3f(xz.x, world_y, xz.y);
         out.position  = camera.view_proj * vec4f(world, 1.0);
         out.world_pos = world;
