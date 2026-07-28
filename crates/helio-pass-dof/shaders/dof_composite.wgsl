@@ -49,10 +49,11 @@ struct VOut {
 
 @vertex
 fn vs_fullscreen(@builtin(vertex_index) vi: u32) -> VOut {
-    let uv = vec2<f32>(f32((vi << 1u) & 2u), f32(vi & 2u));
+    let x = f32((vi << 1u) & 2u);
+    let y = f32(vi & 2u);
     return VOut(
-        vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0),
-        uv,
+        vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0),
+        vec2<f32>(x, y),
     );
 }
 
