@@ -59,11 +59,9 @@ fn is_fragment(source: &str) -> bool {
 /// diagnostic in a prelude-using shader points at a line that actually exists in
 /// the file the reader will open.
 fn describe_location(source: &str, rendered: &str) -> String {
-    if helio_core::shader::uses_prelude(source) {
-        format!(
-            " (prelude-expanded: subtract {} lines for the original file)",
-            helio_core::shader::prelude_lines()
-        )
+    let prepended = helio_core::shader::expanded_lines(source);
+    if prepended > 0 {
+        format!(" (expanded: subtract {prepended} lines for the original file)")
     } else {
         String::new()
     }

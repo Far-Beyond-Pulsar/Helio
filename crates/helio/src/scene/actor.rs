@@ -356,8 +356,11 @@ pub struct WaterVolumeDescriptor {
     /// Water surface height (Y coordinate, local to bounds)
     pub surface_height: f32,
 
-    // Wave parameters (legacy Gerstner — kept for compatibility; heightfield uses sim)
-    /// Wave amplitude (height in meters)
+    // Wave parameters. `wave_amplitude` drives the heightfield surface; the rest
+    // are legacy Gerstner fields kept for compatibility.
+    /// Peak wave displacement in metres, above and below the rest height.
+    /// Clamped by the shader to the headroom between `surface_height` and the
+    /// volume bounds, so waves can never leave the volume.
     pub wave_amplitude: f32,
     /// Wave frequency (spacing between waves)
     pub wave_frequency: f32,
@@ -381,7 +384,11 @@ pub struct WaterVolumeDescriptor {
     // Reflection/refraction
     /// Screen-space reflection intensity (0-1)
     pub reflection_strength: f32,
-    /// Refraction distortion amount
+    /// Refraction distortion, as a multiplier on the physically-derived
+    /// displacement. The surface shader computes the lateral offset of the
+    /// refracted ray from the surface tilt, the index of refraction, and the
+    /// distance the ray travels through the water, then scales it by this.
+    /// 1.0 is physically plausible; 0.0 disables distortion.
     pub refraction_strength: f32,
     /// Fresnel exponent (higher = sharper falloff)
     pub fresnel_power: f32,
@@ -548,7 +555,7 @@ impl WaterVolumeDescriptor {
             foam_threshold: 0.8,
             foam_amount: 0.6,
             reflection_strength: 0.8,
-            refraction_strength: 0.2,
+            refraction_strength: 1.0,
             fresnel_power: 5.0,
             caustics_enabled: true,
             caustics_intensity: 1.5,
@@ -591,7 +598,7 @@ impl WaterVolumeDescriptor {
             foam_threshold: 0.7,
             foam_amount: 0.5,
             reflection_strength: 0.6,
-            refraction_strength: 0.3,
+            refraction_strength: 1.0,
             fresnel_power: 4.0,
             caustics_enabled: true,
             caustics_intensity: 1.2,

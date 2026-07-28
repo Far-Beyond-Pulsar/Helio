@@ -96,7 +96,7 @@ impl LoadConfig {
     }
 }
 
-/// Load a 3D scene file (FBX, glTF, OBJ, etc.) and convert to Helio structures
+/// Load a 3D scene file (FBX, glTF, OBJ, USD, Unreal uasset/umap, etc.) and convert to Helio structures
 ///
 /// This is the main entry point for loading 3D assets. It:
 /// 1. Detects the file format from the extension
@@ -140,6 +140,7 @@ pub fn load_scene_file_with_config<P: AsRef<Path>>(
     registry.register_loader(solid_gltf::GltfLoader);
     registry.register_loader(solid_obj::ObjLoader);
     registry.register_loader(solid_usd::UsdLoader); // supports usda/usdc/usdz
+    registry.register_loader(solid_unreal::UnrealLoader); // supports uasset/umap
 
     // Load the scene
     let solid_scene = registry.load_file(path).map_err(|e| AssetError::Solid(e))?;
@@ -170,6 +171,7 @@ fn import_registry() -> solid_rs::registry::Registry {
     registry.register_loader(solid_gltf::GltfLoader);
     registry.register_loader(solid_obj::ObjLoader);
     registry.register_loader(solid_usd::UsdLoader); // supports usda/usdc/usdz
+    registry.register_loader(solid_unreal::UnrealLoader); // supports uasset/umap
     registry
 }
 
@@ -254,6 +256,7 @@ pub fn load_scene_bytes_with_config(
     registry.register_loader(solid_gltf::GltfLoader);
     registry.register_loader(solid_obj::ObjLoader);
     registry.register_loader(solid_usd::UsdLoader);
+    registry.register_loader(solid_unreal::UnrealLoader);
 
     let mut options = solid_rs::traits::LoadOptions::default();
     options.base_dir = base_dir.map(Path::to_path_buf);

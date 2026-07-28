@@ -22,12 +22,13 @@
 mod v3_demo_common;
 
 use helio::{
-    required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, HelioAction, HelioCommandBridge,
+    required_experimental_features, required_wgpu_features, required_wgpu_limits, Camera, DebugDrawState, HelioAction, HelioCommandBridge,
     LightId, MeshId, ObjectId, Renderer, RendererConfig, Scene, WaterHitboxDescriptor,
     WaterHitboxId, BakeConfig,
 };
 use helio_pass_perf_overlay::PerfOverlayMode;
 use helio_default_graphs::build_default_graph;
+use helio_pass_water_sim::WaterSimPass;
 use helio::Movability;
 use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
 
@@ -238,6 +239,7 @@ impl ApplicationHandler for App {
             label: Some("Device"),
             required_features: required_wgpu_features(adapter.features()),
             required_limits: required_wgpu_limits(adapter.limits()),
+            experimental_features: required_experimental_features(adapter.features()),
             ..Default::default()
         }))
         .expect("device");
@@ -319,46 +321,61 @@ impl ApplicationHandler for App {
         // Realistic oceanographic parameters for stunning photorealistic water
         let pool = helio::WaterVolumeDescriptor {
             bounds_min: [-6.0, 0.3, -6.0],  // 12x12 meter pool, slightly raised
-            bounds_max: [6.0, 2.5, 6.0],    // 2.2m deep pool
-            surface_height: 1.8,  // Water surface at 1.8m above floor
+            bounds_max: [6.0, 3.0, 6.0],    // tall enough for 50cm waves above surface
+            surface_height: 2.2,  // Water surface higher in the pool for visibility
 
-            // GERSTNER WAVE PARAMETERS (natural pool surface)
-            wave_amplitude: 0.035,     // Smaller ripples for a thinner, calmer surface
-            wave_frequency: 0.75,      // Broader, slower waves with less lumpiness
-            wave_speed: 3.2,           // Faster propagation to avoid sluggish, viscous motion
-            wave_direction: [0.6, 0.3], // Subtle diagonal wave direction
-            wave_steepness: 0.22,      // Much softer peaks for a thinner-looking pool
+            // DRAMATIC WAVE PARAMETERS (big rolling swell with visible crests)
+            wave_amplitude: 0.5,       // 50cm waves — big, unmistakable motion
+            wave_frequency: 0.5,       // Longer period for visible swell propagation
+            wave_speed: 6.0,           // Fast, energetic wave motion
+            wave_direction: [0.6, 0.3], // Diagonal travel for visual interest
+            wave_steepness: 0.6,       // Sharp crests that catch the light and trigger foam
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
             water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
             extinction: [0.08, 0.04, 0.02],   // Very low absorption for crystal clear water (reduced by ~55%)
 
-            // FOAM PARAMETERS (white caps on wave crests)
-            foam_threshold: 0.76,      // Foam appears on steeper wave crests
-            foam_amount: 0.45,         // Moderate foam coverage for realism
+            // FOAM PARAMETERS (dramatic whitecaps on big swells)
+            foam_threshold: 0.4,       // Foam appears early — catches every crest
+            foam_amount: 0.85,         // Heavy foam coverage for dramatic effect
 
             // REFLECTION & REFRACTION (physically accurate)
             reflection_strength: 0.65,  // Lowered reflectivity for a cleaner pool look
-            refraction_strength: 0.0,   // Disable heavy chromatic refraction
+            // Multiplier on the physically-derived displacement (IOR x surface
+            // tilt x path length). This was 0.0 to suppress the old constant
+            // screen-space offset, which distorted the shallow edges as hard as
+            // the deep centre; the current model scales with depth on its own.
+            refraction_strength: 1.0,
             fresnel_power: 5.0,         // Physically-based fresnel (water IOR ~1.333)
 
-            // CAUSTICS (disabled for lower shader cost)
-            caustics_enabled: false,
-            caustics_intensity: 0.0,
+            // CAUSTICS
+            // Intensity is scaled up for this scene: at 0.035 m amplitude over a
+            // 12 m pool the surface is nearly flat, so it focuses light only
+            // weakly and the physical contribution alone would be invisible.
+            // The ball's ripples are what actually drive the pattern here.
+            caustics_enabled: true,
+            caustics_intensity: 3.0,
             caustics_scale: 8.0,
             caustics_speed: 0.0,
 
             // VOLUMETRIC EFFECTS
             fog_density: 0.0,
-            god_rays_intensity: 0.0,
-            ssr_enabled: false,
-            ssr_steps: 8,
+            god_rays_intensity: 0.5,
+            // Marches the shared hi-Z pyramid; `ssr_steps` is the iteration
+            // bound and `ssr_step_size` is unused by the hierarchical traversal.
+            ssr_enabled: true,
+            ssr_steps: 64,
             ssr_step_size: 0.05,
             ssr_thickness: 0.02,
             // Sim-based rendering parameters (defaults: IOR 1.333, physically-based fresnel)
             ..Default::default()
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
+        // Crank up wind for dramatic wave motion
+        if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
+            sim.set_wind([0.6, 0.4], 3.5);
+            sim.set_wave_scale(0.25);
+        }
 
         // === BOUNCING BALL ===
         // A shiny sphere that bounces perfectly on the water surface, creating ripple waves.
@@ -1063,6 +1080,10 @@ impl AppState {
             let drag = (1.0 - WATER_DRAG * dt).clamp(0.0, 1.0);
             self.ball_vel.x *= drag;
             self.ball_vel.z *= drag;
+            // Ripple where the ball punches the surface
+            if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
+                sim.add_drop(self.ball_pos.x, self.ball_pos.z, 0.8, 0.15);
+            }
         }
 
         // Elastic bounce off pool walls (no energy loss)

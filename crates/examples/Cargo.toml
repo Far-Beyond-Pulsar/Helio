@@ -140,6 +140,10 @@ name = "editor_demo_mini"
 path = "editor_demo_mini.rs"
 
 [[bin]]
+name = "editor_demo_xl"
+path = "editor_demo_xl.rs"
+
+[[bin]]
 name = "meshlet_cull_benchmark"
 path = "meshlet_cull_benchmark.rs"
 
@@ -206,6 +210,7 @@ helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-voxel-core = { path = "../helio-voxel-core" }
 helio-planet-voxel-core = { workspace = true }
 helio-default-graphs = { path = "../helio-default-graphs" }
+helio-pass-water-sim = { path = "../helio-pass-water-sim" }
 rapier3d = "0.24"
 rapier_testbed3d = "0.24"
 image = { workspace = true, features = ["png"] }

@@ -15,6 +15,7 @@ solid-gltf = { workspace = true, features = ["configurator"] }
 solid-fbx = { workspace = true, features = ["configurator"] }
 solid-obj = { workspace = true, features = ["configurator"] }
 solid-usd = { workspace = true, features = ["configurator"] }
+solid-unreal = { workspace = true }
 
 # Math and utilities
 glam.workspace = true
