@@ -597,16 +597,6 @@ impl RenderPass for DofPass {
         let half_w = (self.width + 1) / 2;
         let half_h = (self.height + 1) / 2;
 
-        // ── Refresh DOF block from the shared postprocess uniform buffer ─
-        // The camera DOF settings are written to GpuPostProcessUniforms by the
-        // Renderer each frame. Copy just the 32-byte DOF block at offset 224
-        // into our own uniform buffer (avoids uniform offset alignment issues).
-        unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
-            pp_buf, DOF_BLOCK_OFFSET,
-            &self.dof_block_buf, 0,
-            DOF_BLOCK_SIZE,
-        );
-
         // ── Lazy rebuild bind groups ────────────────────────────────────
         let coc_key = (
             depth_view as *const _ as usize,
@@ -634,6 +624,19 @@ impl RenderPass for DofPass {
         if self.bg_key_composite != Some(composite_key) {
             self.rebuild_composite_bg(ctx.device, src_view);
             self.bg_key_composite = Some(composite_key);
+        }
+
+        // ── Copy DOF block → compute encoder before dispatches ─────────
+        // The postprocess uniform buffer lives on the render-encoder timeline.
+        // Compute dispatches run on a separate encoder that submits first,
+        // so we must copy here (on the compute encoder) to avoid a race.
+        {
+            let ce = ctx.compute_encoder_ptr;
+            unsafe { &mut *ce }.copy_buffer_to_buffer(
+                pp_buf, DOF_BLOCK_OFFSET,
+                &self.dof_block_buf, 0,
+                DOF_BLOCK_SIZE,
+            );
         }
 
         // ── Pass 1: CoC pre-pass ────────────────────────────────────────
