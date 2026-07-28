@@ -2301,6 +2301,7 @@ dependencies = [
  "helio-pass-planetary-voxel",
  "helio-pass-postprocess",
  "helio-pass-taa",
+ "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-voxel-mesh",
  "helio-pass-voxel-raymarch",

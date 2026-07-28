@@ -63,6 +63,7 @@ impl Renderer {
                 enable_ssr: self.enable_ssr,
                 enable_planar_reflections: self.enable_planar_reflections,
                 enable_environment_reflections: self.enable_environment_reflections,
+                tsr_quality: self.tsr_quality,
             };
             self.graph = rebuilder(
                 &self.device,

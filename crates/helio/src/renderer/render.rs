@@ -10,8 +10,18 @@ use crate::groups::GroupId;
 use crate::scene::Camera;
 
 use super::renderer_impl::{
-    CullStatsReadbackState, DebugCameraUniform, Renderer, HALTON_JITTER,
+    CullStatsReadbackState, DebugCameraUniform, Renderer,
 };
+
+/// R1/R2 low-discrepancy jitter — matches the sequence used by TAA and TSR passes.
+fn r1_r2_jitter(frame: u64) -> [f32; 2] {
+    const INV_R1: f64 = 0.7548776662466927;
+    const INV_R2: f64 = 0.5698402905980539;
+    const PHASE: f64 = 0.5;
+    let fx = frame as f64 * INV_R1 + PHASE;
+    let fy = frame as f64 * INV_R2 + PHASE;
+    [(fx.fract() - 0.5) as f32, (fy.fract() - 0.5) as f32]
+}
 
 impl Renderer {
     fn poll_cull_stats_readback(&mut self) {
@@ -119,18 +129,14 @@ impl Renderer {
 
         let internal_w = (((self.output_width as f32) * self.render_scale).ceil() as u32).max(1);
         let internal_h = (((self.output_height as f32) * self.render_scale).ceil() as u32).max(1);
-        if internal_w != self.jitter_cache_width || internal_h != self.jitter_cache_height {
-            self.jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
-            self.jitter_cache_width = internal_w;
-            self.jitter_cache_height = internal_h;
-        }
 
         let frame_idx = self.scene.gpu_scene().frame_count;
         let (jitter_mat, jx, jy) = if self.enable_jitter {
-            let jitter_mat = self.jitter_matrices[(frame_idx % 16) as usize];
-            let raw = HALTON_JITTER[(frame_idx % 16) as usize];
-            let jx = ((raw[0] - 0.5) * 2.0) / (internal_w as f32);
-            let jy = ((raw[1] - 0.5) * 2.0) / (internal_h as f32);
+            // Use R1/R2 plastic-ratio jitter to match TAA and TSR passes.
+            let jitter = r1_r2_jitter(frame_idx);
+            let jx = jitter[0] * 2.0 / (internal_w as f32);
+            let jy = jitter[1] * 2.0 / (internal_h as f32);
+            let jitter_mat = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
             (jitter_mat, jx, jy)
         } else {
             (glam::Mat4::IDENTITY, 0.0, 0.0)

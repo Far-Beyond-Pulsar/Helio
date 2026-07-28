@@ -71,8 +71,8 @@ impl Camera {
     ///
     /// # Example
     /// ```ignore
-    /// let view = Mat4::look_at_rh(eye, center, up);
-    /// let proj = Mat4::perspective_rh(fov_y, aspect, near, far);
+    /// let view = glam::camera::rh::view::look_at_mat4(eye, center, up);
+    /// let proj = glam::camera::rh::proj::directx::perspective(fov_y, aspect, near, far);
     /// let camera = Camera::from_matrices(view, proj, eye, near, far);
     /// ```
     pub fn from_matrices(view: Mat4, proj: Mat4, position: Vec3, near: f32, far: f32) -> Self {
@@ -121,8 +121,8 @@ impl Camera {
         near: f32,
         far: f32,
     ) -> Self {
-        let view = Mat4::look_at_rh(position, target, up);
-        let proj = Mat4::perspective_rh(fov_y_radians, aspect, near, far);
+        let view = glam::camera::rh::view::look_at_mat4(position, target, up);
+        let proj = glam::camera::rh::proj::directx::perspective(fov_y_radians, aspect, near, far);
         Self::from_matrices(view, proj, position, near, far)
     }
 }
@@ -174,13 +174,10 @@ impl Scene {
             camera.jitter,
             self.prev_view_proj,
         );
-        // Store the UNJITTERED view_proj so next frame's motion-vector
-        // reprojection (prev_view_proj) is not contaminated by this frame's jitter.
-        let inv_jitter = Mat4::from_translation(glam::Vec3::new(
-            -camera.jitter[0], -camera.jitter[1], 0.0,
-        ));
-        let unjittered_proj = inv_jitter * camera.proj;
-        self.prev_view_proj = unjittered_proj * camera.view;
+        // Store the JITTERED view_proj so next frame's motion-vector
+        // reprojection matches the previous frame's rendered NDC space.
+        // Temporal passes (TAA, TSR) rely on this for correct history UV.
+        self.prev_view_proj = camera.proj * camera.view;
         self.gpu_scene.camera.update(uniforms);
         self.gpu_scene.camera_generation = self.gpu_scene.camera_generation.wrapping_add(1);
     }

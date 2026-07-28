@@ -179,7 +179,7 @@ fn gather_neighbourhood(
             l1      += w * q;
             l2      += w * q * q;
 
-            let d = textureSampleLevel(depth, point_sampler, uv + offset, 0.0);
+            let d = textureSample(depth, point_sampler, uv + offset);
             d_min = min(d_min, d);
             d_max = max(d_max, d);
         }
@@ -328,7 +328,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ── Depth-based reprojection → history UV ─────────────────────────────────
-    let depth_val = textureSampleLevel(depth_tex, point_sampler, in.uv, 0.0);
+    let depth_val = textureSample(depth_tex, point_sampler, in.uv);
     let ndc_xy    = vec2<f32>(in.uv.x * 2.0 - 1.0, 1.0 - in.uv.y * 2.0);
     let clip      = vec4<f32>(ndc_xy, depth_val, 1.0);
     let world_h   = camera.inv_view_proj * clip;
@@ -349,7 +349,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ── Reprojected history depth ─────────────────────────────────────────────
     // We approximate history depth by reading the current depth at the history UV.
     // A proper implementation would keep a separate history depth buffer.
-    let history_depth_approx = textureSampleLevel(depth_tex, point_sampler, history_uv, 0.0);
+    let history_depth_approx = textureSample(depth_tex, point_sampler, history_uv);
 
     // ── Neighbourhood statistics ───────────────────────────────────────────────
     let tap_radius = i32(tsr.tap_radius);

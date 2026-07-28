@@ -36,6 +36,10 @@ name = "indoor_cathedral"
 path = "indoor_cathedral.rs"
 
 [[bin]]
+name = "indoor_cathedral_tsr"
+path = "indoor_cathedral_tsr.rs"
+
+[[bin]]
 name = "indoor_cathedral_fxaa"
 path = "indoor_cathedral_fxaa.rs"
 
@@ -196,6 +200,7 @@ helio = { workspace = true, features = ["bake"] }
 libhelio = { workspace = true }
 helio-asset-compat = { workspace = true }
 helio-pass-taa = { workspace = true }
+helio-pass-tsr = { workspace = true }
 helio-pass-fxaa = { path = "../helio-pass-fxaa" }
 helio-pass-corona = { workspace = true }
 helio-pass-decal = { path = "../helio-pass-decal" }

@@ -11,20 +11,10 @@ use helio_core::RenderGraph;
 use super::config::RendererConfig;
 use super::debug::DebugDrawState;
 use super::renderer_impl::{
-    CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer, HALTON_JITTER,
+    CullStatsReadbackState, DebugCameraUniform, GraphRebuilder, Renderer,
 };
 
 impl Renderer {
-    pub(crate) fn compute_jitter_matrices(width: u32, height: u32) -> [glam::Mat4; 16] {
-        let mut matrices = [glam::Mat4::IDENTITY; 16];
-        for (i, raw) in HALTON_JITTER.iter().enumerate() {
-            let jx = ((raw[0] - 0.5) * 2.0) / (width as f32);
-            let jy = ((raw[1] - 0.5) * 2.0) / (height as f32);
-            matrices[i] = glam::Mat4::from_translation(glam::Vec3::new(jx, jy, 0.0));
-        }
-        matrices
-    }
-
     pub(crate) fn create_depth_resources(
         device: &wgpu::Device,
         width: u32,
@@ -122,8 +112,6 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        let jitter_matrices = Self::compute_jitter_matrices(internal_w, internal_h);
-
         let cull_stats_staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("CullStats Staging"),
             size: 32,
@@ -136,7 +124,6 @@ impl Renderer {
         // frame and presents as whole-scene shimmer.
         let enable_jitter = graph.requires_camera_jitter();
 
-        // Extract the rebuilder that was stored in the graph by the builder function
         let graph_rebuilder = graph.take_graph_data::<GraphRebuilder>();
 
         Self {
@@ -188,9 +175,6 @@ impl Renderer {
             graph_time_ms: 0.0,
             frame_times: vec![0.0; 200],
             frame_times_cursor: 0,
-            jitter_matrices,
-            jitter_cache_width: internal_w,
-            jitter_cache_height: internal_h,
             enable_jitter,
             #[cfg(feature = "bake")]
             bake_pending: None,
@@ -208,6 +192,7 @@ impl Renderer {
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
+            tsr_quality: config.tsr_quality,
         }
     }
 
