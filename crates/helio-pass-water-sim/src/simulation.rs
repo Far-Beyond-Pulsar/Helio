@@ -19,6 +19,8 @@ pub(crate) struct DeltaUniform {
     pub time: f32,
     pub wave_scale: f32,
     pub time_step: f32,
+    pub cascade_patch_size: f32,
+    pub cascade_id: u32,
 }
 
 #[repr(C)]

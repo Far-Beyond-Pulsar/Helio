@@ -47,7 +47,7 @@ struct WaterVolume {
 
 @group(0) @binding(0) var<uniform>       camera:         Camera;
 @group(0) @binding(1) var<storage, read> volumes:        array<WaterVolume>;
-@group(0) @binding(2) var water_sim:      texture_2d<f32>;
+@group(0) @binding(2) var water_sim:      texture_2d_array<f32>;
 @group(0) @binding(3) var water_samp:     sampler;
 @group(0) @binding(4) var caustics_tex:   texture_2d<f32>;
 @group(0) @binding(5) var shared_samp:    sampler;
@@ -60,6 +60,9 @@ struct WaterVolume {
 
 const IOR_AIR: f32 = 1.0;
 
+const CASCADE_PATCH_SIZES: array<f32, 3> = array(30.0, 90.0, 270.0);
+const CASCADE_AMPLITUDE_WEIGHTS: array<f32, 3> = array(0.6, 0.3, 0.1);
+
 /// Ceiling on refractive displacement, in metres. Long grazing paths would
 /// otherwise ask for an offset large enough to smear unrelated parts of the
 /// screen into the water.
@@ -69,6 +72,8 @@ struct VertexOutput {
     @builtin(position) position:  vec4f,
     @location(0)       world_pos: vec3f,
     @location(1)       sim_uv:    vec2f,
+    @location(2)       face_type: f32,
+    @location(3) @interpolate(flat) vol_index: u32,
 }
 
 // ── Volume geometry ──────────────────────────────────────────────────────────
@@ -91,6 +96,46 @@ fn water_surface_height(sim_h: f32, vol: WaterVolume) -> f32 {
     return vol.bounds_max.w + sim_h * water_wave_amplitude(vol);
 }
 
+fn sim_layer(vol_index: u32, cascade: u32) -> u32 {
+    return vol_index * 3u + cascade;
+}
+
+/// Sample a single cascade's height at a tiled UV.
+fn sample_cascade_height(cascade: u32, uv: vec2f, vol_index: u32) -> f32 {
+    return textureSampleLevel(water_sim, water_samp, uv, sim_layer(vol_index, cascade), 0.0).r;
+}
+
+/// Sample a single cascade's stored normal BA at a tiled UV.
+fn sample_cascade_normal_ba(cascade: u32, uv: vec2f, vol_index: u32) -> vec2f {
+    return textureSampleLevel(water_sim, water_samp, uv, sim_layer(vol_index, cascade), 0.0).ba;
+}
+
+/// Weighted sum of all cascade heights at a world XZ position.
+/// Each cascade tiles: uv = fract(world_xz / patch_size).
+fn water_cascade_height_sum(world_xz: vec2f, vol_index: u32) -> f32 {
+    var sum = 0.0;
+    for (var i = 0u; i < 3u; i++) {
+        let uv = fract(world_xz / CASCADE_PATCH_SIZES[i]);
+        sum += sample_cascade_height(i, uv, vol_index) * CASCADE_AMPLITUDE_WEIGHTS[i];
+    }
+    return sum;
+}
+
+/// World-space surface normal from all cascades, computed by summing
+/// per-cascade slopes (reconstructed from the stored normal) weighted by
+/// each cascade's amplitude fraction, then normalizing.
+fn water_total_normal(world_xz: vec2f, vol: WaterVolume, vol_index: u32) -> vec3f {
+    var total_slope = vec2f(0.0);
+    for (var i = 0u; i < 3u; i++) {
+        let uv = fract(world_xz / CASCADE_PATCH_SIZES[i]);
+        let ba = sample_cascade_normal_ba(i, uv, vol_index);
+        let ny = sqrt(max(1.0 - dot(ba, ba), 1e-6));
+        let amp = water_wave_amplitude(vol) * CASCADE_AMPLITUDE_WEIGHTS[i];
+        total_slope += (ba / ny) * (amp / CASCADE_PATCH_SIZES[i]);
+    }
+    return normalize(vec3f(total_slope.x, 1.0, total_slope.y));
+}
+
 /// Grid UV in [0,1] → world XZ across the volume footprint.
 fn water_sim_uv_to_world_xz(uv: vec2f, vol: WaterVolume) -> vec2f {
     return mix(vol.bounds_min.xz, vol.bounds_max.xz, uv);
@@ -109,8 +154,9 @@ fn water_world_xz_to_sim_uv(world_xz: vec2f, vol: WaterVolume) -> vec2f {
 /// have to be rescaled by `amplitude / footprint` before they mean anything in
 /// world units — without it the normal does not respond to `wave_amplitude` and
 /// the shading disagrees with the geometry the vertex stage produced.
-fn water_normal(sim_uv: vec2f, vol: WaterVolume) -> vec3f {
-    let info = textureSampleLevel(water_sim, water_samp, sim_uv, 0.0);
+fn water_normal(sim_uv: vec2f, vol: WaterVolume, vol_index: u32) -> vec3f {
+    let layer = sim_layer(vol_index, 0u);
+    let info = textureSampleLevel(water_sim, water_samp, sim_uv, layer, 0.0);
     let ba   = vec2f(info.b, info.a);
     let ny   = sqrt(max(1.0 - dot(ba, ba), 1e-6));
 
@@ -154,13 +200,13 @@ fn water_path_length(
 
 /// Displaced surface height above an arbitrary world XZ (not just the shaded
 /// vertex), for working out how deep a submerged point sits.
-fn water_surface_at(world_xz: vec2f, vol: WaterVolume) -> f32 {
+fn water_surface_at(world_xz: vec2f, vol: WaterVolume, vol_index: u32) -> f32 {
     let uv = water_world_xz_to_sim_uv(world_xz, vol);
     if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) {
         return vol.bounds_max.w;
     }
-    let h = textureSampleLevel(water_sim, water_samp, uv, 0.0).r;
-    return water_surface_height(h, vol);
+    let h_sum = water_cascade_height_sum(world_xz, vol_index);
+    return water_surface_height(h_sum, vol);
 }
 
 /// Caustic light landing on a submerged point.
@@ -169,7 +215,7 @@ fn water_surface_at(world_xz: vec2f, vol: WaterVolume) -> f32 {
 /// same world-XZ-to-UV mapping used everywhere else. Attenuated by how deep the
 /// receiver sits (the pattern washes out as the column deepens) and by how much
 /// the receiving surface faces up.
-fn water_caustics(scene_pos: vec3f, vol: WaterVolume, screen_uv: vec2f) -> vec3f {
+fn water_caustics(scene_pos: vec3f, vol: WaterVolume, screen_uv: vec2f, vol_index: u32) -> vec3f {
     if vol.caustics_params.x <= 0.5 {
         return vec3f(0.0);
     }
@@ -180,7 +226,7 @@ fn water_caustics(scene_pos: vec3f, vol: WaterVolume, screen_uv: vec2f) -> vec3f
     }
 
     // Receivers above the waterline get nothing.
-    let depth_below = water_surface_at(scene_pos.xz, vol) - scene_pos.y;
+    let depth_below = water_surface_at(scene_pos.xz, vol, vol_index) - scene_pos.y;
     if depth_below <= 0.0 {
         return vec3f(0.0);
     }
@@ -397,30 +443,50 @@ fn water_reflection(
 // ── Vertex ───────────────────────────────────────────────────────────────────
 
 @vertex
-fn vs_main(@location(0) position: vec3f) -> VertexOutput {
-    let vol = volumes[0];
-
-    let uv   = position.xy * 0.5 + 0.5;
-    let info = textureSampleLevel(water_sim, water_samp, uv, 0.0);
-
-    let xz    = water_sim_uv_to_world_xz(uv, vol);
-    let world = vec3f(xz.x, water_surface_height(info.r, vol), xz.y);
+fn vs_main(@location(0) position: vec4f, @builtin(instance_index) instance_idx: u32) -> VertexOutput {
+    let vol = volumes[instance_idx];
+    let face_type = position.w;
 
     var out: VertexOutput;
-    out.position  = camera.view_proj * vec4f(world, 1.0);
-    out.world_pos = world;
-    out.sim_uv    = uv;
+    out.face_type = face_type;
+    out.vol_index = instance_idx;
+
+    if face_type < 0.5 {
+        // Top face — static grid in normalized [-1,1], mapped to world XZ
+        let uv  = position.xy * 0.5 + 0.5;
+        let xz  = water_sim_uv_to_world_xz(uv, vol);
+        let h_sum = water_cascade_height_sum(xz, instance_idx);
+        let world = vec3f(xz.x, water_surface_height(h_sum, vol), xz.y);
+        out.position  = camera.view_proj * vec4f(world, 1.0);
+        out.world_pos = world;
+        out.sim_uv    = uv;
+    } else {
+        // Side or bottom face — uniform AABB mapping.
+        // Top-edge side vertices (uv.y ≈ 1.0) follow the displaced water surface
+        // so the side walls match the wave height instead of the flat AABB cap.
+        let uv = position.xyz * 0.5 + 0.5;
+        let xz = mix(vol.bounds_min.xz, vol.bounds_max.xz, uv.xz);
+        let world_y = if uv.y > 0.999 {
+            let h_sum = water_cascade_height_sum(xz, instance_idx);
+            water_surface_height(h_sum, vol)
+        } else {
+            mix(vol.bounds_min.y, vol.bounds_max.y, uv.y)
+        };
+        let world = vec3f(xz.x, world_y, xz.y);
+        out.position  = camera.view_proj * vec4f(world, 1.0);
+        out.world_pos = world;
+        out.sim_uv    = vec2f(0.0);
+    }
     return out;
 }
 
 // ── Fragment: above water ────────────────────────────────────────────────────
 
-@fragment
-fn fs_above(in: VertexOutput) -> @location(0) vec4f {
-    let vol       = volumes[0];
+fn fs_above(in: VertexOutput) -> vec4f {
+    let vol       = volumes[in.vol_index];
     let light_dir = normalize(vol.sun_direction.xyz);
 
-    let normal    = water_normal(in.sim_uv, vol);
+    let normal    = water_total_normal(in.world_pos.xz, vol, in.vol_index);
     let view_dir  = normalize(in.world_pos - camera.position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
 
@@ -428,6 +494,7 @@ fn fs_above(in: VertexOutput) -> @location(0) vec4f {
     // Used to size the refraction offset; the offset then changes which pixel
     // we are looking through, so absorption is re-evaluated against that.
     let path_direct = water_path_length(screen_uv, in.world_pos, view_dir, vol);
+    let vi = in.vol_index;
 
     // ── Refraction ───────────────────────────────────────────────────────────
     // Work out the lateral displacement in WORLD units first, then project it
@@ -476,7 +543,7 @@ fn fs_above(in: VertexOutput) -> @location(0) vec4f {
     // so they are added before absorption attenuates the whole lot.
     if scene_depth < 1.0 {
         let scene_pos = helio_world_from_depth(camera.view_proj_inv, refract_uv, scene_depth);
-        refracted += water_caustics(scene_pos, vol, refract_uv);
+        refracted += water_caustics(scene_pos, vol, refract_uv, vi);
     }
 
     // ── Medium ───────────────────────────────────────────────────────────────
@@ -505,13 +572,12 @@ fn fs_above(in: VertexOutput) -> @location(0) vec4f {
 // through Snell's window; outside that cone the surface is a mirror onto the
 // submerged scene.
 
-@fragment
-fn fs_under(in: VertexOutput) -> @location(0) vec4f {
-    let vol       = volumes[0];
+fn fs_under(in: VertexOutput) -> vec4f {
+    let vol       = volumes[in.vol_index];
     let light_dir = normalize(vol.sun_direction.xyz);
     let ior_water = max(vol.sim_params.x, 1.0);
 
-    let normal    = -water_normal(in.sim_uv, vol);
+    let normal    = -water_total_normal(in.world_pos.xz, vol, in.vol_index);
     let view_dir  = normalize(in.world_pos - camera.position_near.xyz);
     let screen_uv = in.position.xy * viewport.zw;
 
@@ -554,4 +620,33 @@ fn fs_under(in: VertexOutput) -> @location(0) vec4f {
 
     let escape_factor = select(0.0, 1.0, escapes);
     return vec4f(mix(below_color, above_color, (1.0 - fresnel) * escape_factor), 1.0);
+}
+
+// ── Combined entry point ─────────────────────────────────────────────────────
+
+@fragment
+fn fs_main(in: VertexOutput) -> @location(0) vec4f {
+    let vol       = volumes[in.vol_index];
+    let light_dir = normalize(vol.sun_direction.xyz);
+    let view_dir  = normalize(in.world_pos - camera.position_near.xyz);
+    let screen_uv = in.position.xy * viewport.zw;
+
+    if in.face_type >= 0.5 {
+        // Side or bottom face: simple medium integration without refraction,
+        // reflection, or foam — just depth-based extinction.
+        let path = water_path_length(screen_uv, in.world_pos, view_dir, vol);
+        let transmittance = water_transmittance(path, vol);
+        let inscatter     = water_inscatter(view_dir, light_dir, vol);
+        let scene = textureSampleLevel(scene_color, shared_samp, screen_uv, 0.0).rgb;
+        let color = scene * transmittance + inscatter * (1.0 - transmittance);
+        return vec4f(color, 1.0);
+    }
+
+    // Top face: above or underwater based on camera height.
+    let cam_above = camera.position_near.y > in.world_pos.y;
+    if cam_above {
+        return fs_above(in);
+    } else {
+        return fs_under(in);
+    }
 }

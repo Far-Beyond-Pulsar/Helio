@@ -26,6 +26,12 @@ struct UpdateUniforms {
     wave_scale: f32,
     /// Fixed sim-step duration for stable injection magnitude regardless of wave_speed.
     time_step: f32,
+    /// Patch size (metres per tile) for this cascade — scales wind wavenumbers
+    /// so smaller patches produce shorter wavelengths (choppy) and larger patches
+    /// produce long swells.
+    cascade_patch_size: f32,
+    /// Cascade index (0, 1, 2) — unused in shader body but available for debug.
+    cascade_id: u32,
 }
 @group(0) @binding(2) var<uniform> u: UpdateUniforms;
 
@@ -70,33 +76,35 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     // Traveling wave injection -- only when wind is active and normalised.
     if u.wind_strength > 0.001 && dot(u.wind_dir, u.wind_dir) > 0.5 {
         let perp   = vec2<f32>(-u.wind_dir.y, u.wind_dir.x);
-        // Smaller wave_scale = larger k = shorter wavelengths (choppy sea).
-        // Larger wave_scale = smaller k = long swells.
+        // Base wavenumber from cascade patch size — smaller patch → shorter
+        // wavelengths (choppy sea), larger patch → long swells.
+        // wave_scale acts as a global multiplier on top of the cascade's scale.
         let inv_ws = 1.0 / max(u.wave_scale, 0.01);
+        let k_base = 6.2832 / max(u.cascade_patch_size, 0.1);
         let t_old  = u.time - u.time_step;
 
         var dh = 0.0;
 
         // Octave 0 -- primary swell, strict wind direction (50% of energy)
-        let k0 = 6.2832 * 1.5 * inv_ws;
+        let k0 = k_base * 1.5 * inv_ws;
         dh += (twave(uv, t_old,  k0, 0.65, u.wind_dir) -
                twave(uv, u.time, k0, 0.65, u.wind_dir)) * 0.50;
 
         // Octave 1 -- secondary swell +18 deg off wind
         let d1 = normalize(u.wind_dir + perp * 0.3249);   // tan(18 deg)
-        let k1 = 6.2832 * 2.8 * inv_ws;
+        let k1 = k_base * 2.8 * inv_ws;
         dh += (twave(uv, t_old,  k1, 1.10, d1) -
                twave(uv, u.time, k1, 1.10, d1)) * 0.28;
 
         // Octave 2 -- cross-chop -30 deg
         let d2 = normalize(u.wind_dir - perp * 0.5774);   // tan(30 deg)
-        let k2 = 6.2832 * 5.3 * inv_ws;
+        let k2 = k_base * 5.3 * inv_ws;
         dh += (twave(uv, t_old,  k2, 2.00, d2) -
                twave(uv, u.time, k2, 2.00, d2)) * 0.14;
 
         // Octave 3 -- short ripples +50 deg
         let d3 = normalize(u.wind_dir + perp * 1.1918);   // tan(50 deg)
-        let k3 = 6.2832 * 9.5 * inv_ws;
+        let k3 = k_base * 9.5 * inv_ws;
         dh += (twave(uv, t_old,  k3, 3.60, d3) -
                twave(uv, u.time, k3, 3.60, d3)) * 0.08;
 

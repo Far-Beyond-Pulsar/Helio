@@ -35,7 +35,7 @@ struct WaterVolume {
 }
 
 @group(0) @binding(0) var<storage, read> water_volumes: array<WaterVolume>;
-@group(0) @binding(1) var water_sim:  texture_2d<f32>;
+@group(0) @binding(1) var water_sim:  texture_2d_array<f32>;
 @group(0) @binding(2) var water_samp: sampler;
 
 struct VertexOutput {
@@ -62,11 +62,20 @@ fn floor_hit(origin: vec3f, dir: vec3f, floor_y: f32) -> vec3f {
 }
 
 @vertex
-fn vs_main(@location(0) position: vec3f) -> VertexOutput {
+fn vs_main(@location(0) position: vec4f) -> VertexOutput {
+    // Discard non-top-face vertices — side/bottom faces have no sim data.
+    if position.w >= 0.5 {
+        var out: VertexOutput;
+        out.position = vec4f(0.0, 0.0, 2.0, 1.0);
+        out.flat_hit = vec3f(0.0);
+        out.wave_hit = vec3f(0.0);
+        return out;
+    }
+
     let vol = water_volumes[0];
 
     let uv     = position.xy * 0.5 + 0.5;
-    let info   = textureSampleLevel(water_sim, water_samp, uv, 0.0);
+    let info   = textureSampleLevel(water_sim, water_samp, uv, 0u, 0.0);
     let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
     let amp    = water_wave_amplitude(vol);
 

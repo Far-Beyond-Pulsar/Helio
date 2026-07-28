@@ -1,7 +1,8 @@
 use wgpu::util::DeviceExt;
 use crate::simulation::{DeltaUniform, DropUniform, HitboxCountUniform};
 use crate::{
-    make_surface_mesh, vec3_vbl, WaterSimPass, BLIT_WGSL, SIM_SIZE,
+    make_static_box_mesh, make_top_grid, make_caustics_grid, vec4_vbl, WaterSimPass, BLIT_WGSL,
+    CASCADE_COUNT, SIM_SIZE, MAX_SIM_VOLUMES,
 };
 
 impl WaterSimPass {
@@ -158,28 +159,64 @@ impl WaterSimPass {
         let normal_pipeline = make_sim_pipeline("WaterSim Normal", &sim_pl, &normal_frag);
         let hitbox_pipeline = make_sim_pipeline("WaterSim Hitbox", &hitbox_pl, &hitbox_frag);
 
-        let make_sim_tex = |label| {
+        let total_layers = CASCADE_COUNT as u32 * MAX_SIM_VOLUMES;
+
+        let make_array_tex = |label| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
                     width: SIM_SIZE,
                     height: SIM_SIZE,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: total_layers,
                 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             })
         };
 
-        let tex_a = make_sim_tex("WaterSim Tex A");
-        let tex_b = make_sim_tex("WaterSim Tex B");
-        let view_a = tex_a.create_view(&wgpu::TextureViewDescriptor::default());
-        let view_b = tex_b.create_view(&wgpu::TextureViewDescriptor::default());
+        let sim_tex_a = make_array_tex("WaterSim Tex A");
+        let sim_tex_b = make_array_tex("WaterSim Tex B");
+
+        let mut sim_layer_views_a = Vec::with_capacity(total_layers as usize);
+        let mut sim_layer_views_b = Vec::with_capacity(total_layers as usize);
+        for layer in 0..total_layers {
+            let va = sim_tex_a.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("WaterSim Layer A {}", layer)),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            let vb = sim_tex_b.create_view(&wgpu::TextureViewDescriptor {
+                label: Some(&format!("WaterSim Layer B {}", layer)),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            sim_layer_views_a.push(va);
+            sim_layer_views_b.push(vb);
+        }
+
+        let sim_array_view_a = sim_tex_a.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("WaterSim Array View A"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            array_layer_count: Some(total_layers),
+            ..Default::default()
+        });
+        let sim_array_view_b = sim_tex_b.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("WaterSim Array View B"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            array_layer_count: Some(total_layers),
+            ..Default::default()
+        });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("WaterSim Internal Sampler"),
@@ -216,10 +253,22 @@ impl WaterSimPass {
         };
 
         let drop_buf = make_ubuf("WaterSim Drop Uniform", std::mem::size_of::<DropUniform>());
-        let update_buf =
-            make_ubuf("WaterSim Update Uniform", std::mem::size_of::<DeltaUniform>());
-        let normal_buf =
-            make_ubuf("WaterSim Normal Uniform", std::mem::size_of::<DeltaUniform>());
+        let update_bufs_labels: [String; 3] = [
+            "WaterSim Update Uniform C0".into(),
+            "WaterSim Update Uniform C1".into(),
+            "WaterSim Update Uniform C2".into(),
+        ];
+        let normal_bufs_labels: [String; 3] = [
+            "WaterSim Normal Uniform C0".into(),
+            "WaterSim Normal Uniform C1".into(),
+            "WaterSim Normal Uniform C2".into(),
+        ];
+        let mut update_bufs_vec: Vec<wgpu::Buffer> = Vec::with_capacity(CASCADE_COUNT as usize);
+        let mut normal_bufs_vec: Vec<wgpu::Buffer> = Vec::with_capacity(CASCADE_COUNT as usize);
+        for i in 0..CASCADE_COUNT as usize {
+            update_bufs_vec.push(make_ubuf(&update_bufs_labels[i], std::mem::size_of::<DeltaUniform>()));
+            normal_bufs_vec.push(make_ubuf(&normal_bufs_labels[i], std::mem::size_of::<DeltaUniform>()));
+        }
         let hitbox_count_buf =
             make_ubuf("WaterSim Hitbox Count", std::mem::size_of::<HitboxCountUniform>());
 
@@ -242,7 +291,7 @@ impl WaterSimPass {
                         visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
                         count: None,
@@ -255,6 +304,7 @@ impl WaterSimPass {
                     },
                 ],
             });
+
 
         let render_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Water Render BGL"),
@@ -284,7 +334,7 @@ impl WaterSimPass {
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Texture {
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
                         multisampled: false,
                     },
                     count: None,
@@ -369,6 +419,7 @@ impl WaterSimPass {
                     },
                     count: None,
                 },
+
             ],
         });
 
@@ -556,7 +607,7 @@ impl WaterSimPass {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Texture {
                             sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
                             multisampled: false,
                         },
                         count: None,
@@ -647,7 +698,7 @@ impl WaterSimPass {
             include_str!("../shaders/surface.wgsl"),
         );
 
-        let vbl = vec3_vbl();
+        let vbl = vec4_vbl();
 
         let caustics_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Water Caustics Pipeline"),
@@ -686,9 +737,9 @@ impl WaterSimPass {
             cache: None,
         });
 
-        let surface_above_pipeline =
+        let surface_pipeline =
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Water Surface Above Pipeline"),
+                label: Some("Water Surface Pipeline"),
                 layout: Some(&render_pl_layout),
                 vertex: wgpu::VertexState {
                     module: &surface_shader,
@@ -698,7 +749,7 @@ impl WaterSimPass {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &surface_shader,
-                    entry_point: Some("fs_above"),
+                    entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: surface_format,
@@ -708,7 +759,7 @@ impl WaterSimPass {
                 }),
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Back),
+                    cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
@@ -723,44 +774,12 @@ impl WaterSimPass {
                 cache: None,
             });
 
-        let surface_under_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Water Surface Under Pipeline"),
-                layout: Some(&render_pl_layout),
-                vertex: wgpu::VertexState {
-                    module: &surface_shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &[Some(vbl.clone())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &surface_shader,
-                    entry_point: Some("fs_under"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: surface_format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    cull_mode: Some(wgpu::Face::Front),
-                    ..Default::default()
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
+        let (static_box_vbuf, static_box_ibuf, static_box_index_count) = make_static_box_mesh(device);
+        let (top_vbuf, top_ibuf, top_index_count) = make_top_grid(device);
+        let (caustics_vbuf, caustics_ibuf, caustics_index_count) = make_caustics_grid(device);
 
-        let (surface_vbuf, surface_ibuf, surface_index_count) = make_surface_mesh(device);
+        use std::convert::TryInto;
+        let n_updates = total_layers as usize;
 
         Self {
             sim_bgl,
@@ -769,29 +788,40 @@ impl WaterSimPass {
             update_pipeline,
             normal_pipeline,
             hitbox_pipeline,
-            _tex_a: tex_a,
-            _tex_b: tex_b,
-            view_a,
-            view_b,
-            front: true,
+            sim_tex_a,
+            sim_tex_b,
+            sim_array_view_a,
+            sim_array_view_b,
+            sim_layer_views_a,
+            sim_layer_views_b,
+            front_per_layer: vec![true; n_updates],
             sampler,
             output_sampler,
             depth_sampler,
             drop_buf,
-            update_buf,
-            normal_buf,
+            update_bufs: update_bufs_vec.try_into().unwrap_or_else(|_: Vec<wgpu::Buffer>| {
+                panic!("CASCADE_COUNT doesn't match expected size")
+            }),
+            normal_bufs: normal_bufs_vec.try_into().unwrap_or_else(|_: Vec<wgpu::Buffer>| {
+                panic!("CASCADE_COUNT doesn't match expected size")
+            }),
             hitbox_count_buf,
             pending_drops: std::collections::VecDeque::new(),
             drop_staged: false,
-            surface_vbuf,
-            surface_ibuf,
-            surface_index_count,
+            static_box_vbuf,
+            static_box_ibuf,
+            static_box_index_count,
+            top_vbuf,
+            top_ibuf,
+            top_index_count,
+            caustics_vbuf,
+            caustics_ibuf,
+            caustics_index_count,
             caustics_sampler,
             caustics_render_bgl,
             render_bgl,
             caustics_pipeline,
-            surface_above_pipeline,
-            surface_under_pipeline,
+            surface_pipeline,
             _pre_aa_fallback_tex: pre_aa_fallback_tex,
             pre_aa_fallback_view,
             _gbuffer_fallback_tex: gbuffer_fallback_tex,
@@ -818,14 +848,14 @@ impl WaterSimPass {
             caustics_bg: None,
             render_bg: None,
             render_bg_key: None,
-            normal_bg: None,
-            normal_bg_key: None,
+            normal_bgs: vec![None; n_updates],
+            normal_bg_keys: vec![None; n_updates],
             hitbox_bg: None,
             hitbox_bg_key: None,
             drop_bg: None,
             drop_bg_key: None,
-            update_bg: None,
-            update_bg_key: None,
+            update_bgs: vec![None; n_updates],
+            update_bg_keys: vec![None; n_updates],
             underwater_tint_bg: None,
             underwater_tint_bg_key: None,
             _tint_scratch_tex: tint_scratch_tex,
