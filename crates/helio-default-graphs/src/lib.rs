@@ -29,7 +29,6 @@ use helio_pass_simple_cube::SimpleCubePass;
 use helio_pass_sky::SkyPass;
 use helio_pass_sky_lut::SkyLutPass;
 use helio_pass_ssr::SsrPass;
-use helio_pass_taa::TaaPass;
 use helio_pass_tsr::TsrPass;
 use helio_pass_virtual_geometry::VirtualGeometryPass;
 use helio_pass_volumetric_fog::VolumetricFogPass;
@@ -669,8 +668,8 @@ fn build_fxaa_graph_internal(
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
-    // When TSR is configured, replace TaaPass with TsrPass for superior temporal
-    // upscaling.  TSR provides its own temporal AA so no separate FXAA is needed.
+    // TSR provides temporal super-resolution upscaling with its own temporal AA.
+    // When TSR is not configured, skip temporal accumulation (render at native res).
     if let Some(quality) = config.tsr_quality {
         graph.add_pass(Box::new(TsrPass::new(
             device,
@@ -680,15 +679,6 @@ fn build_fxaa_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )));
-    } else {
-        graph.add_pass(Box::new(TaaPass::new(
-            device,
-            iw,
-            ih,
-            config.width,
-            config.height,
-            config.surface_format,
         )));
     }
 
@@ -794,8 +784,8 @@ fn build_hlfs_graph_internal(
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
-    // When TSR is configured, replace TaaPass with TsrPass for superior temporal
-    // upscaling.  TSR provides its own temporal AA so no separate FXAA is needed.
+    // TSR provides temporal super-resolution upscaling with its own temporal AA.
+    // When TSR is not configured, skip temporal accumulation (render at native res).
     if let Some(quality) = config.tsr_quality {
         graph.add_pass(Box::new(TsrPass::new(
             device,
@@ -805,15 +795,6 @@ fn build_hlfs_graph_internal(
             config.height,
             config.surface_format,
             quality,
-        )));
-    } else {
-        graph.add_pass(Box::new(TaaPass::new(
-            device,
-            iw,
-            ih,
-            config.width,
-            config.height,
-            config.surface_format,
         )));
     }
 

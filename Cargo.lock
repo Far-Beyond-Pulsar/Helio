@@ -2300,7 +2300,6 @@ dependencies = [
  "helio-pass-perf-overlay",
  "helio-pass-planetary-voxel",
  "helio-pass-postprocess",
- "helio-pass-taa",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
  "helio-pass-voxel-mesh",
@@ -2954,7 +2953,6 @@ dependencies = [
  "helio-pass-sky",
  "helio-pass-sky-lut",
  "helio-pass-ssr",
- "helio-pass-taa",
  "helio-pass-transparent",
  "helio-pass-tsr",
  "helio-pass-virtual-geometry",
@@ -3273,16 +3271,6 @@ dependencies = [
 
 [[package]]
 name = "helio-pass-ssr"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "helio-core",
- "libhelio",
- "wgpu 30.0.0",
-]
-
-[[package]]
-name = "helio-pass-taa"
 version = "0.1.0"
 dependencies = [
  "bytemuck",

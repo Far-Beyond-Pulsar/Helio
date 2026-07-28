@@ -51,7 +51,6 @@ pollster = "0.4"
 helio-core = { path = "crates/helio-core" }
 helio-default-graphs = { path = "crates/helio-default-graphs"}
 wasm-bindgen = "0.2"
-helio-pass-taa = { path = "crates/helio-pass-taa" }
 helio-pass-tsr = { path = "crates/helio-pass-tsr" }
 helio-pass-postprocess = { path = "crates/helio-pass-postprocess" }
 helio-pass-volumetric-fog = { path = "crates/helio-pass-volumetric-fog" }
