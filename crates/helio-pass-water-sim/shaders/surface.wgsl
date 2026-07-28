@@ -466,12 +466,13 @@ fn vs_main(@location(0) position: vec4f, @builtin(instance_index) instance_idx: 
         // so the side walls match the wave height instead of the flat AABB cap.
         let uv = position.xyz * 0.5 + 0.5;
         let xz = mix(vol.bounds_min.xz, vol.bounds_max.xz, uv.xz);
-        let world_y = if uv.y > 0.999 {
+        var world_y: f32;
+        if uv.y > 0.999 {
             let h_sum = water_cascade_height_sum(xz, instance_idx);
-            water_surface_height(h_sum, vol)
+            world_y = water_surface_height(h_sum, vol);
         } else {
-            mix(vol.bounds_min.y, vol.bounds_max.y, uv.y)
-        };
+            world_y = mix(vol.bounds_min.y, vol.bounds_max.y, uv.y);
+        }
         let world = vec3f(xz.x, world_y, xz.y);
         out.position  = camera.view_proj * vec4f(world, 1.0);
         out.world_pos = world;
