@@ -143,7 +143,7 @@ struct VertexOutput {
     @location(3) world_tangent:  vec3<f32>,
     @location(4) bitangent_sign: f32,
     @location(5) @interpolate(flat) material_id:    u32,
-    @location(6) lightmap_uv:    vec2<f32>,  // Lightmap atlas UV (or (0,0) if no lightmap)
+    @location(6) lightmap_uv:    vec4<f32>,  // Lightmap atlas UV (or (0,0,0,0) if no lightmap)
 }
 
 fn decode_snorm8x4(packed: u32) -> vec3<f32> {
@@ -209,11 +209,11 @@ fn vs_main(v: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
             use_uv1,
         );
         let raw_uv = region.uv_offset + lm_input * region.uv_scale;
-        out.lightmap_uv = clamp(raw_uv, region.uv_clamp_min, region.uv_clamp_max);
+        out.lightmap_uv = vec4<f32>(clamp(raw_uv, region.uv_clamp_min, region.uv_clamp_max), 0.0, 0.0);
     } else {
         // Sentinel: negative UV signals "no lightmap" to the deferred pass.
         // Cannot use (0,0) because a valid atlas region can start at (0,0).
-        out.lightmap_uv = vec2<f32>(-1.0, -1.0);
+        out.lightmap_uv = vec4<f32>(-1.0, -1.0, 0.0, 0.0);
     }
     return out;
 }
@@ -225,7 +225,7 @@ struct GBufferOutput {
     @location(1) normal:      vec4<f32>,
     @location(2) orm:         vec4<f32>,
     @location(3) emissive:    vec4<f32>,
-    @location(4) lightmap_uv: vec2<f32>,
+    @location(4) lightmap_uv: vec4<f32>,
     @location(5) sss:         vec4<f32>,
     @location(6) extra:       vec4<f32>,
 }
@@ -397,7 +397,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0),
+            vec4<f32>(0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0)
         );
@@ -411,7 +411,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(0.0, 0.0, 1.0, 0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0),
+            vec4<f32>(0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0)
         );
@@ -431,7 +431,7 @@ fn fs_main(input: VertexOutput) -> GBufferOutput {
             vec4<f32>(N_geom, 0.0),
             vec4<f32>(1.0, roughness, metallic, 0.0),
             vec4<f32>(0.0),
-            vec2<f32>(0.0),
+            vec4<f32>(0.0),
             vec4<f32>(0.0),
             vec4<f32>(0.0)
         );

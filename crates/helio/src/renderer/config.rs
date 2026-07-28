@@ -15,7 +15,8 @@ pub fn required_wgpu_features(adapter_features: wgpu::Features) -> wgpu::Feature
     #[cfg(not(target_arch = "wasm32"))]
     let required = wgpu::Features::TEXTURE_BINDING_ARRAY
         | wgpu::Features::SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING
-        | wgpu::Features::INDIRECT_FIRST_INSTANCE;
+        | wgpu::Features::INDIRECT_FIRST_INSTANCE
+        | wgpu::Features::SHADER_I16;
     #[cfg(target_arch = "wasm32")]
     let required = wgpu::Features::INDIRECT_FIRST_INSTANCE;
     let mut optional = wgpu::Features::MULTI_DRAW_INDIRECT_COUNT | // compacted indirect count buffer

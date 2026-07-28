@@ -1094,37 +1094,15 @@ impl AppState {
             overlay.populate = show_lod_legend.then(move || {
                 Box::new(move |overlay: &mut helio_pass_debug_overlay::DebugOverlayState| {
                     let stats = *shared_stats.lock().unwrap();
-                    overlay.write_text(0, 2, "VG LOD HEATMAP");
-                    if let Some((first, last)) = stats.selected_lod_range() {
-                        overlay.write_text(
-                            0,
-                            3,
-                            &format!(
-                                "GPU objects: {}  selected: LOD{}..LOD{}  asset max: LOD{}",
-                                stats.visible_objects(), first, last, stats.max_available_lod,
-                            ),
-                        );
-                        overlay.write_text(
-                            0,
-                            4,
-                            &format!(
-                                "Meshlets: {} visible  {} rejected",
-                                stats.visible_meshlets, stats.rejected_meshlets,
-                            ),
-                        );
-                    } else {
-                        overlay.write_text(0, 3, "GPU LOD sample pending / no VG objects visible");
-                    }
-                    for (lod, color) in LOD_COLORS.iter().enumerate() {
-                        let x = 8.0 + lod as f32 * 68.0;
-                        overlay.add_bar(x, 128.0, 20.0, 14.0, color[0], color[1], color[2], 1.0);
-                        overlay.write_small(
-                            (x / 8.0) as u32 + 3,
-                            11,
-                            &format!("L{lod}:{}", stats.lod_object_counts[lod]),
-                        );
-                    }
-                    overlay.write_text(0, 6, "LOD0 = full detail; asset max can be below LOD7");
+                    overlay.write_text(0, 2, "VG FLAT DAG CULL");
+                    overlay.write_text(
+                        0,
+                        3,
+                        &format!(
+                            "Meshlets: {} visible  {} rejected",
+                            stats.visible_meshlets, stats.rejected_meshlets,
+                        ),
+                    );
                 }) as Box<dyn Fn(&mut helio_pass_debug_overlay::DebugOverlayState) + Send + Sync>
             });
         }

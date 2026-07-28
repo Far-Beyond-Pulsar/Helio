@@ -205,32 +205,36 @@ pub(crate) struct TextureRecord {
 
 /// Internal record for a virtual mesh (meshlet-based LOD mesh).
 ///
-/// Stores mesh handles for each LOD level and precomputed meshlet descriptors.
+/// Stores precomputed meshlet descriptors and the per-meshlet flat vertex/
+/// index streams. The flat DAG replaces per-LOD ranges; meshlets are stored
+/// LOD0, LOD1, ... contiguously and linked via `parent_cluster_id`.
 #[derive(Debug, Clone)]
 pub(crate) struct VirtualMeshRecord {
-    /// Mesh pool handles for each uploaded LOD level.
-    pub mesh_ids: Vec<MeshId>,
-
     /// Precomputed meshlet descriptors for all LODs combined.
     pub meshlets: Vec<GpuMeshletEntry>,
 
-    /// Conservative mesh-local sphere used for object culling and LOD distance.
+    /// Flat per-meshlet vertex stream. Each meshlet's vertices are
+    /// `GpuMeshletVertex[meshlet.meshlet_vertex_offset..+vertex_count]`.
+    pub meshlet_vertices: Vec<libhelio::GpuMeshletVertex>,
+
+    /// Flat per-meshlet index stream (u16 meshlet-local vertex indices).
+    /// Each meshlet's indices are
+    /// `u16[meshlet.meshlet_index_offset..+triangle_count*3]`.
+    pub meshlet_indices: Vec<u16>,
+
+    /// Conservative mesh-local sphere used for object culling.
     pub local_bounds: [f32; 4],
 
-    /// Number of valid LOD ranges.
+    /// Number of LOD levels.
     pub lod_count: u32,
 
-    /// Measured accumulated object-space simplification errors.
-    pub lod_errors: [f32; libhelio::VG_LOD_LEVELS],
+    /// Total number of meshlets across all LODs.
+    pub total_meshlet_count: u32,
 
-    /// Per-LOD offsets into `meshlets`, before the shared frame-buffer base is applied.
-    pub lod_first_meshlets: [u32; libhelio::VG_LOD_LEVELS],
-
-    /// Per-LOD meshlet counts.
-    pub lod_meshlet_counts: [u32; libhelio::VG_LOD_LEVELS],
-
-    /// Largest per-LOD meshlet count.
-    pub max_meshlet_count: u32,
+    /// Number of finest-LOD (DAG leaf) meshlets. Leaves are stored first in
+    /// `meshlets` (LOD0). Cull work items only cover this range; coarser
+    /// meshlets are reached exclusively via `parent_cluster_id` walks.
+    pub leaf_meshlet_count: u32,
 
     /// Number of virtual objects currently using this mesh.
     pub ref_count: u32,

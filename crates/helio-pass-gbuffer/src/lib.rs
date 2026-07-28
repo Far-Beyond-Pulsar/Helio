@@ -236,9 +236,10 @@ impl RenderPass for GBufferPass {
         builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_lightmap_uv",
-            wgpu::TextureFormat::Rg16Float,
+            wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.with_extra_usage(wgpu::TextureUsages::STORAGE_BINDING);
         builder.write_color_raw(
             "gbuffer_sss",
             wgpu::TextureFormat::Rgba16Float,
@@ -757,7 +758,7 @@ impl GBufferPass {
                         write_mask: wgpu::ColorWrites::ALL,
                     }),
                     Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rg16Float,
+                        format: wgpu::TextureFormat::Rgba16Float,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),

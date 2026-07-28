@@ -49,7 +49,7 @@ struct CullUniforms {
     object_dispatch_width: u32,
     work_item_count: u32,
     work_dispatch_width: u32,
-    _pad0: u32,
+    hiz_valid: u32,
     _pad1: u32,
     _pad2: u32,
 }
@@ -59,7 +59,7 @@ struct CullUniforms {
 struct InstanceCullData {
     max_scale: f32,
     min_scale: f32,
-    cone_cull_enabled: u32,
+    cull_flags: u32,
     valid_transform: u32,
 }
 
@@ -76,6 +76,8 @@ struct CaseBuffers {
     indirect: wgpu::Buffer,
     draw_count: wgpu::Buffer,
     draw_count_readback: wgpu::Buffer,
+    emit_flags: wgpu::Buffer,
+    emit_flag_bytes: u64,
     object_dispatch_width: u32,
     object_dispatch_height: u32,
     work_dispatch_width: u32,
@@ -245,6 +247,7 @@ async fn run() {
             println!("{},SKIPPED,storage_binding_limit", case.name);
             continue;
         }
+        // Engine uses meshlet_count*2 so opaque and alpha each get a full half.
         let buffers = create_case_buffers(
             &device,
             &queue,
@@ -252,7 +255,7 @@ async fn run() {
             &cull_bind_group_layout,
             case,
             &limits,
-            TOTAL_MESHLETS,
+            TOTAL_MESHLETS * 2,
         );
 
         for _ in 0..warmup {
@@ -289,7 +292,7 @@ async fn run() {
             case.name
         );
         assert_eq!(
-            counters[1], buffers.expected_overflow,
+            counters[2], buffers.expected_overflow,
             "{} reported an unexpected capacity overflow",
             case.name
         );
@@ -342,6 +345,8 @@ async fn run() {
         );
     }
 
+    // Opaque half capacity = draw_capacity/2. Reject 17 by sizing the opaque half
+    // to TOTAL_MESHLETS - 17.
     let overflow_probe = create_case_buffers(
         &device,
         &queue,
@@ -353,7 +358,7 @@ async fn run() {
             meshlets_per_object: TOTAL_MESHLETS / 4096,
         },
         &limits,
-        TOTAL_MESHLETS - 17,
+        (TOTAL_MESHLETS - 17) * 2,
     );
     let _ = dispatch_and_time(
         &device,
@@ -366,8 +371,14 @@ async fn run() {
         &query_readback,
     );
     let counters = read_draw_counters(&device, &queue, &overflow_probe);
-    assert_eq!(counters, [TOTAL_MESHLETS, 17]);
-    eprintln!("overflow_probe,attempted={},rejected={}", counters[0], counters[1]);
+    // [opaque attempts, alpha attempts, overflow rejections]
+    assert_eq!(counters[0] + counters[2], TOTAL_MESHLETS);
+    assert_eq!(counters[2], 17);
+    eprintln!(
+        "overflow_probe,attempted={},rejected={}",
+        counters[0] + counters[2],
+        counters[2]
+    );
 
     let render_probe = create_case_buffers(
         &device,
@@ -493,7 +504,8 @@ fn create_case_buffers(
     let instance_cull = vec![InstanceCullData {
         max_scale: 1.0,
         min_scale: 1.0,
-        cone_cull_enabled: 0,
+        // bit0 = cone cull, bit1 = opaque (matches InstanceCullData / vg_cull.wgsl)
+        cull_flags: 2,
         valid_transform: 1,
     }; case.object_count as usize];
     let meshlets = vec![GpuMeshletEntry {
@@ -503,24 +515,23 @@ fn create_case_buffers(
         cone_cutoff: 2.0,
         cone_axis: [0.0, 0.0, 1.0],
         lod_error: 0.0,
-        first_index: 0,
-        index_count: 3,
-        vertex_offset: 0,
-        instance_index: 0,
+        packed_counts: 3 | (1 << 16), // vertex_count=3, triangle_count=1
+        meshlet_index_offset: 0,
+        meshlet_vertex_offset: 0,
+        parent_cluster_id: u32::MAX,
     }; case.meshlets_per_object as usize];
     let objects: Vec<_> = (0..case.object_count)
         .map(|instance_index| {
-            let mut lod_meshlet_counts = [0; 8];
-            lod_meshlet_counts[0] = case.meshlets_per_object;
             GpuVgObject {
                 instance_index,
-                lod_count: 1,
-                max_meshlet_count: case.meshlets_per_object,
-                reserved: 0,
+                leaf_meshlet_count: case.meshlets_per_object,
+                first_meshlet: 0,
+                total_meshlet_count: case.meshlets_per_object,
                 local_bounds: [0.0, 0.0, -10.0, 1.0],
-                lod_errors: [0.0; 8],
-                lod_first_meshlets: [0; 8],
-                lod_meshlet_counts,
+                emit_flag_base: instance_index * case.meshlets_per_object,
+                visible: 0,
+                _pad0: 0,
+                _pad1: 0,
             }
         })
         .collect();
@@ -555,7 +566,7 @@ fn create_case_buffers(
         object_dispatch_width,
         work_item_count,
         work_dispatch_width,
-        _pad0: 0,
+        hiz_valid: 0,
         _pad1: 0,
         _pad2: 0,
     };
@@ -567,6 +578,16 @@ fn create_case_buffers(
     let instance_buffer = init_buffer(device, "Benchmark Instances", bytemuck::cast_slice(&instances), wgpu::BufferUsages::STORAGE);
     let instance_cull_buffer = init_buffer(device, "Benchmark Instance Cull", bytemuck::cast_slice(&instance_cull), wgpu::BufferUsages::STORAGE);
     let work_item_buffer = init_buffer(device, "Benchmark Work Items", bytemuck::cast_slice(&work_items), wgpu::BufferUsages::STORAGE);
+    let emit_flag_count = u64::from(case.object_count) * u64::from(case.meshlets_per_object);
+    let emit_flags_buffer = output_buffer(
+        device,
+        "Benchmark Emit Flags",
+        emit_flag_count.max(1) * 4,
+        wgpu::BufferUsages::empty(),
+    );
+    let vis_ids_buffer = output_buffer(device, "Benchmark Vis Meshlet IDs", 4, wgpu::BufferUsages::empty());
+    let vis_inst_buffer = output_buffer(device, "Benchmark Vis Instance IDs", 4, wgpu::BufferUsages::empty());
+    let vis_count_buffer = output_buffer(device, "Benchmark Vis Count", 4, wgpu::BufferUsages::empty());
     let indirect_buffer = output_buffer(
         device,
         "Benchmark Indirect",
@@ -582,12 +603,12 @@ fn create_case_buffers(
     let draw_count = output_buffer(
         device,
         "Benchmark Draw And Overflow Counters",
-        8,
+        12, // opaque, alpha, overflow
         wgpu::BufferUsages::INDIRECT,
     );
     let draw_count_readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Benchmark Draw Count Readback"),
-        size: 8,
+        size: 12,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -622,35 +643,34 @@ fn create_case_buffers(
         ..Default::default()
     });
 
+    // Full bind-group entries required by vg_cull.wgsl (select + cull share layout).
+    let full_entries = [
+        wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 2, resource: meshlet_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 3, resource: object_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 4, resource: instance_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 5, resource: indirect_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 6, resource: metadata_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 7, resource: draw_count.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&hiz_view) },
+        wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&hiz_sampler) },
+        wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 11, resource: work_item_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 12, resource: vis_ids_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 13, resource: vis_inst_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 14, resource: vis_count_buffer.as_entire_binding() },
+        wgpu::BindGroupEntry { binding: 15, resource: emit_flags_buffer.as_entire_binding() },
+    ];
     let select_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("VG Object Select Benchmark Bind Group"),
         layout: select_layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: object_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: instance_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 7, resource: draw_count.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
-        ],
+        entries: &full_entries,
     });
     let cull_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("VG Cull Benchmark Bind Group"),
         layout: cull_layout,
-        entries: &[
-            wgpu::BindGroupEntry { binding: 0, resource: camera_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 1, resource: cull_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 2, resource: meshlet_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 3, resource: object_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 4, resource: instance_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 5, resource: indirect_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 6, resource: metadata_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 7, resource: draw_count.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 8, resource: wgpu::BindingResource::TextureView(&hiz_view) },
-            wgpu::BindGroupEntry { binding: 9, resource: wgpu::BindingResource::Sampler(&hiz_sampler) },
-            wgpu::BindGroupEntry { binding: 10, resource: instance_cull_buffer.as_entire_binding() },
-            wgpu::BindGroupEntry { binding: 11, resource: work_item_buffer.as_entire_binding() },
-        ],
+        entries: &full_entries,
     });
 
     CaseBuffers {
@@ -659,12 +679,15 @@ fn create_case_buffers(
         indirect: indirect_buffer,
         draw_count,
         draw_count_readback,
+        emit_flags: emit_flags_buffer,
+        emit_flag_bytes: emit_flag_count.max(1) * 4,
         object_dispatch_width,
         object_dispatch_height,
         work_dispatch_width,
         work_dispatch_height,
         expected_attempts: TOTAL_MESHLETS,
-        expected_overflow: TOTAL_MESHLETS.saturating_sub(draw_capacity),
+        // Opaque path only uses the first half of draw_capacity.
+        expected_overflow: TOTAL_MESHLETS.saturating_sub(draw_capacity / 2),
     }
 }
 
@@ -682,6 +705,7 @@ fn dispatch_and_time(
         label: Some("VG Cull Benchmark Encoder"),
     });
     encoder.clear_buffer(&buffers.draw_count, 0, None);
+    encoder.clear_buffer(&buffers.emit_flags, 0, Some(buffers.emit_flag_bytes));
     encoder.write_timestamp(query_set, 0);
     {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -722,14 +746,14 @@ fn read_draw_counters(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     buffers: &CaseBuffers,
-) -> [u32; 2] {
+) -> [u32; 3] {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("VG Cull Count Readback Encoder"),
     });
-    encoder.copy_buffer_to_buffer(&buffers.draw_count, 0, &buffers.draw_count_readback, 0, 8);
+    encoder.copy_buffer_to_buffer(&buffers.draw_count, 0, &buffers.draw_count_readback, 0, 12);
     queue.submit([encoder.finish()]);
-    let values = read_mapped::<u32>(device, &buffers.draw_count_readback, 2);
-    [values[0], values[1]]
+    let values = read_mapped::<u32>(device, &buffers.draw_count_readback, 3);
+    [values[0], values[1], values[2]]
 }
 
 #[allow(clippy::too_many_arguments)]

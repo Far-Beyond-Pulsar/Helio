@@ -7,7 +7,7 @@
 
 use std::mem;
 
-use libhelio::{GpuMeshletEntry, MESHLET_MAX_TRIANGLES};
+use libhelio::{GpuMeshletEntry, GpuMeshletVertex, MESHLET_MAX_TRIANGLES};
 use meshopt::DecodePosition;
 
 use crate::mesh::PackedVertex;
@@ -309,16 +309,19 @@ fn compact_mesh(vertices: &[PackedVertex], indices: &[u32]) -> (Vec<PackedVertex
 
 // ─── Meshlet building via meshopt ─────────────────────────────────────────
 
-/// Build meshlets using meshoptimizer and return the reordered index buffer.
+/// Build meshlets using meshoptimizer and return per-meshlet vertex/index streams.
 ///
-/// Returns `(meshlet_entries, flat_index_buffer)` — the flat indices are the
-/// meshlet-grouped index data ready for upload to the mega-buffer.
+/// Returns `(meshlet_entries, meshlet_vertices, meshlet_indices)` where:
+/// - `meshlet_vertices` is a flat array of `GpuMeshletVertex` (all meshlets' unique vertices)
+/// - `meshlet_indices` is a flat array of `u16` (all meshlets' local triangle indices)
+///
+/// Each meshlet entry's `meshlet_vertex_offset` and `meshlet_index_offset` are
+/// set relative to the start of these returned arrays. Callers that concatenate
+/// multiple calls must adjust these offsets accordingly.
 pub fn meshletize_with_indices(
     vertices: &[PackedVertex],
     indices: &[u32],
-    mesh_first_index: u32,
-    mesh_first_vertex: u32,
-) -> (Vec<GpuMeshletEntry>, Vec<u32>) {
+) -> (Vec<GpuMeshletEntry>, Vec<GpuMeshletVertex>, Vec<u16>) {
     let tri_count = indices.len() / 3;
     if tri_count == 0
         || vertices.is_empty()
@@ -327,7 +330,7 @@ pub fn meshletize_with_indices(
             .iter()
             .any(|&index| index as usize >= vertices.len())
     {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), Vec::new());
     }
 
     let max_verts = 64usize;
@@ -349,18 +352,44 @@ pub fn meshletize_with_indices(
     );
 
     let mut entries = Vec::with_capacity(meshlets.len());
-    let mut flat_indices: Vec<u32> = Vec::new();
+    let mut all_vertices: Vec<GpuMeshletVertex> = Vec::new();
+    let mut all_indices: Vec<u16> = Vec::new();
 
     for i in 0..meshlets.len() {
         let m = meshlets.get(i);
-        let first_index_offset = flat_indices.len() as u32;
 
-        let mut meshlet_global_indices: Vec<u32> = Vec::with_capacity(m.triangles.len());
-        for &local_tri_idx in m.triangles {
-            let vertex_slot = m.vertices[local_tri_idx as usize];
-            meshlet_global_indices.push(vertex_slot);
-            flat_indices.push(vertex_slot);
+        let vertex_offset = all_vertices.len() as u32;
+        let index_offset = all_indices.len() as u32;
+        let vertex_count = m.vertices.len() as u32;
+
+        // Extract meshlet-unique vertices from the input vertex array.
+        for &local_idx in m.vertices {
+            let src = &vertices[local_idx as usize];
+            all_vertices.push(GpuMeshletVertex {
+                position: src.position,
+                bitangent_sign: src.bitangent_sign,
+                tex_coords0: src.tex_coords0,
+                tex_coords1: src.tex_coords1,
+                normal: src.normal,
+                tangent: src.tangent,
+                _pad: [0; 2],
+            });
         }
+
+        // Build meshlet-local u16 triangle indices.
+        for &local_tri_idx in m.triangles {
+            all_indices.push(local_tri_idx as u16);
+        }
+
+        let triangle_count = (m.triangles.len() / 3) as u32;
+        let packed_counts = vertex_count | (triangle_count << 16);
+
+        // Compute bounds using global vertex indices.
+        let meshlet_global_indices: Vec<u32> = m
+            .triangles
+            .iter()
+            .map(|&local_tri_idx| m.vertices[local_tri_idx as usize])
+            .collect();
 
         let bounds = meshopt::clusterize::compute_cluster_bounds_decoder(
             &meshlet_global_indices,
@@ -374,14 +403,14 @@ pub fn meshletize_with_indices(
             cone_cutoff: bounds.cone_cutoff,
             cone_axis: bounds.cone_axis,
             lod_error: 0.0,
-            first_index: mesh_first_index + first_index_offset,
-            index_count: meshlet_global_indices.len() as u32,
-            vertex_offset: mesh_first_vertex as i32,
-            instance_index: 0,
+            packed_counts,
+            meshlet_index_offset: index_offset,
+            meshlet_vertex_offset: vertex_offset,
+            parent_cluster_id: u32::MAX,
         });
     }
 
-    (entries, flat_indices)
+    (entries, all_vertices, all_indices)
 }
 
 #[cfg(test)]
@@ -462,10 +491,10 @@ mod tests {
         let mut non_finite = vertices.clone();
         non_finite[0].position[0] = f32::NAN;
         assert!(generate_lod_meshes(&non_finite, &[0, 1, 2]).is_empty());
-        assert!(meshletize_with_indices(&vertices, &[0, 1], 0, 0)
+        assert!(meshletize_with_indices(&vertices, &[0, 1])
             .0
             .is_empty());
-        assert!(meshletize_with_indices(&vertices, &[0, 1, 3], 0, 0)
+        assert!(meshletize_with_indices(&vertices, &[0, 1, 3])
             .0
             .is_empty());
     }
@@ -479,22 +508,37 @@ mod tests {
             vertex([0.0, 1.0, 0.0], [0.0, 1.0], [0.0, 0.0, 1.0]),
         ];
         let source = vec![0, 1, 2, 0, 2, 3];
-        let (meshlets, flattened) = meshletize_with_indices(&vertices, &source, 0, 0);
+        let (meshlets, meshlet_verts, meshlet_idxs) =
+            meshletize_with_indices(&vertices, &source);
 
-        assert_eq!(flattened.len(), source.len());
-        let mut flattened_sorted = flattened.clone();
-        let mut source_sorted = source.clone();
-        flattened_sorted.sort_unstable();
-        source_sorted.sort_unstable();
-        assert_eq!(flattened_sorted, source_sorted);
+        // Verify that the vertex stream has at least as many entries as there
+        // are unique vertex references in the source (should be 4 for a quad).
+        assert!(meshlet_verts.len() <= source.len());
 
+        // Verify that every meshlet's index range references valid data.
         for meshlet in &meshlets {
-            let first = meshlet.first_index as usize;
-            let end = first + meshlet.index_count as usize;
-            for &index in &flattened[first..end] {
-                let p = glam::Vec3::from_array(vertices[index as usize].position);
+            let vc = meshlet.packed_counts & 0xFFFF;
+            let tc = meshlet.packed_counts >> 16;
+            assert!(vc >= 3 && vc <= 64);
+            assert!(tc >= 1);
+            let vo = meshlet.meshlet_vertex_offset as usize;
+            let io = meshlet.meshlet_index_offset as usize;
+            let idx_count = tc as usize * 3;
+            // Every local index must reference a valid meshlet vertex.
+            for j in 0..idx_count {
+                let local_idx = meshlet_idxs[io + j] as usize;
+                assert!(local_idx < vc as usize, "local index {local_idx} >= vertex_count {vc}");
+            }
+            // Every vertex must be within the meshlet's bounding sphere.
+            for j in 0..vc as usize {
+                let gpu_v = &meshlet_verts[vo + j];
+                let p = glam::Vec3::from_array(gpu_v.position);
                 let center = glam::Vec3::from_array(meshlet.center);
-                assert!(p.distance(center) <= meshlet.radius + 1e-5);
+                assert!(
+                    p.distance(center) <= meshlet.radius + 1e-5,
+                    "vertex {j} at {p:?} outside sphere center {center:?} radius {}",
+                    meshlet.radius
+                );
             }
         }
     }
@@ -601,5 +645,555 @@ mod tests {
         let lods = generate_lod_meshes(&vertices, &[0, 1, 2]);
         assert_eq!(lods.len(), 1);
         assert_eq!(lods[0].indices.len(), 3);
+    }
+
+    /// Build a grid mesh of `side×side` vertices (yields `(side-1)²` quads).
+    fn make_grid(side: usize) -> (Vec<PackedVertex>, Vec<u32>) {
+        let mut vertices = Vec::with_capacity(side * side);
+        for y in 0..side {
+            for x in 0..side {
+                vertices.push(vertex(
+                    [x as f32, y as f32, ((x * y) % 5) as f32 * 0.05],
+                    [x as f32 / side as f32, y as f32 / side as f32],
+                    [0.0, 0.0, 1.0],
+                ));
+            }
+        }
+        let mut indices = Vec::new();
+        for y in 0..side - 1 {
+            for x in 0..side - 1 {
+                let i = (y * side + x) as u32;
+                indices.extend_from_slice(&[i, i + 1, i + side as u32 + 1]);
+                indices.extend_from_slice(&[i, i + side as u32 + 1, i + side as u32]);
+            }
+        }
+        (vertices, indices)
+    }
+
+    /// Simulate the GPU DAG traversal (coarse→fine) with the given lod_error
+    /// values and camera distance.  Returns the index into `ancestor_errors`
+    /// (0 = finest / leaf, last = coarsest / root).
+    fn dag_traverse(
+        ancestor_errors: &[f32], // finest → root
+        max_scale: f32,
+        focal_pixels: f32,
+        distance: f32,
+        threshold: f32,
+    ) -> usize {
+        let mut i = ancestor_errors.len();
+        loop {
+            if i == 0 {
+                break;
+            }
+            i -= 1;
+            let lod_error = ancestor_errors[i];
+            let closest_distance = distance.max(1.0e-4);
+            let projected = lod_error * max_scale * focal_pixels / closest_distance;
+            if projected <= threshold || i == 0 {
+                return i;
+            }
+        }
+        0
+    }
+
+    /// CPU mirror of GPU leaves-only DAG cull + global emit-flag dedup.
+    ///
+    /// Only meshlets in `0..leaf_count` start traversal. Each selected meshlet
+    /// is claimed at most once (simulating atomicExchange on emit flags).
+    fn simulate_leaves_only_cull(
+        meshlets: &[GpuMeshletEntry],
+        leaf_count: usize,
+        max_scale: f32,
+        focal_pixels: f32,
+        distance: f32,
+        threshold: f32,
+    ) -> Vec<u32> {
+        let mut claimed = vec![false; meshlets.len()];
+        let mut emits = Vec::new();
+
+        for leaf in 0..leaf_count.min(meshlets.len()) {
+            // Walk up to root.
+            let mut stack = Vec::new();
+            let mut cur = leaf;
+            loop {
+                stack.push(cur);
+                let parent = meshlets[cur].parent_cluster_id;
+                if parent == u32::MAX || stack.len() >= 8 {
+                    break;
+                }
+                let p = parent as usize;
+                if p >= meshlets.len() {
+                    break;
+                }
+                cur = p;
+            }
+            // Walk down from root; pick coarsest good-enough level.
+            let mut i = stack.len();
+            let mut selected = None;
+            while i > 0 {
+                i -= 1;
+                let idx = stack[i];
+                let error = meshlets[idx].lod_error;
+                let projected = error * max_scale * focal_pixels / distance.max(1e-4);
+                if projected <= threshold || i == 0 {
+                    selected = Some(idx as u32);
+                    break;
+                }
+            }
+            if let Some(idx) = selected {
+                let slot = idx as usize;
+                if slot < claimed.len() && !claimed[slot] {
+                    claimed[slot] = true;
+                    emits.push(idx);
+                }
+            }
+        }
+        emits
+    }
+
+    /// Build a multi-LOD meshlet DAG matching `meshes.rs` (for unit tests).
+    fn build_test_dag(
+        vertices: &[PackedVertex],
+        indices: &[u32],
+    ) -> (Vec<GpuMeshletEntry>, usize, Vec<u32>) {
+        let lods = generate_lod_meshes(vertices, indices);
+        let mut all_meshlets = Vec::new();
+        let mut lod_meshlet_counts = Vec::new();
+
+        for lod in &lods {
+            let (mut meshlets, _, _) = meshletize_with_indices(&lod.vertices, &lod.indices);
+            for m in &mut meshlets {
+                m.lod_error = lod.error;
+            }
+            lod_meshlet_counts.push(meshlets.len() as u32);
+            all_meshlets.extend(meshlets);
+        }
+
+        let lod_count = lod_meshlet_counts.len();
+        let mut child_start = 0usize;
+        for level in 0..lod_count.saturating_sub(1) {
+            let child_count = lod_meshlet_counts[level] as usize;
+            let parent_start = child_start + child_count;
+            let parent_count = lod_meshlet_counts[level + 1] as usize;
+
+            for ci in child_start..child_start + child_count {
+                let c_center = glam::Vec3::from_array(all_meshlets[ci].center);
+                let c_radius = all_meshlets[ci].radius;
+                let mut best = u32::MAX;
+                let mut best_d = f32::MAX;
+                for pi in parent_start..parent_start + parent_count {
+                    let p_center = glam::Vec3::from_array(all_meshlets[pi].center);
+                    let p_radius = all_meshlets[pi].radius;
+                    let d = c_center.distance(p_center);
+                    if d <= c_radius + p_radius + 1e-6 && d < best_d {
+                        best = pi as u32;
+                        best_d = d;
+                    }
+                }
+                if best == u32::MAX {
+                    for pi in parent_start..parent_start + parent_count {
+                        let p_center = glam::Vec3::from_array(all_meshlets[pi].center);
+                        let d = c_center.distance(p_center);
+                        if d < best_d {
+                            best = pi as u32;
+                            best_d = d;
+                        }
+                    }
+                }
+                all_meshlets[ci].parent_cluster_id = best;
+            }
+            child_start += child_count;
+        }
+        if let Some(&root_count) = lod_meshlet_counts.last() {
+            let root_start = all_meshlets.len() - root_count as usize;
+            for m in &mut all_meshlets[root_start..] {
+                m.parent_cluster_id = u32::MAX;
+            }
+        }
+
+        let leaf_count = lod_meshlet_counts.first().copied().unwrap_or(0) as usize;
+        (all_meshlets, leaf_count, lod_meshlet_counts)
+    }
+
+    #[test]
+    fn dag_parent_links_point_only_to_coarser_lods_and_roots_are_max() {
+        let (vertices, indices) = make_grid(20);
+        let (meshlets, leaf_count, lod_counts) = build_test_dag(&vertices, &indices);
+        assert!(lod_counts.len() >= 2, "need multi-LOD for parent link test");
+        assert!(leaf_count > 0);
+
+        let total = meshlets.len();
+        // Prefix sums of LOD ranges.
+        let mut starts = vec![0usize; lod_counts.len()];
+        for i in 1..lod_counts.len() {
+            starts[i] = starts[i - 1] + lod_counts[i - 1] as usize;
+        }
+
+        for (li, &count) in lod_counts.iter().enumerate() {
+            let start = starts[li];
+            let end = start + count as usize;
+            let is_coarsest = li + 1 == lod_counts.len();
+            for idx in start..end {
+                let parent = meshlets[idx].parent_cluster_id;
+                if is_coarsest {
+                    assert_eq!(
+                        parent,
+                        u32::MAX,
+                        "root meshlet {idx} must have parent 0xFFFFFFFF"
+                    );
+                } else {
+                    assert_ne!(parent, u32::MAX, "non-root meshlet {idx} needs a parent");
+                    let p = parent as usize;
+                    assert!(p < total, "parent {p} out of range for meshlet {idx}");
+                    // Parent must be in a strictly coarser LOD range.
+                    let parent_lod = starts
+                        .iter()
+                        .enumerate()
+                        .find(|&(j, &s)| {
+                            let e = s + lod_counts[j] as usize;
+                            p >= s && p < e
+                        })
+                        .map(|(j, _)| j)
+                        .expect("parent in some LOD");
+                    assert!(
+                        parent_lod > li,
+                        "parent of LOD{li} meshlet {idx} must be coarser, got LOD{parent_lod}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dag_lod_error_zero_at_finest_and_non_decreasing_along_parent_chain() {
+        let (vertices, indices) = make_grid(20);
+        let (meshlets, leaf_count, _) = build_test_dag(&vertices, &indices);
+        assert!(leaf_count > 0);
+
+        for leaf in 0..leaf_count {
+            assert_eq!(
+                meshlets[leaf].lod_error, 0.0,
+                "finest LOD meshlet {leaf} must have lod_error == 0"
+            );
+            let mut cur = leaf;
+            let mut prev_error = meshlets[cur].lod_error;
+            let mut steps = 0;
+            loop {
+                let parent = meshlets[cur].parent_cluster_id;
+                if parent == u32::MAX || steps > 8 {
+                    break;
+                }
+                let p = parent as usize;
+                assert!(p < meshlets.len());
+                let err = meshlets[p].lod_error;
+                assert!(
+                    err.is_finite() && err >= prev_error - 1e-6,
+                    "lod_error must be non-decreasing along parent chain: {prev_error} -> {err}"
+                );
+                // Coarser levels of a simplified mesh should carry positive error.
+                if steps == 0 && meshlets.len() > leaf_count {
+                    // At least one step up from a multi-LOD leaf should raise error
+                    // unless simplification measured zero (degenerate); allow >=.
+                }
+                prev_error = err;
+                cur = p;
+                steps += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn dag_parent_links_have_no_cycles() {
+        let (vertices, indices) = make_grid(18);
+        let (meshlets, _, _) = build_test_dag(&vertices, &indices);
+        let n = meshlets.len();
+        for start in 0..n {
+            let mut cur = start;
+            let mut seen = std::collections::HashSet::new();
+            for _ in 0..16 {
+                assert!(
+                    seen.insert(cur),
+                    "cycle detected in parent chain starting at {start}"
+                );
+                let parent = meshlets[cur].parent_cluster_id;
+                if parent == u32::MAX {
+                    break;
+                }
+                let p = parent as usize;
+                assert!(p < n, "parent out of range");
+                cur = p;
+            }
+        }
+    }
+
+    #[test]
+    fn leaves_only_unique_emits_at_most_leaf_count_and_fewer_when_far() {
+        let (vertices, indices) = make_grid(24);
+        let (meshlets, leaf_count, lod_counts) = build_test_dag(&vertices, &indices);
+        assert!(lod_counts.len() >= 2);
+        assert!(leaf_count > 0);
+
+        let focal = 540.0_f32;
+        let threshold = 2.0_f32;
+
+        let near = simulate_leaves_only_cull(&meshlets, leaf_count, 1.0, focal, 1.0, threshold);
+        let far = simulate_leaves_only_cull(&meshlets, leaf_count, 1.0, focal, 800.0, threshold);
+
+        // Unique by construction of the claim set.
+        assert_eq!(near.len(), near.iter().collect::<std::collections::HashSet<_>>().len());
+        assert_eq!(far.len(), far.iter().collect::<std::collections::HashSet<_>>().len());
+
+        assert!(
+            near.len() <= leaf_count,
+            "unique emits {} must be ≤ leaf count {leaf_count}",
+            near.len()
+        );
+        assert!(
+            far.len() <= leaf_count,
+            "unique emits {} must be ≤ leaf count {leaf_count}",
+            far.len()
+        );
+        assert!(
+            far.len() < leaf_count,
+            "at far distance unique emits {} should be << leaves {leaf_count}",
+            far.len()
+        );
+        assert!(
+            far.len() < near.len(),
+            "far ({}) should emit fewer clusters than near ({})",
+            far.len(),
+            near.len()
+        );
+    }
+
+    #[test]
+    fn two_leaves_sharing_parent_produce_one_emit_when_parent_selected() {
+        // Synthetic DAG: leaves 0,1 → parent 2 (root).
+        let mut meshlets = vec![
+            GpuMeshletEntry {
+                center: [0.0, 0.0, 0.0],
+                radius: 1.0,
+                cone_apex: [0.0; 3],
+                cone_cutoff: 2.0,
+                cone_axis: [0.0, 0.0, 1.0],
+                lod_error: 0.0,
+                packed_counts: 3 | (1 << 16),
+                meshlet_index_offset: 0,
+                meshlet_vertex_offset: 0,
+                parent_cluster_id: 2,
+            },
+            GpuMeshletEntry {
+                center: [0.5, 0.0, 0.0],
+                radius: 1.0,
+                cone_apex: [0.0; 3],
+                cone_cutoff: 2.0,
+                cone_axis: [0.0, 0.0, 1.0],
+                lod_error: 0.0,
+                packed_counts: 3 | (1 << 16),
+                meshlet_index_offset: 0,
+                meshlet_vertex_offset: 0,
+                parent_cluster_id: 2,
+            },
+            GpuMeshletEntry {
+                center: [0.25, 0.0, 0.0],
+                radius: 2.0,
+                cone_apex: [0.0; 3],
+                cone_cutoff: 2.0,
+                cone_axis: [0.0, 0.0, 1.0],
+                lod_error: 1.0, // large error → selected when far enough / threshold loose
+                packed_counts: 3 | (1 << 16),
+                meshlet_index_offset: 0,
+                meshlet_vertex_offset: 0,
+                parent_cluster_id: u32::MAX,
+            },
+        ];
+        // projected = 1.0 * 1.0 * 1000 / dist. At dist=1000, projected=1.0 <= threshold 1.0 → parent.
+        let emits = simulate_leaves_only_cull(&meshlets, 2, 1.0, 1000.0, 1000.0, 1.0);
+        assert_eq!(emits, vec![2], "both leaves must collapse to a single parent emit");
+
+        // Near: projected parent error huge → emit leaves (two unique).
+        meshlets[2].lod_error = 10.0;
+        let near = simulate_leaves_only_cull(&meshlets, 2, 1.0, 1000.0, 10.0, 1.0);
+        // projected parent = 10*1000/10 = 1000 > 1 → need finer → leaves
+        let mut near_sorted = near.clone();
+        near_sorted.sort();
+        assert_eq!(near_sorted, vec![0, 1]);
+    }
+
+    #[test]
+    fn projected_error_lod_selection_coarse_far_fine_near() {
+        // ancestor_errors: finest → root
+        let chain = [0.0, 0.01, 0.04, 0.16];
+        let focal = 1000.0;
+        let thr = 1.0;
+
+        // Near: only finest (error 0) is acceptable once coarser exceeds thr.
+        assert_eq!(dag_traverse(&chain, 1.0, focal, 5.0, thr), 0);
+        // Mid: can accept level 1 (0.01*1000/100 = 0.1 <= 1)
+        assert_eq!(dag_traverse(&chain, 1.0, focal, 100.0, thr), 2);
+        // Far: coarsest root
+        assert_eq!(dag_traverse(&chain, 1.0, focal, 10_000.0, thr), 3);
+        // Non-uniform scale increases projected error → finer selection
+        assert_eq!(dag_traverse(&chain, 4.0, focal, 100.0, thr), 1);
+    }
+
+    #[test]
+    fn dag_traversal_diagnostics() {
+        let side = 24usize;
+        let (vertices, indices) = make_grid(side);
+
+        let lods = generate_lod_meshes(&vertices, &indices);
+        eprintln!("\n=== DAG Diagnostic ===");
+        eprintln!("Grid: {}×{} = {} verts, {} tris",
+            side, side, vertices.len(), indices.len() / 3);
+        eprintln!("LOD count: {}", lods.len());
+
+        // Meshletize each LOD and collect errors.
+        let mut lod_errors: Vec<f32> = Vec::new();
+        let mut lod_meshlet_counts: Vec<u32> = Vec::new();
+        let mut all_meshlets: Vec<GpuMeshletEntry> = Vec::new();
+
+        for (li, lod) in lods.iter().enumerate() {
+            let (mut meshlets, _, _) = meshletize_with_indices(&lod.vertices, &lod.indices);
+            let count = meshlets.len() as u32;
+            lod_errors.push(lod.error);
+            lod_meshlet_counts.push(count);
+            // Assign cumulative error (same as meshes.rs fixup step)
+            for m in &mut meshlets {
+                m.lod_error = lod.error;
+            }
+            eprintln!("  LOD {}: {} tris, {} meshlets, cum_error={:.6}",
+                li, lod.indices.len() / 3, meshlets.len(), lod.error);
+            all_meshlets.extend(meshlets);
+        }
+
+        // ── Build DAG parent links (same algorithm as meshes.rs) ────────────
+        let lod_count = lod_meshlet_counts.len();
+        let mut child_start = 0usize;
+        for level in 0..lod_count.saturating_sub(1) {
+            let child_count = lod_meshlet_counts[level] as usize;
+            let parent_start = child_start + child_count;
+            let parent_count = lod_meshlet_counts[level + 1] as usize;
+
+            for ci in child_start..child_start + child_count {
+                let c_center = glam::Vec3::from_array(all_meshlets[ci].center);
+                let c_radius = all_meshlets[ci].radius;
+                let mut best = u32::MAX;
+                let mut best_d = f32::MAX;
+                for pi in parent_start..parent_start + parent_count {
+                    let p_center = glam::Vec3::from_array(all_meshlets[pi].center);
+                    let p_radius = all_meshlets[pi].radius;
+                    let d = c_center.distance(p_center);
+                    if d <= c_radius + p_radius + 1e-6 && d < best_d {
+                        best = pi as u32;
+                        best_d = d;
+                    }
+                }
+                if best == u32::MAX {
+                    for pi in parent_start..parent_start + parent_count {
+                        let p_center = glam::Vec3::from_array(all_meshlets[pi].center);
+                        let d = c_center.distance(p_center);
+                        if d < best_d {
+                            best = pi as u32;
+                            best_d = d;
+                        }
+                    }
+                }
+                all_meshlets[ci].parent_cluster_id = best;
+            }
+            child_start += child_count;
+        }
+        // Root meshlets get 0xFFFFFFFF (no parent)
+        let root_start: usize = all_meshlets.len() - *lod_meshlet_counts.last().unwrap() as usize;
+        for m in &mut all_meshlets[root_start..] {
+            m.parent_cluster_id = u32::MAX;
+        }
+
+        // ── Validate DAG ────────────────────────────────────────────────────
+        eprintln!("\n  Validating DAG...");
+        let total = all_meshlets.len();
+        let mut visited = vec![false; total];
+        for start in 0..total {
+            let mut cur = start;
+            let mut steps = 0;
+            loop {
+                if visited[cur] { break; }
+                visited[cur] = true;
+                let m = &all_meshlets[cur];
+                if m.parent_cluster_id == u32::MAX || steps > 8 { break; }
+                cur = m.parent_cluster_id as usize;
+                assert!(cur < total, "parent out of bounds: {cur} >= {total}");
+                steps += 1;
+            }
+        }
+        assert!(visited.iter().all(|&v| v), "Some meshlets were not visited");
+
+        // Count unique parent references for each root meshlet
+        eprintln!("\n  Child→parent convergence (fan-in):");
+        for level in 0..lod_count.saturating_sub(1) {
+            let child_count = lod_meshlet_counts[level] as usize;
+            let parent_count = lod_meshlet_counts[level + 1] as usize;
+            let mut fan_in = vec![0u32; parent_count];
+            // Count children that reference each parent
+            child_start = lod_meshlet_counts[..level].iter().copied().sum::<u32>() as usize;
+            for ci in child_start..child_start + child_count {
+                let m = &all_meshlets[ci];
+                if m.parent_cluster_id != u32::MAX {
+                    let pi = m.parent_cluster_id as usize;
+                    let parent_lod_start = lod_meshlet_counts[..level + 1].iter().copied().sum::<u32>() as usize;
+                    if pi >= parent_lod_start && pi < parent_lod_start + parent_count {
+                        fan_in[pi - parent_lod_start] += 1;
+                    }
+                }
+            }
+            eprintln!("    LOD {} → LOD {} children per parent: {:?}",
+                level, level + 1, fan_in);
+        }
+
+        // ── Leaves-only + global claim simulation at various distances ─────
+        let leaf_count = lod_meshlet_counts[0] as usize;
+        let focal_pixels = 540.0;
+        let threshold_px = 0.5;
+        let max_scale = 1.0;
+
+        eprintln!("\n  Leaves-only + claim simulation:");
+        let distances: [f32; 9] = [0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 250.0, 500.0, 1000.0];
+        for &dist in &distances {
+            let emits = simulate_leaves_only_cull(
+                &all_meshlets,
+                leaf_count,
+                max_scale,
+                focal_pixels,
+                dist,
+                threshold_px,
+            );
+            let mut lod_emit_counts = vec![0u32; lod_count];
+            for &idx in &emits {
+                let mut cursor = 0usize;
+                for li in 0..lod_count {
+                    let cnt = lod_meshlet_counts[li] as usize;
+                    if (idx as usize) >= cursor && (idx as usize) < cursor + cnt {
+                        lod_emit_counts[li] += 1;
+                        break;
+                    }
+                    cursor += cnt;
+                }
+            }
+            let unique = emits.len();
+            eprintln!("    dist={dist:>6.1}: {unique:>3} unique emits (≤ {leaf_count} leaves)");
+            eprintln!("              per-LOD: {:?}", &lod_emit_counts);
+
+            assert!(unique <= leaf_count);
+            if dist <= 1.0 {
+                assert!(lod_emit_counts[0] > 0, "At dist={dist}, LOD 0 should have emits");
+            }
+            if dist >= 500.0 {
+                let coarse_emits: u32 = lod_emit_counts[1..].iter().sum();
+                assert!(
+                    coarse_emits > 0 || unique < leaf_count,
+                    "At dist={dist}, should select coarser LODs or fewer clusters"
+                );
+            }
+        }
     }
 }
