@@ -49,7 +49,7 @@ struct WaterVolume {
 @group(0) @binding(3) var scene_samp:    sampler;
 @group(0) @binding(4) var depth_texture: texture_depth_2d;
 @group(0) @binding(5) var depth_samp:    sampler;
-@group(0) @binding(6) var water_sim:     texture_2d<f32>;
+@group(0) @binding(6) var water_sim:     texture_2d_array<f32>;
 @group(0) @binding(7) var water_samp:    sampler;
 @group(0) @binding(8) var caustics_tex:  texture_2d<f32>;
 
@@ -87,14 +87,19 @@ fn water_wave_amplitude(vol: WaterVolume) -> f32 {
     return clamp(vol.wave_params.x, 0.0, max(headroom, 0.0));
 }
 
+/// Return the sim texture array layer for a volume index and cascade.
+fn sim_layer(vol_index: u32, cascade: u32) -> i32 {
+    return i32(vol_index * 3u + cascade);
+}
+
 /// Displaced surface height above a world XZ position.
-fn water_surface_at(world_xz: vec2f, vol: WaterVolume) -> f32 {
+fn water_surface_at(world_xz: vec2f, vol: WaterVolume, vol_idx: u32) -> f32 {
     let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
     let uv     = (world_xz - vol.bounds_min.xz) / extent;
     if any(uv < vec2f(0.0)) || any(uv > vec2f(1.0)) {
         return vol.bounds_max.w;
     }
-    let h = textureSampleLevel(water_sim, water_samp, uv, 0.0).r;
+    let h = textureSampleLevel(water_sim, water_samp, uv, vol_idx * 3u, 0.0).r;
     return vol.bounds_max.w + h * water_wave_amplitude(vol);
 }
 
@@ -183,7 +188,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
 
         // Against the DISPLACED surface, not the flat plane — otherwise the
         // test is wrong precisely when the camera is at the waterline.
-        let surf = water_surface_at(cam_pos.xz, v);
+        let surf = water_surface_at(cam_pos.xz, v, i);
         let depth_under = surf - cam_pos.y;
         if depth_under <= -SUBMERGE_BLEND { continue; }
 
@@ -198,7 +203,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     }
 
     let vol       = volumes[u32(vol_idx)];
-    let surface_h = water_surface_at(cam_pos.xz, vol);
+    let surface_h = water_surface_at(cam_pos.xz, vol, u32(vol_idx));
     let cam_depth = max(surface_h - cam_pos.y, 0.0);
 
     // ── Lens wobble + chromatic aberration ───────────────────────────────────
@@ -244,7 +249,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         if vol.caustics_params.x > 0.5 {
             let extent = max(vol.bounds_max.xz - vol.bounds_min.xz, vec2f(1e-4));
             let cuv    = (world_pos.xz - vol.bounds_min.xz) / extent;
-            let below  = water_surface_at(world_pos.xz, vol) - world_pos.y;
+            let below  = water_surface_at(world_pos.xz, vol, u32(vol_idx)) - world_pos.y;
             if below > 0.0 && all(cuv >= vec2f(0.0)) && all(cuv <= vec2f(1.0)) {
                 let caustic = textureSampleLevel(caustics_tex, water_samp, cuv, 0.0).r;
                 lit += vec3f(caustic) * exp(-below * 0.12);
