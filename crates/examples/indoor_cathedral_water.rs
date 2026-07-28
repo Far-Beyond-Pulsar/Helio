@@ -28,6 +28,7 @@ use helio::{
 };
 use helio_pass_perf_overlay::PerfOverlayMode;
 use helio_default_graphs::build_default_graph;
+use helio_pass_water_sim::WaterSimPass;
 use helio::Movability;
 use v3_demo_common::{box_mesh, insert_object, insert_object_with_movability, make_material, plane_mesh, point_light, sphere_mesh};
 
@@ -323,20 +324,20 @@ impl ApplicationHandler for App {
             bounds_max: [6.0, 2.5, 6.0],    // 2.2m deep pool
             surface_height: 1.8,  // Water surface at 1.8m above floor
 
-            // GERSTNER WAVE PARAMETERS (natural pool surface)
-            wave_amplitude: 0.035,     // Smaller ripples for a thinner, calmer surface
-            wave_frequency: 0.75,      // Broader, slower waves with less lumpiness
-            wave_speed: 3.2,           // Faster propagation to avoid sluggish, viscous motion
-            wave_direction: [0.6, 0.3], // Subtle diagonal wave direction
-            wave_steepness: 0.22,      // Much softer peaks for a thinner-looking pool
+            // DRAMATIC WAVE PARAMETERS (big rolling swell with visible crests)
+            wave_amplitude: 0.35,      // 35cm waves — big enough to see motion clearly
+            wave_frequency: 0.6,       // Longer period for visible swell propagation
+            wave_speed: 5.0,           // Energetic wave motion across the pool
+            wave_direction: [0.6, 0.3], // Diagonal travel for visual interest
+            wave_steepness: 0.5,       // Sharp crests that catch the light and trigger foam
 
             // WATER OPTICAL PROPERTIES (crystal clear pool water)
             water_color: [0.05, 0.20, 0.30],  // Light blue-green for clear water
             extinction: [0.08, 0.04, 0.02],   // Very low absorption for crystal clear water (reduced by ~55%)
 
-            // FOAM PARAMETERS (white caps on wave crests)
-            foam_threshold: 0.76,      // Foam appears on steeper wave crests
-            foam_amount: 0.45,         // Moderate foam coverage for realism
+            // FOAM PARAMETERS (dramatic whitecaps on big swells)
+            foam_threshold: 0.4,       // Foam appears early — catches every crest
+            foam_amount: 0.85,         // Heavy foam coverage for dramatic effect
 
             // REFLECTION & REFRACTION (physically accurate)
             reflection_strength: 0.65,  // Lowered reflectivity for a cleaner pool look
@@ -370,6 +371,11 @@ impl ApplicationHandler for App {
             ..Default::default()
         };
         renderer.scene_mut().insert_actor(helio::SceneActor::water_volume(pool));
+        // Crank up wind for dramatic wave motion
+        if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
+            sim.set_wind([0.6, 0.4], 3.5);
+            sim.set_wave_scale(0.25);
+        }
 
         // === BOUNCING BALL ===
         // A shiny sphere that bounces perfectly on the water surface, creating ripple waves.
@@ -1074,6 +1080,10 @@ impl AppState {
             let drag = (1.0 - WATER_DRAG * dt).clamp(0.0, 1.0);
             self.ball_vel.x *= drag;
             self.ball_vel.z *= drag;
+            // Ripple where the ball punches the surface
+            if let Some(sim) = renderer.find_pass_mut::<WaterSimPass>() {
+                sim.add_drop(self.ball_pos.x, self.ball_pos.z, 0.8, 0.15);
+            }
         }
 
         // Elastic bounce off pool walls (no energy loss)
