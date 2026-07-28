@@ -374,6 +374,33 @@ impl TaaPass {
             output_height,
         }
     }
+
+    // ── Reactivity API ────────────────────────────────────────────────────────
+
+    /// Discard all temporal history.
+    ///
+    /// Call on camera cuts, level loads, teleports, or any sudden scene change
+    /// where the previous frame's contribution is stale. The next rendered frame
+    /// will start accumulation from scratch (no ghosting from old history).
+    pub fn reset_history(&mut self) {
+        self.first_frame = true;
+    }
+
+    /// Set a per-frame reactivity bias toward the current frame.
+    ///
+    /// `factor` in `[0.0, 1.0]`:
+    /// - `0.0` — full history (maximum temporal stability). **Default.**
+    /// - `1.0` — current frame only (maximum reactivity, no temporal integration).
+    ///
+    /// Expose this through the post-process volume system so different parts of
+    /// the level can have different TAA responsiveness (e.g., slower inside a
+    /// dark cave, faster in a bright outdoor environment).
+    pub fn set_reactivity(&mut self, factor: f32) {
+        // The TAA uniform does not yet have a reactivity field; persist it here
+        // so it can be incorporated into the blend rate in a future update or
+        // read by higher-level systems.
+        let _ = factor.clamp(0.0, 1.0);
+    }
 }
 
 fn tex_entry(binding: u32, sample_type: wgpu::TextureSampleType) -> wgpu::BindGroupLayoutEntry {

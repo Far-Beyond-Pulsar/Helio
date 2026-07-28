@@ -105,6 +105,8 @@ pub struct Renderer {
     pub(crate) enable_ssr: bool,
     pub(crate) enable_planar_reflections: bool,
     pub(crate) enable_environment_reflections: bool,
+    /// TSR quality preset, preserved across graph rebuilds.
+    pub(crate) tsr_quality: Option<helio_pass_tsr::TsrQuality>,
     pub(crate) debug_mode: u32,
     pub(crate) editor_mode: bool,
     pub(crate) debug_state: Arc<Mutex<DebugDrawState>>,
@@ -543,6 +545,7 @@ impl Renderer {
             enable_ssr: self.enable_ssr,
             enable_planar_reflections: self.enable_planar_reflections,
             enable_environment_reflections: self.enable_environment_reflections,
+            tsr_quality: self.tsr_quality,
         }
     }
 }

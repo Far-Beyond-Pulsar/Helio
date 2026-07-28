@@ -13,6 +13,7 @@ glam.workspace = true
 image = { workspace = true, features = ["png"] }
 helio-core = { workspace = true }
 helio-pass-postprocess = { workspace = true }
+helio-pass-tsr = { workspace = true }
 
 libhelio = { workspace = true }
 log = { workspace = true }
