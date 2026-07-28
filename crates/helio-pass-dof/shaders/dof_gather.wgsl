@@ -28,19 +28,16 @@ struct CameraUniforms {
     prev_view_proj: mat4x4<f32>,
 }
 
+// DOF block of GpuPostProcessUniforms, bound at byte offset 224.
 struct DofUniforms {
-    focal_distance:     f32,
-    focal_region:       f32,
-    aperture_shape:     f32,
-    aperture_rotation:  f32,
-    near_transition:    f32,
-    far_transition:     f32,
-    max_bokeh_size:     f32,
-    sensor_diagonal:    f32,
-    enabled:            u32,
-    _pad:               f32,
-    blend_weight:       f32,
-    _pad2:              f32,
+    dof_focal_distance:     f32,
+    dof_focal_region:       f32,
+    dof_aperture_shape:     f32,
+    dof_aperture_rotation:  f32,
+    dof_near_transition:    f32,
+    dof_far_transition:     f32,
+    dof_max_bokeh_size:     f32,
+    dof_sensor_diagonal:    f32,
 }
 
 @group(0) @binding(0) var<uniform> dof: DofUniforms;
@@ -106,7 +103,7 @@ fn sample_bokeh_weight(offset: vec2<f32>, blade_count: u32) -> f32 {
 fn gather_blur(uv: vec2<f32>, coc_radius: f32, blade_count: u32, src_dims: vec2<f32>) -> vec3<f32> {
     var accumulated = vec3<f32>(0.0);
     var total_weight = 0.0;
-    let radius = clamp(coc_radius, 0.5, dof.max_bokeh_size);
+    let radius = clamp(coc_radius, 0.5, dof.dof_max_bokeh_size);
     let scale = radius / 32.0;
 
     for (var i = 0u; i < POISSON_SAMPLES; i++) {
@@ -141,7 +138,7 @@ fn cs_gather(@builtin(global_invocation_id) gid: vec3<u32>) {
     let full_uv = (vec2<f32>(gid.xy) * 2.0 + 0.5) / src_dims;
 
     let coc = textureLoad(coc_tex, vec2<i32>(gid.xy), 0).r;
-    let blade_count = u32(max(dof.aperture_shape, 0.0));
+    let blade_count = u32(max(dof.dof_aperture_shape, 0.0));
 
     if coc < 0.5 {
         let col = textureSampleLevel(src_tex, linear_samp, full_uv, 0.0).rgb;

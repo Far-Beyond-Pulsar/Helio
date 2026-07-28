@@ -22,19 +22,17 @@ struct CameraUniforms {
     prev_view_proj: mat4x4<f32>,
 }
 
+// DOF block of GpuPostProcessUniforms, bound at byte offset 224.
+// Field names match the Rust struct for clarity.
 struct DofUniforms {
-    focal_distance:     f32,
-    focal_region:       f32,
-    aperture_shape:     f32,
-    aperture_rotation:  f32,
-    near_transition:    f32,
-    far_transition:     f32,
-    max_bokeh_size:     f32,
-    sensor_diagonal:    f32,
-    enabled:            u32,
-    _pad:               f32,
-    blend_weight:       f32,
-    _pad2:              f32,
+    dof_focal_distance:     f32,
+    dof_focal_region:       f32,
+    dof_aperture_shape:     f32,
+    dof_aperture_rotation:  f32,
+    dof_near_transition:    f32,
+    dof_far_transition:     f32,
+    dof_max_bokeh_size:     f32,
+    dof_sensor_diagonal:    f32,
 }
 
 @group(0) @binding(0) var<uniform> dof: DofUniforms;
@@ -47,14 +45,14 @@ fn linearize_depth(raw: f32) -> f32 {
 }
 
 fn compute_coc(linear_depth: f32) -> f32 {
-    let focal_dist = dof.focal_distance;
-    let focal_region = dof.focal_region;
+    let focal_dist = dof.dof_focal_distance;
+    let focal_region = dof.dof_focal_region;
     let near_blur = max(focal_dist - focal_region - linear_depth, 0.0)
-        / max(dof.near_transition, 0.001);
+        / max(dof.dof_near_transition, 0.001);
     let far_blur = max(linear_depth - (focal_dist + focal_region), 0.0)
-        / max(dof.far_transition, 0.001);
-    let coc = max(near_blur, far_blur) * dof.sensor_diagonal * 0.02;
-    return clamp(coc, 0.0, dof.max_bokeh_size);
+        / max(dof.dof_far_transition, 0.001);
+    let coc = max(near_blur, far_blur) * dof.dof_sensor_diagonal * 0.02;
+    return clamp(coc, 0.0, dof.dof_max_bokeh_size);
 }
 
 @compute @workgroup_size(WG_X, WG_Y)

@@ -26,24 +26,10 @@ const COMPOSITE_SHADER_SRC: &str = include_str!("../shaders/dof_composite.wgsl")
 const WG_COC: u32 = 16;
 const WG_GATHER: u32 = 8;
 
-/// Mirror of the DofUniforms struct used in all three shaders.
-/// Matches the field layout expected by the WGSL shaders.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-struct DofUniforms {
-    focal_distance: f32,
-    focal_region: f32,
-    aperture_shape: f32,
-    aperture_rotation: f32,
-    near_transition: f32,
-    far_transition: f32,
-    max_bokeh_size: f32,
-    sensor_diagonal: f32,
-    enabled: u32,
-    _pad: f32,
-    blend_weight: f32,
-    _pad2: f32,
-}
+/// Byte offset of the DOF block within GpuPostProcessUniforms.
+const DOF_BLOCK_OFFSET: u64 = 224;
+/// Size of the DOF block (8 f32 fields).
+const DOF_BLOCK_SIZE: u64 = 32;
 
 pub struct DofPass {
     // Pipelines
@@ -85,8 +71,9 @@ pub struct DofPass {
     bg_key_gather: Option<(usize, usize, usize, usize, usize, usize)>,
     bg_key_composite: Option<(usize, usize, usize, usize, usize)>,
 
-    // Uniform buffer
-    uniform_buf: wgpu::Buffer,
+    // Tiny uniform buffer holding a copy of the DOF block from the shared
+    // postprocess_uniforms buffer. Contents are refreshed via GPU copy in execute().
+    dof_block_buf: wgpu::Buffer,
 
     width: u32,
     height: u32,
@@ -148,10 +135,10 @@ impl DofPass {
             ..Default::default()
         });
 
-        // ── Uniform buffer ──────────────────────────────────────────────
-        let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("DOF Uniforms"),
-            size: std::mem::size_of::<DofUniforms>() as u64,
+        // ── DOF block uniform buffer (populated via GPU copy each frame) ──
+        let dof_block_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("DOF Block Uniforms"),
+            size: DOF_BLOCK_SIZE,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -188,13 +175,15 @@ impl DofPass {
         });
 
         // ── Bind group layouts ──────────────────────────────────────────
-        let uniform_entry = |binding: u32| wgpu::BindGroupLayoutEntry {
+        /// Uniform buffer binding for the DOF block of GpuPostProcessUniforms.
+        /// The buffer is bound with offset DOF_BLOCK_OFFSET and size DOF_BLOCK_SIZE.
+        let uniform_entry = |binding: u32, min_size: Option<wgpu::BufferSize>| wgpu::BindGroupLayoutEntry {
             binding,
             visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::FRAGMENT,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Uniform,
                 has_dynamic_offset: false,
-                min_binding_size: None,
+                min_binding_size: min_size,
             },
             count: None,
         };
@@ -202,8 +191,8 @@ impl DofPass {
         let coc_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DOF CoC BGL"),
             entries: &[
-                uniform_entry(0),
-                uniform_entry(1),
+                uniform_entry(0, wgpu::BufferSize::new(DOF_BLOCK_SIZE)),
+                uniform_entry(1, None),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -233,8 +222,8 @@ impl DofPass {
         let gather_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DOF Gather BGL"),
             entries: &[
-                uniform_entry(0),
-                uniform_entry(1),
+                uniform_entry(0, wgpu::BufferSize::new(DOF_BLOCK_SIZE)),
+                uniform_entry(1, None),
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
                     visibility: wgpu::ShaderStages::COMPUTE,
@@ -298,7 +287,7 @@ impl DofPass {
         let composite_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("DOF Composite BGL"),
             entries: &[
-                uniform_entry(0),
+                uniform_entry(0, wgpu::BufferSize::new(DOF_BLOCK_SIZE)),
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
                     visibility: wgpu::ShaderStages::FRAGMENT,
@@ -440,7 +429,7 @@ impl DofPass {
             bg_key_coc: None,
             bg_key_gather: None,
             bg_key_composite: None,
-            uniform_buf,
+            dof_block_buf,
             width,
             height,
             format,
@@ -457,7 +446,7 @@ impl DofPass {
             label: Some("DOF CoC BG"),
             layout: &self.coc_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.dof_block_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(depth_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.coc_view) },
@@ -476,7 +465,7 @@ impl DofPass {
             label: Some("DOF Gather BG"),
             layout: &self.gather_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.dof_block_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: camera_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(src_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.coc_view) },
@@ -498,7 +487,7 @@ impl DofPass {
             label: Some("DOF Composite BG"),
             layout: &self.composite_bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.dof_block_buf.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(src_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&self.near_blur_view) },
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&self.far_blur_view) },
@@ -588,27 +577,35 @@ impl RenderPass for DofPass {
     }
 
     fn prepare(&mut self, _ctx: &PrepareContext) -> HelioResult<()> {
-        // TODO: Copy DOF settings from GpuPostProcessUniforms into self.uniform_buf.
-        // This requires a GPU copy from the postprocess_uniforms buffer or a CPU
-        // staging read. For now the uniform buffer is written once at creation.
         Ok(())
     }
 
     fn execute(&mut self, ctx: &mut PassContext) -> HelioResult<()> {
         let src_view = match ctx.resources.pre_dof.get() {
             Some(v) => v,
-            // Fall back to pre_aa if no pre_dof available (e.g. when running
-            // standalone without PostProcessPass output_to_pre_dof enabled).
             None => match ctx.resources.pre_aa.get() {
                 Some(v) => v,
                 None => return Ok(()),
             },
+        };
+        let Some(pp_buf) = ctx.resources.postprocess_uniforms.get() else {
+            return Ok(());
         };
         let depth_view = ctx.depth;
         let camera_buf = ctx.scene.camera;
 
         let half_w = (self.width + 1) / 2;
         let half_h = (self.height + 1) / 2;
+
+        // ── Refresh DOF block from the shared postprocess uniform buffer ─
+        // The camera DOF settings are written to GpuPostProcessUniforms by the
+        // Renderer each frame. Copy just the 32-byte DOF block at offset 224
+        // into our own uniform buffer (avoids uniform offset alignment issues).
+        unsafe { &mut *ctx.encoder_ptr }.copy_buffer_to_buffer(
+            pp_buf, DOF_BLOCK_OFFSET,
+            &self.dof_block_buf, 0,
+            DOF_BLOCK_SIZE,
+        );
 
         // ── Lazy rebuild bind groups ────────────────────────────────────
         let coc_key = (
@@ -623,7 +620,7 @@ impl RenderPass for DofPass {
         let gather_key = (
             src_view as *const _ as usize,
             camera_buf as *const _ as usize,
-            0, 0, 0, 0, // padding to match 6-element tuple
+            0, 0, 0, 0,
         );
         if self.bg_key_gather != Some(gather_key) {
             self.rebuild_gather_bg(ctx.device, src_view, camera_buf);
@@ -632,21 +629,12 @@ impl RenderPass for DofPass {
 
         let composite_key = (
             src_view as *const _ as usize,
-            0, 0, 0, 0, // padding to match 5-element tuple
+            0, 0, 0, 0,
         );
         if self.bg_key_composite != Some(composite_key) {
             self.rebuild_composite_bg(ctx.device, src_view);
             self.bg_key_composite = Some(composite_key);
         }
-
-        // ── Write DOF uniforms from the camera/PP settings ─────────────
-        // For the initial implementation, the DofPass uses default DOF
-        // settings from the CPU-side PostProcessSettings. A future change
-        // should read the GpuPostProcessUniforms buffer and copy the DOF
-        // block into self.uniform_buf via a GPU copy or a CPU staging read.
-        //
-        // For now the uniform_buf is written once with defaults at creation
-        // time; the shader reads these values each frame.
 
         // ── Pass 1: CoC pre-pass ────────────────────────────────────────
         {
@@ -683,7 +671,7 @@ impl RenderPass for DofPass {
                 resolve_target: None,
                 depth_slice: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                     store: wgpu::StoreOp::Store,
                 },
             })];

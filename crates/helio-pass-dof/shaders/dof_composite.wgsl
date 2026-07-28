@@ -20,19 +20,16 @@ struct CameraUniforms {
     prev_view_proj: mat4x4<f32>,
 }
 
+// DOF block of GpuPostProcessUniforms, bound at byte offset 224.
 struct DofUniforms {
-    focal_distance:     f32,
-    focal_region:       f32,
-    aperture_shape:     f32,
-    aperture_rotation:  f32,
-    near_transition:    f32,
-    far_transition:     f32,
-    max_bokeh_size:     f32,
-    sensor_diagonal:    f32,
-    enabled:            u32,
-    _pad:               f32,
-    blend_weight:       f32,
-    _pad2:              f32,
+    dof_focal_distance:     f32,
+    dof_focal_region:       f32,
+    dof_aperture_shape:     f32,
+    dof_aperture_rotation:  f32,
+    dof_near_transition:    f32,
+    dof_far_transition:     f32,
+    dof_max_bokeh_size:     f32,
+    dof_sensor_diagonal:    f32,
 }
 
 @group(0) @binding(0) var<uniform> dof: DofUniforms;
@@ -93,14 +90,15 @@ fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
 
     let sharp = textureSampleLevel(src_tex, linear_samp, uv, 0.0).rgb;
 
-    if dof.aperture_shape < 0.0 {
+    if dof.dof_aperture_shape < 0.0 {
         return vec4<f32>(sharp, 1.0);
     }
 
     let half_dims = vec2<f32>(textureDimensions(near_blur));
-    let half_uv = uv * half_dims / dims;
+    // Same UV works for both full-res and half-res textures — they cover the same viewport.
+    let half_uv = uv;
 
-    let coc_coord = vec2<i32>(i32(half_uv.x), i32(half_uv.y));
+    let coc_coord = vec2<i32>(i32(half_uv.x * half_dims.x), i32(half_uv.y * half_dims.y));
     let coc = textureLoad(coc_tex, clamp(coc_coord, vec2<i32>(0), vec2<i32>(i32(half_dims.x) - 1, i32(half_dims.y) - 1)), 0).r;
 
     if coc < 0.5 {
@@ -110,7 +108,7 @@ fn fs_composite(in: VOut) -> @location(0) vec4<f32> {
     let near = coc_aware_sample(near_blur, half_uv, coc_tex, coc);
     let far = coc_aware_sample(far_blur, half_uv, coc_tex, coc);
 
-    let blend = clamp(coc / dof.max_bokeh_size, 0.0, 1.0);
+    let blend = clamp(coc / dof.dof_max_bokeh_size, 0.0, 1.0);
     let blurred = mix(near.rgb, far.rgb, 0.5);
 
     return vec4<f32>(mix(sharp, blurred, blend), 1.0);
