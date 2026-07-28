@@ -19,6 +19,7 @@ use helio_pass_perf_overlay::{
     PerfOverlayAnalyzerPass, PerfOverlayCostAnalyzerPass, PerfOverlayPass, PerfOverlayShared,
 };
 use helio_pass_planar_reflection::PlanarReflectionPass;
+use helio_pass_dof::DofPass;
 use helio_pass_postprocess::{PostProcessPass, PostProcessVolumeBlendPass};
 use helio_pass_radiance_cascades::RadianceCascadesPass;
 use helio_pass_shadow::ShadowPass;
@@ -489,13 +490,22 @@ fn build_default_graph_internal(
         graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
     }
 
-    graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(
+    let mut pp = PostProcessPass::new_with_user_effects(
         device,
         queue,
         config.width,
         config.height,
         config.surface_format,
         user_effects,
+    );
+    // Enable pre_dof output so the DofPass can read the post-processed image.
+    pp.set_output_to_pre_dof(true);
+    graph.add_pass(Box::new(pp));
+
+    // Cinematic bokeh DOF — runs after the main uber-shader, reads "pre_dof"
+    // (written by PostProcessPass) and writes the final output to ctx.target.
+    graph.add_pass(Box::new(DofPass::new(
+        device, queue, config.width, config.height, config.surface_format,
     )));
 
     add_final_passes(

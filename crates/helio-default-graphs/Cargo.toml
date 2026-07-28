@@ -40,3 +40,4 @@ helio-pass-transparent = { path = "../helio-pass-transparent" }
 helio-pass-virtual-geometry = { path = "../helio-pass-virtual-geometry" }
 helio-pass-water-sim = { path = "../helio-pass-water-sim" }
 helio-pass-voxel-mesh = { path = "../helio-pass-voxel-mesh" }
+helio-pass-dof = { path = "../helio-pass-dof" }

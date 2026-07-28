@@ -113,6 +113,13 @@ pub struct PostProcessPass {
     user_effect_entries: Vec<UserEffectEntry>,
     // Cached built shader source to avoid rebuilding identical configs.
     cached_shader_source: Option<String>,
+
+    // ── DOF passthrough (when DofPass follows in the graph) ────────────────
+    /// When true, the uber-shader renders to an internal "pre_dof" texture
+    /// instead of ctx.target, and the DOF step is skipped (handled by DofPass).
+    output_to_pre_dof: bool,
+    pre_dof_tex: Option<wgpu::Texture>,
+    pre_dof_view: Option<wgpu::TextureView>,
 }
 
 impl PostProcessPass {
@@ -495,6 +502,9 @@ impl PostProcessPass {
             user_effect_entries: initial_entries,
             cached_shader_source: Some(initial_src),
             uber_pl: render_pl,
+            output_to_pre_dof: false,
+            pre_dof_tex: None,
+            pre_dof_view: None,
         }
     }
 
@@ -602,6 +612,14 @@ impl PostProcessPass {
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
+
+    /// Enable output to an internal "pre_dof" texture instead of ctx.target.
+    /// When active, the uber-shader skips the inline DOF step (which is then
+    /// handled by the separate DofPass). This is used by default graphs that
+    /// include the cinematic bokeh DOF pass.
+    pub fn set_output_to_pre_dof(&mut self, enable: bool) {
+        self.output_to_pre_dof = enable;
+    }
 
     /// Gate bloom compute dispatches on/off.
     /// Call each frame from the renderer when the blended bloom settings are known.
@@ -798,6 +816,26 @@ impl RenderPass for PostProcessPass {
         self.main_bg_key = None;
         self.bloom_extract_bg = None;
         self.first_frame = true;
+
+        // Recreate pre_dof texture on resize
+        if self.output_to_pre_dof {
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("PostProcess Pre-DOF"),
+                size: wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: self.format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            self.pre_dof_tex = Some(tex);
+            self.pre_dof_view = Some(view);
+        } else {
+            self.pre_dof_tex = None;
+            self.pre_dof_view = None;
+        }
     }
 
     fn prepare(&mut self, ctx: &PrepareContext) -> HelioResult<()> {
@@ -941,12 +979,17 @@ impl RenderPass for PostProcessPass {
             }
         }
 
-        // 3. Uber render pass
+        // 3. Uber render pass (optionally to pre_dof texture when DofPass follows)
+        let target = if self.output_to_pre_dof {
+            self.pre_dof_view.as_ref().unwrap_or(ctx.target)
+        } else {
+            ctx.target
+        };
         {
             let mut pass = unsafe { &mut *ctx.encoder_ptr }.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("PostProcess Uber"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: ctx.target,
+                    view: target,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -965,5 +1008,11 @@ impl RenderPass for PostProcessPass {
         }
 
         Ok(())
+    }
+
+    fn publish<'a>(&'a self, frame: &mut libhelio::FrameResources<'a>) {
+        if let Some(view) = &self.pre_dof_view {
+            frame.pre_dof.write(view, "PostProcess");
+        }
     }
 }

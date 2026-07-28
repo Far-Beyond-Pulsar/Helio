@@ -318,12 +318,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let jitter_uv = tsr.jitter_offset * vec2<f32>(1.0, -1.0) / in_dims;
     let cur_uv    = in.uv + jitter_uv;
 
-    // ── Current frame sample ──────────────────────────────────────────────────
+    // ── Current frame sample (jitter-corrected) ───────────────────────────────
     let current_rgb = textureSampleLevel(current_frame, linear_sampler, cur_uv, 0.0).rgb;
 
     // ── RESET path ────────────────────────────────────────────────────────────
     if tsr.reset != 0u {
-        let sharpened = apply_cas(current_rgb, in.uv);
+        let sharpened = apply_cas(current_rgb, cur_uv);
         return vec4<f32>(sharpened, 1.0);
     }
 
@@ -339,7 +339,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // If reprojected UV is out of screen, use current frame only
     if any(history_uv < vec2<f32>(0.0)) || any(history_uv > vec2<f32>(1.0)) {
-        let sharpened = apply_cas(current_rgb, in.uv);
+        let sharpened = apply_cas(current_rgb, cur_uv);
         return vec4<f32>(sharpened, 1.0);
     }
 
@@ -347,9 +347,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let history_rgb = sample_catmull_rom(history_frame, linear_sampler, history_uv);
 
     // ── Reprojected history depth ─────────────────────────────────────────────
-    // We approximate history depth by reading the current depth at the history UV.
+    // We use the current depth value for the disocclusion comparison. Sampling
+    // at history_uv would cause false disocclusions at depth edges because the
+    // jitter delta between frames shifts history_uv away from in.uv, even for
+    // a perfectly static scene. That spurious CLASS_DISOCCLUSION forces blend
+    // to 0.5 and prevents temporal accumulation (visible as shimmer/shake).
     // A proper implementation would keep a separate history depth buffer.
-    let history_depth_approx = textureSample(depth_tex, point_sampler, history_uv);
+    let history_depth_approx = depth_val;
 
     // ── Neighbourhood statistics ───────────────────────────────────────────────
     let tap_radius = i32(tsr.tap_radius);
@@ -397,7 +401,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ── CAS sharpening ────────────────────────────────────────────────────────
     // Only sharpen in areas with enough variance to have recoverable detail.
     let cas_weight = clamp((n.variance - 0.002) * 10.0, 0.0, 1.0);
-    let cas_result = apply_cas(result_linear, in.uv);
+    let cas_result = apply_cas(result_linear, cur_uv);
     let output     = mix(result_linear, cas_result, cas_weight);
 
     return vec4<f32>(output, 1.0);

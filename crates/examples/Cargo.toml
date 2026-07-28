@@ -148,6 +148,10 @@ name = "editor_demo_xl"
 path = "editor_demo_xl.rs"
 
 [[bin]]
+name = "editor_demo_tsr"
+path = "editor_demo_tsr.rs"
+
+[[bin]]
 name = "meshlet_cull_benchmark"
 path = "meshlet_cull_benchmark.rs"
 

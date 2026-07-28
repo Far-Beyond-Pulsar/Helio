@@ -282,6 +282,9 @@ impl ApplicationHandler for App {
                 inner_angle: 0.0,
                 god_rays_decay: 0.0,
                 god_rays_density: 0.0,
+                god_rays_enabled: 0,
+                god_rays_weight: 0.0,
+                god_rays_exposure: 0.0,
                 _pad2: [0, 0, 0],
                 _pad: 0,
             }));

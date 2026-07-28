@@ -65,6 +65,7 @@ helio-pass-decal = { path = "crates/helio-pass-decal" }
 helio-pass-sdf = { path = "crates/helio-pass-sdf" }
 helio-pass-voxel-mesh = { path = "crates/helio-pass-voxel-mesh" }
 helio-pass-fxaa = { path = "crates/helio-pass-fxaa" }
+helio-pass-dof = { path = "crates/helio-pass-dof" }
 
 [dependencies]
 tiny_http = "0.12"

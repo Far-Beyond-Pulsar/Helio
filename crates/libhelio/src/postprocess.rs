@@ -91,14 +91,18 @@ pub struct GpuPostProcessUniforms {
     pub grain_enabled: u32,
 
     // ── Depth of Field (32 bytes) ──
+    // dof_aperture_shape encodes both mode and blade count:
+    //   < 0 → DOF disabled
+    //   0.0 → DOF_MODE_GAUSSIAN (circular, cheap)
+    //   > 0 → DOF_MODE_BOKEH with floor(blades) aperture blades
     pub dof_focal_distance: f32,
     pub dof_focal_region: f32,
+    pub dof_aperture_shape: f32,
+    pub dof_aperture_rotation: f32,
     pub dof_near_transition: f32,
     pub dof_far_transition: f32,
-    pub dof_scale: f32,
     pub dof_max_bokeh_size: f32,
-    pub dof_enabled: u32,
-    pub pad_dof: f32,
+    pub dof_sensor_diagonal: f32,
 
     // ── Motion Blur (16 bytes) ──
     pub motion_blur_amount: f32,
@@ -266,12 +270,12 @@ impl Default for GpuPostProcessUniforms {
 
             dof_focal_distance: 100.0,
             dof_focal_region: 50.0,
+            dof_aperture_shape: 5.0,
+            dof_aperture_rotation: 0.0,
             dof_near_transition: 100.0,
             dof_far_transition: 100.0,
-            dof_scale: 1.0,
             dof_max_bokeh_size: 10.0,
-            dof_enabled: 0,
-            pad_dof: 0.0,
+            dof_sensor_diagonal: 43.3,
 
             motion_blur_amount: 0.0,
             motion_blur_max: 64.0,
@@ -369,6 +373,8 @@ pub struct PostProcessSettings {
     pub dof_scale: f32,
     pub dof_max_bokeh_size: f32,
     pub dof_aperture_blades: u32,
+    pub dof_aperture_rotation: f32,
+    pub dof_sensor_diagonal: f32,
     pub dof_enabled: bool,
 
     // Motion Blur
@@ -458,12 +464,12 @@ impl PostProcessSettings {
 
             dof_focal_distance: self.dof_focal_distance,
             dof_focal_region: self.dof_focal_region,
+            dof_aperture_shape: if self.dof_enabled { self.dof_aperture_blades as f32 } else { -1.0 },
+            dof_aperture_rotation: self.dof_aperture_rotation,
             dof_near_transition: self.dof_near_transition,
             dof_far_transition: self.dof_far_transition,
-            dof_scale: self.dof_scale,
             dof_max_bokeh_size: self.dof_max_bokeh_size,
-            dof_enabled: self.dof_enabled as u32,
-            pad_dof: 0.0,
+            dof_sensor_diagonal: self.dof_sensor_diagonal,
 
             motion_blur_amount: self.motion_blur_amount,
             motion_blur_max: self.motion_blur_max,
@@ -549,6 +555,8 @@ impl Default for PostProcessSettings {
             dof_scale: 1.0,
             dof_max_bokeh_size: 10.0,
             dof_aperture_blades: 5,
+            dof_aperture_rotation: 0.0,
+            dof_sensor_diagonal: 43.3,
             dof_enabled: false,
 
             motion_blur_amount: 0.0,
@@ -779,6 +787,8 @@ impl PostProcessBlender {
             dof_scale: lerp(a.dof_scale, b.dof_scale, t),
             dof_max_bokeh_size: lerp(a.dof_max_bokeh_size, b.dof_max_bokeh_size, t),
             dof_aperture_blades: if t > 0.5 { b.dof_aperture_blades } else { a.dof_aperture_blades },
+            dof_aperture_rotation: lerp(a.dof_aperture_rotation, b.dof_aperture_rotation, t),
+            dof_sensor_diagonal: lerp(a.dof_sensor_diagonal, b.dof_sensor_diagonal, t),
             dof_enabled: if t > 0.5 { b.dof_enabled } else { a.dof_enabled },
 
             motion_blur_amount: lerp(a.motion_blur_amount, b.motion_blur_amount, t),
@@ -868,10 +878,12 @@ fn unpack_settings(gpu: &GpuPostProcessUniforms) -> PostProcessSettings {
         dof_focal_region: gpu.dof_focal_region,
         dof_near_transition: gpu.dof_near_transition,
         dof_far_transition: gpu.dof_far_transition,
-        dof_scale: gpu.dof_scale,
+        dof_scale: 1.0,
         dof_max_bokeh_size: gpu.dof_max_bokeh_size,
-        dof_aperture_blades: 5,
-        dof_enabled: gpu.dof_enabled != 0,
+        dof_aperture_blades: gpu.dof_aperture_shape.max(0.0) as u32,
+        dof_aperture_rotation: gpu.dof_aperture_rotation,
+        dof_sensor_diagonal: gpu.dof_sensor_diagonal,
+        dof_enabled: gpu.dof_aperture_shape >= 0.0,
 
         motion_blur_amount: gpu.motion_blur_amount,
         motion_blur_max: gpu.motion_blur_max,

@@ -90,12 +90,12 @@ struct GpuPostProcessUniforms {
     grain_enabled:          u32,
     dof_focal_distance:     f32,
     dof_focal_region:       f32,
+    dof_aperture_shape:     f32,
+    dof_aperture_rotation:  f32,
     dof_near_transition:    f32,
     dof_far_transition:     f32,
-    dof_scale:              f32,
     dof_max_bokeh_size:     f32,
-    dof_enabled:            u32,
-    _pad12:                 f32,
+    dof_sensor_diagonal:    f32,
     motion_blur_amount:     f32,
     motion_blur_max:        f32,
     motion_blur_enabled:    u32,
@@ -254,11 +254,12 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     r.grain_enabled          = select(base.grain_enabled, vol.grain_enabled, t > 0.5);
     r.dof_focal_distance     = lerpf(base.dof_focal_distance, vol.dof_focal_distance, t);
     r.dof_focal_region       = lerpf(base.dof_focal_region, vol.dof_focal_region, t);
+    r.dof_aperture_shape     = lerpf(base.dof_aperture_shape, vol.dof_aperture_shape, t);
+    r.dof_aperture_rotation  = lerpf(base.dof_aperture_rotation, vol.dof_aperture_rotation, t);
     r.dof_near_transition    = lerpf(base.dof_near_transition, vol.dof_near_transition, t);
     r.dof_far_transition     = lerpf(base.dof_far_transition, vol.dof_far_transition, t);
-    r.dof_scale              = lerpf(base.dof_scale, vol.dof_scale, t);
     r.dof_max_bokeh_size     = lerpf(base.dof_max_bokeh_size, vol.dof_max_bokeh_size, t);
-    r.dof_enabled            = select(base.dof_enabled, vol.dof_enabled, t > 0.5);
+    r.dof_sensor_diagonal    = lerpf(base.dof_sensor_diagonal, vol.dof_sensor_diagonal, t);
     r.motion_blur_amount     = lerpf(base.motion_blur_amount, vol.motion_blur_amount, t);
     r.motion_blur_max        = lerpf(base.motion_blur_max, vol.motion_blur_max, t);
     r.motion_blur_enabled    = select(base.motion_blur_enabled, vol.motion_blur_enabled, t > 0.5);
@@ -287,7 +288,7 @@ fn blend_settings(base: GpuPostProcessUniforms, vol: GpuPostProcessUniforms, t: 
     // The struct is fully written by this function; uninitialized fields get default values.
     r._pad4 = 0.0; r._pad5 = 0.0; r._pad6 = 0.0; r._pad7 = 0.0; r._pad8 = 0.0;
     r._pad9 = 0.0; r._pad10 = 0.0; r._pad_vignette = 0.0; r._pad11 = 0.0;
-    r._pad12 = 0.0; r._pad13 = 0.0; r._pad14 = 0.0;
+    r._pad13 = 0.0; r._pad14 = 0.0;
     r._pad_fog_color = 0.0; r._pad_fog_emissive = 0.0;
     return r;
 }
@@ -604,18 +605,24 @@ fn apply_grain(color: vec3<f32>, uv: vec2<f32>, dims: vec2<f32>) -> vec3<f32> {
 
 // ── Depth of Field (Gaussian approximation) ────────────────────────────────────
 
+// ── DOF mode constants (match CPU-side dof_aperture_shape encoding) ──
+//   dof_aperture_shape < 0 → disabled
+//   dof_aperture_shape == 0 → DOF_MODE_GAUSSIAN (circular fallback)
+//   dof_aperture_shape > 0 → DOF_MODE_BOKEH with floor(shape) blades
+
 fn dof_coc(depth: f32) -> f32 {
     let linear_depth = -camera.proj[3][2] / (depth * 2.0 - 1.0 + camera.proj[2][2]);
     let focal_dist = postprocess.dof_focal_distance;
     let focal_region = postprocess.dof_focal_region;
     let near_blur = max(focal_dist - focal_region - linear_depth, 0.0) / max(postprocess.dof_near_transition, 0.001);
     let far_blur = max(linear_depth - (focal_dist + focal_region), 0.0) / max(postprocess.dof_far_transition, 0.001);
-    let coc = max(near_blur, far_blur) * postprocess.dof_scale;
+    // Thin-lens CoC: sensor_diagonal / focal_dist gives the physical blur circle
+    // scaled to screen pixels via max_bokeh_size.
+    let coc = max(near_blur, far_blur) * postprocess.dof_sensor_diagonal * 0.02;
     return clamp(coc, 0.0, postprocess.dof_max_bokeh_size);
 }
 
-fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> vec3<f32> {
-    if postprocess.dof_enabled == 0u { return color; }
+fn apply_dof_gaussian(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> vec3<f32> {
     let coc = dof_coc(depth) * postprocess.blend_weight_dof;
     if coc < 0.5 { return color; }
     let radius = clamp(coc, 1.0, postprocess.dof_max_bokeh_size);
@@ -634,6 +641,14 @@ fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> ve
     }
     if total > 0.0 { blurred /= total; }
     return mix(color, blurred, clamp(coc / postprocess.dof_max_bokeh_size, 0.0, 1.0));
+}
+
+fn apply_dof(color: vec3<f32>, uv: vec2<f32>, depth: f32, dims: vec2<f32>) -> vec3<f32> {
+    let shape = postprocess.dof_aperture_shape;
+    if shape < 0.0 { return color; }
+    // Gaussian fallback (shape == 0) runs inline; bokeh mode is handled by
+    // the separate DofPass when it is present in the graph.
+    return apply_dof_gaussian(color, uv, depth, dims);
 }
 
 // ── Motion blur ────────────────────────────────────────────────────────────────
@@ -734,7 +749,7 @@ fn fs_uber(in: VOut) -> @location(0) vec4<f32> {
 
     //%P2
 
-    // 9. Depth of Field
+    // 9. Depth of Field (Gaussian fallback when no DofPass is in the graph)
     let raw_depth = textureLoad(depth_input, vec2<i32>(i32(uv.x * dims.x), i32(uv.y * dims.y)), 0);
     color = apply_dof(color, uv, raw_depth, dims);
 

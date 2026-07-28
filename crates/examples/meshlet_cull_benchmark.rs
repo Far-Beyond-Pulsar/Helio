@@ -81,7 +81,7 @@ struct CaseBuffers {
     work_dispatch_width: u32,
     work_dispatch_height: u32,
     expected_attempts: u32,
-    expected_overflow: u32,
+    expected_overflow: u32, // counter[2]: publication overflow (rejected by capacity)
 }
 
 fn main() {
@@ -289,8 +289,8 @@ async fn run() {
             case.name
         );
         assert_eq!(
-            counters[1], buffers.expected_overflow,
-            "{} reported an unexpected capacity overflow",
+            counters[2], buffers.expected_overflow,
+            "{} reported an unexpected publication overflow",
             case.name
         );
         timings_ms.sort_by(f64::total_cmp);
@@ -366,8 +366,17 @@ async fn run() {
         &query_readback,
     );
     let counters = read_draw_counters(&device, &queue, &overflow_probe);
-    assert_eq!(counters, [TOTAL_MESHLETS, 17]);
-    eprintln!("overflow_probe,attempted={},rejected={}", counters[0], counters[1]);
+    // With the opaque/alpha split, half_capacity = draw_capacity / 2.
+    // All meshlets are opaque, so overflow = TOTAL_MESHLETS - half_capacity.
+    assert_eq!(
+        counters,
+        [
+            TOTAL_MESHLETS,
+            0,
+            TOTAL_MESHLETS - (TOTAL_MESHLETS - 17) / 2,
+        ],
+    );
+    eprintln!("overflow_probe,attempted={},rejected={}", counters[0], counters[2]);
 
     let render_probe = create_case_buffers(
         &device,
@@ -493,7 +502,7 @@ fn create_case_buffers(
     let instance_cull = vec![InstanceCullData {
         max_scale: 1.0,
         min_scale: 1.0,
-        cone_cull_enabled: 0,
+        cone_cull_enabled: 3, // CULL_FLAG_CONE_CULL | CULL_FLAG_OPAQUE
         valid_transform: 1,
     }; case.object_count as usize];
     let meshlets = vec![GpuMeshletEntry {
@@ -579,15 +588,17 @@ fn create_case_buffers(
         u64::from(TOTAL_MESHLETS) * std::mem::size_of::<GpuVgDraw>() as u64,
         wgpu::BufferUsages::empty(),
     );
+    // 3 u32s: counter[0] = opaque count, counter[1] = alpha count,
+    // counter[2] = publication overflow (rejected by bounded arrays).
     let draw_count = output_buffer(
         device,
         "Benchmark Draw And Overflow Counters",
-        8,
+        12,
         wgpu::BufferUsages::INDIRECT,
     );
     let draw_count_readback = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("Benchmark Draw Count Readback"),
-        size: 8,
+        size: 12,
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -664,7 +675,10 @@ fn create_case_buffers(
         work_dispatch_width,
         work_dispatch_height,
         expected_attempts: TOTAL_MESHLETS,
-        expected_overflow: TOTAL_MESHLETS.saturating_sub(draw_capacity),
+        // Half of the draw capacity is reserved for opaque draws, the other
+        // half for alpha. Since all benchmark meshlets are opaque, the
+        // publication overflow is total meshlets minus the opaque half-cap.
+        expected_overflow: TOTAL_MESHLETS - draw_capacity / 2,
     }
 }
 
@@ -722,14 +736,14 @@ fn read_draw_counters(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     buffers: &CaseBuffers,
-) -> [u32; 2] {
+) -> [u32; 3] {
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("VG Cull Count Readback Encoder"),
     });
-    encoder.copy_buffer_to_buffer(&buffers.draw_count, 0, &buffers.draw_count_readback, 0, 8);
+    encoder.copy_buffer_to_buffer(&buffers.draw_count, 0, &buffers.draw_count_readback, 0, 12);
     queue.submit([encoder.finish()]);
-    let values = read_mapped::<u32>(device, &buffers.draw_count_readback, 2);
-    [values[0], values[1]]
+    let values = read_mapped::<u32>(device, &buffers.draw_count_readback, 3);
+    [values[0], values[1], values[2]]
 }
 
 #[allow(clippy::too_many_arguments)]
