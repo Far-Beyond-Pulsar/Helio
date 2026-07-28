@@ -184,21 +184,21 @@ fn add_late_passes(
 ) {
     let camera_buf = scene.gpu_scene().camera.buffer();
 
-    // let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
-    //     .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
-    //     .into_rgba8();
-    // let (sw, sh) = spotlight.dimensions();
-    //    let mut billboard_pass = BillboardPass::new_with_sprite_rgba(
-    //        device,
-    //        queue,
-    //        camera_buf,
-    //        config.surface_format,
-    //        spotlight.as_raw(),
-    //        sw,
-    //        sh,
-    //    );
-    //    billboard_pass.set_occluded_by_geometry(true);
-    //    graph.add_pass(Box::new(billboard_pass));
+    let spotlight = image::load_from_memory(SPOTLIGHT_PNG)
+        .unwrap_or_else(|_| image::DynamicImage::new_rgba8(1, 1))
+        .into_rgba8();
+    let (sw, sh) = spotlight.dimensions();
+    let mut billboard_pass = BillboardPass::new_with_sprite_rgba(
+        device,
+        queue,
+        camera_buf,
+        config.surface_format,
+        spotlight.as_raw(),
+        sw,
+        sh,
+    );
+    billboard_pass.set_occluded_by_geometry(true);
+    graph.add_pass(Box::new(billboard_pass));
     graph.add_pass(Box::new(PerfOverlayAnalyzerPass::new(Arc::clone(perf))));
 
     graph.add_pass(Box::new(CoronaPass::new(
