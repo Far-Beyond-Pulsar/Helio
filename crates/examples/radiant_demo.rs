@@ -196,13 +196,40 @@ impl ApplicationHandler for App {
             .register_partial_str("opal", opal_wgsl.to_string());
         log::info!("[RADIANT] Opal template registered as class {}", opal_class);
 
+        // ── Register glass template ─────────────────────────────────────────
+
+        let glass_wgsl = include_str!("../helio/templates/glass.wgsl");
+        let glass_class = renderer
+            .template_registry_mut()
+            .register_partial_str("glass", glass_wgsl.to_string());
+        log::info!("[RADIANT] Glass (gbuffer) template registered as class {}", glass_class);
+
+        // Register transparent version at the gbuffer glass class ID so the
+        // transparent pass finds the glass shader instead of falling back to default.
+        let glass_transparent_wgsl = include_str!("../helio/templates/glass_transparent.wgsl");
+        let glass_transparent_src =
+            renderer.transparent_template_registry_mut()
+                .compose_transparent_override(glass_transparent_wgsl);
+        renderer.transparent_template_registry_mut().register_str_at(
+            glass_class, "glass_transparent", glass_transparent_src
+        );
+        log::info!("[RADIANT] Glass (transparent) template registered as class {}", glass_class);
+
         // ── Register water template ─────────────────────────────────────────
 
         let water_wgsl = include_str!("../helio/templates/water.wgsl");
         let water_class = renderer
             .template_registry_mut()
             .register_partial_str("water", water_wgsl.to_string());
-        log::info!("[RADIANT] Water template registered as class {}", water_class);
+        log::info!("[RADIANT] Water (gbuffer) template registered as class {}", water_class);
+
+        // Also register a transparent water template so the transparent pass
+        // renders it with real alpha blending instead of the fixed overlay.
+        let water_transparent_wgsl = include_str!("../helio/templates/water_transparent.wgsl");
+        let water_transparent_class = renderer
+            .transparent_template_registry_mut()
+            .register_transparent_partial_str("water_transparent", water_transparent_wgsl.to_string());
+        log::info!("[RADIANT] Water (transparent) template registered as class {}", water_transparent_class);
 
         // ── Register graph snippet ──────────────────────────────────────────
 
@@ -398,6 +425,28 @@ impl ApplicationHandler for App {
             .scene_mut()
             .update_material_class_params(opal_mat, [3.0, 1.0, 0.4, 0.0]);
 
+        // ── Glass material ────────────────────────────────────────────────────
+
+        let glass_mat = renderer.scene_mut().insert_material(GpuMaterial {
+            base_color: [0.85, 0.90, 0.95, 0.70], // slightly blue-tinted glass
+            emissive: [0.0; 4],
+            roughness_metallic: [0.015, 0.0, 1.5, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        });
+        renderer
+            .scene_mut()
+            .set_material_class(glass_mat, glass_class, 0,
+                Some(libhelio::FLAG_TRANSPARENT_ONLY))
+            .unwrap();
+
         // ── Water material ────────────────────────────────────────────────────
 
         let water_mat = renderer.scene_mut().insert_material(GpuMaterial {
@@ -515,6 +564,15 @@ impl ApplicationHandler for App {
             Mat4::from_translation(Vec3::new(s * 1.0, yp, back_z)),
             1.0,
         );
+        // Glass: transparent sphere with Fresnel reflections
+        v3_demo_common::insert_object(
+            &mut renderer,
+            sphere_mesh,
+            glass_mat,
+            Mat4::from_translation(Vec3::new(-s * 2.5, yp + 0.5, front_z + 1.0)),
+            0.8,
+        );
+
         // Opal: milky body + iridescent play-of-colour
         v3_demo_common::insert_object(
             &mut renderer,
@@ -589,6 +647,7 @@ impl ApplicationHandler for App {
         log::info!("");
         log::info!("═══ Helio Radiant Material Demo ═══");
         log::info!("  ── Front row ──────────────────────────");
+        log::info!("  [-6.25] Glass             (Tier 3, glass/Fresnel shader)");
         log::info!("  [-3.75] Gold metallic     (Tier 1, metallic flags)");
         log::info!("  [-1.25] Red plastic       (Tier 1, matte dielectric)");
         log::info!("  [ 1.25] Clear coat        (Tier 2, clear_coat template)");

@@ -481,4 +481,10 @@ impl Scene {
     pub fn set_template_registry(&mut self, reg: Box<dyn std::any::Any + Send + Sync>) {
         self.gpu_scene.template_registry = Some(reg);
     }
+
+    /// Store a type-erased TRANSPARENT template registry on the GpuScene so the
+    /// TransparentPass can find it across graph rebuilds.
+    pub fn set_transparent_template_registry(&mut self, reg: Box<dyn std::any::Any + Send + Sync>) {
+        self.gpu_scene.transparent_template_registry = Some(reg);
+    }
 }

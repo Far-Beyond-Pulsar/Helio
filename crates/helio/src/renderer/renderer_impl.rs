@@ -150,10 +150,13 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
-    /// Templates registered by the user, preserved across graph rebuilds (resize).
-    /// The GBufferPass reads from this; after a graph rebuild the latest snapshot
-    /// is injected into the new GBufferPass.
+    /// Templates registered by the user for the gbuffer (opaque) path.
+    /// Preserved across graph rebuilds (resize).
     pub(crate) template_registry: RadiantTemplateRegistry,
+
+    /// Templates registered by the user for the transparent path.
+    /// Used by TransparentPass for alpha-blended materials (water, glass, etc.).
+    pub(crate) transparent_template_registry: RadiantTemplateRegistry,
 }
 
 pub struct DebugBatch<'a> {
@@ -437,18 +440,28 @@ impl Renderer {
         self.graph.find_pass::<T>()
     }
 
-    /// Access the template registry (preserved across graph rebuilds).
+    /// Access the gbuffer template registry (preserved across graph rebuilds).
     /// Register custom surface templates here instead of through the pass
     /// directly to ensure they survive window resize.
     pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
         &mut self.template_registry
     }
 
-    /// Sync the renderer's template registry into the GpuScene so the
-    /// GBufferPass can find it across graph rebuilds (window resize).
+    /// Access the transparent template registry for alpha-blended materials.
+    pub fn transparent_template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
+        &mut self.transparent_template_registry
+    }
+
+    /// Sync the renderer's template registries into the GpuScene so passes
+    /// can find them across graph rebuilds.
     pub(crate) fn sync_template_registry_to_scene(&mut self) {
+        // Gbuffer templates
         let reg: Box<dyn std::any::Any + Send + Sync> = Box::new(self.template_registry.clone());
         self.scene.set_template_registry(reg);
+
+        // Transparent templates (separate registry to avoid binding layout conflicts)
+        let treg: Box<dyn std::any::Any + Send + Sync> = Box::new(self.transparent_template_registry.clone());
+        self.scene.set_transparent_template_registry(treg);
     }
 
     pub fn set_clear_color(&mut self, color: [f32; 4]) {

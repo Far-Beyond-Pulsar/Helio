@@ -205,6 +205,7 @@ impl Renderer {
             cull_stats_buffer,
             graph_rebuilder,
             template_registry: RadiantTemplateRegistry::new(),
+            transparent_template_registry: RadiantTemplateRegistry::new(),
         }
     }
 

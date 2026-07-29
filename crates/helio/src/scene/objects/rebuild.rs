@@ -60,6 +60,7 @@ impl super::super::Scene {
             self.gpu_scene.compacted_indices.set_data(Vec::new());
             self.gpu_scene.compacted_indices_2.set_data(Vec::new());
             self.gpu_scene.material_class_ranges.clear();
+            self.gpu_scene.transparent_material_class_ranges.clear();
             return;
         }
 
@@ -86,7 +87,9 @@ impl super::super::Scene {
         // Track the new GPU slot assigned to each dense-array entry.
         let mut gpu_slots: Vec<u32> = vec![0u32; n];
         // Track the (material_class, graph_hash) of each draw group for range building.
+        // Also store the dense index of the first object in the group for flag lookup.
         let mut group_keys: Vec<(u32, u64)> = Vec::new();
+        let mut group_first_dense: Vec<usize> = Vec::new();
 
         let group_hidden = self.group_hidden;
 
@@ -139,11 +142,14 @@ impl super::super::Scene {
                 first_instance: group_start,
             });
             group_keys.push((class, graph_hash));
+            group_first_dense.push(order[i - instance_count as usize]);
         }
 
         // Build material class ranges from consecutive draw groups with the same
         // (class, graph_hash) so each range can use a single PSO.
-        let mut ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
+        // Also split into opaque and transparent ranges based on FLAG_TRANSPARENT_ONLY.
+        let mut opaque_ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
+        let mut transparent_ranges: Vec<(u32, u64, u32, u32)> = Vec::new();
         let mut gi = 0;
         while gi < group_keys.len() {
             let (class, graph_hash) = group_keys[gi];
@@ -153,10 +159,24 @@ impl super::super::Scene {
                 count += 1;
                 gi += 1;
             }
-            ranges.push((class, graph_hash, start, count));
+            // Check if this class is transparent by looking at the first draw group's material
+            let first_dense = group_first_dense[gi - count as usize];
+            let (is_transparent, mat_flags) = self.objects.get_dense(first_dense)
+                .and_then(|r| self.materials.get(r.material))
+                .map(|m| ((m.gpu.flags & libhelio::FLAG_TRANSPARENT_ONLY) != 0, m.gpu.flags))
+                .unwrap_or((false, 0));
+            log::info!("[Rebuild] class={} flags={:#x} is_transparent={} first_dense={}",
+                class, mat_flags, is_transparent, first_dense);
+            if is_transparent {
+                transparent_ranges.push((class, graph_hash, start, count));
+            } else {
+                opaque_ranges.push((class, graph_hash, start, count));
+            }
         }
-        log::info!("[Scene] rebuilt material_class_ranges: {:?} ({} objects, {} draw groups)", ranges, n, draw_calls.len());
-        self.gpu_scene.material_class_ranges = ranges;
+        log::info!("[Scene] rebuilt material_class_ranges: opaque={:?} transparent={:?} ({} objects, {} draw groups)",
+            opaque_ranges, transparent_ranges, n, draw_calls.len());
+        self.gpu_scene.material_class_ranges = opaque_ranges;
+        self.gpu_scene.transparent_material_class_ranges = transparent_ranges;
 
         // Patch each ObjectRecord with its new GPU slot so that in-frame
         // `update_object_transform` / `update_object_bounds` can update in-place.

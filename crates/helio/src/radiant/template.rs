@@ -94,22 +94,13 @@ fn base_gbuffer_source() -> &'static str {
     ))
 }
 
-/// Replace the `radiant_eval_surface` function in the base gbuffer.wgsl with a
-/// custom override. This allows template files to contain ONLY the surface
-/// function body, avoiding full-file duplication.
-fn compose_radiant_eval_override(base: &str, override_fn: &str) -> String {
-    // Find the default `fn radiant_eval_surface(...) -> SurfaceData {`
-    // and replace everything from that line until the closing brace of the function
-    // with the override function.
-    //
-    // Strategy: find `fn radiant_eval_surface` and then find the matching `}`
-    // that closes the function, and replace everything between.
-    let marker = "fn radiant_eval_surface";
-    if let Some(start) = base.find(marker) {
-        // Find the opening brace of the function
+/// Replace a function in the base WGSL with a custom override.
+/// `fn_marker` is the function declaration prefix (e.g. `"fn radiant_eval_surface"`).
+/// The override function must have the same signature as the original.
+fn compose_fn_override(base: &str, override_fn: &str, fn_marker: &str) -> String {
+    if let Some(start) = base.find(fn_marker) {
         if let Some(body_start) = base[start..].find('{') {
             let body_start_abs = start + body_start;
-            // Track brace depth to find the closing brace
             let mut depth = 1u32;
             let mut i = body_start_abs + 1;
             let bytes = base.as_bytes();
@@ -121,13 +112,12 @@ fn compose_radiant_eval_override(base: &str, override_fn: &str) -> String {
                 }
                 i += 1;
             }
-            let body_end = i; // Position after the closing '}'
+            let body_end = i;
             let before = &base[..start];
             let after = &base[body_end..];
             return format!("{}{}\n{}", before, override_fn, after);
         }
     }
-    // Fallback: just use the override as-is (it may be a complete file)
     override_fn.to_string()
 }
 
@@ -141,6 +131,15 @@ impl Clone for RadiantTemplateRegistry {
 }
 
 impl RadiantTemplateRegistry {
+    /// Create an empty registry (no built-in templates).
+    /// Used by TransparentPass to avoid inheriting gbuffer templates.
+    pub fn new_empty() -> Self {
+        Self {
+            templates: HashMap::new(),
+            next_id: 5,
+        }
+    }
+
     pub fn new() -> Self {
         let mut reg = Self {
             templates: HashMap::new(),
@@ -193,8 +192,22 @@ impl RadiantTemplateRegistry {
         self.templates.keys().copied().collect()
     }
 
+    /// Iterate over all (class_id, template) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&u32, &RadiantTemplate)> {
+        self.templates.iter()
+    }
+
     pub fn register(&mut self, class: u32, template: RadiantTemplate) {
         self.templates.insert(class, template);
+    }
+
+    /// Override an existing class with a new WGSL source (used by TransparentPass
+    /// to replace the default gbuffer base with its own transparent base shader).
+    pub fn override_class(&mut self, class: u32, name: &'static str, wgsl_source: &'static str) {
+        self.templates.insert(class, RadiantTemplate {
+            name,
+            wgsl_source,
+        });
     }
 
     /// Load a template from a WGSL file on disk. The template should contain
@@ -230,7 +243,34 @@ impl RadiantTemplateRegistry {
     /// the base gbuffer.wgsl at registration time.
     pub fn register_partial_str(&mut self, name: &str, override_fn: String) -> u32 {
         let base = base_gbuffer_source();
-        let composed = compose_radiant_eval_override(base, &override_fn);
+        let composed = compose_fn_override(base, &override_fn, "fn radiant_eval_surface");
+        self.register_str(name, composed)
+    }
+
+    /// Compose a transparent override function with the transparent base shader.
+    /// Returns the composed WGSL source ready for registration.
+    pub fn compose_transparent_override(&self, override_fn: &str) -> String {
+        let base = include_str!("../../templates/transparent_base.wgsl");
+        compose_fn_override(base, override_fn, "fn radiant_eval_transparent")
+    }
+
+    /// Register a template at a specific class ID (instead of auto-assigning).
+    pub fn register_str_at(&mut self, class: u32, name: &str, wgsl_source: String) {
+        self.templates.insert(
+            class,
+            RadiantTemplate {
+                name: Box::leak(format!("Radiant:{}", name).into_boxed_str()),
+                wgsl_source: Box::leak(wgsl_source.into_boxed_str()),
+            },
+        );
+    }
+
+    /// Register a partial template for the transparent pass.
+    /// The `override_fn` should contain a `fn radiant_eval_transparent(...)` function body.
+    /// Composed with the transparent base shader at registration time.
+    pub fn register_transparent_partial_str(&mut self, name: &str, override_fn: String) -> u32 {
+        let base = include_str!("../../templates/transparent_base.wgsl");
+        let composed = compose_fn_override(base, &override_fn, "fn radiant_eval_transparent");
         self.register_str(name, composed)
     }
 
@@ -239,7 +279,7 @@ impl RadiantTemplateRegistry {
     /// predefined `MATERIAL_CLASS_*` constants.
     fn register_partial_str_with_id(&mut self, id: u32, name: &str, override_fn: String) {
         let base = base_gbuffer_source();
-        let composed = compose_radiant_eval_override(base, &override_fn);
+        let composed = compose_fn_override(base, &override_fn, "fn radiant_eval_surface");
         self.templates.insert(
             id,
             RadiantTemplate {
