@@ -1,10 +1,3 @@
-//! Transparent geometry pass shader.
-//!
-//! Adapted from geometry.wgsl for transparent/alpha-blended objects.
-//! Uses Group 0 (camera, globals, instances) only.
-//! Alpha blending is handled by the render pipeline blend state.
-//! A full implementation would add Group 1 for per-material colors/textures.
-
 struct Camera {
     view_proj: mat4x4<f32>,
     position:  vec3<f32>,
@@ -22,7 +15,6 @@ struct Globals {
     csm_splits:        vec4<f32>,
 }
 
-/// Must match `GpuInstanceData` in libhelio.
 struct GpuInstanceData {
     transform:     mat4x4<f32>,
     normal_mat_0:  vec4<f32>,
@@ -77,11 +69,8 @@ fn vs_main(vertex: Vertex, @builtin(instance_index) slot: u32) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Simple ambient + normal-based shading with translucent alpha.
-    // A full implementation would sample per-material textures from Group 1.
     let ambient = globals.ambient_color.rgb * globals.ambient_intensity;
     let normal_shade = in.world_normal * 0.5 + 0.5;
     let color = ambient + normal_shade * 0.3;
-    let alpha = 0.5; // Fixed 50% alpha; full impl reads per-material alpha
-    return vec4<f32>(color, alpha);
+    return vec4<f32>(color, 0.3);
 }

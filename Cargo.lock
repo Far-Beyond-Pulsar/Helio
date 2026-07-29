@@ -3293,8 +3293,11 @@ name = "helio-pass-transparent"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "helio",
  "helio-core",
+ "helio-pass-gbuffer",
  "libhelio",
+ "log",
  "wgpu 30.0.0",
 ]
 

@@ -472,6 +472,11 @@ fn build_default_graph_internal(
     graph.add_pass(Box::new(PostProcessVolumeBlendPass::new(device)));
     graph.add_pass(Box::new(VolumetricFogPass::new(device)));
 
+    // Transparent pass — alpha-blended geometry (simple fixed shader).
+    let camera_buf = scene.gpu_scene().camera.buffer();
+    let instances_buf = scene.gpu_scene().instances.buffer();
+    graph.add_pass(Box::new(helio_pass_transparent::TransparentPass::new(device, camera_buf, instances_buf, config.surface_format)));
+
     graph.add_pass(Box::new(FxaaPass::new(device, config.surface_format)));
 
     graph.add_pass(Box::new(PostProcessPass::new_with_user_effects(

@@ -166,7 +166,7 @@ impl GBufferPass {
             });
 
         // ── Bind Group Layout 1: material + textures ──────────────────────────
-        let bind_group_layout_1 = create_gbuffer_material_bgl(device);
+        let bind_group_layout_1 = create_material_bgl(device);
 
         // ── Pipeline layout (shared by all pipeline variants) ─────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -821,7 +821,11 @@ impl GBufferPass {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Build the BGL for group 1 (bindless materials + textures).
-fn create_gbuffer_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+// TODO: Generalize material BGL creation to avoid cross-pass deps.
+// Both GBufferPass and TransparentPass need the same material bind group layout.
+// This should be moved to a shared crate (helio-core or libhelio) so neither
+// pass depends on the other for basic infrastructure.
+pub fn create_material_bgl(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     #[cfg(not(target_arch = "wasm32"))]
     let texture_array_count =
         NonZeroU32::new(MAX_TEXTURES as u32).expect("non-zero texture table size");

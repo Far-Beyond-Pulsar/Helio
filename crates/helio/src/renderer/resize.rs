@@ -13,8 +13,6 @@ impl Renderer {
         if self.output_width == width && self.output_height == height {
             return; // no-op: preserve pass state registered before first frame
         }
-        log::info!("[Renderer] set_render_size: {}x{} -> {}x{} (pending resize)",
-            self.output_width, self.output_height, width, height);
         self.output_width = width;
         self.output_height = height;
         self.pending_resize = Some((width, height));

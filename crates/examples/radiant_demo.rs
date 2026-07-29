@@ -132,7 +132,8 @@ impl ApplicationHandler for App {
             },
         );
 
-        let config = RendererConfig::new(size.width, size.height, surface_format);
+        let mut config = RendererConfig::new(size.width, size.height, surface_format);
+        config.enable_ssr = true;
         let mut scene = Scene::new(device.clone(), queue.clone());
         let debug_camera_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Debug Camera Buffer"),
@@ -194,6 +195,14 @@ impl ApplicationHandler for App {
             .template_registry_mut()
             .register_partial_str("opal", opal_wgsl.to_string());
         log::info!("[RADIANT] Opal template registered as class {}", opal_class);
+
+        // ── Register water template ─────────────────────────────────────────
+
+        let water_wgsl = include_str!("../helio/templates/water.wgsl");
+        let water_class = renderer
+            .template_registry_mut()
+            .register_partial_str("water", water_wgsl.to_string());
+        log::info!("[RADIANT] Water template registered as class {}", water_class);
 
         // ── Register graph snippet ──────────────────────────────────────────
 
@@ -389,6 +398,27 @@ impl ApplicationHandler for App {
             .scene_mut()
             .update_material_class_params(opal_mat, [3.0, 1.0, 0.4, 0.0]);
 
+        // ── Water material ────────────────────────────────────────────────────
+
+        let water_mat = renderer.scene_mut().insert_material(GpuMaterial {
+            base_color: [0.02, 0.1, 0.15, 0.85],
+            emissive: [0.0; 4],
+            roughness_metallic: [0.02, 0.0, 1.33, 0.0],
+            tex_base_color: GpuMaterial::NO_TEXTURE,
+            tex_normal: GpuMaterial::NO_TEXTURE,
+            tex_roughness: GpuMaterial::NO_TEXTURE,
+            tex_emissive: GpuMaterial::NO_TEXTURE,
+            tex_occlusion: GpuMaterial::NO_TEXTURE,
+            workflow: 0,
+            flags: 0,
+            material_class: 0,
+            class_params: [0.0; 4],
+        });
+        renderer
+            .scene_mut()
+            .set_material_class(water_mat, water_class, 0, None)
+            .unwrap();
+
         // ── Meshes ───────────────────────────────────────────────────────────
 
         let sphere_mesh = renderer
@@ -485,13 +515,22 @@ impl ApplicationHandler for App {
             Mat4::from_translation(Vec3::new(s * 1.0, yp, back_z)),
             1.0,
         );
-        // Opal: milky body + iridescent play-of-colour (iridescent template)
+        // Opal: milky body + iridescent play-of-colour
         v3_demo_common::insert_object(
             &mut renderer,
             sphere_mesh,
             opal_mat,
             Mat4::from_translation(Vec3::new(s * 2.0, yp, back_z)),
             1.0,
+        );
+
+        // Water: animated wave surface
+        v3_demo_common::insert_object(
+            &mut renderer,
+            sphere_mesh,
+            water_mat,
+            Mat4::from_translation(Vec3::new(s * 3.5, yp - 0.3, back_z - 0.5)),
+            1.2,
         );
 
         // ── Lights ───────────────────────────────────────────────────────────
@@ -560,6 +599,7 @@ impl ApplicationHandler for App {
         log::info!("  [ 0.00] Skin              (Tier 2, skin template)");
         log::info!("  [ 2.50] Aniso spinning    (Tier 2, aniso, anim direction)");
         log::info!("  [ 5.00] Opal              (Tier 3, custom opal shader)");
+        log::info!("  [ 8.75] Water             (Tier 3, animated water shader)");
         log::info!("");
 
         self.state = Some(AppState {
