@@ -87,11 +87,12 @@ impl super::super::Scene {
         // Track the new GPU slot assigned to each dense-array entry.
         let mut gpu_slots: Vec<u32> = vec![0u32; n];
         // Track the (material_class, graph_hash) of each draw group for range building.
-        // Also store the dense index of the first object in the group for flag lookup.
+        // group_transparent tracks whether the group's material has FLAG_TRANSPARENT_ONLY.
         let mut group_keys: Vec<(u32, u64)> = Vec::new();
-        let mut group_first_dense: Vec<usize> = Vec::new();
+        let mut group_transparent: Vec<bool> = Vec::new();
 
         let group_hidden = self.group_hidden;
+
 
         let mut i = 0;
         while i < order.len() {
@@ -142,7 +143,11 @@ impl super::super::Scene {
                 first_instance: group_start,
             });
             group_keys.push((class, graph_hash));
-            group_first_dense.push(order[i - instance_count as usize]);
+            // Determine transparency from the material flags
+            let is_transparent = self.materials.get(r0.material)
+                .map(|m| (m.gpu.flags & libhelio::FLAG_TRANSPARENT_ONLY) != 0)
+                .unwrap_or(false);
+            group_transparent.push(is_transparent);
         }
 
         // Build material class ranges from consecutive draw groups with the same
@@ -159,14 +164,8 @@ impl super::super::Scene {
                 count += 1;
                 gi += 1;
             }
-            // Check if this class is transparent by looking at the first draw group's material
-            let first_dense = group_first_dense[gi - count as usize];
-            let (is_transparent, mat_flags) = self.objects.get_dense(first_dense)
-                .and_then(|r| self.materials.get(r.material))
-                .map(|m| ((m.gpu.flags & libhelio::FLAG_TRANSPARENT_ONLY) != 0, m.gpu.flags))
-                .unwrap_or((false, 0));
-            log::info!("[Rebuild] class={} flags={:#x} is_transparent={} first_dense={}",
-                class, mat_flags, is_transparent, first_dense);
+            // Check if any group in this range is transparent
+            let is_transparent = group_transparent[gi - count as usize];
             if is_transparent {
                 transparent_ranges.push((class, graph_hash, start, count));
             } else {
