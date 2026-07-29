@@ -513,6 +513,19 @@ impl RenderPass for GBufferPass {
             wgpu::IndexFormat::Uint32,
         );
 
+        // Sync template registry from scene (survives graph rebuilds)
+        if let Some(reg_any) = ctx.scene.template_registry.as_ref() {
+            if let Some(reg) = reg_any.downcast_ref::<helio::radiant::RadiantTemplateRegistry>() {
+                let old_keys = self.template_registry.keys();
+                self.template_registry = reg.clone();
+                let new_keys = self.template_registry.keys();
+                if old_keys != new_keys {
+                    // Registry changed — pipelines must be re-created
+                    self.pipelines.clear();
+                    self.shader_cache = helio::radiant::RadiantShaderCache::new();
+                }
+            }
+        }
         let ranges = ctx.scene.material_class_ranges;
         if ranges.is_empty() {
             // Fallback: no ranges (e.g. legacy mode without material_class data).
@@ -648,6 +661,16 @@ impl GBufferPass {
     /// Access the template registry for loading new surface archetypes at runtime.
     pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
         &mut self.template_registry
+    }
+
+    /// Replace the entire template registry (used after graph rebuild to
+    /// preserve user-registered templates across resize).
+    pub fn set_template_registry(&mut self, registry: RadiantTemplateRegistry) {
+        self.template_registry = registry;
+        // Pipelines must be re-created because they reference the old template
+        // WGSL sources; clear them to force recompilation on the next frame.
+        self.pipelines.clear();
+        self.shader_cache = RadiantShaderCache::new();
     }
 
     /// Get or create a render pipeline for the given key.

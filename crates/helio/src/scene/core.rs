@@ -475,4 +475,10 @@ impl Scene {
     pub fn tlas(&self) -> Option<&wgpu::Tlas> {
         self.gpu_scene.tlas_manager.tlas()
     }
+
+    /// Store a type-erased template registry on the GpuScene so the GBufferPass
+    /// can find it across graph rebuilds (window resize).
+    pub fn set_template_registry(&mut self, reg: Box<dyn std::any::Any + Send + Sync>) {
+        self.gpu_scene.template_registry = Some(reg);
+    }
 }

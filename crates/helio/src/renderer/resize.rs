@@ -10,6 +10,11 @@ impl Renderer {
     pub fn set_render_size(&mut self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
+        if self.output_width == width && self.output_height == height {
+            return; // no-op: preserve pass state registered before first frame
+        }
+        log::info!("[Renderer] set_render_size: {}x{} -> {}x{} (pending resize)",
+            self.output_width, self.output_height, width, height);
         self.output_width = width;
         self.output_height = height;
         self.pending_resize = Some((width, height));

@@ -11,6 +11,15 @@ pub struct RadiantTemplate {
     pub wgsl_source: &'static str,
 }
 
+impl Clone for RadiantTemplate {
+    fn clone(&self) -> Self {
+        Self {
+            name: Box::leak(self.name.to_string().into_boxed_str()),
+            wgsl_source: Box::leak(self.wgsl_source.to_string().into_boxed_str()),
+        }
+    }
+}
+
 impl RadiantTemplate {
     /// Build the final WGSL source by optionally injecting a graph snippet.
     /// If `graph_wgsl` is empty, the OVERRIDE markers are replaced with a no-op
@@ -122,11 +131,23 @@ fn compose_radiant_eval_override(base: &str, override_fn: &str) -> String {
     override_fn.to_string()
 }
 
+impl Clone for RadiantTemplateRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            templates: self.templates.clone(),
+            next_id: self.next_id,
+        }
+    }
+}
+
 impl RadiantTemplateRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
             templates: HashMap::new(),
-            next_id: 1,
+            // Start at 5 to avoid conflicts with built-in templates:
+            //   0 = default_pbr, 1 = clear_coat, 2 = subsurface,
+            //   3 = anisotropic, 4 = skin
+            next_id: 5,
         };
         reg.templates.insert(
             0,
@@ -168,6 +189,10 @@ impl RadiantTemplateRegistry {
         self.templates.get(&class)
     }
 
+    pub fn keys(&self) -> Vec<u32> {
+        self.templates.keys().copied().collect()
+    }
+
     pub fn register(&mut self, class: u32, template: RadiantTemplate) {
         self.templates.insert(class, template);
     }
@@ -189,6 +214,7 @@ impl RadiantTemplateRegistry {
     pub fn register_str(&mut self, name: &str, wgsl_source: String) -> u32 {
         let id = self.next_id;
         self.next_id += 1;
+        log::info!("[Radiant] register_str '{}' → class {}", name, id);
         self.templates.insert(
             id,
             RadiantTemplate {

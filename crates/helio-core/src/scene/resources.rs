@@ -199,6 +199,10 @@ pub struct SceneResources<'a> {
     /// Compiled graph WGSL snippets keyed by hash. Populated during flush.
     pub graph_wgsl_snippets: &'a std::collections::HashMap<u64, String>,
 
+    /// Custom template registrations that survive graph rebuilds.
+    /// GBufferPass downcasts to `RadiantTemplateRegistry` before each frame.
+    pub template_registry: &'a Option<Box<dyn std::any::Any + Send + Sync>>,
+
     /// Reflection capture storage buffer.
     pub reflection_captures: &'a wgpu::Buffer,
     /// Number of reflection captures in the buffer.

@@ -261,6 +261,11 @@ pub struct GpuScene {
     /// during flush.  The GBuffer pass looks up WGSL by hash when building PSOs.
     pub graph_wgsl_snippets: std::collections::HashMap<u64, String>,
 
+    /// Custom template registrations that survive graph rebuilds.
+    /// Stored as `Box<dyn Any>` — the GBufferPass downcasts it to
+    /// `RadiantTemplateRegistry` at the start of every frame.
+    pub template_registry: Option<Box<dyn std::any::Any + Send + Sync>>,
+
     /// Reflection capture GPU storage buffer.
     pub reflection_captures: GrowableBuffer<libhelio::GpuReflectionCapture>,
 
@@ -384,6 +389,7 @@ impl GpuScene {
             material_class_ranges: Vec::new(),
             material_graph_hashes: Vec::new(),
             graph_wgsl_snippets: std::collections::HashMap::new(),
+            template_registry: None,
             reflection_captures,
             blas_manager: BlasManager::new(device_for_rt.clone()),
             tlas_manager: TlasManager::new(device_for_rt, 65536),
@@ -456,6 +462,7 @@ impl GpuScene {
             material_class_ranges: &self.material_class_ranges,
             material_graph_hashes: &self.material_graph_hashes,
             graph_wgsl_snippets: &self.graph_wgsl_snippets,
+            template_registry: &self.template_registry,
             reflection_captures: self.reflection_captures.buffer(),
             reflection_capture_count: self.reflection_captures.len() as u32,
             rt_available: self.tlas_manager.is_rt_available(),

@@ -180,8 +180,6 @@ impl ApplicationHandler for App {
 
         let iridescent_wgsl = include_str!("shaders/radiant_iridescent.wgsl");
         let iridescent_class = renderer
-            .find_pass_mut::<GBufferPass>()
-            .expect("GBufferPass not found")
             .template_registry_mut()
             .register_str("iridescent", iridescent_wgsl.to_string());
         log::info!(
@@ -193,8 +191,6 @@ impl ApplicationHandler for App {
 
         let opal_wgsl = include_str!("../helio/templates/opal.wgsl");
         let opal_class = renderer
-            .find_pass_mut::<GBufferPass>()
-            .expect("GBufferPass not found")
             .template_registry_mut()
             .register_partial_str("opal", opal_wgsl.to_string());
         log::info!("[RADIANT] Opal template registered as class {}", opal_class);

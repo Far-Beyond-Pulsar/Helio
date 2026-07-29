@@ -27,6 +27,7 @@ pub type GraphRebuilder = Arc<
 
 use crate::groups::GroupId;
 use crate::mesh::MeshBuffers;
+use crate::radiant::RadiantTemplateRegistry;
 use crate::scene::Scene;
 
 use super::config::GiConfig;
@@ -149,6 +150,10 @@ pub struct Renderer {
     pub(crate) pending_resize: Option<(u32, u32)>,
     pub(crate) clear_target_next_frame: bool,
     pub(crate) graph_rebuilder: Option<GraphRebuilder>,
+    /// Templates registered by the user, preserved across graph rebuilds (resize).
+    /// The GBufferPass reads from this; after a graph rebuild the latest snapshot
+    /// is injected into the new GBufferPass.
+    pub(crate) template_registry: RadiantTemplateRegistry,
 }
 
 pub struct DebugBatch<'a> {
@@ -430,6 +435,20 @@ impl Renderer {
 
     pub fn find_pass<T: RenderPass + 'static>(&self) -> Option<&T> {
         self.graph.find_pass::<T>()
+    }
+
+    /// Access the template registry (preserved across graph rebuilds).
+    /// Register custom surface templates here instead of through the pass
+    /// directly to ensure they survive window resize.
+    pub fn template_registry_mut(&mut self) -> &mut RadiantTemplateRegistry {
+        &mut self.template_registry
+    }
+
+    /// Sync the renderer's template registry into the GpuScene so the
+    /// GBufferPass can find it across graph rebuilds (window resize).
+    pub(crate) fn sync_template_registry_to_scene(&mut self) {
+        let reg: Box<dyn std::any::Any + Send + Sync> = Box::new(self.template_registry.clone());
+        self.scene.set_template_registry(reg);
     }
 
     pub fn set_clear_color(&mut self, color: [f32; 4]) {

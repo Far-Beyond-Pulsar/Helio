@@ -5,6 +5,7 @@ use std::time::Instant;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 
+use crate::radiant::RadiantTemplateRegistry;
 use crate::scene::Scene;
 use helio_core::RenderGraph;
 
@@ -199,15 +200,11 @@ impl Renderer {
             clear_target_next_frame: true,
             owns_device: true,
             pending_resize: None,
-            // Note: pending_resize is intentionally None on init. The graph's
-            // lock() already sized textures to config.width/height. Setting it
-            // to Some would trigger an unnecessary graph rebuild on the first
-            // frame, destroying any pass state set between construction and
-            // first render (e.g. set_user_shader).
             gizmo_camera: None,
             gizmo_viewport_height: 0.0,
             cull_stats_buffer,
             graph_rebuilder,
+            template_registry: RadiantTemplateRegistry::new(),
         }
     }
 
@@ -219,7 +216,7 @@ impl Renderer {
         height: u32,
         render_scale: f32,
         config: RendererConfig,
-        mut scene: Scene,
+        scene: Scene,
         graph: RenderGraph,
         debug_state: Arc<Mutex<DebugDrawState>>,
         debug_camera_buffer: wgpu::Buffer,

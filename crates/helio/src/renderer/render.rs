@@ -157,6 +157,9 @@ impl Renderer {
         self.scene.update_camera(jittered_camera);
         self.scene.flush();
 
+        // Sync template registry to GpuScene before anything takes &self.scene
+        self.sync_template_registry_to_scene();
+
         let editor_hidden = self.scene.is_group_hidden(GroupId::EDITOR);
         let light_count = self.scene.gpu_scene().lights.len();
         let light_gen = self.scene.gpu_scene().movable_lights_generation;

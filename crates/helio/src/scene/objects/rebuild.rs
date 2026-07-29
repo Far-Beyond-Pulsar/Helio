@@ -155,6 +155,7 @@ impl super::super::Scene {
             }
             ranges.push((class, graph_hash, start, count));
         }
+        log::info!("[Scene] rebuilt material_class_ranges: {:?} ({} objects, {} draw groups)", ranges, n, draw_calls.len());
         self.gpu_scene.material_class_ranges = ranges;
 
         // Patch each ObjectRecord with its new GPU slot so that in-frame
