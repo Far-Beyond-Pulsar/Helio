@@ -127,6 +127,7 @@ pub struct Renderer {
     pub(crate) delta_time: f32,
     /// Optional 3D LUT texture view for colour grading, set by the application.
     pub(crate) color_grading_lut_view: Option<wgpu::TextureView>,
+    pub(crate) ies_texture_view: Option<wgpu::TextureView>,
     pub(crate) graph_time_ms: f32,
     pub(crate) cull_stats_staging: wgpu::Buffer,
     pub(crate) cull_stats_readback_state: CullStatsReadbackState,
@@ -601,5 +602,60 @@ impl Renderer {
     /// Returns the current colour grading LUT view, if any.
     pub fn color_grading_lut(&self) -> Option<&wgpu::TextureView> {
         self.color_grading_lut_view.as_ref()
+    }
+
+    /// Upload an IES profile texture to the scene's IES texture array.
+    ///
+    /// The texture should be a single R8Unorm 256×256 layer containing the
+    /// IES angular intensity distribution. Returns the layer index to use
+    /// as `ies_profile_index` / `light_function_index` on GpuLight.
+    ///
+    /// Currently creates a new array texture each call (single-profile).
+    /// Multi-profile support can be added by growing the array.
+    pub fn upload_ies_texture(&mut self, data: &[u8], width: u32, height: u32) -> Option<u32> {
+        if data.len() < (width * height) as usize {
+            return None;
+        }
+        let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("IES Texture Array"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        );
+        let view = tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        self.ies_texture_view = Some(view);
+        Some(0) // always layer 0 for now
+    }
+
+    /// Returns the current IES texture array view, if any.
+    pub fn ies_texture_view(&self) -> Option<&wgpu::TextureView> {
+        self.ies_texture_view.as_ref()
+    }
+
+    /// Set the IES texture array view directly (for multi-layer arrays).
+    pub fn set_ies_texture_view(&mut self, view: wgpu::TextureView) {
+        self.ies_texture_view = Some(view);
     }
 }

@@ -552,6 +552,10 @@ impl GpuScene {
         self.voxel_volumes.flush(queue);
         self.voxel_edit_ring.flush(queue);
         self.reflection_captures.flush(queue);
+
+        // After flush, cycle prev_model = model so that next frame's velocity
+        // buffer captures the movement between this frame and the next.
+        self.instances.cycle_prev_models();
     }
 
     pub fn components_mut(&mut self) -> &mut ComponentRegistry {

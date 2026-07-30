@@ -87,10 +87,10 @@ struct GpuLight {
     flare_tint_r:       f32,
     flare_tint_g:       f32,
     flare_tint_b:       f32,
-    _pad2_0:            u32,
-    _pad2_1:            u32,
-    _pad2_2:            u32,
-    _pad2_3:            u32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
 }
 
 struct LightMatrix { mat: mat4x4<f32> }
@@ -177,6 +177,9 @@ struct ShadowConfig {
 // Planar reflection texture (Rgba16Float, full resolution)
 @group(2) @binding(16) var planar_tex: texture_2d<f32>;
 @group(2) @binding(17) var planar_sampler: sampler;
+// IES light profile textures (R8Unorm, 256×256 per slice, C type angular distribution)
+@group(2) @binding(18) var ies_textures: texture_2d_array<f32>;
+@group(2) @binding(19) var ies_sampler: sampler;
 
 // Reflection captures, uploaded sorted by influence volume, largest first.
 // The blend below runs front-to-back and saturates, so ordering is what lets a
@@ -800,6 +803,47 @@ fn pbr_direct_light(
         if light.light_type == 2u {  // Spot light
             let cos_a = dot(-L, light.direction_outer.xyz);
             atten    *= smoothstep(light.direction_outer.w, light.inner_angle, cos_a);
+        }
+        // IES light profile: sample angular intensity distribution
+        if light.ies_profile_index >= 0 {
+            let light_dir = normalize(light.direction_outer.xyz);
+            let theta = acos(clamp(dot(-L, light_dir), -1.0, 1.0));
+            let cross_dir = cross(-L, light_dir);
+            let phi = atan2(cross_dir.x, cross_dir.y);
+            let ies_uv = vec2<f32>(
+                phi / 6.2831853 + 0.5,
+                theta * 0.6366198,
+            ) * vec2<f32>(light.ies_angle_scale, light.ies_angle_scale)
+            + vec2<f32>(light.ies_angle_offset / 360.0, 0.0);
+            let ies_sample = textureSampleLevel(
+                ies_textures, ies_sampler, ies_uv, u32(light.ies_profile_index), 0.0
+            ).r;
+            atten *= ies_sample;
+        }
+        // Light function (gobo/cookie) projection
+        if light.light_function_index >= 0 {
+            let light_to_surface = world_pos - light.position_range.xyz;
+            let light_dir = normalize(light.direction_outer.xyz);
+            let projected = light_to_surface - dot(light_to_surface, light_dir) * light_dir;
+            let proj_len = max(length(projected), 0.0001);
+            let projected_n = projected / proj_len;
+            // Build tangent frame: handle degenerate case where light_dir ≈ up
+            let gobo_up_vec = select(
+                vec3<f32>(0.0, 1.0, 0.0),
+                vec3<f32>(0.0, 0.0, 1.0),
+                abs(dot(light_dir, vec3<f32>(0.0, 1.0, 0.0))) > 0.99,
+            );
+            let gobo_right = normalize(cross(light_dir, gobo_up_vec));
+            let gobo_up = cross(gobo_right, light_dir);
+            let gobo_uv = vec2<f32>(
+                dot(projected, gobo_right) / (light.position_range.w * 0.5) + 0.5,
+                dot(projected, gobo_up) / (light.position_range.w * 0.5) + 0.5,
+            );
+            let gobo_sample = textureSampleLevel(
+                ies_textures, ies_sampler, clamp(gobo_uv, vec2<f32>(0.0), vec2<f32>(1.0)),
+                u32(light.light_function_index), 0.0
+            ).r;
+            atten *= gobo_sample;
         }
         radiance = light.color_intensity.xyz * light.color_intensity.w * atten;
     }

@@ -48,10 +48,10 @@ struct GpuLight {
     flare_tint_r:       f32,
     flare_tint_g:       f32,
     flare_tint_b:       f32,
-    _pad2_0:            u32,
-    _pad2_1:            u32,
-    _pad2_2:            u32,
-    _pad2_3:            u32,
+    ies_profile_index:    i32,
+    light_function_index: i32,
+    ies_angle_scale:      f32,
+    ies_angle_offset:     f32,
 }
 
 struct MeshletParams {
