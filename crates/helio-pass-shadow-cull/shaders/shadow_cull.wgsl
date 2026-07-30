@@ -9,18 +9,22 @@ struct GpuShadowMatrix {
 }
 
 struct GpuInstance {
-    model_0:     vec4<f32>,
-    model_1:     vec4<f32>,
-    model_2:     vec4<f32>,
-    model_3:     vec4<f32>,
-    normal_0:    vec4<f32>,
-    normal_1:    vec4<f32>,
-    normal_2:    vec4<f32>,
-    bounds:      vec4<f32>,
-    mesh_id:     u32,
-    material_id: u32,
-    flags:       u32,
-    _pad:        u32,
+    model_0:      vec4<f32>,  //   0
+    model_1:      vec4<f32>,  //  16
+    model_2:      vec4<f32>,  //  32
+    model_3:      vec4<f32>,  //  48
+    normal_0:     vec4<f32>,  //  64
+    normal_1:     vec4<f32>,  //  80
+    normal_2:     vec4<f32>,  //  96
+    bounds:       vec4<f32>,  // 112
+    prev_model_0: vec4<f32>,  // 128
+    prev_model_1: vec4<f32>,  // 144
+    prev_model_2: vec4<f32>,  // 160
+    prev_model_3: vec4<f32>,  // 176
+    mesh_id:      u32,        // 192
+    material_id:  u32,        // 196
+    flags:        u32,        // 200
+    _pad:         u32,        // 204
 }
 
 struct DrawIndexedIndirect {

@@ -618,7 +618,7 @@ impl VirtualGeometryPass {
     fn make_instance_buf(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
         device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("VG Instance Buffer"),
-            size: capacity * 144,
+            size: capacity * std::mem::size_of::<GpuInstanceData>() as u64,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         })
@@ -762,7 +762,7 @@ impl RenderPass for VirtualGeometryPass {
                 self.object_buf = Self::make_object_buf(ctx.device, vg.object_count as u64 * 2);
                 grew = true;
             }
-            let instance_capacity = self.instance_buf.size() / 144;
+            let instance_capacity = self.instance_buf.size() / std::mem::size_of::<GpuInstanceData>() as u64;
             if (vg.object_count as u64) > instance_capacity {
                 self.instance_buf = Self::make_instance_buf(ctx.device, vg.object_count as u64 * 2);
                 self.instance_cull_buf =
