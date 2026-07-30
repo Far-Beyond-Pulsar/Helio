@@ -41,9 +41,17 @@ struct GpuLight {
     god_rays_weight:   f32,
     god_rays_decay:    f32,
     god_rays_exposure: f32,
-    _pad2_0:           u32,
-    _pad2_1:           u32,
-    _pad2_2:           u32,
+    flare_enabled:      u32,
+    flare_type:         u32,
+    flare_intensity:    f32,
+    flare_scale:        f32,
+    flare_tint_r:       f32,
+    flare_tint_g:       f32,
+    flare_tint_b:       f32,
+    _pad2_0:            u32,
+    _pad2_1:            u32,
+    _pad2_2:            u32,
+    _pad2_3:            u32,
 }
 
 struct MeshletParams {

@@ -243,7 +243,14 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         god_rays_weight: 0.6,
         god_rays_decay: 1.0,
         god_rays_exposure: 0.7,
-        _pad2: [0; 3],
+        flare_enabled: 0,
+        flare_type: 0,
+        flare_intensity: 0.0,
+        flare_scale: 0.0,
+        flare_tint_r: 0.0,
+        flare_tint_g: 0.0,
+        flare_tint_b: 0.0,
+        _pad2: [0; 4],
     }));
     renderer.scene_mut().insert_actor(SceneActor::light(GpuLight {
         position_range: [0.0, 0.0, 0.0, f32::MAX],
@@ -258,7 +265,14 @@ async fn render_snapshot_async<P: AsRef<Path>>(
         god_rays_weight: 0.6,
         god_rays_decay: 1.0,
         god_rays_exposure: 0.7,
-        _pad2: [0; 3],
+        flare_enabled: 0,
+        flare_type: 0,
+        flare_intensity: 0.0,
+        flare_scale: 0.0,
+        flare_tint_r: 0.0,
+        flare_tint_g: 0.0,
+        flare_tint_b: 0.0,
+        _pad2: [0; 4],
     }));
 
     renderer.scene_mut().flush();
@@ -600,7 +614,14 @@ impl SnapshotBatch {
                 god_rays_weight:     0.6,
                 god_rays_decay:      1.0,
                 god_rays_exposure:   0.7,
-                _pad2:               [0; 3],
+                flare_enabled:        0,
+                flare_type:           0,
+                flare_intensity:      0.0,
+                flare_scale:          0.0,
+                flare_tint_r:         0.0,
+                flare_tint_g:         0.0,
+                flare_tint_b:         0.0,
+                _pad2:               [0; 4],
             }));
         }
 
