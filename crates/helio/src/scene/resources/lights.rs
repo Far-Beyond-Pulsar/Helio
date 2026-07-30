@@ -167,6 +167,14 @@ impl super::super::Scene {
         let removed = self.lights.remove(id).ok_or_else(|| invalid("light"))?;
         let gpu_removed = self.gpu_scene.lights.swap_remove(removed.dense_index);
         debug_assert!(gpu_removed.is_some());
+
+        // Update gpu_index for the element that was swap-moved into the vacated slot
+        if let Some((moved_handle, new_dense_index)) = removed.moved {
+            if let Some((_, record)) = self.lights.get_mut_with_index(moved_handle) {
+                record.gpu_index = new_dense_index as u32;
+            }
+        }
+
         Ok(())
     }
 }
