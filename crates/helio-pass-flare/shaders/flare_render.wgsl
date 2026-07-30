@@ -55,43 +55,14 @@ fn sample_atlas_chromatic(idx: u32, offset: vec2<f32>, chroma_shift: f32) -> vec
     return vec3<f32>(r, g, b);
 }
 
-fn anamorphic_streak(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f32>,
-                     screen_dims: vec2<f32>, dir: vec2<f32>) -> vec3<f32> {
-    let delta = input_uv - flare_uv;
-    let parallel = dot(delta, dir);
-    let perp_vec = delta - dir * parallel;
-    let perp_len = length(perp_vec * screen_dims);
-    let streak = exp(-perp_len * perp_len * 0.003) * 0.12;
-    return light_col * streak;
-}
-
-fn diffraction_spike(input_uv: vec2<f32>, flare_uv: vec2<f32>, light_col: vec3<f32>,
-                     screen_dims: vec2<f32>, spike_count: u32) -> vec3<f32> {
-    let delta = input_uv - flare_uv;
-    let dist = length(delta * screen_dims);
-    if dist < 1.0 { return vec3<f32>(0.0); }
-
-    let angle = atan2(delta.y, delta.x);
-    let spike_width = 0.04;
-    var spike = 0.0;
-    for (var i = 0u; i < spike_count; i++) {
-        let a = f32(i) * 6.2832 / f32(spike_count) + 1.5708;
-        let d = abs(angle - a);
-        let wrapped = min(d, 6.2832 - d);
-        if wrapped < spike_width {
-            spike = max(spike, 1.0 - wrapped / spike_width);
-        }
-    }
-    let falloff = exp(-dist * 0.004);
-    return light_col * spike * falloff * 0.08;
-}
-
 @fragment
 fn fs_flare(input: VertexOutput) -> @location(0) vec4<f32> {
     let num_flares = flare_count[0];
     if num_flares == 0u { return vec4<f32>(0.0); }
 
     let screen_dims = vec2<f32>(flare_uniforms.screen_width, flare_uniforms.screen_height);
+    if screen_dims.x < 1.0 || screen_dims.y < 1.0 { return vec4<f32>(0.0); }
+
     let centre_uv = vec2<f32>(0.5, 0.5);
     var result = vec3<f32>(0.0);
 
@@ -107,13 +78,6 @@ fn fs_flare(input: VertexOutput) -> @location(0) vec4<f32> {
         let dist_px = length(to_centre * screen_dims);
         let dir = select(normalize(to_centre), vec2<f32>(1.0, 0.0), dist_px < 1.0);
         let dist_norm = dist_px / length(screen_dims);
-
-        // Streaks
-        result += anamorphic_streak(input.uv, flare_uv, light_col, screen_dims, vec2<f32>(1.0, 0.0));
-        result += anamorphic_streak(input.uv, flare_uv, light_col * 0.5, screen_dims, vec2<f32>(0.0, 1.0));
-
-        // Diffraction spikes
-        result += diffraction_spike(input.uv, flare_uv, light_col, screen_dims, 6u);
 
         // Ghost reflections (use atlas cells 0-5)
         for (var gi = 0u; gi < 6u; gi++) {
