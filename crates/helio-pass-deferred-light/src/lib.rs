@@ -434,10 +434,31 @@ impl DeferredLightPass {
             ..Default::default()
         });
 
-        // IES fallback: 1×1×1 array (single black texel, acts as identity multiplier 0)
+        // IES fallback: 32×32, 2 layers.
+        // Layer 0 = spotlight gradient (bright centre, gaussian falloff) — for IES profiles
+        // Layer 1 = checkerboard grid — for gobo/cookie projection
+        const IES_FALLBACK_SIZE: u32 = 32;
+        let mut ies_data = Vec::with_capacity((IES_FALLBACK_SIZE * IES_FALLBACK_SIZE * 2) as usize);
+        // Layer 0: gaussian spotlight
+        for y in 0..IES_FALLBACK_SIZE {
+            for x in 0..IES_FALLBACK_SIZE {
+                let u = (x as f32 + 0.5) / IES_FALLBACK_SIZE as f32 * 2.0 - 1.0;
+                let v = (y as f32 + 0.5) / IES_FALLBACK_SIZE as f32 * 2.0 - 1.0;
+                let dist = (u * u + v * v).sqrt();
+                let gaussian = (-dist * dist * 4.0).exp();
+                ies_data.push((gaussian.clamp(0.0, 1.0) * 255.0) as u8);
+            }
+        }
+        // Layer 1: checkerboard gobo (alternating 4px squares)
+        for y in 0..IES_FALLBACK_SIZE {
+            for x in 0..IES_FALLBACK_SIZE {
+                let tile = ((x / 4) + (y / 4)) & 1;
+                ies_data.push(if tile == 0 { 255u8 } else { 40u8 });
+            }
+        }
         let fallback_ies_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("DeferredLight IES Fallback"),
-            size: wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 2 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -445,11 +466,19 @@ impl DeferredLightPass {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
+        // Write layer 0 (IES spotlight)
         queue.write_texture(
-            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
-            &[255u8],  // 255 = identity multiplier (1.0)
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(1), rows_per_image: Some(1) },
-            wgpu::Extent3d { width: 1, height: 1, depth_or_array_layers: 1 },
+            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 0 }, aspect: wgpu::TextureAspect::All },
+            &ies_data[..(IES_FALLBACK_SIZE * IES_FALLBACK_SIZE) as usize],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_FALLBACK_SIZE), rows_per_image: Some(IES_FALLBACK_SIZE) },
+            wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 1 },
+        );
+        // Write layer 1 (gobo checkerboard)
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &fallback_ies_texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y: 0, z: 1 }, aspect: wgpu::TextureAspect::All },
+            &ies_data[(IES_FALLBACK_SIZE * IES_FALLBACK_SIZE) as usize..],
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(IES_FALLBACK_SIZE), rows_per_image: Some(IES_FALLBACK_SIZE) },
+            wgpu::Extent3d { width: IES_FALLBACK_SIZE, height: IES_FALLBACK_SIZE, depth_or_array_layers: 1 },
         );
         let fallback_ies_view = fallback_ies_texture.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),

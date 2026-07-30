@@ -112,11 +112,11 @@ impl HelioWasmApp for Demo {
                 _ => 0.80,
             };
             if enabled {
-                light.ies_profile_index = 0;
+                light.ies_profile_index = 0;  // layer 0 = spotlight gradient
                 light.ies_angle_scale = match i { 0 => 0.5, 1 => 1.0, _ => 2.0 };
             }
             if self.gobo_enabled {
-                light.light_function_index = 0;
+                light.light_function_index = 1;  // layer 1 = checkerboard gobo
             }
             let _ = renderer.scene_mut().update_light(self.light_ids[i], light);
         }
