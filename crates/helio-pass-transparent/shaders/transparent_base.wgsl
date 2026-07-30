@@ -62,6 +62,7 @@ struct GpuInstanceData {
     model:         mat4x4<f32>,
     normal_mat:    array<vec4<f32>, 3>,
     bounds:        vec4<f32>,
+    prev_model:    mat4x4<f32>,
     mesh_id:       u32,
     material_id:   u32,
     flags:         u32,

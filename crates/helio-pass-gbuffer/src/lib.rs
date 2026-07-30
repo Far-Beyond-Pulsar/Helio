@@ -1,16 +1,18 @@
 //! G-Buffer pass.
 //!
-//! Renders opaque geometry to 4 render targets (albedo, normal, ORM, emissive) + depth.
+//! Renders opaque geometry to 8 render targets (albedo, normal, ORM, emissive,
+//! lightmap_uv, sss, extra, velocity) + depth.
 //! O(1) CPU: single `multi_draw_indexed_indirect` call regardless of scene size.
 //!
 //! # Render Targets (owned by this pass)
 //!
-//! | Slot | Name     | Format        | Contents                          |
-//! |------|----------|---------------|-----------------------------------|
-//! | 0    | albedo   | Rgba8Unorm    | albedo.rgb + alpha                |
-//! | 1    | normal   | Rgba16Float   | world normal.xyz + F0.r           |
-//! | 2    | orm      | Rgba8Unorm    | AO, roughness, metallic, F0.g     |
-//! | 3    | emissive | Rgba16Float   | emissive.rgb + F0.b               |
+//! | Slot | Name           | Format        | Contents                          |
+//! |------|----------------|---------------|-----------------------------------|
+//! | 0    | albedo         | Rgba8Unorm    | albedo.rgb + alpha                |
+//! | 1    | normal         | Rgba16Float   | world normal.xyz + F0.r           |
+//! | 2    | orm            | Rgba8Unorm    | AO, roughness, metallic, F0.g     |
+//! | 3    | emissive       | Rgba16Float   | emissive.rgb + F0.b               |
+//! | 7    | gbuffer_velocity | Rg16Float    | screen-space velocity (px/frame)  |
 //!
 //! # Material Bind Group
 //!
@@ -57,9 +59,9 @@ pub struct GBufferGlobals {
     pub rc_world_max: [f32; 4],
     pub csm_splits: [f32; 4],
     pub debug_mode: u32,
+    pub screen_width: f32,
+    pub screen_height: f32,
     pub _pad0: u32,
-    pub _pad1: u32,
-    pub _pad2: u32,
 }
 
 // ── Pass struct ───────────────────────────────────────────────────────────────
@@ -249,6 +251,11 @@ impl RenderPass for GBufferPass {
             wgpu::TextureFormat::Rgba16Float,
             ResourceSize::MatchSurface,
         );
+        builder.write_color_raw(
+            "gbuffer_velocity",
+            wgpu::TextureFormat::Rg16Float,
+            ResourceSize::MatchSurface,
+        );
     }
 
     fn publish<'a>(&'a self, _frame: &mut libhelio::FrameResources<'a>) {}
@@ -263,6 +270,7 @@ impl RenderPass for GBufferPass {
         let lightmap_uv = resources.gbuffer_lightmap_uv.read("GBuffer")?;
         let sss_target = resources.gbuffer_sss.read("GBuffer")?;
         let extra_target = resources.gbuffer_extra.read("GBuffer")?;
+        let velocity_target = resources.gbuffer_velocity.read("GBuffer")?;
         let color_attachments: &'a [Option<wgpu::RenderPassColorAttachment<'a>>] =
             Box::leak(Box::new([
                 Some(wgpu::RenderPassColorAttachment {
@@ -321,6 +329,15 @@ impl RenderPass for GBufferPass {
                 }),
                 Some(wgpu::RenderPassColorAttachment {
                     view: extra_target,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                }),
+                Some(wgpu::RenderPassColorAttachment {
+                    view: velocity_target,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -388,9 +405,9 @@ impl RenderPass for GBufferPass {
             rc_world_max,
             csm_splits: self.csm_splits,
             debug_mode: self.debug_mode,
+            screen_width: ctx.width as f32,
+            screen_height: ctx.height as f32,
             _pad0: 0,
-            _pad1: 0,
-            _pad2: 0,
         };
         ctx.write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
         Ok(())
@@ -603,7 +620,7 @@ impl RenderPass for GBufferPass {
     }
 
     fn writes(&self) -> &'static [&'static str] {
-        &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra"]
+        &["gbuffer", "gbuffer_lightmap_uv", "gbuffer_sss", "gbuffer_extra", "gbuffer_velocity"]
     }
 }
 
@@ -791,6 +808,11 @@ impl GBufferPass {
                     }),
                     Some(wgpu::ColorTargetState {
                         format: wgpu::TextureFormat::Rgba16Float,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    }),
+                    Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rg16Float,
                         blend: None,
                         write_mask: wgpu::ColorWrites::ALL,
                     }),

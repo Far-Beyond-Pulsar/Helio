@@ -485,6 +485,7 @@ fn create_case_buffers(
             0.0, 0.0, 1.0, 0.0,
         ],
         bounds: [0.0, 0.0, -10.0, 1.0],
+        prev_model: identity,
         mesh_id: 0,
         material_id: 0,
         flags: 0,

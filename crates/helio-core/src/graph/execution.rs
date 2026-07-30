@@ -890,6 +890,7 @@ fn route_named_texture<'a>(name: &str, view: &'a wgpu::TextureView, frame: &mut 
         "gbuffer_lightmap_uv" => frame.gbuffer_lightmap_uv.write(view, "Graph"),
         "gbuffer_sss" => frame.gbuffer_sss.write(view, "Graph"),
         "gbuffer_extra" => frame.gbuffer_extra.write(view, "Graph"),
+        "gbuffer_velocity" => frame.gbuffer_velocity.write(view, "Graph"),
         "water_sim_texture" => frame.water_sim_texture.write(view, "Graph"),
         "water_caustics" => frame.water_caustics.write(view, "Graph"),
         "rc_cascades" => frame.rc_view.write(view, "Graph"),

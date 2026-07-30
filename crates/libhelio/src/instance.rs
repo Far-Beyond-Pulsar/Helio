@@ -6,7 +6,7 @@
 
 use bytemuck::{Pod, Zeroable};
 
-/// Per-instance data for GPU-driven rendering. 144 bytes.
+/// Per-instance data for GPU-driven rendering. 208 bytes.
 ///
 /// Uploaded once when instances change (dirty tracking), then read-only on GPU.
 /// The vertex shader uses `instance_index` to look up this data from a storage buffer.
@@ -19,6 +19,7 @@ use bytemuck::{Pod, Zeroable};
 ///     normal_mat_1: vec4<f32>,    // 16 bytes — row 1
 ///     normal_mat_2: vec4<f32>,    // 16 bytes — row 2
 ///     bounds:       vec4<f32>,    // 16 bytes — bounding sphere
+///     prev_model:   mat4x4<f32>,  // 64 bytes — previous frame model matrix
 ///     mesh_id:      u32,          //  4 bytes
 ///     material_id:  u32,          //  4 bytes
 ///     flags:        u32,          //  4 bytes
@@ -34,6 +35,8 @@ pub struct GpuInstanceData {
     pub normal_mat: [f32; 12],
     /// Bounding sphere center in world space (xyz) + radius (w)
     pub bounds: [f32; 4],
+    /// Previous frame model matrix (column-major, 64 bytes)
+    pub prev_model: [f32; 16],
     /// Mesh index into the global mesh table
     pub mesh_id: u32,
     /// Material index into the global material table
