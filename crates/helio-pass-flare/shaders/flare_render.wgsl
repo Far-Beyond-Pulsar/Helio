@@ -102,9 +102,11 @@ fn fs_flare(input: VertexOutput) -> @location(0) vec4<f32> {
         let intensity = flare.light_intensity;
         if intensity < 0.01 { continue; }
 
-        let light_col = flare.light_color * intensity;
         let sp = flare.screen_pos;
         let flare_uv = sp / screen_dims;
+        let edge_dist = min(min(flare_uv.x, 1.0 - flare_uv.x), min(flare_uv.y, 1.0 - flare_uv.y));
+        let edge_fade = smoothstep(0.0, 0.25, edge_dist);
+        let light_col = flare.light_color * intensity * edge_fade;
         let to_centre = centre_uv - flare_uv;
         let dist_px = length(to_centre * screen_dims);
         let dir = select(normalize(to_centre), vec2<f32>(1.0, 0.0), dist_px < 1.0);
