@@ -2964,6 +2964,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "helio-foliage-core"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "glam 0.33.2",
+]
+
+[[package]]
 name = "helio-pass-billboard"
 version = "0.1.0"
 dependencies = [

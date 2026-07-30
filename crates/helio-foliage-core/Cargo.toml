@@ -1,0 +1,11 @@
+[package]
+name = "helio-foliage-core"
+version = "0.1.0"
+edition = "2021"
+description = "Foliage GPU types, packing helpers and CPU mirrors of the foliage shader math for Helio"
+
+[dependencies]
+bytemuck = { workspace = true, features = ["derive"] }
+glam = { workspace = true }
+
+[dev-dependencies]
